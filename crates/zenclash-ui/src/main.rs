@@ -1,0 +1,114 @@
+use std::{net::TcpListener, path::PathBuf, sync::Arc, sync::OnceLock, time::Duration};
+
+use gpui::Application;
+use gpui_component_assets::Assets;
+use zenclash_core::{
+    LogMonitor, MihomoClient, MihomoEndpoint, MihomoLaunchConfig, MihomoProcess, TrafficMonitor,
+};
+use zenclash_ui::app;
+
+static TOKIO_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+fn runtime() -> &'static tokio::runtime::Runtime {
+    TOKIO_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("zenclash-io")
+            .build()
+            .expect("failed to create ZenClash I/O runtime")
+    })
+}
+
+fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "zenclash=info".into()),
+        )
+        .init();
+
+    let runtime = runtime();
+    let _runtime_guard = runtime.enter();
+    let (endpoint, mihomo_process, profile_path) = bootstrap_mihomo(runtime);
+    let client = MihomoClient::new(endpoint.clone()).expect("failed to create Mihomo client");
+    let traffic = TrafficMonitor::start(runtime.handle(), endpoint.clone());
+    let logs = LogMonitor::start(runtime.handle(), endpoint, "debug");
+    let runtime_handle = runtime.handle().clone();
+
+    Application::new().with_assets(Assets).run(move |cx| {
+        app::init(cx);
+        app::create_main_window(
+            app::AppServices {
+                client,
+                traffic_monitor: traffic,
+                log_monitor: logs,
+                mihomo_process,
+                profile_path,
+                runtime: runtime_handle,
+            },
+            cx,
+        )
+        .expect("failed to create ZenClash window");
+        cx.activate(true);
+    });
+}
+
+fn bootstrap_mihomo(
+    runtime: &tokio::runtime::Runtime,
+) -> (MihomoEndpoint, Option<Arc<MihomoProcess>>, Option<PathBuf>) {
+    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("ZenClash workspace root")
+        .to_path_buf();
+    let profile_path = std::env::var_os("ZENCLASH_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project_root.join("examples/19facdf022b.yaml"));
+
+    if std::env::var_os("ZENCLASH_CONTROLLER").is_some() {
+        return (MihomoEndpoint::from_env(), None, Some(profile_path));
+    }
+
+    let mut launch = match MihomoLaunchConfig::discover(&project_root) {
+        Ok(launch) => launch,
+        Err(error) => {
+            tracing::warn!(%error, "Mihomo binary discovery failed; using controller-only mode");
+            return (MihomoEndpoint::from_env(), None, Some(profile_path));
+        }
+    };
+    match allocate_managed_controller() {
+        Ok(controller) => launch = launch.with_controller_override(controller),
+        Err(error) => {
+            tracing::warn!(%error, "failed to allocate an isolated Mihomo controller port");
+        }
+    }
+    let endpoint = launch.endpoint.clone();
+
+    match MihomoProcess::spawn(launch.clone()) {
+        Ok(process) => {
+            match runtime.block_on(process.wait_until_ready(Duration::from_secs(20))) {
+                Ok(()) => {
+                    tracing::info!(controller = %endpoint.controller, "managed Mihomo is ready")
+                }
+                Err(error) => {
+                    tracing::error!(%error, "managed Mihomo failed to become ready");
+                    for line in process.snapshot().logs.iter().rev().take(12).rev() {
+                        tracing::error!("{line}");
+                    }
+                }
+            }
+            (endpoint, Some(process), Some(launch.config_file))
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to start managed Mihomo");
+            (endpoint, None, Some(launch.config_file))
+        }
+    }
+}
+
+fn allocate_managed_controller() -> std::io::Result<String> {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    Ok(format!("127.0.0.1:{port}"))
+}
