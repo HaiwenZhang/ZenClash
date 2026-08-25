@@ -1,86 +1,27 @@
 use std::{
     collections::VecDeque,
     io::{BufRead, BufReader},
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, Command, Stdio},
     sync::Arc,
     time::Duration,
 };
 
 use parking_lot::{Mutex, RwLock};
-use serde::Deserialize;
 
 use crate::{MihomoClient, MihomoEndpoint, MihomoError, MihomoResult};
 
+mod discovery;
+mod resources;
+
+#[cfg(test)]
+mod tests;
+
+pub use discovery::MihomoLaunchConfig;
+
 const MAX_LOG_LINES: usize = 1_000;
 
-#[derive(Clone, Debug)]
-pub struct MihomoLaunchConfig {
-    pub binary: PathBuf,
-    pub config_file: PathBuf,
-    pub home_dir: PathBuf,
-    pub endpoint: MihomoEndpoint,
-    pub controller_override: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct FileControllerConfig {
-    #[serde(default, rename = "external-controller")]
-    external_controller: String,
-    #[serde(default)]
-    secret: String,
-}
-
-impl MihomoLaunchConfig {
-    pub fn new(
-        binary: impl Into<PathBuf>,
-        config_file: impl Into<PathBuf>,
-        home_dir: impl Into<PathBuf>,
-    ) -> MihomoResult<Self> {
-        let config_file = config_file.into();
-        let endpoint = endpoint_from_config_file(&config_file)?;
-        Ok(Self {
-            binary: binary.into(),
-            config_file,
-            home_dir: home_dir.into(),
-            endpoint,
-            controller_override: None,
-        })
-    }
-
-    pub fn with_controller_override(mut self, controller: impl Into<String>) -> Self {
-        let controller = controller.into();
-        self.endpoint.controller = controller.clone();
-        self.controller_override = Some(controller);
-        self
-    }
-
-    pub fn discover(project_root: impl AsRef<Path>) -> MihomoResult<Self> {
-        let project_root = project_root.as_ref();
-        let config_file = std::env::var_os("ZENCLASH_CONFIG")
-            .map(PathBuf::from)
-            .or_else(bundled_profile)
-            .unwrap_or_else(|| project_root.join("examples/19facdf022b.yaml"));
-        let home_dir = std::env::var_os("ZENCLASH_MIHOMO_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| default_home_dir(project_root));
-        let binary = std::env::var_os("ZENCLASH_MIHOMO_BINARY")
-            .map(PathBuf::from)
-            .or_else(bundled_mihomo_binary)
-            .or_else(|| {
-                let candidate = project_root.join("bin/mihomo");
-                candidate.is_file().then_some(candidate)
-            })
-            .or_else(find_mihomo_binary)
-            .ok_or_else(|| {
-                MihomoError::Process(
-                    "找不到 mihomo；请设置 ZENCLASH_MIHOMO_BINARY 或将 mihomo 放入 PATH".into(),
-                )
-            })?;
-        Self::new(binary, config_file, home_dir)
-    }
-}
-
+/// Owned managed Mihomo child process with bounded stdout/stderr history.
 pub struct MihomoProcess {
     child: Mutex<Option<Child>>,
     logs: Arc<RwLock<VecDeque<String>>>,
@@ -88,20 +29,34 @@ pub struct MihomoProcess {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Point-in-time state used by the native runtime page.
 pub struct MihomoProcessSnapshot {
+    /// Whether the child is still running.
     pub running: bool,
+    /// Live process identifier, absent after exit or stop.
     pub pid: Option<u32>,
+    /// Executable used to launch the child.
     pub binary: PathBuf,
+    /// Active YAML configuration passed to the child.
     pub config_file: PathBuf,
+    /// Mihomo writable data directory.
     pub home_dir: PathBuf,
+    /// Most recent bounded stdout and stderr lines.
     pub logs: Vec<String>,
 }
 
 impl MihomoProcess {
+    /// Starts Mihomo and attaches bounded output collectors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the data directory, child process, or collector
+    /// threads cannot be created. A partially started child is terminated.
     pub fn spawn(config: MihomoLaunchConfig) -> MihomoResult<Arc<Self>> {
         std::fs::create_dir_all(&config.home_dir)
             .map_err(|error| MihomoError::Process(error.to_string()))?;
         let mut command = Command::new(&config.binary);
+        configure_child_command(&mut command);
         command
             .arg("-d")
             .arg(&config.home_dir)
@@ -119,11 +74,19 @@ impl MihomoProcess {
             })?;
 
         let logs = Arc::new(RwLock::new(VecDeque::new()));
-        if let Some(stdout) = child.stdout.take() {
-            collect_output(stdout, "INFO", logs.clone());
-        }
-        if let Some(stderr) = child.stderr.take() {
-            collect_output(stderr, "CORE", logs.clone());
+        let collectors = (|| {
+            if let Some(stdout) = child.stdout.take() {
+                collect_output(stdout, "INFO", logs.clone())?;
+            }
+            if let Some(stderr) = child.stderr.take() {
+                collect_output(stderr, "CORE", logs.clone())?;
+            }
+            Ok::<_, MihomoError>(())
+        })();
+        if let Err(error) = collectors {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
         }
 
         Ok(Arc::new(Self {
@@ -133,11 +96,24 @@ impl MihomoProcess {
         }))
     }
 
+    /// Polls the real `/version` endpoint until it responds, the child exits,
+    /// or the supplied timeout elapses.
+    ///
+    /// # Errors
+    ///
+    /// Returns the last process log when Mihomo exits early, or a timeout error.
     pub async fn wait_until_ready(&self, timeout: Duration) -> MihomoResult<()> {
         let client = MihomoClient::new(self.config.endpoint.clone())?;
-        let started = tokio::time::Instant::now();
+        let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            if client.version().await.is_ok() {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(self.readiness_timeout_error());
+            }
+            if tokio::time::timeout(readiness_attempt_timeout(remaining), client.version())
+                .await
+                .is_ok_and(|result| result.is_ok())
+            {
                 return Ok(());
             }
             if !self.is_running() {
@@ -149,33 +125,56 @@ impl MihomoProcess {
                     .unwrap_or_else(|| "mihomo 在控制器就绪前退出".into());
                 return Err(MihomoError::Process(message));
             }
-            if started.elapsed() >= timeout {
-                return Err(MihomoError::Process(format!(
-                    "等待 Mihomo 控制器 {} 超时",
-                    self.config.endpoint.controller
-                )));
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(self.readiness_timeout_error());
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(remaining.min(Duration::from_millis(100))).await;
         }
     }
 
-    pub fn endpoint(&self) -> &MihomoEndpoint {
+    fn readiness_timeout_error(&self) -> MihomoError {
+        MihomoError::Process(format!(
+            "等待 Mihomo 控制器 {} 超时",
+            self.config.endpoint.controller
+        ))
+    }
+
+    /// Returns the controller endpoint assigned to this process.
+    #[must_use]
+    pub const fn endpoint(&self) -> &MihomoEndpoint {
         &self.config.endpoint
     }
 
+    /// Checks whether the child has not exited yet.
+    #[must_use]
     pub fn is_running(&self) -> bool {
         let mut child = self.child.lock();
-        match child.as_mut() {
-            Some(child) => matches!(child.try_wait(), Ok(None)),
-            None => false,
-        }
+        child.as_mut().is_some_and(|child| match child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(_)) => false,
+            Err(error) => {
+                tracing::warn!(%error, "failed to query Mihomo process status");
+                false
+            }
+        })
     }
 
+    /// Captures process paths, live PID, running state, and recent logs.
+    #[must_use]
     pub fn snapshot(&self) -> MihomoProcessSnapshot {
-        let mut child = self.child.lock();
-        let (running, pid) = match child.as_mut() {
-            Some(process) => (matches!(process.try_wait(), Ok(None)), Some(process.id())),
-            None => (false, None),
+        let (running, pid) = {
+            let mut child = self.child.lock();
+            child
+                .as_mut()
+                .map_or((false, None), |process| match process.try_wait() {
+                    Ok(None) => (true, Some(process.id())),
+                    Ok(Some(_)) => (false, None),
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to snapshot Mihomo process status");
+                        (false, None)
+                    }
+                })
         };
         MihomoProcessSnapshot {
             running,
@@ -187,27 +186,55 @@ impl MihomoProcess {
         }
     }
 
+    /// Terminates and reaps the child while retaining its handle on failure so
+    /// callers may retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when status inspection, termination, or waiting fails.
     pub fn stop(&self) -> MihomoResult<()> {
         let mut child = self.child.lock();
-        if let Some(mut process) = child.take() {
-            if process
-                .try_wait()
-                .map_err(|error| MihomoError::Process(error.to_string()))?
-                .is_none()
-            {
-                process
-                    .kill()
-                    .map_err(|error| MihomoError::Process(error.to_string()))?;
-                let _ = process.wait();
-            }
+        let Some(process) = child.as_mut() else {
+            return Ok(());
+        };
+        if process
+            .try_wait()
+            .map_err(|error| MihomoError::Process(format!("查询 Mihomo 状态失败：{error}")))?
+            .is_none()
+        {
+            process
+                .kill()
+                .map_err(|error| MihomoError::Process(format!("停止 Mihomo 失败：{error}")))?;
+            process
+                .wait()
+                .map_err(|error| MihomoError::Process(format!("等待 Mihomo 退出失败：{error}")))?;
         }
+        child.take();
+        drop(child);
         Ok(())
     }
 }
 
+fn readiness_attempt_timeout(remaining: Duration) -> Duration {
+    remaining.min(Duration::from_millis(750))
+}
+
+#[cfg(target_os = "windows")]
+fn configure_child_command(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn configure_child_command(_command: &mut Command) {}
+
 impl Drop for MihomoProcess {
     fn drop(&mut self) {
-        let _ = self.stop();
+        if let Err(error) = self.stop() {
+            tracing::warn!(%error, "failed to stop Mihomo while dropping process owner");
+        }
     }
 }
 
@@ -215,100 +242,28 @@ fn collect_output(
     reader: impl std::io::Read + Send + 'static,
     label: &'static str,
     logs: Arc<RwLock<VecDeque<String>>>,
-) {
+) -> MihomoResult<()> {
     std::thread::Builder::new()
         .name(format!("zenclash-mihomo-{label}"))
         .spawn(move || {
-            for line in BufReader::new(reader).lines().map_while(Result::ok) {
+            for line in BufReader::new(reader).lines() {
+                let line = match line {
+                    Ok(line) => line,
+                    Err(error) => {
+                        tracing::warn!(%error, stream = label, "failed to read Mihomo output");
+                        break;
+                    }
+                };
                 let mut logs = logs.write();
                 if logs.len() >= MAX_LOG_LINES {
                     logs.pop_front();
                 }
                 logs.push_back(format!("[{label}] {line}"));
+                drop(logs);
             }
         })
-        .expect("failed to start Mihomo output collector");
-}
-
-fn endpoint_from_config_file(path: &Path) -> MihomoResult<MihomoEndpoint> {
-    let contents = std::fs::read_to_string(path).map_err(|error| {
-        MihomoError::Process(format!("无法读取 Mihomo 配置 {}：{error}", path.display()))
-    })?;
-    let config: FileControllerConfig = serde_yaml::from_str(&contents).map_err(|error| {
-        MihomoError::Process(format!("无法解析 Mihomo 配置 {}：{error}", path.display()))
-    })?;
-    let controller = if config.external_controller.trim().is_empty() {
-        "127.0.0.1:9090".to_owned()
-    } else {
-        config.external_controller
-    };
-    Ok(MihomoEndpoint::new(controller, config.secret))
-}
-
-fn find_mihomo_binary() -> Option<PathBuf> {
-    let names = if cfg!(windows) {
-        ["mihomo.exe", "mihomo"]
-    } else {
-        ["mihomo", "mihomo"]
-    };
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
-            .find(|candidate| candidate.is_file())
-    })
-}
-
-fn bundled_resources_dir() -> Option<PathBuf> {
-    let executable = std::env::current_exe().ok()?;
-    let macos_dir = executable.parent()?;
-    let contents_dir = macos_dir.parent()?;
-    let resources = contents_dir.join("Resources");
-    resources.is_dir().then_some(resources)
-}
-
-fn bundled_mihomo_binary() -> Option<PathBuf> {
-    let name = if cfg!(windows) {
-        "mihomo.exe"
-    } else {
-        "mihomo"
-    };
-    let candidate = bundled_resources_dir()?.join(name);
-    candidate.is_file().then_some(candidate)
-}
-
-fn bundled_profile() -> Option<PathBuf> {
-    let candidate = bundled_resources_dir()?.join("profile.yaml");
-    candidate.is_file().then_some(candidate)
-}
-
-fn default_home_dir(project_root: &Path) -> PathBuf {
-    if bundled_resources_dir().is_some() {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join("Library/Application Support/ZenClash/mihomo");
-        }
-    }
-    project_root.join("target/zenclash-mihomo")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reads_controller_and_secret_from_yaml() {
-        let path = std::env::temp_dir().join(format!(
-            "zenclash-endpoint-{}-{}.yaml",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        std::fs::write(
-            &path,
-            "external-controller: 127.0.0.1:19090\nsecret: integration-secret\n",
-        )
-        .unwrap();
-        let endpoint = endpoint_from_config_file(&path).unwrap();
-        let _ = std::fs::remove_file(path);
-        assert_eq!(endpoint.controller, "127.0.0.1:19090");
-        assert_eq!(endpoint.secret, "integration-secret");
-    }
+        .map(|_| ())
+        .map_err(|error| {
+            MihomoError::Process(format!("无法启动 Mihomo {label} 日志收集线程：{error}"))
+        })
 }

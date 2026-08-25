@@ -5193,6 +5193,7 @@ dependencies = [
  "base64",
  "bytes",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -5212,12 +5213,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
  "webpki-roots 1.0.9",
 ]
@@ -8400,16 +8403,18 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "zenclash-ui"
 version = "0.1.0"
 dependencies = [
- "anyhow",
+ "futures-util",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
+ "parking_lot",
  "serde_json",
  "tokio",
  "tracing",

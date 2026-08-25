@@ -1,30 +1,163 @@
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use std::{collections::HashMap, path::PathBuf};
+
+use tray_icon::{
+    menu::MenuEvent, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
+};
 use zenclash_core::{format_speed, TrafficSnapshot};
+
+mod icon;
+mod menu;
+
+use icon::traffic_icon;
+use menu::build_menu;
+
+#[derive(Clone, Debug, Default)]
+/// Complete state used to rebuild the native status menu.
+pub struct TrayMenuState {
+    /// Active Mihomo routing mode.
+    pub mode: String,
+    /// Whether an operating-system proxy is enabled.
+    pub system_proxy: bool,
+    /// Whether Mihomo TUN is enabled.
+    pub tun: bool,
+    /// Whether the compact traffic window is currently open.
+    pub floating_visible: bool,
+    /// Preferred local proxy port exposed in environment commands.
+    pub mixed_port: u16,
+    /// Display name of the active managed profile.
+    pub profile_name: String,
+    /// Proxy groups rendered as nested native menus.
+    pub groups: Vec<TrayProxyGroup>,
+    /// Named directories exposed by the Open Directories submenu.
+    pub directories: Vec<(String, PathBuf)>,
+}
+
+#[derive(Clone, Debug, Default)]
+/// One selectable Mihomo proxy group shown as a submenu.
+pub struct TrayProxyGroup {
+    /// Mihomo proxy-group name.
+    pub name: String,
+    /// Currently selected member.
+    pub now: String,
+    /// Optional delay-test URL supplied by Mihomo.
+    pub test_url: Option<String>,
+    /// Selectable group members.
+    pub proxies: Vec<TrayProxyNode>,
+}
+
+#[derive(Clone, Debug, Default)]
+/// Proxy node and its most recent delay used by a tray submenu.
+pub struct TrayProxyNode {
+    /// Mihomo proxy name.
+    pub name: String,
+    /// Most recent measured delay in milliseconds.
+    pub delay: Option<u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+/// Application command encoded into a native menu item identifier.
+pub enum TrayCommand {
+    /// Activate the main `ZenClash` window.
+    ShowWindow,
+    /// Open or close the compact traffic window.
+    ToggleFloatingWindow,
+    /// Select rule routing mode.
+    SetRuleMode,
+    /// Select global routing mode.
+    SetGlobalMode,
+    /// Select direct routing mode.
+    SetDirectMode,
+    /// Enable or disable the operating-system proxy.
+    SetSystemProxy {
+        /// Requested enabled state.
+        enabled: bool,
+        /// Local Mihomo proxy port.
+        port: u16,
+    },
+    /// Enable or disable Mihomo TUN.
+    SetTun(bool),
+    /// Run delay tests for all supplied group members.
+    TestGroup {
+        /// Mihomo proxy-group name.
+        group: String,
+        /// Proxy names to test.
+        proxies: Vec<String>,
+        /// Optional group-specific test URL.
+        test_url: Option<String>,
+    },
+    /// Select one member of a Mihomo proxy group.
+    SelectProxy {
+        /// Mihomo proxy-group name.
+        group: String,
+        /// Proxy member to select.
+        proxy: String,
+    },
+    /// Navigate to profile management.
+    OpenProfiles,
+    /// Open a directory in the platform file manager.
+    OpenDirectory(PathBuf),
+    /// Copy shell proxy environment variables.
+    CopyEnvironment {
+        /// Local Mihomo proxy port.
+        port: u16,
+    },
+    /// Hide the main app while retaining the status item.
+    LightMode,
+    /// Relaunch the current executable.
+    Restart,
+    /// Terminate `ZenClash`.
+    Quit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Mouse gestures emitted by the native tray icon.
+pub enum TrayClick {
+    /// Primary click requests the main window.
+    ShowWindow,
+    /// Secondary click requests the native menu.
+    ShowMenu,
+}
 
 /// Native status-bar indicator. The arrows are rendered as a macOS template
 /// image and the live upload/download rates are shown beside it.
 pub struct NetworkTrayIcon {
     icon: TrayIcon,
     last_title: String,
+    commands: HashMap<String, TrayCommand>,
 }
 
 impl NetworkTrayIcon {
+    /// Creates the native traffic icon and its initial menu.
+    ///
+    /// # Errors
+    ///
+    /// Returns a platform error when the icon, menu, or native tray cannot be created.
     pub fn new() -> Result<Self, String> {
         let icon = traffic_icon(0, 0)?;
+        let (menu, commands) = build_menu(&TrayMenuState::default())?;
         let tray = TrayIconBuilder::new()
             .with_tooltip("ZenClash · Mihomo 网络流量")
             .with_title("↑ 0 B/s  ↓ 0 B/s")
             .with_icon(icon)
             .with_icon_as_template(true)
+            .with_menu(Box::new(menu))
+            .with_menu_on_left_click(false)
+            .with_menu_on_right_click(false)
             .build()
             .map_err(|error| error.to_string())?;
         Ok(Self {
             icon: tray,
             last_title: String::new(),
+            commands,
         })
     }
 
-    pub fn update(&mut self, traffic: &TrafficSnapshot) {
+    /// Updates the title, tooltip, and activity bars when throughput changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a platform error when a native property cannot be updated.
+    pub fn update(&mut self, traffic: &TrafficSnapshot) -> Result<(), String> {
         let title = if traffic.connected {
             format!(
                 "↑ {}  ↓ {}",
@@ -35,89 +168,80 @@ impl NetworkTrayIcon {
             "Mihomo 离线".into()
         };
         if title == self.last_title {
-            return;
+            return Ok(());
         }
         self.icon.set_title(Some(&title));
-        let _ = self.icon.set_tooltip(Some(format!("ZenClash · {title}")));
-        if let Ok(icon) = traffic_icon(traffic.upload, traffic.download) {
-            let _ = self.icon.set_icon_with_as_template(Some(icon), true);
-        }
+        self.icon
+            .set_tooltip(Some(format!("ZenClash · {title}")))
+            .map_err(|error| error.to_string())?;
+        let icon = traffic_icon(traffic.upload, traffic.download)?;
+        self.icon
+            .set_icon_with_as_template(Some(icon), true)
+            .map_err(|error| error.to_string())?;
         self.last_title = title;
+        Ok(())
     }
 
-    pub fn set_visible(&self, visible: bool) {
-        let _ = self.icon.set_visible(visible);
+    /// Shows or hides the native tray indicator.
+    ///
+    /// # Errors
+    ///
+    /// Returns a platform error if visibility cannot be changed.
+    pub fn set_visible(&self, visible: bool) -> Result<(), String> {
+        self.icon
+            .set_visible(visible)
+            .map_err(|error| error.to_string())
     }
-}
 
-fn traffic_icon(upload: u64, download: u64) -> Result<Icon, String> {
-    const WIDTH: u32 = 22;
-    const HEIGHT: u32 = 18;
-    let mut rgba = vec![0; (WIDTH * HEIGHT * 4) as usize];
-    let mut pixel = |x: u32, y: u32, alpha: u8| {
-        if x >= WIDTH || y >= HEIGHT {
-            return;
+    /// Rebuilds the menu and atomically replaces its command mapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any native menu item cannot be created or appended.
+    pub fn update_menu(&mut self, state: &TrayMenuState) -> Result<(), String> {
+        let (menu, commands) = build_menu(state)?;
+        self.icon.set_menu(Some(Box::new(menu)));
+        self.commands = commands;
+        Ok(())
+    }
+
+    /// Drains menu events until it finds a command owned by this tray.
+    #[must_use]
+    pub fn next_command(&self) -> Option<TrayCommand> {
+        while let Ok(event) = MenuEvent::receiver().try_recv() {
+            if let Some(command) = self.commands.get(event.id().as_ref()) {
+                return Some(command.clone());
+            }
         }
-        let offset = ((y * WIDTH + x) * 4) as usize;
-        rgba[offset + 3] = alpha;
-    };
-
-    for y in 4..15 {
-        pixel(5, y, 255);
-        pixel(6, y, 255);
+        None
     }
-    for step in 0..4 {
-        for x in (5 - step)..=(6 + step) {
-            pixel(x, 4 + step, 255);
+
+    /// Drains icon events until it finds a released click owned by this tray.
+    #[must_use]
+    pub fn next_click(&self) -> Option<TrayClick> {
+        while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+            if let TrayIconEvent::Click {
+                id,
+                button,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                if id != self.icon.id() {
+                    continue;
+                }
+                return match button {
+                    MouseButton::Left => Some(TrayClick::ShowWindow),
+                    MouseButton::Right => Some(TrayClick::ShowMenu),
+                    MouseButton::Middle => None,
+                };
+            }
         }
+        None
     }
 
-    for y in 3..14 {
-        pixel(15, y, 255);
-        pixel(16, y, 255);
-    }
-    for step in 0..4 {
-        for x in (15 - step)..=(16 + step) {
-            pixel(x, 14 - step, 255);
-        }
-    }
-
-    let up_height = activity_height(upload);
-    let down_height = activity_height(download);
-    for y in 0..up_height {
-        pixel(0, 16 - y, 170);
-        pixel(1, 16 - y, 170);
-    }
-    for y in 0..down_height {
-        pixel(20, 16 - y, 170);
-        pixel(21, 16 - y, 170);
-    }
-
-    Icon::from_rgba(rgba, WIDTH, HEIGHT).map_err(|error| error.to_string())
-}
-
-fn activity_height(bytes_per_second: u64) -> u32 {
-    if bytes_per_second == 0 {
-        return 1;
-    }
-    ((bytes_per_second as f64 + 1.0).log2() / 2.0)
-        .round()
-        .clamp(2.0, 14.0) as u32
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn activity_indicator_uses_logarithmic_height() {
-        assert_eq!(activity_height(0), 1);
-        assert!(activity_height(1024) > activity_height(1));
-        assert_eq!(activity_height(u64::MAX), 14);
-    }
-
-    #[test]
-    fn creates_valid_rgba_tray_icons() {
-        assert!(traffic_icon(1024, 2048).is_ok());
+    /// Opens the native status menu programmatically.
+    pub fn show_menu(&self) {
+        self.icon.show_menu();
     }
 }

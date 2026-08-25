@@ -1,23 +1,16 @@
-use std::{net::TcpListener, path::PathBuf, sync::Arc, sync::OnceLock, time::Duration};
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
+//! Native `ZenClash` executable bootstrap and managed Mihomo discovery.
+
+use std::{net::TcpListener, path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::Application;
 use gpui_component_assets::Assets;
 use zenclash_core::{
-    LogMonitor, MihomoClient, MihomoEndpoint, MihomoLaunchConfig, MihomoProcess, TrafficMonitor,
+    LogMonitor, MihomoClient, MihomoEndpoint, MihomoLaunchConfig, MihomoProcess, ProfileStore,
+    TrafficMonitor,
 };
 use zenclash_ui::app;
-
-static TOKIO_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-
-fn runtime() -> &'static tokio::runtime::Runtime {
-    TOKIO_RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .thread_name("zenclash-io")
-            .build()
-            .expect("failed to create ZenClash I/O runtime")
-    })
-}
 
 fn main() {
     tracing_subscriber::fmt()
@@ -27,10 +20,20 @@ fn main() {
         )
         .init();
 
-    let runtime = runtime();
+    if let Err(error) = run() {
+        tracing::error!(%error, "ZenClash startup failed");
+        eprintln!("ZenClash 启动失败：{error}");
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("zenclash-io")
+        .build()?;
     let _runtime_guard = runtime.enter();
-    let (endpoint, mihomo_process, profile_path) = bootstrap_mihomo(runtime);
-    let client = MihomoClient::new(endpoint.clone()).expect("failed to create Mihomo client");
+    let (endpoint, mihomo_process, profile_path) = bootstrap_mihomo(&runtime)?;
+    let client = MihomoClient::new(endpoint.clone())?;
     let traffic = TrafficMonitor::start(runtime.handle(), endpoint.clone());
     let logs = LogMonitor::start(runtime.handle(), endpoint, "debug");
     let runtime_handle = runtime.handle().clone();
@@ -47,35 +50,54 @@ fn main() {
                 runtime: runtime_handle,
             },
             cx,
-        )
-        .expect("failed to create ZenClash window");
+        );
         cx.activate(true);
     });
+    Ok(())
 }
 
 fn bootstrap_mihomo(
     runtime: &tokio::runtime::Runtime,
-) -> (MihomoEndpoint, Option<Arc<MihomoProcess>>, Option<PathBuf>) {
+) -> std::io::Result<(MihomoEndpoint, Option<Arc<MihomoProcess>>, Option<PathBuf>)> {
     let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|path| path.parent())
-        .expect("ZenClash workspace root")
+        .ok_or_else(|| std::io::Error::other("无法从 Cargo 清单路径确定 ZenClash 工作区"))?
         .to_path_buf();
-    let profile_path = std::env::var_os("ZENCLASH_CONFIG")
+    let selected_profile = std::env::var_os("ZENCLASH_CONFIG")
         .map(PathBuf::from)
-        .unwrap_or_else(|| project_root.join("examples/19facdf022b.yaml"));
+        .or_else(|| {
+            ProfileStore::discover()
+                .and_then(|store| store.active_path())
+                .inspect_err(|error| tracing::warn!(%error, "failed to load active profile"))
+                .ok()
+                .flatten()
+        });
 
     if std::env::var_os("ZENCLASH_CONTROLLER").is_some() {
-        return (MihomoEndpoint::from_env(), None, Some(profile_path));
+        let profile_path =
+            selected_profile.unwrap_or_else(|| project_root.join("examples/19facdf022b.yaml"));
+        return Ok((MihomoEndpoint::from_env(), None, Some(profile_path)));
     }
 
-    let mut launch = match MihomoLaunchConfig::discover(&project_root) {
+    let discovered = match MihomoLaunchConfig::discover(&project_root) {
         Ok(launch) => launch,
         Err(error) => {
             tracing::warn!(%error, "Mihomo binary discovery failed; using controller-only mode");
-            return (MihomoEndpoint::from_env(), None, Some(profile_path));
+            let profile_path =
+                selected_profile.unwrap_or_else(|| project_root.join("examples/19facdf022b.yaml"));
+            return Ok((MihomoEndpoint::from_env(), None, Some(profile_path)));
         }
     };
+    let profile_path = selected_profile.unwrap_or_else(|| discovered.config_file.clone());
+    let mut launch =
+        match MihomoLaunchConfig::new(discovered.binary, &profile_path, discovered.home_dir) {
+            Ok(launch) => launch,
+            Err(error) => {
+                tracing::warn!(%error, "active profile is invalid; using controller-only mode");
+                return Ok((MihomoEndpoint::from_env(), None, Some(profile_path)));
+            }
+        };
     match allocate_managed_controller() {
         Ok(controller) => launch = launch.with_controller_override(controller),
         Err(error) => {
@@ -88,20 +110,23 @@ fn bootstrap_mihomo(
         Ok(process) => {
             match runtime.block_on(process.wait_until_ready(Duration::from_secs(20))) {
                 Ok(()) => {
-                    tracing::info!(controller = %endpoint.controller, "managed Mihomo is ready")
+                    tracing::info!(controller = %endpoint.controller, "managed Mihomo is ready");
                 }
                 Err(error) => {
                     tracing::error!(%error, "managed Mihomo failed to become ready");
                     for line in process.snapshot().logs.iter().rev().take(12).rev() {
                         tracing::error!("{line}");
                     }
+                    if let Err(stop_error) = process.stop() {
+                        tracing::error!(%stop_error, "failed to stop unready managed Mihomo");
+                    }
                 }
             }
-            (endpoint, Some(process), Some(launch.config_file))
+            Ok((endpoint, Some(process), Some(launch.config_file)))
         }
         Err(error) => {
             tracing::error!(%error, "failed to start managed Mihomo");
-            (endpoint, None, Some(launch.config_file))
+            Ok((endpoint, None, Some(launch.config_file)))
         }
     }
 }

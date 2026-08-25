@@ -68,3 +68,57 @@ open target/ZenClash.app
 The bundle contains the selected real Mihomo binary and profile under
 `Contents/Resources`; runtime data is stored in
 `~/Library/Application Support/ZenClash/mihomo`.
+
+## Release installers
+
+Every installer bundles the pinned real Mihomo release. Local build scripts use
+`examples/19facdf022b.yaml` by default, while public CI packages use the safe
+bootstrap profile described below. The platform build entry points are:
+
+```sh
+# Apple Silicon macOS (.dmg)
+ZENCLASH_MIHOMO_BINARY=/absolute/path/to/mihomo \
+  scripts/build_macos_package.sh 0.1.0 dist
+
+# Ubuntu 22.04 or newer (.deb), run on Ubuntu 22.04
+sudo scripts/install_linux_build_deps.sh
+ZENCLASH_MIHOMO_BINARY=/absolute/path/to/mihomo \
+  scripts/build_deb_package.sh 0.1.0 dist
+
+# Fedora / Rocky Linux (.rpm), run inside the target distribution
+scripts/install_linux_build_deps.sh
+ZENCLASH_PACKAGE_FLAVOR=fedora44 \
+ZENCLASH_MIHOMO_BINARY=/absolute/path/to/mihomo \
+  scripts/build_rpm_package.sh 0.1.0 dist
+```
+
+On Windows, run the following from PowerShell with Rust and Inno Setup 6
+installed:
+
+```powershell
+scripts/build_windows_installer.ps1 -Version 0.1.0 -OutputDir dist
+```
+
+Before publishing, configure the repository secret `ZENCLASH_TEST_PROFILE_URL`
+with a private URL that downloads the real Clash profile used by integration
+tests. The downloaded profile is kept in the runner's temporary directory and
+is never uploaded as an artifact. Public installers instead contain
+`platforms/common/default.yaml`, a functional direct-only bootstrap profile;
+users add their own online subscription or local YAML in subscription
+management.
+
+Pushing a tag whose value matches the workspace version, for example `v0.1.0`,
+starts `.github/workflows/release.yml`. The workflow runs formatting, Clippy,
+workspace tests, and the ignored real-Mihomo integration test before building:
+
+- Windows Server 2022 x64 Inno Setup installer;
+- macOS 15 Apple Silicon DMG;
+- Ubuntu 22.04-baseline amd64 DEB for Ubuntu 22.04 and newer;
+- Fedora 42, 43, and 44 x86_64 RPMs (the releases covering the latest two
+  years at the time this matrix was added);
+- Rocky Linux 8 and 9 x86_64 RPMs.
+
+The release job publishes SHA-256 checksums and, for public repositories,
+GitHub artifact attestations. Without `APPLE_SIGNING_IDENTITY`, the macOS app is
+ad-hoc signed and is not notarized; set that environment variable on a trusted
+release runner when distributing a Developer ID-signed build.

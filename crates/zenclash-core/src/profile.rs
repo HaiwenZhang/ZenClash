@@ -2,10 +2,15 @@ use std::path::{Path, PathBuf};
 
 use serde_yaml::Value;
 
-use crate::{MihomoError, MihomoResult};
+use crate::{profiles::read_profile_bytes, MihomoError, MihomoResult};
 
 /// Builds the effective Mihomo YAML without changing any source file.
 /// Later override files win and mappings are merged recursively.
+///
+/// # Errors
+///
+/// Returns an error when any source is unreadable, exceeds the managed profile
+/// size limit, is not UTF-8 or valid YAML, or the merged YAML cannot be encoded.
 pub fn merge_profile_overrides(
     profile: impl AsRef<Path>,
     overrides: &[PathBuf],
@@ -21,8 +26,11 @@ pub fn merge_profile_overrides(
 }
 
 fn read_yaml(path: &Path, kind: &str) -> MihomoResult<Value> {
-    let source = std::fs::read_to_string(path).map_err(|error| {
+    let payload = read_profile_bytes(path).map_err(|error| {
         MihomoError::Process(format!("无法读取{kind} {}：{error}", path.display()))
+    })?;
+    let source = String::from_utf8(payload).map_err(|error| {
+        MihomoError::Process(format!("{kind} {} 不是 UTF-8：{error}", path.display()))
     })?;
     serde_yaml::from_str(&source).map_err(|error| {
         MihomoError::Process(format!("无法解析{kind} {}：{error}", path.display()))
@@ -47,7 +55,10 @@ fn merge_yaml(target: &mut Value, patch: Value) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use super::*;
+    use crate::profiles::MAX_PROFILE_BYTES;
 
     #[test]
     fn recursively_merges_yaml_with_later_overrides_winning() {
@@ -65,5 +76,23 @@ mod tests {
         assert_eq!(base["dns"]["ipv6"].as_bool(), Some(true));
         assert_eq!(base["dns"]["nameserver"][0].as_str(), Some("1.1.1.1"));
         assert_eq!(base["rules"][0].as_str(), Some("MATCH,Proxy"));
+    }
+
+    #[test]
+    fn read_yaml_rejects_files_above_the_profile_size_limit() {
+        let sequence = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "zenclash-oversized-override-{}-{sequence}.yaml",
+            std::process::id()
+        ));
+        std::fs::write(&path, vec![b'a'; MAX_PROFILE_BYTES + 1]).unwrap();
+
+        let error = read_yaml(&path, "覆写").unwrap_err();
+        std::fs::remove_file(path).unwrap();
+
+        assert!(error.to_string().contains("超过 16 MiB 限制"));
     }
 }

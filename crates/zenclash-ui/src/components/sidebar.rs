@@ -2,241 +2,236 @@ use gpui::{
     div, prelude::FluentBuilder, px, App, InteractiveElement, IntoElement, ParentElement,
     RenderOnce, StatefulInteractiveElement, Styled, Window,
 };
-use gpui_component::{h_flex, scroll::ScrollableElement, v_flex, ActiveTheme, Icon};
-use zenclash_core::{format_speed, TrafficSnapshot};
+use gpui_component::{
+    badge::Badge, divider::Divider, scroll::ScrollableElement, v_flex, ActiveTheme, Icon, IconName,
+};
 
 use crate::{
     app::{
         NavigateConnections, NavigateDns, NavigateLogs, NavigateMihomo, NavigateNetwork,
         NavigateOverride, NavigateProfiles, NavigateProxies, NavigateResources, NavigateRules,
         NavigateSettings, NavigateSniffer, NavigateSubStore, NavigateSystemProxy, NavigateTraffic,
-        NavigateTun, SetDirectMode, SetGlobalMode, SetRuleMode,
+        NavigateTun,
     },
     pages::Page,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// Mihomo's mutually exclusive outbound routing modes.
 pub enum OutboundMode {
+    /// Route connections through Mihomo rules.
     #[default]
     Rule,
+    /// Route connections through the selected global proxy.
     Global,
+    /// Bypass proxies for every connection.
     Direct,
 }
 
 impl OutboundMode {
-    fn label(self) -> &'static str {
+    /// Returns the localized user-facing label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Rule => "规则",
             Self::Global => "全局",
             Self::Direct => "直连",
         }
     }
+
+    /// Returns the compact uppercase UI code.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Rule => "RULE",
+            Self::Global => "GLOBAL",
+            Self::Direct => "DIRECT",
+        }
+    }
+
+    /// Returns the lowercase value accepted by Mihomo's `/configs` API.
+    #[must_use]
+    pub const fn api_value(self) -> &'static str {
+        match self {
+            Self::Rule => "rule",
+            Self::Global => "global",
+            Self::Direct => "direct",
+        }
+    }
+
+    /// Parses a Mihomo API value, defaulting unknown values to rule mode.
+    #[must_use]
+    pub fn from_api(mode: &str) -> Self {
+        match mode.to_ascii_lowercase().as_str() {
+            "global" => Self::Global,
+            "direct" => Self::Direct,
+            _ => Self::Rule,
+        }
+    }
 }
 
 #[derive(IntoElement)]
+/// Primary page navigation rendered beside the active content view.
 pub struct Sidebar {
     current_page: Page,
-    mode: OutboundMode,
-    traffic: TrafficSnapshot,
-    samples: Vec<u64>,
 }
 
 impl Sidebar {
-    pub fn new(
-        current_page: Page,
-        mode: OutboundMode,
-        traffic: TrafficSnapshot,
-        samples: Vec<u64>,
-    ) -> Self {
-        Self {
-            current_page,
-            mode,
-            traffic,
-            samples,
-        }
+    /// Creates a sidebar with the supplied destination highlighted.
+    #[must_use]
+    pub const fn new(current_page: Page) -> Self {
+        Self { current_page }
     }
 
-    fn render_mode_switcher(&self, theme: &gpui_component::Theme) -> impl IntoElement {
-        h_flex()
-            .gap_1()
-            .p_1()
-            .rounded(theme.radius)
-            .bg(theme.muted)
-            .children(
-                [
-                    OutboundMode::Rule,
-                    OutboundMode::Global,
-                    OutboundMode::Direct,
-                ]
-                .into_iter()
-                .map(|mode| {
-                    let active = mode == self.mode;
-                    div()
-                        .id(mode.label())
-                        .flex_1()
-                        .py_1()
-                        .rounded(theme.radius)
-                        .cursor_pointer()
-                        .text_center()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(mode.label())
-                        .when(active, |this| {
-                            this.bg(theme.primary).text_color(theme.primary_foreground)
-                        })
-                        .when(!active, |this| {
-                            this.text_color(theme.muted_foreground)
-                                .hover(|this| this.bg(theme.background))
-                        })
-                        .on_click(move |_, window, cx| match mode {
-                            OutboundMode::Rule => window.dispatch_action(Box::new(SetRuleMode), cx),
-                            OutboundMode::Global => {
-                                window.dispatch_action(Box::new(SetGlobalMode), cx)
-                            }
-                            OutboundMode::Direct => {
-                                window.dispatch_action(Box::new(SetDirectMode), cx)
-                            }
-                        })
-                }),
-            )
-    }
-
-    fn render_card(&self, page: Page, theme: &gpui_component::Theme) -> gpui::AnyElement {
+    fn render_nav_item(&self, page: Page, theme: &gpui_component::Theme) -> gpui::AnyElement {
         let active = page == self.current_page;
-        let is_connections = page == Page::Connections;
-        let background = if active {
-            theme.primary
-        } else {
-            theme.secondary
-        };
-        let foreground = if active {
-            theme.primary_foreground
-        } else {
-            theme.foreground
-        };
-
-        let mut card = v_flex()
+        div()
             .id(page.route())
             .relative()
-            .flex_1()
-            .min_w(px(98.))
-            .h(px(if is_connections { 102. } else { 72. }))
-            .justify_between()
-            .p_3()
+            .h(px(40.))
+            .w_full()
             .rounded(theme.radius)
-            .border_1()
-            .border_color(if active { theme.primary } else { theme.border })
-            .bg(background)
-            .text_color(foreground)
             .cursor_pointer()
-            .hover(|this| if active { this } else { this.bg(theme.muted) })
-            .on_click(move |_, window, cx| dispatch_navigate(page, window, cx));
-
-        if is_connections {
-            let maximum = self.samples.iter().copied().max().unwrap_or(1).max(1);
-            card = card
-                .child(
-                    h_flex()
-                        .items_start()
-                        .justify_between()
-                        .child(Icon::new(page.icon()).size_5())
-                        .child(
-                            v_flex()
-                                .items_end()
-                                .gap_0()
-                                .text_xs()
-                                .child(format!("↑ {}", format_speed(self.traffic.upload)))
-                                .child(format!("↓ {}", format_speed(self.traffic.download))),
-                        ),
-                )
-                .child(h_flex().h(px(16.)).items_end().gap_1().children(
-                    self.samples.iter().enumerate().map(|(index, value)| {
-                        let height = 2. + 14. * (*value as f32 / maximum as f32);
-                        div()
-                            .id(("traffic-sample", index))
-                            .flex_1()
-                            .h(px(height))
-                            .rounded_sm()
-                            .bg(foreground.opacity(0.42))
-                    }),
-                ))
-                .child(
+            .text_color(if active {
+                theme.foreground
+            } else {
+                theme.muted_foreground
+            })
+            .when(active, |this| this.bg(theme.sidebar_accent))
+            .when(!active, |this| {
+                this.hover(|style| {
+                    style
+                        .bg(theme.sidebar_accent.opacity(0.62))
+                        .text_color(theme.foreground)
+                })
+            })
+            .when(active, |this| {
+                this.child(
                     div()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .child(page.label()),
-                );
-        } else {
-            card = card.child(Icon::new(page.icon()).size_5()).child(
-                div()
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .child(page.label()),
-            );
-        }
+                        .absolute()
+                        .left_0()
+                        .top(px(8.))
+                        .bottom(px(8.))
+                        .w(px(3.))
+                        .rounded_r_full()
+                        .bg(theme.primary),
+                )
+            })
+            .child(
+                gpui_component::h_flex()
+                    .size_full()
+                    .px_3()
+                    .gap_3()
+                    .child(
+                        Badge::new()
+                            .when(active, |badge| badge.dot().color(theme.primary))
+                            .child(
+                                div()
+                                    .size(px(27.))
+                                    .rounded(px(6.))
+                                    .bg(if active {
+                                        theme.primary.opacity(0.13)
+                                    } else {
+                                        theme.transparent
+                                    })
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(Icon::new(page.icon()).size_4()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .font_weight(if active {
+                                gpui::FontWeight::SEMIBOLD
+                            } else {
+                                gpui::FontWeight::NORMAL
+                            })
+                            .child(page.label()),
+                    )
+                    .when(active, |this| {
+                        this.child(
+                            Icon::new(IconName::ChevronRight)
+                                .size_3()
+                                .text_color(theme.primary),
+                        )
+                    }),
+            )
+            .on_click(move |_, window, cx| dispatch_navigate(page, window, cx))
+            .into_any_element()
+    }
 
-        card.into_any_element()
+    fn render_section(
+        &self,
+        label: &'static str,
+        pages: &[Page],
+        theme: &gpui_component::Theme,
+    ) -> gpui::AnyElement {
+        v_flex()
+            .gap_1()
+            .child(
+                div()
+                    .px_3()
+                    .pt_1()
+                    .pb_1()
+                    .text_size(px(10.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.muted_foreground.opacity(0.72))
+                    .child(label),
+            )
+            .children(
+                pages
+                    .iter()
+                    .copied()
+                    .map(|page| self.render_nav_item(page, theme)),
+            )
+            .into_any_element()
     }
 }
 
 impl RenderOnce for Sidebar {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let mut cards = v_flex().gap_2();
-        for pair in Page::SIDEBAR_CARDS.chunks(2) {
-            let mut row = h_flex().gap_2();
-            for page in pair {
-                row = row.child(self.render_card(*page, theme));
-            }
-            if pair.len() == 1 {
-                row = row.child(div().flex_1().min_w(px(98.)));
-            }
-            cards = cards.child(row);
-        }
 
         v_flex()
-            .w(px(250.))
+            .w(px(216.))
             .h_full()
             .flex_none()
-            .bg(theme.background)
+            .bg(theme.sidebar)
             .border_r_1()
-            .border_color(theme.border)
-            .child(
-                h_flex()
-                    .h(px(49.))
-                    .px_3()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        Icon::new(gpui_component::IconName::Star)
-                            .size_6()
-                            .text_color(theme.primary),
-                    )
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .child("ZenClash"),
-                    ),
-            )
-            .child(div().px_2().pb_2().child(self.render_mode_switcher(theme)))
+            .border_color(theme.sidebar_border)
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scrollbar()
                     .px_2()
-                    .child(cards),
+                    .py_3()
+                    .child(
+                        v_flex()
+                            .gap_3()
+                            .child(self.render_section("OVERVIEW", &Page::OVERVIEW, theme))
+                            .child(Divider::horizontal().color(theme.sidebar_border))
+                            .child(self.render_section("ROUTING", &Page::ROUTING, theme))
+                            .child(Divider::horizontal().color(theme.sidebar_border))
+                            .child(self.render_section(
+                                "CONFIGURATION",
+                                &Page::CONFIGURATION,
+                                theme,
+                            ))
+                            .child(Divider::horizontal().color(theme.sidebar_border))
+                            .child(self.render_section("SYSTEM", &Page::SYSTEM, theme)),
+                    ),
             )
             .child(
                 div()
                     .p_2()
                     .border_t_1()
-                    .border_color(theme.border)
-                    .child(self.render_card(Page::Settings, theme)),
+                    .border_color(theme.sidebar_border)
+                    .child(self.render_nav_item(Page::Settings, theme)),
             )
     }
 }
@@ -259,5 +254,20 @@ fn dispatch_navigate(page: Page, window: &mut Window, cx: &mut App) {
         Page::Network => window.dispatch_action(Box::new(NavigateNetwork), cx),
         Page::Traffic => window.dispatch_action(Box::new(NavigateTraffic), cx),
         Page::Settings => window.dispatch_action(Box::new(NavigateSettings), cx),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OutboundMode;
+
+    #[test]
+    fn outbound_mode_parses_mihomo_values_case_insensitively() {
+        assert_eq!(OutboundMode::from_api("GLOBAL"), OutboundMode::Global);
+    }
+
+    #[test]
+    fn outbound_mode_defaults_unknown_values_to_rule() {
+        assert_eq!(OutboundMode::from_api("unexpected"), OutboundMode::Rule);
     }
 }

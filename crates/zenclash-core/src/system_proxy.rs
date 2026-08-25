@@ -1,176 +1,108 @@
-use std::process::{Command, Output};
+//! Native desktop system-proxy discovery and control.
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod command;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(any(target_os = "macos", test))]
+mod macos;
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+mod unsupported;
+#[cfg(any(target_os = "windows", test))]
+mod windows;
+
+#[cfg(target_os = "linux")]
+use linux as platform;
+#[cfg(target_os = "macos")]
+use macos as platform;
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+use unsupported as platform;
+#[cfg(target_os = "windows")]
+use windows as platform;
 
 use crate::{MihomoError, MihomoResult};
 
+/// Current HTTP and HTTPS proxy state reported by the desktop operating system.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SystemProxyStatus {
+    /// Human-readable network service or desktop proxy backend name.
     pub service: String,
+    /// Whether the HTTP proxy is enabled.
     pub enabled: bool,
+    /// HTTP proxy host.
     pub server: String,
+    /// HTTP proxy port.
     pub port: u16,
+    /// Whether the HTTPS proxy is enabled.
     pub secure_enabled: bool,
+    /// HTTPS proxy host.
     pub secure_server: String,
+    /// HTTPS proxy port.
     pub secure_port: u16,
 }
 
+/// Controller for the platform's active desktop system-proxy service.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SystemProxyManager {
     service: String,
 }
 
 impl SystemProxyManager {
+    /// Detects the desktop proxy backend and its active network service.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the platform is unsupported or its native proxy
+    /// command is unavailable.
     pub fn detect() -> MihomoResult<Self> {
-        #[cfg(target_os = "macos")]
-        {
-            if let Ok(service) = std::env::var("ZENCLASH_NETWORK_SERVICE") {
-                if !service.trim().is_empty() {
-                    return Ok(Self { service });
-                }
-            }
-            let output = run_networksetup(["-listallnetworkservices"])?;
-            let services = String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .map(str::trim)
-                .filter(|line| {
-                    !line.is_empty() && !line.starts_with("An asterisk") && !line.starts_with('*')
-                })
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-            let service = services
-                .iter()
-                .find(|service| service.as_str() == "Wi-Fi")
-                .or_else(|| services.iter().find(|service| service.contains("Ethernet")))
-                .or_else(|| services.first())
-                .cloned()
-                .ok_or_else(|| MihomoError::Process("未找到可用的 macOS 网络服务".into()))?;
-            Ok(Self { service })
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            Err(MihomoError::Process("当前平台尚未实现系统代理控制".into()))
-        }
+        platform::detect().map(|service| Self { service })
     }
 
+    /// Returns the human-readable service selected during detection.
+    #[must_use]
     pub fn service(&self) -> &str {
         &self.service
     }
 
+    /// Reads the current HTTP and HTTPS proxy settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the platform command fails or its settings cannot
+    /// be queried.
     pub fn status(&self) -> MihomoResult<SystemProxyStatus> {
-        #[cfg(target_os = "macos")]
-        {
-            let web = run_networksetup(["-getwebproxy", self.service.as_str()])?;
-            let secure = run_networksetup(["-getsecurewebproxy", self.service.as_str()])?;
-            let (enabled, server, port) = parse_proxy_output(&web.stdout);
-            let (secure_enabled, secure_server, secure_port) = parse_proxy_output(&secure.stdout);
-            Ok(SystemProxyStatus {
-                service: self.service.clone(),
-                enabled,
-                server,
-                port,
-                secure_enabled,
-                secure_server,
-                secure_port,
-            })
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            Err(MihomoError::Process(
-                "当前平台尚未实现系统代理状态读取".into(),
-            ))
-        }
+        platform::status(&self.service)
     }
 
+    /// Enables or disables the HTTP and HTTPS proxy for this service.
+    ///
+    /// When enabling, the backend disables the active proxy before writing all
+    /// values and only re-enables it after every write succeeds. This favors a
+    /// safe disabled state over exposing a partially configured proxy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an empty host, a zero port, or a failed native
+    /// platform command.
     pub fn set_enabled(&self, enabled: bool, server: &str, port: u16) -> MihomoResult<()> {
-        #[cfg(target_os = "macos")]
-        {
-            if enabled {
-                if server.trim().is_empty() || port == 0 {
-                    return Err(MihomoError::Process("系统代理地址或端口无效".into()));
-                }
-                let port = port.to_string();
-                run_networksetup([
-                    "-setwebproxy",
-                    self.service.as_str(),
-                    server,
-                    port.as_str(),
-                    "off",
-                ])?;
-                run_networksetup([
-                    "-setsecurewebproxy",
-                    self.service.as_str(),
-                    server,
-                    port.as_str(),
-                    "off",
-                ])?;
-                run_networksetup([
-                    "-setproxybypassdomains",
-                    self.service.as_str(),
-                    "localhost",
-                    "127.0.0.1",
-                    "::1",
-                    "*.local",
-                    "192.168.0.0/16",
-                    "10.0.0.0/8",
-                    "172.16.0.0/12",
-                ])?;
-            }
-            let state = if enabled { "on" } else { "off" };
-            run_networksetup(["-setwebproxystate", self.service.as_str(), state])?;
-            run_networksetup(["-setsecurewebproxystate", self.service.as_str(), state])?;
-            Ok(())
+        if enabled && (server.trim().is_empty() || port == 0) {
+            return Err(MihomoError::Process("系统代理地址或端口无效".into()));
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (enabled, server, port);
-            Err(MihomoError::Process("当前平台尚未实现系统代理设置".into()))
-        }
+        platform::set_enabled(&self.service, enabled, server, port)
     }
-}
-
-#[cfg(target_os = "macos")]
-fn run_networksetup<const N: usize>(args: [&str; N]) -> MihomoResult<Output> {
-    let output = Command::new("/usr/sbin/networksetup")
-        .args(args)
-        .output()
-        .map_err(|error| MihomoError::Process(format!("执行 networksetup 失败：{error}")))?;
-    if output.status.success() {
-        Ok(output)
-    } else {
-        let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        Err(MihomoError::Process(if message.is_empty() {
-            format!("networksetup 退出状态：{}", output.status)
-        } else {
-            message
-        }))
-    }
-}
-
-fn parse_proxy_output(output: &[u8]) -> (bool, String, u16) {
-    let output = String::from_utf8_lossy(output);
-    let value = |key: &str| {
-        output
-            .lines()
-            .find_map(|line| line.trim().strip_prefix(key).map(str::trim))
-            .unwrap_or_default()
-    };
-    (
-        value("Enabled:").eq_ignore_ascii_case("yes"),
-        value("Server:").to_owned(),
-        value("Port:").parse().unwrap_or_default(),
-    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::SystemProxyManager;
 
     #[test]
-    fn parses_macos_networksetup_proxy_output() {
-        let (enabled, server, port) = parse_proxy_output(
-            b"Enabled: Yes\nServer: 127.0.0.1\nPort: 7890\nAuthenticated Proxy Enabled: 0\n",
-        );
-        assert!(enabled);
-        assert_eq!(server, "127.0.0.1");
-        assert_eq!(port, 7890);
+    fn rejects_invalid_proxy_endpoint_before_platform_command() {
+        let manager = SystemProxyManager {
+            service: "test-service".into(),
+        };
+
+        assert!(manager.set_enabled(true, "   ", 7890).is_err());
+        assert!(manager.set_enabled(true, "127.0.0.1", 0).is_err());
     }
 }

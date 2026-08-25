@@ -1,99 +1,92 @@
-use std::process::Command;
+//! Cross-platform discovery of the host's active network path.
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod command;
+#[cfg(any(target_os = "linux", test))]
+mod linux;
+#[cfg(any(target_os = "macos", test))]
+mod macos;
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+mod unsupported;
+#[cfg(any(target_os = "windows", test))]
+mod windows;
+
+#[cfg(target_os = "linux")]
+use linux as platform;
+#[cfg(target_os = "macos")]
+use macos as platform;
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+use unsupported as platform;
+#[cfg(target_os = "windows")]
+use windows as platform;
+
+/// Snapshot of the operating system's active default network path.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SystemNetworkSnapshot {
+    /// Active interface or adapter name.
     pub interface: String,
+    /// IPv4 default gateway, when the route exposes one.
     pub gateway: String,
+    /// IPv4 address assigned to the active interface.
     pub local_ipv4: String,
+    /// DNS servers reported by the operating system.
     pub dns_servers: Vec<String>,
+    /// Hard failure or partial-discovery warning.
     pub error: Option<String>,
 }
 
 impl SystemNetworkSnapshot {
+    /// Detects the active interface, gateway, address and DNS servers.
+    ///
+    /// Hard failures produce an otherwise empty snapshot. Optional command
+    /// failures retain successfully discovered fields and populate
+    /// [`Self::error`] with a warning.
+    #[must_use]
     pub fn detect() -> Self {
-        #[cfg(target_os = "macos")]
-        {
-            match detect_macos() {
-                Ok(snapshot) => snapshot,
-                Err(error) => Self {
-                    error: Some(error),
-                    ..Default::default()
-                },
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            Self {
-                error: Some("当前平台尚未实现网络接口探测".into()),
-                ..Default::default()
-            }
+        platform::detect().unwrap_or_else(Self::failed)
+    }
+
+    fn failed(error: String) -> Self {
+        Self {
+            error: Some(error),
+            ..Self::default()
         }
     }
 }
 
-#[cfg(target_os = "macos")]
-fn detect_macos() -> Result<SystemNetworkSnapshot, String> {
-    let route = command_output("/sbin/route", &["-n", "get", "default"])?;
-    let interface = route_value(&route, "interface:");
-    let gateway = route_value(&route, "gateway:");
-    let local_ipv4 = if interface.is_empty() {
-        String::new()
+fn warning_message(warnings: &[String]) -> Option<String> {
+    if warnings.is_empty() {
+        None
     } else {
-        command_output("/usr/sbin/ipconfig", &["getifaddr", &interface])
-            .unwrap_or_default()
-            .trim()
-            .to_owned()
-    };
-    let dns = command_output("/usr/sbin/scutil", &["--dns"]).unwrap_or_default();
-    let mut dns_servers = dns
-        .lines()
-        .filter_map(|line| {
-            line.trim()
-                .strip_prefix("nameserver[")
-                .and_then(|line| line.split_once(": "))
-                .map(|(_, value)| value.trim().to_owned())
-        })
-        .collect::<Vec<_>>();
-    dns_servers.sort();
-    dns_servers.dedup();
-    Ok(SystemNetworkSnapshot {
-        interface,
-        gateway,
-        local_ipv4,
-        dns_servers,
-        error: None,
-    })
-}
-
-#[cfg(target_os = "macos")]
-fn command_output(command: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(command)
-        .args(args)
-        .output()
-        .map_err(|error| format!("执行 {command} 失败：{error}"))?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+        Some(warnings.join("；"))
     }
 }
 
-fn route_value(output: &str, key: &str) -> String {
-    output
-        .lines()
-        .find_map(|line| line.trim().strip_prefix(key).map(str::trim))
-        .unwrap_or_default()
-        .to_owned()
+fn unique_nonempty(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut result = Vec::new();
+    for value in values {
+        let value = value.trim().to_owned();
+        if !value.is_empty() && !result.contains(&value) {
+            result.push(value);
+        }
+    }
+    result
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::unique_nonempty;
 
     #[test]
-    fn parses_default_route_fields() {
-        let output = "   route to: default\ndestination: default\n    gateway: 192.168.1.1\n  interface: en0\n";
-        assert_eq!(route_value(output, "gateway:"), "192.168.1.1");
-        assert_eq!(route_value(output, "interface:"), "en0");
+    fn unique_nonempty_preserves_first_seen_order() {
+        assert_eq!(
+            unique_nonempty([
+                " 8.8.8.8 ".to_owned(),
+                String::new(),
+                "1.1.1.1".to_owned(),
+                "8.8.8.8".to_owned(),
+            ]),
+            ["8.8.8.8".to_owned(), "1.1.1.1".to_owned()]
+        );
     }
 }

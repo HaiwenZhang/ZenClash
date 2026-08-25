@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=ZenClash
+Comment=Native Mihomo client
+Exec=zenclash
+Icon=zenclash
+Terminal=false
+Categories=Network;Utility;
+StartupNotify=true
+StartupWMClass=ZenClash

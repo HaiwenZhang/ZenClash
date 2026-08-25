@@ -6,7 +6,9 @@ use crate::{MihomoError, MihomoResult};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MihomoEndpoint {
+    /// HTTP(S) controller base URL or `host:port` shorthand.
     pub controller: String,
+    /// Bearer token configured as Mihomo's controller secret.
     #[serde(default)]
     pub secret: String,
 }
@@ -21,6 +23,8 @@ impl Default for MihomoEndpoint {
 }
 
 impl MihomoEndpoint {
+    /// Creates an endpoint without performing network I/O.
+    #[must_use]
     pub fn new(controller: impl Into<String>, secret: impl Into<String>) -> Self {
         Self {
             controller: controller.into(),
@@ -30,6 +34,7 @@ impl MihomoEndpoint {
 
     /// Resolve the initial controller from environment overrides, while retaining
     /// Mihomo's conventional local controller as the zero-configuration default.
+    #[must_use]
     pub fn from_env() -> Self {
         let mut endpoint = Self::default();
         if let Ok(controller) = std::env::var("ZENCLASH_CONTROLLER") {
@@ -43,36 +48,59 @@ impl MihomoEndpoint {
         endpoint
     }
 
+    /// Builds a validated HTTP(S) URL below the configured controller path.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed controllers, unsupported schemes, embedded
+    /// credentials, queries and fragments.
     pub fn http_url(&self, path: &str) -> MihomoResult<String> {
-        let base = self.normalized_http_base()?;
-        Ok(format!("{base}/{}", path.trim_start_matches('/')))
+        let mut url = self.normalized_http_base()?;
+        let base_path = url.path().trim_end_matches('/').to_owned();
+        url.set_path(&format!("{base_path}/{}", path.trim_start_matches('/')));
+        Ok(url.to_string())
     }
 
+    /// Builds the equivalent WebSocket URL below the controller path.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same endpoint-validation errors as [`Self::http_url`].
     pub fn websocket_url(&self, path: &str) -> MihomoResult<String> {
-        let base = self.normalized_http_base()?;
-        let base = if let Some(rest) = base.strip_prefix("https://") {
-            format!("wss://{rest}")
-        } else if let Some(rest) = base.strip_prefix("http://") {
-            format!("ws://{rest}")
-        } else {
-            return Err(MihomoError::InvalidEndpoint(self.controller.clone()));
-        };
-        Ok(format!("{base}/{}", path.trim_start_matches('/')))
+        let mut url = self.normalized_http_base()?;
+        let websocket_scheme = if url.scheme() == "https" { "wss" } else { "ws" };
+        url.set_scheme(websocket_scheme)
+            .map_err(|()| MihomoError::InvalidEndpoint(self.controller.clone()))?;
+        let base_path = url.path().trim_end_matches('/').to_owned();
+        url.set_path(&format!("{base_path}/{}", path.trim_start_matches('/')));
+        Ok(url.to_string())
     }
 
-    fn normalized_http_base(&self) -> MihomoResult<String> {
+    fn normalized_http_base(&self) -> MihomoResult<reqwest::Url> {
         let controller = self.controller.trim().trim_end_matches('/');
         if controller.is_empty() {
             return Err(MihomoError::InvalidEndpoint(self.controller.clone()));
         }
-
-        if controller.starts_with("http://") || controller.starts_with("https://") {
-            Ok(controller.to_owned())
+        let controller = if controller.starts_with("http://") || controller.starts_with("https://")
+        {
+            controller.to_owned()
         } else if !controller.contains("://") {
-            Ok(format!("http://{controller}"))
+            format!("http://{controller}")
         } else {
-            Err(MihomoError::InvalidEndpoint(self.controller.clone()))
+            return Err(MihomoError::InvalidEndpoint(self.controller.clone()));
+        };
+        let url = reqwest::Url::parse(&controller)
+            .map_err(|_| MihomoError::InvalidEndpoint(self.controller.clone()))?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(MihomoError::InvalidEndpoint(self.controller.clone()));
         }
+        Ok(url)
     }
 }
 
@@ -106,5 +134,39 @@ mod tests {
             endpoint.http_url("version"),
             Err(MihomoError::InvalidEndpoint(_))
         ));
+    }
+
+    #[test]
+    fn rejects_controller_credentials_and_query_parameters() {
+        let with_credentials = MihomoEndpoint::new("http://user:pass@127.0.0.1:9090", "");
+        let with_query = MihomoEndpoint::new("http://127.0.0.1:9090?token=secret", "");
+
+        assert_eq!(
+            (
+                with_credentials.http_url("version").is_err(),
+                with_query.http_url("version").is_err()
+            ),
+            (true, true)
+        );
+    }
+
+    #[test]
+    fn preserves_controller_base_path_without_treating_request_path_as_query() {
+        let endpoint = MihomoEndpoint::new("https://controller.example/api", "");
+        assert_eq!(
+            endpoint.http_url("version?raw=true").unwrap(),
+            "https://controller.example/api/version%3Fraw=true"
+        );
+    }
+
+    #[test]
+    fn preserves_percent_encoded_mihomo_path_segments() {
+        let endpoint = MihomoEndpoint::new("http://127.0.0.1:9090", "");
+        assert_eq!(
+            endpoint
+                .http_url("/proxies/HK%2F%E9%A6%99%E6%B8%AF")
+                .unwrap(),
+            "http://127.0.0.1:9090/proxies/HK%2F%E9%A6%99%E6%B8%AF"
+        );
     }
 }

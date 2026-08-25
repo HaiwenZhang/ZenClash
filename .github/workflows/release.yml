@@ -1,0 +1,323 @@
+name: Build and publish release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      mihomo_version:
+        description: Mihomo release tag bundled into every installer
+        required: true
+        default: v1.19.30
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  MIHOMO_VERSION: ${{ inputs.mihomo_version || 'v1.19.30' }}
+
+jobs:
+  prepare:
+    name: Validate release version
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Match tag and Cargo version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [[ -z "${manifest_version}" ]]; then
+            echo "Workspace package version was not found" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            if [[ "${tag_version}" != "${manifest_version}" ]]; then
+              echo "Tag ${GITHUB_REF_NAME} does not match Cargo version ${manifest_version}" >&2
+              exit 1
+            fi
+          fi
+          printf 'version=%s\n' "${manifest_version}" >>"${GITHUB_OUTPUT}"
+
+  verify:
+    name: Rust checks and real Mihomo integration
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Linux dependencies
+        run: sudo scripts/install_linux_build_deps.sh
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: >-
+          cargo clippy --workspace --all-targets --all-features --locked --
+          -D warnings
+          -D clippy::future_not_send
+          -D clippy::await_holding_lock
+          -D clippy::large_futures
+          -D clippy::perf
+          -D clippy::redundant_clone
+          -D clippy::needless_collect
+          -D clippy::large_enum_variant
+          -D clippy::manual_ok_or
+          -D clippy::missing_errors_doc
+          -D clippy::missing_panics_doc
+
+      - name: Run workspace tests
+        run: cargo test --workspace --all-features --locked
+
+      - name: Build warning-free Rust documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --all-features --no-deps --locked
+
+      - name: Download private real Clash profile
+        shell: bash
+        env:
+          PROFILE_URL: ${{ secrets.ZENCLASH_TEST_PROFILE_URL }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${PROFILE_URL}" ]]; then
+            echo "Configure the ZENCLASH_TEST_PROFILE_URL repository secret with a real Clash subscription URL" >&2
+            exit 1
+          fi
+          curl --fail --silent --show-error --location --retry 3 \
+            --header 'Accept: text/yaml, application/yaml, text/plain, */*' \
+            --header 'User-Agent: clash.meta' \
+            "${PROFILE_URL}" --output "${RUNNER_TEMP}/real-profile.yaml"
+
+      - name: Download verified Mihomo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/download_mihomo.sh linux amd64 "${RUNNER_TEMP}/mihomo"
+
+      - name: Run the real-profile Mihomo integration test
+        env:
+          ZENCLASH_MIHOMO_BINARY: ${{ runner.temp }}/mihomo
+          ZENCLASH_INTEGRATION_HOME: ${{ runner.temp }}/mihomo-home
+          ZENCLASH_CONFIG: ${{ runner.temp }}/real-profile.yaml
+        run: cargo test --locked -p zenclash-core --test real_mihomo -- --ignored --nocapture
+
+  macos:
+    name: macOS 15 Apple Silicon DMG
+    needs: [prepare, verify]
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Run native core tests
+        run: cargo test --locked -p zenclash-core --lib
+
+      - name: Download verified Mihomo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/download_mihomo.sh darwin arm64 "${RUNNER_TEMP}/mihomo"
+
+      - name: Build DMG
+        env:
+          ZENCLASH_MIHOMO_BINARY: ${{ runner.temp }}/mihomo
+          ZENCLASH_CONFIG: ${{ github.workspace }}/platforms/common/default.yaml
+        run: scripts/build_macos_package.sh "${{ needs.prepare.outputs.version }}" dist
+
+      - name: Upload macOS installer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: zenclash-macos-arm64
+          path: dist/ZenClash-${{ needs.prepare.outputs.version }}-macOS-arm64.dmg
+          if-no-files-found: error
+          compression-level: 0
+
+  windows:
+    name: Windows x64 installer
+    needs: [prepare, verify]
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Run native core tests
+        run: cargo test --locked -p zenclash-core --lib
+
+      - name: Build Inno Setup installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/build_windows_installer.ps1 -Version "${{ needs.prepare.outputs.version }}" -OutputDir "${{ github.workspace }}\dist" -ProfilePath "${{ github.workspace }}\platforms\common\default.yaml"
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: zenclash-windows-x64
+          path: dist/ZenClash-${{ needs.prepare.outputs.version }}-windows-x64-setup.exe
+          if-no-files-found: error
+          compression-level: 0
+
+  ubuntu:
+    name: Ubuntu 22.04+ DEB
+    needs: [prepare, verify]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Linux dependencies
+        run: sudo scripts/install_linux_build_deps.sh
+
+      - name: Download verified Mihomo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/download_mihomo.sh linux amd64 "${RUNNER_TEMP}/mihomo"
+
+      - name: Build Debian package
+        env:
+          ZENCLASH_MIHOMO_BINARY: ${{ runner.temp }}/mihomo
+          ZENCLASH_CONFIG: ${{ github.workspace }}/platforms/common/default.yaml
+        run: scripts/build_deb_package.sh "${{ needs.prepare.outputs.version }}" dist
+
+      - name: Upload Ubuntu package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: zenclash-ubuntu-22.04-amd64
+          path: dist/ZenClash-${{ needs.prepare.outputs.version }}-Ubuntu-22.04+-amd64.deb
+          if-no-files-found: error
+          compression-level: 0
+
+  rpm:
+    name: ${{ matrix.label }} RPM
+    needs: [prepare, verify]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Fedora 42
+            image: fedora:42
+            flavor: fedora42
+          - label: Fedora 43
+            image: fedora:43
+            flavor: fedora43
+          - label: Fedora 44
+            image: fedora:44
+            flavor: fedora44
+          - label: Rocky Linux 8
+            image: rockylinux:8
+            flavor: rocky8
+          - label: Rocky Linux 9
+            image: rockylinux:9
+            flavor: rocky9
+    steps:
+      - name: Bootstrap release container
+        run: dnf install -y git gzip tar
+
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install build dependencies
+        run: scripts/install_linux_build_deps.sh
+
+      - name: Install the Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+            https://sh.rustup.rs -o /tmp/rustup-init.sh
+          sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable
+          printf '%s\n' "${HOME}/.cargo/bin" >>"${GITHUB_PATH}"
+
+      - name: Download verified Mihomo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/download_mihomo.sh linux amd64 /tmp/mihomo
+
+      - name: Build RPM
+        env:
+          CARGO_TARGET_DIR: /tmp/zenclash-target
+          ZENCLASH_MIHOMO_BINARY: /tmp/mihomo
+          ZENCLASH_CONFIG: ${{ github.workspace }}/platforms/common/default.yaml
+          ZENCLASH_PACKAGE_FLAVOR: ${{ matrix.flavor }}
+        run: scripts/build_rpm_package.sh "${{ needs.prepare.outputs.version }}" dist
+
+      - name: Upload RPM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: zenclash-${{ matrix.flavor }}-x86_64
+          path: dist/ZenClash-${{ needs.prepare.outputs.version }}-${{ matrix.flavor }}-x86_64.rpm
+          if-no-files-found: error
+          compression-level: 0
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [prepare, macos, windows, ubuntu, rpm]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download all installers
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum ./* >SHA256SUMS
+
+      - name: Attest release artifacts
+        if: github.event.repository.visibility == 'public'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/*
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" dist/* --clobber
+          else
+            gh release create "${RELEASE_TAG}" dist/* \
+              --verify-tag \
+              --generate-notes \
+              --title "ZenClash ${RELEASE_TAG}"
+          fi

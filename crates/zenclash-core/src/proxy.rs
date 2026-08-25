@@ -5,52 +5,72 @@ use serde::{Deserialize, Serialize};
 /// One latency sample returned inside Mihomo's proxy history.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DelayHistory {
+    /// Mihomo-provided sample timestamp.
     #[serde(default)]
     pub time: String,
+    /// Latest measured delay in milliseconds.
     #[serde(default)]
     pub delay: u32,
+    /// Mean measured delay in milliseconds.
     #[serde(default, rename = "meanDelay")]
     pub mean_delay: u32,
 }
 
+/// Delay response returned by Mihomo's proxy health-check API.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DelayResult {
+    /// Latest measured delay in milliseconds.
     #[serde(default)]
     pub delay: u32,
+    /// Mean measured delay in milliseconds.
     #[serde(default, rename = "meanDelay")]
     pub mean_delay: u32,
 }
 
 /// A proxy or a nested proxy group as exposed by `/proxies`.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProxyNode {
+    /// Mihomo proxy name.
     #[serde(default)]
     pub name: String,
+    /// Mihomo proxy implementation type.
     #[serde(default, rename = "type")]
     pub kind: String,
+    /// Latest health state, when Mihomo provides one.
     #[serde(default)]
     pub alive: Option<bool>,
+    /// Whether the proxy supports UDP forwarding.
     #[serde(default)]
     pub udp: bool,
+    /// Whether the proxy supports XUDP.
     #[serde(default)]
     pub xudp: bool,
+    /// Whether TCP Fast Open is enabled.
     #[serde(default)]
     pub tfo: bool,
+    /// Whether Multipath TCP is enabled.
     #[serde(default)]
     pub mptcp: bool,
+    /// Whether protocol multiplexing is enabled.
     #[serde(default)]
     pub smux: bool,
+    /// Delay history reported by Mihomo and local checks.
     #[serde(default)]
     pub history: Vec<DelayHistory>,
+    /// Provider that supplied this proxy, when applicable.
     #[serde(default, rename = "provider-name")]
     pub provider_name: Option<String>,
 }
 
 impl ProxyNode {
+    /// Returns the most recent delay sample.
+    #[must_use]
     pub fn latest_delay(&self) -> Option<u32> {
         self.history.last().map(|sample| sample.delay)
     }
 
+    /// Iterates over enabled transport capability labels.
     pub fn capabilities(&self) -> impl Iterator<Item = &'static str> {
         [
             (self.udp, "UDP"),
@@ -64,28 +84,39 @@ impl ProxyNode {
     }
 }
 
+/// Selectable Mihomo proxy group with its resolved member nodes.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProxyGroup {
+    /// Group name.
     pub name: String,
+    /// Mihomo group implementation type.
     pub kind: String,
+    /// Currently selected member name.
     pub now: String,
+    /// Resolved member nodes in Mihomo order.
     pub all: Vec<ProxyNode>,
+    /// Optional URL used for group health checks.
     pub test_url: Option<String>,
+    /// Whether Mihomo marks this group as hidden.
     pub hidden: bool,
 }
 
+/// Resolved proxy groups and aggregate proxy count.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProxyCatalog {
+    /// Selectable groups exposed by Mihomo.
     pub groups: Vec<ProxyGroup>,
+    /// Total raw proxy entries, including group objects.
     pub proxy_count: usize,
 }
 
 #[derive(Debug, Default, Deserialize)]
-pub(crate) struct RawProxyCatalog {
+pub struct RawProxyCatalog {
     #[serde(default)]
     proxies: BTreeMap<String, RawProxy>,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Default, Deserialize)]
 struct RawProxy {
     #[serde(default)]
