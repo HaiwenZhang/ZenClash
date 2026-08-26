@@ -20,6 +20,8 @@ mod tests;
 pub use discovery::MihomoLaunchConfig;
 
 const MAX_LOG_LINES: usize = 1_000;
+const DEFAULT_MEOW_RUST_LOG: &str = "info";
+const QUIET_MEOW_PROTOCOL_LOGS: &str = "tokio_tungstenite=warn,tungstenite=warn";
 
 /// Owned managed Mihomo child process with bounded stdout/stderr history.
 pub struct MihomoProcess {
@@ -228,6 +230,7 @@ fn spawn_child(
         .map_err(|error| MihomoError::Process(error.to_string()))?;
     let mut command = Command::new(&config.binary);
     configure_child_command(&mut command);
+    configure_child_environment(&mut command, config.kind);
     command
         .arg("-d")
         .arg(&config.home_dir)
@@ -258,6 +261,27 @@ fn spawn_child(
         return Err(error);
     }
     Ok(child)
+}
+
+fn configure_child_environment(command: &mut Command, kind: CoreKind) {
+    let Some(filter) = core_rust_log_filter(
+        kind,
+        std::env::var("ZENCLASH_MEOW_RUST_LOG").ok().as_deref(),
+    ) else {
+        return;
+    };
+    command.env("RUST_LOG", filter);
+}
+
+fn core_rust_log_filter(kind: CoreKind, requested: Option<&str>) -> Option<String> {
+    if kind != CoreKind::Meow {
+        return None;
+    }
+    let requested = requested
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_MEOW_RUST_LOG);
+    Some(format!("{requested},{QUIET_MEOW_PROTOCOL_LOGS}"))
 }
 
 #[cfg(target_os = "windows")]

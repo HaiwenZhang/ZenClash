@@ -1,7 +1,7 @@
 use super::{
     div, format_speed, h_flex, px, throughput_activity_percent, v_flex, AnyElement, Badge, Button,
-    ButtonGroup, Divider, InteractiveElement, IntoElement, OutboundMode, ParentElement, Progress,
-    Selectable, SetDirectMode, SetGlobalMode, SetRuleMode, Sizable, Styled, VecDeque, ZenClashApp,
+    ButtonGroup, Context, Divider, InteractiveElement, IntoElement, OutboundMode, ParentElement,
+    Progress, Selectable, Sizable, Styled, VecDeque, ZenClashApp,
 };
 
 impl ZenClashApp {
@@ -33,7 +33,11 @@ impl ZenClashApp {
         clippy::too_many_lines,
         reason = "the signal rail is one declarative GPUI element tree whose layout context is shared across every child"
     )]
-    pub(super) fn render_signal_rail(&self, theme: &gpui_component::Theme) -> AnyElement {
+    pub(super) fn render_signal_rail(
+        &self,
+        theme: &gpui_component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let online = self.traffic.connected;
         let (core_status, core_color) = match (online, self.proxy_listener_available) {
             (false, _) => ("RECONNECT", theme.danger),
@@ -216,15 +220,15 @@ impl ZenClashApp {
                                             .label(OutboundMode::Direct.code())
                                             .selected(outbound_mode == OutboundMode::Direct),
                                     )
-                                    .on_click(|selected, window, cx| {
+                                    .on_click(cx.listener(|this, selected: &Vec<usize>, _, cx| {
                                         if selected.contains(&0) {
-                                            window.dispatch_action(Box::new(SetRuleMode), cx);
+                                            this.set_mode(OutboundMode::Rule, cx);
                                         } else if selected.contains(&1) {
-                                            window.dispatch_action(Box::new(SetGlobalMode), cx);
+                                            this.set_mode(OutboundMode::Global, cx);
                                         } else if selected.contains(&2) {
-                                            window.dispatch_action(Box::new(SetDirectMode), cx);
+                                            this.set_mode(OutboundMode::Direct, cx);
                                         }
-                                    }),
+                                    })),
                             ),
                     ),
             )

@@ -20,6 +20,22 @@ fn readiness_attempt_timeout_caps_long_controller_attempts() {
     );
 }
 
+#[test]
+fn mihomo_does_not_receive_a_rust_log_override() {
+    assert_eq!(core_rust_log_filter(CoreKind::Mihomo, Some("debug")), None);
+}
+
+#[test]
+fn meow_log_filter_caps_recursive_websocket_frame_logging() {
+    let filter = core_rust_log_filter(
+        CoreKind::Meow,
+        Some("debug,tungstenite=trace,tokio_tungstenite=trace"),
+    )
+    .unwrap();
+
+    assert!(filter.ends_with("tokio_tungstenite=warn,tungstenite=warn"));
+}
+
 #[cfg(unix)]
 #[test]
 fn exited_process_snapshot_does_not_expose_a_stale_pid() {

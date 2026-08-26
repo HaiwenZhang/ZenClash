@@ -59,6 +59,18 @@ impl MihomoLogLevel {
             Self::Debug => "debug",
         }
     }
+
+    const fn realtime_stream_level(self) -> Self {
+        // meow-rs broadcasts its WebSocket protocol DEBUG events through the
+        // same `/logs` stream. Subscribing at DEBUG therefore records each
+        // outgoing frame as another outgoing frame. The native UI intentionally
+        // keeps operational logs while leaving verbose diagnostics to the core's
+        // own stdout/file sink.
+        match self {
+            Self::Debug => Self::Info,
+            level => level,
+        }
+    }
 }
 
 /// One entry received from Mihomo's `/logs` stream.
@@ -86,8 +98,12 @@ pub struct LogMonitor {
 
 impl LogMonitor {
     /// Starts a log monitor at the requested Mihomo severity level.
+    ///
+    /// Debug is normalized to info for the real-time WebSocket because some
+    /// compatible cores emit their own frame-writing diagnostics into `/logs`.
     #[must_use]
     pub fn start(runtime: &Handle, endpoint: MihomoEndpoint, level: MihomoLogLevel) -> Arc<Self> {
+        let level = level.realtime_stream_level();
         let entries = Arc::new(RwLock::new(VecDeque::new()));
         let connected = Arc::new(RwLock::new(false));
         let file = file::LogFileWorker::start();
@@ -120,7 +136,9 @@ impl LogMonitor {
     }
 
     /// Changes the stream threshold and reconnects only when it actually differs.
+    /// Debug requests use the safe info threshold for the real-time stream.
     pub fn set_level(&self, level: MihomoLogLevel) {
+        let level = level.realtime_stream_level();
         if *self.level.borrow() != level {
             self.level.send_replace(level);
         }
@@ -429,6 +447,18 @@ mod tests {
             Some(MihomoLogLevel::Warning)
         );
         assert_eq!(MihomoLogLevel::from_api("trace"), None);
+    }
+
+    #[test]
+    fn realtime_stream_caps_debug_to_operational_logs() {
+        assert_eq!(
+            MihomoLogLevel::Debug.realtime_stream_level(),
+            MihomoLogLevel::Info
+        );
+        assert_eq!(
+            MihomoLogLevel::Warning.realtime_stream_level(),
+            MihomoLogLevel::Warning
+        );
     }
 
     #[tokio::test]

@@ -6,12 +6,23 @@ use std::{net::TcpListener, path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::Application;
 use gpui_component_assets::Assets;
+use tracing_subscriber::{filter::Directive, EnvFilter};
 use zenclash_core::{
     AppPreferences, AppPreferencesStore, ControlledConfigStore, CoreKind, LogMonitor, MihomoClient,
     MihomoEndpoint, MihomoLaunchConfig, MihomoProcess, ProfileStore, TrafficMonitor,
     YamlOverrideStore,
 };
 use zenclash_ui::app;
+
+const DEFAULT_TRACING_FILTER: &str = "zenclash=info,zenclash_core=info,zenclash_ui=info";
+const QUIET_NETWORK_TARGETS: [&str; 6] = [
+    "tokio_tungstenite=warn",
+    "tungstenite=warn",
+    "reqwest=warn",
+    "hyper=warn",
+    "h2=warn",
+    "rustls=warn",
+];
 
 struct RecoveredCore {
     kind: CoreKind,
@@ -23,16 +34,28 @@ struct RecoveredCore {
 
 fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "zenclash=info".into()),
-        )
+        .with_env_filter(tracing_filter(std::env::var("RUST_LOG").ok().as_deref()))
         .init();
 
     if let Err(error) = run() {
         tracing::error!(%error, "ZenClash startup failed");
         eprintln!("ZenClash 启动失败：{error}");
     }
+}
+
+fn tracing_filter(requested: Option<&str>) -> EnvFilter {
+    let mut filter = requested
+        .and_then(|value| EnvFilter::try_new(value).ok())
+        .unwrap_or_else(|| EnvFilter::new(DEFAULT_TRACING_FILTER));
+    for value in QUIET_NETWORK_TARGETS {
+        if let Ok(directive) = value.parse::<Directive>() {
+            // Protocol frame dumps can recursively enter a controller's `/logs`
+            // WebSocket. Keep those targets quiet even when application debug
+            // logging is requested through `RUST_LOG`.
+            filter = filter.add_directive(directive);
+        }
+    }
+    filter
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -323,4 +346,21 @@ fn allocate_managed_controller() -> std::io::Result<String> {
     let port = listener.local_addr()?.port();
     drop(listener);
     Ok(format!("127.0.0.1:{port}"))
+}
+
+#[cfg(test)]
+mod tracing_tests {
+    use super::tracing_filter;
+
+    #[test]
+    fn application_filter_overrides_verbose_protocol_targets() {
+        let filter = tracing_filter(Some("debug,tungstenite=trace,tokio_tungstenite=trace"));
+        let filter = filter.to_string();
+
+        assert!(filter.contains("tungstenite=warn"));
+        assert!(filter.contains("tokio_tungstenite=warn"));
+        assert!(filter.contains("reqwest=warn"));
+        assert!(!filter.contains("tungstenite=trace"));
+        assert!(!filter.contains("tokio_tungstenite=trace"));
+    }
 }

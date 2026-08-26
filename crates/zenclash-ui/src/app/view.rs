@@ -11,7 +11,7 @@ impl Focusable for ZenClashApp {
 
 impl Render for ZenClashApp {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
         let content = match self.current_page {
             Page::Proxies => self.proxies_page.clone().into_any_element(),
             _ => self.runtime_page.clone().into_any_element(),
@@ -51,7 +51,7 @@ impl Render for ZenClashApp {
             .on_action(cx.listener(Self::on_hide_traffic_icon))
             .on_action(cx.listener(Self::on_show_status_menu))
             .on_action(cx.listener(Self::on_toggle_floating_window))
-            .child(self.render_signal_rail(theme))
+            .child(self.render_signal_rail(&theme, cx))
             .child(
                 h_flex()
                     .flex_1()
