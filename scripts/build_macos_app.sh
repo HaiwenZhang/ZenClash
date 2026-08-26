@@ -13,19 +13,29 @@ RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 PROFILE_PATH="${ZENCLASH_CONFIG:-${PROJECT_ROOT}/examples/19facdf022b.yaml}"
 MIHOMO_PATH="${ZENCLASH_MIHOMO_BINARY:-}"
 CARGO_OUTPUT_ROOT="${CARGO_TARGET_DIR:-${PROJECT_ROOT}/target}"
+MIHOMO_WORK_DIR=""
+
+cleanup() {
+  if [[ -n "${MIHOMO_WORK_DIR}" ]]; then
+    rm -rf "${MIHOMO_WORK_DIR}"
+  fi
+}
+trap cleanup EXIT
 
 if [[ "$(uname -m)" != "arm64" ]]; then
   echo "The macOS release bundle must be built on an Apple Silicon runner." >&2
   exit 1
 fi
 
-if [[ -z "${MIHOMO_PATH}" ]]; then
-  MIHOMO_PATH="$(command -v mihomo || true)"
-fi
-
-if [[ ! -x "${MIHOMO_PATH}" ]]; then
-  echo "Set ZENCLASH_MIHOMO_BINARY to a real executable Mihomo binary." >&2
-  exit 1
+if [[ -n "${MIHOMO_PATH}" ]]; then
+  if [[ ! -x "${MIHOMO_PATH}" ]]; then
+    echo "ZENCLASH_MIHOMO_BINARY is not an executable file: ${MIHOMO_PATH}" >&2
+    exit 1
+  fi
+else
+  MIHOMO_WORK_DIR="$(mktemp -d)"
+  MIHOMO_PATH="${MIHOMO_WORK_DIR}/mihomo"
+  "${SCRIPT_DIR}/download_mihomo.sh" darwin arm64 "${MIHOMO_PATH}"
 fi
 
 if [[ ! -f "${PROFILE_PATH}" ]]; then
@@ -49,6 +59,7 @@ cp "${PROJECT_ROOT}/platforms/macos/Info.plist" "${CONTENTS_DIR}/Info.plist"
 cp "${MIHOMO_PATH}" "${RESOURCES_DIR}/mihomo"
 cp "${PROFILE_PATH}" "${RESOURCES_DIR}/profile.yaml"
 chmod 755 "${MACOS_DIR}/zenclash" "${RESOURCES_DIR}/mihomo"
+"${RESOURCES_DIR}/mihomo" -v
 
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "${CONTENTS_DIR}/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION%%-*}" "${CONTENTS_DIR}/Info.plist"

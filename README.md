@@ -95,14 +95,17 @@ ZENCLASH_CONFIG="$PWD/examples/19facdf022b.yaml" \
 ## Build the macOS app bundle
 
 ```sh
-ZENCLASH_MIHOMO_BINARY=/absolute/path/to/mihomo \
-  scripts/build_macos_app.sh
+scripts/build_macos_app.sh
 open target/ZenClash.app
 ```
 
-The bundle contains the selected real Mihomo binary and profile under
-`Contents/Resources`; runtime data is stored in
-`~/Library/Application Support/ZenClash/mihomo`.
+When `ZENCLASH_MIHOMO_BINARY` is not set, the script downloads the pinned
+official Apple Silicon Mihomo release and requires its GitHub SHA-256 digest to
+match before building. The bundle contains the verified binary and profile
+under `Contents/Resources`; runtime data is stored in
+`~/Library/Application Support/ZenClash/mihomo`. Set
+`ZENCLASH_MIHOMO_BINARY=/absolute/path/to/mihomo` only to override the bundled
+core deliberately.
 
 ## Release installers
 
@@ -115,20 +118,24 @@ bootstrap profile described below. The platform build entry points are:
 
 ```sh
 # Apple Silicon macOS (.dmg)
-ZENCLASH_MIHOMO_BINARY=/absolute/path/to/mihomo \
-  scripts/build_macos_package.sh 0.1.0 dist
+scripts/build_macos_package.sh 0.1.0 dist
 
 # Ubuntu 22.04 or newer (.deb), run on Ubuntu 22.04
 sudo scripts/install_linux_build_deps.sh
-ZENCLASH_MIHOMO_BINARY=/absolute/path/to/mihomo \
-  scripts/build_deb_package.sh 0.1.0 dist
+scripts/build_deb_package.sh 0.1.0 dist
 
 # Fedora / Rocky Linux (.rpm), run inside the target distribution
 scripts/install_linux_build_deps.sh
 ZENCLASH_PACKAGE_FLAVOR=fedora44 \
-ZENCLASH_MIHOMO_BINARY=/absolute/path/to/mihomo \
   scripts/build_rpm_package.sh 0.1.0 dist
 ```
+
+All four platform scripts download the pinned official Mihomo release when no
+binary override is supplied, verify the published SHA-256 digest, execute its
+version check, and place it inside the installer. Set `MIHOMO_VERSION=vX.Y.Z`
+to build with another official tag. A supplied `ZENCLASH_MIHOMO_BINARY` must
+already be an executable for the target platform and is never silently
+replaced by a download.
 
 On Windows, run the following from PowerShell with Rust and Inno Setup 6
 installed:

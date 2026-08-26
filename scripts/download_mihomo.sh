@@ -57,17 +57,19 @@ fi
 
 curl "${curl_args[@]}" "${download_url}" --output "${archive_path}"
 
-if [[ "${asset_digest}" == sha256:* ]]; then
-  expected_hash="${asset_digest#sha256:}"
-  if command -v sha256sum >/dev/null 2>&1; then
-    actual_hash="$(sha256sum "${archive_path}" | awk '{print $1}')"
-  else
-    actual_hash="$(shasum -a 256 "${archive_path}" | awk '{print $1}')"
-  fi
-  if [[ "${actual_hash}" != "${expected_hash}" ]]; then
-    echo "Mihomo SHA-256 mismatch for ${asset_name}" >&2
-    exit 1
-  fi
+if [[ "${asset_digest}" != sha256:* ]]; then
+  echo "Mihomo release asset does not publish a SHA-256 digest: ${asset_name}" >&2
+  exit 1
+fi
+expected_hash="${asset_digest#sha256:}"
+if command -v sha256sum >/dev/null 2>&1; then
+  actual_hash="$(sha256sum "${archive_path}" | awk '{print $1}')"
+else
+  actual_hash="$(shasum -a 256 "${archive_path}" | awk '{print $1}')"
+fi
+if [[ "${actual_hash}" != "${expected_hash}" ]]; then
+  echo "Mihomo SHA-256 mismatch for ${asset_name}" >&2
+  exit 1
 fi
 
 mkdir -p "$(dirname "${output_path}")"

@@ -10,7 +10,7 @@ cargo_output_root="${CARGO_TARGET_DIR:-${project_root}/target}"
 architecture="$(dpkg --print-architecture)"
 work_dir="$(mktemp -d)"
 package_root="${work_dir}/root"
-mihomo_path="${ZENCLASH_MIHOMO_BINARY:-${work_dir}/mihomo}"
+mihomo_path="${ZENCLASH_MIHOMO_BINARY:-}"
 
 cleanup() {
   rm -rf "${work_dir}"
@@ -25,7 +25,13 @@ if [[ ! -f "${profile_path}" ]]; then
   echo "Mihomo profile not found: ${profile_path}" >&2
   exit 1
 fi
-if [[ ! -x "${mihomo_path}" ]]; then
+if [[ -n "${mihomo_path}" ]]; then
+  if [[ ! -x "${mihomo_path}" ]]; then
+    echo "ZENCLASH_MIHOMO_BINARY is not an executable file: ${mihomo_path}" >&2
+    exit 1
+  fi
+else
+  mihomo_path="${work_dir}/mihomo"
   "${script_dir}/download_mihomo.sh" linux amd64 "${mihomo_path}"
 fi
 
@@ -60,5 +66,6 @@ package_path="${output_dir}/ZenClash-${version}-Ubuntu-22.04+-${architecture}.de
 dpkg-deb --build --root-owner-group "${package_root}" "${package_path}"
 dpkg-deb --info "${package_path}" >/dev/null
 dpkg-deb --contents "${package_path}" >/dev/null
+dpkg-deb --contents "${package_path}" | grep -Eq '[[:space:]]\./usr/lib/zenclash/mihomo$'
 
 echo "Built ${package_path}"

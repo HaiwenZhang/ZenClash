@@ -133,14 +133,9 @@ jobs:
       - name: Run native core tests
         run: cargo test --locked -p zenclash-core --lib
 
-      - name: Download verified Mihomo
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: scripts/download_mihomo.sh darwin arm64 "${RUNNER_TEMP}/mihomo"
-
       - name: Build DMG
         env:
-          ZENCLASH_MIHOMO_BINARY: ${{ runner.temp }}/mihomo
+          GH_TOKEN: ${{ github.token }}
           ZENCLASH_CONFIG: ${{ github.workspace }}/platforms/common/default.yaml
         run: scripts/build_macos_package.sh "${{ needs.prepare.outputs.version }}" dist
 
@@ -190,14 +185,9 @@ jobs:
       - name: Install Linux dependencies
         run: sudo scripts/install_linux_build_deps.sh
 
-      - name: Download verified Mihomo
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: scripts/download_mihomo.sh linux amd64 "${RUNNER_TEMP}/mihomo"
-
       - name: Build Debian package
         env:
-          ZENCLASH_MIHOMO_BINARY: ${{ runner.temp }}/mihomo
+          GH_TOKEN: ${{ github.token }}
           ZENCLASH_CONFIG: ${{ github.workspace }}/platforms/common/default.yaml
         run: scripts/build_deb_package.sh "${{ needs.prepare.outputs.version }}" dist
 
@@ -248,15 +238,10 @@ jobs:
           sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable
           printf '%s\n' "${HOME}/.cargo/bin" >>"${GITHUB_PATH}"
 
-      - name: Download verified Mihomo
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: scripts/download_mihomo.sh linux amd64 /tmp/mihomo
-
       - name: Build RPM
         env:
           CARGO_TARGET_DIR: /tmp/zenclash-target
-          ZENCLASH_MIHOMO_BINARY: /tmp/mihomo
+          GH_TOKEN: ${{ github.token }}
           ZENCLASH_CONFIG: ${{ github.workspace }}/platforms/common/default.yaml
           ZENCLASH_PACKAGE_FLAVOR: ${{ matrix.flavor }}
         run: scripts/build_rpm_package.sh "${{ needs.prepare.outputs.version }}" dist

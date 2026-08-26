@@ -48,12 +48,13 @@ try {
         }
         $Archive = Join-Path $WorkDir $AssetName
         Invoke-WebRequest -Uri $Asset.browser_download_url -OutFile $Archive
-        if ($Asset.digest -and $Asset.digest.StartsWith("sha256:")) {
-            $ExpectedHash = $Asset.digest.Substring(7)
-            $ActualHash = (Get-FileHash -Algorithm SHA256 -Path $Archive).Hash.ToLowerInvariant()
-            if ($ActualHash -ne $ExpectedHash.ToLowerInvariant()) {
-                throw "Mihomo SHA-256 mismatch for $AssetName"
-            }
+        if (-not $Asset.digest -or -not $Asset.digest.StartsWith("sha256:")) {
+            throw "Mihomo release asset does not publish a SHA-256 digest: $AssetName"
+        }
+        $ExpectedHash = $Asset.digest.Substring(7)
+        $ActualHash = (Get-FileHash -Algorithm SHA256 -Path $Archive).Hash.ToLowerInvariant()
+        if ($ActualHash -ne $ExpectedHash.ToLowerInvariant()) {
+            throw "Mihomo SHA-256 mismatch for $AssetName"
         }
         $Expanded = Join-Path $WorkDir "mihomo"
         Expand-Archive -Path $Archive -DestinationPath $Expanded
@@ -90,6 +91,10 @@ try {
     Copy-Item $MihomoBinary (Join-Path $ResourcesDir "mihomo.exe")
     Copy-Item $ProfilePath (Join-Path $ResourcesDir "profile.yaml")
     Copy-Item (Join-Path $ProjectRoot "platforms\macos\ZenClash.png") (Join-Path $ResourcesDir "ZenClash.png")
+    & (Join-Path $ResourcesDir "mihomo.exe") -v
+    if ($LASTEXITCODE -ne 0) {
+        throw "The packaged Mihomo executable failed its version check"
+    }
 
     $IsccCandidates = [System.Collections.Generic.List[string]]::new()
     $IsccCommand = Get-Command ISCC.exe -ErrorAction SilentlyContinue
