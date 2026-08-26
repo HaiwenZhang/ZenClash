@@ -1,7 +1,8 @@
 use super::{
-    div, empty_state, format_bytes, h_flex, metric, px, v_flex, Button, ButtonVariants,
-    ConnectionsSnapshot, Context, Disableable, FluentBuilder, Icon, IconName, InteractiveElement,
-    IntoElement, Page, ParentElement, RuntimeData, RuntimePage, Sizable, Styled,
+    div, empty_state, format_bytes, h_flex, message_banner, metric, px, v_flex, Button,
+    ButtonVariants, ConnectionsSnapshot, Context, Disableable, FluentBuilder, Icon, IconName,
+    InteractiveElement, IntoElement, Page, ParentElement, RuntimeData, RuntimePage, Sizable,
+    Styled,
 };
 
 impl RuntimePage {
@@ -96,6 +97,19 @@ impl RuntimePage {
         let total = data.connections.len();
         v_flex()
             .gap_4()
+            .when(
+                !self.core_kind.capabilities().udp_connection_tracking,
+                |this| {
+                    this.child(message_banner(
+                        format!(
+                            "{} 当前不会完整上报 UDP 连接；TCP 连接、累计流量和关闭操作仍来自真实控制器。",
+                            self.core_kind.display_name()
+                        ),
+                        theme.warning,
+                        theme,
+                    ))
+                },
+            )
             .child(
                 h_flex()
                     .gap_3()

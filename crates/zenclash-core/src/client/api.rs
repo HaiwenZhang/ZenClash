@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use reqwest::Method;
 use serde::Serialize;
@@ -128,8 +128,9 @@ impl MihomoClient {
                 "不支持的出站模式：{mode}"
             )));
         }
-        self.patch_json("/configs", &serde_json::json!({ "mode": mode }))
+        self.patch_configs_verified(&serde_json::json!({ "mode": mode }))
             .await
+            .map(|_| ())
     }
 
     /// Applies a partial typed or JSON-compatible `/configs` update.
@@ -139,6 +140,41 @@ impl MihomoClient {
     /// Returns serialization, transport or API-status errors.
     pub async fn patch_configs<T: Serialize + Sync + ?Sized>(&self, body: &T) -> MihomoResult<()> {
         self.patch_json("/configs", body).await
+    }
+
+    /// Applies a JSON `/configs` patch and verifies that Mihomo reports the
+    /// requested values afterward.
+    ///
+    /// Mihomo returns success for some unsupported runtime fields while
+    /// silently keeping the previous configuration. UI controls should use
+    /// this method so an accepted HTTP response is not presented as an applied
+    /// setting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the patch is not an object, the request or
+    /// readback fails, or the returned runtime configuration does not contain
+    /// the requested values.
+    pub async fn patch_configs_verified(
+        &self,
+        body: &serde_json::Value,
+    ) -> MihomoResult<RuntimeConfig> {
+        if !body.is_object() {
+            return Err(MihomoError::InvalidInput(
+                "运行时配置补丁必须是 JSON 对象".into(),
+            ));
+        }
+        self.patch_configs(body).await?;
+        let config = self.runtime_config().await?;
+        let actual = serde_json::to_value(&config).map_err(|error| {
+            MihomoError::Process(format!("无法验证 Mihomo 运行时配置：{error}"))
+        })?;
+        if !json_contains(&actual, body) {
+            return Err(MihomoError::Process(format!(
+                "Mihomo 接受了配置请求，但状态回读未应用：{body}"
+            )));
+        }
+        Ok(config)
     }
 
     /// Reads a UTF-8 YAML file asynchronously and asks Mihomo to reload it.
@@ -234,6 +270,84 @@ impl MihomoClient {
     pub async fn close_all_connections(&self) -> MihomoResult<()> {
         self.send_empty(Method::DELETE, "/connections").await
     }
+
+    /// Asks the running Mihomo core to download and install its latest release.
+    ///
+    /// The request uses a longer timeout because Mihomo performs the download
+    /// and replacement before acknowledging the operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport or API-status errors reported by Mihomo.
+    pub async fn upgrade_core(&self) -> MihomoResult<()> {
+        self.send_long_operation(Method::POST, "/upgrade").await
+    }
+
+    /// Asks Mihomo to refresh `GeoIP`, `GeoSite` and MMDB assets from `geox-url`.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport or API-status errors reported by Mihomo.
+    pub async fn update_geodata(&self) -> MihomoResult<()> {
+        self.send_long_operation(Method::POST, "/configs/geo").await
+    }
+
+    /// Asks Mihomo to refresh the configured external Web UI archive.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport or API-status errors reported by Mihomo.
+    pub async fn update_external_ui(&self) -> MihomoResult<()> {
+        self.send_long_operation(Method::POST, "/upgrade/ui").await
+    }
+
+    /// Enables or disables one compiled rule by its runtime index and verifies
+    /// the state through a fresh `/rules` response.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport or API-status errors, or a verification error when
+    /// the running Mihomo build does not expose the requested indexed rule and
+    /// its mutable runtime state.
+    pub async fn set_rule_disabled(
+        &self,
+        index: usize,
+        disabled: bool,
+    ) -> MihomoResult<RuleCatalog> {
+        let _mutation_guard = self.mutation_gate.lock().await;
+        let body = serde_json::json!({index.to_string(): disabled});
+        let response = self
+            .request(Method::PATCH, "/rules/disable")?
+            .json(&body)
+            .send()
+            .await?;
+        request::ensure_success(response).await?;
+        let catalog = self.rule_catalog().await?;
+        let verified = catalog.rules.iter().any(|rule| {
+            rule.index == Some(index)
+                && rule
+                    .extra
+                    .as_ref()
+                    .is_some_and(|extra| extra.disabled == disabled)
+        });
+        if !verified {
+            return Err(MihomoError::Process(format!(
+                "Mihomo 接受了规则状态请求，但规则 #{index} 的回读状态不匹配"
+            )));
+        }
+        Ok(catalog)
+    }
+
+    async fn send_long_operation(&self, method: Method, path: &str) -> MihomoResult<()> {
+        let _mutation_guard = self.mutation_gate.lock().await;
+        let response = self
+            .request(method, path)?
+            .timeout(Duration::from_secs(120))
+            .send()
+            .await?;
+        request::ensure_success(response).await?;
+        Ok(())
+    }
 }
 
 fn require_non_empty(value: &str, label: &str) -> MihomoResult<()> {
@@ -241,6 +355,19 @@ fn require_non_empty(value: &str, label: &str) -> MihomoResult<()> {
         Err(MihomoError::InvalidInput(format!("{label}不能为空")))
     } else {
         Ok(())
+    }
+}
+
+fn json_contains(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
+    match expected {
+        serde_json::Value::Object(expected) => actual.as_object().is_some_and(|actual| {
+            expected.iter().all(|(key, expected)| {
+                actual
+                    .get(key)
+                    .is_some_and(|actual| json_contains(actual, expected))
+            })
+        }),
+        _ => actual == expected,
     }
 }
 
@@ -258,4 +385,26 @@ fn validated_test_url(value: Option<&str>) -> MihomoResult<reqwest::Url> {
 
 pub(super) fn encode_path_segment(value: &str) -> String {
     percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC).to_string()
+}
+
+#[cfg(test)]
+mod verification_tests {
+    use super::json_contains;
+
+    #[test]
+    fn matches_nested_runtime_patch_as_a_subset() {
+        let actual = serde_json::json!({
+            "ipv6": true,
+            "tun": {"enable": false, "stack": "mixed"}
+        });
+
+        assert!(json_contains(
+            &actual,
+            &serde_json::json!({"tun": {"enable": false}})
+        ));
+        assert!(!json_contains(
+            &actual,
+            &serde_json::json!({"tun": {"enable": true}})
+        ));
+    }
 }

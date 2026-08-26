@@ -1,7 +1,7 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use parking_lot::Mutex;
-use zenclash_core::MihomoClient;
+use zenclash_core::{ControlledConfigStore, MihomoClient, YamlOverrideStore};
 
 use super::sidebar::OutboundMode;
 
@@ -37,6 +37,7 @@ impl OutboundModeCoordinator {
         &self,
         mode: OutboundMode,
         client: &MihomoClient,
+        controlled: Option<(ControlledConfigStore, PathBuf)>,
         runtime: &tokio::runtime::Handle,
     ) -> bool {
         let submission = self.state.lock().submit(mode);
@@ -46,17 +47,41 @@ impl OutboundModeCoordinator {
             Submission::Start(mode) => {
                 let state = self.clone();
                 let client = client.clone();
-                runtime.spawn(async move { state.drive(client, mode).await });
+                runtime.spawn(async move {
+                    state.drive(client, controlled, mode).await;
+                });
                 true
             }
         }
     }
 
-    async fn drive(self, client: MihomoClient, mut mode: OutboundMode) {
+    async fn drive(
+        self,
+        client: MihomoClient,
+        controlled: Option<(ControlledConfigStore, PathBuf)>,
+        mut mode: OutboundMode,
+    ) {
         loop {
-            let result = client.set_mode(mode.api_value()).await;
+            let result = match &controlled {
+                Some((controlled, profile)) => match load_managed_overrides().await {
+                    Ok(overrides) => controlled
+                        .apply_json_update_with_overrides(
+                            &client,
+                            profile,
+                            &serde_json::json!({"mode": mode.api_value()}),
+                            overrides,
+                        )
+                        .await
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error),
+                },
+                None => client
+                    .set_mode(mode.api_value())
+                    .await
+                    .map_err(|error| error.to_string()),
+            };
             if let Err(error) = &result {
-                tracing::warn!(%error, mode = mode.api_value(), "failed to update Mihomo outbound mode");
+                tracing::warn!(%error, mode = mode.api_value(), "failed to update core outbound mode");
             }
             let Some(next) = self.state.lock().complete(mode, result.is_ok()) else {
                 break;
@@ -64,6 +89,13 @@ impl OutboundModeCoordinator {
             mode = next;
         }
     }
+}
+
+async fn load_managed_overrides() -> Result<Vec<PathBuf>, String> {
+    tokio::task::spawn_blocking(|| YamlOverrideStore::discover()?.load_enabled_paths())
+        .await
+        .map_err(|error| format!("读取 YAML 覆写任务异常结束：{error}"))?
+        .map_err(|error| error.to_string())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

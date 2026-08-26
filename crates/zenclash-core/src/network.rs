@@ -6,10 +6,17 @@ mod command;
 mod linux;
 #[cfg(any(target_os = "macos", test))]
 mod macos;
+mod probe;
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 mod unsupported;
 #[cfg(any(target_os = "windows", test))]
 mod windows;
+
+pub use probe::{
+    NetworkLatencyResult, NetworkLatencyTarget, NetworkProbeError, NetworkProbeResult,
+    NetworkProbeRoute, NetworkProbeService, NetworkProbeSnapshot, PublicIpInfo, PublicIpProvider,
+    DEFAULT_NETWORK_LATENCY_TARGETS,
+};
 
 #[cfg(target_os = "linux")]
 use linux as platform;

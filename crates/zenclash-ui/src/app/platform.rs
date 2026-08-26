@@ -5,9 +5,12 @@ use std::{
     thread,
 };
 
-use zenclash_core::ProfileStore;
+use zenclash_core::{CoreKind, ProfileStore};
 
-pub(super) fn tray_directories(profile_path: Option<&Path>) -> Vec<(String, PathBuf)> {
+pub(super) fn tray_directories(
+    profile_path: Option<&Path>,
+    core_kind: CoreKind,
+) -> Vec<(String, PathBuf)> {
     let mut directories = Vec::new();
     if let Some(config_dir) = profile_path.and_then(Path::parent) {
         directories.push(("配置文件目录".into(), config_dir.to_path_buf()));
@@ -19,7 +22,10 @@ pub(super) fn tray_directories(profile_path: Option<&Path>) -> Vec<(String, Path
             .unwrap_or_else(|| store.root())
             .to_path_buf();
         directories.push(("应用数据目录".into(), data.clone()));
-        directories.push(("Mihomo 工作目录".into(), data.join("mihomo")));
+        directories.push((
+            format!("{} 工作目录", core_kind.display_name()),
+            data.join(core_kind.executable_stem()),
+        ));
     }
     if let Some(resources) = installed_resources_dir() {
         directories.push(("内核与资源目录".into(), resources));

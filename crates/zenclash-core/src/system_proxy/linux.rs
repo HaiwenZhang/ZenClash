@@ -24,6 +24,8 @@ pub(super) fn status(service: &str) -> MihomoResult<SystemProxyStatus> {
         "org.gnome.system.proxy.https",
         "port",
     ])?)?;
+    let bypass = parse_gsettings_list(&gsettings_value(["get", PROXY_SCHEMA, "ignore-hosts"])?);
+    let auto_url = gsettings_value(["get", PROXY_SCHEMA, "autoconfig-url"])?;
     let enabled = mode == "manual";
     Ok(SystemProxyStatus {
         service: service.to_owned(),
@@ -33,6 +35,9 @@ pub(super) fn status(service: &str) -> MihomoResult<SystemProxyStatus> {
         secure_enabled: enabled,
         secure_server,
         secure_port,
+        bypass,
+        auto_enabled: mode == "auto" && !auto_url.is_empty(),
+        auto_url,
     })
 }
 
@@ -41,6 +46,7 @@ pub(super) fn set_enabled(
     enabled: bool,
     server: &str,
     port: u16,
+    bypass: &[String],
 ) -> MihomoResult<()> {
     if !enabled {
         run_gsettings(["set", PROXY_SCHEMA, "mode", "none"])?;
@@ -55,13 +61,19 @@ pub(super) fn set_enabled(
     run_gsettings(["set", "org.gnome.system.proxy.http", "port", &port])?;
     run_gsettings(["set", "org.gnome.system.proxy.https", "host", server])?;
     run_gsettings(["set", "org.gnome.system.proxy.https", "port", &port])?;
-    run_gsettings([
-        "set",
-        PROXY_SCHEMA,
-        "ignore-hosts",
-        "['localhost', '127.0.0.0/8', '::1', '*.local', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16']",
-    ])?;
+    let bypass = format_gsettings_list(bypass);
+    run_gsettings(["set", PROXY_SCHEMA, "ignore-hosts", &bypass])?;
     run_gsettings(["set", PROXY_SCHEMA, "mode", "manual"])?;
+    Ok(())
+}
+
+pub(super) fn set_pac_enabled(_service: &str, enabled: bool, url: &str) -> MihomoResult<()> {
+    run_gsettings(["set", PROXY_SCHEMA, "mode", "none"])?;
+    if !enabled {
+        return Ok(());
+    }
+    run_gsettings(["set", PROXY_SCHEMA, "autoconfig-url", url])?;
+    run_gsettings(["set", PROXY_SCHEMA, "mode", "auto"])?;
     Ok(())
 }
 
@@ -83,14 +95,51 @@ fn parse_proxy_port(value: &str) -> MihomoResult<u16> {
     })
 }
 
+fn format_gsettings_list(entries: &[String]) -> String {
+    format!(
+        "[{}]",
+        entries
+            .iter()
+            .map(|entry| format!("'{entry}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn parse_gsettings_list(value: &str) -> Vec<String> {
+    value
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(',')
+        .map(|entry| entry.trim().trim_matches('\''))
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_proxy_port;
+    use super::{format_gsettings_list, parse_gsettings_list, parse_proxy_port};
 
     #[test]
     fn rejects_invalid_gsettings_proxy_port() {
         let error = parse_proxy_port("not-a-port").unwrap_err();
 
         assert!(error.to_string().contains("无效代理端口"));
+    }
+
+    #[test]
+    fn gsettings_bypass_list_round_trips_in_order() {
+        let entries = vec![
+            "localhost".into(),
+            "192.168.0.0/16".into(),
+            "*.local".into(),
+        ];
+
+        assert_eq!(
+            parse_gsettings_list(&format_gsettings_list(&entries)),
+            entries
+        );
     }
 }

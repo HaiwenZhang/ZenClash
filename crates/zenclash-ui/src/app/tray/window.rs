@@ -55,10 +55,14 @@ impl ZenClashApp {
     }
 
     pub(in crate::app) fn set_mode(&mut self, mode: OutboundMode, cx: &mut Context<Self>) {
-        if self
-            .outbound_mode
-            .request(mode, &self.client, &self.runtime)
-        {
+        if self.outbound_mode.request(
+            mode,
+            &self.client,
+            self.profile_path
+                .clone()
+                .map(|profile| (self.controlled_config_store.clone(), profile)),
+            &self.runtime,
+        ) {
             cx.notify();
         }
     }

@@ -1,15 +1,23 @@
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{File, OpenOptions},
+    io,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-pub(super) fn find_mihomo_binary() -> Option<PathBuf> {
-    let names: &[&str] = if cfg!(windows) {
-        &["mihomo.exe", "mihomo"]
+use crate::{CoreKind, MihomoError, MihomoResult};
+
+pub(super) fn find_core_binary(kind: CoreKind) -> Option<PathBuf> {
+    let stem = kind.executable_stem();
+    let names = if cfg!(windows) {
+        vec![format!("{stem}.exe"), stem.to_owned()]
     } else {
-        &["mihomo"]
+        vec![stem.to_owned()]
     };
     std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths)
             .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
-            .find(|candidate| is_mihomo_binary_candidate(candidate))
+            .find(|candidate| is_core_binary_candidate(candidate))
     })
 }
 
@@ -61,13 +69,118 @@ fn resource_candidates_for_layout(executable: &Path, layout: BundleLayout) -> Ve
     }
 }
 
-pub(super) fn bundled_mihomo_binary() -> Option<PathBuf> {
-    let name = if cfg!(windows) {
-        "mihomo.exe"
-    } else {
-        "mihomo"
-    };
-    bundled_resource(name).filter(|candidate| is_mihomo_binary_candidate(candidate))
+pub(super) fn bundled_core_binary(kind: CoreKind) -> Option<PathBuf> {
+    let name = executable_filename(kind);
+    bundled_resource(&name).filter(|candidate| is_core_binary_candidate(candidate))
+}
+
+/// Seeds the immutable packaged core into a user-writable managed location.
+/// Existing valid managed cores are preserved so an online update survives an
+/// application restart and never mutates a signed application bundle.
+pub(super) fn install_bundled_core(
+    kind: CoreKind,
+    bundled: &Path,
+    home_dir: &Path,
+) -> MihomoResult<PathBuf> {
+    let cores = home_dir.join("cores");
+    let name = executable_filename(kind);
+    let target = cores.join(&name);
+    if target
+        .symlink_metadata()
+        .is_ok_and(|metadata| !metadata.file_type().is_symlink())
+        && is_core_binary_candidate(&target)
+    {
+        return Ok(target);
+    }
+    std::fs::create_dir_all(&cores).map_err(|error| {
+        MihomoError::Process(format!("无法创建托管内核目录 {}：{error}", cores.display()))
+    })?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let staging = cores.join(format!(".{name}.seed-{}-{nonce}", std::process::id()));
+    let result =
+        seed_bundled_core(bundled, &staging).and_then(|()| activate_seeded_core(&staging, &target));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
+    result.map(|()| target)
+}
+
+fn seed_bundled_core(bundled: &Path, staging: &Path) -> MihomoResult<()> {
+    let mut input = File::open(bundled).map_err(|error| {
+        MihomoError::Process(format!("无法读取随包内核 {}：{error}", bundled.display()))
+    })?;
+    let mut output = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(staging)
+        .map_err(|error| {
+            MihomoError::Process(format!("无法创建托管内核 {}：{error}", staging.display()))
+        })?;
+    io::copy(&mut input, &mut output).map_err(|error| {
+        MihomoError::Process(format!("无法复制托管内核 {}：{error}", staging.display()))
+    })?;
+    let permissions = std::fs::metadata(bundled)
+        .map_err(|error| MihomoError::Process(error.to_string()))?
+        .permissions();
+    std::fs::set_permissions(staging, permissions).map_err(|error| {
+        MihomoError::Process(format!(
+            "无法设置托管内核权限 {}：{error}",
+            staging.display()
+        ))
+    })?;
+    output.sync_all().map_err(|error| {
+        MihomoError::Process(format!("无法同步托管内核 {}：{error}", staging.display()))
+    })
+}
+
+fn activate_seeded_core(staging: &Path, target: &Path) -> MihomoResult<()> {
+    let invalid = target.with_file_name(format!(
+        ".{}.invalid-{}",
+        target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("mihomo"),
+        std::process::id()
+    ));
+    let had_invalid = target.exists();
+    if had_invalid {
+        std::fs::rename(target, &invalid).map_err(|error| {
+            MihomoError::Process(format!(
+                "无法隔离无效托管内核 {}：{error}",
+                target.display()
+            ))
+        })?;
+    }
+    if let Err(error) = std::fs::rename(staging, target) {
+        if had_invalid {
+            let _ = std::fs::rename(&invalid, target);
+        }
+        return Err(MihomoError::Process(format!(
+            "无法启用托管内核 {}：{error}",
+            target.display()
+        )));
+    }
+    if had_invalid {
+        std::fs::remove_file(&invalid).map_err(|error| {
+            MihomoError::Process(format!("托管内核已启用，但无法删除无效旧文件：{error}"))
+        })?;
+    }
+    sync_directory(target.parent().unwrap_or_else(|| Path::new(".")))
+}
+
+#[cfg(unix)]
+fn sync_directory(directory: &Path) -> MihomoResult<()> {
+    File::open(directory)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| MihomoError::Process(format!("无法同步托管内核目录：{error}")))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_directory: &Path) -> MihomoResult<()> {
+    Ok(())
 }
 
 pub(super) fn bundled_profile() -> Option<PathBuf> {
@@ -89,7 +202,7 @@ fn find_bundled_resource(
         .find(|candidate| candidate.is_file())
 }
 
-pub(super) fn is_mihomo_binary_candidate(path: &Path) -> bool {
+pub(super) fn is_core_binary_candidate(path: &Path) -> bool {
     if !path.is_file() {
         return false;
     }
@@ -106,13 +219,22 @@ pub(super) fn is_mihomo_binary_candidate(path: &Path) -> bool {
     }
 }
 
-pub(super) fn default_home_dir(project_root: &Path) -> PathBuf {
+pub(super) fn default_core_home_dir(project_root: &Path, kind: CoreKind) -> PathBuf {
     if bundled_resources_dir().is_some() {
         if let Some(data_dir) = platform_data_dir() {
-            return data_dir.join("mihomo");
+            return data_dir.join(kind.executable_stem());
         }
     }
-    project_root.join("target/zenclash-mihomo")
+    project_root.join(format!("target/zenclash-{}", kind.executable_stem()))
+}
+
+fn executable_filename(kind: CoreKind) -> String {
+    let stem = kind.executable_stem();
+    if cfg!(windows) {
+        format!("{stem}.exe")
+    } else {
+        stem.to_owned()
+    }
 }
 
 fn platform_data_dir() -> Option<PathBuf> {
@@ -230,7 +352,35 @@ mod tests {
         std::fs::write(&binary, b"binary").unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        assert!(!is_mihomo_binary_candidate(&binary));
+        assert!(!is_core_binary_candidate(&binary));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundled_core_is_seeded_once_into_writable_storage() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "zenclash-bundled-core-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let bundled = root.join("packaged-mihomo");
+        std::fs::write(&bundled, b"packaged").unwrap();
+        std::fs::set_permissions(&bundled, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let managed = install_bundled_core(CoreKind::Mihomo, &bundled, &root.join("data")).unwrap();
+        assert_eq!(std::fs::read(&managed).unwrap(), b"packaged");
+        std::fs::write(&managed, b"updated").unwrap();
+        let reused = install_bundled_core(CoreKind::Mihomo, &bundled, &root.join("data")).unwrap();
+
+        assert_eq!(managed, reused);
+        assert_eq!(std::fs::read(reused).unwrap(), b"updated");
         std::fs::remove_dir_all(root).unwrap();
     }
 }

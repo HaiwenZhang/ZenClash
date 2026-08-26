@@ -7,8 +7,10 @@ use thiserror::Error;
 
 mod activation;
 mod download;
+mod edit;
 mod model;
 mod remote;
+mod schedule;
 mod storage;
 mod store;
 mod validation;
@@ -17,13 +19,33 @@ mod validation;
 mod tests;
 
 use download::download_profile;
-pub use model::{ProfileActivation, ProfileCatalog, ProfileRecord, ProfileSource, ProfileUpdate};
+pub use model::{
+    ProfileActivation, ProfileCatalog, ProfileRecord, ProfileSource, ProfileUpdate,
+    RemoteProfileOptions, RemoteProfileRoute, SubscriptionAuthorization, SubscriptionMetadata,
+    SubscriptionUsage,
+};
+pub use storage::atomic_write;
 pub use storage::read_profile_bytes;
-use storage::{atomic_write, home_dir, read_index_bytes};
+use storage::{home_dir, read_index_bytes};
 pub use validation::validate_clash_yaml;
-use validation::{normalized_user_agent, unique_id, unix_timestamp};
+use validation::{
+    normalized_profile_name, normalized_remote_url, normalized_user_agent, unique_id,
+    unix_timestamp,
+};
 
 const DEFAULT_USER_AGENT: &str = "clash.meta";
+/// Default automatic refresh cadence for remote profiles.
+pub const DEFAULT_PROFILE_UPDATE_INTERVAL_MINUTES: u32 = 24 * 60;
+/// Smallest accepted automatic refresh cadence for remote profiles.
+pub const MIN_PROFILE_UPDATE_INTERVAL_MINUTES: u32 = 15;
+/// Largest accepted automatic refresh cadence for remote profiles.
+pub const MAX_PROFILE_UPDATE_INTERVAL_MINUTES: u32 = 30 * 24 * 60;
+/// Default end-to-end timeout for one subscription download.
+pub const DEFAULT_PROFILE_DOWNLOAD_TIMEOUT_SECONDS: u32 = 30;
+/// Smallest accepted per-subscription download timeout.
+pub const MIN_PROFILE_DOWNLOAD_TIMEOUT_SECONDS: u32 = 1;
+/// Largest accepted per-subscription download timeout.
+pub const MAX_PROFILE_DOWNLOAD_TIMEOUT_SECONDS: u32 = 10 * 60;
 pub const MAX_PROFILE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PROFILE_INDEX_BYTES: usize = 4 * 1024 * 1024;
 

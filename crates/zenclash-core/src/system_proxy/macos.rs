@@ -33,8 +33,11 @@ pub(super) fn detect() -> MihomoResult<String> {
 pub(super) fn status(service: &str) -> MihomoResult<SystemProxyStatus> {
     let web = run_networksetup(["-getwebproxy", service])?;
     let secure = run_networksetup(["-getsecurewebproxy", service])?;
+    let auto = run_networksetup(["-getautoproxyurl", service])?;
+    let bypass = run_networksetup(["-getproxybypassdomains", service])?;
     let (enabled, server, port) = parse_proxy_output(&web.stdout)?;
     let (secure_enabled, secure_server, secure_port) = parse_proxy_output(&secure.stdout)?;
+    let (auto_enabled, auto_url) = parse_auto_proxy_output(&auto.stdout)?;
     Ok(SystemProxyStatus {
         service: service.to_owned(),
         enabled,
@@ -43,6 +46,9 @@ pub(super) fn status(service: &str) -> MihomoResult<SystemProxyStatus> {
         secure_enabled,
         secure_server,
         secure_port,
+        bypass: parse_bypass_output(&bypass.stdout),
+        auto_enabled,
+        auto_url,
     })
 }
 
@@ -60,30 +66,43 @@ pub(super) fn set_enabled(
     enabled: bool,
     server: &str,
     port: u16,
+    bypass: &[String],
 ) -> MihomoResult<()> {
     if !enabled {
-        return set_proxy_states(service, false);
+        set_proxy_states(service, false)?;
+        return set_auto_proxy_state(service, false);
     }
 
     // Both native states are switched off before values change. If any write
     // fails, the proxy stays disabled instead of becoming partially active.
     set_proxy_states(service, false)?;
+    set_auto_proxy_state(service, false)?;
     let port = port.to_string();
     run_networksetup(["-setwebproxy", service, server, &port, "off"])?;
     run_networksetup(["-setsecurewebproxy", service, server, &port, "off"])?;
-    run_networksetup([
-        "-setproxybypassdomains",
-        service,
-        "localhost",
-        "127.0.0.1",
-        "::1",
-        "*.local",
-        "192.168.0.0/16",
-        "10.0.0.0/8",
-        "172.16.0.0/12",
-    ])?;
+    let mut bypass_args = vec!["-setproxybypassdomains", service];
+    if bypass.is_empty() {
+        bypass_args.push("Empty");
+    } else {
+        bypass_args.extend(bypass.iter().map(String::as_str));
+    }
+    run_networksetup_slice(&bypass_args)?;
     if let Err(error) = set_proxy_states(service, true) {
         let _ = set_proxy_states(service, false);
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub(super) fn set_pac_enabled(service: &str, enabled: bool, url: &str) -> MihomoResult<()> {
+    set_proxy_states(service, false)?;
+    set_auto_proxy_state(service, false)?;
+    if !enabled {
+        return Ok(());
+    }
+    run_networksetup(["-setautoproxyurl", service, url])?;
+    if let Err(error) = set_auto_proxy_state(service, true) {
+        let _ = set_auto_proxy_state(service, false);
         return Err(error);
     }
     Ok(())
@@ -96,8 +115,21 @@ fn set_proxy_states(service: &str, enabled: bool) -> MihomoResult<()> {
     web.and(secure).map(|_| ())
 }
 
+fn set_auto_proxy_state(service: &str, enabled: bool) -> MihomoResult<()> {
+    run_networksetup([
+        "-setautoproxystate",
+        service,
+        if enabled { "on" } else { "off" },
+    ])?;
+    Ok(())
+}
+
 fn run_networksetup<const N: usize>(args: [&str; N]) -> MihomoResult<Output> {
-    let output = crate::platform_command::output("/usr/sbin/networksetup", &args)
+    run_networksetup_slice(&args)
+}
+
+fn run_networksetup_slice(args: &[&str]) -> MihomoResult<Output> {
+    let output = crate::platform_command::output("/usr/sbin/networksetup", args)
         .map_err(MihomoError::Process)?;
     if output.status.success() {
         return Ok(output);
@@ -109,6 +141,20 @@ fn run_networksetup<const N: usize>(args: [&str; N]) -> MihomoResult<Output> {
     } else {
         message
     }))
+}
+
+fn parse_bypass_output(output: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && !line
+                    .to_ascii_lowercase()
+                    .starts_with("there aren't any bypass domains")
+        })
+        .map(str::to_owned)
+        .collect()
 }
 
 fn parse_default_interface(output: &[u8]) -> Option<String> {
@@ -160,9 +206,26 @@ fn parse_proxy_output(output: &[u8]) -> MihomoResult<(bool, String, u16)> {
     Ok((enabled, server, port))
 }
 
+fn parse_auto_proxy_output(output: &[u8]) -> MihomoResult<(bool, String)> {
+    let output = String::from_utf8_lossy(output);
+    let value = |key: &str| {
+        output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(key).map(str::trim))
+            .ok_or_else(|| MihomoError::Process(format!("networksetup 输出缺少 {key}")))
+    };
+    Ok((
+        value("Enabled:")?.eq_ignore_ascii_case("yes"),
+        value("URL:")?.to_owned(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_default_interface, parse_proxy_output, parse_service_for_interface};
+    use super::{
+        parse_auto_proxy_output, parse_bypass_output, parse_default_interface, parse_proxy_output,
+        parse_service_for_interface,
+    };
 
     #[test]
     fn parses_networksetup_proxy_output() {
@@ -193,6 +256,22 @@ mod tests {
         assert_eq!(
             parse_service_for_interface(order, &interface).as_deref(),
             Some("USB Ethernet")
+        );
+    }
+
+    #[test]
+    fn parses_networksetup_bypass_domains_in_native_order() {
+        assert_eq!(
+            parse_bypass_output(b"localhost\n127.0.0.1\n*.local\n"),
+            ["localhost", "127.0.0.1", "*.local"]
+        );
+    }
+
+    #[test]
+    fn parses_networksetup_automatic_proxy_output() {
+        assert_eq!(
+            parse_auto_proxy_output(b"URL: http://127.0.0.1:10000/pac\nEnabled: Yes\n").unwrap(),
+            (true, "http://127.0.0.1:10000/pac".into())
         );
     }
 }

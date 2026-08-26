@@ -57,7 +57,7 @@ impl FloatingTrafficWindow {
     fn set_mode(&mut self, mode: OutboundMode, cx: &mut Context<Self>) {
         if self
             .outbound_mode
-            .request(mode, &self.client, &self.runtime)
+            .request(mode, &self.client, None, &self.runtime)
         {
             cx.notify();
         }

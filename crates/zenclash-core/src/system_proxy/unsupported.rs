@@ -16,6 +16,11 @@ pub(super) fn set_enabled(
     _enabled: bool,
     _server: &str,
     _port: u16,
+    _bypass: &[String],
 ) -> MihomoResult<()> {
     Err(MihomoError::Process("当前平台尚未实现系统代理设置".into()))
+}
+
+pub(super) fn set_pac_enabled(_service: &str, _enabled: bool, _url: &str) -> MihomoResult<()> {
+    Err(MihomoError::Process("当前平台尚未实现 PAC 系统代理".into()))
 }

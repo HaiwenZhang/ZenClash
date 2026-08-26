@@ -142,3 +142,89 @@ async fn cloned_clients_serialize_mutating_requests() {
         "a second mutation started before the first completed"
     );
 }
+
+#[tokio::test]
+async fn maintenance_operations_use_real_mihomo_post_endpoints() {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2_048];
+            let bytes = stream.read(&mut request).unwrap();
+            requests.push(String::from_utf8_lossy(&request[..bytes]).into_owned());
+            write!(
+                stream,
+                "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+        }
+        requests
+    });
+    let client = MihomoClient::new(MihomoEndpoint::new(
+        format!("http://{address}"),
+        "maintenance-secret",
+    ))
+    .unwrap();
+
+    client.upgrade_core().await.unwrap();
+    client.update_geodata().await.unwrap();
+    client.update_external_ui().await.unwrap();
+    let requests = server.join().unwrap();
+    let first_lines = requests
+        .iter()
+        .map(|request| request.lines().next().unwrap_or_default())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        first_lines,
+        [
+            "POST /upgrade HTTP/1.1",
+            "POST /configs/geo HTTP/1.1",
+            "POST /upgrade/ui HTTP/1.1"
+        ]
+    );
+    assert!(requests.iter().all(|request| request
+        .to_ascii_lowercase()
+        .contains("authorization: bearer maintenance-secret")));
+}
+
+#[tokio::test]
+async fn rule_disable_uses_indexed_patch_and_requires_matching_readback() {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut patch_stream, _) = listener.accept().unwrap();
+        let mut patch_request = [0_u8; 2_048];
+        let bytes = patch_stream.read(&mut patch_request).unwrap();
+        let patch_request = String::from_utf8_lossy(&patch_request[..bytes]).into_owned();
+        write!(
+            patch_stream,
+            "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+
+        let (mut readback_stream, _) = listener.accept().unwrap();
+        let mut readback_request = [0_u8; 2_048];
+        let bytes = readback_stream.read(&mut readback_request).unwrap();
+        let readback_request = String::from_utf8_lossy(&readback_request[..bytes]).into_owned();
+        let body = r#"{"rules":[{"type":"Domain","payload":"example.com","proxy":"DIRECT","size":-1,"index":12,"extra":{"disabled":true,"hitCount":1,"hitAt":"now","missCount":0,"missAt":""}}]}"#;
+        write!(
+            readback_stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        (patch_request, readback_request)
+    });
+    let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+
+    let catalog = client.set_rule_disabled(12, true).await.unwrap();
+    let (patch_request, readback_request) = server.join().unwrap();
+
+    assert!(patch_request.starts_with("PATCH /rules/disable HTTP/1.1"));
+    assert!(patch_request.contains(r#""12":true"#));
+    assert!(readback_request.starts_with("GET /rules HTTP/1.1"));
+    assert!(catalog.rules[0].extra.as_ref().unwrap().disabled);
+}

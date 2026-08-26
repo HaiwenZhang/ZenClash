@@ -6,30 +6,38 @@ use std::{
 };
 
 use gpui::{
-    div, prelude::FluentBuilder, px, App, AppContext, Context, Entity, EventEmitter, Focusable,
-    InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render, Styled, Window,
+    div, prelude::FluentBuilder, px, App, AppContext, ClipboardItem, Context, Entity, EventEmitter,
+    Focusable, InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render,
+    StatefulInteractiveElement, Styled, Subscription, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
     h_flex,
-    input::{Input, InputState},
+    input::{Input, InputEvent, InputState},
     scroll::ScrollableElement,
     switch::Switch,
-    v_flex, ActiveTheme, Disableable, Icon, IconName, Sizable,
+    v_flex, ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable,
 };
 use serde_json::{json, Value};
 use zenclash_core::{
-    format_speed, merge_profile_overrides, ConnectionsSnapshot, LogMonitor, MihomoClient,
-    MihomoProcess, ProfileCatalog, ProfileStore, ProviderCatalog, RuleCatalog, RuntimeConfig,
-    SubStoreClient, SubStoreItem, SubStoreSnapshot, SystemNetworkSnapshot, SystemProxyManager,
-    SystemProxyStatus, TrafficMonitor, VersionInfo,
+    default_pac_script, default_system_proxy_bypass, diff_yaml_configs, format_log_entries,
+    format_speed, normalize_pac_script, normalize_system_proxy_bypass, normalize_system_proxy_host,
+    AppPreferences, AppPreferencesStore, AutostartStatus, ConfigDiffReport, ConnectionsSnapshot,
+    ControlledConfigStore, CoreKind, LogMonitor, MihomoClient, MihomoProcess, NetworkLatencyTarget,
+    NetworkProbeRoutePreference, NetworkProbeSnapshot, ProfileCatalog, ProfileStore,
+    ProviderCatalog, PublicIpProvider, RemoteProfileOptions, RemoteProfileRoute, RuleCatalog,
+    RuntimeConfig, SubStoreClient, SubStoreItem, SubStoreItemKind, SubStoreSnapshot,
+    SystemNetworkSnapshot, SystemProxyController, SystemProxyManager, SystemProxyMode,
+    SystemProxyStatus, TrafficHistoryStore, TrafficMonitor, TunPermissionGrant,
+    TunPermissionManager, TunPermissionStatus, VersionInfo, YamlOverrideCatalog, YamlOverrideStore,
 };
 
-use crate::app::{HideTrafficIcon, SetDarkTheme, SetLightTheme, ShowTrafficIcon};
+use crate::app::{HideTrafficIcon, SetDarkTheme, SetLightTheme, SetSystemTheme, ShowTrafficIcon};
 
 use super::Page;
 
 mod common;
+mod config_inputs;
 mod connections;
 mod dns;
 mod lifecycle;
@@ -38,7 +46,7 @@ mod logs;
 mod mihomo;
 mod network;
 mod overrides;
-mod profiles;
+pub(crate) mod profiles;
 mod resources;
 mod rules;
 mod settings;
@@ -51,16 +59,20 @@ mod tun;
 mod view;
 
 use common::{
-    compact_text, empty_dash, empty_state, format_bytes, format_port, format_profile_age,
-    format_proxy, info_row, message_banner, metric, normalized_fraction, setting_card,
-    setting_switch, yes_no,
+    compact_text, config_input_row, empty_dash, empty_state, format_bytes, format_port,
+    format_profile_age, format_proxy, info_row, message_banner, metric, normalized_fraction,
+    setting_card, setting_switch, yes_no,
 };
-use loader::load_page;
+use config_inputs::ConfigInputs;
+use loader::{load_page, load_page_with_binary};
+use mihomo::CoreReleaseState;
+use overrides::ConfigPreview;
 use state::{PageTaskToken, RuntimeData};
 
 /// Stateful GPUI page host for Mihomo runtime, configuration, and diagnostics.
 pub struct RuntimePage {
     page: Page,
+    core_kind: CoreKind,
     client: MihomoClient,
     runtime: tokio::runtime::Handle,
     traffic_monitor: Arc<TrafficMonitor>,
@@ -68,13 +80,32 @@ pub struct RuntimePage {
     process: Option<Arc<MihomoProcess>>,
     profile_path: Option<PathBuf>,
     profile_store: Option<ProfileStore>,
+    controlled_config_store: ControlledConfigStore,
+    controlled_config: Value,
+    config_inputs: ConfigInputs,
+    config_inputs_profile: Option<PathBuf>,
     profile_catalog: ProfileCatalog,
-    subscription_name: Entity<InputState>,
-    subscription_url: Entity<InputState>,
-    subscription_user_agent: Entity<InputState>,
-    override_paths: Vec<PathBuf>,
+    webdav: settings::webdav::WebDavUiState,
+    preferences_store: Option<AppPreferencesStore>,
+    preferences: AppPreferences,
+    system_proxy_controller: SystemProxyController,
+    traffic_history_store: Option<TrafficHistoryStore>,
+    profile_forms: profiles::ProfileFormState,
+    network_latency_name: Entity<InputState>,
+    network_latency_url: Entity<InputState>,
+    log_filter: Entity<InputState>,
+    rule_filter: Entity<InputState>,
+    system_proxy_editor: Option<system_proxy::SystemProxyEditorState>,
+    core_releases: CoreReleaseState,
+    override_store: Option<YamlOverrideStore>,
+    override_catalog: YamlOverrideCatalog,
+    config_preview: Option<ConfigPreview>,
+    profile_editor: overrides::ProfileEditorState,
     data: RuntimeData,
     traffic_samples: VecDeque<u64>,
+    traffic_history: traffic::TrafficHistoryUiState,
+    network_probe: network::NetworkProbeUiState,
+    ruleset: resources::RulesetUiState,
     navigation_generation: u64,
     load_generation: u64,
     loading: bool,
@@ -83,10 +114,13 @@ pub struct RuntimePage {
     error: Option<String>,
     notice: Option<String>,
     focus_handle: gpui::FocusHandle,
+    _subscriptions: Vec<Subscription>,
 }
 
 /// Runtime services shared by the native Mihomo management pages.
 pub struct RuntimePageServices {
+    /// Explicit runtime core selected for this application process.
+    pub core_kind: CoreKind,
     /// Typed Mihomo controller client.
     pub client: MihomoClient,
     /// Tokio runtime used for controller and filesystem work.
@@ -99,6 +133,16 @@ pub struct RuntimePageServices {
     pub process: Option<Arc<MihomoProcess>>,
     /// Active YAML path used by the managed core.
     pub profile_path: Option<PathBuf>,
+    /// Persistent controlled-config layer merged over the active profile.
+    pub controlled_config_store: ControlledConfigStore,
+    /// Persistent native application settings used by real runtime features.
+    pub preferences_store: Option<AppPreferencesStore>,
+    /// Application preferences loaded before the first page is rendered.
+    pub preferences: AppPreferences,
+    /// Shared native/PAC controller also used by the app tray.
+    pub system_proxy_controller: SystemProxyController,
+    /// Native `SQLite` traffic database, when the platform data directory is available.
+    pub traffic_history_store: Option<TrafficHistoryStore>,
 }
 
 /// Event emitted after a managed profile becomes the active Mihomo config.
@@ -109,3 +153,12 @@ pub struct ProfileActivated {
 }
 
 impl EventEmitter<ProfileActivated> for RuntimePage {}
+
+/// Event emitted after imported application preferences become authoritative.
+#[derive(Clone, Debug)]
+pub struct PreferencesRestored {
+    /// Preferences loaded from the validated backup.
+    pub preferences: AppPreferences,
+}
+
+impl EventEmitter<PreferencesRestored> for RuntimePage {}

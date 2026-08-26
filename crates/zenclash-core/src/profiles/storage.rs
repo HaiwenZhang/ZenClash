@@ -36,7 +36,7 @@ pub(super) fn read_index_bytes(path: &Path) -> ProfileStoreResult<Vec<u8>> {
     Ok(payload)
 }
 
-pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -50,12 +50,25 @@ pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         std::process::id(),
         sequence
     ));
-    fs::write(&temporary, bytes)?;
-    let result = replace_file(&temporary, path);
+    let result = fs::write(&temporary, bytes)
+        .and_then(|()| restrict_private_file(&temporary))
+        .and_then(|()| replace_file(&temporary, path));
     if result.is_err() {
         let _ = fs::remove_file(temporary);
     }
     result
+}
+
+#[cfg(unix)]
+fn restrict_private_file(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn restrict_private_file(_: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]

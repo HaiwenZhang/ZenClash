@@ -29,6 +29,7 @@ fn exited_process_snapshot_does_not_expose_a_stale_pid() {
         child: Mutex::new(Some(child)),
         logs: Arc::new(RwLock::new(VecDeque::new())),
         config: MihomoLaunchConfig {
+            kind: CoreKind::Mihomo,
             binary: PathBuf::from("/usr/bin/true"),
             config_file: PathBuf::from("profile.yaml"),
             home_dir: PathBuf::new(),
@@ -40,4 +41,41 @@ fn exited_process_snapshot_does_not_expose_a_stale_pid() {
     let snapshot = process.snapshot();
 
     assert_eq!((snapshot.running, snapshot.pid), (false, None));
+    assert_eq!(snapshot.kind, CoreKind::Mihomo);
+}
+
+#[cfg(unix)]
+#[test]
+fn restart_replaces_the_child_and_preserves_process_owner() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = std::env::temp_dir().join(format!(
+        "zenclash-process-restart-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let binary = directory.join("mihomo");
+    std::fs::write(&binary, "#!/bin/sh\nsleep 30\n").unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let process = MihomoProcess::spawn(MihomoLaunchConfig {
+        kind: CoreKind::Mihomo,
+        binary,
+        config_file: directory.join("profile.yaml"),
+        home_dir: directory.join("data"),
+        endpoint: MihomoEndpoint::default(),
+        controller_override: None,
+    })
+    .unwrap();
+    let first_pid = process.snapshot().pid.unwrap();
+
+    process.restart().unwrap();
+    let second_pid = process.snapshot().pid.unwrap();
+    process.stop().unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+
+    assert_ne!(first_pid, second_pid);
 }

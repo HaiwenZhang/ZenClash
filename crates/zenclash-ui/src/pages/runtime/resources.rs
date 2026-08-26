@@ -1,10 +1,73 @@
 use super::{
-    div, empty_dash, empty_state, h_flex, load_page, px, v_flex, Button, Context, Disableable,
+    div, empty_dash, empty_state, h_flex, info_row, json, load_page, message_banner, px,
+    setting_card, setting_switch, v_flex, Button, ButtonVariants, Context, Disableable,
     FluentBuilder, Icon, IconName, InteractiveElement, IntoElement, Page, ParentElement,
-    ProviderCatalog, RuntimeData, RuntimePage, Sizable, Styled,
+    ProviderCatalog, RuntimeConfig, RuntimeData, RuntimePage, Sizable, Styled,
 };
 
+mod ruleset;
+
+pub(super) use ruleset::RulesetUiState;
+
+#[derive(Clone, Copy)]
+enum BuiltinResource {
+    GeoData,
+    ExternalUi,
+}
+
 impl RuntimePage {
+    fn update_builtin_resource(&mut self, resource: BuiltinResource, cx: &mut Context<Self>) {
+        let supported = match resource {
+            BuiltinResource::GeoData => self.core_kind.capabilities().geodata_update,
+            BuiltinResource::ExternalUi => self.core_kind.capabilities().external_ui_update,
+        };
+        if !supported {
+            self.error = Some(format!(
+                "{} 暂不支持该 Mihomo 内置资源更新接口",
+                self.core_kind.display_name()
+            ));
+            cx.notify();
+            return;
+        }
+        let Some(token) = self.begin_mutation(Page::Resources) else {
+            return;
+        };
+        let client = self.client.clone();
+        let task = self.runtime.spawn(async move {
+            match resource {
+                BuiltinResource::GeoData => client.update_geodata().await,
+                BuiltinResource::ExternalUi => client.update_external_ui().await,
+            }
+            .map_err(|error| error.to_string())?;
+            load_page(client, Page::Resources).await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|error| format!("内置资源更新任务异常结束：{error}"))
+                .and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                this.mutating = false;
+                match result {
+                    Ok(data) => {
+                        if this.replace_page_data(token, data) {
+                            this.notice = Some(match resource {
+                                BuiltinResource::GeoData => "GeoData 已由 Mihomo 下载并更新".into(),
+                                BuiltinResource::ExternalUi => {
+                                    "External UI 已由 Mihomo 下载并更新".into()
+                                }
+                            });
+                        }
+                    }
+                    Err(error) => this.set_page_error(token, error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn update_provider(&mut self, name: String, is_rule: bool, cx: &mut Context<Self>) {
         let Some(token) = self.begin_mutation(Page::Resources) else {
             return;
@@ -45,12 +108,22 @@ impl RuntimePage {
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let (proxy, rules) = match &self.data {
-            RuntimeData::Resources { proxy, rules } => (proxy.clone(), rules.clone()),
-            _ => (ProviderCatalog::default(), ProviderCatalog::default()),
+        let (config, proxy, rules) = match &self.data {
+            RuntimeData::Resources {
+                config,
+                proxy,
+                rules,
+            } => (config.clone(), proxy.clone(), rules.clone()),
+            _ => (
+                RuntimeConfig::default(),
+                ProviderCatalog::default(),
+                ProviderCatalog::default(),
+            ),
         };
         v_flex()
             .gap_4()
+            .child(self.render_builtin_resources(&config, theme, cx))
+            .child(self.render_ruleset_converter(theme, cx))
             .child(provider_section(
                 "代理提供者",
                 proxy,
@@ -69,6 +142,129 @@ impl RuntimePage {
             ))
             .into_any_element()
     }
+
+    fn render_builtin_resources(
+        &self,
+        config: &RuntimeConfig,
+        theme: &gpui_component::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let controlled = &self.controlled_config;
+        let geodata_mode = config_bool(config, controlled, "geodata-mode");
+        let geo_auto_update = config_bool(config, controlled, "geo-auto-update");
+        let geo_interval = config_value(config, controlled, "geo-update-interval")
+            .and_then(serde_json::Value::as_u64)
+            .map_or_else(|| "—".into(), |hours| format!("{hours} 小时"));
+        let geox =
+            config_value(config, controlled, "geox-url").and_then(serde_json::Value::as_object);
+        let geoip = geox
+            .and_then(|urls| urls.get("geoip"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("—");
+        let geosite = geox
+            .and_then(|urls| urls.get("geosite"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("—");
+        let external_ui_url = config_value(config, controlled, "external-ui-url")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("—");
+
+        setting_card("GeoData 与 External UI", theme)
+            .when(
+                !self.core_kind.capabilities().geodata_update
+                    || !self.core_kind.capabilities().external_ui_update,
+                |card| {
+                    card.child(message_banner(
+                        format!(
+                            "{} 可继续使用配置中的资源地址，但不支持 Mihomo 的 GeoData / External UI 在线更新接口。",
+                            self.core_kind.display_name()
+                        ),
+                        theme.warning,
+                        theme,
+                    ))
+                },
+            )
+            .child(setting_switch(
+                "DAT GeoData 模式",
+                "关闭时使用 MMDB/MetaDB；修改后写入受控配置并由 Mihomo 验证",
+                self.controlled_bool("/geodata-mode", geodata_mode),
+                "resource-geodata-mode",
+                theme,
+                cx.listener(|this, checked, _, cx| {
+                    this.apply_controlled_config(
+                        json!({"geodata-mode": *checked}),
+                        "GeoData 模式已保存并热重载",
+                        cx,
+                    );
+                }),
+            ))
+            .child(setting_switch(
+                "自动更新 GeoData",
+                "由 Mihomo 按配置的更新间隔维护 GeoData",
+                self.controlled_bool("/geo-auto-update", geo_auto_update),
+                "resource-geo-auto-update",
+                theme,
+                cx.listener(|this, checked, _, cx| {
+                    this.apply_controlled_config(
+                        json!({"geo-auto-update": *checked}),
+                        "GeoData 自动更新设置已保存",
+                        cx,
+                    );
+                }),
+            ))
+            .child(info_row("更新间隔", &geo_interval, theme))
+            .child(info_row("GeoIP", geoip, theme))
+            .child(info_row("GeoSite", geosite, theme))
+            .child(info_row("External UI", external_ui_url, theme))
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .p_4()
+                    .child(
+                        Button::new("update-geodata")
+                            .icon(IconName::Redo2)
+                            .label("立即更新 GeoData")
+                            .small()
+                            .primary()
+                            .loading(self.mutating)
+                            .disabled(
+                                self.mutating || !self.core_kind.capabilities().geodata_update,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.update_builtin_resource(BuiltinResource::GeoData, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("update-external-ui")
+                            .icon(IconName::Redo2)
+                            .label("更新 External UI")
+                            .small()
+                            .outline()
+                            .disabled(
+                                self.mutating
+                                    || !self.core_kind.capabilities().external_ui_update,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.update_builtin_resource(BuiltinResource::ExternalUi, cx);
+                            })),
+                    ),
+            )
+    }
+}
+
+fn config_value<'a>(
+    config: &'a RuntimeConfig,
+    controlled: &'a serde_json::Value,
+    key: &str,
+) -> Option<&'a serde_json::Value> {
+    controlled.get(key).or_else(|| config.extra.get(key))
+}
+
+fn config_bool(config: &RuntimeConfig, controlled: &serde_json::Value, key: &str) -> bool {
+    config_value(config, controlled, key)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn provider_section(
@@ -120,6 +316,21 @@ fn provider_section(
                         } else {
                             provider.proxies.len()
                         };
+                        let metadata = if is_rule {
+                            let behavior = empty_dash(&provider.behavior);
+                            let format = empty_dash(&provider.format).to_ascii_uppercase();
+                            format!(
+                                "{} · {behavior} · {format} · {} · {item_count} 项",
+                                provider.vehicle_type,
+                                empty_dash(&provider.updated_at)
+                            )
+                        } else {
+                            format!(
+                                "{} · {} · {item_count} 项",
+                                provider.vehicle_type,
+                                empty_dash(&provider.updated_at)
+                            )
+                        };
                         h_flex()
                             .id((
                                 if is_rule {
@@ -137,14 +348,10 @@ fn provider_section(
                             .child(Icon::new(IconName::Inbox).size_4())
                             .child(
                                 v_flex().flex_1().child(div().text_sm().child(name)).child(
-                                    div().text_xs().text_color(theme.muted_foreground).child(
-                                        format!(
-                                            "{} · {} · {} 项",
-                                            provider.vehicle_type,
-                                            empty_dash(&provider.updated_at),
-                                            item_count
-                                        ),
-                                    ),
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(metadata),
                                 ),
                             )
                             .child(

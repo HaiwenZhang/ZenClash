@@ -1,7 +1,16 @@
 use super::{
-    tray_directories, AppContext, Context, OutboundMode, TrayMenuState, TrayProxyGroup,
-    TrayProxyNode, ZenClashApp,
+    tray_directories, AppContext, Context, OutboundMode, TrayMenuState, TrayProfile,
+    TrayProxyGroup, TrayProxyNode, ZenClashApp,
 };
+
+struct TrayMenuSnapshot {
+    config: zenclash_core::RuntimeConfig,
+    catalog: zenclash_core::ProxyCatalog,
+    system_proxy: Result<bool, String>,
+    profiles: Result<zenclash_core::ProfileCatalog, String>,
+    mode_generation: u64,
+    profile_path: Option<std::path::PathBuf>,
+}
 
 impl ZenClashApp {
     pub(in crate::app) fn refresh_tray_menu(&mut self, cx: &mut Context<Self>) {
@@ -20,20 +29,29 @@ impl ZenClashApp {
             let system_proxy_task = tokio::task::spawn_blocking(|| {
                 zenclash_core::SystemProxyManager::detect()
                     .and_then(|manager| manager.status())
-                    .map(|status| status.enabled || status.secure_enabled)
+                    .map(|status| status.active())
                     .map_err(|error| error.to_string())
             });
-            let (config, catalog, system_proxy) = tokio::join!(
+            let profile_catalog_task = tokio::task::spawn_blocking(|| {
+                let store =
+                    zenclash_core::ProfileStore::discover().map_err(|error| error.to_string())?;
+                store.load().map_err(|error| error.to_string())
+            });
+            let (config, catalog, system_proxy, profiles) = tokio::join!(
                 client.runtime_config(),
                 client.proxy_catalog(),
-                system_proxy_task
+                system_proxy_task,
+                profile_catalog_task
             );
             let config = config.map_err(|error| error.to_string())?;
             let catalog = catalog.map_err(|error| error.to_string())?;
             let system_proxy = system_proxy
                 .map_err(|error| format!("系统代理状态任务异常结束：{error}"))
                 .and_then(|result| result);
-            Ok::<_, String>((config, catalog, system_proxy, mode_generation))
+            let profiles = profiles
+                .map_err(|error| format!("配置目录任务异常结束：{error}"))
+                .and_then(|result| result);
+            Ok::<_, String>((config, catalog, system_proxy, profiles, mode_generation))
         });
         let profile_path = self.profile_path.clone();
 
@@ -42,13 +60,16 @@ impl ZenClashApp {
             let _ = this.update(cx, |this, cx| {
                 this.tray_refreshing = false;
                 match result {
-                    Ok(Ok((config, catalog, system_proxy, mode_generation))) => {
+                    Ok(Ok((config, catalog, system_proxy, profiles, mode_generation))) => {
                         this.apply_tray_menu_state(
-                            &config,
-                            catalog,
-                            system_proxy,
-                            mode_generation,
-                            profile_path.as_deref(),
+                            TrayMenuSnapshot {
+                                config,
+                                catalog,
+                                system_proxy,
+                                profiles,
+                                mode_generation,
+                                profile_path,
+                            },
                             cx,
                         );
                     }
@@ -71,15 +92,15 @@ impl ZenClashApp {
         .detach();
     }
 
-    fn apply_tray_menu_state(
-        &mut self,
-        config: &zenclash_core::RuntimeConfig,
-        catalog: zenclash_core::ProxyCatalog,
-        system_proxy: Result<bool, String>,
-        mode_generation: u64,
-        profile_path: Option<&std::path::Path>,
-        cx: &mut Context<Self>,
-    ) {
+    fn apply_tray_menu_state(&mut self, snapshot: TrayMenuSnapshot, cx: &mut Context<Self>) {
+        let TrayMenuSnapshot {
+            config,
+            catalog,
+            system_proxy,
+            profiles: profile_catalog,
+            mode_generation,
+            profile_path,
+        } = snapshot;
         self.outbound_mode
             .synchronize(OutboundMode::from_api(&config.mode), mode_generation);
         let mixed_port = [config.mixed_port, config.port, config.socks_port]
@@ -106,9 +127,36 @@ impl ZenClashApp {
                     .collect(),
             })
             .collect();
-        let profile_name = profile_path.and_then(|path| path.file_name()).map_or_else(
-            || "当前配置".into(),
-            |name| name.to_string_lossy().into_owned(),
+        let (profile_name, profiles) = profile_catalog.map_or_else(
+            |error| {
+                tracing::warn!(%error, "failed to read managed profiles for tray menu");
+                (
+                    profile_path
+                        .as_deref()
+                        .and_then(|path| path.file_name())
+                        .map_or_else(
+                            || "当前配置".into(),
+                            |name| name.to_string_lossy().into_owned(),
+                        ),
+                    Vec::new(),
+                )
+            },
+            |catalog| {
+                let profile_name = catalog
+                    .active_profile()
+                    .map_or_else(|| "当前配置".into(), |profile| profile.name.clone());
+                let active = catalog.active.as_deref();
+                let profiles = catalog
+                    .profiles
+                    .into_iter()
+                    .map(|profile| TrayProfile {
+                        active: active == Some(profile.id.as_str()),
+                        id: profile.id,
+                        name: profile.name,
+                    })
+                    .collect();
+                (profile_name, profiles)
+            },
         );
         let floating_visible = self
             .floating_window
@@ -127,8 +175,9 @@ impl ZenClashApp {
             floating_visible,
             mixed_port,
             profile_name,
+            profiles,
             groups,
-            directories: tray_directories(profile_path),
+            directories: tray_directories(profile_path.as_deref(), self.core_kind),
         };
         if let Some(tray) = self.network_tray.as_mut() {
             if let Err(error) = tray.update_menu(&state) {

@@ -14,15 +14,21 @@ use gpui_component::{
     v_flex, ActiveTheme, Root, Selectable, Sizable, ThemeMode, TitleBar,
 };
 use zenclash_core::{
-    format_speed, LogMonitor, MihomoClient, MihomoProcess, TrafficMonitor, TrafficSnapshot,
+    format_speed, AppPreferences, AppPreferencesStore, AppearancePreference, ControlledConfigStore,
+    CoreKind, LogMonitor, MihomoClient, MihomoProcess, SystemProxyController, SystemProxyMode,
+    TrafficHistoryStore, TrafficMonitor, TrafficSnapshot,
 };
 
 mod actions;
 mod bootstrap;
 mod platform;
+mod profile_updates;
 mod signal;
+mod system_proxy;
+mod traffic_history;
 mod tray;
 mod view;
+mod webdav_backups;
 
 pub use bootstrap::{create_main_window, init};
 use platform::{open_directory, tray_directories};
@@ -34,13 +40,14 @@ use crate::{
         mode::OutboundModeCoordinator,
         sidebar::{OutboundMode, Sidebar},
         tray::{
-            NetworkTrayIcon, TrayClick, TrayCommand, TrayMenuState, TrayProxyGroup, TrayProxyNode,
+            EnvironmentShell, NetworkTrayIcon, TrayClick, TrayCommand, TrayMenuState, TrayProfile,
+            TrayProxyGroup, TrayProxyNode,
         },
     },
     design::{apply_zen_theme, color, throughput_activity_percent, SIGNAL_CYAN, UPLINK_AMBER},
     pages::{
         proxies::ProxiesPage,
-        runtime::{ProfileActivated, RuntimePage, RuntimePageServices},
+        runtime::{PreferencesRestored, ProfileActivated, RuntimePage, RuntimePageServices},
         Page,
     },
 };
@@ -78,6 +85,7 @@ mod action_types {
             SetRuleMode,
             SetGlobalMode,
             SetDirectMode,
+            SetSystemTheme,
             SetLightTheme,
             SetDarkTheme,
             ShowTrafficIcon,
@@ -94,6 +102,7 @@ pub use action_types::*;
 pub struct ZenClashApp {
     current_page: Page,
     outbound_mode: OutboundModeCoordinator,
+    core_kind: CoreKind,
     client: MihomoClient,
     traffic_monitor: Arc<TrafficMonitor>,
     traffic: TrafficSnapshot,
@@ -103,22 +112,32 @@ pub struct ZenClashApp {
     focus_handle: gpui::FocusHandle,
     proxies_page: Entity<ProxiesPage>,
     runtime_page: Entity<RuntimePage>,
-    _mihomo_process: Option<Arc<MihomoProcess>>,
+    mihomo_process: Option<Arc<MihomoProcess>>,
     profile_path: Option<PathBuf>,
+    controlled_config_store: ControlledConfigStore,
     main_window: AnyWindowHandle,
     floating_window: Option<AnyWindowHandle>,
     tray_refreshing: bool,
     tray_refresh_pending: bool,
     tray_menu_requested: bool,
     system_proxy_commands: LatestCommandQueue<(bool, u16)>,
+    system_proxy_controller: SystemProxyController,
+    quit_state: system_proxy::QuitState,
     tun_commands: LatestCommandQueue<bool>,
     proxy_selection_commands: LatestCommandQueue<(String, String)>,
+    profile_selection_commands: LatestCommandQueue<String>,
     network_tray: Option<NetworkTrayIcon>,
+    preferences_store: Option<AppPreferencesStore>,
+    preferences: AppPreferences,
+    log_monitor: Arc<LogMonitor>,
+    traffic_history_policy: Arc<traffic_history::TrafficHistoryPolicy>,
     _subscriptions: Vec<Subscription>,
 }
 
 /// Runtime services prepared by the executable before constructing the UI.
 pub struct AppServices {
+    /// Explicit runtime core selected for this application process.
+    pub core_kind: CoreKind,
     /// Typed external-controller client.
     pub client: MihomoClient,
     /// Shared reconnecting traffic stream.
@@ -129,6 +148,8 @@ pub struct AppServices {
     pub mihomo_process: Option<Arc<MihomoProcess>>,
     /// Active Clash/Mihomo YAML path, when known.
     pub profile_path: Option<PathBuf>,
+    /// Persistent controlled-config layer merged over the active profile.
+    pub controlled_config_store: ControlledConfigStore,
     /// Tokio runtime used for network and blocking bridge tasks.
     pub runtime: tokio::runtime::Handle,
 }
@@ -137,15 +158,19 @@ impl ZenClashApp {
     fn new(
         services: AppServices,
         network_tray: Option<NetworkTrayIcon>,
+        preferences_store: Option<AppPreferencesStore>,
+        preferences: AppPreferences,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let AppServices {
+            core_kind,
             client,
             traffic_monitor,
             log_monitor,
             mihomo_process,
             profile_path,
+            controlled_config_store,
             runtime,
         } = services;
         let focus_handle = cx.focus_handle();
@@ -153,31 +178,48 @@ impl ZenClashApp {
         let main_window = window.window_handle();
         let proxies_page = cx.new(|cx| ProxiesPage::new(client.clone(), runtime.clone(), cx));
         let app_profile_path = profile_path.clone();
+        let app_controlled_config_store = controlled_config_store.clone();
+        let traffic_history_store = TrafficHistoryStore::discover()
+            .inspect_err(
+                |error| tracing::warn!(%error, "failed to discover traffic-history database"),
+            )
+            .ok();
+        let traffic_history_policy =
+            Arc::new(traffic_history::TrafficHistoryPolicy::new(&preferences));
+        let system_proxy_controller = SystemProxyController::default();
         let runtime_page = cx.new(|cx| {
             RuntimePage::new(
                 Page::Mihomo,
                 RuntimePageServices {
+                    core_kind,
                     client: client.clone(),
                     runtime: runtime.clone(),
                     traffic_monitor: traffic_monitor.clone(),
-                    log_monitor,
+                    log_monitor: log_monitor.clone(),
                     process: mihomo_process.clone(),
                     profile_path,
+                    controlled_config_store,
+                    preferences_store: preferences_store.clone(),
+                    preferences: preferences.clone(),
+                    system_proxy_controller: system_proxy_controller.clone(),
+                    traffic_history_store: traffic_history_store.clone(),
                 },
                 window,
                 cx,
             )
         });
-        let profile_subscription =
-            cx.subscribe(&runtime_page, |this, _, event: &ProfileActivated, cx| {
-                this.profile_path = Some(event.path.clone());
-                this.proxies_page
-                    .update(cx, super::pages::proxies::ProxiesPage::profile_activated);
-                this.refresh_tray_menu(cx);
-            });
+        let profile_subscription = Self::subscribe_profile_events(&runtime_page, cx);
+        let preferences_subscription = Self::subscribe_preference_events(&runtime_page, cx);
+        let appearance_subscription = cx.observe_window_appearance(window, |this, window, cx| {
+            if this.preferences.appearance == AppearancePreference::System {
+                apply_zen_theme(ThemeMode::from(window.appearance()), Some(window), cx);
+                cx.notify();
+            }
+        });
         let mut app = Self {
             current_page: Page::default(),
             outbound_mode: OutboundModeCoordinator::new_unsynchronized(OutboundMode::default()),
+            core_kind,
             client,
             traffic_monitor,
             traffic: TrafficSnapshot::default(),
@@ -187,24 +229,85 @@ impl ZenClashApp {
             focus_handle,
             proxies_page,
             runtime_page,
-            _mihomo_process: mihomo_process,
+            mihomo_process,
             profile_path: app_profile_path,
+            controlled_config_store: app_controlled_config_store,
             main_window,
             floating_window: None,
             tray_refreshing: false,
             tray_refresh_pending: false,
             tray_menu_requested: false,
             system_proxy_commands: LatestCommandQueue::default(),
+            system_proxy_controller,
+            quit_state: system_proxy::QuitState::default(),
             tun_commands: LatestCommandQueue::default(),
             proxy_selection_commands: LatestCommandQueue::default(),
+            profile_selection_commands: LatestCommandQueue::default(),
             network_tray,
-            _subscriptions: vec![profile_subscription],
+            preferences_store,
+            preferences,
+            log_monitor,
+            traffic_history_policy,
+            _subscriptions: vec![
+                profile_subscription,
+                preferences_subscription,
+                appearance_subscription,
+            ],
         };
         app.start_traffic_updates(cx);
+        app.restore_pac_proxy(cx);
         app.start_mode_sync(cx);
+        app.start_profile_updates(cx);
+        app.start_webdav_backups(cx);
+        app.start_traffic_history(traffic_history_store);
         Self::start_tray_updates(cx);
         app.refresh_tray_menu(cx);
         app
+    }
+
+    fn subscribe_profile_events(
+        runtime_page: &Entity<RuntimePage>,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe(runtime_page, |this, _, event: &ProfileActivated, cx| {
+            this.profile_path = Some(event.path.clone());
+            this.proxies_page
+                .update(cx, super::pages::proxies::ProxiesPage::profile_activated);
+            this.refresh_tray_menu(cx);
+        })
+    }
+
+    fn subscribe_preference_events(
+        runtime_page: &Entity<RuntimePage>,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe(runtime_page, |this, _, event: &PreferencesRestored, cx| {
+            this.preferences = event.preferences.clone();
+            this.traffic_history_policy.update(&this.preferences);
+            if let Err(error) = bootstrap::configure_log_monitor(
+                &this.log_monitor,
+                this.preferences_store.as_ref(),
+                &this.preferences,
+            ) {
+                tracing::warn!(%error, "failed to apply restored log persistence settings");
+            }
+            if let Some(tray) = &this.network_tray {
+                if let Err(error) = tray.set_visible(this.preferences.traffic_tray_visible) {
+                    tracing::warn!(%error, "failed to apply restored tray visibility");
+                }
+            }
+            let appearance = this.preferences.appearance;
+            let _ = cx.update_window(this.main_window, move |_, window, cx| {
+                let mode = match appearance {
+                    AppearancePreference::System => ThemeMode::from(window.appearance()),
+                    AppearancePreference::Light => ThemeMode::Light,
+                    AppearancePreference::Dark => ThemeMode::Dark,
+                };
+                apply_zen_theme(mode, Some(window), cx);
+            });
+            this.refresh_tray_menu(cx);
+            cx.notify();
+        })
     }
 
     fn start_traffic_updates(&mut self, cx: &mut Context<Self>) {

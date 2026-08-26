@@ -8,9 +8,6 @@ use crate::{MihomoError, MihomoResult};
 #[cfg(target_os = "windows")]
 const INTERNET_SETTINGS: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings";
 
-#[cfg(any(target_os = "windows", test))]
-const PROXY_OVERRIDE: &str = "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;192.168.*;<local>";
-
 #[cfg(target_os = "windows")]
 pub(super) fn detect() -> MihomoResult<String> {
     query_value("ProxyEnable")?;
@@ -34,6 +31,14 @@ pub(super) fn status(service: &str) -> MihomoResult<SystemProxyStatus> {
         .unwrap_or_default();
     let (server, port, secure_server, secure_port) =
         parse_proxy_server(value).map_err(MihomoError::Process)?;
+    let bypass = query_value("ProxyOverride")
+        .ok()
+        .and_then(|output| registry_string_value(&output))
+        .map_or_else(Vec::new, |value| parse_bypass(&value));
+    let auto_url = query_value("AutoConfigURL")
+        .ok()
+        .and_then(|output| registry_string_value(&output))
+        .unwrap_or_default();
     Ok(SystemProxyStatus {
         service: service.to_owned(),
         enabled: enabled && !server.is_empty() && port > 0,
@@ -42,6 +47,9 @@ pub(super) fn status(service: &str) -> MihomoResult<SystemProxyStatus> {
         secure_enabled: enabled && !secure_server.is_empty() && secure_port > 0,
         secure_server,
         secure_port,
+        bypass,
+        auto_enabled: !auto_url.is_empty(),
+        auto_url,
     })
 }
 
@@ -51,25 +59,41 @@ pub(super) fn set_enabled(
     enabled: bool,
     server: &str,
     port: u16,
+    bypass: &[String],
 ) -> MihomoResult<()> {
-    let update = update_registry(enabled, server, port);
+    let update = update_registry(enabled, server, port, bypass);
     let notification = notify_wininet();
     combine_update_and_notification(update, notification)
 }
 
 #[cfg(target_os = "windows")]
-fn update_registry(enabled: bool, server: &str, port: u16) -> MihomoResult<()> {
+fn update_registry(enabled: bool, server: &str, port: u16, bypass: &[String]) -> MihomoResult<()> {
     if !enabled {
-        return set_proxy_enabled(false);
+        set_proxy_enabled(false)?;
+        return add_value("AutoConfigURL", "REG_SZ", "");
     }
 
     // ProxyEnable is cleared before updating an existing WinINET proxy. It is
     // restored only after both the endpoint and bypass list are complete.
     set_proxy_enabled(false)?;
+    add_value("AutoConfigURL", "REG_SZ", "")?;
     let proxy = format!("http={server}:{port};https={server}:{port}");
     add_value("ProxyServer", "REG_SZ", &proxy)?;
-    add_value("ProxyOverride", "REG_SZ", PROXY_OVERRIDE)?;
+    add_value("ProxyOverride", "REG_SZ", &bypass.join(";"))?;
     set_proxy_enabled(true)
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn set_pac_enabled(_service: &str, enabled: bool, url: &str) -> MihomoResult<()> {
+    let update = update_pac_registry(enabled, url);
+    let notification = notify_wininet();
+    combine_update_and_notification(update, notification)
+}
+
+#[cfg(target_os = "windows")]
+fn update_pac_registry(enabled: bool, url: &str) -> MihomoResult<()> {
+    set_proxy_enabled(false)?;
+    add_value("AutoConfigURL", "REG_SZ", if enabled { url } else { "" })
 }
 
 #[cfg(target_os = "windows")]
@@ -176,9 +200,25 @@ fn parse_proxy_server(value: &str) -> Result<(String, u16, String, u16), String>
     Ok((http.0, http.1, https.0, https.1))
 }
 
+fn registry_string_value(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        line.split_once("REG_SZ")
+            .map(|(_, value)| value.trim().to_owned())
+    })
+}
+
+fn parse_bypass(value: &str) -> Vec<String> {
+    value
+        .split(';')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_proxy_server, PROXY_OVERRIDE};
+    use super::{parse_bypass, parse_proxy_server, registry_string_value};
 
     #[test]
     fn parses_protocol_specific_proxy_server() {
@@ -219,7 +259,21 @@ mod tests {
     }
 
     #[test]
-    fn bypasses_the_full_private_172_16_network() {
-        assert!(PROXY_OVERRIDE.contains("172.16.*") && PROXY_OVERRIDE.contains("172.31.*"));
+    fn parses_wininet_bypass_and_preserves_order() {
+        assert_eq!(
+            parse_bypass("localhost;127.*;*.example.com;<local>"),
+            ["localhost", "127.*", "*.example.com", "<local>"]
+        );
+    }
+
+    #[test]
+    fn extracts_registry_string_value_without_command_columns() {
+        assert_eq!(
+            registry_string_value(
+                "    ProxyOverride    REG_SZ    localhost;127.*;*.example.com\r\n"
+            )
+            .as_deref(),
+            Some("localhost;127.*;*.example.com")
+        );
     }
 }

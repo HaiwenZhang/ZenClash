@@ -1,9 +1,10 @@
 mod catalog;
+mod editor;
 mod forms;
 
 use super::super::{
-    h_flex, metric, v_flex, IntoElement, ParentElement, RuntimeConfig, RuntimeData, RuntimePage,
-    Styled,
+    h_flex, metric, v_flex, FluentBuilder, IntoElement, ParentElement, RuntimeConfig, RuntimeData,
+    RuntimePage, Styled,
 };
 
 impl RuntimePage {
@@ -45,6 +46,9 @@ impl RuntimePage {
             .child(self.render_subscription_form(theme, cx))
             .child(self.render_local_import(theme, cx))
             .child(self.render_managed_profiles(theme, cx))
+            .when(self.profile_forms.editing_profile_id.is_some(), |this| {
+                this.child(self.render_remote_profile_editor(theme, cx))
+            })
             .child(self.render_current_profile(&config, theme, cx))
             .into_any_element()
     }

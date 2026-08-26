@@ -1,5 +1,7 @@
 use std::{
+    ffi::OsStr,
     io::{self, Read},
+    path::Path,
     process::{Child, Command, ExitStatus, Output, Stdio},
     thread,
     time::{Duration, Instant},
@@ -17,46 +19,69 @@ pub fn output(command: &str, args: &[&str]) -> Result<Output, String> {
     output_with_timeout(command, args, COMMAND_TIMEOUT)
 }
 
-fn output_with_timeout(command: &str, args: &[&str], timeout: Duration) -> Result<Output, String> {
-    let mut child = Command::new(command)
-        .args(args)
+pub(crate) fn output_with_timeout(
+    command: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<Output, String> {
+    let mut process = Command::new(command);
+    process.args(args);
+    output_from_command(process, command, timeout)
+}
+
+pub(crate) fn output_path_with_timeout(
+    command: &Path,
+    args: &[&OsStr],
+    timeout: Duration,
+) -> Result<Output, String> {
+    let mut process = Command::new(command);
+    process.args(args);
+    output_from_command(process, &command.display().to_string(), timeout)
+}
+
+fn output_from_command(
+    mut command: Command,
+    display_name: &str,
+    timeout: Duration,
+) -> Result<Output, String> {
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| format!("执行 {command} 失败：{error}"))?;
+        .map_err(|error| format!("执行 {display_name} 失败：{error}"))?;
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| abort_for_setup_error(&mut child, command, "无法捕获标准输出"))?;
+        .ok_or_else(|| abort_for_setup_error(&mut child, display_name, "无法捕获标准输出"))?;
     let stdout_reader = match spawn_reader(stdout, "stdout") {
         Ok(reader) => reader,
         Err(error) => {
             abort_child(&mut child);
-            return Err(format!("执行 {command} 失败：{error}"));
+            return Err(format!("执行 {display_name} 失败：{error}"));
         }
     };
     let Some(stderr) = child.stderr.take() else {
         abort_child(&mut child);
         let _ = join_reader(stdout_reader, "stdout");
-        return Err(format!("执行 {command} 失败：无法捕获标准错误"));
+        return Err(format!("执行 {display_name} 失败：无法捕获标准错误"));
     };
     let stderr_reader = match spawn_reader(stderr, "stderr") {
         Ok(reader) => reader,
         Err(error) => {
             abort_child(&mut child);
             let _ = join_reader(stdout_reader, "stdout");
-            return Err(format!("执行 {command} 失败：{error}"));
+            return Err(format!("执行 {display_name} 失败：{error}"));
         }
     };
 
-    let status = wait_for_exit(&mut child, command, timeout);
+    let status = wait_for_exit(&mut child, display_name, timeout);
     let stdout = join_reader(stdout_reader, "stdout");
     let stderr = join_reader(stderr_reader, "stderr");
 
     Ok(Output {
         status: status?,
-        stdout: stdout.map_err(|error| format!("读取 {command} 标准输出失败：{error}"))?,
-        stderr: stderr.map_err(|error| format!("读取 {command} 标准错误失败：{error}"))?,
+        stdout: stdout.map_err(|error| format!("读取 {display_name} 标准输出失败：{error}"))?,
+        stderr: stderr.map_err(|error| format!("读取 {display_name} 标准错误失败：{error}"))?,
     })
 }
 

@@ -1,15 +1,18 @@
 # ZenClash
 
-ZenClash is a native Mihomo client implemented in Rust with GPUI and
-gpui-component. The workspace currently contains:
+ZenClash is a native Clash-compatible client implemented in Rust with GPUI and
+gpui-component. Mihomo is the default production core; meow-rs is an explicit
+experimental alternative with capability-aware UI and restart-based full
+configuration transactions. The workspace currently contains:
 
 - `zenclash-core`: typed Mihomo HTTP/WebSocket APIs, managed core process,
   macOS system proxy integration, traffic/log monitors, and real integration
   tests.
 - `zenclash-ui`: GPUI native window, Clash Party-style card sidebar, proxy
   selection and latency tests, connections, rules, providers, runtime settings,
-  TUN controls, logs, traffic charts, local profile switching, ordered YAML
-  overrides, Sub-Store connectivity, and a native status-bar traffic icon.
+  TUN controls, logs, real SQLite-backed traffic history and rankings, local
+  profile switching, ordered YAML overrides, Sub-Store connectivity, and a
+  native status-bar traffic icon.
 
 ## Run against the supplied real profile
 
@@ -30,12 +33,30 @@ ZENCLASH_CONTROLLER=http://127.0.0.1:9090 \
 ```
 
 Optional environment variables are `ZENCLASH_SECRET`, `ZENCLASH_CONFIG`,
-`ZENCLASH_MIHOMO_HOME`, and `ZENCLASH_NETWORK_SERVICE`.
+`ZENCLASH_CORE_BINARY`, `ZENCLASH_CORE_HOME`, `ZENCLASH_MIHOMO_HOME`, and
+`ZENCLASH_NETWORK_SERVICE`.
+
+To run the downloaded `examples/meow-rs` source instead, build it and select it
+explicitly. ZenClash never silently changes between cores:
+
+```sh
+cargo build --manifest-path examples/meow-rs/Cargo.toml -p meow-app
+ZENCLASH_CORE=meow-rs \
+ZENCLASH_MEOW_BINARY="$PWD/examples/meow-rs/target/debug/meow" \
+  cargo run -p zenclash-ui --bin zenclash
+```
+
+The same selection is available under Settings and takes effect after restart.
+If the selected binary is absent or fails its real `/version` readiness check,
+startup fails clearly. An external controller is used only when
+`ZENCLASH_CONTROLLER` is set explicitly.
 
 The profile page can switch to another local YAML through the native file
-picker. The override page recursively merges one or more YAML files in their
-selected order and sends the generated payload directly to Mihomo; source files
-are never rewritten.
+picker. The override page imports individual YAML files or the immediate YAML
+children of a directory into a private managed store. Enablement and order are
+persisted, later mappings win recursively, and the same final payload is used
+for startup, profile switches, settings changes, tray actions, editing, and
+backup restore. Imported source files are never rewritten.
 
 ZenClash connects to an existing Sub-Store backend/frontend at
 `http://127.0.0.1:38324` and `http://127.0.0.1:14122` by default. Override these
@@ -46,7 +67,8 @@ with `ZENCLASH_SUBSTORE_URL` and `ZENCLASH_SUBSTORE_FRONTEND_URL`.
 The integration test never starts a mock controller. It launches the supplied
 Mihomo binary, overrides only the controller address to isolate the test, loads
 the real profile, and verifies version, runtime config, proxies, group switching,
-rules, providers, connections, and the traffic WebSocket.
+rules, providers, connections, the traffic WebSocket, and persistent ordered
+YAML overrides across a settings update.
 
 ```sh
 ZENCLASH_MIHOMO_BINARY=/absolute/path/to/mihomo \
@@ -56,6 +78,19 @@ ZENCLASH_MIHOMO_BINARY=/absolute/path/to/mihomo \
 If the profile needs GeoIP data, point `ZENCLASH_INTEGRATION_HOME` at a Mihomo
 home directory that already contains the downloaded data or allow Mihomo to
 download it during the test.
+
+## Real meow-rs integration test
+
+This test also uses no mock server. It starts the actual meow-rs process with
+the supplied Clash YAML, reads version/proxy/connection APIs, writes a real
+controlled setting, restarts the process, verifies the resulting mode from the
+controller, and sends an HTTP request through its real Mixed listener:
+
+```sh
+ZENCLASH_MEOW_BINARY="$PWD/examples/meow-rs/target/debug/meow" \
+ZENCLASH_CONFIG="$PWD/examples/19facdf022b.yaml" \
+  cargo test -p zenclash-core --test real_meow -- --ignored --nocapture
+```
 
 ## Build the macOS app bundle
 
@@ -71,7 +106,10 @@ The bundle contains the selected real Mihomo binary and profile under
 
 ## Release installers
 
-Every installer bundles the pinned real Mihomo release. Local build scripts use
+Every installer bundles the pinned real Mihomo release, so normal installation
+does not depend on a first-run download. The experimental meow-rs core is not
+silently substituted and is currently supplied separately through
+`ZENCLASH_MEOW_BINARY`. Local build scripts use
 `examples/19facdf022b.yaml` by default, while public CI packages use the safe
 bootstrap profile described below. The platform build entry points are:
 

@@ -3,15 +3,20 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use super::resources::{
-    bundled_mihomo_binary, bundled_profile, default_home_dir, find_mihomo_binary,
-    is_mihomo_binary_candidate,
+    bundled_core_binary, bundled_profile, default_core_home_dir, find_core_binary,
+    install_bundled_core, is_core_binary_candidate,
 };
-use crate::{profiles::read_profile_bytes, MihomoEndpoint, MihomoError, MihomoResult};
+use crate::{
+    profiles::read_profile_bytes, CoreCapabilities, CoreKind, MihomoEndpoint, MihomoError,
+    MihomoResult,
+};
 
 /// Resolved inputs used to launch one managed Mihomo process.
 #[derive(Clone, Debug)]
 pub struct MihomoLaunchConfig {
-    /// Mihomo executable selected from an override, bundle, workspace, or `PATH`.
+    /// Runtime core selected explicitly by the user or caller.
+    pub kind: CoreKind,
+    /// Core executable selected from an override, bundle, workspace, or `PATH`.
     pub binary: PathBuf,
     /// Clash/Mihomo YAML file passed with `-f`.
     pub config_file: PathBuf,
@@ -42,9 +47,24 @@ impl MihomoLaunchConfig {
         config_file: impl Into<PathBuf>,
         home_dir: impl Into<PathBuf>,
     ) -> MihomoResult<Self> {
+        Self::for_kind(CoreKind::Mihomo, binary, config_file, home_dir)
+    }
+
+    /// Builds a launch configuration for one explicit runtime core.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the configuration cannot be read or parsed.
+    pub fn for_kind(
+        kind: CoreKind,
+        binary: impl Into<PathBuf>,
+        config_file: impl Into<PathBuf>,
+        home_dir: impl Into<PathBuf>,
+    ) -> MihomoResult<Self> {
         let config_file = config_file.into();
         let endpoint = endpoint_from_config_file(&config_file)?;
         Ok(Self {
+            kind,
             binary: binary.into(),
             config_file,
             home_dir: home_dir.into(),
@@ -69,34 +89,89 @@ impl MihomoLaunchConfig {
     ///
     /// Returns an error if no executable is found or the selected YAML is invalid.
     pub fn discover(project_root: impl AsRef<Path>) -> MihomoResult<Self> {
+        Self::discover_for_kind(project_root, CoreKind::Mihomo)
+    }
+
+    /// Discovers launch inputs for an explicit runtime core.
+    ///
+    /// The selected core never falls back silently to another implementation.
+    /// This keeps behavior deterministic when meow-rs is selected explicitly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the selected executable is absent or invalid, or
+    /// when the selected YAML cannot be read.
+    pub fn discover_for_kind(project_root: impl AsRef<Path>, kind: CoreKind) -> MihomoResult<Self> {
         let project_root = project_root.as_ref();
         let config_file = std::env::var_os("ZENCLASH_CONFIG")
             .map(PathBuf::from)
             .or_else(bundled_profile)
             .unwrap_or_else(|| project_root.join("examples/19facdf022b.yaml"));
-        let home_dir = std::env::var_os("ZENCLASH_MIHOMO_HOME")
-            .map_or_else(|| default_home_dir(project_root), PathBuf::from);
-        let binary = match std::env::var_os("ZENCLASH_MIHOMO_BINARY").map(PathBuf::from) {
-            Some(binary) if is_mihomo_binary_candidate(&binary) => binary,
-            Some(binary) => {
+        let home_dir = std::env::var_os("ZENCLASH_CORE_HOME")
+            .or_else(|| std::env::var_os(kind.home_environment_variable()))
+            .map_or_else(|| default_core_home_dir(project_root, kind), PathBuf::from);
+        let binary_override = std::env::var_os("ZENCLASH_CORE_BINARY")
+            .map(|value| ("ZENCLASH_CORE_BINARY", PathBuf::from(value)))
+            .or_else(|| {
+                std::env::var_os(kind.binary_environment_variable())
+                    .map(|value| (kind.binary_environment_variable(), PathBuf::from(value)))
+            });
+        let binary = match binary_override {
+            Some((_, binary)) if is_core_binary_candidate(&binary) => binary,
+            Some((variable, binary)) => {
                 return Err(MihomoError::Process(format!(
-                    "ZENCLASH_MIHOMO_BINARY 指向的文件不可执行：{}",
+                    "{} 指向的 {} 文件不可执行：{}",
+                    variable,
+                    kind.display_name(),
                     binary.display()
                 )));
             }
-            None => bundled_mihomo_binary()
-                .or_else(|| {
-                    let candidate = project_root.join("bin/mihomo");
-                    is_mihomo_binary_candidate(&candidate).then_some(candidate)
-                })
-                .or_else(find_mihomo_binary)
-                .ok_or_else(|| {
-                    MihomoError::Process(
-                        "找不到 mihomo；请设置 ZENCLASH_MIHOMO_BINARY 或将 mihomo 放入 PATH".into(),
-                    )
-                })?,
+            None => {
+                if let Some(bundled) = bundled_core_binary(kind) {
+                    install_bundled_core(kind, &bundled, &home_dir)?
+                } else {
+                    workspace_core_candidates(project_root, kind)
+                        .into_iter()
+                        .find(|candidate| is_core_binary_candidate(candidate))
+                        .or_else(|| find_core_binary(kind))
+                        .ok_or_else(|| {
+                            MihomoError::Process(format!(
+                                "找不到 {}；请设置 {} 或将 {} 放入 PATH",
+                                kind.display_name(),
+                                kind.binary_environment_variable(),
+                                kind.executable_stem()
+                            ))
+                        })?
+                }
+            }
         };
-        Self::new(binary, config_file, home_dir)
+        Self::for_kind(kind, binary, config_file, home_dir)
+    }
+
+    /// Returns the capabilities guaranteed by the selected runtime core.
+    #[must_use]
+    pub const fn capabilities(&self) -> CoreCapabilities {
+        self.kind.capabilities()
+    }
+}
+
+fn workspace_core_candidates(project_root: &Path, kind: CoreKind) -> Vec<PathBuf> {
+    let filename = if cfg!(windows) {
+        format!("{}.exe", kind.executable_stem())
+    } else {
+        kind.executable_stem().to_owned()
+    };
+    match kind {
+        CoreKind::Mihomo => vec![project_root.join("bin").join(filename)],
+        CoreKind::Meow => vec![
+            project_root.join("bin").join(&filename),
+            project_root
+                .join("examples/meow-rs/target/release")
+                .join(&filename),
+            project_root
+                .join("examples/meow-rs/target/debug")
+                .join(filename),
+        ],
     }
 }
 
@@ -152,5 +227,30 @@ mod tests {
         let _ = std::fs::remove_file(path);
 
         assert!(matches!(error, MihomoError::Process(message) if message.contains("超过 16 MiB")));
+    }
+
+    #[test]
+    fn explicit_meow_launch_keeps_the_selected_core_kind() {
+        let path = std::env::temp_dir().join(format!(
+            "zenclash-endpoint-{}-meow.yaml",
+            std::process::id()
+        ));
+        std::fs::write(&path, "external-controller: 127.0.0.1:19090\n").unwrap();
+
+        let launch =
+            MihomoLaunchConfig::for_kind(CoreKind::Meow, "meow", &path, "meow-home").unwrap();
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(launch.kind, CoreKind::Meow);
+        assert!(!launch.capabilities().full_config_reload);
+    }
+
+    #[test]
+    fn meow_workspace_lookup_includes_the_downloaded_example_build() {
+        let candidates = workspace_core_candidates(Path::new("/workspace"), CoreKind::Meow);
+        let filename = if cfg!(windows) { "meow.exe" } else { "meow" };
+
+        assert!(candidates
+            .contains(&Path::new("/workspace/examples/meow-rs/target/release").join(filename)));
     }
 }

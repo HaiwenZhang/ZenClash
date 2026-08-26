@@ -17,6 +17,7 @@ gpui-component.workspace = true
 gpui-component-assets.workspace = true
 parking_lot.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

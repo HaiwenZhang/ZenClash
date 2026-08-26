@@ -33,8 +33,14 @@ pub struct Provider {
     #[serde(default)]
     pub proxies: Vec<Value>,
     /// Number of rules in a rule provider.
-    #[serde(default)]
+    #[serde(default, rename = "ruleCount")]
     pub rule_count: usize,
+    /// Rule-provider behavior such as `domain`, `ipcidr`, or `classical`.
+    #[serde(default)]
+    pub behavior: String,
+    /// Rule-provider storage format such as `yaml`, `text`, or `mrs`.
+    #[serde(default)]
+    pub format: String,
     /// Provider fields not yet modeled by `ZenClash`.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,

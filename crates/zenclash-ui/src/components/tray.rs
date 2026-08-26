@@ -26,10 +26,23 @@ pub struct TrayMenuState {
     pub mixed_port: u16,
     /// Display name of the active managed profile.
     pub profile_name: String,
+    /// Managed profiles available for direct switching.
+    pub profiles: Vec<TrayProfile>,
     /// Proxy groups rendered as nested native menus.
     pub groups: Vec<TrayProxyGroup>,
     /// Named directories exposed by the Open Directories submenu.
     pub directories: Vec<(String, PathBuf)>,
+}
+
+#[derive(Clone, Debug, Default)]
+/// One managed profile shown in the native status menu.
+pub struct TrayProfile {
+    /// Stable profile identifier used by the profile store.
+    pub id: String,
+    /// User-facing profile name.
+    pub name: String,
+    /// Whether this profile is currently active.
+    pub active: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -52,6 +65,41 @@ pub struct TrayProxyNode {
     pub name: String,
     /// Most recent measured delay in milliseconds.
     pub delay: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Shell syntax used when copying proxy environment variables.
+pub enum EnvironmentShell {
+    /// POSIX-compatible Bash/Zsh syntax.
+    Bash,
+    /// Windows Command Prompt syntax.
+    CommandPrompt,
+    /// Windows `PowerShell` syntax.
+    PowerShell,
+    /// Fish shell syntax.
+    Fish,
+    /// Nushell syntax.
+    Nushell,
+}
+
+impl EnvironmentShell {
+    const ALL: [Self; 5] = [
+        Self::Bash,
+        Self::CommandPrompt,
+        Self::PowerShell,
+        Self::Fish,
+        Self::Nushell,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Bash => "Bash / Zsh",
+            Self::CommandPrompt => "Command Prompt",
+            Self::PowerShell => "PowerShell",
+            Self::Fish => "Fish",
+            Self::Nushell => "Nushell",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -92,6 +140,11 @@ pub enum TrayCommand {
         /// Proxy member to select.
         proxy: String,
     },
+    /// Activate a managed profile and reload its effective YAML.
+    SelectProfile {
+        /// Stable profile identifier.
+        id: String,
+    },
     /// Navigate to profile management.
     OpenProfiles,
     /// Open a directory in the platform file manager.
@@ -100,6 +153,8 @@ pub enum TrayCommand {
     CopyEnvironment {
         /// Local Mihomo proxy port.
         port: u16,
+        /// Target shell syntax.
+        shell: EnvironmentShell,
     },
     /// Hide the main app while retaining the status item.
     LightMode,
@@ -132,11 +187,11 @@ impl NetworkTrayIcon {
     /// # Errors
     ///
     /// Returns a platform error when the icon, menu, or native tray cannot be created.
-    pub fn new() -> Result<Self, String> {
+    pub fn new(core_kind: zenclash_core::CoreKind) -> Result<Self, String> {
         let icon = traffic_icon(0, 0)?;
         let (menu, commands) = build_menu(&TrayMenuState::default())?;
         let tray = TrayIconBuilder::new()
-            .with_tooltip("ZenClash · Mihomo 网络流量")
+            .with_tooltip(format!("ZenClash · {} 网络流量", core_kind.display_name()))
             .with_title("↑ 0 B/s  ↓ 0 B/s")
             .with_icon(icon)
             .with_icon_as_template(true)
@@ -165,7 +220,7 @@ impl NetworkTrayIcon {
                 format_speed(traffic.download)
             )
         } else {
-            "Mihomo 离线".into()
+            "内核离线".into()
         };
         if title == self.last_title {
             return Ok(());

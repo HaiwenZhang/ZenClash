@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use super::{
     atomic_write, home_dir, read_index_bytes, read_profile_bytes, unique_id, unix_timestamp,
     validate_clash_yaml, ProfileCatalog, ProfileRecord, ProfileSource, ProfileStore,
-    ProfileStoreError, ProfileStoreResult,
+    ProfileStoreError, ProfileStoreResult, SubscriptionMetadata,
 };
 
 impl ProfileStore {
@@ -121,10 +121,28 @@ impl ProfileStore {
         source: ProfileSource,
         payload: &str,
     ) -> ProfileStoreResult<ProfileRecord> {
+        self.store_profile_with_subscription(name, source, payload, SubscriptionMetadata::default())
+    }
+
+    pub(super) fn store_profile_with_subscription(
+        &self,
+        name: String,
+        source: ProfileSource,
+        payload: &str,
+        subscription: SubscriptionMetadata,
+    ) -> ProfileStoreResult<ProfileRecord> {
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
         let id = unique_id(&catalog, &name);
         let file_name = format!("{id}.yaml");
+        let accepts_suggested_interval = matches!(
+            &source,
+            ProfileSource::Remote { options, .. } if !options.fixed_update_interval
+        );
+        let update_interval_minutes = accepts_suggested_interval
+            .then_some(subscription.suggested_update_interval_minutes)
+            .flatten()
+            .unwrap_or(super::DEFAULT_PROFILE_UPDATE_INTERVAL_MINUTES);
         let record = ProfileRecord {
             id,
             name,
@@ -132,6 +150,10 @@ impl ProfileStore {
             source,
             updated_at: unix_timestamp(),
             size_bytes: payload.len() as u64,
+            auto_update: false,
+            update_interval_minutes,
+            update_cron: None,
+            subscription,
         };
         let path = self.profile_path(&record);
         atomic_write(&path, payload.as_bytes())?;
@@ -170,7 +192,8 @@ impl ProfileStore {
     pub(super) fn save_unlocked(&self, catalog: &ProfileCatalog) -> ProfileStoreResult<()> {
         fs::create_dir_all(&self.root)?;
         let bytes = serde_json::to_vec_pretty(catalog)?;
-        atomic_write(&self.index_path(), &bytes)?;
+        let path = self.index_path();
+        atomic_write(&path, &bytes)?;
         Ok(())
     }
 

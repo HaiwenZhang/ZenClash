@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 
 use serde_yaml::Value;
 
-use crate::{profiles::read_profile_bytes, MihomoError, MihomoResult};
+use crate::{
+    profiles::{read_profile_bytes, validate_clash_yaml, MAX_PROFILE_BYTES},
+    MihomoError, MihomoResult,
+};
 
 /// Builds the effective Mihomo YAML without changing any source file.
 /// Later override files win and mappings are merged recursively.
@@ -21,8 +24,44 @@ pub fn merge_profile_overrides(
         let patch = read_yaml(path, "覆写")?;
         merge_yaml(&mut document, patch);
     }
-    serde_yaml::to_string(&document)
-        .map_err(|error| MihomoError::Process(format!("无法序列化合并后的 Mihomo 配置：{error}")))
+    serialize_profile(&document)
+}
+
+pub fn merge_profile_patch(profile: &Path, patch: Value) -> MihomoResult<String> {
+    let mut document = read_yaml(profile, "基础配置")?;
+    merge_yaml(&mut document, patch);
+    serialize_profile(&document)
+}
+
+pub fn merge_payload_overrides(payload: &str, overrides: &[PathBuf]) -> MihomoResult<String> {
+    if payload.len() > MAX_PROFILE_BYTES {
+        return Err(MihomoError::InvalidInput(format!(
+            "基础配置超过 {} MiB 限制",
+            MAX_PROFILE_BYTES / 1024 / 1024
+        )));
+    }
+    let mut document = serde_yaml::from_str(payload)
+        .map_err(|error| MihomoError::Process(format!("无法解析基础配置：{error}")))?;
+    for path in overrides {
+        let patch = read_yaml(path, "覆写")?;
+        merge_yaml(&mut document, patch);
+    }
+    serialize_profile(&document)
+}
+
+fn serialize_profile(document: &Value) -> MihomoResult<String> {
+    let payload = serde_yaml::to_string(document).map_err(|error| {
+        MihomoError::Process(format!("无法序列化合并后的 Mihomo 配置：{error}"))
+    })?;
+    if payload.len() > MAX_PROFILE_BYTES {
+        return Err(MihomoError::InvalidInput(format!(
+            "合并配置超过 {} MiB 限制",
+            MAX_PROFILE_BYTES / 1024 / 1024
+        )));
+    }
+    validate_clash_yaml(&payload)
+        .map_err(|error| MihomoError::Process(format!("合并后的 Mihomo 配置无效：{error}")))?;
+    Ok(payload)
 }
 
 fn read_yaml(path: &Path, kind: &str) -> MihomoResult<Value> {
@@ -37,7 +76,7 @@ fn read_yaml(path: &Path, kind: &str) -> MihomoResult<Value> {
     })
 }
 
-fn merge_yaml(target: &mut Value, patch: Value) {
+pub fn merge_yaml(target: &mut Value, patch: Value) {
     match (target, patch) {
         (Value::Mapping(target), Value::Mapping(patch)) => {
             for (key, value) in patch {
@@ -94,5 +133,25 @@ mod tests {
         std::fs::remove_file(path).unwrap();
 
         assert!(error.to_string().contains("超过 16 MiB 限制"));
+    }
+
+    #[test]
+    fn payload_overrides_preserve_controlled_values() {
+        let root =
+            std::env::temp_dir().join(format!("zenclash-payload-override-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let override_path = root.join("override.yaml");
+        std::fs::write(&override_path, "dns:\n  ipv6: true\nmode: global\n").unwrap();
+
+        let payload = merge_payload_overrides(
+            "mixed-port: 7890\ndns:\n  enable: true\n  nameserver: [1.1.1.1]\nmode: rule\n",
+            &[override_path],
+        )
+        .unwrap();
+        let merged: Value = serde_yaml::from_str(&payload).unwrap();
+        assert_eq!(merged["dns"]["enable"].as_bool(), Some(true));
+        assert_eq!(merged["dns"]["ipv6"].as_bool(), Some(true));
+        assert_eq!(merged["mode"].as_str(), Some("global"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

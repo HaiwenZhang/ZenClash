@@ -1,13 +1,31 @@
 use super::{
-    apply_zen_theme, Context, HideTrafficIcon, NavigateConnections, NavigateDns, NavigateLogs,
-    NavigateMihomo, NavigateNetwork, NavigateOverride, NavigateProfiles, NavigateProxies,
-    NavigateResources, NavigateRules, NavigateSettings, NavigateSniffer, NavigateSubStore,
-    NavigateSystemProxy, NavigateTraffic, NavigateTun, OutboundMode, Page, SetDarkTheme,
-    SetDirectMode, SetGlobalMode, SetLightTheme, SetRuleMode, ShowStatusMenu, ShowTrafficIcon,
-    ThemeMode, ToggleFloatingWindow, Window, ZenClashApp,
+    apply_zen_theme, AppPreferences, AppearancePreference, Context, HideTrafficIcon,
+    NavigateConnections, NavigateDns, NavigateLogs, NavigateMihomo, NavigateNetwork,
+    NavigateOverride, NavigateProfiles, NavigateProxies, NavigateResources, NavigateRules,
+    NavigateSettings, NavigateSniffer, NavigateSubStore, NavigateSystemProxy, NavigateTraffic,
+    NavigateTun, OutboundMode, Page, Quit, SetDarkTheme, SetDirectMode, SetGlobalMode,
+    SetLightTheme, SetRuleMode, SetSystemTheme, ShowStatusMenu, ShowTrafficIcon, ThemeMode,
+    ToggleFloatingWindow, Window, ZenClashApp,
 };
 
 impl ZenClashApp {
+    pub(super) fn on_quit(&mut self, _: &Quit, _: &mut Window, cx: &mut Context<Self>) {
+        self.begin_quit(None, cx);
+    }
+
+    fn update_preferences(&mut self, mutate: impl Fn(&mut AppPreferences)) {
+        mutate(&mut self.preferences);
+        let Some(store) = &self.preferences_store else {
+            return;
+        };
+        match store.update(mutate) {
+            Ok(preferences) => self.preferences = preferences,
+            Err(error) => {
+                tracing::warn!(%error, path = %store.path().display(), "failed to update application preferences");
+            }
+        }
+    }
+
     pub(super) fn on_navigate_system_proxy(
         &mut self,
         _: &NavigateSystemProxy,
@@ -179,7 +197,6 @@ impl ZenClashApp {
         self.set_mode(OutboundMode::Direct, cx);
     }
 
-    #[allow(clippy::unused_self, reason = "GPUI action-handler signature")]
     pub(super) fn on_set_light_theme(
         &mut self,
         _: &SetLightTheme,
@@ -187,10 +204,25 @@ impl ZenClashApp {
         cx: &mut Context<Self>,
     ) {
         apply_zen_theme(ThemeMode::Light, Some(window), cx);
+        self.update_preferences(|preferences| {
+            preferences.appearance = AppearancePreference::Light;
+        });
         cx.notify();
     }
 
-    #[allow(clippy::unused_self, reason = "GPUI action-handler signature")]
+    pub(super) fn on_set_system_theme(
+        &mut self,
+        _: &SetSystemTheme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        apply_zen_theme(ThemeMode::from(window.appearance()), Some(window), cx);
+        self.update_preferences(|preferences| {
+            preferences.appearance = AppearancePreference::System;
+        });
+        cx.notify();
+    }
+
     pub(super) fn on_set_dark_theme(
         &mut self,
         _: &SetDarkTheme,
@@ -198,6 +230,9 @@ impl ZenClashApp {
         cx: &mut Context<Self>,
     ) {
         apply_zen_theme(ThemeMode::Dark, Some(window), cx);
+        self.update_preferences(|preferences| {
+            preferences.appearance = AppearancePreference::Dark;
+        });
         cx.notify();
     }
 
@@ -212,6 +247,7 @@ impl ZenClashApp {
                 tracing::warn!(%error, "failed to show native traffic tray");
             }
         }
+        self.update_preferences(|preferences| preferences.traffic_tray_visible = true);
         cx.notify();
     }
 
@@ -226,6 +262,7 @@ impl ZenClashApp {
                 tracing::warn!(%error, "failed to hide native traffic tray");
             }
         }
+        self.update_preferences(|preferences| preferences.traffic_tray_visible = false);
         cx.notify();
     }
 

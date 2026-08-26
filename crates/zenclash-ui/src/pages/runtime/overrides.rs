@@ -1,31 +1,41 @@
 use super::{
-    h_flex, info_row, load_page, merge_profile_overrides, message_banner, setting_card, v_flex,
-    Button, ButtonVariants, Context, Disableable, IconName, IntoElement, Page, ParentElement,
-    PathPromptOptions, RuntimePage, Styled,
+    diff_yaml_configs, div, h_flex, info_row, load_page, message_banner, px, setting_card, v_flex,
+    Button, ButtonVariants, ClipboardItem, ConfigDiffReport, Context, Disableable, FluentBuilder,
+    IconName, IntoElement, Page, ParentElement, PathPromptOptions, RuntimePage, ScrollableElement,
+    Sizable, Styled, Switch,
 };
+
+mod diff_view;
+mod editor;
+mod store_actions;
+use diff_view::render_config_diff;
+pub(crate) use editor::ProfileEditorState;
+
+const MAX_PREVIEW_BYTES: usize = 64 * 1024;
+const MAX_CONFIG_DIFF_ENTRIES: usize = 200;
+
+pub(super) struct ConfigPreview {
+    source: String,
+    effective: String,
+    diff: ConfigDiffReport,
+}
 
 impl RuntimePage {
     fn choose_overrides(&mut self, cx: &mut Context<Self>) {
         let token = self.page_task_token_for(Page::Override);
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
-            directories: false,
+            directories: true,
             multiple: true,
-            prompt: Some("按应用顺序选择 YAML 覆写".into()),
+            prompt: Some("导入 YAML 覆写文件或目录".into()),
         });
         cx.spawn(async move |this, cx| {
             let selection = receiver.await;
             let _ = this.update(cx, |this, cx| match selection {
                 Ok(Ok(Some(paths))) => {
-                    this.override_paths = paths;
                     if this.is_page_task_current(token) {
-                        this.notice = Some(format!(
-                            "已选择 {} 份覆写；点击“合并并热重载”应用",
-                            this.override_paths.len()
-                        ));
-                        this.error = None;
+                        this.import_override_paths(paths, cx);
                     }
-                    cx.notify();
                 }
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
@@ -41,31 +51,91 @@ impl RuntimePage {
         .detach();
     }
 
+    fn load_config_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile_path.clone() else {
+            self.error = Some("未配置基础配置文件路径".into());
+            cx.notify();
+            return;
+        };
+        let Some(token) = self.begin_mutation(Page::Override) else {
+            return;
+        };
+        let controlled = self.controlled_config_store.clone();
+        let overrides = self.enabled_override_paths();
+        let task = self.runtime.spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                let source = controlled
+                    .source_payload(&profile)
+                    .map_err(|error| error.to_string())?;
+                let effective = controlled
+                    .effective_with_overrides(profile, &overrides)
+                    .map_err(|error| error.to_string())?;
+                let diff = diff_yaml_configs(&source, &effective, MAX_CONFIG_DIFF_ENTRIES)
+                    .map_err(|error| error.to_string())?;
+                Ok::<_, String>(ConfigPreview {
+                    source,
+                    effective,
+                    diff,
+                })
+            })
+            .await
+            .map_err(|error| format!("配置预览任务异常结束：{error}"))?
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|error| format!("配置预览后台任务异常结束：{error}"))
+                .and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                this.mutating = false;
+                match result {
+                    Ok(preview) if this.is_page_task_current(token) => {
+                        this.config_preview = Some(preview);
+                        this.notice = Some("已生成原始配置与最终运行配置预览".into());
+                    }
+                    Ok(_) => {}
+                    Err(error) => this.set_page_error(token, error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn copy_config_preview(&self, effective: bool, cx: &mut Context<Self>) {
+        let Some(preview) = &self.config_preview else {
+            return;
+        };
+        let payload = if effective {
+            &preview.effective
+        } else {
+            &preview.source
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(payload.clone()));
+    }
+
     fn apply_overrides(&mut self, cx: &mut Context<Self>) {
         let Some(profile) = self.profile_path.clone() else {
             self.error = Some("未配置基础配置文件路径".into());
             cx.notify();
             return;
         };
-        if self.override_paths.is_empty() {
-            return;
-        }
+        let overrides = self.enabled_override_paths();
         let Some(token) = self.begin_mutation(Page::Override) else {
             return;
         };
-        let overrides = self.override_paths.clone();
         let count = overrides.len();
         let client = self.client.clone();
+        let controlled = self.controlled_config_store.clone();
+        let core_runtime = super::profiles::workflow::CoreProfileRuntime::new(
+            self.core_kind,
+            client.clone(),
+            self.process.clone(),
+        );
         let task = self.runtime.spawn(async move {
-            let payload =
-                tokio::task::spawn_blocking(move || merge_profile_overrides(profile, &overrides))
-                    .await
-                    .map_err(|error| format!("覆写合并任务异常结束：{error}"))?
-                    .map_err(|error| error.to_string())?;
-            client
-                .reload_payload(payload, true)
-                .await
-                .map_err(|error| error.to_string())?;
+            super::profiles::workflow::reload_effective(controlled, &core_runtime, &profile)
+                .await?;
             load_page(client, Page::Override).await
         });
         cx.spawn(async move |this, cx| {
@@ -95,66 +165,255 @@ impl RuntimePage {
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let path = self
-            .profile_path
-            .as_ref()
-            .map_or_else(|| "未指定".into(), |path| path.display().to_string());
-        let count = self.override_paths.len();
         v_flex()
             .gap_4()
-            .child(
-                setting_card("配置覆写链", theme)
-                    .child(info_row("基础配置", &path, theme))
-                    .child(info_row("YAML 覆写", &format!("{count} 份"), theme))
-                    .children(self.override_paths.iter().enumerate().map(|(index, path)| {
-                        info_row(
-                            "应用顺序",
-                            &format!("{}. {}", index + 1, path.display()),
-                            theme,
-                        )
-                    }))
-                    .child(
-                        h_flex()
-                            .justify_end()
-                            .gap_2()
-                            .p_3()
-                            .child(
-                                Button::new("choose-overrides")
-                                    .icon(IconName::FolderOpen)
-                                    .label("选择 YAML 覆写")
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.choose_overrides(cx)),
-                                    ),
-                            )
-                            .child(
-                                Button::new("clear-overrides")
-                                    .label("清空")
-                                    .disabled(count == 0 || self.mutating)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.override_paths.clear();
-                                        this.notice =
-                                            Some("覆写选择已清空；运行中配置未改变".into());
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("apply-overrides")
-                                    .icon(IconName::Redo2)
-                                    .label("合并并热重载")
-                                    .primary()
-                                    .loading(self.mutating)
-                                    .disabled(count == 0)
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.apply_overrides(cx)),
-                                    ),
-                            ),
-                    ),
-            )
+            .child(self.render_override_chain(theme, cx))
             .child(message_banner(
                 "基础文件保持不变；映射递归合并，后选覆写优先，数组与标量整体替换。".into(),
                 theme.primary,
                 theme,
             ))
+            .children(self.config_preview.as_ref().map(|preview| {
+                v_flex()
+                    .gap_4()
+                    .child(render_config_diff(&preview.diff, theme))
+                    .child(preview_panel(
+                        "原始 Profile YAML",
+                        &preview.source,
+                        "copy-source-config",
+                        theme,
+                        cx.listener(|this, _, _, cx| this.copy_config_preview(false, cx)),
+                    ))
+                    .child(preview_panel(
+                        "最终运行 YAML",
+                        &preview.effective,
+                        "copy-effective-config",
+                        theme,
+                        cx.listener(|this, _, _, cx| this.copy_config_preview(true, cx)),
+                    ))
+            }))
+            .when(self.profile_editor.original.is_some(), |this| {
+                this.child(self.render_profile_yaml_editor(theme, cx))
+            })
             .into_any_element()
+    }
+
+    fn render_override_chain(
+        &self,
+        theme: &gpui_component::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let path = self
+            .profile_path
+            .as_ref()
+            .map_or_else(|| "未指定".into(), |path| path.display().to_string());
+        let count = self.override_catalog.items.len();
+        let enabled = self
+            .override_catalog
+            .items
+            .iter()
+            .filter(|record| record.enabled)
+            .count();
+        setting_card("配置覆写链", theme)
+            .child(info_row("基础配置", &path, theme))
+            .child(info_row(
+                "YAML 覆写",
+                &format!("{enabled} 启用 / {count} 托管"),
+                theme,
+            ))
+            .children(
+                self.override_catalog
+                    .items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, record)| self.render_override_record(index, record, theme, cx)),
+            )
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .p_3()
+                    .child(
+                        Button::new("preview-overrides")
+                            .icon(IconName::Eye)
+                            .label("预览最终配置")
+                            .loading(self.mutating)
+                            .disabled(self.mutating)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.load_config_preview(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("edit-source-profile")
+                            .icon(IconName::File)
+                            .label("编辑原始 YAML")
+                            .outline()
+                            .disabled(
+                                self.mutating
+                                    || self.config_preview.is_none()
+                                    || self.profile_catalog.active.is_none(),
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_profile_yaml_editor(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("choose-overrides")
+                            .icon(IconName::FolderOpen)
+                            .label("导入文件 / 目录")
+                            .on_click(cx.listener(|this, _, _, cx| this.choose_overrides(cx))),
+                    )
+                    .child(
+                        Button::new("apply-overrides")
+                            .icon(IconName::Redo2)
+                            .label("合并并热重载")
+                            .primary()
+                            .loading(self.mutating)
+                            .disabled(self.profile_path.is_none())
+                            .on_click(cx.listener(|this, _, _, cx| this.apply_overrides(cx))),
+                    ),
+            )
+    }
+
+    fn render_override_record(
+        &self,
+        index: usize,
+        record: &zenclash_core::YamlOverrideRecord,
+        theme: &gpui_component::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let enabled_id = record.id.clone();
+        let up_id = record.id.clone();
+        let down_id = record.id.clone();
+        let delete_id = record.id.clone();
+        h_flex()
+            .min_h(px(44.))
+            .px_4()
+            .gap_3()
+            .border_t_1()
+            .border_color(theme.border)
+            .child(
+                Switch::new(("override-enabled", index))
+                    .checked(record.enabled)
+                    .disabled(self.mutating)
+                    .on_click(cx.listener(move |this, checked, _, cx| {
+                        this.set_override_enabled(&enabled_id, *checked, cx);
+                    })),
+            )
+            .child(
+                div()
+                    .w(px(24.))
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(format!("{}.", index + 1)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .child(record.name.clone()),
+            )
+            .child(
+                Button::new(("override-up", index))
+                    .icon(IconName::ArrowUp)
+                    .xsmall()
+                    .ghost()
+                    .disabled(index == 0 || self.mutating)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.move_override(&up_id, -1, cx);
+                    })),
+            )
+            .child(
+                Button::new(("override-down", index))
+                    .icon(IconName::ArrowDown)
+                    .xsmall()
+                    .ghost()
+                    .disabled(index + 1 == self.override_catalog.items.len() || self.mutating)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.move_override(&down_id, 1, cx);
+                    })),
+            )
+            .child(
+                Button::new(("override-delete", index))
+                    .icon(IconName::Delete)
+                    .xsmall()
+                    .ghost()
+                    .danger()
+                    .disabled(record.enabled || self.mutating)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.delete_disabled_override(delete_id.clone(), cx);
+                    })),
+            )
+    }
+}
+
+fn preview_panel<F>(
+    title: &'static str,
+    payload: &str,
+    button_id: &'static str,
+    theme: &gpui_component::Theme,
+    copy: F,
+) -> gpui::Div
+where
+    F: Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+{
+    let (content, truncated) = preview_text(payload);
+    setting_card(title, theme)
+        .child(
+            h_flex()
+                .justify_between()
+                .px_4()
+                .py_3()
+                .child(format!("{} bytes", payload.len()))
+                .child(
+                    Button::new(button_id)
+                        .icon(IconName::Copy)
+                        .label("复制完整内容")
+                        .on_click(copy),
+                ),
+        )
+        .child(
+            div()
+                .max_h(px(360.))
+                .overflow_y_scrollbar()
+                .p_4()
+                .font_family(theme.mono_font_family.clone())
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(content),
+        )
+        .when(truncated, |panel| {
+            panel.child(message_banner(
+                "界面仅显示前 64 KiB；复制按钮仍会复制完整 YAML。".into(),
+                theme.warning,
+                theme,
+            ))
+        })
+}
+
+fn preview_text(payload: &str) -> (String, bool) {
+    if payload.len() <= MAX_PREVIEW_BYTES {
+        return (payload.to_owned(), false);
+    }
+    let mut end = MAX_PREVIEW_BYTES;
+    while !payload.is_char_boundary(end) {
+        end -= 1;
+    }
+    (payload[..end].to_owned(), true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_truncation_preserves_utf8_boundaries() {
+        let payload = "配".repeat(MAX_PREVIEW_BYTES);
+        let (preview, truncated) = preview_text(&payload);
+
+        assert!(truncated);
+        assert!(preview.len() <= MAX_PREVIEW_BYTES);
+        assert!(preview.is_char_boundary(preview.len()));
     }
 }

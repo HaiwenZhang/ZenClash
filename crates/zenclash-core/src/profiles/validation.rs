@@ -1,5 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use reqwest::header::HeaderValue;
+
 use super::{ProfileCatalog, ProfileStoreError, ProfileStoreResult, DEFAULT_USER_AGENT};
 
 const MAX_PROFILE_ID_CHARS: usize = 64;
@@ -42,13 +44,41 @@ pub fn validate_clash_yaml(payload: &str) -> ProfileStoreResult<()> {
     Ok(())
 }
 
-pub(super) fn normalized_user_agent(value: &str) -> String {
+pub(super) fn normalized_user_agent(value: &str) -> ProfileStoreResult<String> {
     let value = value.trim();
-    if value.is_empty() {
-        DEFAULT_USER_AGENT.into()
+    let value: String = if value.is_empty() {
+        DEFAULT_USER_AGENT.to_owned()
     } else {
-        value.into()
+        value.to_owned()
+    };
+    HeaderValue::from_str(&value)
+        .map_err(|error| ProfileStoreError::InvalidYaml(format!("User-Agent 无效：{error}")))?;
+    Ok(value)
+}
+
+pub(super) fn normalized_remote_url(value: &str) -> ProfileStoreResult<String> {
+    let url = reqwest::Url::parse(value.trim())
+        .map_err(|error| ProfileStoreError::InvalidYaml(format!("订阅 URL 无效：{error}")))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(ProfileStoreError::InvalidYaml(
+            "订阅 URL 必须是无嵌入凭据的 HTTP(S) 地址".into(),
+        ));
     }
+    Ok(url.into())
+}
+
+pub(super) fn normalized_profile_name(value: &str) -> ProfileStoreResult<String> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().count() > 128 {
+        return Err(ProfileStoreError::InvalidYaml(
+            "订阅名称必须为 1 到 128 个字符".into(),
+        ));
+    }
+    Ok(value.to_owned())
 }
 
 pub(super) fn unique_id(catalog: &ProfileCatalog, name: &str) -> String {

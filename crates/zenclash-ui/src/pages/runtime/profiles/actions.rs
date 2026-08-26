@@ -1,7 +1,7 @@
 use super::{
     super::{
         load_page, Context, Page, PageTaskToken, PathBuf, PathPromptOptions, ProfileActivated,
-        RuntimePage,
+        RemoteProfileOptions, RuntimePage, Window,
     },
     workflow,
 };
@@ -19,11 +19,11 @@ impl RuntimePage {
             return;
         };
         let client = self.client.clone();
+        let controlled = self.controlled_config_store.clone();
+        let core_runtime =
+            workflow::CoreProfileRuntime::new(self.core_kind, client.clone(), self.process.clone());
         let task = self.runtime.spawn(async move {
-            client
-                .reload_config(&path, true)
-                .await
-                .map_err(|error| error.to_string())?;
+            workflow::reload_effective(controlled, &core_runtime, &path).await?;
             load_page(client, Page::Profiles).await
         });
         cx.spawn(async move |this, cx| {
@@ -36,7 +36,15 @@ impl RuntimePage {
                 match result {
                     Ok(data) => {
                         if this.replace_page_data(token, data) {
-                            this.notice = Some("真实配置已由 Mihomo 热重载".into());
+                            this.notice =
+                                Some(if this.core_kind.capabilities().full_config_reload {
+                                    format!("真实配置已由 {} 热重载", this.core_kind.display_name())
+                                } else {
+                                    format!(
+                                        "真实配置已由 {} 重启加载并回读",
+                                        this.core_kind.display_name()
+                                    )
+                                });
                         }
                     }
                     Err(error) => this.set_page_error(token, error),
@@ -71,9 +79,15 @@ impl RuntimePage {
             return;
         };
         let client = self.client.clone();
-        let task = self
-            .runtime
-            .spawn(workflow::import_local(store, client, path));
+        let controlled = self.controlled_config_store.clone();
+        let core_runtime =
+            workflow::CoreProfileRuntime::new(self.core_kind, client, self.process.clone());
+        let task = self.runtime.spawn(workflow::import_local(
+            store,
+            controlled,
+            core_runtime,
+            path,
+        ));
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
@@ -106,21 +120,59 @@ impl RuntimePage {
         if self.mutating {
             return;
         }
-        let name = self.subscription_name.read(cx).value().to_string();
-        let url = self.subscription_url.read(cx).value().to_string();
-        let user_agent = self.subscription_user_agent.read(cx).value().to_string();
+        let name = self
+            .profile_forms
+            .subscription_name
+            .read(cx)
+            .value()
+            .to_string();
+        let url = self
+            .profile_forms
+            .subscription_url
+            .read(cx)
+            .value()
+            .to_string();
+        let user_agent = self
+            .profile_forms
+            .subscription_user_agent
+            .read(cx)
+            .value()
+            .to_string();
+        let authorization = self
+            .profile_forms
+            .subscription_authorization
+            .read(cx)
+            .value()
+            .to_string();
         if name.trim().is_empty() || url.trim().is_empty() {
             self.error = Some("请填写订阅名称和订阅 URL".into());
             cx.notify();
             return;
         }
+        let options = match RemoteProfileOptions::new(authorization, false) {
+            Ok(options) => options.with_route(self.profile_forms.subscription_route),
+            Err(error) => {
+                self.error = Some(format!("订阅请求设置无效：{error}"));
+                cx.notify();
+                return;
+            }
+        };
         let Some(token) = self.begin_mutation(Page::Profiles) else {
             return;
         };
         let client = self.client.clone();
-        let task = self
-            .runtime
-            .spawn(workflow::add_remote(store, client, name, url, user_agent));
+        let controlled = self.controlled_config_store.clone();
+        let core_runtime =
+            workflow::CoreProfileRuntime::new(self.core_kind, client, self.process.clone());
+        let task = self.runtime.spawn(workflow::add_remote(
+            store,
+            controlled,
+            core_runtime,
+            name,
+            url,
+            user_agent,
+            options,
+        ));
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
@@ -152,9 +204,15 @@ impl RuntimePage {
             return;
         };
         let client = self.client.clone();
-        let task = self
-            .runtime
-            .spawn(workflow::activate_existing(store, client, id));
+        let controlled = self.controlled_config_store.clone();
+        let core_runtime =
+            workflow::CoreProfileRuntime::new(self.core_kind, client, self.process.clone());
+        let task = self.runtime.spawn(workflow::activate_existing(
+            store,
+            controlled,
+            core_runtime,
+            id,
+        ));
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
@@ -184,7 +242,7 @@ impl RuntimePage {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("选择 Mihomo YAML 配置".into()),
+            prompt: Some("选择 Clash YAML 配置".into()),
         });
         cx.spawn(async move |this, cx| {
             let selection = receiver.await;
@@ -220,6 +278,8 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) {
         self.profile_path = Some(outcome.path.clone());
+        self.invalidate_config_inputs();
+        self.config_preview = None;
         if let Err(error) = self.reload_profile_catalog() {
             self.set_page_error(token, error);
         }

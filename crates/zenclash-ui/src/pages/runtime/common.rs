@@ -1,6 +1,6 @@
 use super::{
-    div, h_flex, px, v_flex, App, Icon, IconName, IntoElement, ParentElement, Styled, Switch,
-    Window,
+    div, h_flex, px, v_flex, App, Icon, IconName, Input, IntoElement, ParentElement, Styled,
+    Switch, Window,
 };
 
 pub(super) fn setting_card(title: &'static str, theme: &gpui_component::Theme) -> gpui::Div {
@@ -23,6 +23,37 @@ pub(super) fn setting_card(title: &'static str, theme: &gpui_component::Theme) -
                 .child(div().size(px(6.)).rounded_full().bg(theme.primary))
                 .child(title),
         )
+}
+
+pub(super) fn config_input_row(
+    label: &'static str,
+    description: &'static str,
+    input: Input,
+    theme: &gpui_component::Theme,
+) -> gpui::AnyElement {
+    h_flex()
+        .min_h(px(64.))
+        .px_4()
+        .py_3()
+        .gap_5()
+        .items_start()
+        .justify_between()
+        .border_b_1()
+        .border_color(theme.border)
+        .child(
+            v_flex()
+                .w(px(210.))
+                .gap_1()
+                .child(div().text_sm().child(label))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(description),
+                ),
+        )
+        .child(div().flex_1().max_w(px(680.)).child(input.cleanable(true)))
+        .into_any_element()
 }
 
 pub(super) fn info_row(
@@ -51,8 +82,8 @@ pub(super) fn info_row(
 }
 
 pub(super) fn setting_switch<F>(
-    label: &'static str,
-    description: &'static str,
+    label: impl Into<gpui::SharedString>,
+    description: impl Into<gpui::SharedString>,
     checked: bool,
     id: &'static str,
     theme: &gpui_component::Theme,
@@ -61,6 +92,8 @@ pub(super) fn setting_switch<F>(
 where
     F: Fn(&bool, &mut Window, &mut App) + 'static,
 {
+    let label = label.into();
+    let description = description.into();
     h_flex()
         .min_h(px(58.))
         .px_4()

@@ -1,6 +1,6 @@
 use super::{
-    ConnectionsSnapshot, Page, ProviderCatalog, RuleCatalog, RuntimeConfig, SubStoreSnapshot,
-    SystemNetworkSnapshot, SystemProxyStatus, VersionInfo,
+    AutostartStatus, ConnectionsSnapshot, Page, ProviderCatalog, RuleCatalog, RuntimeConfig,
+    SubStoreSnapshot, SystemNetworkSnapshot, SystemProxyStatus, TunPermissionStatus, VersionInfo,
 };
 
 #[derive(Clone, Debug)]
@@ -20,6 +20,7 @@ pub(super) enum RuntimeData {
     Connections(ConnectionsSnapshot),
     Rules(RuleCatalog),
     Resources {
+        config: RuntimeConfig,
         proxy: ProviderCatalog,
         rules: ProviderCatalog,
     },
@@ -31,7 +32,15 @@ pub(super) enum RuntimeData {
         config: RuntimeConfig,
         system: SystemNetworkSnapshot,
     },
+    Tun {
+        config: RuntimeConfig,
+        permissions: Result<TunPermissionStatus, String>,
+    },
     SubStore(SubStoreSnapshot),
+    Settings {
+        config: RuntimeConfig,
+        autostart: AutostartStatus,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

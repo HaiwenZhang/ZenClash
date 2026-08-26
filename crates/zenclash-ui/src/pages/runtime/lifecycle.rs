@@ -1,10 +1,111 @@
 use super::{
-    load_page, AppContext, Context, Duration, HashSet, InputState, Page, PageTaskToken,
+    load_page, load_page_with_binary, AppContext, ConfigInputs, Context, ControlledConfigStore,
+    Duration, HashSet, InputEvent, InputState, Page, PageTaskToken, ProfileActivated,
     ProfileCatalog, ProfileStore, RuntimeConfig, RuntimeData, RuntimePage, RuntimePageServices,
-    Value, VecDeque, Window,
+    Value, VecDeque, Window, YamlOverrideCatalog, YamlOverrideStore,
 };
 
+struct InitialPersistentState {
+    profile_store: Option<ProfileStore>,
+    profile_catalog: ProfileCatalog,
+    controlled_config: Value,
+    effective_config: Value,
+    override_store: Option<YamlOverrideStore>,
+    override_catalog: YamlOverrideCatalog,
+    error: Option<String>,
+}
+
+fn load_initial_persistent_state(
+    profile_path: Option<&std::path::Path>,
+    controlled_store: &ControlledConfigStore,
+) -> InitialPersistentState {
+    let (profile_store, profile_catalog, store_error) = match ProfileStore::discover() {
+        Ok(store) => match store.load() {
+            Ok(catalog) => (Some(store), catalog, None),
+            Err(error) => (
+                Some(store),
+                ProfileCatalog::default(),
+                Some(error.to_string()),
+            ),
+        },
+        Err(error) => (None, ProfileCatalog::default(), Some(error.to_string())),
+    };
+    let (controlled_config, controlled_error) = controlled_store.load_json().map_or_else(
+        |error| (empty_json_object(), Some(error.to_string())),
+        |value| (value, None),
+    );
+    let (override_store, override_catalog, override_error) = match YamlOverrideStore::discover() {
+        Ok(store) => match store.load() {
+            Ok(catalog) => (Some(store), catalog, None),
+            Err(error) => (
+                Some(store),
+                YamlOverrideCatalog::default(),
+                Some(error.to_string()),
+            ),
+        },
+        Err(error) => (
+            None,
+            YamlOverrideCatalog::default(),
+            Some(error.to_string()),
+        ),
+    };
+    let override_paths = override_store
+        .as_ref()
+        .map_or_else(Vec::new, |store| store.enabled_paths(&override_catalog));
+    let (effective_config, effective_error) = profile_path
+        .map_or_else(
+            || Ok(empty_json_object()),
+            |profile| controlled_store.effective_json_with_overrides(profile, &override_paths),
+        )
+        .map_or_else(
+            |error| (empty_json_object(), Some(error.to_string())),
+            |value| (value, None),
+        );
+    InitialPersistentState {
+        profile_store,
+        profile_catalog,
+        controlled_config,
+        effective_config,
+        override_store,
+        override_catalog,
+        error: store_error
+            .or(controlled_error)
+            .or(effective_error)
+            .or(override_error),
+    }
+}
+
+fn empty_json_object() -> Value {
+    Value::Object(serde_json::Map::default())
+}
+
 impl RuntimePage {
+    pub(crate) fn profile_updated_in_background(
+        &mut self,
+        outcome: super::profiles::workflow::BackgroundUpdateOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = self.reload_profile_catalog() {
+            tracing::warn!(%error, "failed to reload profile catalog after background update");
+        }
+        self.notice = Some(format!("在线订阅“{}”已自动更新", outcome.name));
+        if outcome.active {
+            self.profile_path = Some(outcome.path.clone());
+            self.invalidate_config_inputs();
+            self.config_preview = None;
+            cx.emit(ProfileActivated { path: outcome.path });
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn report_background_profile_error(&mut self, error: &str, cx: &mut Context<Self>) {
+        tracing::warn!(%error, "automatic profile update failed");
+        if self.page == Page::Profiles {
+            self.error = Some(format!("自动更新失败：{error}"));
+            cx.notify();
+        }
+    }
+
     /// Creates the runtime page host and starts its bounded live-update loop.
     pub fn new(
         page: Page,
@@ -13,36 +114,54 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> Self {
         let RuntimePageServices {
+            core_kind,
             client,
             runtime,
             traffic_monitor,
             log_monitor,
             process,
             profile_path,
+            controlled_config_store,
+            preferences_store,
+            preferences,
+            system_proxy_controller,
+            traffic_history_store,
         } = services;
-        let (profile_store, profile_catalog, store_error) = match ProfileStore::discover() {
-            Ok(store) => match store.load() {
-                Ok(catalog) => (Some(store), catalog, None),
-                Err(error) => (
-                    Some(store),
-                    ProfileCatalog::default(),
-                    Some(error.to_string()),
-                ),
-            },
-            Err(error) => (None, ProfileCatalog::default(), Some(error.to_string())),
-        };
-        let subscription_name =
-            cx.new(|cx| InputState::new(window, cx).placeholder("例如：机场主订阅"));
-        let subscription_url = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("https://example.com/api/v1/client/subscribe…")
+        let InitialPersistentState {
+            profile_store,
+            profile_catalog,
+            controlled_config,
+            effective_config,
+            override_store,
+            override_catalog,
+            error,
+        } = load_initial_persistent_state(profile_path.as_deref(), &controlled_config_store);
+        let (webdav, webdav_error) = super::settings::webdav::WebDavUiState::discover(window, cx);
+        let config_inputs = ConfigInputs::new(&effective_config, window, cx);
+        let config_inputs_profile = profile_path.clone();
+        let profile_forms = super::profiles::ProfileFormState::new(window, cx);
+        let profile_editor = super::overrides::ProfileEditorState::new(window, cx);
+        let network_latency_name =
+            cx.new(|cx| InputState::new(window, cx).placeholder("例如：公司网关"));
+        let network_latency_url = cx
+            .new(|cx| InputState::new(window, cx).placeholder("https://example.com/generate_204"));
+        let log_filter = cx.new(|cx| InputState::new(window, cx).placeholder("过滤级别或内容…"));
+        let log_filter_subscription = cx.subscribe(&log_filter, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
         });
-        let subscription_user_agent = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value("clash.meta")
-                .placeholder("clash.meta")
-        });
+        let rule_filter =
+            cx.new(|cx| InputState::new(window, cx).placeholder("过滤规则类型、内容或策略…"));
+        let rule_filter_subscription =
+            cx.subscribe(&rule_filter, |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            });
         let mut this = Self {
             page,
+            core_kind,
             client,
             runtime,
             traffic_monitor,
@@ -50,21 +169,41 @@ impl RuntimePage {
             process,
             profile_path,
             profile_store,
+            controlled_config_store,
+            controlled_config,
+            config_inputs,
+            config_inputs_profile,
             profile_catalog,
-            subscription_name,
-            subscription_url,
-            subscription_user_agent,
-            override_paths: Vec::new(),
+            webdav,
+            preferences_store,
+            preferences,
+            system_proxy_controller,
+            traffic_history_store,
+            profile_forms,
+            network_latency_name,
+            network_latency_url,
+            log_filter,
+            rule_filter,
+            system_proxy_editor: None,
+            core_releases: super::CoreReleaseState::default(),
+            override_store,
+            override_catalog,
+            config_preview: None,
+            profile_editor,
             data: RuntimeData::Empty,
             traffic_samples: VecDeque::from(vec![0; 48]),
+            traffic_history: super::traffic::TrafficHistoryUiState::default(),
+            network_probe: super::network::NetworkProbeUiState::default(),
+            ruleset: super::resources::RulesetUiState::default(),
             navigation_generation: 0,
             load_generation: 0,
             loading: false,
             mutating: false,
             closing_connections: HashSet::new(),
-            error: store_error,
+            error: error.or(webdav_error),
             notice: None,
             focus_handle: cx.focus_handle(),
+            _subscriptions: vec![log_filter_subscription, rule_filter_subscription],
         };
         this.refresh(cx);
         Self::start_live_updates(cx);
@@ -76,6 +215,9 @@ impl RuntimePage {
         if self.page == page {
             return;
         }
+        if self.page == Page::Network {
+            self.cancel_network_probe();
+        }
         self.page = page;
         self.navigation_generation = self.navigation_generation.wrapping_add(1);
         self.data = RuntimeData::Empty;
@@ -83,15 +225,20 @@ impl RuntimePage {
         self.loading = false;
         self.error = None;
         self.notice = None;
+        self.reload_controlled_config(cx);
         if page == Page::Profiles {
             if let Err(error) = self.reload_profile_catalog() {
                 self.error = Some(error);
             }
         }
         self.refresh(cx);
+        if page == Page::Traffic {
+            self.refresh_traffic_history(cx);
+        }
     }
 
     fn start_live_updates(cx: &mut Context<Self>) {
+        let mut history_ticks = 0_u8;
         cx.spawn(async move |this, cx| loop {
             tokio::time::sleep(Duration::from_millis(500)).await;
             if this
@@ -112,6 +259,15 @@ impl RuntimePage {
                     {
                         this.refresh(cx);
                     }
+                    if this.page == Page::Traffic {
+                        history_ticks = history_ticks.saturating_add(1);
+                        if history_ticks >= 10 {
+                            history_ticks = 0;
+                            this.refresh_traffic_history(cx);
+                        }
+                    } else {
+                        history_ticks = 0;
+                    }
                 })
                 .is_err()
             {
@@ -131,9 +287,10 @@ impl RuntimePage {
         self.error = None;
         let page = self.page;
         let client = self.client.clone();
+        let mihomo_binary = self.mihomo_binary();
         let task = self
             .runtime
-            .spawn(async move { load_page(client, page).await });
+            .spawn(async move { load_page_with_binary(client, page, mihomo_binary).await });
         cx.spawn(async move |this, cx| {
             let result = match task.await {
                 Ok(result) => result,
@@ -148,7 +305,12 @@ impl RuntimePage {
                     return;
                 }
                 match result {
-                    Ok(data) => this.data = data,
+                    Ok(data) => {
+                        this.data = data;
+                        if page == Page::Network {
+                            this.refresh_network_probe(cx);
+                        }
+                    }
                     Err(error) => this.error = Some(error),
                 }
                 cx.notify();
@@ -158,46 +320,145 @@ impl RuntimePage {
         cx.notify();
     }
 
-    pub(super) fn patch_config(
+    pub(super) fn apply_controlled_config(
         &mut self,
-        body: Value,
+        patch: Value,
         success: &'static str,
         cx: &mut Context<Self>,
     ) {
+        let Some(profile) = self.profile_path.clone() else {
+            self.error = Some("未配置当前配置文件路径".into());
+            cx.notify();
+            return;
+        };
         let page = self.page;
         let Some(token) = self.begin_mutation(page) else {
             return;
         };
+        let controlled = self.controlled_config_store.clone();
+        let overrides = self.enabled_override_paths();
         let client = self.client.clone();
+        let uses_restart = !self.core_kind.capabilities().full_config_reload;
+        let process = self.process.clone();
+        if uses_restart && process.is_none() {
+            self.mutating = false;
+            self.error = Some(format!(
+                "外部 {} 不支持完整配置热重载；请由 ZenClash 托管该内核后重试",
+                self.core_kind.display_name()
+            ));
+            cx.notify();
+            return;
+        }
         let task = self.runtime.spawn(async move {
-            client
-                .patch_configs(&body)
-                .await
-                .map_err(|error| error.to_string())?;
-            load_page(client, page).await
+            if uses_restart {
+                let process = process.ok_or_else(|| {
+                    "托管内核在配置任务启动前已不可用，请重启 ZenClash".to_owned()
+                })?;
+                controlled
+                    .apply_json_update_with_restart(process, profile, &patch, overrides)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            } else {
+                controlled
+                    .apply_json_update_with_overrides(&client, profile, &patch, overrides)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            let controlled_config = controlled.load_json().map_err(|error| error.to_string())?;
+            let data = load_page(client, page).await?;
+            Ok::<_, String>((data, controlled_config))
         });
         cx.spawn(async move |this, cx| {
-            let result = match task.await {
-                Ok(result) => result,
-                Err(error) => Err(format!("配置更新任务异常结束：{error}")),
-            };
+            let result = task
+                .await
+                .map_err(|error| format!("受控配置任务异常结束：{error}"))
+                .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
-                if !this.is_page_task_current(token) {
-                    cx.notify();
-                    return;
-                }
                 match result {
-                    Ok(data) => {
-                        this.data = data;
-                        this.notice = Some(success.into());
+                    Ok((data, controlled_config)) => {
+                        if this.replace_page_data(token, data) {
+                            this.controlled_config = controlled_config;
+                            this.config_preview = None;
+                            this.notice = Some(if uses_restart {
+                                format!(
+                                    "{}（{} 已重启并通过控制器验收）",
+                                    success.replace("热重载", "保存"),
+                                    this.core_kind.display_name()
+                                )
+                            } else {
+                                success.into()
+                            });
+                        }
                     }
-                    Err(error) => this.error = Some(error),
+                    Err(error) => this.set_page_error(token, error),
                 }
                 cx.notify();
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    pub(super) fn controlled_bool(&self, pointer: &str, fallback: bool) -> bool {
+        self.controlled_config
+            .pointer(pointer)
+            .and_then(Value::as_bool)
+            .unwrap_or(fallback)
+    }
+
+    pub(super) fn refresh_config_inputs_if_needed(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.config_inputs_profile == self.profile_path {
+            return;
+        }
+        let Some(profile) = self.profile_path.as_ref() else {
+            self.config_inputs_profile = None;
+            return;
+        };
+        match self.controlled_config_store.effective_json(profile) {
+            Ok(config) => {
+                self.config_inputs = ConfigInputs::new(&config, window, cx);
+                self.config_inputs_profile = Some(profile.clone());
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
+    }
+
+    pub(super) fn invalidate_config_inputs(&mut self) {
+        self.config_inputs_profile = None;
+    }
+
+    pub(crate) fn reload_controlled_config(&mut self, cx: &mut Context<Self>) {
+        match self.controlled_config_store.load_json() {
+            Ok(controlled) => self.controlled_config = controlled,
+            Err(error) => self.error = Some(error.to_string()),
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn profile_activated_from_tray(
+        &mut self,
+        path: std::path::PathBuf,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.profile_path = Some(path.clone());
+        self.invalidate_config_inputs();
+        self.config_preview = None;
+        if let Err(error) = self.reload_profile_catalog() {
+            self.error = Some(error);
+        }
+        self.notice = Some(format!("已从状态栏切换到“{name}”"));
+        cx.emit(super::ProfileActivated { path });
+        self.refresh(cx);
+    }
+
+    pub(crate) fn report_tray_profile_error(&mut self, error: &str, cx: &mut Context<Self>) {
+        self.error = Some(format!("状态栏切换配置失败：{error}"));
         cx.notify();
     }
 
@@ -249,9 +510,19 @@ impl RuntimePage {
             RuntimeData::Config(config)
             | RuntimeData::Core { config, .. }
             | RuntimeData::Profile { config, .. }
+            | RuntimeData::Resources { config, .. }
             | RuntimeData::SystemProxy { config, .. }
-            | RuntimeData::Network { config, .. } => Some(config),
+            | RuntimeData::Network { config, .. }
+            | RuntimeData::Tun { config, .. }
+            | RuntimeData::Settings { config, .. } => Some(config),
             _ => None,
         }
+    }
+
+    pub(super) fn mihomo_binary(&self) -> Option<std::path::PathBuf> {
+        self.process
+            .as_ref()
+            .map(|process| process.snapshot().binary)
+            .or_else(|| std::env::var_os("ZENCLASH_MIHOMO_BINARY").map(std::path::PathBuf::from))
     }
 }

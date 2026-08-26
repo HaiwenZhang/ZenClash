@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -10,6 +11,10 @@ use serde::{Deserialize, Serialize};
 use tokio::{runtime::Handle, task::JoinHandle};
 
 use crate::{websocket::connect_stream, MihomoEndpoint};
+
+mod file;
+
+pub use file::{LogPersistenceError, LogPersistenceResult, LogPersistenceStatus};
 
 const MAX_LOG_ENTRIES: usize = 2_000;
 
@@ -31,6 +36,7 @@ pub struct LogEntry {
 pub struct LogMonitor {
     entries: Arc<RwLock<VecDeque<LogEntry>>>,
     connected: Arc<RwLock<bool>>,
+    file: file::LogFileWorker,
     task: JoinHandle<()>,
 }
 
@@ -40,15 +46,18 @@ impl LogMonitor {
     pub fn start(runtime: &Handle, endpoint: MihomoEndpoint, level: &str) -> Arc<Self> {
         let entries = Arc::new(RwLock::new(VecDeque::new()));
         let connected = Arc::new(RwLock::new(false));
+        let file = file::LogFileWorker::start();
         let task = runtime.spawn(run_monitor(
             endpoint,
             level.to_owned(),
             entries.clone(),
             connected.clone(),
+            file.sender(),
         ));
         Arc::new(Self {
             entries,
             connected,
+            file,
             task,
         })
     }
@@ -62,6 +71,30 @@ impl LogMonitor {
     /// Removes all currently buffered log entries.
     pub fn clear(&self) {
         self.entries.write().clear();
+    }
+
+    /// Configures bounded, continuous persistence for newly received log entries.
+    ///
+    /// A disabled configuration retains the target path and limit for status
+    /// display but performs no writes. Configuration changes take effect without
+    /// reconnecting the Mihomo stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file-size limit is outside 1–100 MiB.
+    pub fn configure_persistence(
+        &self,
+        path: impl Into<PathBuf>,
+        enabled: bool,
+        max_mebibytes: u16,
+    ) -> LogPersistenceResult<()> {
+        self.file.configure(path.into(), enabled, max_mebibytes)
+    }
+
+    /// Returns a snapshot of the persistent-log writer state.
+    #[must_use]
+    pub fn persistence_status(&self) -> LogPersistenceStatus {
+        self.file.status()
     }
 
     /// Returns whether the log WebSocket is currently connected.
@@ -83,11 +116,35 @@ impl Drop for LogMonitor {
     }
 }
 
+/// Formats buffered Mihomo log entries as a stable, line-oriented text file.
+#[must_use]
+pub fn format_log_entries(entries: &[LogEntry]) -> String {
+    let mut output = String::new();
+    for entry in entries {
+        use std::fmt::Write as _;
+
+        let level = if entry.level.trim().is_empty() {
+            "INFO"
+        } else {
+            entry.level.trim()
+        };
+        let _ = writeln!(
+            output,
+            "[{}] {:<7} {}",
+            entry.timestamp_ms,
+            level.to_ascii_uppercase(),
+            entry.payload
+        );
+    }
+    output
+}
+
 async fn run_monitor(
     endpoint: MihomoEndpoint,
     level: String,
     entries: Arc<RwLock<VecDeque<LogEntry>>>,
     connected: Arc<RwLock<bool>>,
+    file_sender: file::LogFileSender,
 ) {
     loop {
         match connect_stream(
@@ -106,12 +163,14 @@ async fn run_monitor(
                             match serde_json::from_slice::<LogEntry>(&message.into_data()) {
                                 Ok(mut entry) => {
                                     entry.timestamp_ms = now_ms();
-                                    push_bounded(&entries, entry);
+                                    push_bounded(&entries, entry.clone());
+                                    file_sender.append(entry);
                                 }
                                 Err(error) => {
                                     tracing::debug!(%error, "received malformed Mihomo log frame");
                                     push_monitor_error(
                                         &entries,
+                                        &file_sender,
                                         "收到无法解析的 Mihomo 日志帧".into(),
                                     );
                                 }
@@ -120,28 +179,37 @@ async fn run_monitor(
                         Ok(message) if message.is_close() => break,
                         Ok(_) => {}
                         Err(error) => {
-                            push_monitor_error(&entries, format!("日志流读取失败：{error}"));
+                            push_monitor_error(
+                                &entries,
+                                &file_sender,
+                                format!("日志流读取失败：{error}"),
+                            );
                             break;
                         }
                     }
                 }
             }
-            Err(error) => push_monitor_error(&entries, format!("日志流连接失败：{error}")),
+            Err(error) => {
+                push_monitor_error(&entries, &file_sender, format!("日志流连接失败：{error}"));
+            }
         }
         *connected.write() = false;
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
 
-fn push_monitor_error(entries: &RwLock<VecDeque<LogEntry>>, payload: String) {
-    push_bounded(
-        entries,
-        LogEntry {
-            level: "error".into(),
-            payload,
-            timestamp_ms: now_ms(),
-        },
-    );
+fn push_monitor_error(
+    entries: &RwLock<VecDeque<LogEntry>>,
+    file_sender: &file::LogFileSender,
+    payload: String,
+) {
+    let entry = LogEntry {
+        level: "error".into(),
+        payload,
+        timestamp_ms: now_ms(),
+    };
+    push_bounded(entries, entry.clone());
+    file_sender.append(entry);
 }
 
 fn push_bounded(entries: &RwLock<VecDeque<LogEntry>>, entry: LogEntry) {
@@ -184,6 +252,27 @@ mod tests {
         .unwrap();
         assert_eq!(entry.level, "info");
         assert!(entry.payload.contains("example.com"));
+    }
+
+    #[test]
+    fn text_export_preserves_order_and_severity() {
+        let entries = [
+            LogEntry {
+                level: "info".into(),
+                payload: "first".into(),
+                timestamp_ms: 10,
+            },
+            LogEntry {
+                level: "warn".into(),
+                payload: "second".into(),
+                timestamp_ms: 20,
+            },
+        ];
+
+        assert_eq!(
+            format_log_entries(&entries),
+            "[10] INFO    first\n[20] WARN    second\n"
+        );
     }
 
     #[test]

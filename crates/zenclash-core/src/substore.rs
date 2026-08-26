@@ -4,6 +4,15 @@ use serde::Deserialize;
 
 use crate::{MihomoError, MihomoResult};
 
+/// Kind of generated Clash profile exposed by a Sub-Store backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubStoreItemKind {
+    /// A single Sub-Store subscription.
+    Subscription,
+    /// A Sub-Store collection composed from one or more subscriptions.
+    Collection,
+}
+
 /// Named subscription or collection returned by a Sub-Store backend.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -128,6 +137,41 @@ impl SubStoreClient {
         snapshot
     }
 
+    /// Builds the backend URL that generates a Clash Meta profile for an item.
+    ///
+    /// The item name is encoded as exactly one path segment, and a no-cache
+    /// request is used so importing or updating a profile reaches Sub-Store's
+    /// current output instead of a stale generated document.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the item name is empty or the configured backend
+    /// URL cannot be used as a hierarchical HTTP URL.
+    pub fn profile_url(&self, kind: SubStoreItemKind, name: &str) -> MihomoResult<String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(MihomoError::InvalidInput(
+                "Sub-Store 项目名称不能为空".into(),
+            ));
+        }
+        let mut url = self.backend_url.clone();
+        {
+            let mut segments = url
+                .path_segments_mut()
+                .map_err(|()| MihomoError::InvalidEndpoint(display_url(&self.backend_url)))?;
+            segments.pop_if_empty();
+            segments.push("download");
+            if kind == SubStoreItemKind::Collection {
+                segments.push("collection");
+            }
+            segments.push(name);
+        }
+        url.query_pairs_mut()
+            .append_pair("target", "ClashMeta")
+            .append_pair("noCache", "true");
+        Ok(url.into())
+    }
+
     async fn get_items(&self, path: &str) -> MihomoResult<Vec<SubStoreItem>> {
         let endpoint = self.backend_url.join(path).map_err(|error| {
             MihomoError::InvalidEndpoint(format!("{} ({error})", self.backend_url))
@@ -194,6 +238,31 @@ mod tests {
             client.backend_url.join("api/subs").unwrap().as_str(),
             "https://substore.example/tenant/api/subs"
         );
+    }
+
+    #[test]
+    fn builds_safe_clash_meta_download_urls() {
+        let client = SubStoreClient::new(
+            "https://substore.example/tenant/",
+            "https://substore.example/ui",
+        )
+        .unwrap();
+
+        assert_eq!(
+            client
+                .profile_url(SubStoreItemKind::Subscription, "香港/主订阅")
+                .unwrap(),
+            "https://substore.example/tenant/download/%E9%A6%99%E6%B8%AF%2F%E4%B8%BB%E8%AE%A2%E9%98%85?target=ClashMeta&noCache=true"
+        );
+        assert_eq!(
+            client
+                .profile_url(SubStoreItemKind::Collection, "all")
+                .unwrap(),
+            "https://substore.example/tenant/download/collection/all?target=ClashMeta&noCache=true"
+        );
+        assert!(client
+            .profile_url(SubStoreItemKind::Subscription, "  ")
+            .is_err());
     }
 
     #[test]

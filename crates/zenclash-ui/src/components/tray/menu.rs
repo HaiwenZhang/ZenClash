@@ -5,9 +5,15 @@ use std::{
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
-use super::{TrayCommand, TrayMenuState};
+use super::{EnvironmentShell, TrayCommand, TrayMenuState};
 
 static NEXT_MENU_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn select_profile_command(profile: &super::TrayProfile) -> TrayCommand {
+    TrayCommand::SelectProfile {
+        id: profile.id.clone(),
+    }
+}
 
 struct MenuAssembler {
     commands: HashMap<String, TrayCommand>,
@@ -152,18 +158,32 @@ pub(super) fn build_menu(
     menu.append(&separator_2)
         .map_err(|error| error.to_string())?;
     let profiles = Submenu::new("配置文件", true);
-    let current_profile = builder.check(
-        if state.profile_name.is_empty() {
-            "当前配置"
-        } else {
-            state.profile_name.as_str()
-        },
-        true,
-        TrayCommand::OpenProfiles,
-    );
+    for profile in &state.profiles {
+        let item = builder.check(
+            &profile.name,
+            profile.active,
+            select_profile_command(profile),
+        );
+        profiles.append(&item).map_err(|error| error.to_string())?;
+    }
+    if state.profiles.is_empty() {
+        let current_profile = builder.check(
+            if state.profile_name.is_empty() {
+                "当前配置"
+            } else {
+                state.profile_name.as_str()
+            },
+            true,
+            TrayCommand::OpenProfiles,
+        );
+        profiles
+            .append(&current_profile)
+            .map_err(|error| error.to_string())?;
+    }
+    let profile_separator = PredefinedMenuItem::separator();
     let open_profiles = builder.item("打开订阅管理…", TrayCommand::OpenProfiles);
     profiles
-        .append_items(&[&current_profile, &open_profiles])
+        .append_items(&[&profile_separator, &open_profiles])
         .map_err(|error| error.to_string())?;
     menu.append(&profiles).map_err(|error| error.to_string())?;
 
@@ -179,12 +199,19 @@ pub(super) fn build_menu(
             .map_err(|error| error.to_string())?;
     }
 
-    let copy_environment = builder.item(
-        "复制代理环境变量",
-        TrayCommand::CopyEnvironment {
-            port: state.mixed_port,
-        },
-    );
+    let copy_environment = Submenu::new("复制代理环境变量", true);
+    for shell in EnvironmentShell::ALL {
+        let item = builder.item(
+            shell.label(),
+            TrayCommand::CopyEnvironment {
+                port: state.mixed_port,
+                shell,
+            },
+        );
+        copy_environment
+            .append(&item)
+            .map_err(|error| error.to_string())?;
+    }
     menu.append(&copy_environment)
         .map_err(|error| error.to_string())?;
 
@@ -218,5 +245,18 @@ mod tests {
         let second = MenuAssembler::new().register(TrayCommand::ShowWindow);
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn profile_entries_create_real_selection_commands() {
+        let profile = super::super::TrayProfile {
+            id: "airport".into(),
+            name: "主订阅".into(),
+            active: true,
+        };
+
+        let command = select_profile_command(&profile);
+
+        assert!(matches!(command, TrayCommand::SelectProfile { id } if id == "airport"));
     }
 }

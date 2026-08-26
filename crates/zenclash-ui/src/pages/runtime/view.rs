@@ -98,14 +98,14 @@ impl RuntimePage {
             Page::Mihomo => self.render_core(theme, cx),
             Page::Profiles => self.render_profile(theme, cx),
             Page::Connections => self.render_connections(theme, cx),
-            Page::Rules => self.render_rules(theme),
+            Page::Rules => self.render_rules(theme, cx),
             Page::Resources => self.render_resources(theme, cx),
-            Page::Logs => self.render_logs(theme),
+            Page::Logs => self.render_logs(theme, cx),
             Page::Tun => self.render_tun(theme, cx),
-            Page::Sniffer => self.render_sniffer(theme),
-            Page::Traffic => self.render_traffic(theme),
-            Page::Network => self.render_network(theme),
-            Page::Dns => self.render_dns(theme),
+            Page::Sniffer => self.render_sniffer(theme, cx),
+            Page::Traffic => self.render_traffic(theme, cx),
+            Page::Network => self.render_network(theme, cx),
+            Page::Dns => self.render_dns(theme, cx),
             Page::SystemProxy => self.render_system_proxy(theme, cx),
             Page::Override => self.render_override(theme, cx),
             Page::SubStore => self.render_substore(theme, cx),
@@ -122,7 +122,8 @@ impl Focusable for RuntimePage {
 }
 
 impl Render for RuntimePage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.refresh_config_inputs_if_needed(window, cx);
         let theme = cx.theme().clone();
         v_flex()
             .track_focus(&self.focus_handle)

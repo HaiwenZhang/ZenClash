@@ -1,8 +1,8 @@
 use super::{
     open_directory, px, tray_directories, AppContext, ClipboardItem, Context, Duration,
-    FloatingTrafficWindow, NetworkTrayIcon, OutboundMode, Page, Root, TitleBar, TrayClick,
-    TrayCommand, TrayMenuState, TrayProxyGroup, TrayProxyNode, WindowBounds, WindowKind,
-    WindowOptions, ZenClashApp,
+    EnvironmentShell, FloatingTrafficWindow, NetworkTrayIcon, OutboundMode, Page, Root, TitleBar,
+    TrayClick, TrayCommand, TrayMenuState, TrayProfile, TrayProxyGroup, TrayProxyNode,
+    WindowBounds, WindowKind, WindowOptions, ZenClashApp,
 };
 
 mod commands;

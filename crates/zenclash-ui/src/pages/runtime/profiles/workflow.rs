@@ -1,13 +1,19 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
-use zenclash_core::{MihomoClient, ProfileRecord, ProfileStore, ProfileStoreResult, ProfileUpdate};
+use zenclash_core::{
+    ControlledConfigStore, CoreKind, MihomoClient, MihomoProcess, ProfileRecord, ProfileStore,
+    ProfileStoreResult, ProfileUpdate, RemoteProfileOptions, RemoteProfileRoute, YamlOverrideStore,
+};
 
 use super::super::{load_page, Page, RuntimeData};
 
-pub(super) struct ActivationOutcome {
-    pub(super) refresh: Result<RuntimeData, String>,
-    pub(super) path: PathBuf,
-    pub(super) name: String,
+pub(crate) struct ActivationOutcome {
+    pub(in crate::pages::runtime) refresh: Result<RuntimeData, String>,
+    pub(crate) path: PathBuf,
+    pub(crate) name: String,
 }
 
 pub(super) struct UpdateOutcome {
@@ -17,33 +23,105 @@ pub(super) struct UpdateOutcome {
     pub(super) active: bool,
 }
 
+pub(crate) struct BackgroundUpdateOutcome {
+    pub(crate) path: PathBuf,
+    pub(crate) name: String,
+    pub(crate) active: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct CoreProfileRuntime {
+    kind: CoreKind,
+    client: MihomoClient,
+    process: Option<Arc<MihomoProcess>>,
+}
+
+impl CoreProfileRuntime {
+    pub(crate) fn new(
+        kind: CoreKind,
+        client: MihomoClient,
+        process: Option<Arc<MihomoProcess>>,
+    ) -> Self {
+        Self {
+            kind,
+            client,
+            process,
+        }
+    }
+
+    pub(crate) fn client(&self) -> &MihomoClient {
+        &self.client
+    }
+
+    pub(crate) fn kind(&self) -> CoreKind {
+        self.kind
+    }
+
+    pub(crate) async fn reload_with_overrides(
+        &self,
+        controlled: ControlledConfigStore,
+        path: &Path,
+        overrides: Vec<PathBuf>,
+    ) -> Result<(), String> {
+        if self.kind.capabilities().full_config_reload {
+            controlled
+                .reload_with_overrides(&self.client, path, overrides)
+                .await
+                .map_err(|error| error.to_string())
+        } else if let Some(process) = self.process.clone() {
+            controlled
+                .restart_with_overrides(process, path, overrides)
+                .await
+                .map_err(|error| error.to_string())
+        } else {
+            Err(format!(
+                "外部 {} 不支持完整配置热重载；请由 ZenClash 托管该内核后重试",
+                self.kind.display_name()
+            ))
+        }
+    }
+}
+
 pub(super) async fn import_local(
     store: ProfileStore,
-    client: MihomoClient,
+    controlled: ControlledConfigStore,
+    runtime: CoreProfileRuntime,
     source: PathBuf,
 ) -> Result<ActivationOutcome, String> {
     let import_store = store.clone();
     let record = run_store(move || import_store.import_local(source)).await?;
-    activate_new_record(store, client, record, "Mihomo 拒绝该配置").await
+    let rejected = format!("{} 拒绝该配置", runtime.kind.display_name());
+    activate_new_record(store, controlled, runtime, record, &rejected).await
 }
 
-pub(super) async fn add_remote(
+pub(in super::super) async fn add_remote(
     store: ProfileStore,
-    client: MihomoClient,
+    controlled: ControlledConfigStore,
+    runtime: CoreProfileRuntime,
     name: String,
     url: String,
     user_agent: String,
+    options: RemoteProfileOptions,
 ) -> Result<ActivationOutcome, String> {
+    let proxy_port = subscription_proxy_port(&runtime.client, options.route()).await?;
     let record = store
-        .add_remote(name, url, user_agent)
+        .add_remote_with_options(name, url, user_agent, options, proxy_port)
         .await
         .map_err(|error| error.to_string())?;
-    activate_new_record(store, client, record, "下载成功，但 Mihomo 拒绝该配置").await
+    activate_new_record(
+        store,
+        controlled,
+        runtime.clone(),
+        record,
+        &format!("下载成功，但 {} 拒绝该配置", runtime.kind.display_name()),
+    )
+    .await
 }
 
-pub(super) async fn activate_existing(
+pub(crate) async fn activate_existing(
     store: ProfileStore,
-    client: MihomoClient,
+    controlled: ControlledConfigStore,
+    runtime: CoreProfileRuntime,
     id: String,
 ) -> Result<ActivationOutcome, String> {
     let load_store = store.clone();
@@ -62,16 +140,20 @@ pub(super) async fn activate_existing(
     let activation =
         run_store(move || activation_store.activate_reversible(&activation_id)).await?;
     let path = activation.path().to_path_buf();
-    if let Err(error) = client.reload_config(&path, true).await {
+    if let Err(error) = reload_effective(controlled, &runtime, &path).await {
         let rollback_store = store.clone();
         return match run_store(move || rollback_store.rollback_activation(activation)).await {
-            Ok(()) => Err(format!("Mihomo 拒绝该配置，活动选择已恢复：{error}")),
+            Ok(()) => Err(format!(
+                "{} 拒绝该配置，活动选择已恢复：{error}",
+                runtime.kind.display_name()
+            )),
             Err(rollback) => Err(format!(
-                "Mihomo 拒绝该配置：{error}；恢复原活动配置失败：{rollback}"
+                "{} 拒绝该配置：{error}；恢复原活动配置失败：{rollback}",
+                runtime.kind.display_name()
             )),
         };
     }
-    let refresh = load_page(client, Page::Profiles).await;
+    let refresh = load_page(runtime.client, Page::Profiles).await;
     Ok(ActivationOutcome {
         refresh,
         path,
@@ -81,11 +163,33 @@ pub(super) async fn activate_existing(
 
 pub(super) async fn update_remote(
     store: ProfileStore,
-    client: MihomoClient,
+    controlled: ControlledConfigStore,
+    runtime: CoreProfileRuntime,
     id: String,
 ) -> Result<UpdateOutcome, String> {
+    let outcome = update_remote_background(store, controlled, runtime.clone(), id).await?;
+    let refresh = load_page(runtime.client, Page::Profiles).await;
+    Ok(UpdateOutcome {
+        refresh,
+        path: outcome.path,
+        name: outcome.name,
+        active: outcome.active,
+    })
+}
+
+pub(crate) async fn update_remote_background(
+    store: ProfileStore,
+    controlled: ControlledConfigStore,
+    runtime: CoreProfileRuntime,
+    id: String,
+) -> Result<BackgroundUpdateOutcome, String> {
+    let route = store
+        .remote_route(&id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let proxy_port = subscription_proxy_port(&runtime.client, route).await?;
     let update = store
-        .update_remote(&id)
+        .update_remote_with_proxy(&id, proxy_port)
         .await
         .map_err(|error| error.to_string())?;
     let record = update.record.clone();
@@ -98,15 +202,39 @@ pub(super) async fn update_remote(
         .as_deref()
         == Some(active_id.as_str());
     if is_active {
-        reload_updated_profile(&store, &client, &path, update).await?;
+        reload_updated_profile(&store, controlled, &runtime, &path, update).await?;
     }
-    let refresh = load_page(client, Page::Profiles).await;
-    Ok(UpdateOutcome {
-        refresh,
+    Ok(BackgroundUpdateOutcome {
         path,
         name: record.name,
         active: is_active,
     })
+}
+
+async fn subscription_proxy_port(
+    client: &MihomoClient,
+    route: RemoteProfileRoute,
+) -> Result<Option<u16>, String> {
+    if route == RemoteProfileRoute::Direct {
+        return Ok(None);
+    }
+    let config = match client.runtime_config().await {
+        Ok(config) => config,
+        Err(_) if route == RemoteProfileRoute::DirectWithMihomoFallback => return Ok(None),
+        Err(error) => return Err(format!("无法读取当前内核的订阅代理端口：{error}")),
+    };
+    let port = if config.mixed_port != 0 {
+        config.mixed_port
+    } else {
+        config.port
+    };
+    if port != 0 {
+        Ok(Some(port))
+    } else if route == RemoteProfileRoute::DirectWithMihomoFallback {
+        Ok(None)
+    } else {
+        Err("当前内核没有可用的 HTTP/Mixed 订阅代理端口".into())
+    }
 }
 
 pub(super) async fn delete(store: ProfileStore, id: String) -> Result<(), String> {
@@ -115,7 +243,8 @@ pub(super) async fn delete(store: ProfileStore, id: String) -> Result<(), String
 
 async fn activate_new_record(
     store: ProfileStore,
-    client: MihomoClient,
+    controlled: ControlledConfigStore,
+    runtime: CoreProfileRuntime,
     record: ProfileRecord,
     rejection_prefix: &str,
 ) -> Result<ActivationOutcome, String> {
@@ -132,7 +261,7 @@ async fn activate_new_record(
         }
     };
     let path = activation.path().to_path_buf();
-    if let Err(error) = client.reload_config(&path, true).await {
+    if let Err(error) = reload_effective(controlled, &runtime, &path).await {
         let rollback_store = store.clone();
         let primary = match run_store(move || rollback_store.rollback_activation(activation)).await
         {
@@ -145,7 +274,7 @@ async fn activate_new_record(
         };
         return Err(cleanup_new_record(store, record.id, primary).await);
     }
-    let refresh = load_page(client, Page::Profiles).await;
+    let refresh = load_page(runtime.client, Page::Profiles).await;
     Ok(ActivationOutcome {
         refresh,
         path,
@@ -155,20 +284,40 @@ async fn activate_new_record(
 
 async fn reload_updated_profile(
     store: &ProfileStore,
-    client: &MihomoClient,
+    controlled: ControlledConfigStore,
+    runtime: &CoreProfileRuntime,
     path: &Path,
     update: ProfileUpdate,
 ) -> Result<(), String> {
-    if let Err(error) = client.reload_config(path, true).await {
+    if let Err(error) = reload_effective(controlled, runtime, path).await {
         let rollback_store = store.clone();
         return match run_store(move || rollback_store.rollback_update(update)).await {
-            Ok(_) => Err(format!("Mihomo 拒绝订阅更新，已恢复上一版本：{error}")),
+            Ok(_) => Err(format!(
+                "{} 拒绝订阅更新，已恢复上一版本：{error}",
+                runtime.kind.display_name()
+            )),
             Err(rollback) => Err(format!(
-                "Mihomo 拒绝订阅更新：{error}；恢复上一版本失败：{rollback}"
+                "{} 拒绝订阅更新：{error}；恢复上一版本失败：{rollback}",
+                runtime.kind.display_name()
             )),
         };
     }
     Ok(())
+}
+
+pub(in super::super) async fn reload_effective(
+    controlled: ControlledConfigStore,
+    runtime: &CoreProfileRuntime,
+    path: &Path,
+) -> Result<(), String> {
+    let overrides =
+        tokio::task::spawn_blocking(|| YamlOverrideStore::discover()?.load_enabled_paths())
+            .await
+            .map_err(|error| format!("读取 YAML 覆写任务异常结束：{error}"))?
+            .map_err(|error| error.to_string())?;
+    runtime
+        .reload_with_overrides(controlled, path, overrides)
+        .await
 }
 
 async fn cleanup_new_record(store: ProfileStore, id: String, primary: String) -> String {
