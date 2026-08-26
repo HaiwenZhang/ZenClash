@@ -26,11 +26,10 @@ use zenclash_core::{
     ControlledConfigStore, CoreBinaryInfo, CoreKind, LogMonitor, MihomoClient, MihomoLaunchConfig,
     MihomoLogLevel, MihomoProcess, NetworkLatencyTarget, NetworkProbeRoutePreference,
     NetworkProbeSnapshot, ProfileCatalog, ProfileStore, ProviderCatalog, PublicIpProvider,
-    RemoteProfileOptions, RemoteProfileRoute, RuleCatalog, RuntimeConfig, SubStoreClient,
-    SubStoreItem, SubStoreItemKind, SubStoreSnapshot, SystemNetworkSnapshot, SystemProxyController,
-    SystemProxyManager, SystemProxyMode, SystemProxyStatus, TrafficHistoryStore, TrafficMonitor,
-    TunPermissionGrant, TunPermissionManager, TunPermissionStatus, VersionInfo,
-    YamlOverrideCatalog, YamlOverrideStore,
+    RemoteProfileOptions, RemoteProfileRoute, RuleCatalog, RuntimeConfig, SystemNetworkSnapshot,
+    SystemProxyController, SystemProxyManager, SystemProxyMode, SystemProxyStatus,
+    TrafficHistoryStore, TrafficMonitor, TunPermissionGrant, TunPermissionManager,
+    TunPermissionStatus, VersionInfo, YamlOverrideCatalog, YamlOverrideStore,
 };
 
 use crate::app::{HideTrafficIcon, SetDarkTheme, SetLightTheme, SetSystemTheme, ShowTrafficIcon};
@@ -41,6 +40,7 @@ mod common;
 mod config_inputs;
 mod connections;
 mod dns;
+mod home;
 mod lifecycle;
 mod loader;
 mod logs;
@@ -53,7 +53,6 @@ mod rules;
 mod settings;
 mod sniffer;
 mod state;
-mod substore;
 mod system_proxy;
 mod traffic;
 mod tun;
@@ -95,6 +94,7 @@ pub struct RuntimePage {
     profile_forms: profiles::ProfileFormState,
     network_latency_name: Entity<InputState>,
     network_latency_url: Entity<InputState>,
+    connection_filter: Entity<InputState>,
     log_filter: Entity<InputState>,
     rule_filter: Entity<InputState>,
     system_proxy_editor: Option<system_proxy::SystemProxyEditorState>,
@@ -104,7 +104,7 @@ pub struct RuntimePage {
     config_preview: Option<ConfigPreview>,
     profile_editor: overrides::ProfileEditorState,
     data: RuntimeData,
-    traffic_samples: VecDeque<u64>,
+    traffic_samples: VecDeque<LiveTrafficSample>,
     traffic_history: traffic::TrafficHistoryUiState,
     network_probe: network::NetworkProbeUiState,
     ruleset: resources::RulesetUiState,
@@ -117,6 +117,12 @@ pub struct RuntimePage {
     notice: Option<String>,
     focus_handle: gpui::FocusHandle,
     _subscriptions: Vec<Subscription>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct LiveTrafficSample {
+    upload: u64,
+    download: u64,
 }
 
 /// Runtime services shared by the native Mihomo management pages.

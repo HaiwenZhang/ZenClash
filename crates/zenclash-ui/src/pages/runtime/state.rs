@@ -1,11 +1,18 @@
 use super::{
     AutostartStatus, ConnectionsSnapshot, Page, ProviderCatalog, RuleCatalog, RuntimeConfig,
-    SubStoreSnapshot, SystemNetworkSnapshot, SystemProxyStatus, TunPermissionStatus, VersionInfo,
+    SystemNetworkSnapshot, SystemProxyStatus, TunPermissionStatus, VersionInfo,
 };
+use zenclash_core::ProxyCatalog;
 
 #[derive(Clone, Debug)]
 pub(super) enum RuntimeData {
     Empty,
+    Dashboard {
+        config: RuntimeConfig,
+        proxies: ProxyCatalog,
+        connections: ConnectionsSnapshot,
+        system_proxy: SystemProxyStatus,
+    },
     Config(RuntimeConfig),
     Core {
         version: VersionInfo,
@@ -36,7 +43,6 @@ pub(super) enum RuntimeData {
         config: RuntimeConfig,
         permissions: Result<TunPermissionStatus, String>,
     },
-    SubStore(SubStoreSnapshot),
     Settings {
         config: RuntimeConfig,
         autostart: AutostartStatus,

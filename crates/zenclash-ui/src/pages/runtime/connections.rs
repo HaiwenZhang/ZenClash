@@ -1,7 +1,7 @@
 use super::{
     div, empty_state, format_bytes, h_flex, message_banner, metric, px, v_flex, Button,
     ButtonVariants, ConnectionsSnapshot, Context, Disableable, FluentBuilder, Icon, IconName,
-    InteractiveElement, IntoElement, Page, ParentElement, RuntimeData, RuntimePage, Sizable,
+    Input, InteractiveElement, IntoElement, Page, ParentElement, RuntimeData, RuntimePage, Sizable,
     Styled,
 };
 
@@ -95,6 +95,13 @@ impl RuntimePage {
             _ => ConnectionsSnapshot::default(),
         };
         let total = data.connections.len();
+        let query = normalize_connection_query(&self.connection_filter.read(cx).value());
+        let filtered = data
+            .connections
+            .iter()
+            .filter(|connection| connection_matches(connection, &query))
+            .collect::<Vec<_>>();
+        let visible = filtered.len();
         v_flex()
             .gap_4()
             .when(
@@ -156,17 +163,40 @@ impl RuntimePage {
                     ),
             )
             .child(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(div().flex_1().child(Input::new(&self.connection_filter).small()))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(if query.is_empty() {
+                                format!("{total} 条活动连接")
+                            } else {
+                                format!("{visible} / {total} 条")
+                            }),
+                    ),
+            )
+            .child(
                 v_flex()
                     .rounded(theme.radius)
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.secondary)
-                    .when(total == 0, |this| {
-                        this.child(empty_state("当前没有活动连接", theme))
+                    .when(filtered.is_empty(), |this| {
+                        this.child(empty_state(
+                            if total == 0 {
+                                "当前没有活动连接"
+                            } else {
+                                "没有匹配的连接"
+                            },
+                            theme,
+                        ))
                     })
                     .children(
-                        data.connections
-                            .iter()
+                        filtered
+                            .into_iter()
                             .enumerate()
                             .map(|(index, connection)| {
                                 let id = connection.id.clone();
@@ -176,7 +206,7 @@ impl RuntimePage {
                                 } else {
                                     connection.metadata.host.clone()
                                 };
-                                let chain = connection.chains.join(" → ");
+                                let summary = connection_summary(connection);
                                 h_flex()
                                     .id(("connection-row", index))
                                     .min_h(px(58.))
@@ -198,12 +228,7 @@ impl RuntimePage {
                                                 div()
                                                     .text_xs()
                                                     .text_color(theme.muted_foreground)
-                                                    .child(format!(
-                                                        "{} · {} · {}",
-                                                        connection.metadata.network,
-                                                        connection.rule,
-                                                        chain
-                                                    )),
+                                                    .child(summary),
                                             ),
                                     )
                                     .child(
@@ -230,5 +255,95 @@ impl RuntimePage {
                     ),
             )
             .into_any_element()
+    }
+}
+
+fn normalize_connection_query(query: &str) -> String {
+    query.trim().to_ascii_lowercase()
+}
+
+fn connection_matches(connection: &zenclash_core::Connection, query: &str) -> bool {
+    query.is_empty()
+        || connection
+            .metadata
+            .host
+            .to_ascii_lowercase()
+            .contains(query)
+        || connection
+            .metadata
+            .destination_ip
+            .to_ascii_lowercase()
+            .contains(query)
+        || connection
+            .metadata
+            .source_ip
+            .to_ascii_lowercase()
+            .contains(query)
+        || connection
+            .metadata
+            .process
+            .to_ascii_lowercase()
+            .contains(query)
+        || connection.rule.to_ascii_lowercase().contains(query)
+        || connection.rule_payload.to_ascii_lowercase().contains(query)
+        || connection
+            .chains
+            .iter()
+            .any(|chain| chain.to_ascii_lowercase().contains(query))
+}
+
+fn connection_summary(connection: &zenclash_core::Connection) -> String {
+    let mut parts = Vec::with_capacity(4);
+    if !connection.metadata.network.is_empty() {
+        parts.push(connection.metadata.network.clone());
+    }
+    if !connection.metadata.process.is_empty() {
+        parts.push(connection.metadata.process.clone());
+    }
+    if !connection.rule.is_empty() {
+        parts.push(connection.rule.clone());
+    }
+    if !connection.chains.is_empty() {
+        parts.push(connection.chains.join(" → "));
+    }
+    if parts.is_empty() {
+        "连接详情暂不可用".into()
+    } else {
+        parts.join(" · ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filter_matches_connection_identity_and_route_fields() {
+        let connection = zenclash_core::Connection {
+            metadata: zenclash_core::ConnectionMetadata {
+                host: "Example.COM".into(),
+                destination_ip: "203.0.113.8".into(),
+                process: "Browser".into(),
+                ..Default::default()
+            },
+            rule: "DomainSuffix".into(),
+            chains: vec!["Hong Kong".into()],
+            ..Default::default()
+        };
+
+        for query in ["example", "203.0.113", "browser", "domainsuffix", "hong"] {
+            assert!(connection_matches(
+                &connection,
+                &normalize_connection_query(query)
+            ));
+        }
+        assert!(!connection_matches(
+            &connection,
+            &normalize_connection_query("direct")
+        ));
+        assert_eq!(
+            connection_summary(&connection),
+            "Browser · DomainSuffix · Hong Kong"
+        );
     }
 }

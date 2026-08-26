@@ -1,8 +1,9 @@
 use super::{
     load_page, load_page_with_binary, AppContext, ConfigInputs, Context, ControlledConfigStore,
-    Duration, HashSet, InputEvent, InputState, MihomoLogLevel, Page, PageTaskToken,
-    ProfileActivated, ProfileCatalog, ProfileStore, RuntimeConfig, RuntimeData, RuntimePage,
-    RuntimePageServices, Value, VecDeque, Window, YamlOverrideCatalog, YamlOverrideStore,
+    Duration, HashSet, InputEvent, InputState, LiveTrafficSample, MihomoLogLevel, Page,
+    PageTaskToken, ProfileActivated, ProfileCatalog, ProfileStore, RuntimeConfig, RuntimeData,
+    RuntimePage, RuntimePageServices, Value, VecDeque, Window, YamlOverrideCatalog,
+    YamlOverrideStore,
 };
 
 struct InitialPersistentState {
@@ -146,6 +147,14 @@ impl RuntimePage {
             cx.new(|cx| InputState::new(window, cx).placeholder("例如：公司网关"));
         let network_latency_url = cx
             .new(|cx| InputState::new(window, cx).placeholder("https://example.com/generate_204"));
+        let connection_filter =
+            cx.new(|cx| InputState::new(window, cx).placeholder("过滤域名、IP、进程或规则…"));
+        let connection_filter_subscription =
+            cx.subscribe(&connection_filter, |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            });
         let log_filter = cx.new(|cx| InputState::new(window, cx).placeholder("过滤级别或内容…"));
         let log_filter_subscription = cx.subscribe(&log_filter, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -184,6 +193,7 @@ impl RuntimePage {
             profile_forms,
             network_latency_name,
             network_latency_url,
+            connection_filter,
             log_filter,
             rule_filter,
             system_proxy_editor: None,
@@ -193,7 +203,7 @@ impl RuntimePage {
             config_preview: None,
             profile_editor,
             data: RuntimeData::Empty,
-            traffic_samples: VecDeque::from(vec![0; 48]),
+            traffic_samples: VecDeque::from(vec![LiveTrafficSample::default(); 48]),
             traffic_history: super::traffic::TrafficHistoryUiState::default(),
             network_probe: super::network::NetworkProbeUiState::default(),
             ruleset: super::resources::RulesetUiState::default(),
@@ -205,7 +215,11 @@ impl RuntimePage {
             error: error.or(webdav_error),
             notice: startup_notice,
             focus_handle: cx.focus_handle(),
-            _subscriptions: vec![log_filter_subscription, rule_filter_subscription],
+            _subscriptions: vec![
+                connection_filter_subscription,
+                log_filter_subscription,
+                rule_filter_subscription,
+            ],
         };
         this.refresh(cx);
         Self::start_live_updates(cx);
@@ -244,6 +258,7 @@ impl RuntimePage {
 
     fn start_live_updates(cx: &mut Context<Self>) {
         let mut history_ticks = 0_u8;
+        let mut dashboard_ticks = 0_u8;
         cx.spawn(async move |this, cx| loop {
             tokio::time::sleep(Duration::from_millis(500)).await;
             if this
@@ -252,8 +267,10 @@ impl RuntimePage {
                     if this.traffic_samples.len() >= 48 {
                         this.traffic_samples.pop_front();
                     }
-                    this.traffic_samples
-                        .push_back(traffic.upload.saturating_add(traffic.download));
+                    this.traffic_samples.push_back(LiveTrafficSample {
+                        upload: traffic.upload,
+                        download: traffic.download,
+                    });
                     if matches!(this.page, Page::Logs) {
                         cx.notify();
                     }
@@ -272,6 +289,16 @@ impl RuntimePage {
                         }
                     } else {
                         history_ticks = 0;
+                    }
+                    if this.page == Page::Home {
+                        cx.notify();
+                        dashboard_ticks = dashboard_ticks.saturating_add(1);
+                        if dashboard_ticks >= 4 && !this.loading && !this.mutating {
+                            dashboard_ticks = 0;
+                            this.refresh(cx);
+                        }
+                    } else {
+                        dashboard_ticks = 0;
                     }
                 })
                 .is_err()
@@ -519,7 +546,8 @@ impl RuntimePage {
 
     pub(super) const fn config(&self) -> Option<&RuntimeConfig> {
         match &self.data {
-            RuntimeData::Config(config)
+            RuntimeData::Dashboard { config, .. }
+            | RuntimeData::Config(config)
             | RuntimeData::Core { config, .. }
             | RuntimeData::Profile { config, .. }
             | RuntimeData::Resources { config, .. }

@@ -1,7 +1,7 @@
 use super::{
-    div, h_flex, message_banner, px, v_flex, ActiveTheme, App, Button, Context, Disableable,
-    FluentBuilder, Focusable, Icon, IconName, InteractiveElement, IntoElement, Page, ParentElement,
-    Render, RuntimePage, ScrollableElement, Sizable, Styled, Window,
+    div, h_flex, message_banner, v_flex, ActiveTheme, App, Button, ButtonVariants, Context,
+    Disableable, FluentBuilder, Focusable, Icon, IconName, InteractiveElement, IntoElement, Page,
+    ParentElement, Render, RuntimePage, ScrollableElement, Sizable, Styled, Window,
 };
 
 impl RuntimePage {
@@ -10,10 +10,15 @@ impl RuntimePage {
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let loading = self.loading;
+        let traffic = self.traffic_monitor.snapshot();
+        let (status, status_color) = if traffic.connected {
+            ("内核在线", theme.success)
+        } else {
+            ("正在重连", theme.warning)
+        };
         h_flex()
-            .h(px(86.))
-            .px_6()
+            .h_16()
+            .px_5()
             .items_center()
             .justify_between()
             .border_b_1()
@@ -22,38 +27,16 @@ impl RuntimePage {
                 h_flex()
                     .gap_3()
                     .child(
-                        div()
-                            .size(px(38.))
-                            .rounded(theme.radius)
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.secondary)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                Icon::new(self.page.icon())
-                                    .size_5()
-                                    .text_color(theme.primary),
-                            ),
+                        Icon::new(self.page.icon())
+                            .size_5()
+                            .text_color(theme.primary),
                     )
                     .child(
                         v_flex()
                             .gap_0()
                             .child(
                                 div()
-                                    .text_size(px(10.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(theme.primary)
-                                    .child(format!(
-                                        "{} / {}",
-                                        self.page.section_label(),
-                                        self.page.route().to_ascii_uppercase()
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .text_xl()
+                                    .text_lg()
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .child(self.page.label()),
                             )
@@ -66,14 +49,26 @@ impl RuntimePage {
                     ),
             )
             .child(
-                Button::new("refresh-runtime-page")
-                    .icon(IconName::Redo2)
-                    .label(if loading { "读取中" } else { "刷新" })
-                    .small()
-                    .outline()
-                    .loading(loading)
-                    .disabled(self.mutating)
-                    .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                h_flex()
+                    .gap_3()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(div().size_2().rounded_full().bg(status_color))
+                            .child(status),
+                    )
+                    .child(
+                        Button::new("refresh-runtime-page")
+                            .icon(IconName::Redo2)
+                            .label(if self.loading { "读取中" } else { "刷新" })
+                            .small()
+                            .ghost()
+                            .loading(self.loading)
+                            .disabled(self.mutating)
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                    ),
             )
     }
 
@@ -95,6 +90,7 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         match self.page {
+            Page::Home => self.render_home(theme, cx),
             Page::Mihomo => self.render_core(theme, cx),
             Page::Profiles => self.render_profile(theme, cx),
             Page::Connections => self.render_connections(theme, cx),
@@ -108,7 +104,6 @@ impl RuntimePage {
             Page::Dns => self.render_dns(theme, cx),
             Page::SystemProxy => self.render_system_proxy(theme, cx),
             Page::Override => self.render_override(theme, cx),
-            Page::SubStore => self.render_substore(theme, cx),
             Page::Settings => self.render_settings(theme, cx),
             Page::Proxies => div().into_any_element(),
         }
@@ -135,9 +130,9 @@ impl Render for RuntimePage {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scrollbar()
-                    .gap_5()
-                    .px_6()
-                    .py_5()
+                    .gap_4()
+                    .px_5()
+                    .py_4()
                     .child(self.render_status(&theme))
                     .child(self.render_body(&theme, cx)),
             )

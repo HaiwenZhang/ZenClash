@@ -181,12 +181,15 @@ impl RuntimePage {
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
                 match result {
-                    Ok(outcome) => this.apply_profile_activation(
-                        outcome,
-                        |name| format!("在线订阅“{name}”已下载并启用"),
-                        token,
-                        cx,
-                    ),
+                    Ok(outcome) => {
+                        this.profile_forms.adding_subscription = false;
+                        this.apply_profile_activation(
+                            outcome,
+                            |name| format!("在线订阅“{name}”已下载并启用"),
+                            token,
+                            cx,
+                        );
+                    }
                     Err(error) => this.set_page_error(token, error),
                 }
                 cx.notify();

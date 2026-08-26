@@ -1,6 +1,6 @@
 use super::{
-    MihomoClient, Page, PathBuf, RuntimeData, SubStoreClient, SystemNetworkSnapshot,
-    SystemProxyManager, TunPermissionManager,
+    MihomoClient, Page, PathBuf, RuntimeData, SystemNetworkSnapshot, SystemProxyManager,
+    TunPermissionManager,
 };
 
 pub(super) async fn load_page(client: MihomoClient, page: Page) -> Result<RuntimeData, String> {
@@ -13,6 +13,7 @@ pub(super) async fn load_page_with_binary(
     mihomo_binary: Option<PathBuf>,
 ) -> Result<RuntimeData, String> {
     match page {
+        Page::Home => load_dashboard(client).await,
         Page::Mihomo => {
             let (version, config) = tokio::try_join!(client.version(), client.runtime_config())
                 .map_err(|error| error.to_string())?;
@@ -58,10 +59,6 @@ pub(super) async fn load_page_with_binary(
         Page::SystemProxy => load_system_proxy(client).await,
         Page::Network => load_network(client).await,
         Page::Tun => load_tun(client, mihomo_binary).await,
-        Page::SubStore => {
-            let client = SubStoreClient::from_env().map_err(|error| error.to_string())?;
-            Ok(RuntimeData::SubStore(client.snapshot().await))
-        }
         Page::Settings => load_settings(client).await,
         Page::Logs => Ok(RuntimeData::Empty),
         _ => client
@@ -70,6 +67,26 @@ pub(super) async fn load_page_with_binary(
             .map(RuntimeData::Config)
             .map_err(|error| error.to_string()),
     }
+}
+
+async fn load_dashboard(client: MihomoClient) -> Result<RuntimeData, String> {
+    let system_proxy_task = tokio::task::spawn_blocking(|| {
+        let manager = SystemProxyManager::detect().map_err(|error| error.to_string())?;
+        manager.status().map_err(|error| error.to_string())
+    });
+    let (config, proxies, connections, system_proxy) = tokio::join!(
+        client.runtime_config(),
+        client.proxy_catalog(),
+        client.connections_snapshot(),
+        system_proxy_task
+    );
+    Ok(RuntimeData::Dashboard {
+        config: config.map_err(|error| error.to_string())?,
+        proxies: proxies.map_err(|error| error.to_string())?,
+        connections: connections.map_err(|error| error.to_string())?,
+        system_proxy: system_proxy
+            .map_err(|error| format!("系统代理状态任务异常结束：{error}"))??,
+    })
 }
 
 async fn load_system_proxy(client: MihomoClient) -> Result<RuntimeData, String> {

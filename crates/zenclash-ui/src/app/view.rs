@@ -25,6 +25,7 @@ impl Render for ZenClashApp {
             .text_color(theme.foreground)
             .key_context("ZenClash")
             .on_action(cx.listener(Self::on_quit))
+            .on_action(cx.listener(Self::on_navigate_home))
             .on_action(cx.listener(Self::on_navigate_system_proxy))
             .on_action(cx.listener(Self::on_navigate_tun))
             .on_action(cx.listener(Self::on_navigate_profiles))
@@ -37,7 +38,6 @@ impl Render for ZenClashApp {
             .on_action(cx.listener(Self::on_navigate_rules))
             .on_action(cx.listener(Self::on_navigate_resources))
             .on_action(cx.listener(Self::on_navigate_override))
-            .on_action(cx.listener(Self::on_navigate_substore))
             .on_action(cx.listener(Self::on_navigate_network))
             .on_action(cx.listener(Self::on_navigate_traffic))
             .on_action(cx.listener(Self::on_navigate_settings))
@@ -51,7 +51,6 @@ impl Render for ZenClashApp {
             .on_action(cx.listener(Self::on_hide_traffic_icon))
             .on_action(cx.listener(Self::on_show_status_menu))
             .on_action(cx.listener(Self::on_toggle_floating_window))
-            .child(self.render_signal_rail(&theme, cx))
             .child(
                 h_flex()
                     .flex_1()

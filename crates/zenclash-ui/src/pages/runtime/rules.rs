@@ -1,7 +1,7 @@
 use super::{
-    div, empty_state, h_flex, message_banner, metric, px, v_flex, Context, Disableable,
-    FluentBuilder, Input, InteractiveElement, IntoElement, Page, ParentElement, RuntimeData,
-    RuntimePage, Sizable, Styled, Switch,
+    div, empty_state, h_flex, message_banner, px, v_flex, Context, Disableable, FluentBuilder,
+    Input, InteractiveElement, IntoElement, Page, ParentElement, RuntimeData, RuntimePage, Sizable,
+    Styled, Switch,
 };
 
 const MAX_VISIBLE_RULES: usize = 800;
@@ -83,21 +83,37 @@ impl RuntimePage {
             })
             .child(
                 h_flex()
+                    .min_h(px(64.))
+                    .px_4()
+                    .gap_4()
                     .justify_between()
-                    .child(metric(
-                        if query.is_empty() {
-                            "运行时规则"
-                        } else {
-                            "过滤结果"
-                        },
-                        if query.is_empty() {
-                            rules.len().to_string()
-                        } else {
-                            format!("{filtered_count} / {}", rules.len())
-                        },
-                        theme.primary,
-                        theme,
-                    ))
+                    .rounded(theme.radius)
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.secondary)
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .child(div().text_sm().text_color(theme.muted_foreground).child(
+                                if query.is_empty() {
+                                    "运行时规则"
+                                } else {
+                                    "过滤结果"
+                                },
+                            ))
+                            .child(
+                                div()
+                                    .font_family(theme.mono_font_family.clone())
+                                    .text_lg()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(theme.primary)
+                                    .child(if query.is_empty() {
+                                        rules.len().to_string()
+                                    } else {
+                                        format!("{filtered_count} / {}", rules.len())
+                                    }),
+                            ),
+                    )
                     .child(
                         div()
                             .text_xs()
@@ -108,7 +124,11 @@ impl RuntimePage {
             .child(Input::new(&self.rule_filter).small())
             .child(
                 v_flex()
-                    .gap_2()
+                    .rounded(theme.radius)
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.secondary)
+                    .overflow_hidden()
                     .when(filtered.is_empty(), |this| {
                         this.child(empty_state(
                             if rules.is_empty() {
@@ -146,10 +166,8 @@ impl RuntimePage {
             .px_4()
             .py_3()
             .gap_4()
-            .rounded(theme.radius)
-            .border_1()
+            .border_b_1()
             .border_color(theme.border)
-            .bg(theme.secondary)
             .opacity(if disabled { 0.55 } else { 1.0 })
             .child(
                 v_flex()
@@ -164,11 +182,7 @@ impl RuntimePage {
                             .child(rule_badge(rule.kind.clone(), theme.primary, theme))
                             .child(rule_badge(rule.proxy.clone(), theme.success, theme))
                             .child(div().text_xs().text_color(theme.muted_foreground).child(
-                                format!(
-                                    "#{} · size {}",
-                                    runtime_index.map_or(position, |index| index),
-                                    rule.size
-                                ),
+                                format!("规则 #{}", runtime_index.map_or(position, |index| index)),
                             )),
                     ),
             );

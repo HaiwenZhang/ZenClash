@@ -4,6 +4,7 @@ use super::{
     ParentElement, PreferencesRestored, RuntimeConfig, RuntimeData, RuntimePage, Selectable,
     SetDarkTheme, SetLightTheme, SetSystemTheme, ShowTrafficIcon, Sizable, Styled,
 };
+use crate::components::sidebar::dispatch_navigate;
 
 mod backup;
 mod core_management;
@@ -25,6 +26,7 @@ impl RuntimePage {
         };
         v_flex()
             .gap_4()
+            .child(self.render_advanced_tools(theme))
             .child(self.render_core_management(theme, cx))
             .child(self.render_application_settings(&config, &autostart, theme, cx))
             .when(self.core_kind.is_experimental(), |this| {
@@ -39,6 +41,37 @@ impl RuntimePage {
             .into_any_element()
     }
 
+    fn render_advanced_tools(&self, theme: &gpui_component::Theme) -> impl IntoElement {
+        setting_card("网络与内核", theme).child(
+            v_flex()
+                .p_4()
+                .gap_4()
+                .child(
+                    div().text_xs().text_color(theme.muted_foreground).child(
+                        "日常操作保留在首页；只有需要改变接管方式或排查内核时才进入这些工具。",
+                    ),
+                )
+                .child(advanced_tool_group(
+                    "代理接管",
+                    "操作系统代理与虚拟网卡",
+                    &[Page::SystemProxy, Page::Tun],
+                    theme,
+                ))
+                .child(advanced_tool_group(
+                    "配置处理",
+                    "DNS、嗅探、资源与 YAML 覆写",
+                    &[Page::Dns, Page::Sniffer, Page::Resources, Page::Override],
+                    theme,
+                ))
+                .child(advanced_tool_group(
+                    "诊断维护",
+                    "网络环境与 Mihomo 内核",
+                    &[Page::Network, Page::Mihomo],
+                    theme,
+                )),
+        )
+    }
+
     fn render_application_settings(
         &self,
         config: &RuntimeConfig,
@@ -47,7 +80,6 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         setting_card("应用与控制器", theme)
-            .child(info_row("界面技术", "Rust · GPUI · gpui-component", theme))
             .child(info_row(
                 "控制器",
                 &self.client.endpoint().controller,
@@ -278,6 +310,47 @@ impl RuntimePage {
         .detach();
         cx.notify();
     }
+}
+
+fn advanced_tool_group(
+    label: &'static str,
+    description: &'static str,
+    pages: &'static [Page],
+    theme: &gpui_component::Theme,
+) -> gpui::AnyElement {
+    h_flex()
+        .items_start()
+        .gap_4()
+        .child(
+            v_flex()
+                .w_32()
+                .flex_none()
+                .gap_1()
+                .child(div().text_sm().child(label))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(description),
+                ),
+        )
+        .child(
+            h_flex()
+                .flex_1()
+                .gap_2()
+                .flex_wrap()
+                .children(pages.iter().copied().map(advanced_tool_button)),
+        )
+        .into_any_element()
+}
+
+fn advanced_tool_button(page: Page) -> Button {
+    Button::new(page.route())
+        .icon(page.icon())
+        .label(page.label())
+        .small()
+        .outline()
+        .on_click(move |_, window, cx| dispatch_navigate(page, window, cx))
 }
 
 fn theme_setting(theme: &gpui_component::Theme) -> gpui::Div {

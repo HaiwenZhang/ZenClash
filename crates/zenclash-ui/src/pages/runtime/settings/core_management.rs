@@ -51,7 +51,7 @@ impl RuntimePage {
     ) -> impl IntoElement {
         let requested = self.preferences.core_kind;
         let recovered = requested != self.core_kind;
-        setting_card("核心舱 · Core bay", theme)
+        setting_card("运行内核", theme)
             .child(
                 h_flex()
                     .min_h(px(76.))

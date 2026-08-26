@@ -4,6 +4,7 @@ use zenclash_core::RemoteProfileRoute;
 
 /// Input and editor state owned by the profiles page.
 pub(crate) struct ProfileFormState {
+    pub(super) adding_subscription: bool,
     pub(super) subscription_name: Entity<InputState>,
     pub(super) subscription_url: Entity<InputState>,
     pub(super) subscription_user_agent: Entity<InputState>,
@@ -26,6 +27,7 @@ impl ProfileFormState {
         cx: &mut Context<'_, super::super::RuntimePage>,
     ) -> Self {
         Self {
+            adding_subscription: false,
             subscription_name: cx
                 .new(|cx| InputState::new(window, cx).placeholder("例如：机场主订阅")),
             subscription_url: cx.new(|cx| {

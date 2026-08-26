@@ -1,11 +1,11 @@
 use super::{
     apply_zen_theme, AppPreferences, AppearancePreference, Context, HideTrafficIcon,
-    NavigateConnections, NavigateDns, NavigateLogs, NavigateMihomo, NavigateNetwork,
+    NavigateConnections, NavigateDns, NavigateHome, NavigateLogs, NavigateMihomo, NavigateNetwork,
     NavigateOverride, NavigateProfiles, NavigateProxies, NavigateResources, NavigateRules,
-    NavigateSettings, NavigateSniffer, NavigateSubStore, NavigateSystemProxy, NavigateTraffic,
-    NavigateTun, OutboundMode, Page, Quit, SetDarkTheme, SetDirectMode, SetGlobalMode,
-    SetLightTheme, SetRuleMode, SetSystemTheme, ShowStatusMenu, ShowTrafficIcon, ThemeMode,
-    ToggleFloatingWindow, Window, ZenClashApp,
+    NavigateSettings, NavigateSniffer, NavigateSystemProxy, NavigateTraffic, NavigateTun,
+    OutboundMode, Page, Quit, SetDarkTheme, SetDirectMode, SetGlobalMode, SetLightTheme,
+    SetRuleMode, SetSystemTheme, ShowStatusMenu, ShowTrafficIcon, ThemeMode, ToggleFloatingWindow,
+    Window, ZenClashApp,
 };
 
 impl ZenClashApp {
@@ -24,6 +24,15 @@ impl ZenClashApp {
                 tracing::warn!(%error, path = %store.path().display(), "failed to update application preferences");
             }
         }
+    }
+
+    pub(super) fn on_navigate_home(
+        &mut self,
+        _: &NavigateHome,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate(Page::Home, cx);
     }
 
     pub(super) fn on_navigate_system_proxy(
@@ -132,15 +141,6 @@ impl ZenClashApp {
         cx: &mut Context<Self>,
     ) {
         self.navigate(Page::Override, cx);
-    }
-
-    pub(super) fn on_navigate_substore(
-        &mut self,
-        _: &NavigateSubStore,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.navigate(Page::SubStore, cx);
     }
 
     pub(super) fn on_navigate_network(

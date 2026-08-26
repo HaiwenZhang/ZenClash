@@ -3,8 +3,8 @@ mod editor;
 mod forms;
 
 use super::super::{
-    h_flex, metric, v_flex, FluentBuilder, IntoElement, ParentElement, RuntimeConfig, RuntimeData,
-    RuntimePage, Styled,
+    h_flex, metric, v_flex, Button, ButtonVariants, Disableable, FluentBuilder, IconName,
+    IntoElement, ParentElement, RuntimeConfig, RuntimeData, RuntimePage, Sizable, Styled,
 };
 
 impl RuntimePage {
@@ -27,24 +27,67 @@ impl RuntimePage {
             .gap_4()
             .child(
                 h_flex()
+                    .justify_between()
                     .gap_3()
                     .flex_wrap()
-                    .child(metric(
-                        "代理对象",
-                        proxy_count.to_string(),
-                        theme.primary,
-                        theme,
-                    ))
-                    .child(metric(
-                        "策略组",
-                        group_count.to_string(),
-                        theme.success,
-                        theme,
-                    ))
-                    .child(metric("规则", rule_count.to_string(), theme.warning, theme)),
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .flex_wrap()
+                            .child(metric(
+                                "代理对象",
+                                proxy_count.to_string(),
+                                theme.primary,
+                                theme,
+                            ))
+                            .child(metric(
+                                "策略组",
+                                group_count.to_string(),
+                                theme.success,
+                                theme,
+                            ))
+                            .child(metric("规则", rule_count.to_string(), theme.warning, theme)),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("toggle-add-subscription")
+                                    .icon(if self.profile_forms.adding_subscription {
+                                        IconName::Close
+                                    } else {
+                                        IconName::Plus
+                                    })
+                                    .label(if self.profile_forms.adding_subscription {
+                                        "收起订阅表单"
+                                    } else {
+                                        "添加在线订阅"
+                                    })
+                                    .small()
+                                    .outline()
+                                    .disabled(self.mutating)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.profile_forms.adding_subscription =
+                                            !this.profile_forms.adding_subscription;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("choose-profile")
+                                    .icon(IconName::FolderOpen)
+                                    .label("导入本地 YAML")
+                                    .small()
+                                    .primary()
+                                    .disabled(self.mutating)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.choose_profile(cx);
+                                    })),
+                            ),
+                    ),
             )
-            .child(self.render_subscription_form(theme, cx))
-            .child(self.render_local_import(theme, cx))
+            .when(self.profile_forms.adding_subscription, |this| {
+                this.child(self.render_subscription_form(theme, cx))
+            })
             .child(self.render_managed_profiles(theme, cx))
             .when(self.profile_forms.editing_profile_id.is_some(), |this| {
                 this.child(self.render_remote_profile_editor(theme, cx))

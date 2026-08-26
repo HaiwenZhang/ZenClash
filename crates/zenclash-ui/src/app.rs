@@ -1,29 +1,21 @@
-use std::{collections::VecDeque, path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::{
-    div, px, AnyElement, AnyWindowHandle, App, AppContext, ClipboardItem, Context, Entity,
-    Focusable, InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, SharedString,
-    Styled, Subscription, Window, WindowBounds, WindowKind, WindowOptions,
+    div, px, AnyWindowHandle, App, AppContext, ClipboardItem, Context, Entity, Focusable,
+    InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, SharedString, Styled,
+    Subscription, Window, WindowBounds, WindowKind, WindowOptions,
 };
-use gpui_component::{
-    badge::Badge,
-    button::{Button, ButtonGroup},
-    divider::Divider,
-    h_flex,
-    progress::Progress,
-    v_flex, ActiveTheme, Root, Selectable, Sizable, ThemeMode, TitleBar,
-};
+use gpui_component::{h_flex, v_flex, ActiveTheme, Root, ThemeMode, TitleBar};
 use zenclash_core::{
-    format_speed, AppPreferences, AppPreferencesStore, AppearancePreference, ControlledConfigStore,
-    CoreKind, LogMonitor, MihomoClient, MihomoLogLevel, MihomoProcess, SystemProxyController,
-    SystemProxyMode, TrafficHistoryStore, TrafficMonitor, TrafficSnapshot,
+    AppPreferences, AppPreferencesStore, AppearancePreference, ControlledConfigStore, CoreKind,
+    LogMonitor, MihomoClient, MihomoLogLevel, MihomoProcess, SystemProxyController,
+    SystemProxyMode, TrafficHistoryStore, TrafficMonitor,
 };
 
 mod actions;
 mod bootstrap;
 mod platform;
 mod profile_updates;
-mod signal;
 mod system_proxy;
 mod traffic_history;
 mod tray;
@@ -44,7 +36,7 @@ use crate::{
             TrayProxyGroup, TrayProxyNode,
         },
     },
-    design::{apply_zen_theme, throughput_activity_percent},
+    design::apply_zen_theme,
     pages::{
         proxies::ProxiesPage,
         runtime::{PreferencesRestored, ProfileActivated, RuntimePage, RuntimePageServices},
@@ -66,6 +58,7 @@ mod action_types {
         zenclash,
         [
             Quit,
+            NavigateHome,
             NavigateSystemProxy,
             NavigateTun,
             NavigateProfiles,
@@ -78,7 +71,6 @@ mod action_types {
             NavigateRules,
             NavigateResources,
             NavigateOverride,
-            NavigateSubStore,
             NavigateNetwork,
             NavigateTraffic,
             NavigateSettings,
@@ -105,10 +97,6 @@ pub struct ZenClashApp {
     core_kind: CoreKind,
     client: MihomoClient,
     traffic_monitor: Arc<TrafficMonitor>,
-    traffic: TrafficSnapshot,
-    proxy_listener_available: Option<bool>,
-    upload_samples: VecDeque<u64>,
-    download_samples: VecDeque<u64>,
     runtime: tokio::runtime::Handle,
     focus_handle: gpui::FocusHandle,
     proxies_page: Entity<ProxiesPage>,
@@ -193,7 +181,7 @@ impl ZenClashApp {
         let system_proxy_controller = SystemProxyController::default();
         let runtime_page = cx.new(|cx| {
             RuntimePage::new(
-                Page::Mihomo,
+                Page::Home,
                 RuntimePageServices {
                     core_kind,
                     client: client.clone(),
@@ -227,10 +215,6 @@ impl ZenClashApp {
             core_kind,
             client,
             traffic_monitor,
-            traffic: TrafficSnapshot::default(),
-            proxy_listener_available: None,
-            upload_samples: VecDeque::from(vec![0; 24]),
-            download_samples: VecDeque::from(vec![0; 24]),
             runtime,
             focus_handle,
             proxies_page,
@@ -339,16 +323,6 @@ impl ZenClashApp {
                             tracing::warn!(%error, "failed to update native traffic tray");
                         }
                     }
-                    if this.upload_samples.len() >= 24 {
-                        this.upload_samples.pop_front();
-                    }
-                    if this.download_samples.len() >= 24 {
-                        this.download_samples.pop_front();
-                    }
-                    this.upload_samples.push_back(snapshot.upload);
-                    this.download_samples.push_back(snapshot.download);
-                    this.traffic = snapshot;
-                    cx.notify();
                 })
                 .is_err()
             {
@@ -370,19 +344,9 @@ impl ZenClashApp {
             let task = runtime.spawn(async move { client.runtime_config().await });
             match task.await {
                 Ok(Ok(config)) => {
-                    let proxy_listener_available = config.system_proxy_port().is_some();
                     mode.synchronize(OutboundMode::from_api(&config.mode), generation);
                     if let Some(level) = MihomoLogLevel::from_api(&config.log_level) {
                         logs.set_level(level);
-                    }
-                    if this
-                        .update(cx, |this, cx| {
-                            this.proxy_listener_available = Some(proxy_listener_available);
-                            cx.notify();
-                        })
-                        .is_err()
-                    {
-                        break;
                     }
                 }
                 Ok(Err(error)) => {

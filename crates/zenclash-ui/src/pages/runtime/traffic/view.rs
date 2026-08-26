@@ -1,12 +1,22 @@
+use chrono::{DateTime, Local, Utc};
+use gpui::SharedString;
+use gpui_component::chart::AreaChart;
 use zenclash_core::{TrafficDimension, TrafficTrendPoint};
 
 use super::{dimension_label, TrafficRange};
 use crate::pages::runtime::{
-    div, empty_state, format_bytes, format_speed, h_flex, metric, normalized_fraction, px, v_flex,
-    Button, ButtonVariants, ConnectionsSnapshot, Context, Disableable, FluentBuilder, IconName,
+    div, empty_state, format_bytes, format_speed, h_flex, metric, px, v_flex, Button,
+    ButtonVariants, ConnectionsSnapshot, Context, Disableable, FluentBuilder, IconName,
     InteractiveElement, IntoElement, ParentElement, RuntimeData, RuntimePage, Selectable, Sizable,
     StatefulInteractiveElement, Styled,
 };
+
+#[derive(Clone, Debug, PartialEq)]
+struct HistoricalTrafficPoint {
+    label: SharedString,
+    upload: f64,
+    download: f64,
+}
 
 impl RuntimePage {
     pub(in crate::pages::runtime) fn render_traffic(
@@ -20,15 +30,6 @@ impl RuntimePage {
             _ => ConnectionsSnapshot::default(),
         };
         let history = &self.traffic_history;
-        let maximum = history
-            .overview
-            .trend
-            .iter()
-            .map(|point| point.upload.saturating_add(point.download))
-            .max()
-            .unwrap_or(1)
-            .max(1);
-
         v_flex()
             .gap_4()
             .child(
@@ -61,7 +62,7 @@ impl RuntimePage {
                     )),
             )
             .child(self.render_traffic_controls(theme, cx))
-            .child(self.render_traffic_signal(maximum, theme))
+            .child(self.render_traffic_signal(theme))
             .child(
                 h_flex()
                     .items_start()
@@ -73,12 +74,22 @@ impl RuntimePage {
             .into_any_element()
     }
 
-    fn render_traffic_signal(
-        &self,
-        maximum: u64,
-        theme: &gpui_component::Theme,
-    ) -> gpui::AnyElement {
+    fn render_traffic_signal(&self, theme: &gpui_component::Theme) -> gpui::AnyElement {
         let history = &self.traffic_history;
+        let points = historical_traffic_points(&history.overview.trend, history.range);
+        let has_points = !points.is_empty();
+        let tick_margin = (points.len() / 6).max(1);
+        let chart = AreaChart::new(points)
+            .x(|point| point.label.clone())
+            .y(|point| point.download)
+            .stroke(theme.chart_1)
+            .fill(theme.chart_1.opacity(0.18))
+            .natural()
+            .y(|point| point.upload)
+            .stroke(theme.chart_2)
+            .fill(theme.chart_2.opacity(0.14))
+            .natural()
+            .tick_margin(tick_margin);
         v_flex()
             .rounded(theme.radius)
             .border_1()
@@ -96,7 +107,7 @@ impl RuntimePage {
                                 div()
                                     .text_sm()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child("流量信号带"),
+                                    .child("历史流量趋势"),
                             )
                             .child(div().text_xs().text_color(theme.muted_foreground).child(
                                 format!(
@@ -111,11 +122,26 @@ impl RuntimePage {
                         h_flex()
                             .gap_3()
                             .text_xs()
-                            .child(h_flex().gap_1().text_color(theme.success).child("■ 上传"))
-                            .child(h_flex().gap_1().text_color(theme.primary).child("■ 下载")),
+                            .child(h_flex().gap_1().text_color(theme.chart_2).child("● 上传"))
+                            .child(h_flex().gap_1().text_color(theme.chart_1).child("● 下载")),
                     ),
             )
-            .child(render_trend(&history.overview.trend, maximum, theme))
+            .child(
+                div()
+                    .h(px(210.))
+                    .mx_4()
+                    .mb_4()
+                    .mt_3()
+                    .p_3()
+                    .rounded(theme.radius)
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.background.opacity(0.36))
+                    .when(has_points, |this| this.child(chart))
+                    .when(!has_points, |this| {
+                        this.child(empty_state("这个时间范围还没有流量样本", theme))
+                    }),
+            )
             .into_any_element()
     }
 
@@ -417,42 +443,60 @@ impl RuntimePage {
     }
 }
 
-fn render_trend(
+fn historical_traffic_points(
     points: &[TrafficTrendPoint],
-    maximum: u64,
-    theme: &gpui_component::Theme,
-) -> gpui::AnyElement {
-    if points.is_empty() {
-        return empty_state("这个时间范围还没有流量样本", theme).into_any_element();
+    range: TrafficRange,
+) -> Vec<HistoricalTrafficPoint> {
+    points
+        .iter()
+        .map(|point| HistoricalTrafficPoint {
+            label: format_trend_timestamp(point.timestamp_ms, range).into(),
+            upload: chart_value(point.upload),
+            download: chart_value(point.download),
+        })
+        .collect()
+}
+
+fn format_trend_timestamp(timestamp_ms: u64, range: TrafficRange) -> String {
+    let timestamp_ms = i64::try_from(timestamp_ms).unwrap_or(i64::MAX);
+    DateTime::<Utc>::from_timestamp_millis(timestamp_ms)
+        .map(|timestamp| timestamp.with_timezone(&Local))
+        .map_or_else(
+            || "—".to_owned(),
+            |timestamp| match range {
+                TrafficRange::Hour | TrafficRange::Day => timestamp.format("%H:%M").to_string(),
+                TrafficRange::Week | TrafficRange::Month => timestamp.format("%m-%d").to_string(),
+            },
+        )
+}
+
+fn chart_value(bytes: u64) -> f64 {
+    f64::from(u32::try_from(bytes).unwrap_or(u32::MAX))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_chart_keeps_upload_and_download_as_distinct_series() {
+        let points = historical_traffic_points(
+            &[TrafficTrendPoint {
+                timestamp_ms: 1_700_000_000_000,
+                upload: 1_024,
+                download: 8_192,
+            }],
+            TrafficRange::Hour,
+        );
+
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].upload, 1_024.0);
+        assert_eq!(points[0].download, 8_192.0);
+        assert!(!points[0].label.is_empty());
     }
-    h_flex()
-        .h(px(190.))
-        .items_end()
-        .gap_1()
-        .p_4()
-        .children(points.iter().enumerate().map(|(index, point)| {
-            let upload_height = 154.0 * normalized_fraction(point.upload, maximum);
-            let download_height = 154.0 * normalized_fraction(point.download, maximum);
-            v_flex()
-                .id(("history-signal", index))
-                .flex_1()
-                .h_full()
-                .justify_end()
-                .gap_0()
-                .child(
-                    div()
-                        .w_full()
-                        .h(px(download_height.max(1.)))
-                        .rounded_t_sm()
-                        .bg(theme.primary.opacity(0.78)),
-                )
-                .child(
-                    div()
-                        .w_full()
-                        .h(px(upload_height.max(1.)))
-                        .rounded_b_sm()
-                        .bg(theme.success.opacity(0.78)),
-                )
-        }))
-        .into_any_element()
+
+    #[test]
+    fn history_chart_caps_values_that_exceed_chart_numeric_support() {
+        assert_eq!(chart_value(u64::MAX), f64::from(u32::MAX));
+    }
 }

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use gpui::{
     div, prelude::FluentBuilder, px, App, Context, Focusable, InteractiveElement, IntoElement,
-    ParentElement, Render, StatefulInteractiveElement, Styled, Window,
+    ParentElement, Render, Styled, Window,
 };
 use gpui_component::{
     button::Button, h_flex, progress::Progress, scroll::ScrollableElement, v_flex, ActiveTheme,
@@ -112,9 +112,9 @@ impl Render for ProxiesPage {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scrollbar()
-                    .gap_5()
-                    .px_6()
-                    .py_5()
+                    .gap_4()
+                    .px_5()
+                    .py_4()
                     .when_some(error, |this, error| {
                         this.child(
                             h_flex()

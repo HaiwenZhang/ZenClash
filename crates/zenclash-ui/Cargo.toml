@@ -11,6 +11,7 @@ name = "zenclash"
 path = "src/main.rs"
 
 [dependencies]
+chrono.workspace = true
 futures-util.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true

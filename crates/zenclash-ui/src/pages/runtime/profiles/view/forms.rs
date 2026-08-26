@@ -148,41 +148,6 @@ impl RuntimePage {
             )
     }
 
-    pub(super) fn render_local_import(
-        &self,
-        theme: &gpui_component::Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        setting_card("本地 Clash YAML", theme).child(
-            h_flex()
-                .p_4()
-                .gap_4()
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .gap_1()
-                        .child(
-                            div()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child("导入到 ZenClash 配置仓库"),
-                        )
-                        .child(
-                            div().text_xs().text_color(theme.muted_foreground).child(
-                                "支持 .yaml / .yml Clash 与 Mihomo 配置；原文件不会被修改。",
-                            ),
-                        ),
-                )
-                .child(
-                    Button::new("choose-profile")
-                        .icon(IconName::FolderOpen)
-                        .label("选择本地 YAML")
-                        .outline()
-                        .disabled(self.mutating)
-                        .on_click(cx.listener(|this, _, _, cx| this.choose_profile(cx))),
-                ),
-        )
-    }
-
     pub(super) fn render_current_profile(
         &self,
         config: &RuntimeConfig,

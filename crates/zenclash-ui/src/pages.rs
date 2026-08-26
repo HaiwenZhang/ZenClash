@@ -8,6 +8,9 @@ pub mod runtime;
 /// Stable identity of every destination in the `ZenClash` navigation model.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum Page {
+    /// Compact operational summary and primary controls.
+    #[default]
+    Home,
     /// Operating-system HTTP and HTTPS proxy control.
     SystemProxy,
     /// Runtime-core TUN virtual-interface configuration.
@@ -15,7 +18,6 @@ pub enum Page {
     /// Local profiles and online subscription management.
     Profiles,
     /// Proxy groups, nodes, selection, and delay testing.
-    #[default]
     Proxies,
     /// Managed runtime process and controller information.
     Mihomo,
@@ -33,8 +35,6 @@ pub enum Page {
     Resources,
     /// Ordered YAML override chain.
     Override,
-    /// External Sub-Store service catalog.
-    SubStore,
     /// Operating-system network information.
     Network,
     /// Live and historical traffic presentation.
@@ -44,45 +44,13 @@ pub enum Page {
 }
 
 impl Page {
-    /// Pages grouped under the sidebar overview section.
-    pub const OVERVIEW: [Self; 4] = [
+    /// Everyday destinations kept visible in the compact sidebar.
+    pub const PRIMARY: [Self; 6] = [
         Self::Proxies,
-        Self::Connections,
-        Self::Traffic,
-        Self::Network,
-    ];
-
-    /// Pages grouped under the sidebar routing section.
-    pub const ROUTING: [Self; 4] = [Self::SystemProxy, Self::Tun, Self::Dns, Self::Sniffer];
-
-    /// Pages grouped under the sidebar configuration section.
-    pub const CONFIGURATION: [Self; 5] = [
         Self::Profiles,
-        Self::Rules,
-        Self::Resources,
-        Self::Override,
-        Self::SubStore,
-    ];
-
-    /// Pages grouped under the sidebar system section.
-    pub const SYSTEM: [Self; 2] = [Self::Mihomo, Self::Logs];
-
-    /// Ordered pages rendered as primary sidebar cards.
-    pub const SIDEBAR_CARDS: [Self; 15] = [
-        Self::Proxies,
         Self::Connections,
-        Self::Traffic,
-        Self::Network,
-        Self::SystemProxy,
-        Self::Tun,
-        Self::Dns,
-        Self::Sniffer,
-        Self::Profiles,
         Self::Rules,
-        Self::Resources,
-        Self::Override,
-        Self::SubStore,
-        Self::Mihomo,
+        Self::Traffic,
         Self::Logs,
     ];
 
@@ -90,6 +58,7 @@ impl Page {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Home => "首页",
             Self::SystemProxy => "系统代理",
             Self::Tun => "虚拟网卡",
             Self::Profiles => "订阅管理",
@@ -102,24 +71,9 @@ impl Page {
             Self::Rules => "规则",
             Self::Resources => "外部资源",
             Self::Override => "覆写",
-            Self::SubStore => "Sub-Store",
             Self::Network => "网络信息",
             Self::Traffic => "用量",
             Self::Settings => "应用设置",
-        }
-    }
-
-    /// Returns the uppercase sidebar section label.
-    #[must_use]
-    pub const fn section_label(self) -> &'static str {
-        match self {
-            Self::Proxies | Self::Connections | Self::Traffic | Self::Network => "OVERVIEW",
-            Self::SystemProxy | Self::Tun | Self::Dns | Self::Sniffer => "ROUTING",
-            Self::Profiles | Self::Rules | Self::Resources | Self::Override | Self::SubStore => {
-                "CONFIGURATION"
-            }
-            Self::Mihomo | Self::Logs => "SYSTEM",
-            Self::Settings => "PREFERENCES",
         }
     }
 
@@ -127,6 +81,7 @@ impl Page {
     #[must_use]
     pub const fn route(self) -> &'static str {
         match self {
+            Self::Home => "home",
             Self::SystemProxy => "sysproxy",
             Self::Tun => "tun",
             Self::Profiles => "profiles",
@@ -139,7 +94,6 @@ impl Page {
             Self::Rules => "rules",
             Self::Resources => "resources",
             Self::Override => "override",
-            Self::SubStore => "substore",
             Self::Network => "network",
             Self::Traffic => "traffic",
             Self::Settings => "settings",
@@ -150,6 +104,7 @@ impl Page {
     #[must_use]
     pub const fn icon(self) -> IconName {
         match self {
+            Self::Home => IconName::LayoutDashboard,
             Self::SystemProxy => IconName::Globe,
             Self::Tun => IconName::Map,
             Self::Profiles => IconName::FolderOpen,
@@ -162,7 +117,6 @@ impl Page {
             Self::Rules => IconName::Menu,
             Self::Resources => IconName::Inbox,
             Self::Override => IconName::Replace,
-            Self::SubStore => IconName::Folder,
             Self::Network => IconName::Inspector,
             Self::Traffic => IconName::ChartPie,
             Self::Settings => IconName::Settings2,
@@ -173,6 +127,7 @@ impl Page {
     #[must_use]
     pub const fn subtitle(self) -> &'static str {
         match self {
+            Self::Home => "一眼确认当前订阅、节点、代理模式与网络活动。",
             Self::SystemProxy => "配置操作系统 HTTP/HTTPS 代理与绕过地址。",
             Self::Tun => "管理当前内核的 TUN 虚拟网卡、路由与权限。",
             Self::Profiles => "添加、更新、编辑并切换本地或远程订阅。",
@@ -185,7 +140,6 @@ impl Page {
             Self::Rules => "浏览当前运行时规则和命中策略。",
             Self::Resources => "更新代理提供者、规则提供者与 GeoData。",
             Self::Override => "按顺序管理托管 YAML 覆写并预览最终配置。",
-            Self::SubStore => "管理 Sub-Store 服务与订阅处理页面。",
             Self::Network => "查看网络接口、出口地址和连通性。",
             Self::Traffic => "按主机、来源、出站和进程分析历史用量。",
             Self::Settings => "配置运行内核、主题、托盘、流量历史与备份。",

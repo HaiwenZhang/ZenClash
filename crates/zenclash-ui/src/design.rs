@@ -10,6 +10,11 @@ pub const UPLINK_AMBER: u32 = 0x00F2_B84B;
 /// Coral accent used for errors and destructive states.
 pub const FAULT_CORAL: u32 = 0x00FF_6B64;
 
+const DARK_PANEL: u32 = 0x000C_1C24;
+const DARK_RAISED: u32 = 0x0010_2832;
+const DARK_BORDER: u32 = 0x001B_3942;
+const DARK_FOREGROUND: u32 = 0x00DC_E9E8;
+const DARK_MUTED_FOREGROUND: u32 = 0x0082_9B9D;
 const LIGHT_CANVAS: u32 = 0x00F4_F7FA;
 const LIGHT_PANEL: u32 = 0x00FF_FFFF;
 const LIGHT_RAISED: u32 = 0x00E9_EFF5;
@@ -46,11 +51,15 @@ pub fn apply_zen_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut Ap
     let theme = Theme::global_mut(cx);
 
     let background = color(if dark { DEEP_INK } else { LIGHT_CANVAS });
-    let panel = color(if dark { 0x000C_1C24 } else { LIGHT_PANEL });
-    let raised = color(if dark { 0x0010_2832 } else { LIGHT_RAISED });
-    let border = color(if dark { 0x001B_3942 } else { LIGHT_BORDER });
-    let foreground = color(if dark { 0x00DC_E9E8 } else { LIGHT_INK });
-    let muted_foreground = color(if dark { 0x0082_9B9D } else { LIGHT_MUTED_INK });
+    let panel = color(if dark { DARK_PANEL } else { LIGHT_PANEL });
+    let raised = color(if dark { DARK_RAISED } else { LIGHT_RAISED });
+    let border = color(if dark { DARK_BORDER } else { LIGHT_BORDER });
+    let foreground = color(if dark { DARK_FOREGROUND } else { LIGHT_INK });
+    let muted_foreground = color(if dark {
+        DARK_MUTED_FOREGROUND
+    } else {
+        LIGHT_MUTED_INK
+    });
     let signal = color(if dark { SIGNAL_CYAN } else { LIGHT_SIGNAL });
     let signal_foreground = color(if dark { 0x0003_110F } else { LIGHT_PANEL });
     let amber = color(if dark { UPLINK_AMBER } else { LIGHT_UPLINK });
@@ -180,8 +189,8 @@ fn relative_luminance(rgb: u32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        contrast_ratio, throughput_activity_percent, LIGHT_CANVAS, LIGHT_INK, LIGHT_MUTED_INK,
-        LIGHT_SIGNAL,
+        contrast_ratio, throughput_activity_percent, DARK_FOREGROUND, DARK_MUTED_FOREGROUND,
+        DEEP_INK, LIGHT_CANVAS, LIGHT_INK, LIGHT_MUTED_INK, LIGHT_SIGNAL, SIGNAL_CYAN,
     };
 
     #[test]
@@ -204,5 +213,20 @@ mod tests {
     #[test]
     fn light_signal_text_meets_wcag_aa_contrast() {
         assert!(contrast_ratio(LIGHT_SIGNAL, LIGHT_CANVAS) >= 4.5);
+    }
+
+    #[test]
+    fn dark_body_text_exceeds_wcag_aaa_contrast() {
+        assert!(contrast_ratio(DARK_FOREGROUND, DEEP_INK) >= 7.0);
+    }
+
+    #[test]
+    fn dark_muted_text_meets_wcag_aa_contrast() {
+        assert!(contrast_ratio(DARK_MUTED_FOREGROUND, DEEP_INK) >= 4.5);
+    }
+
+    #[test]
+    fn dark_signal_text_meets_wcag_aa_contrast() {
+        assert!(contrast_ratio(SIGNAL_CYAN, DEEP_INK) >= 4.5);
     }
 }

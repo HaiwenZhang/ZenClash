@@ -1,7 +1,8 @@
+use gpui_component::{button::ButtonVariants, Selectable};
+
 use super::{
     div, h_flex, px, test_key, v_flex, Button, Context, Disableable, FluentBuilder, Icon, IconName,
-    InteractiveElement, IntoElement, ParentElement, Progress, ProxiesPage, ProxyGroup, ProxyNode,
-    Sizable, StatefulInteractiveElement, Styled,
+    IntoElement, ParentElement, Progress, ProxiesPage, ProxyGroup, ProxyNode, Sizable, Styled,
 };
 
 impl ProxiesPage {
@@ -13,8 +14,8 @@ impl ProxiesPage {
         let loading = self.loading;
         let refreshing_disabled = self.switching.is_some();
         h_flex()
-            .h(px(86.))
-            .px_6()
+            .h_16()
+            .px_5()
             .items_center()
             .justify_between()
             .border_b_1()
@@ -23,36 +24,18 @@ impl ProxiesPage {
                 h_flex()
                     .gap_3()
                     .child(
-                        div()
-                            .size(px(38.))
-                            .rounded(theme.radius)
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.secondary)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                Icon::new(IconName::GalleryVerticalEnd)
-                                    .size_5()
-                                    .text_color(theme.primary),
-                            ),
+                        Icon::new(IconName::GalleryVerticalEnd)
+                            .size_5()
+                            .text_color(theme.primary),
                     )
                     .child(
                         v_flex()
                             .gap_0()
                             .child(
                                 div()
-                                    .text_size(px(10.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(theme.primary)
-                                    .child("OVERVIEW / LIVE ROUTING"),
-                            )
-                            .child(
-                                div()
-                                    .text_xl()
+                                    .text_lg()
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .child("代理与策略"),
+                                    .child("代理组"),
                             )
                             .child(
                                 div()
@@ -67,7 +50,7 @@ impl ProxiesPage {
                     .icon(IconName::Redo2)
                     .label(if loading { "读取中" } else { "刷新状态" })
                     .small()
-                    .outline()
+                    .ghost()
                     .loading(loading)
                     .disabled(refreshing_disabled)
                     .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
@@ -98,22 +81,28 @@ impl ProxiesPage {
             .overflow_hidden()
             .child(
                 h_flex()
-                    .id(("proxy-group", group_index))
                     .min_h(px(64.))
                     .px_4()
                     .items_center()
                     .justify_between()
-                    .cursor_pointer()
-                    .hover(|this| this.bg(theme.muted.opacity(0.55)))
                     .child(
                         h_flex()
                             .items_center()
                             .gap_3()
-                            .child(Icon::new(if expanded {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            }))
+                            .child(
+                                div()
+                                    .size_8()
+                                    .rounded(theme.radius)
+                                    .bg(theme.muted)
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        Icon::new(IconName::GalleryVerticalEnd)
+                                            .size_4()
+                                            .text_color(theme.primary),
+                                    ),
+                            )
                             .child(
                                 v_flex()
                                     .gap_0()
@@ -149,24 +138,39 @@ impl ProxiesPage {
                             ),
                     )
                     .child(
-                        Button::new(("test-group", group_index))
-                            .icon(IconName::Redo2)
-                            .label(if testing_group {
-                                "测速中"
-                            } else {
-                                "全部测速"
-                            })
-                            .small()
-                            .outline()
-                            .loading(testing_group)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.test_group(&group_for_test, cx);
-                            })),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_group(&group_name, cx);
-                    })),
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new(("test-group", group_index))
+                                    .icon(IconName::Redo2)
+                                    .label(if testing_group {
+                                        "测速中"
+                                    } else {
+                                        "全部测速"
+                                    })
+                                    .small()
+                                    .ghost()
+                                    .loading(testing_group)
+                                    .disabled(testing_group)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.test_group(&group_for_test, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new(("toggle-group", group_index))
+                                    .icon(if expanded {
+                                        IconName::ChevronDown
+                                    } else {
+                                        IconName::ChevronRight
+                                    })
+                                    .label(if expanded { "收起" } else { "展开" })
+                                    .small()
+                                    .outline()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.toggle_group(&group_name, cx);
+                                    })),
+                            ),
+                    ),
             )
             .when(expanded, |this| {
                 this.child(
@@ -183,10 +187,6 @@ impl ProxiesPage {
             })
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "one proxy card is a cohesive declarative GPUI element tree"
-    )]
     pub(super) fn render_proxy(
         &self,
         group_index: usize,
@@ -235,13 +235,9 @@ impl ProxiesPage {
         };
 
         v_flex()
-            .id((
-                gpui::ElementId::from(("proxy", group_index)),
-                proxy_index.to_string(),
-            ))
             .relative()
             .w(px(236.))
-            .min_h(px(98.))
+            .min_h(px(126.))
             .gap_2()
             .p_3()
             .rounded(theme.radius_lg)
@@ -256,8 +252,6 @@ impl ProxiesPage {
             } else {
                 theme.background
             })
-            .cursor_pointer()
-            .hover(|this| this.bg(theme.muted))
             .when(selected, |this| {
                 this.child(
                     div()
@@ -293,30 +287,7 @@ impl ProxiesPage {
                                 proxy.name.clone()
                             }),
                     )
-                    .child(
-                        div()
-                            .id((
-                                gpui::ElementId::from(("proxy-delay", group_index)),
-                                proxy_index.to_string(),
-                            ))
-                            .px_2()
-                            .py_1()
-                            .rounded(theme.radius)
-                            .text_xs()
-                            .text_color(delay_color)
-                            .hover(|this| this.bg(theme.muted))
-                            .child(delay_text)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.test_proxy(
-                                    delay_group.clone(),
-                                    delay_proxy.clone(),
-                                    test_url.clone(),
-                                    delay_provider.clone(),
-                                    cx,
-                                );
-                            })),
-                    ),
+                    .child(div().text_xs().text_color(delay_color).child(delay_text)),
             )
             .child(
                 h_flex()
@@ -332,9 +303,58 @@ impl ProxiesPage {
                     }),
             )
             .child(Progress::new().h(px(3.)).bg(delay_color).value(health))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.change_proxy(group_name.clone(), proxy_name.clone(), cx);
-            }))
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_1()
+                    .child(
+                        Button::new((
+                            gpui::ElementId::from(("test-proxy", group_index)),
+                            proxy_index.to_string(),
+                        ))
+                        .icon(IconName::Redo2)
+                        .label(if testing { "测速中" } else { "测速" })
+                        .small()
+                        .ghost()
+                        .loading(testing)
+                        .disabled(testing)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.test_proxy(
+                                delay_group.clone(),
+                                delay_proxy.clone(),
+                                test_url.clone(),
+                                delay_provider.clone(),
+                                cx,
+                            );
+                        })),
+                    )
+                    .child(
+                        Button::new((
+                            gpui::ElementId::from(("select-proxy", group_index)),
+                            proxy_index.to_string(),
+                        ))
+                        .icon(if selected {
+                            IconName::Check
+                        } else {
+                            IconName::ArrowRight
+                        })
+                        .label(if selected {
+                            "当前节点"
+                        } else if switching {
+                            "切换中"
+                        } else {
+                            "选择"
+                        })
+                        .small()
+                        .outline()
+                        .selected(selected)
+                        .loading(switching)
+                        .disabled(selected || self.switching.is_some())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.change_proxy(group_name.clone(), proxy_name.clone(), cx);
+                        })),
+                    ),
+            )
             .into_any_element()
     }
 }

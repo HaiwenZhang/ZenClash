@@ -27,14 +27,19 @@ impl SystemProxyForm {
 }
 
 impl RuntimePage {
-    pub(super) fn toggle_system_proxy(&mut self, enabled: bool, cx: &mut Context<Self>) {
+    pub(in crate::pages::runtime) fn toggle_system_proxy(
+        &mut self,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
         let port = self.system_proxy_port();
         if enabled && port == 0 {
             self.error = Some(self.unavailable_system_proxy_message());
             cx.notify();
             return;
         }
-        let Some(token) = self.begin_mutation(Page::SystemProxy) else {
+        let page = self.page;
+        let Some(token) = self.begin_mutation(page) else {
             return;
         };
         let client = self.client.clone();
@@ -46,7 +51,7 @@ impl RuntimePage {
             })
             .await
             .map_err(|error| format!("系统代理后台任务异常结束：{error}"))??;
-            load_page(client, Page::SystemProxy).await
+            load_page(client, page).await
         });
         cx.spawn(async move |this, cx| {
             let result = task
@@ -257,6 +262,9 @@ impl RuntimePage {
         matches!(
             &self.data,
             RuntimeData::SystemProxy { status, .. } if status.active()
+        ) || matches!(
+            &self.data,
+            RuntimeData::Dashboard { system_proxy, .. } if system_proxy.active()
         )
     }
 }
