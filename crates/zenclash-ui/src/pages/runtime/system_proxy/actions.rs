@@ -30,7 +30,7 @@ impl RuntimePage {
     pub(super) fn toggle_system_proxy(&mut self, enabled: bool, cx: &mut Context<Self>) {
         let port = self.system_proxy_port();
         if enabled && port == 0 {
-            self.error = Some("当前内核没有可用的 HTTP/Mixed 监听端口，无法启用系统代理".into());
+            self.error = Some(self.unavailable_system_proxy_message());
             cx.notify();
             return;
         }
@@ -237,9 +237,20 @@ impl RuntimePage {
 
     fn system_proxy_port(&self) -> u16 {
         self.config()
-            .map(|config| [config.mixed_port, config.port, config.socks_port])
-            .and_then(|ports| ports.into_iter().find(|port| *port > 0))
+            .and_then(zenclash_core::RuntimeConfig::system_proxy_port)
             .unwrap_or_default()
+    }
+
+    fn unavailable_system_proxy_message(&self) -> String {
+        let listener_error = self.process.as_ref().and_then(|process| {
+            process.snapshot().logs.into_iter().rev().find(|line| {
+                let normalized = line.to_ascii_lowercase();
+                normalized.contains("start http server error")
+                    || normalized.contains("start mixed server error")
+                    || normalized.contains("address already in use")
+            })
+        });
+        unavailable_message(listener_error.as_deref())
     }
 
     fn system_proxy_active(&self) -> bool {
@@ -247,6 +258,18 @@ impl RuntimePage {
             &self.data,
             RuntimeData::SystemProxy { status, .. } if status.active()
         )
+    }
+}
+
+fn unavailable_message(listener_error: Option<&str>) -> String {
+    match listener_error {
+        Some(error) if error.to_ascii_lowercase().contains("address already in use") => format!(
+            "当前内核的 HTTP/Mixed 监听端口被其他程序占用，无法启用系统代理。请退出其他代理客户端（例如 Clash Party）或修改 ZenClash 监听端口后重试。内核日志：{error}"
+        ),
+        Some(error) => format!(
+            "当前内核没有成功启动 HTTP/Mixed 监听端口，无法启用系统代理。内核日志：{error}"
+        ),
+        None => "当前内核没有可用的 HTTP/Mixed 监听端口，无法启用系统代理。SOCKS-only 端口不能用于系统 HTTP/HTTPS 代理；请在核心设置中启用 Mixed 或 HTTP 端口。".into(),
     }
 }
 
@@ -306,5 +329,26 @@ fn rollback_error(
         Err(rollback) => Err(format!(
             "{context}：{error}；恢复原系统代理也失败：{rollback}"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unavailable_message;
+
+    #[test]
+    fn unavailable_message_explains_an_occupied_listener() {
+        let message = unavailable_message(Some(
+            "Start HTTP server error: listen tcp 127.0.0.1:7890: bind: address already in use",
+        ));
+
+        assert!(message.contains("Clash Party") && message.contains("7890"));
+    }
+
+    #[test]
+    fn unavailable_message_rejects_socks_only_system_proxying() {
+        let message = unavailable_message(None);
+
+        assert!(message.contains("SOCKS-only") && message.contains("Mixed 或 HTTP"));
     }
 }

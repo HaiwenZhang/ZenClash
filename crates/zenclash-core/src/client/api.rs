@@ -64,11 +64,38 @@ impl MihomoClient {
         test_url: Option<&str>,
         timeout_ms: u64,
     ) -> MihomoResult<DelayResult> {
+        self.proxy_delay_with_provider(proxy, test_url, timeout_ms, None)
+            .await
+    }
+
+    /// Measures one proxy's delay, using Mihomo's provider health-check API
+    /// when the node originated from a proxy provider.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty proxy/provider names, zero timeouts and non-HTTP(S) test
+    /// URLs, and propagates transport, API-status or response-decoding errors.
+    pub async fn proxy_delay_with_provider(
+        &self,
+        proxy: &str,
+        test_url: Option<&str>,
+        timeout_ms: u64,
+        provider: Option<&str>,
+    ) -> MihomoResult<DelayResult> {
         require_non_empty(proxy, "代理节点名称")?;
         if timeout_ms == 0 {
             return Err(MihomoError::InvalidInput("延迟测试超时必须大于 0".into()));
         }
-        let path = format!("/proxies/{}/delay", encode_path_segment(proxy));
+        let path = if let Some(provider) = provider {
+            require_non_empty(provider, "代理提供者名称")?;
+            format!(
+                "/providers/proxies/{}/{}/healthcheck",
+                encode_path_segment(provider),
+                encode_path_segment(proxy)
+            )
+        } else {
+            format!("/proxies/{}/delay", encode_path_segment(proxy))
+        };
         let timeout = timeout_ms.to_string();
         let url = validated_test_url(test_url)?;
         let response = self

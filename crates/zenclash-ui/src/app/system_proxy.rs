@@ -31,9 +31,8 @@ impl ZenClashApp {
             if !status.auto_enabled {
                 return Ok::<bool, String>(false);
             }
-            let port = [config.mixed_port, config.port, config.socks_port]
-                .into_iter()
-                .find(|port| *port > 0)
+            let port = config
+                .system_proxy_port()
                 .ok_or_else(|| "PAC 恢复失败：当前内核没有可用代理端口".to_owned())?;
             tokio::task::spawn_blocking(move || {
                 controller
@@ -66,17 +65,25 @@ impl ZenClashApp {
         self.quit_state = QuitState::InProgress;
         let controller = self.system_proxy_controller.clone();
         let owns_pac = controller.pac_status().is_some();
+        let process = self.mihomo_process.clone();
         let task = self.runtime.spawn(async move {
-            if !owns_pac {
-                return Ok(());
+            if owns_pac {
+                tokio::task::spawn_blocking(move || {
+                    controller
+                        .set_enabled(false, SystemProxyMode::Pac, "", 0, &[], "")
+                        .map_err(|error| error.to_string())
+                })
+                .await
+                .map_err(|error| format!("退出前关闭 PAC 任务异常结束：{error}"))??;
             }
-            tokio::task::spawn_blocking(move || {
-                controller
-                    .set_enabled(false, SystemProxyMode::Pac, "", 0, &[], "")
-                    .map_err(|error| error.to_string())
-            })
-            .await
-            .map_err(|error| format!("退出前关闭 PAC 任务异常结束：{error}"))?
+            if let Some(process) = process {
+                tokio::task::spawn_blocking(move || {
+                    process.stop().map_err(|error| error.to_string())
+                })
+                .await
+                .map_err(|error| format!("退出前停止内核任务异常结束：{error}"))??;
+            }
+            Ok::<(), String>(())
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;

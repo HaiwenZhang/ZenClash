@@ -204,6 +204,7 @@ impl ProxiesPage {
         let delay_group = group.name.clone();
         let delay_proxy = proxy.name.clone();
         let test_url = group.test_url.clone();
+        let delay_provider = proxy.provider_name.clone();
         let delay = proxy.latest_delay();
         let delay_color = match delay {
             Some(0) => theme.danger,
@@ -307,6 +308,7 @@ impl ProxiesPage {
                                     delay_group.clone(),
                                     delay_proxy.clone(),
                                     test_url.clone(),
+                                    delay_provider.clone(),
                                     cx,
                                 );
                             })),

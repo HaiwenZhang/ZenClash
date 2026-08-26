@@ -36,6 +36,7 @@ async fn drives_the_supplied_profile_through_a_real_mihomo_process() {
         .configure_persistence(&persistent_log_path, true, 1)
         .expect("configure production persistent log writer");
 
+    verify_real_direct_proxy_delay(&client).await;
     verify_persistent_log_stream(
         &client,
         &persistent_logs,
@@ -50,6 +51,19 @@ async fn drives_the_supplied_profile_through_a_real_mihomo_process() {
     verify_managed_restart(&process, &client, &inputs.profile, &inputs.home).await;
 
     process.stop().expect("stop real Mihomo");
+}
+
+async fn verify_real_direct_proxy_delay(client: &MihomoClient) {
+    let result = client
+        .proxy_delay(
+            "DIRECT",
+            Some("https://www.gstatic.com/generate_204"),
+            5_000,
+        )
+        .await
+        .expect("measure DIRECT through the real Mihomo delay API");
+
+    assert!(result.delay > 0, "real DIRECT delay must be positive");
 }
 
 async fn verify_persistent_log_stream(

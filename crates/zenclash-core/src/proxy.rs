@@ -110,6 +110,39 @@ pub struct ProxyCatalog {
     pub proxy_count: usize,
 }
 
+impl ProxyCatalog {
+    /// Iterates over the strategy groups relevant to one outbound mode.
+    ///
+    /// Rule mode exposes profile-defined groups but not Mihomo's synthetic
+    /// `GLOBAL` selector. Global mode exposes only that selector, while direct
+    /// mode has no selectable proxy group.
+    pub fn groups_for_mode<'a>(
+        &'a self,
+        mode: &'a str,
+    ) -> impl Iterator<Item = &'a ProxyGroup> + 'a {
+        self.groups
+            .iter()
+            .filter(move |group| group_visible_in_mode(&group.name, mode))
+    }
+
+    /// Consumes the catalog and yields the strategy groups for one mode.
+    pub fn into_groups_for_mode(self, mode: &str) -> impl Iterator<Item = ProxyGroup> + '_ {
+        self.groups
+            .into_iter()
+            .filter(move |group| group_visible_in_mode(&group.name, mode))
+    }
+}
+
+fn group_visible_in_mode(group: &str, mode: &str) -> bool {
+    if mode.eq_ignore_ascii_case("direct") {
+        false
+    } else if mode.eq_ignore_ascii_case("global") {
+        group.eq_ignore_ascii_case("GLOBAL")
+    } else {
+        !group.eq_ignore_ascii_case("GLOBAL")
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct RawProxyCatalog {
     #[serde(default)]
@@ -204,7 +237,12 @@ impl From<RawProxyCatalog> for ProxyCatalog {
                 kind: proxy.kind.clone(),
                 now: proxy.now.clone(),
                 all,
-                test_url: proxy.test_url.clone(),
+                test_url: proxy
+                    .test_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+                    .map(str::to_owned),
                 hidden: proxy.hidden,
             });
         }
@@ -243,5 +281,61 @@ mod tests {
             catalog.groups[0].all[1].capabilities().collect::<Vec<_>>(),
             vec!["UDP"]
         );
+    }
+
+    #[test]
+    fn empty_group_test_url_uses_the_client_default() {
+        let raw: RawProxyCatalog = serde_json::from_str(
+            r#"{"proxies":{"DIRECT":{"name":"DIRECT","type":"Direct"},"Proxy":{"name":"Proxy","type":"Selector","now":"DIRECT","all":["DIRECT"],"testUrl":""}}}"#,
+        )
+        .unwrap();
+
+        let catalog = ProxyCatalog::from(raw);
+
+        assert_eq!(catalog.groups[0].test_url, None);
+    }
+
+    #[test]
+    fn rule_mode_excludes_the_synthetic_global_group() {
+        let catalog = mode_catalog();
+
+        let names = catalog
+            .groups_for_mode("rule")
+            .map(|group| group.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["Proxy", "Streaming"]);
+    }
+
+    #[test]
+    fn global_mode_exposes_only_the_synthetic_global_group() {
+        let catalog = mode_catalog();
+
+        let names = catalog
+            .groups_for_mode("GLOBAL")
+            .map(|group| group.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["GLOBAL"]);
+    }
+
+    #[test]
+    fn direct_mode_has_no_selectable_proxy_groups() {
+        let catalog = mode_catalog();
+
+        assert_eq!(catalog.groups_for_mode("direct").count(), 0);
+    }
+
+    fn mode_catalog() -> ProxyCatalog {
+        ProxyCatalog {
+            groups: ["GLOBAL", "Proxy", "Streaming"]
+                .into_iter()
+                .map(|name| ProxyGroup {
+                    name: name.into(),
+                    ..ProxyGroup::default()
+                })
+                .collect(),
+            proxy_count: 3,
+        }
     }
 }

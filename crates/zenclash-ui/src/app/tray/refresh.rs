@@ -103,13 +103,10 @@ impl ZenClashApp {
         } = snapshot;
         self.outbound_mode
             .synchronize(OutboundMode::from_api(&config.mode), mode_generation);
-        let mixed_port = [config.mixed_port, config.port, config.socks_port]
-            .into_iter()
-            .find(|port| *port > 0)
-            .unwrap_or_default();
+        let mixed_port = config.system_proxy_port().unwrap_or_default();
+        let outbound_mode = config.mode.clone();
         let groups = catalog
-            .groups
-            .into_iter()
+            .into_groups_for_mode(&outbound_mode)
             .map(|group| TrayProxyGroup {
                 name: group.name,
                 now: group.now,

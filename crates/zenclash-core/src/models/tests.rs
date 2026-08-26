@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn system_proxy_port_prefers_mixed_over_http() {
+    let config = RuntimeConfig {
+        port: 7892,
+        mixed_port: 7890,
+        ..RuntimeConfig::default()
+    };
+
+    assert_eq!(config.system_proxy_port(), Some(7890));
+}
+
+#[test]
+fn system_proxy_port_rejects_a_socks_only_listener() {
+    let config = RuntimeConfig {
+        socks_port: 7891,
+        ..RuntimeConfig::default()
+    };
+
+    assert_eq!(config.system_proxy_port(), None);
+}
+
+#[test]
 fn decodes_real_mihomo_runtime_shapes() {
     let config: RuntimeConfig = serde_json::from_str(
         r#"{"port":7890,"socks-port":7891,"mode":"rule","log-level":"info","ipv6":true,"tun":{"enable":false,"stack":"mixed","auto-route":true},"sniffing":{"enable":true}}"#,

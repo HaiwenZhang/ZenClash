@@ -63,6 +63,43 @@ async fn proxy_delay_rejects_non_http_test_url_before_network_request() {
 }
 
 #[tokio::test]
+async fn provider_proxy_delay_uses_the_provider_healthcheck_endpoint() {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 2_048];
+        let bytes = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..bytes]).into_owned();
+        let body = r#"{"delay":42}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        request
+    });
+    let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+
+    let result = client
+        .proxy_delay_with_provider(
+            "香港/01",
+            Some("https://example.com/generate_204"),
+            5_000,
+            Some("机场 A"),
+        )
+        .await
+        .unwrap();
+    let request = server.join().unwrap();
+
+    assert_eq!(result.delay, 42);
+    assert!(request.starts_with(
+        "GET /providers/proxies/%E6%9C%BA%E5%9C%BA%20A/%E9%A6%99%E6%B8%AF%2F01/healthcheck?"
+    ));
+}
+
+#[tokio::test]
 async fn reload_payload_rejects_oversized_config_before_network_request() {
     let client = MihomoClient::new(MihomoEndpoint::default()).unwrap();
     let payload = "a".repeat(crate::profiles::MAX_PROFILE_BYTES + 1);

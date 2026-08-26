@@ -35,6 +35,12 @@ impl ZenClashApp {
     )]
     pub(super) fn render_signal_rail(&self, theme: &gpui_component::Theme) -> AnyElement {
         let online = self.traffic.connected;
+        let (core_status, core_color) = match (online, self.proxy_listener_available) {
+            (false, _) => ("RECONNECT", theme.danger),
+            (true, Some(false)) => ("DEGRADED", theme.warning),
+            (true, None) => ("CHECKING", theme.warning),
+            (true, Some(true)) => ("ONLINE", theme.success),
+        };
         let outbound_mode = self.outbound_mode.displayed();
         let download_color = theme.chart_1;
         let upload_color = theme.chart_2;
@@ -86,24 +92,21 @@ impl ZenClashApp {
                         h_flex()
                             .gap_3()
                             .child(
-                                Badge::new()
-                                    .dot()
-                                    .color(if online { theme.success } else { theme.danger })
-                                    .child(
-                                        div()
-                                            .size(px(31.))
-                                            .rounded(theme.radius)
-                                            .border_1()
-                                            .border_color(theme.border)
-                                            .bg(theme.secondary)
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .font_family(theme.mono_font_family.clone())
-                                            .text_size(px(10.))
-                                            .font_weight(gpui::FontWeight::BOLD)
-                                            .child("M"),
-                                    ),
+                                Badge::new().dot().color(core_color).child(
+                                    div()
+                                        .size(px(31.))
+                                        .rounded(theme.radius)
+                                        .border_1()
+                                        .border_color(theme.border)
+                                        .bg(theme.secondary)
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .font_family(theme.mono_font_family.clone())
+                                        .text_size(px(10.))
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .child("M"),
+                                ),
                             )
                             .child(
                                 v_flex()
@@ -119,12 +122,8 @@ impl ZenClashApp {
                                             .font_family(theme.mono_font_family.clone())
                                             .text_sm()
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(if online {
-                                                theme.success
-                                            } else {
-                                                theme.danger
-                                            })
-                                            .child(if online { "ONLINE" } else { "RECONNECT" }),
+                                            .text_color(core_color)
+                                            .child(core_status),
                                     ),
                             ),
                     )

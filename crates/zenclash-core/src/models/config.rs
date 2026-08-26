@@ -57,6 +57,20 @@ pub struct RuntimeConfig {
     pub extra: BTreeMap<String, Value>,
 }
 
+impl RuntimeConfig {
+    /// Returns the listener suitable for native HTTP/HTTPS system proxying.
+    ///
+    /// A mixed listener is preferred because it also supports SOCKS clients.
+    /// A SOCKS-only listener is deliberately not returned: operating-system
+    /// HTTP/HTTPS proxy settings cannot send HTTP CONNECT traffic to it.
+    #[must_use]
+    pub fn system_proxy_port(&self) -> Option<u16> {
+        [self.mixed_port, self.port]
+            .into_iter()
+            .find(|port| *port > 0)
+    }
+}
+
 /// Runtime subset of Mihomo TUN configuration.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]

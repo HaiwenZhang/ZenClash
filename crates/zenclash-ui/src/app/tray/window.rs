@@ -55,6 +55,8 @@ impl ZenClashApp {
     }
 
     pub(in crate::app) fn set_mode(&mut self, mode: OutboundMode, cx: &mut Context<Self>) {
+        self.proxies_page
+            .update(cx, |page, cx| page.set_outbound_mode(mode.api_value(), cx));
         if self.outbound_mode.request(
             mode,
             &self.client,

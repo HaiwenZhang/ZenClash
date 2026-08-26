@@ -106,6 +106,7 @@ pub struct ZenClashApp {
     client: MihomoClient,
     traffic_monitor: Arc<TrafficMonitor>,
     traffic: TrafficSnapshot,
+    proxy_listener_available: Option<bool>,
     upload_samples: VecDeque<u64>,
     download_samples: VecDeque<u64>,
     runtime: tokio::runtime::Handle,
@@ -227,6 +228,7 @@ impl ZenClashApp {
             client,
             traffic_monitor,
             traffic: TrafficSnapshot::default(),
+            proxy_listener_available: None,
             upload_samples: VecDeque::from(vec![0; 24]),
             download_samples: VecDeque::from(vec![0; 24]),
             runtime,
@@ -326,6 +328,10 @@ impl ZenClashApp {
                 .update(cx, |this, cx| {
                     if observed_mode_revision != mode_revision {
                         observed_mode_revision = mode_revision;
+                        let displayed = mode.displayed();
+                        this.proxies_page.update(cx, |page, cx| {
+                            page.set_outbound_mode(displayed.api_value(), cx);
+                        });
                         this.refresh_tray_menu(cx);
                     }
                     if let Some(tray) = this.network_tray.as_mut() {
@@ -363,7 +369,17 @@ impl ZenClashApp {
             let task = runtime.spawn(async move { client.runtime_config().await });
             match task.await {
                 Ok(Ok(config)) => {
+                    let proxy_listener_available = config.system_proxy_port().is_some();
                     mode.synchronize(OutboundMode::from_api(&config.mode), generation);
+                    if this
+                        .update(cx, |this, cx| {
+                            this.proxy_listener_available = Some(proxy_listener_available);
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
                 Ok(Err(error)) => {
                     tracing::debug!(%error, "failed to synchronize Mihomo outbound mode");

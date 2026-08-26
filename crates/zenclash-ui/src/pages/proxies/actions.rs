@@ -2,6 +2,9 @@ use super::{
     append_delay, take_untested_proxies, test_key, CatalogTaskToken, Context, ProxiesPage,
     ProxyGroup,
 };
+use futures_util::{stream, StreamExt};
+
+const MAX_DELAY_TEST_CONCURRENCY: usize = 16;
 
 impl ProxiesPage {
     pub(super) fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -19,10 +22,10 @@ impl ProxiesPage {
 
         let client = self.client.clone();
         let task = self.runtime.spawn(async move {
-            client
-                .proxy_catalog()
-                .await
-                .map_err(|error| error.to_string())
+            let (catalog, config) =
+                tokio::try_join!(client.proxy_catalog(), client.runtime_config())
+                    .map_err(|error| error.to_string())?;
+            Ok::<_, String>((catalog, config.mode))
         });
 
         cx.spawn(async move |this, cx| {
@@ -36,13 +39,14 @@ impl ProxiesPage {
                 }
                 this.loading = false;
                 match result {
-                    Ok(catalog) => {
+                    Ok((catalog, mode)) => {
                         if this.expanded.is_empty() {
-                            if let Some(group) = catalog.groups.first() {
+                            if let Some(group) = catalog.groups_for_mode(&mode).next() {
                                 this.expanded.insert(group.name.clone());
                             }
                         }
                         this.catalog = Some(catalog);
+                        this.outbound_mode = mode;
                         this.error = None;
                     }
                     Err(error) => this.error = Some(error),
@@ -68,6 +72,20 @@ impl ProxiesPage {
     pub(super) fn toggle_group(&mut self, name: &str, cx: &mut Context<Self>) {
         if !self.expanded.remove(name) {
             self.expanded.insert(name.to_owned());
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn set_outbound_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
+        if self.outbound_mode.eq_ignore_ascii_case(mode) {
+            return;
+        }
+        self.outbound_mode = mode.to_ascii_lowercase();
+        self.expanded.clear();
+        if let Some(catalog) = &self.catalog {
+            if let Some(group) = catalog.groups_for_mode(&self.outbound_mode).next() {
+                self.expanded.insert(group.name.clone());
+            }
         }
         cx.notify();
     }
@@ -116,6 +134,7 @@ impl ProxiesPage {
         group: String,
         proxy: String,
         test_url: Option<String>,
+        provider: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let test_key = test_key(&group, &proxy);
@@ -129,7 +148,12 @@ impl ProxiesPage {
         let proxy_for_task = proxy.clone();
         let task = self.runtime.spawn(async move {
             client
-                .proxy_delay(&proxy_for_task, test_url.as_deref(), 5_000)
+                .proxy_delay_with_provider(
+                    &proxy_for_task,
+                    test_url.as_deref(),
+                    5_000,
+                    provider.as_deref(),
+                )
                 .await
                 .map_err(|error| error.to_string())
         });
@@ -176,17 +200,24 @@ impl ProxiesPage {
         let group_name = group.name.clone();
         let test_url = group.test_url.clone();
         let task = self.runtime.spawn(async move {
-            let tests = proxies.into_iter().map(|proxy| {
+            stream::iter(proxies.into_iter().map(|proxy| {
                 let client = client.clone();
                 let test_url = test_url.clone();
                 async move {
                     let result = client
-                        .proxy_delay(&proxy.name, test_url.as_deref(), 5_000)
+                        .proxy_delay_with_provider(
+                            &proxy.name,
+                            test_url.as_deref(),
+                            5_000,
+                            proxy.provider_name.as_deref(),
+                        )
                         .await;
                     (proxy.name, result)
                 }
-            });
-            futures_util::future::join_all(tests).await
+            }))
+            .buffer_unordered(MAX_DELAY_TEST_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await
         });
 
         cx.spawn(async move |this, cx| {
@@ -203,6 +234,7 @@ impl ProxiesPage {
                 match result {
                     Ok(results) => {
                         let mut failed = 0usize;
+                        let mut first_error = None;
                         for (proxy, result) in results {
                             if let Ok(result) = result {
                                 this.record_delay(
@@ -211,13 +243,19 @@ impl ProxiesPage {
                                     result.delay,
                                     result.mean_delay,
                                 );
-                            } else {
+                            } else if let Err(error) = result {
                                 failed += 1;
+                                first_error.get_or_insert_with(|| error.to_string());
                                 this.record_delay(&group_name, &proxy, 0, 0);
                             }
                         }
                         if failed > 0 {
-                            this.error = Some(format!("{failed} 个节点延迟测试失败"));
+                            this.error = Some(match first_error {
+                                Some(error) => {
+                                    format!("{failed} 个节点延迟测试失败；首个错误：{error}")
+                                }
+                                None => format!("{failed} 个节点延迟测试失败"),
+                            });
                         }
                     }
                     Err(error) => this.error = Some(error),

@@ -17,10 +17,7 @@ impl RuntimePage {
             _ => (RuntimeConfig::default(), SystemProxyStatus::default()),
         };
         let active = status.active();
-        let port = [config.mixed_port, config.port, config.socks_port]
-            .into_iter()
-            .find(|port| *port > 0)
-            .unwrap_or_default();
+        let port = config.system_proxy_port().unwrap_or_default();
         let native_bypass = if status.bypass.is_empty() {
             "无".to_owned()
         } else {

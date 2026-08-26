@@ -20,6 +20,7 @@ pub struct ProxiesPage {
     client: MihomoClient,
     runtime: tokio::runtime::Handle,
     catalog: Option<ProxyCatalog>,
+    outbound_mode: String,
     expanded: HashSet<String>,
     testing: HashSet<String>,
     switching: Option<(String, String)>,
@@ -40,6 +41,7 @@ impl ProxiesPage {
             client,
             runtime,
             catalog: None,
+            outbound_mode: "rule".into(),
             expanded: HashSet::new(),
             testing: HashSet::new(),
             switching: None,
@@ -114,18 +116,28 @@ impl Render for ProxiesPage {
                         )
                     })
                     .when_some(catalog, |this, catalog| {
-                        if catalog.groups.is_empty() {
+                        let groups = catalog
+                            .groups_for_mode(&self.outbound_mode)
+                            .collect::<Vec<_>>();
+                        if groups.is_empty() {
+                            let message = if self.outbound_mode.eq_ignore_ascii_case("direct") {
+                                "当前为 DIRECT 直连模式，无需选择代理策略组。"
+                            } else if self.outbound_mode.eq_ignore_ascii_case("global") {
+                                "当前配置没有可用的 GLOBAL 策略组。"
+                            } else {
+                                "当前配置没有可用的代理组。"
+                            };
                             this.child(
                                 div()
                                     .p_4()
                                     .rounded(theme.radius)
                                     .bg(theme.secondary)
                                     .text_sm()
-                                    .child("当前配置没有可用的代理组。"),
+                                    .child(message),
                             )
                         } else {
                             this.children(
-                                catalog.groups.iter().enumerate().map(|(index, group)| {
+                                groups.into_iter().enumerate().map(|(index, group)| {
                                     self.render_group(index, group, &theme, cx)
                                 }),
                             )
