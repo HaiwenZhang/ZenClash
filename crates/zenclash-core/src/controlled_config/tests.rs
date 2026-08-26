@@ -241,3 +241,70 @@ async fn settings_update_preserves_ordered_overrides_in_runtime_and_cache() {
     assert!(server.join().unwrap().contains("ipv6: false"));
     fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn mode_update_uses_partial_runtime_patch_and_persists_the_selection() {
+    let root = test_root("mode-partial-patch");
+    let profile = write_profile(&root);
+    let store = ControlledConfigStore::new(root.join("store"));
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut requests = Vec::new();
+        for (index, mode) in ["rule", "", "global"].into_iter().enumerate() {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 8_192];
+            let length = stream.read(&mut request).unwrap();
+            requests.push(String::from_utf8_lossy(&request[..length]).into_owned());
+            if index == 1 {
+                write!(
+                    stream,
+                    "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            } else {
+                let body = format!(r#"{{"mode":"{mode}"}}"#);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        }
+        requests
+    });
+    let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+
+    store
+        .apply_mode_update_with_overrides(&client, &profile, "global", Vec::new())
+        .await
+        .unwrap();
+
+    let requests = server.join().unwrap();
+    let first_lines = requests
+        .iter()
+        .map(|request| request.lines().next().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        first_lines,
+        [
+            "GET /configs HTTP/1.1",
+            "PATCH /configs HTTP/1.1",
+            "GET /configs HTTP/1.1"
+        ]
+    );
+    assert!(requests[1].contains(r#""mode":"global""#));
+    assert_eq!(
+        store
+            .load_json()
+            .unwrap()
+            .get("mode")
+            .and_then(serde_json::Value::as_str),
+        Some("global")
+    );
+    assert!(fs::read_to_string(store.runtime_path())
+        .unwrap()
+        .contains("mode: global"));
+    fs::remove_dir_all(root).unwrap();
+}

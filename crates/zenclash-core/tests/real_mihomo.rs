@@ -45,12 +45,40 @@ async fn drives_the_supplied_profile_through_a_real_mihomo_process() {
     )
     .await;
     verify_runtime_api(&client, &inputs.profile, &inputs.home).await;
+    verify_controlled_mode_switch(&client, &inputs.profile, &inputs.home).await;
     verify_profile_workflows(&client, &inputs.profile, &inputs.home).await;
     verify_catalog_apis(&client).await;
     verify_traffic_stream(&process).await;
     verify_managed_restart(&process, &client, &inputs.profile, &inputs.home).await;
 
     process.stop().expect("stop real Mihomo");
+}
+
+async fn verify_controlled_mode_switch(client: &MihomoClient, profile: &Path, home: &Path) {
+    let controlled = ControlledConfigStore::new(home.join("controlled-mode-integration"));
+    for mode in ["global", "direct", "rule"] {
+        controlled
+            .apply_mode_update_with_overrides(client, profile, mode, Vec::new())
+            .await
+            .unwrap_or_else(|error| panic!("switch real Mihomo to {mode}: {error}"));
+        assert_eq!(
+            client
+                .runtime_config()
+                .await
+                .expect("read real Mihomo mode after switch")
+                .mode
+                .to_ascii_lowercase(),
+            mode
+        );
+    }
+    assert_eq!(
+        controlled
+            .load_json()
+            .expect("read persisted real Mihomo mode")
+            .get("mode")
+            .and_then(serde_json::Value::as_str),
+        Some("rule")
+    );
 }
 
 async fn verify_real_direct_proxy_delay(client: &MihomoClient) {

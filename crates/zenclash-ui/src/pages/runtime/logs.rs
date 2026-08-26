@@ -100,6 +100,7 @@ impl RuntimePage {
             ))
             .child(info_row("文件", &path, theme))
             .child(info_row("写入状态", state, theme))
+            .child(info_row("当前占用", &format_log_disk_usage(&status), theme))
             .when(status.dropped_entries > 0, |card| {
                 card.child(info_row(
                     "队列丢弃",
@@ -363,9 +364,9 @@ fn render_log_header(
             theme,
         ))
         .child(metric(
-            "磁盘日志",
+            "磁盘占用",
             if persistence.enabled {
-                format_bytes(persistence.size_bytes)
+                format_log_disk_usage(persistence)
             } else {
                 "已关闭".into()
             },
@@ -392,6 +393,17 @@ fn render_log_header(
                     "正在重连"
                 }),
         )
+}
+
+fn format_log_disk_usage(persistence: &zenclash_core::LogPersistenceStatus) -> String {
+    if persistence.max_bytes == 0 {
+        return format_bytes(persistence.size_bytes);
+    }
+    format!(
+        "{} / {}",
+        format_bytes(persistence.size_bytes),
+        format_bytes(persistence.max_bytes)
+    )
 }
 
 fn log_matches(entry: &zenclash_core::LogEntry, query: &str) -> bool {
@@ -422,5 +434,16 @@ mod tests {
             &normalize_log_query(" PROXY connection ")
         ));
         assert!(!log_matches(&entry, "dns"));
+    }
+
+    #[test]
+    fn disk_usage_always_includes_the_configured_limit() {
+        let status = zenclash_core::LogPersistenceStatus {
+            size_bytes: 2_621_440,
+            max_bytes: 5_242_880,
+            ..Default::default()
+        };
+
+        assert_eq!(format_log_disk_usage(&status), "2.5 MiB / 5.0 MiB");
     }
 }

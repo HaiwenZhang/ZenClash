@@ -65,10 +65,10 @@ impl OutboundModeCoordinator {
             let result = match &controlled {
                 Some((controlled, profile)) => match load_managed_overrides().await {
                     Ok(overrides) => controlled
-                        .apply_json_update_with_overrides(
+                        .apply_mode_update_with_overrides(
                             &client,
                             profile,
-                            &serde_json::json!({"mode": mode.api_value()}),
+                            mode.api_value(),
                             overrides,
                         )
                         .await

@@ -203,7 +203,20 @@ impl LogFileWorker {
     }
 
     pub(super) fn status(&self) -> LogPersistenceStatus {
-        self.sender.status.read().clone()
+        let mut status = self.sender.status.read().clone();
+        if let Some(path) = &status.path {
+            match fs::metadata(path) {
+                Ok(metadata) => status.size_bytes = metadata.len(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    status.size_bytes = 0;
+                }
+                Err(error) if status.last_error.is_none() => {
+                    status.last_error = Some(format!("无法读取日志文件状态：{error}"));
+                }
+                Err(_) => {}
+            }
+        }
+        status
     }
 }
 
@@ -241,18 +254,21 @@ impl BoundedLogFile {
     }
 
     fn synchronize_path(&mut self, config: &LogFileConfig) -> LogPersistenceResult<()> {
-        if self.path.as_ref() == Some(&config.path) {
-            return Ok(());
+        if self.path.as_ref() != Some(&config.path) {
+            if let Some(parent) = config
+                .path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                fs::create_dir_all(parent)?;
+            }
+            self.path = Some(config.path.clone());
         }
-        if let Some(parent) = config
-            .path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            fs::create_dir_all(parent)?;
-        }
+        // Configuration events, another app instance, or manual maintenance
+        // may change the file without changing its path. Refresh before every
+        // append so the bounded writer and the UI never return to a stale
+        // cached counter after reporting the real metadata size.
         self.size = fs::metadata(&config.path).map_or(0, |metadata| metadata.len());
-        self.path = Some(config.path.clone());
         Ok(())
     }
 
@@ -388,6 +404,32 @@ mod tests {
         assert!(fs::read_to_string(&path)
             .unwrap()
             .contains("queued.example.com"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn append_resynchronizes_after_the_file_changes_outside_the_writer() {
+        let path = test_path("external-change");
+        let config = LogFileConfig::from_bytes(path.clone(), true, 1_024);
+        let mut writer = BoundedLogFile::default();
+        writer.append(&config, &entry("first", 1)).unwrap();
+        fs::write(&path, b"x").unwrap();
+
+        let reported = writer.append(&config, &entry("second", 2)).unwrap();
+
+        assert_eq!(reported, fs::metadata(&path).unwrap().len());
+        assert!(fs::read_to_string(&path).unwrap().contains("second"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn status_reads_current_file_metadata_instead_of_a_stale_counter() {
+        let path = test_path("status-metadata");
+        let worker = LogFileWorker::start();
+        worker.configure(path.clone(), true, 1).unwrap();
+        fs::write(&path, b"external").unwrap();
+
+        assert_eq!(worker.status().size_bytes, 8);
         fs::remove_file(path).unwrap();
     }
 }

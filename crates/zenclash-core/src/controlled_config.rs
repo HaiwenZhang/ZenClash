@@ -351,6 +351,95 @@ impl ControlledConfigStore {
         Ok(())
     }
 
+    /// Changes the live outbound mode without reloading unrelated listeners,
+    /// then persists the selection for the next managed-core startup.
+    ///
+    /// A mode switch is a partial Mihomo runtime mutation. Reloading the whole
+    /// profile here can fail because of an unrelated listener, DNS, or TUN
+    /// setting and makes a simple routing change unnecessarily disruptive.
+    /// The generated startup cache is still updated with explicit overrides
+    /// applied so the next launch uses the same effective configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns preparation, merge, runtime patch/readback, persistence, cache,
+    /// or rollback errors.
+    pub async fn apply_mode_update_with_overrides(
+        &self,
+        client: &MihomoClient,
+        profile: impl AsRef<Path>,
+        mode: &str,
+        overrides: Vec<PathBuf>,
+    ) -> ControlledConfigResult<()> {
+        let mode = mode.trim().to_ascii_lowercase();
+        if !matches!(mode.as_str(), "rule" | "global" | "direct") {
+            return Err(ControlledConfigError::Profile(MihomoError::InvalidInput(
+                format!("不支持的出站模式：{mode}"),
+            )));
+        }
+
+        let _mutation_guard = self.mutation_gate.lock().await;
+        let prepare_store = self.clone();
+        let profile = profile.as_ref().to_path_buf();
+        let patch = serde_json::json!({"mode": mode.clone()});
+        let update =
+            tokio::task::spawn_blocking(move || prepare_store.prepare_json_update(profile, &patch))
+                .await
+                .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let next_base = update.next_payload().to_owned();
+        let next_runtime =
+            tokio::task::spawn_blocking(move || merge_payload_overrides(&next_base, &overrides))
+                .await
+                .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let cache_store = self.clone();
+        let cache =
+            tokio::task::spawn_blocking(move || cache_store.stage_runtime_payload(&next_runtime))
+                .await
+                .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+
+        let previous_mode = match client.runtime_config().await {
+            Ok(config) => config.mode,
+            Err(error) => {
+                rollback_runtime_cache(cache).await?;
+                return Err(ControlledConfigError::Profile(error));
+            }
+        };
+        if let Err(error) = client.set_mode(&mode).await {
+            let cache_rollback = rollback_runtime_cache(cache).await;
+            let runtime_rollback = client.set_mode(&previous_mode).await;
+            return match (cache_rollback, runtime_rollback) {
+                (Ok(()), Ok(())) => Err(ControlledConfigError::Profile(error)),
+                (cache, runtime) => Err(ControlledConfigError::Transaction(format!(
+                    "切换模式失败：{error}；缓存恢复：{}；Mihomo 恢复：{}",
+                    result_label(cache),
+                    result_label(runtime)
+                ))),
+            };
+        }
+
+        let commit_store = self.clone();
+        let commit_update = update.clone();
+        let commit = tokio::task::spawn_blocking(move || commit_store.commit(&commit_update))
+            .await
+            .map_err(|error| ControlledConfigError::Task(error.to_string()))?;
+        if let Err(error) = commit {
+            let cache_rollback = rollback_runtime_cache(cache).await;
+            let runtime_rollback = client.set_mode(&previous_mode).await;
+            return match (cache_rollback, runtime_rollback) {
+                (Ok(()), Ok(())) => Err(ControlledConfigError::Transaction(format!(
+                    "保存模式失败，启动缓存与 Mihomo 均已恢复上一模式：{error}"
+                ))),
+                (cache, runtime) => Err(ControlledConfigError::Transaction(format!(
+                    "保存模式失败：{error}；缓存恢复：{}；Mihomo 恢复：{}",
+                    result_label(cache),
+                    result_label(runtime)
+                ))),
+            };
+        }
+        cache.commit();
+        Ok(())
+    }
+
     /// Applies and persists a JSON patch by restarting a managed core with the
     /// newly materialized effective profile.
     ///
@@ -585,6 +674,12 @@ async fn restart_and_wait(process: Arc<MihomoProcess>) -> ControlledConfigResult
         .wait_until_ready(Duration::from_secs(20))
         .await
         .map_err(ControlledConfigError::Profile)
+}
+
+async fn rollback_runtime_cache(cache: RuntimeCacheTransaction) -> ControlledConfigResult<()> {
+    tokio::task::spawn_blocking(move || cache.rollback())
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))?
 }
 
 async fn rollback_cache_and_restart(
