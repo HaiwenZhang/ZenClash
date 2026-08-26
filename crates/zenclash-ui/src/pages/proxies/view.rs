@@ -206,14 +206,18 @@ impl ProxiesPage {
         let test_url = group.test_url.clone();
         let delay_provider = proxy.provider_name.clone();
         let delay = proxy.latest_delay();
-        let delay_color = match delay {
-            Some(0) => theme.danger,
-            Some(value) if value < 500 => theme.success,
-            Some(_) => theme.warning,
-            None => theme.muted_foreground,
+        let failure = self.test_failures.get(&test_key(&group.name, &proxy.name));
+        let delay_color = match (failure, delay) {
+            (Some(_), _) => theme.danger,
+            (None, Some(0)) => theme.danger,
+            (None, Some(value)) if value < 500 => theme.success,
+            (None, Some(_)) => theme.warning,
+            (None, None) => theme.muted_foreground,
         };
         let delay_text = if testing {
             "测速中…".to_owned()
+        } else if let Some(failure) = failure {
+            failure.label().to_owned()
         } else {
             match delay {
                 Some(0) => "超时".to_owned(),

@@ -8,7 +8,7 @@ use std::{
 };
 
 use super::{ControlledConfigError, ControlledConfigStore};
-use crate::{MihomoClient, MihomoEndpoint};
+use crate::{CoreKind, MihomoClient, MihomoEndpoint};
 
 fn test_root(name: &str) -> PathBuf {
     let sequence = SystemTime::now()
@@ -53,6 +53,78 @@ fn prepares_commits_and_materializes_without_changing_source_profile() {
     assert_eq!(
         fs::read_to_string(effective).unwrap(),
         update.next_payload()
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn meow_materialization_adds_dns_upstreams_only_for_an_empty_enabled_resolver() {
+    let root = test_root("meow-dns-defaults");
+    fs::create_dir_all(&root).unwrap();
+    let profile = root.join("base.yaml");
+    fs::write(
+        &profile,
+        "mixed-port: 7890\ndns:\n  enable: true\nrules: [MATCH,DIRECT]\n",
+    )
+    .unwrap();
+    let store = ControlledConfigStore::new(root.join("store"));
+
+    let effective = store
+        .materialize_with_overrides_for_core(&profile, &[], CoreKind::Meow)
+        .unwrap();
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(&fs::read_to_string(effective).unwrap()).unwrap();
+
+    assert_eq!(yaml["dns"]["nameserver"].as_sequence().unwrap().len(), 2);
+    assert_eq!(
+        yaml["dns"]["default-nameserver"]
+            .as_sequence()
+            .unwrap()
+            .len(),
+        2
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn core_materialization_preserves_explicit_dns_upstreams() {
+    let root = test_root("meow-custom-dns");
+    let profile = write_profile(&root);
+    let store = ControlledConfigStore::new(root.join("store"));
+
+    let effective = store
+        .materialize_with_overrides_for_core(&profile, &[], CoreKind::Meow)
+        .unwrap();
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(&fs::read_to_string(effective).unwrap()).unwrap();
+
+    assert_eq!(yaml["dns"]["nameserver"][0].as_str(), Some("1.1.1.1"));
+    assert!(yaml["dns"]["default-nameserver"].is_null());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn meow_materialization_keeps_custom_bootstrap_and_adds_missing_main_dns() {
+    let root = test_root("meow-bootstrap-only");
+    fs::create_dir_all(&root).unwrap();
+    let profile = root.join("base.yaml");
+    fs::write(
+        &profile,
+        "dns:\n  enable: true\n  default-nameserver: [9.9.9.9]\nrules: [MATCH,DIRECT]\n",
+    )
+    .unwrap();
+    let store = ControlledConfigStore::new(root.join("store"));
+
+    let effective = store
+        .materialize_with_overrides_for_core(&profile, &[], CoreKind::Meow)
+        .unwrap();
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(&fs::read_to_string(effective).unwrap()).unwrap();
+
+    assert_eq!(yaml["dns"]["nameserver"].as_sequence().unwrap().len(), 2);
+    assert_eq!(
+        yaml["dns"]["default-nameserver"][0].as_str(),
+        Some("9.9.9.9")
     );
     fs::remove_dir_all(root).unwrap();
 }

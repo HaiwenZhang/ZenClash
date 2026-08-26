@@ -220,7 +220,7 @@ fn bootstrap_core(
     };
     let profile_path = selected_profile.unwrap_or_else(|| discovered.config_file.clone());
     let effective_path = controlled_config_store
-        .materialize_with_overrides(&profile_path, override_paths)
+        .materialize_with_overrides_for_core(&profile_path, override_paths, core_kind)
         .map_err(std::io::Error::other)?;
     let mut launch = match MihomoLaunchConfig::for_kind(
         core_kind,

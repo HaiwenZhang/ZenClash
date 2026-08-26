@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use gpui::{
     div, prelude::FluentBuilder, px, App, Context, Focusable, InteractiveElement, IntoElement,
@@ -23,6 +23,7 @@ pub struct ProxiesPage {
     outbound_mode: String,
     expanded: HashSet<String>,
     testing: HashSet<String>,
+    test_failures: HashMap<String, DelayTestFailure>,
     switching: Option<(String, String)>,
     loading: bool,
     catalog_generation: u64,
@@ -44,6 +45,7 @@ impl ProxiesPage {
             outbound_mode: "rule".into(),
             expanded: HashSet::new(),
             testing: HashSet::new(),
+            test_failures: HashMap::new(),
             switching: None,
             loading: false,
             catalog_generation: 0,
@@ -57,6 +59,30 @@ impl ProxiesPage {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CatalogTaskToken(u64);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DelayTestFailure {
+    Timeout,
+    Failed,
+}
+
+impl DelayTestFailure {
+    fn from_error(error: &str) -> Self {
+        let error = error.to_ascii_lowercase();
+        if error.contains("http 504") || error.contains("timeout") || error.contains("timed out") {
+            Self::Timeout
+        } else {
+            Self::Failed
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Timeout => "超时",
+            Self::Failed => "失败",
+        }
+    }
+}
 
 impl CatalogTaskToken {
     const fn is_current(self, generation: u64) -> bool {
@@ -232,5 +258,17 @@ mod tests {
         let token = CatalogTaskToken(7);
 
         assert!(token.is_current(7));
+    }
+
+    #[test]
+    fn delay_failures_distinguish_timeout_from_transport_failure() {
+        assert_eq!(
+            DelayTestFailure::from_error("Mihomo API returned HTTP 504: Timeout"),
+            DelayTestFailure::Timeout
+        );
+        assert_eq!(
+            DelayTestFailure::from_error("Mihomo API returned HTTP 503: transport error"),
+            DelayTestFailure::Failed
+        );
     }
 }

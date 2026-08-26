@@ -47,7 +47,10 @@ impl ZenClashApp {
 
     pub(in crate::app) fn navigate(&mut self, page: Page, cx: &mut Context<Self>) {
         self.current_page = page;
-        if page != Page::Proxies {
+        if page == Page::Proxies {
+            self.proxies_page
+                .update(cx, crate::pages::proxies::ProxiesPage::reload);
+        } else {
             self.runtime_page
                 .update(cx, |runtime_page, cx| runtime_page.switch_to(page, cx));
         }

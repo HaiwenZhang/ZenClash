@@ -247,11 +247,39 @@ impl From<RawProxyCatalog> for ProxyCatalog {
             });
         }
 
+        groups.sort_by(|left, right| {
+            group_display_priority(left)
+                .cmp(&group_display_priority(right))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+
         Self {
             groups,
             proxy_count,
         }
     }
+}
+
+fn group_display_priority(group: &ProxyGroup) -> u8 {
+    if group.name.eq_ignore_ascii_case("GLOBAL") || is_primary_selector(group) {
+        0
+    } else if group.hidden {
+        2
+    } else {
+        1
+    }
+}
+
+fn is_primary_selector(group: &ProxyGroup) -> bool {
+    if !group.kind.eq_ignore_ascii_case("selector") {
+        return false;
+    }
+    let name = group.name.trim().to_ascii_lowercase();
+    group.name.contains("选择节点")
+        || group.name.contains("节点选择")
+        || matches!(name.as_str(), "proxy" | "proxies" | "代理")
+        || name.contains("select proxy")
+        || name.contains("proxy select")
 }
 
 #[cfg(test)]
@@ -324,6 +352,23 @@ mod tests {
         let catalog = mode_catalog();
 
         assert_eq!(catalog.groups_for_mode("direct").count(), 0);
+    }
+
+    #[test]
+    fn primary_selector_is_first_in_rule_mode_even_when_names_sort_later() {
+        let raw: RawProxyCatalog = serde_json::from_str(
+            r#"{"proxies":{"DIRECT":{"name":"DIRECT","type":"Direct"},"OneDrive":{"name":"OneDrive","type":"Selector","all":["DIRECT"]},"🔰 选择节点":{"name":"🔰 选择节点","type":"Selector","all":["DIRECT"]},"GLOBAL":{"name":"GLOBAL","type":"Selector","all":["DIRECT"]}}}"#,
+        )
+        .unwrap();
+        let catalog = ProxyCatalog::from(raw);
+
+        assert_eq!(
+            catalog
+                .groups_for_mode("rule")
+                .next()
+                .map(|group| group.name.as_str()),
+            Some("🔰 选择节点")
+        );
     }
 
     fn mode_catalog() -> ProxyCatalog {

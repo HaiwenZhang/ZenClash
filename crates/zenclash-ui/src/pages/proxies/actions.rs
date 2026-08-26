@@ -47,6 +47,7 @@ impl ProxiesPage {
                         }
                         this.catalog = Some(catalog);
                         this.outbound_mode = mode;
+                        this.test_failures.clear();
                         this.error = None;
                     }
                     Err(error) => this.error = Some(error),
@@ -66,6 +67,7 @@ impl ProxiesPage {
     pub fn profile_activated(&mut self, cx: &mut Context<Self>) {
         self.catalog = None;
         self.expanded.clear();
+        self.test_failures.clear();
         self.start_refresh(true, cx);
     }
 
@@ -170,9 +172,14 @@ impl ProxiesPage {
                 this.testing.remove(&test_key);
                 match result {
                     Ok(result) => {
+                        this.test_failures.remove(&test_key);
                         this.record_delay(&group, &proxy, result.delay, result.mean_delay);
                     }
                     Err(error) => {
+                        this.test_failures.insert(
+                            test_key.clone(),
+                            super::DelayTestFailure::from_error(&error),
+                        );
                         this.record_delay(&group, &proxy, 0, 0);
                         this.error = Some(error);
                     }
@@ -237,6 +244,7 @@ impl ProxiesPage {
                         let mut first_error = None;
                         for (proxy, result) in results {
                             if let Ok(result) = result {
+                                this.test_failures.remove(&test_key(&group_name, &proxy));
                                 this.record_delay(
                                     &group_name,
                                     &proxy,
@@ -246,6 +254,10 @@ impl ProxiesPage {
                             } else if let Err(error) = result {
                                 failed += 1;
                                 first_error.get_or_insert_with(|| error.to_string());
+                                this.test_failures.insert(
+                                    test_key(&group_name, &proxy),
+                                    super::DelayTestFailure::from_error(&error.to_string()),
+                                );
                                 this.record_delay(&group_name, &proxy, 0, 0);
                             }
                         }
@@ -282,6 +294,7 @@ impl ProxiesPage {
     fn begin_catalog_operation(&mut self) -> CatalogTaskToken {
         self.catalog_generation = self.catalog_generation.wrapping_add(1);
         self.testing.clear();
+        self.test_failures.clear();
         self.switching = None;
         CatalogTaskToken(self.catalog_generation)
     }

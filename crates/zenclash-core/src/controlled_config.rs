@@ -13,8 +13,10 @@ use thiserror::Error;
 use crate::{
     profile::{merge_payload_overrides, merge_profile_patch, merge_yaml},
     profiles::{atomic_write, read_profile_bytes, MAX_PROFILE_BYTES},
-    MihomoClient, MihomoError, MihomoProcess,
+    CoreKind, MihomoClient, MihomoError, MihomoProcess,
 };
+
+const MEOW_DEFAULT_NAMESERVERS: [&str; 2] = ["223.5.5.5", "1.1.1.1"];
 
 mod storage;
 
@@ -245,6 +247,30 @@ impl ControlledConfigStore {
         overrides: &[PathBuf],
     ) -> ControlledConfigResult<PathBuf> {
         let payload = self.effective_with_overrides(profile, overrides)?;
+        self.write_runtime_payload(&payload)
+    }
+
+    /// Materializes startup YAML with compatibility defaults for one core.
+    ///
+    /// meow-rs treats `dns.enable: true` with no configured upstream as an
+    /// enabled but empty resolver. Mihomo supplies an internal fallback for
+    /// the same profile. To keep subscriptions portable, generated meow-rs
+    /// runtime YAML receives conservative IP-literal DNS defaults only when
+    /// `nameserver` is absent or empty. An explicit `default-nameserver` is
+    /// retained; source profiles and the persistent controlled override remain
+    /// untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when merging, normalization, or the atomic cache write fails.
+    pub fn materialize_with_overrides_for_core(
+        &self,
+        profile: impl AsRef<Path>,
+        overrides: &[PathBuf],
+        kind: CoreKind,
+    ) -> ControlledConfigResult<PathBuf> {
+        let payload = self.effective_with_overrides(profile, overrides)?;
+        let payload = normalize_runtime_payload(kind, payload)?;
         self.write_runtime_payload(&payload)
     }
 
@@ -626,6 +652,7 @@ impl ControlledConfigStore {
         process: Arc<MihomoProcess>,
         payload: String,
     ) -> ControlledConfigResult<RuntimeCacheTransaction> {
+        let payload = normalize_runtime_payload(process.kind(), payload)?;
         let store = self.clone();
         let cache = tokio::task::spawn_blocking(move || store.stage_runtime_payload(&payload))
             .await
@@ -661,6 +688,61 @@ impl ControlledConfigStore {
             previous_payload,
             next_payload,
         })
+    }
+}
+
+fn normalize_runtime_payload(kind: CoreKind, payload: String) -> ControlledConfigResult<String> {
+    if kind != CoreKind::Meow {
+        return Ok(payload);
+    }
+
+    let mut document = serde_yaml::from_str::<Value>(&payload)?;
+    let Some(root) = document.as_mapping_mut() else {
+        return Err(ControlledConfigError::NotMapping);
+    };
+    let dns_key = Value::String("dns".into());
+    let Some(dns) = root.get_mut(&dns_key).and_then(Value::as_mapping_mut) else {
+        return Ok(payload);
+    };
+    if !yaml_bool(dns, "enable") || has_nonempty_dns_value(dns, "nameserver") {
+        return Ok(payload);
+    }
+
+    let defaults = Value::Sequence(
+        MEOW_DEFAULT_NAMESERVERS
+            .into_iter()
+            .map(|server| Value::String(server.into()))
+            .collect(),
+    );
+    dns.insert(Value::String("nameserver".into()), defaults.clone());
+    if !has_nonempty_dns_value(dns, "default-nameserver") {
+        dns.insert(Value::String("default-nameserver".into()), defaults);
+    }
+    let normalized = serde_yaml::to_string(&document)?;
+    if normalized.len() > MAX_PROFILE_BYTES {
+        return Err(ControlledConfigError::TooLarge);
+    }
+    Ok(normalized)
+}
+
+fn yaml_bool(mapping: &serde_yaml::Mapping, key: &str) -> bool {
+    mapping
+        .get(Value::String(key.into()))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn has_nonempty_dns_value(dns: &serde_yaml::Mapping, key: &str) -> bool {
+    dns.get(Value::String(key.into()))
+        .is_some_and(yaml_value_is_nonempty)
+}
+
+fn yaml_value_is_nonempty(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::String(value) => !value.trim().is_empty(),
+        Value::Sequence(values) => !values.is_empty(),
+        _ => true,
     }
 }
 
