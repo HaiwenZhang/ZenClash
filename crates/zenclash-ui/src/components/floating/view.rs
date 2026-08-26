@@ -9,10 +9,7 @@ use gpui_component::{
 use zenclash_core::format_speed;
 
 use super::FloatingTrafficWindow;
-use crate::{
-    components::sidebar::OutboundMode,
-    design::{color, throughput_activity_percent, SIGNAL_CYAN, UPLINK_AMBER},
-};
+use crate::{components::sidebar::OutboundMode, design::throughput_activity_percent};
 
 impl Render for FloatingTrafficWindow {
     #[allow(
@@ -110,14 +107,14 @@ impl Render for FloatingTrafficWindow {
                                 "DOWNLOAD",
                                 "↓",
                                 format_speed(self.traffic.download),
-                                color(SIGNAL_CYAN),
+                                theme.chart_1,
                                 theme,
                             ))
                             .child(speed_panel(
                                 "UPLOAD",
                                 "↑",
                                 format_speed(self.traffic.upload),
-                                color(UPLINK_AMBER),
+                                theme.chart_2,
                                 theme,
                             )),
                     )

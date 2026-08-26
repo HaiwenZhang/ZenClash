@@ -1,6 +1,6 @@
 use super::{
-    div, h_flex, px, v_flex, App, Icon, IconName, Input, IntoElement, ParentElement, Styled,
-    Switch, Window,
+    div, h_flex, px, v_flex, App, FluentBuilder, Icon, IconName, Input, IntoElement, ParentElement,
+    Styled, Switch, Window,
 };
 
 pub(super) fn setting_card(title: &'static str, theme: &gpui_component::Theme) -> gpui::Div {
@@ -9,6 +9,7 @@ pub(super) fn setting_card(title: &'static str, theme: &gpui_component::Theme) -
         .border_1()
         .border_color(theme.border)
         .bg(theme.secondary)
+        .when(theme.shadow, |this| this.shadow_sm())
         .overflow_hidden()
         .child(
             h_flex()

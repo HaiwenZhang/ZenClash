@@ -1,12 +1,14 @@
 use super::{
     div, h_flex, info_row, json, px, setting_card, setting_switch, v_flex, AutostartStatus, Button,
-    Context, CoreKind, Disableable, FluentBuilder, HideTrafficIcon, IconName, IntoElement, Page,
+    Context, Disableable, FluentBuilder, HideTrafficIcon, IconName, IntoElement, Page,
     ParentElement, PreferencesRestored, RuntimeConfig, RuntimeData, RuntimePage, Selectable,
     SetDarkTheme, SetLightTheme, SetSystemTheme, ShowTrafficIcon, Sizable, Styled,
 };
 
 mod backup;
+mod core_management;
 pub(in crate::pages::runtime) mod webdav;
+pub(in crate::pages::runtime) use core_management::CoreManagementUiState;
 
 impl RuntimePage {
     pub(super) fn render_settings(
@@ -23,6 +25,7 @@ impl RuntimePage {
         };
         v_flex()
             .gap_4()
+            .child(self.render_core_management(theme, cx))
             .child(self.render_application_settings(&config, &autostart, theme, cx))
             .when(self.core_kind.is_experimental(), |this| {
                 this.child(super::message_banner(
@@ -50,7 +53,6 @@ impl RuntimePage {
                 &self.client.endpoint().controller,
                 theme,
             ))
-            .child(self.core_selection_setting(theme, cx))
             .child(setting_switch(
                 "登录时自动启动",
                 if autostart.enabled && !autostart.matches_current_executable {
@@ -91,108 +93,6 @@ impl RuntimePage {
             .child(theme_setting(theme))
             .child(tray_setting(theme))
             .child(self.traffic_history_setting(theme, cx))
-    }
-
-    fn core_selection_setting(
-        &self,
-        theme: &gpui_component::Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let current = self.core_kind.display_name();
-        let requested = self.preferences.core_kind;
-        h_flex()
-            .min_h(px(70.))
-            .px_4()
-            .gap_3()
-            .justify_between()
-            .border_b_1()
-            .border_color(theme.border)
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().text_sm().child(format!("运行内核 · 当前 {current}")))
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(
-                        if requested == self.core_kind {
-                            "Mihomo 为默认完整内核；meow-rs 需显式选择"
-                        } else {
-                            "选择已保存，将在重启 ZenClash 后生效"
-                        },
-                    )),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("core-mihomo")
-                            .label("Mihomo")
-                            .small()
-                            .outline()
-                            .selected(requested == CoreKind::Mihomo)
-                            .disabled(self.mutating)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.set_preferred_core(CoreKind::Mihomo, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("core-meow")
-                            .label("meow-rs · 实验")
-                            .small()
-                            .outline()
-                            .selected(requested == CoreKind::Meow)
-                            .disabled(self.mutating)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.set_preferred_core(CoreKind::Meow, cx);
-                            })),
-                    ),
-            )
-    }
-
-    fn set_preferred_core(&mut self, core_kind: CoreKind, cx: &mut Context<Self>) {
-        let Some(store) = self.preferences_store.clone() else {
-            self.error = Some("应用设置存储不可用；请检查应用数据目录权限".into());
-            cx.notify();
-            return;
-        };
-        let Some(token) = self.begin_mutation(Page::Settings) else {
-            return;
-        };
-        let task = self.runtime.spawn(async move {
-            tokio::task::spawn_blocking(move || {
-                store
-                    .update(|preferences| preferences.core_kind = core_kind)
-                    .map_err(|error| error.to_string())
-            })
-            .await
-            .map_err(|error| format!("内核选择保存任务异常结束：{error}"))?
-        });
-        cx.spawn(async move |this, cx| {
-            let result = task
-                .await
-                .map_err(|error| format!("内核选择保存任务异常结束：{error}"))
-                .and_then(|result| result);
-            let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
-                match result {
-                    Ok(preferences) if this.is_page_task_current(token) => {
-                        this.preferences = preferences.clone();
-                        this.notice = Some(if core_kind == this.core_kind {
-                            format!("{} 已设为默认内核", core_kind.display_name())
-                        } else {
-                            format!(
-                                "{} 已选中；重启 ZenClash 后生效，不会静默切换其他内核",
-                                core_kind.display_name()
-                            )
-                        });
-                        cx.emit(PreferencesRestored { preferences });
-                    }
-                    Ok(_) => {}
-                    Err(error) => this.set_page_error(token, error),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
     }
 
     fn set_autostart(&mut self, enabled: bool, cx: &mut Context<Self>) {

@@ -98,6 +98,7 @@ impl Sidebar {
                 theme.muted_foreground
             })
             .when(active, |this| this.bg(theme.sidebar_accent))
+            .when(active && theme.shadow, |this| this.shadow_xs())
             .when(!active, |this| {
                 this.hover(|style| {
                     style

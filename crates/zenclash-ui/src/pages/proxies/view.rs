@@ -94,6 +94,7 @@ impl ProxiesPage {
             .border_1()
             .border_color(theme.border)
             .bg(theme.secondary)
+            .when(theme.shadow, |this| this.shadow_sm())
             .overflow_hidden()
             .child(
                 h_flex()

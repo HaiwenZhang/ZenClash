@@ -220,15 +220,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: Fedora 41
-            image: fedora:41
-            flavor: fedora41
-          - label: Fedora 42
-            image: fedora:42
-            flavor: fedora42
-          - label: Fedora 43
-            image: fedora:43
-            flavor: fedora43
           - label: Fedora 44
             image: fedora:44
             flavor: fedora44

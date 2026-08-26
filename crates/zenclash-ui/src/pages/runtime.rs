@@ -23,12 +23,12 @@ use zenclash_core::{
     default_pac_script, default_system_proxy_bypass, diff_yaml_configs, format_log_entries,
     format_speed, normalize_pac_script, normalize_system_proxy_bypass, normalize_system_proxy_host,
     AppPreferences, AppPreferencesStore, AutostartStatus, ConfigDiffReport, ConnectionsSnapshot,
-    ControlledConfigStore, CoreKind, LogMonitor, MihomoClient, MihomoProcess, NetworkLatencyTarget,
-    NetworkProbeRoutePreference, NetworkProbeSnapshot, ProfileCatalog, ProfileStore,
-    ProviderCatalog, PublicIpProvider, RemoteProfileOptions, RemoteProfileRoute, RuleCatalog,
-    RuntimeConfig, SubStoreClient, SubStoreItem, SubStoreItemKind, SubStoreSnapshot,
-    SystemNetworkSnapshot, SystemProxyController, SystemProxyManager, SystemProxyMode,
-    SystemProxyStatus, TrafficHistoryStore, TrafficMonitor, TunPermissionGrant,
+    ControlledConfigStore, CoreBinaryInfo, CoreKind, LogMonitor, MihomoClient, MihomoLaunchConfig,
+    MihomoProcess, NetworkLatencyTarget, NetworkProbeRoutePreference, NetworkProbeSnapshot,
+    ProfileCatalog, ProfileStore, ProviderCatalog, PublicIpProvider, RemoteProfileOptions,
+    RemoteProfileRoute, RuleCatalog, RuntimeConfig, SubStoreClient, SubStoreItem, SubStoreItemKind,
+    SubStoreSnapshot, SystemNetworkSnapshot, SystemProxyController, SystemProxyManager,
+    SystemProxyMode, SystemProxyStatus, TrafficHistoryStore, TrafficMonitor, TunPermissionGrant,
     TunPermissionManager, TunPermissionStatus, VersionInfo, YamlOverrideCatalog, YamlOverrideStore,
 };
 
@@ -88,6 +88,7 @@ pub struct RuntimePage {
     webdav: settings::webdav::WebDavUiState,
     preferences_store: Option<AppPreferencesStore>,
     preferences: AppPreferences,
+    core_management: settings::CoreManagementUiState,
     system_proxy_controller: SystemProxyController,
     traffic_history_store: Option<TrafficHistoryStore>,
     profile_forms: profiles::ProfileFormState,
@@ -143,6 +144,8 @@ pub struct RuntimePageServices {
     pub system_proxy_controller: SystemProxyController,
     /// Native `SQLite` traffic database, when the platform data directory is available.
     pub traffic_history_store: Option<TrafficHistoryStore>,
+    /// Visible explanation when startup recovered from the requested core.
+    pub startup_notice: Option<String>,
 }
 
 /// Event emitted after a managed profile becomes the active Mihomo config.

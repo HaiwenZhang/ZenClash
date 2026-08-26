@@ -102,6 +102,23 @@ impl MihomoLaunchConfig {
     /// Returns an error if the selected executable is absent or invalid, or
     /// when the selected YAML cannot be read.
     pub fn discover_for_kind(project_root: impl AsRef<Path>, kind: CoreKind) -> MihomoResult<Self> {
+        Self::discover_for_kind_with_binary(project_root, kind, None)
+    }
+
+    /// Discovers launch inputs while honoring a user-selected executable.
+    ///
+    /// Environment overrides remain authoritative. When no override exists, a
+    /// custom path is checked before bundled, workspace, and `PATH` candidates.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an explicit executable is absent or invalid, or when
+    /// the selected YAML cannot be read.
+    pub fn discover_for_kind_with_binary(
+        project_root: impl AsRef<Path>,
+        kind: CoreKind,
+        preferred_binary: Option<&Path>,
+    ) -> MihomoResult<Self> {
         let project_root = project_root.as_ref();
         let config_file = std::env::var_os("ZENCLASH_CONFIG")
             .map(PathBuf::from)
@@ -127,7 +144,16 @@ impl MihomoLaunchConfig {
                 )));
             }
             None => {
-                if let Some(bundled) = bundled_core_binary(kind) {
+                if let Some(binary) = preferred_binary {
+                    if !is_core_binary_candidate(binary) {
+                        return Err(MihomoError::Process(format!(
+                            "首选 {} 文件不可执行：{}",
+                            kind.display_name(),
+                            binary.display()
+                        )));
+                    }
+                    binary.to_path_buf()
+                } else if let Some(bundled) = bundled_core_binary(kind) {
                     install_bundled_core(kind, &bundled, &home_dir)?
                 } else {
                     workspace_core_candidates(project_root, kind)

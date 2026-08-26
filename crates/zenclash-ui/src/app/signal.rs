@@ -1,8 +1,7 @@
 use super::{
-    color, div, format_speed, h_flex, px, throughput_activity_percent, v_flex, AnyElement, Badge,
-    Button, ButtonGroup, Divider, InteractiveElement, IntoElement, OutboundMode, ParentElement,
-    Progress, Selectable, SetDirectMode, SetGlobalMode, SetRuleMode, Sizable, Styled, VecDeque,
-    ZenClashApp, SIGNAL_CYAN, UPLINK_AMBER,
+    div, format_speed, h_flex, px, throughput_activity_percent, v_flex, AnyElement, Badge, Button,
+    ButtonGroup, Divider, InteractiveElement, IntoElement, OutboundMode, ParentElement, Progress,
+    Selectable, SetDirectMode, SetGlobalMode, SetRuleMode, Sizable, Styled, VecDeque, ZenClashApp,
 };
 
 impl ZenClashApp {
@@ -37,8 +36,8 @@ impl ZenClashApp {
     pub(super) fn render_signal_rail(&self, theme: &gpui_component::Theme) -> AnyElement {
         let online = self.traffic.connected;
         let outbound_mode = self.outbound_mode.displayed();
-        let download_color = color(SIGNAL_CYAN);
-        let upload_color = color(UPLINK_AMBER);
+        let download_color = theme.chart_1;
+        let upload_color = theme.chart_2;
         let total = self.traffic.upload.saturating_add(self.traffic.download);
         let activity = throughput_activity_percent(total);
 

@@ -7,10 +7,19 @@ use std::{net::TcpListener, path::PathBuf, sync::Arc, time::Duration};
 use gpui::Application;
 use gpui_component_assets::Assets;
 use zenclash_core::{
-    AppPreferencesStore, ControlledConfigStore, CoreKind, LogMonitor, MihomoClient, MihomoEndpoint,
-    MihomoLaunchConfig, MihomoProcess, ProfileStore, TrafficMonitor, YamlOverrideStore,
+    AppPreferences, AppPreferencesStore, ControlledConfigStore, CoreKind, LogMonitor, MihomoClient,
+    MihomoEndpoint, MihomoLaunchConfig, MihomoProcess, ProfileStore, TrafficMonitor,
+    YamlOverrideStore,
 };
 use zenclash_ui::app;
+
+struct RecoveredCore {
+    kind: CoreKind,
+    binary: Option<PathBuf>,
+    endpoint: MihomoEndpoint,
+    process: Option<Arc<MihomoProcess>>,
+    profile: Option<PathBuf>,
+}
 
 fn main() {
     tracing_subscriber::fmt()
@@ -32,15 +41,61 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .thread_name("zenclash-io")
         .build()?;
     let _runtime_guard = runtime.enter();
-    let core_kind = selected_core_kind()?;
+    let (preferences_store, preferences) = load_preferences();
+    let environment_core = std::env::var("ZENCLASH_CORE")
+        .ok()
+        .map(|value| value.parse())
+        .transpose()?;
+    let requested_core = environment_core.unwrap_or(preferences.core_kind);
     let controlled_config_store = ControlledConfigStore::discover()?;
     let override_paths = YamlOverrideStore::discover()?.load_enabled_paths()?;
-    let (endpoint, mihomo_process, profile_path) = bootstrap_core(
+    let preferred_binary = preferences.core_binaries.path(requested_core);
+    let initial = bootstrap_core(
         &runtime,
-        core_kind,
+        requested_core,
+        preferred_binary,
         &controlled_config_store,
         &override_paths,
-    )?;
+    );
+    let (core_kind, endpoint, mihomo_process, profile_path, startup_notice) = match initial {
+        Ok((endpoint, process, profile)) => (requested_core, endpoint, process, profile, None),
+        Err(initial_error) if environment_core.is_none() => {
+            let recovered = recover_core(
+                &runtime,
+                &preferences,
+                requested_core,
+                preferred_binary,
+                &controlled_config_store,
+                &override_paths,
+                &initial_error,
+            )?;
+            let source = recovered
+                .binary
+                .as_ref()
+                .map_or_else(|| "自动发现".to_owned(), |path| path.display().to_string());
+            let notice = format!(
+                "首选 {} 启动失败，已明确恢复到 {}（{}）。首选项没有被覆盖，请在“设置 → 核心舱”重新检测或选择文件。原因：{}",
+                requested_core,
+                recovered.kind,
+                source,
+                initial_error
+            );
+            tracing::warn!(requested = %requested_core, fallback = %recovered.kind, %initial_error, "recovered with last usable core");
+            (
+                recovered.kind,
+                recovered.endpoint,
+                recovered.process,
+                recovered.profile,
+                Some(notice),
+            )
+        }
+        Err(error) => return Err(error.into()),
+    };
+    remember_working_core(
+        preferences_store.as_ref(),
+        core_kind,
+        mihomo_process.as_ref(),
+    );
     let client = MihomoClient::new(endpoint.clone())?;
     if core_kind.capabilities().full_config_reload {
         if let Some(profile) = profile_path.as_ref() {
@@ -71,6 +126,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 profile_path,
                 controlled_config_store,
                 runtime: runtime_handle,
+                startup_notice,
             },
             cx,
         );
@@ -79,15 +135,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn selected_core_kind() -> Result<CoreKind, Box<dyn std::error::Error>> {
-    if let Ok(value) = std::env::var("ZENCLASH_CORE") {
-        return Ok(value.parse()?);
-    }
-    match AppPreferencesStore::discover().and_then(|store| store.load()) {
-        Ok(preferences) => Ok(preferences.core_kind),
+fn load_preferences() -> (Option<AppPreferencesStore>, AppPreferences) {
+    match AppPreferencesStore::discover() {
+        Ok(store) => match store.load() {
+            Ok(preferences) => (Some(store), preferences),
+            Err(error) => {
+                tracing::warn!(%error, "failed to load selected core; using defaults");
+                (Some(store), AppPreferences::default())
+            }
+        },
         Err(error) => {
-            tracing::warn!(%error, "failed to load selected core; using Mihomo");
-            Ok(CoreKind::Mihomo)
+            tracing::warn!(%error, "failed to discover preferences; using defaults");
+            (None, AppPreferences::default())
         }
     }
 }
@@ -95,6 +154,7 @@ fn selected_core_kind() -> Result<CoreKind, Box<dyn std::error::Error>> {
 fn bootstrap_core(
     runtime: &tokio::runtime::Runtime,
     core_kind: CoreKind,
+    preferred_binary: Option<&std::path::Path>,
     controlled_config_store: &ControlledConfigStore,
     override_paths: &[PathBuf],
 ) -> std::io::Result<(MihomoEndpoint, Option<Arc<MihomoProcess>>, Option<PathBuf>)> {
@@ -119,7 +179,11 @@ fn bootstrap_core(
         return Ok((MihomoEndpoint::from_env(), None, Some(profile_path)));
     }
 
-    let discovered = match MihomoLaunchConfig::discover_for_kind(&project_root, core_kind) {
+    let discovered = match MihomoLaunchConfig::discover_for_kind_with_binary(
+        &project_root,
+        core_kind,
+        preferred_binary,
+    ) {
         Ok(launch) => launch,
         Err(error) => {
             return Err(std::io::Error::other(format!(
@@ -176,6 +240,77 @@ fn bootstrap_core(
         Err(error) => Err(std::io::Error::other(format!(
             "无法启动托管 {core_kind}：{error}"
         ))),
+    }
+}
+
+fn recover_core(
+    runtime: &tokio::runtime::Runtime,
+    preferences: &AppPreferences,
+    requested_core: CoreKind,
+    requested_binary: Option<&std::path::Path>,
+    controlled_config_store: &ControlledConfigStore,
+    override_paths: &[PathBuf],
+    initial_error: &std::io::Error,
+) -> std::io::Result<RecoveredCore> {
+    let mut candidates = Vec::new();
+    if let Some(kind) = preferences.last_known_good_core {
+        let binary = preferences.last_known_good_binary.clone();
+        if kind != requested_core || binary.as_deref() != requested_binary {
+            candidates.push((kind, binary));
+        }
+    }
+    if requested_core != CoreKind::Mihomo || requested_binary.is_some() {
+        candidates.push((CoreKind::Mihomo, None));
+    }
+    if requested_core != CoreKind::Meow || requested_binary.is_some() {
+        candidates.push((CoreKind::Meow, None));
+    }
+
+    let mut failures = vec![initial_error.to_string()];
+    for (kind, binary) in candidates {
+        match bootstrap_core(
+            runtime,
+            kind,
+            binary.as_deref(),
+            controlled_config_store,
+            override_paths,
+        ) {
+            Ok((endpoint, process, profile)) => {
+                let actual_binary = process
+                    .as_ref()
+                    .map(|process| process.snapshot().binary)
+                    .or(binary);
+                return Ok(RecoveredCore {
+                    kind,
+                    binary: actual_binary,
+                    endpoint,
+                    process,
+                    profile,
+                });
+            }
+            Err(error) => failures.push(error.to_string()),
+        }
+    }
+    Err(std::io::Error::other(format!(
+        "首选内核与恢复内核均启动失败：{}",
+        failures.join("；")
+    )))
+}
+
+fn remember_working_core(
+    store: Option<&AppPreferencesStore>,
+    kind: CoreKind,
+    process: Option<&Arc<MihomoProcess>>,
+) {
+    let (Some(store), Some(process)) = (store, process) else {
+        return;
+    };
+    let binary = process.snapshot().binary;
+    if let Err(error) = store.update(|preferences| {
+        preferences.last_known_good_core = Some(kind);
+        preferences.last_known_good_binary = Some(binary);
+    }) {
+        tracing::warn!(%error, "failed to remember last working core");
     }
 }
 

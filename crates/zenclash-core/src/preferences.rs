@@ -48,6 +48,12 @@ pub struct AppPreferences {
     pub version: u32,
     /// Runtime core requested for the next application start.
     pub core_kind: CoreKind,
+    /// Optional user-selected executable paths for each supported runtime core.
+    pub core_binaries: CoreBinaryPreferences,
+    /// Most recent core that completed managed startup successfully.
+    pub last_known_good_core: Option<CoreKind>,
+    /// Exact executable used by the most recent successful managed startup.
+    pub last_known_good_binary: Option<PathBuf>,
     /// Preferred native application appearance.
     pub appearance: AppearancePreference,
     /// Whether the live native traffic indicator is visible.
@@ -76,11 +82,43 @@ pub struct AppPreferences {
     pub system_proxy_pac_script: String,
 }
 
+/// User-selected executable paths for the two supported runtime cores.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CoreBinaryPreferences {
+    /// Custom Mihomo executable, or automatic discovery when absent.
+    pub mihomo: Option<PathBuf>,
+    /// Custom meow-rs executable, or automatic discovery when absent.
+    pub meow: Option<PathBuf>,
+}
+
+impl CoreBinaryPreferences {
+    /// Returns the custom executable selected for `kind`.
+    #[must_use]
+    pub fn path(&self, kind: CoreKind) -> Option<&Path> {
+        match kind {
+            CoreKind::Mihomo => self.mihomo.as_deref(),
+            CoreKind::Meow => self.meow.as_deref(),
+        }
+    }
+
+    /// Replaces the custom executable for `kind`.
+    pub fn set(&mut self, kind: CoreKind, path: Option<PathBuf>) {
+        match kind {
+            CoreKind::Mihomo => self.mihomo = path,
+            CoreKind::Meow => self.meow = path,
+        }
+    }
+}
+
 impl Default for AppPreferences {
     fn default() -> Self {
         Self {
             version: 1,
             core_kind: CoreKind::Mihomo,
+            core_binaries: CoreBinaryPreferences::default(),
+            last_known_good_core: None,
+            last_known_good_binary: None,
             appearance: AppearancePreference::System,
             traffic_tray_visible: true,
             traffic_history_enabled: true,
@@ -349,6 +387,12 @@ mod tests {
         let store = AppPreferencesStore::new(&path);
         let preferences = AppPreferences {
             core_kind: CoreKind::Meow,
+            core_binaries: CoreBinaryPreferences {
+                mihomo: None,
+                meow: Some(PathBuf::from("/opt/zenclash/meow")),
+            },
+            last_known_good_core: Some(CoreKind::Mihomo),
+            last_known_good_binary: Some(PathBuf::from("/opt/zenclash/mihomo")),
             appearance: AppearancePreference::Light,
             traffic_tray_visible: false,
             ..AppPreferences::default()

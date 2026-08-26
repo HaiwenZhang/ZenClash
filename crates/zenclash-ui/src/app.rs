@@ -44,7 +44,7 @@ use crate::{
             TrayProxyGroup, TrayProxyNode,
         },
     },
-    design::{apply_zen_theme, color, throughput_activity_percent, SIGNAL_CYAN, UPLINK_AMBER},
+    design::{apply_zen_theme, throughput_activity_percent},
     pages::{
         proxies::ProxiesPage,
         runtime::{PreferencesRestored, ProfileActivated, RuntimePage, RuntimePageServices},
@@ -152,6 +152,8 @@ pub struct AppServices {
     pub controlled_config_store: ControlledConfigStore,
     /// Tokio runtime used for network and blocking bridge tasks.
     pub runtime: tokio::runtime::Handle,
+    /// Visible explanation when startup recovered from an unusable preferred core.
+    pub startup_notice: Option<String>,
 }
 
 impl ZenClashApp {
@@ -172,6 +174,7 @@ impl ZenClashApp {
             profile_path,
             controlled_config_store,
             runtime,
+            startup_notice,
         } = services;
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
@@ -203,6 +206,7 @@ impl ZenClashApp {
                     preferences: preferences.clone(),
                     system_proxy_controller: system_proxy_controller.clone(),
                     traffic_history_store: traffic_history_store.clone(),
+                    startup_notice,
                 },
                 window,
                 cx,

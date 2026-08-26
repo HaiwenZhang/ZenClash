@@ -8,6 +8,7 @@ mod client;
 mod config_diff;
 mod controlled_config;
 mod core_backend;
+mod core_installation;
 mod core_update;
 mod endpoint;
 mod logs;
@@ -42,6 +43,7 @@ pub use controlled_config::{
     ControlledConfigError, ControlledConfigResult, ControlledConfigStore, ControlledConfigUpdate,
 };
 pub use core_backend::{CoreCapabilities, CoreKind, ParseCoreKindError};
+pub use core_installation::{validate_core_binary, CoreBinaryError, CoreBinaryInfo};
 pub use core_update::{
     CoreUpdateError, CoreUpdateResult, CoreUpdateTransaction, MihomoRelease, MihomoReleaseAsset,
     MihomoReleaseService, PreparedCoreUpdate,
@@ -62,7 +64,7 @@ pub use network::{
 };
 pub use preferences::{
     AppPreferences, AppPreferencesError, AppPreferencesResult, AppPreferencesStore,
-    AppearancePreference, NetworkProbeRoutePreference,
+    AppearancePreference, CoreBinaryPreferences, NetworkProbeRoutePreference,
 };
 pub use process::{MihomoLaunchConfig, MihomoProcess, MihomoProcessSnapshot};
 pub use profile::merge_profile_overrides;

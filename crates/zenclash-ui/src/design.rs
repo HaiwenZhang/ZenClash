@@ -10,6 +10,18 @@ pub const UPLINK_AMBER: u32 = 0x00F2_B84B;
 /// Coral accent used for errors and destructive states.
 pub const FAULT_CORAL: u32 = 0x00FF_6B64;
 
+const LIGHT_CANVAS: u32 = 0x00F4_F7FA;
+const LIGHT_PANEL: u32 = 0x00FF_FFFF;
+const LIGHT_RAISED: u32 = 0x00E9_EFF5;
+const LIGHT_BORDER: u32 = 0x00D5_DEE7;
+const LIGHT_INK: u32 = 0x0017_2635;
+const LIGHT_MUTED_INK: u32 = 0x0060_7386;
+const LIGHT_SIGNAL: u32 = 0x000B_7A71;
+const LIGHT_UPLINK: u32 = 0x009B_650E;
+const LIGHT_SUCCESS: u32 = 0x0016_7956;
+const LIGHT_DANGER: u32 = 0x00BD_3F3F;
+const LIGHT_SIDEBAR: u32 = 0x00ED_F2F7;
+
 /// Converts a packed RGB value into GPUI's HSLA representation.
 #[must_use]
 pub fn color(hex: u32) -> Hsla {
@@ -33,17 +45,19 @@ pub fn apply_zen_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut Ap
     let dark = mode.is_dark();
     let theme = Theme::global_mut(cx);
 
-    let background = color(if dark { DEEP_INK } else { 0x00F1_F7F6 });
-    let panel = color(if dark { 0x000C_1C24 } else { 0x00FF_FFFF });
-    let raised = color(if dark { 0x0010_2832 } else { 0x00E4_EFED });
-    let border = color(if dark { 0x001B_3942 } else { 0x00C7_DAD7 });
-    let foreground = color(if dark { 0x00DC_E9E8 } else { 0x0013_2B30 });
-    let muted_foreground = color(if dark { 0x0082_9B9D } else { 0x0062_7C7E });
-    let signal = color(SIGNAL_CYAN);
-    let signal_foreground = color(if dark { 0x0003_110F } else { 0x0006_201D });
-    let amber = color(UPLINK_AMBER);
-    let coral = color(FAULT_CORAL);
-    let success = color(if dark { 0x0043_C98B } else { 0x0016_8A5B });
+    let background = color(if dark { DEEP_INK } else { LIGHT_CANVAS });
+    let panel = color(if dark { 0x000C_1C24 } else { LIGHT_PANEL });
+    let raised = color(if dark { 0x0010_2832 } else { LIGHT_RAISED });
+    let border = color(if dark { 0x001B_3942 } else { LIGHT_BORDER });
+    let foreground = color(if dark { 0x00DC_E9E8 } else { LIGHT_INK });
+    let muted_foreground = color(if dark { 0x0082_9B9D } else { LIGHT_MUTED_INK });
+    let signal = color(if dark { SIGNAL_CYAN } else { LIGHT_SIGNAL });
+    let signal_foreground = color(if dark { 0x0003_110F } else { LIGHT_PANEL });
+    let amber = color(if dark { UPLINK_AMBER } else { LIGHT_UPLINK });
+    let coral = color(if dark { FAULT_CORAL } else { LIGHT_DANGER });
+    let success = color(if dark { 0x0043_C98B } else { LIGHT_SUCCESS });
+    let sidebar = color(if dark { 0x0009_171E } else { LIGHT_SIDEBAR });
+    let sidebar_accent = if dark { raised } else { panel };
 
     configure_theme_metrics(theme);
 
@@ -83,14 +97,14 @@ pub fn apply_zen_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut Ap
     colors.info_hover = signal.opacity(0.84);
     colors.info_active = signal.opacity(0.72);
     colors.progress_bar = signal;
-    colors.sidebar = color(if dark { 0x0009_171E } else { 0x00EA_F3F1 });
+    colors.sidebar = sidebar;
     colors.sidebar_foreground = foreground;
     colors.sidebar_border = border;
-    colors.sidebar_accent = raised;
+    colors.sidebar_accent = sidebar_accent;
     colors.sidebar_accent_foreground = foreground;
     colors.sidebar_primary = signal;
     colors.sidebar_primary_foreground = signal_foreground;
-    colors.title_bar = background;
+    colors.title_bar = if dark { background } else { panel };
     colors.title_bar_border = border;
     colors.list = panel;
     colors.list_head = raised;
@@ -139,18 +153,56 @@ fn configure_theme_metrics(theme: &mut Theme) {
     theme.mono_font_size = gpui::px(12.);
     theme.radius = gpui::px(8.);
     theme.radius_lg = gpui::px(12.);
-    theme.shadow = false;
+    theme.shadow = !theme.mode.is_dark();
     theme.tile_shadow = false;
 }
 
 #[cfg(test)]
+fn contrast_ratio(left: u32, right: u32) -> f64 {
+    let left = relative_luminance(left);
+    let right = relative_luminance(right);
+    (left.max(right) + 0.05) / (left.min(right) + 0.05)
+}
+
+#[cfg(test)]
+fn relative_luminance(rgb: u32) -> f64 {
+    let channel = |shift| {
+        let value = f64::from(u8::try_from((rgb >> shift) & 0xff_u32).unwrap_or_default()) / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+}
+
+#[cfg(test)]
 mod tests {
-    use super::throughput_activity_percent;
+    use super::{
+        contrast_ratio, throughput_activity_percent, LIGHT_CANVAS, LIGHT_INK, LIGHT_MUTED_INK,
+        LIGHT_SIGNAL,
+    };
 
     #[test]
     fn activity_percent_is_bounded_without_float_casts() {
         assert!((throughput_activity_percent(0) - 0.0).abs() < f32::EPSILON);
         assert!((throughput_activity_percent(2 * 1024 * 1024) - 50.0).abs() < f32::EPSILON);
         assert!((throughput_activity_percent(u64::MAX) - 100.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn light_body_text_exceeds_wcag_aaa_contrast() {
+        assert!(contrast_ratio(LIGHT_INK, LIGHT_CANVAS) >= 7.0);
+    }
+
+    #[test]
+    fn light_muted_text_meets_wcag_aa_contrast() {
+        assert!(contrast_ratio(LIGHT_MUTED_INK, LIGHT_CANVAS) >= 4.5);
+    }
+
+    #[test]
+    fn light_signal_text_meets_wcag_aa_contrast() {
+        assert!(contrast_ratio(LIGHT_SIGNAL, LIGHT_CANVAS) >= 4.5);
     }
 }

@@ -126,6 +126,7 @@ impl RuntimePage {
             preferences,
             system_proxy_controller,
             traffic_history_store,
+            startup_notice,
         } = services;
         let InitialPersistentState {
             profile_store,
@@ -177,6 +178,7 @@ impl RuntimePage {
             webdav,
             preferences_store,
             preferences,
+            core_management: super::settings::CoreManagementUiState::default(),
             system_proxy_controller,
             traffic_history_store,
             profile_forms,
@@ -201,7 +203,7 @@ impl RuntimePage {
             mutating: false,
             closing_connections: HashSet::new(),
             error: error.or(webdav_error),
-            notice: None,
+            notice: startup_notice,
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![log_filter_subscription, rule_filter_subscription],
         };
@@ -232,6 +234,9 @@ impl RuntimePage {
             }
         }
         self.refresh(cx);
+        if page == Page::Settings {
+            self.refresh_core_management(cx);
+        }
         if page == Page::Traffic {
             self.refresh_traffic_history(cx);
         }
