@@ -111,7 +111,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!(core = %core_kind, "skipping unsupported full configuration hot reload");
     }
     let traffic = TrafficMonitor::start(runtime.handle(), endpoint.clone());
-    let logs = LogMonitor::start(runtime.handle(), endpoint, "debug");
+    let logs = LogMonitor::start(
+        runtime.handle(),
+        endpoint,
+        zenclash_core::MihomoLogLevel::Info,
+    );
     let runtime_handle = runtime.handle().clone();
 
     Application::new().with_assets(Assets).run(move |cx| {

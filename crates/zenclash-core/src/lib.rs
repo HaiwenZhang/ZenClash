@@ -51,7 +51,7 @@ pub use core_update::{
 pub use endpoint::MihomoEndpoint;
 pub use logs::{
     format_log_entries, LogEntry, LogMonitor, LogPersistenceError, LogPersistenceResult,
-    LogPersistenceStatus,
+    LogPersistenceStatus, MihomoLogLevel,
 };
 pub use models::{
     Connection, ConnectionMetadata, ConnectionsSnapshot, MemorySnapshot, Provider, ProviderCatalog,

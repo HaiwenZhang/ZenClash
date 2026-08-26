@@ -1,8 +1,8 @@
 use super::{
     load_page, load_page_with_binary, AppContext, ConfigInputs, Context, ControlledConfigStore,
-    Duration, HashSet, InputEvent, InputState, Page, PageTaskToken, ProfileActivated,
-    ProfileCatalog, ProfileStore, RuntimeConfig, RuntimeData, RuntimePage, RuntimePageServices,
-    Value, VecDeque, Window, YamlOverrideCatalog, YamlOverrideStore,
+    Duration, HashSet, InputEvent, InputState, MihomoLogLevel, Page, PageTaskToken,
+    ProfileActivated, ProfileCatalog, ProfileStore, RuntimeConfig, RuntimeData, RuntimePage,
+    RuntimePageServices, Value, VecDeque, Window, YamlOverrideCatalog, YamlOverrideStore,
 };
 
 struct InitialPersistentState {
@@ -331,6 +331,10 @@ impl RuntimePage {
         success: &'static str,
         cx: &mut Context<Self>,
     ) {
+        let requested_log_level = patch
+            .get("log-level")
+            .and_then(Value::as_str)
+            .and_then(MihomoLogLevel::from_api);
         let Some(profile) = self.profile_path.clone() else {
             self.error = Some("未配置当前配置文件路径".into());
             cx.notify();
@@ -383,6 +387,9 @@ impl RuntimePage {
                 match result {
                     Ok((data, controlled_config)) => {
                         if this.replace_page_data(token, data) {
+                            if let Some(level) = requested_log_level {
+                                this.log_monitor.set_level(level);
+                            }
                             this.controlled_config = controlled_config;
                             this.config_preview = None;
                             this.notice = Some(if uses_restart {

@@ -24,12 +24,13 @@ use zenclash_core::{
     format_speed, normalize_pac_script, normalize_system_proxy_bypass, normalize_system_proxy_host,
     AppPreferences, AppPreferencesStore, AutostartStatus, ConfigDiffReport, ConnectionsSnapshot,
     ControlledConfigStore, CoreBinaryInfo, CoreKind, LogMonitor, MihomoClient, MihomoLaunchConfig,
-    MihomoProcess, NetworkLatencyTarget, NetworkProbeRoutePreference, NetworkProbeSnapshot,
-    ProfileCatalog, ProfileStore, ProviderCatalog, PublicIpProvider, RemoteProfileOptions,
-    RemoteProfileRoute, RuleCatalog, RuntimeConfig, SubStoreClient, SubStoreItem, SubStoreItemKind,
-    SubStoreSnapshot, SystemNetworkSnapshot, SystemProxyController, SystemProxyManager,
-    SystemProxyMode, SystemProxyStatus, TrafficHistoryStore, TrafficMonitor, TunPermissionGrant,
-    TunPermissionManager, TunPermissionStatus, VersionInfo, YamlOverrideCatalog, YamlOverrideStore,
+    MihomoLogLevel, MihomoProcess, NetworkLatencyTarget, NetworkProbeRoutePreference,
+    NetworkProbeSnapshot, ProfileCatalog, ProfileStore, ProviderCatalog, PublicIpProvider,
+    RemoteProfileOptions, RemoteProfileRoute, RuleCatalog, RuntimeConfig, SubStoreClient,
+    SubStoreItem, SubStoreItemKind, SubStoreSnapshot, SystemNetworkSnapshot, SystemProxyController,
+    SystemProxyManager, SystemProxyMode, SystemProxyStatus, TrafficHistoryStore, TrafficMonitor,
+    TunPermissionGrant, TunPermissionManager, TunPermissionStatus, VersionInfo,
+    YamlOverrideCatalog, YamlOverrideStore,
 };
 
 use crate::app::{HideTrafficIcon, SetDarkTheme, SetLightTheme, SetSystemTheme, ShowTrafficIcon};

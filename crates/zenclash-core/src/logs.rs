@@ -8,7 +8,7 @@ use std::{
 use futures_util::StreamExt;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tokio::{runtime::Handle, task::JoinHandle};
+use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
 
 use crate::{websocket::connect_stream, MihomoEndpoint};
 
@@ -16,7 +16,50 @@ mod file;
 
 pub use file::{LogPersistenceError, LogPersistenceResult, LogPersistenceStatus};
 
-const MAX_LOG_ENTRIES: usize = 2_000;
+const MAX_LOG_ENTRIES: usize = 500;
+
+/// Severity threshold accepted by Mihomo's `/logs` stream.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MihomoLogLevel {
+    /// Disable core log events.
+    Silent,
+    /// Keep only errors.
+    Error,
+    /// Keep warnings and errors.
+    Warning,
+    /// Keep normal operational events, warnings, and errors.
+    #[default]
+    Info,
+    /// Include verbose diagnostic events.
+    Debug,
+}
+
+impl MihomoLogLevel {
+    /// Parses a Mihomo runtime configuration value.
+    #[must_use]
+    pub fn from_api(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "silent" => Some(Self::Silent),
+            "error" => Some(Self::Error),
+            "warning" | "warn" => Some(Self::Warning),
+            "info" => Some(Self::Info),
+            "debug" => Some(Self::Debug),
+            _ => None,
+        }
+    }
+
+    /// Returns the query value accepted by Mihomo.
+    #[must_use]
+    pub const fn api_value(self) -> &'static str {
+        match self {
+            Self::Silent => "silent",
+            Self::Error => "error",
+            Self::Warning => "warning",
+            Self::Info => "info",
+            Self::Debug => "debug",
+        }
+    }
+}
 
 /// One entry received from Mihomo's `/logs` stream.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -36,6 +79,7 @@ pub struct LogEntry {
 pub struct LogMonitor {
     entries: Arc<RwLock<VecDeque<LogEntry>>>,
     connected: Arc<RwLock<bool>>,
+    level: watch::Sender<MihomoLogLevel>,
     file: file::LogFileWorker,
     task: JoinHandle<()>,
 }
@@ -43,13 +87,14 @@ pub struct LogMonitor {
 impl LogMonitor {
     /// Starts a log monitor at the requested Mihomo severity level.
     #[must_use]
-    pub fn start(runtime: &Handle, endpoint: MihomoEndpoint, level: &str) -> Arc<Self> {
+    pub fn start(runtime: &Handle, endpoint: MihomoEndpoint, level: MihomoLogLevel) -> Arc<Self> {
         let entries = Arc::new(RwLock::new(VecDeque::new()));
         let connected = Arc::new(RwLock::new(false));
         let file = file::LogFileWorker::start();
+        let (level_sender, level_receiver) = watch::channel(level);
         let task = runtime.spawn(run_monitor(
             endpoint,
-            level.to_owned(),
+            level_receiver,
             entries.clone(),
             connected.clone(),
             file.sender(),
@@ -57,6 +102,7 @@ impl LogMonitor {
         Arc::new(Self {
             entries,
             connected,
+            level: level_sender,
             file,
             task,
         })
@@ -71,6 +117,19 @@ impl LogMonitor {
     /// Removes all currently buffered log entries.
     pub fn clear(&self) {
         self.entries.write().clear();
+    }
+
+    /// Changes the stream threshold and reconnects only when it actually differs.
+    pub fn set_level(&self, level: MihomoLogLevel) {
+        if *self.level.borrow() != level {
+            self.level.send_replace(level);
+        }
+    }
+
+    /// Returns the active or next requested stream threshold.
+    #[must_use]
+    pub fn level(&self) -> MihomoLogLevel {
+        *self.level.borrow()
     }
 
     /// Configures bounded, continuous persistence for newly received log entries.
@@ -141,23 +200,38 @@ pub fn format_log_entries(entries: &[LogEntry]) -> String {
 
 async fn run_monitor(
     endpoint: MihomoEndpoint,
-    level: String,
+    mut level: watch::Receiver<MihomoLogLevel>,
     entries: Arc<RwLock<VecDeque<LogEntry>>>,
     connected: Arc<RwLock<bool>>,
     file_sender: file::LogFileSender,
 ) {
     loop {
+        let requested_level = *level.borrow();
+        let mut level_changed = false;
         match connect_stream(
             &endpoint,
             "/logs",
-            &[("level", level.as_str())],
+            &[("level", requested_level.api_value())],
             "连接 Mihomo 日志流超时",
         )
         .await
         {
             Ok(mut socket) => {
                 *connected.write() = true;
-                while let Some(message) = socket.next().await {
+                loop {
+                    let message = tokio::select! {
+                        changed = level.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                            level_changed = true;
+                            break;
+                        }
+                        message = socket.next() => message,
+                    };
+                    let Some(message) = message else {
+                        break;
+                    };
                     match message {
                         Ok(message) if message.is_text() || message.is_binary() => {
                             match serde_json::from_slice::<LogEntry>(&message.into_data()) {
@@ -194,7 +268,17 @@ async fn run_monitor(
             }
         }
         *connected.write() = false;
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        if level_changed {
+            continue;
+        }
+        tokio::select! {
+            changed = level.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+            () = tokio::time::sleep(Duration::from_secs(2)) => {}
+        }
     }
 }
 
@@ -336,5 +420,27 @@ mod tests {
             Some("latest")
         );
         drop(entries);
+    }
+
+    #[test]
+    fn log_levels_parse_mihomo_values_case_insensitively() {
+        assert_eq!(
+            MihomoLogLevel::from_api(" WARNING "),
+            Some(MihomoLogLevel::Warning)
+        );
+        assert_eq!(MihomoLogLevel::from_api("trace"), None);
+    }
+
+    #[tokio::test]
+    async fn changing_log_level_updates_the_monitor_without_restarting_it() {
+        let monitor = LogMonitor::start(
+            &Handle::current(),
+            MihomoEndpoint::default(),
+            MihomoLogLevel::Info,
+        );
+
+        monitor.set_level(MihomoLogLevel::Warning);
+
+        assert_eq!(monitor.level(), MihomoLogLevel::Warning);
     }
 }

@@ -15,8 +15,8 @@ use gpui_component::{
 };
 use zenclash_core::{
     format_speed, AppPreferences, AppPreferencesStore, AppearancePreference, ControlledConfigStore,
-    CoreKind, LogMonitor, MihomoClient, MihomoProcess, SystemProxyController, SystemProxyMode,
-    TrafficHistoryStore, TrafficMonitor, TrafficSnapshot,
+    CoreKind, LogMonitor, MihomoClient, MihomoLogLevel, MihomoProcess, SystemProxyController,
+    SystemProxyMode, TrafficHistoryStore, TrafficMonitor, TrafficSnapshot,
 };
 
 mod actions;
@@ -362,6 +362,7 @@ impl ZenClashApp {
         let client = self.client.clone();
         let runtime = self.runtime.clone();
         let mode = self.outbound_mode.clone();
+        let logs = self.log_monitor.clone();
         cx.spawn(async move |this, cx| loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
             let generation = mode.generation();
@@ -371,6 +372,9 @@ impl ZenClashApp {
                 Ok(Ok(config)) => {
                     let proxy_listener_available = config.system_proxy_port().is_some();
                     mode.synchronize(OutboundMode::from_api(&config.mode), generation);
+                    if let Some(level) = MihomoLogLevel::from_api(&config.log_level) {
+                        logs.set_level(level);
+                    }
                     if this
                         .update(cx, |this, cx| {
                             this.proxy_listener_available = Some(proxy_listener_available);

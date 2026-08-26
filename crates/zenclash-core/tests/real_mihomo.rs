@@ -10,8 +10,8 @@ use std::{
 };
 
 use zenclash_core::{
-    ControlledConfigStore, LogMonitor, MihomoClient, MihomoLaunchConfig, MihomoProcess,
-    NetworkLatencyTarget, NetworkProbeRoute, NetworkProbeService, ProfileStore,
+    ControlledConfigStore, LogMonitor, MihomoClient, MihomoLaunchConfig, MihomoLogLevel,
+    MihomoProcess, NetworkLatencyTarget, NetworkProbeRoute, NetworkProbeService, ProfileStore,
     RemoteProfileOptions, RulesetBehavior, RulesetConverter, SystemNetworkSnapshot, TrafficMonitor,
     YamlOverrideStore,
 };
@@ -29,7 +29,7 @@ async fn drives_the_supplied_profile_through_a_real_mihomo_process() {
     let persistent_logs = LogMonitor::start(
         &tokio::runtime::Handle::current(),
         process.endpoint().clone(),
-        "debug",
+        MihomoLogLevel::Debug,
     );
     let persistent_log_path = inputs.home.join("integration-continuous-mihomo.log");
     persistent_logs

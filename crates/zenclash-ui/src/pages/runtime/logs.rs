@@ -1,11 +1,11 @@
 use super::{
     div, empty_state, format_bytes, format_log_entries, h_flex, info_row, metric, px, setting_card,
     setting_switch, v_flex, Button, Context, Disableable, FluentBuilder, IconName, Input,
-    InteractiveElement, IntoElement, Page, ParentElement, PreferencesRestored, RuntimePage,
-    Selectable, Sizable, Styled,
+    InteractiveElement, IntoElement, MihomoLogLevel, Page, ParentElement, PreferencesRestored,
+    RuntimePage, Selectable, Sizable, Styled,
 };
 
-const MAX_VISIBLE_LOGS: usize = 600;
+const MAX_VISIBLE_LOGS: usize = 500;
 
 impl RuntimePage {
     pub(super) fn render_logs(
@@ -100,6 +100,11 @@ impl RuntimePage {
             ))
             .child(info_row("文件", &path, theme))
             .child(info_row("写入状态", state, theme))
+            .child(info_row(
+                "实时采集",
+                log_level_description(self.log_monitor.level()),
+                theme,
+            ))
             .child(info_row("当前占用", &format_log_disk_usage(&status), theme))
             .when(status.dropped_entries > 0, |card| {
                 card.child(info_row(
@@ -406,6 +411,16 @@ fn format_log_disk_usage(persistence: &zenclash_core::LogPersistenceStatus) -> S
     )
 }
 
+const fn log_level_description(level: MihomoLogLevel) -> &'static str {
+    match level {
+        MihomoLogLevel::Silent => "静默 · 不接收内核事件",
+        MihomoLogLevel::Error => "错误 · 仅保留故障",
+        MihomoLogLevel::Warning => "警告 · 推荐日常精简使用",
+        MihomoLogLevel::Info => "信息 · 默认，包含连接与运行事件",
+        MihomoLogLevel::Debug => "调试 · 仅排障时临时开启",
+    }
+}
+
 fn log_matches(entry: &zenclash_core::LogEntry, query: &str) -> bool {
     query.is_empty()
         || entry.level.to_ascii_lowercase().contains(query)
@@ -445,5 +460,11 @@ mod tests {
         };
 
         assert_eq!(format_log_disk_usage(&status), "2.5 MiB / 5.0 MiB");
+    }
+
+    #[test]
+    fn log_level_descriptions_distinguish_daily_use_from_diagnostics() {
+        assert!(log_level_description(MihomoLogLevel::Warning).contains("推荐"));
+        assert!(log_level_description(MihomoLogLevel::Debug).contains("排障"));
     }
 }
