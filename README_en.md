@@ -11,9 +11,8 @@
 </p>
 
 <p align="center">
-  <strong>A native Mihomo desktop client built with Rust and GPUI</strong>
+  <strong>A native Mihomo desktop client built with Rust, GPUI and GPUI Component</strong>
   <br>
-  See the current state at a glance, then open a dedicated page when you need more detail.
 </p>
 
 <p align="center">

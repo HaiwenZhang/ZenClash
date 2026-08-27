@@ -11,9 +11,7 @@
 </p>
 
 <p align="center">
-  <strong>使用 Rust 与 GPUI 构建的原生 Mihomo 桌面客户端</strong>
-  <br>
-  简洁查看当前状态，需要更多信息时再进入对应页面。
+  <strong>使用 Rust 与 GPUI 和 GPUI Component 构建的原生 Mihomo 桌面客户端</strong>
 </p>
 
 <p align="center">
