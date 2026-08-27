@@ -1,12 +1,17 @@
+#[cfg(unix)]
 use std::{
     io::{Read, Write},
     net::TcpListener,
-    path::PathBuf,
     thread,
+};
+use std::{
+    path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
 use flate2::{Compression, write::GzEncoder};
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
 
 use super::{
@@ -29,6 +34,7 @@ fn unique_directory(label: &str) -> PathBuf {
     ))
 }
 
+#[cfg(unix)]
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }

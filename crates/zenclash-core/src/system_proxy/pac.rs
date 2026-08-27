@@ -199,11 +199,20 @@ fn run_server(listener: &TcpListener, script: &[u8], shutdown: &AtomicBool) {
 }
 
 fn serve_connection(mut stream: TcpStream, script: &[u8]) -> std::io::Result<()> {
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     let mut request = [0_u8; MAX_HTTP_REQUEST_BYTES];
-    let read = stream.read(&mut request)?;
-    let request_line = std::str::from_utf8(&request[..read])
+    let mut request_length = 0;
+    while request_length < request.len() && !request[..request_length].contains(&b'\n') {
+        match stream.read(&mut request[request_length..]) {
+            Ok(0) => break,
+            Ok(read) => request_length += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    let request_line = std::str::from_utf8(&request[..request_length])
         .ok()
         .and_then(|request| request.lines().next())
         .unwrap_or_default();
@@ -259,6 +268,24 @@ mod tests {
         let mut stream = TcpStream::connect(status.address).unwrap();
         stream
             .write_all(b"GET /pac HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+
+        assert!(response.contains("PROXY 127.0.0.1:17890"), "{response}");
+    }
+
+    #[test]
+    fn pac_server_accepts_a_fragmented_http_request_line() {
+        let server = PacServer::default();
+        let status = server
+            .start("127.0.0.1", default_pac_script(), 17_890)
+            .unwrap();
+        let mut stream = TcpStream::connect(status.address).unwrap();
+        stream.write_all(b"GET /").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        stream
+            .write_all(b"pac HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();

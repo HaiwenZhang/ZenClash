@@ -234,11 +234,10 @@ fn non_empty_diagnostic(diagnostic: String) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn invokes_the_target_core_with_test_home_and_config_arguments() {
         let root = test_root("accepts");
@@ -258,7 +257,6 @@ mod tests {
         std::fs::remove_dir_all(root).expect("remove test root");
     }
 
-    #[cfg(unix)]
     #[test]
     fn reports_real_core_rejection_diagnostics() {
         let root = test_root("rejects");
@@ -275,7 +273,6 @@ mod tests {
         std::fs::remove_dir_all(root).expect("remove test root");
     }
 
-    #[cfg(unix)]
     #[test]
     fn payload_validation_removes_its_private_temporary_file() {
         let root = test_root("payload-cleanup");
@@ -298,7 +295,6 @@ mod tests {
         std::fs::remove_dir_all(root).expect("remove test root");
     }
 
-    #[cfg(unix)]
     fn validation_script(root: &Path, name: &str, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
 
@@ -313,7 +309,6 @@ mod tests {
         path
     }
 
-    #[cfg(unix)]
     fn test_root(name: &str) -> PathBuf {
         let sequence = VALIDATION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(

@@ -1,5 +1,8 @@
-use std::{collections::VecDeque, path::PathBuf, process::Command, sync::Arc};
+use std::collections::VecDeque;
+#[cfg(unix)]
+use std::{path::PathBuf, process::Command, sync::Arc};
 
+#[cfg(unix)]
 use parking_lot::{Mutex, RwLock};
 
 use super::*;
