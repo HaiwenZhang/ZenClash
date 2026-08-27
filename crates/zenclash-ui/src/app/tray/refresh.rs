@@ -46,10 +46,20 @@ impl ZenClashApp {
             let config = config.map_err(|error| error.to_string())?;
             let catalog = catalog.map_err(|error| error.to_string())?;
             let system_proxy = system_proxy
-                .map_err(|error| format!("系统代理状态任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "tray.errors.system_proxy_status",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let profiles = profiles
-                .map_err(|error| format!("配置目录任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "tray.errors.config_directory",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             Ok::<_, String>((config, catalog, system_proxy, profiles, mode_generation))
         });
@@ -132,16 +142,17 @@ impl ZenClashApp {
                         .as_deref()
                         .and_then(|path| path.file_name())
                         .map_or_else(
-                            || "当前配置".into(),
+                            || zenclash_i18n::text("tray.current_profile"),
                             |name| name.to_string_lossy().into_owned(),
                         ),
                     Vec::new(),
                 )
             },
             |catalog| {
-                let profile_name = catalog
-                    .active_profile()
-                    .map_or_else(|| "当前配置".into(), |profile| profile.name.clone());
+                let profile_name = catalog.active_profile().map_or_else(
+                    || zenclash_i18n::text("tray.current_profile"),
+                    |profile| profile.name.clone(),
+                );
                 let active = catalog.active.as_deref();
                 let profiles = catalog
                     .profiles

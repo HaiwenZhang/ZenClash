@@ -76,10 +76,10 @@ impl DelayTestFailure {
         }
     }
 
-    const fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Self::Timeout => "超时",
-            Self::Failed => "失败",
+            Self::Timeout => zenclash_i18n::text("proxies.status.timeout"),
+            Self::Failed => zenclash_i18n::text("proxies.status.failed"),
         }
     }
 }
@@ -138,7 +138,7 @@ impl Render for ProxiesPage {
                                 .bg(theme.secondary)
                                 .text_sm()
                                 .text_color(theme.muted_foreground)
-                                .child("正在读取 Mihomo 代理组…"),
+                                .child(zenclash_i18n::text("proxies.loading")),
                         )
                     })
                     .when_some(catalog, |this, catalog| {
@@ -147,11 +147,11 @@ impl Render for ProxiesPage {
                             .collect::<Vec<_>>();
                         if groups.is_empty() {
                             let message = if self.outbound_mode.eq_ignore_ascii_case("direct") {
-                                "当前为 DIRECT 直连模式，无需选择代理策略组。"
+                                zenclash_i18n::text("proxies.empty.direct")
                             } else if self.outbound_mode.eq_ignore_ascii_case("global") {
-                                "当前配置没有可用的 GLOBAL 策略组。"
+                                zenclash_i18n::text("proxies.empty.global")
                             } else {
-                                "当前配置没有可用的代理组。"
+                                zenclash_i18n::text("proxies.empty.rule")
                             };
                             this.child(
                                 div()

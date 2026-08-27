@@ -1,173 +1,215 @@
-# ZenClash
+<p align="center">
+  <img src="platforms/macos/ZenClash.png" width="120" alt="ZenClash Logo">
+</p>
 
-ZenClash is a native Clash-compatible client implemented in Rust with GPUI and
-gpui-component. Mihomo is the default production core; meow-rs is an explicit
-experimental alternative with capability-aware UI and restart-based full
-configuration transactions. The workspace currently contains:
+<h1 align="center">ZenClash</h1>
 
-- `zenclash-core`: typed Mihomo HTTP/WebSocket APIs, managed core process,
-  cross-platform system proxy integration, persistent configuration stores,
-  traffic/log monitors, and real integration tests.
-- `zenclash-ui`: GPUI native window, Clash Party-style card sidebar, proxy
-  selection and latency tests, connections, rules, providers, runtime settings,
-  TUN controls, logs, real SQLite-backed traffic history and rankings, local
-  profile switching, ordered YAML overrides, Sub-Store connectivity, and a
-  native status-bar traffic icon.
+<p align="center">
+  简体中文
+  ·
+  <a href="README_en.md">English</a>
+</p>
 
-## Run with the bundled bootstrap profile
+<p align="center">
+  <strong>使用 Rust 与 GPUI 构建的原生 Mihomo 桌面客户端</strong>
+  <br>
+  简洁查看当前状态，需要更多信息时再进入对应页面。
+</p>
 
-Use a real Mihomo executable. ZenClash starts it with the safe direct-only
-`platforms/common/default.yaml` profile until you import a local profile or add
-an online subscription.
+<p align="center">
+  <a href="https://github.com/HaiwenZhang/zenclash/releases">下载</a>
+  ·
+  <a href="https://github.com/HaiwenZhang/zenclash/issues">问题反馈</a>
+  ·
+  <a href="LICENSE">GPL-3.0 许可证</a>
+</p>
+
+> [!IMPORTANT]
+> ZenClash 目前仍处于早期开发阶段，界面、配置格式和部分功能可能继续调整。启用系统代理或 TUN 前，请确保已有可用的直连恢复方式。
+
+## 首页预览
+
+![ZenClash 首页](docs/home.png)
+
+首页集中展示当前订阅、当前节点、代理状态、路由模式和实时流量。订阅与节点可以直接切换，详细配置与诊断信息则保留在各自页面中。
+
+## 主要功能
+
+- **原生桌面界面**：基于 GPUI 与 gpui-component 构建，支持浅色、深色和跟随系统主题。
+- **订阅管理**：支持在线订阅与本地 Clash/Mihomo YAML，显示流量额度、更新时间和到期信息。
+- **代理组与节点**：查看代理组、切换节点、执行延迟测试，并保留本地测速历史。
+- **快捷控制**：在首页切换系统代理，以及规则、全局、直连三种路由模式。
+- **TUN 与系统代理**：提供跨平台系统代理管理、TUN 配置和运行状态检查。
+- **实时监控**：查看上传、下载、活动连接、运行日志和实时流量趋势。
+- **历史用量**：使用本地 SQLite 记录流量历史，并按域名、设备、出口和进程进行统计。
+- **连接与规则**：查看活动连接、关闭连接、搜索规则、检查代理与规则提供者。
+- **YAML 覆写**：通过有序覆写层组合配置，支持预览最终结果，且不会修改导入的源文件。
+- **状态栏菜单**：显示实时上下行速度，快速切换模式、系统代理、TUN、节点和配置文件。
+- **备份与恢复**：支持完整本地 ZIP 快照，以及可选的 WebDAV 远程备份。
+- **内核管理**：Mihomo 是默认正式内核；meow-rs 作为实验选项，仅在用户明确选择时启用。
+
+## 支持平台
+
+| 平台 | 发布格式 | 架构 |
+| --- | --- | --- |
+| macOS | DMG | Apple Silicon |
+| Windows | Inno Setup 安装程序 | x86_64 |
+| Ubuntu 22.04 及以上 | DEB | amd64 |
+| Fedora / Rocky Linux | RPM | x86_64 |
+
+发布安装包会内置经过 SHA-256 校验的 Mihomo，不需要在首次启动时另外下载内核。开发构建也可以连接已有的 Mihomo 控制器。
+
+## 快速开始
+
+1. 从 [Releases](https://github.com/HaiwenZhang/zenclash/releases) 下载对应平台的安装包。
+2. 启动 ZenClash，进入「订阅管理」。
+3. 添加在线订阅，或者导入本地 YAML 配置。
+4. 在首页选择订阅与节点。
+5. 根据需要启用系统代理或 TUN。
+
+如果当前配置无法通过内核检查，ZenClash 会保留原始配置，并尝试使用内置的直连恢复配置启动，方便用户返回订阅管理页面修复问题。
+
+## 从源码运行
+
+### 环境要求
+
+- Rust 1.80 或更高版本
+- 对应平台的原生构建工具链
+- 一个真实可执行的 Mihomo 内核
+
+指定 Mihomo 路径后运行：
 
 ```sh
 ZENCLASH_MIHOMO_BINARY=/absolute/path/to/mihomo \
   cargo run -p zenclash-ui --bin zenclash
 ```
 
-To connect to an already-running controller instead:
+连接已经运行的 Mihomo 控制器：
 
 ```sh
 ZENCLASH_CONTROLLER=http://127.0.0.1:9090 \
-  ZENCLASH_CONFIG="$PWD/platforms/common/default.yaml" \
-  cargo run -p zenclash-ui --bin zenclash
-```
-
-Optional environment variables are `ZENCLASH_SECRET`, `ZENCLASH_CONFIG`,
-`ZENCLASH_CORE_BINARY`, `ZENCLASH_CORE_HOME`, `ZENCLASH_MIHOMO_HOME`, and
-`ZENCLASH_NETWORK_SERVICE`.
-
-To run the downloaded `examples/meow-rs` source instead, build it and select it
-explicitly. ZenClash never silently changes between cores:
-
-```sh
-cargo build --manifest-path examples/meow-rs/Cargo.toml -p meow-app
-ZENCLASH_CORE=meow-rs \
-ZENCLASH_MEOW_BINARY="$PWD/examples/meow-rs/target/debug/meow" \
-  cargo run -p zenclash-ui --bin zenclash
-```
-
-The same selection is available under Settings and takes effect after restart.
-If the selected binary is absent or fails its real `/version` readiness check,
-ZenClash reports the failed candidate and can recover through the last usable
-core without rewriting the user's selection. If an active YAML is rejected,
-the installed app starts a packaged direct-only, listener-free recovery profile
-so the Profiles page remains usable; it leaves the rejected source untouched.
-An external controller is used only when `ZENCLASH_CONTROLLER` is set explicitly.
-
-The profile page can switch to another local YAML through the native file
-picker. The override page imports individual YAML files or the immediate YAML
-children of a directory into a private managed store. Enablement and order are
-persisted, later mappings win recursively, and the same final payload is used
-for startup, profile switches, settings changes, tray actions, editing, and
-backup restore. Imported source files are never rewritten.
-
-ZenClash connects to an existing Sub-Store backend/frontend at
-`http://127.0.0.1:38324` and `http://127.0.0.1:14122` by default. Override these
-with `ZENCLASH_SUBSTORE_URL` and `ZENCLASH_SUBSTORE_FRONTEND_URL`.
-
-## Real Mihomo integration test
-
-The integration test never starts a mock controller. It launches the supplied
-Mihomo binary, overrides only the controller address to isolate the test, loads
-the real profile, and verifies version, runtime config, proxies, group switching,
-rules, providers, connections, the traffic WebSocket, and persistent ordered
-YAML overrides across a settings update.
-
-```sh
-ZENCLASH_MIHOMO_BINARY=/absolute/path/to/mihomo \
-  cargo test -p zenclash-core --test real_mihomo -- --ignored --nocapture
-```
-
-If the profile needs GeoIP data, point `ZENCLASH_INTEGRATION_HOME` at a Mihomo
-home directory that already contains the downloaded data or allow Mihomo to
-download it during the test.
-
-## Real meow-rs integration test
-
-This test also uses no mock server. It starts the actual meow-rs process with
-the supplied Clash YAML, reads version/proxy/connection APIs, writes a real
-controlled setting, restarts the process, verifies the resulting mode from the
-controller, and sends an HTTP request through its real Mixed listener:
-
-```sh
-ZENCLASH_MEOW_BINARY="$PWD/examples/meow-rs/target/debug/meow" \
 ZENCLASH_CONFIG="$PWD/platforms/common/default.yaml" \
-  cargo test -p zenclash-core --test real_meow -- --ignored --nocapture
+  cargo run -p zenclash-ui --bin zenclash
 ```
 
-## Build the macOS app bundle
+控制器启用了鉴权时，可以同时设置：
+
+```sh
+export ZENCLASH_SECRET="your-controller-secret"
+```
+
+常用环境变量：
+
+| 变量 | 用途 |
+| --- | --- |
+| `ZENCLASH_MIHOMO_BINARY` | 指定 Mihomo 可执行文件 |
+| `ZENCLASH_MIHOMO_HOME` | 指定 Mihomo 工作目录 |
+| `ZENCLASH_CONTROLLER` | 连接外部 Mihomo 控制器 |
+| `ZENCLASH_SECRET` | 外部控制器鉴权密钥 |
+| `ZENCLASH_CONFIG` | 指定启动配置文件 |
+| `ZENCLASH_NETWORK_SERVICE` | 指定 macOS 网络服务名称 |
+| `ZENCLASH_CORE` | 显式选择 `mihomo` 或实验性的 `meow-rs` |
+| `ZENCLASH_MEOW_BINARY` | 指定 meow-rs 可执行文件 |
+| `ZENCLASH_SUBSTORE_URL` | 覆盖 Sub-Store 后端地址 |
+| `ZENCLASH_SUBSTORE_FRONTEND_URL` | 覆盖 Sub-Store 前端地址 |
+
+ZenClash 不会静默切换到实验内核。只有明确选择 `meow-rs` 且提供有效二进制时，才会使用该内核运行。
+
+## 构建安装包
+
+### macOS
+
+目前 macOS 发布脚本面向 Apple Silicon：
+
+```sh
+scripts/build_macos_package.sh 0.1.0 dist
+```
+
+仅构建 `.app`：
 
 ```sh
 scripts/build_macos_app.sh
 open target/ZenClash.app
 ```
 
-When `ZENCLASH_MIHOMO_BINARY` is not set, the script downloads the pinned
-official Apple Silicon Mihomo release and requires its GitHub SHA-256 digest to
-match before building. The bundle contains the verified binary and profile
-under `Contents/Resources`; runtime data is stored in
-`~/Library/Application Support/ZenClash/mihomo`. A separate `recovery.yaml` is
-also packaged and is used only after the active profile is rejected. Set
-`ZENCLASH_MIHOMO_BINARY=/absolute/path/to/mihomo` only to override the bundled
-core deliberately.
-
-## Release installers
-
-Every installer bundles the pinned real Mihomo release, so normal installation
-does not depend on a first-run download. The experimental meow-rs core is not
-silently substituted and is currently supplied separately through
-`ZENCLASH_MEOW_BINARY`. Local build scripts use
-`platforms/common/default.yaml` by default. The platform build entry points are:
+### Ubuntu / Debian
 
 ```sh
-# Apple Silicon macOS (.dmg)
-scripts/build_macos_package.sh 0.1.0 dist
-
-# Ubuntu 22.04 or newer (.deb), run on Ubuntu 22.04
 sudo scripts/install_linux_build_deps.sh
 scripts/build_deb_package.sh 0.1.0 dist
+```
 
-# Fedora / Rocky Linux (.rpm), run inside the target distribution
-scripts/install_linux_build_deps.sh
+### Fedora / Rocky Linux
+
+```sh
+sudo scripts/install_linux_build_deps.sh
 ZENCLASH_PACKAGE_FLAVOR=fedora44 \
   scripts/build_rpm_package.sh 0.1.0 dist
 ```
 
-All four platform scripts download the pinned official Mihomo release when no
-binary override is supplied, verify the published SHA-256 digest, execute its
-version check, and place it inside the installer. Set `MIHOMO_VERSION=vX.Y.Z`
-to build with another official tag. A supplied `ZENCLASH_MIHOMO_BINARY` must
-already be an executable for the target platform and is never silently
-replaced by a download.
+### Windows
 
-On Windows, run the following from PowerShell with Rust and Inno Setup 6
-installed:
+在安装 Rust、Visual Studio Build Tools 和 Inno Setup 6 的 PowerShell 中运行：
 
 ```powershell
 scripts/build_windows_installer.ps1 -Version 0.1.0 -OutputDir dist
 ```
 
-Before publishing, configure the repository secret `ZENCLASH_TEST_PROFILE_URL`
-with a private URL that downloads the real Clash profile used by integration
-tests. The downloaded profile is kept in the runner's temporary directory and
-is never uploaded as an artifact. Public installers instead contain
-`platforms/common/default.yaml`, a functional direct-only bootstrap profile;
-users add their own online subscription or local YAML in subscription
-management.
+构建脚本默认下载固定版本的官方 Mihomo，并校验发布资源提供的 SHA-256。可以通过 `MIHOMO_VERSION=vX.Y.Z` 指定其他官方版本，或者使用 `ZENCLASH_MIHOMO_BINARY` 明确提供本地内核。
 
-Pushing a tag whose value matches the workspace version, for example `v0.1.0`,
-starts `.github/workflows/release.yml`. The workflow runs formatting, Clippy,
-workspace tests, and the ignored real-Mihomo integration test before building:
+## 项目结构
 
-- Windows Server 2022 x64 Inno Setup installer;
-- macOS 15 Apple Silicon DMG;
-- Ubuntu 22.04-baseline amd64 DEB for Ubuntu 22.04 and newer;
-- Fedora 42, 43, and 44 x86_64 RPMs (the releases covering the latest two
-  years at the time this matrix was added);
-- Rocky Linux 8 and 9 x86_64 RPMs.
+| 路径 | 说明 |
+| --- | --- |
+| `crates/zenclash-core` | Mihomo API、内核进程、系统代理、配置存储、流量和日志监控 |
+| `crates/zenclash-i18n` | 简体中文与英文界面文案 |
+| `crates/zenclash-ui` | GPUI 原生窗口、页面与桌面交互 |
+| `platforms` | 平台配置、应用图标、默认配置和恢复配置 |
+| `scripts` | macOS、Windows、DEB、RPM 构建脚本 |
+| `docs` | README 截图与项目文档资源 |
 
-The release job publishes SHA-256 checksums and, for public repositories,
-GitHub artifact attestations. Without `APPLE_SIGNING_IDENTITY`, the macOS app is
-ad-hoc signed and is not notarized; set that environment variable on a trusted
-release runner when distributing a Developer ID-signed build.
+## 配置与数据安全
+
+- 导入的订阅和 YAML 源文件不会被原地改写。
+- 启用的配置、覆写层和运行时设置会生成独立的托管配置。
+- 活动配置被内核拒绝时，会保留原始来源并进入直连恢复流程。
+- 只有显式设置 `ZENCLASH_CONTROLLER` 时，才会连接外部控制器。
+- ZenClash 启动的 Mihomo 进程会在应用正常退出时同步停止。
+- 流量历史默认保存在本地 SQLite 数据库中，可在设置中关闭或调整保留时间。
+
+## 测试
+
+运行格式检查与工作区测试：
+
+```sh
+cargo fmt --all -- --check
+cargo test --workspace --all-features --locked
+```
+
+使用真实 Mihomo 运行端到端集成测试：
+
+```sh
+ZENCLASH_MIHOMO_BINARY=/absolute/path/to/mihomo \
+ZENCLASH_CONFIG=/absolute/path/to/profile.yaml \
+  cargo test -p zenclash-core --test real_mihomo -- --ignored --nocapture
+```
+
+该测试会启动真实 Mihomo 进程，验证版本、运行配置、代理组切换、规则、提供者、连接、流量 WebSocket、订阅下载和 YAML 覆写，不使用模拟控制器。
+
+## 参与贡献
+
+欢迎提交 Issue 和 Pull Request。提交代码前，请至少确保：
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked
+```
+
+报告问题时，建议附上操作系统、ZenClash 版本、Mihomo 版本、复现步骤和已脱敏的相关日志。请勿公开提交订阅地址、控制器密钥或其他凭据。
+
+## 许可证
+
+Copyright © 2026 Haiwen Zhang
+
+ZenClash 采用 [GNU General Public License v3.0 only](LICENSE) 许可。

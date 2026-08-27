@@ -19,23 +19,37 @@ impl ProfileEditorState {
                 InputState::new(window, cx)
                     .code_editor("yaml")
                     .rows(24)
-                    .placeholder("先生成配置预览，再打开原始 YAML 编辑器")
+                    .placeholder(zenclash_i18n::text("overrides.editor.placeholder"))
             }),
             original: None,
             profile_id: None,
         }
+    }
+
+    pub(in crate::pages::runtime) fn refresh_localized_placeholder(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<'_, RuntimePage>,
+    ) {
+        self.input.update(cx, |input, cx| {
+            input.set_placeholder(
+                zenclash_i18n::text("overrides.editor.placeholder"),
+                window,
+                cx,
+            );
+        });
     }
 }
 
 impl RuntimePage {
     pub(super) fn open_profile_yaml_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(preview) = &self.config_preview else {
-            self.error = Some("请先生成原始配置预览".into());
+            self.error = Some(zenclash_i18n::text("overrides.errors.preview_required"));
             cx.notify();
             return;
         };
         let Some(profile_id) = self.profile_catalog.active.clone() else {
-            self.error = Some("当前配置不属于 ZenClash 托管仓库，无法安全编辑".into());
+            self.error = Some(zenclash_i18n::text("overrides.errors.unmanaged_profile"));
             cx.notify();
             return;
         };
@@ -61,7 +75,7 @@ impl RuntimePage {
             self.profile_editor.profile_id.clone(),
             self.profile_editor.original.clone(),
         ) else {
-            self.error = Some("Profile 编辑事务已经失效，请重新打开".into());
+            self.error = Some(zenclash_i18n::text("overrides.errors.editor_expired"));
             cx.notify();
             return;
         };
@@ -84,7 +98,12 @@ impl RuntimePage {
                 edit_store.replace_payload(&edit_id, &original, &candidate)
             })
             .await
-            .map_err(|error| format!("保存 Profile 编辑任务异常结束：{error}"))?
+            .map_err(|error| {
+                zenclash_i18n::text_with(
+                    "overrides.errors.editor_save_task",
+                    &[("error", error.to_string())],
+                )
+            })?
             .map_err(|error| error.to_string())?;
             let path = store.profile_path(&update.record);
             if let Err(error) =
@@ -97,14 +116,25 @@ impl RuntimePage {
                 })
                 .await
                 {
-                    Ok(Ok(_)) => Err(format!(
-                        "{core_name} 拒绝编辑后的 YAML，已恢复原文件：{error}"
+                    Ok(Ok(_)) => Err(zenclash_i18n::text_with(
+                        "overrides.errors.editor_rejected_rolled_back",
+                        &[("core", core_name.to_owned()), ("error", error.clone())],
                     )),
-                    Ok(Err(rollback)) => Err(format!(
-                        "{core_name} 拒绝编辑后的 YAML：{error}；恢复原文件失败：{rollback}"
+                    Ok(Err(rollback)) => Err(zenclash_i18n::text_with(
+                        "overrides.errors.editor_rejected_rollback_failed",
+                        &[
+                            ("core", core_name.to_owned()),
+                            ("error", error.clone()),
+                            ("rollback", rollback.to_string()),
+                        ],
                     )),
-                    Err(rollback) => Err(format!(
-                        "{core_name} 拒绝编辑后的 YAML：{error}；回滚任务异常结束：{rollback}"
+                    Err(rollback) => Err(zenclash_i18n::text_with(
+                        "overrides.errors.editor_rejected_rollback_task",
+                        &[
+                            ("core", core_name.to_owned()),
+                            ("error", error),
+                            ("rollback", rollback.to_string()),
+                        ],
                     )),
                 };
             }
@@ -113,7 +143,12 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("Profile 编辑工作流异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "overrides.errors.editor_workflow",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -127,9 +162,9 @@ impl RuntimePage {
                         if let Err(error) = this.reload_profile_catalog() {
                             this.set_page_error(token, error);
                         } else {
-                            this.notice = Some(format!(
-                                "原始 Profile YAML 已保存并由 {} 验收",
-                                this.core_kind.display_name()
+                            this.notice = Some(zenclash_i18n::text_with(
+                                "overrides.notices.editor_saved",
+                                &[("core", this.core_kind.display_name().to_owned())],
                             ));
                             cx.emit(super::super::ProfileActivated { path });
                         }
@@ -149,7 +184,7 @@ impl RuntimePage {
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        setting_card("原始 Profile YAML 编辑器", theme)
+        setting_card(zenclash_i18n::text("overrides.editor.title"), theme)
             .child(
                 v_flex()
                     .h(px(520.))
@@ -163,7 +198,7 @@ impl RuntimePage {
                     .p_3()
                     .child(
                         Button::new("cancel-profile-yaml-edit")
-                            .label("取消")
+                            .label(zenclash_i18n::text("overrides.editor.cancel"))
                             .ghost()
                             .disabled(self.mutating)
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -173,7 +208,7 @@ impl RuntimePage {
                     .child(
                         Button::new("save-profile-yaml-edit")
                             .icon(IconName::Check)
-                            .label("校验、保存并热重载")
+                            .label(zenclash_i18n::text("overrides.editor.save"))
                             .primary()
                             .loading(self.mutating)
                             .on_click(cx.listener(|this, _, _, cx| {

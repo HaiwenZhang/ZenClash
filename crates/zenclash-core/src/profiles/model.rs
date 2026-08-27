@@ -284,10 +284,10 @@ pub struct ProfileRecord {
 impl ProfileRecord {
     /// Returns a concise localized source label for the UI.
     #[must_use]
-    pub const fn source_label(&self) -> &'static str {
+    pub fn source_label(&self) -> String {
         match self.source {
-            ProfileSource::Local { .. } => "本地 YAML",
-            ProfileSource::Remote { .. } => "在线订阅",
+            ProfileSource::Local { .. } => zenclash_i18n::text("profiles.source.local"),
+            ProfileSource::Remote { .. } => zenclash_i18n::text("profiles.source.remote"),
         }
     }
 

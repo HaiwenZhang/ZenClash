@@ -11,7 +11,7 @@ impl RuntimePage {
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut card = setting_card("WebDAV 远端保险库", theme)
+        let mut card = setting_card(zenclash_i18n::text("webdav.title"), theme)
             .child(self.render_webdav_status(theme))
             .child(self.render_webdav_fields(theme, cx))
             .child(self.render_webdav_actions(theme, cx))
@@ -25,9 +25,9 @@ impl RuntimePage {
                     .text_sm()
                     .text_color(theme.muted_foreground)
                     .child(if self.webdav.verified {
-                        "远端目录为空；点击“立即备份”创建第一份快照"
+                        zenclash_i18n::text("webdav.empty.verified")
                     } else {
-                        "保存并测试连接后，这里会显示可恢复的 ZIP 快照"
+                        zenclash_i18n::text("webdav.empty.unverified")
                     }),
             );
         }
@@ -45,44 +45,44 @@ impl RuntimePage {
     ) -> gpui::Div {
         v_flex()
             .child(config_input_row(
-                "服务器 URL",
-                "填写 WebDAV 根地址；凭据不能写在 URL 中",
+                zenclash_i18n::text("webdav.fields.url"),
+                zenclash_i18n::text("webdav.fields.url_description"),
                 Input::new(&self.webdav.url),
                 theme,
             ))
             .child(config_input_row(
-                "远程目录",
-                "ZenClash 会逐级创建这个相对目录",
+                zenclash_i18n::text("webdav.fields.directory"),
+                zenclash_i18n::text("webdav.fields.directory_description"),
                 Input::new(&self.webdav.directory),
                 theme,
             ))
             .child(config_input_row(
-                "用户名",
-                "留空时不发送 HTTP Basic 凭据",
+                zenclash_i18n::text("webdav.fields.username"),
+                zenclash_i18n::text("webdav.fields.username_description"),
                 Input::new(&self.webdav.username),
                 theme,
             ))
             .child(config_input_row(
-                "密码",
-                "优先使用服务商提供的独立应用密码",
+                zenclash_i18n::text("webdav.fields.password"),
+                zenclash_i18n::text("webdav.fields.password_description"),
                 Input::new(&self.webdav.password).mask_toggle(),
                 theme,
             ))
             .child(config_input_row(
-                "保留份数",
-                "只清理当前设备生成的旧备份；0 表示不限",
+                zenclash_i18n::text("webdav.fields.retention"),
+                zenclash_i18n::text("webdav.fields.retention_description"),
                 Input::new(&self.webdav.max_backups),
                 theme,
             ))
             .child(config_input_row(
-                "定时备份",
-                "使用本地时区的 Cron；支持常用 5 字段，留空即停用",
+                zenclash_i18n::text("webdav.fields.schedule"),
+                zenclash_i18n::text("webdav.fields.schedule_description"),
                 Input::new(&self.webdav.backup_cron),
                 theme,
             ))
             .child(setting_switch(
-                "允许无效 TLS 证书",
-                "仅用于你确认可信的自签名服务器",
+                zenclash_i18n::text("webdav.fields.invalid_tls"),
+                zenclash_i18n::text("webdav.fields.invalid_tls_description"),
                 self.webdav.accept_invalid_certificates,
                 "webdav-invalid-tls",
                 theme,
@@ -110,12 +110,16 @@ impl RuntimePage {
             .child(
                 v_flex()
                     .gap_1()
-                    .child(div().text_sm().child("手动同步"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(zenclash_i18n::text("webdav.actions.manual")),
+                    )
                     .child(
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child("上传真实本地快照；下载后先验证，再事务切换活动配置"),
+                            .child(zenclash_i18n::text("webdav.actions.manual_description")),
                     ),
             )
             .child(
@@ -124,7 +128,7 @@ impl RuntimePage {
                     .child(
                         Button::new("webdav-save-test")
                             .icon(IconName::Globe)
-                            .label("保存并测试")
+                            .label(zenclash_i18n::text("webdav.actions.save_test"))
                             .small()
                             .outline()
                             .disabled(self.mutating)
@@ -133,7 +137,7 @@ impl RuntimePage {
                     .child(
                         Button::new("webdav-upload")
                             .icon(IconName::ArrowUp)
-                            .label("立即备份")
+                            .label(zenclash_i18n::text("webdav.actions.backup_now"))
                             .small()
                             .primary()
                             .disabled(self.mutating)
@@ -142,7 +146,7 @@ impl RuntimePage {
                     .child(
                         Button::new("webdav-refresh")
                             .icon(IconName::Redo2)
-                            .label("刷新")
+                            .label(zenclash_i18n::text("webdav.actions.refresh"))
                             .small()
                             .ghost()
                             .disabled(self.mutating)
@@ -156,14 +160,17 @@ impl RuntimePage {
     fn render_webdav_status(&self, theme: &gpui_component::Theme) -> gpui::Div {
         let (label, detail, color) = if self.webdav.verified {
             (
-                "连接已验证",
-                format!("已发现 {} 份安全 ZIP", self.webdav.backups.len()),
+                zenclash_i18n::text("webdav.status.verified"),
+                zenclash_i18n::text_with(
+                    "webdav.status.found",
+                    &[("count", self.webdav.backups.len().to_string())],
+                ),
                 theme.success,
             )
         } else {
             (
-                "等待验证",
-                "不会在未验证服务器前自动上传".to_owned(),
+                zenclash_i18n::text("webdav.status.waiting"),
+                zenclash_i18n::text("webdav.status.waiting_description"),
                 theme.warning,
             )
         };
@@ -221,10 +228,14 @@ impl RuntimePage {
     ) -> gpui::Div {
         let restore_name = backup.filename.clone();
         let delete_name = backup.filename.clone();
-        let size = backup
-            .size_bytes
-            .map_or_else(|| "大小未知".into(), format_backup_size);
-        let modified = backup.modified.as_deref().unwrap_or("时间未知");
+        let size = backup.size_bytes.map_or_else(
+            || zenclash_i18n::text("webdav.status.size_unknown"),
+            format_backup_size,
+        );
+        let modified = backup
+            .modified
+            .clone()
+            .unwrap_or_else(|| zenclash_i18n::text("webdav.status.time_unknown"));
         h_flex()
             .min_h(px(64.))
             .px_4()
@@ -247,7 +258,7 @@ impl RuntimePage {
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(format!("{size} · {}", compact_text(modified, 48))),
+                            .child(format!("{size} · {}", compact_text(&modified, 48))),
                     ),
             )
             .child(
@@ -256,7 +267,7 @@ impl RuntimePage {
                     .child(
                         Button::new(("webdav-restore", index))
                             .icon(IconName::ArrowDown)
-                            .label("恢复")
+                            .label(zenclash_i18n::text("webdav.actions.restore"))
                             .small()
                             .outline()
                             .disabled(self.mutating)
@@ -287,5 +298,5 @@ fn webdav_storage_note(theme: &gpui_component::Theme) -> gpui::Div {
         .text_color(theme.muted_foreground)
         .border_b_1()
         .border_color(theme.border)
-        .child("连接设置保存在当前用户私有文件中，不写入备份 ZIP；定时任务在应用运行期间按本地时区执行。")
+        .child(zenclash_i18n::text("webdav.storage_note"))
 }

@@ -50,22 +50,22 @@ impl RuntimePage {
                     .gap_3()
                     .flex_wrap()
                     .child(metric(
-                        "公网出口",
-                        snapshot
-                            .public_ip
-                            .as_ref()
-                            .map_or_else(|| "等待探测".into(), |info| info.ip.clone()),
+                        zenclash_i18n::text("network.metrics.public_exit"),
+                        snapshot.public_ip.as_ref().map_or_else(
+                            || zenclash_i18n::text("network.metrics.waiting"),
+                            |info| info.ip.clone(),
+                        ),
                         theme.primary,
                         theme,
                     ))
                     .child(metric(
-                        "平均延迟",
+                        zenclash_i18n::text("network.metrics.average_latency"),
                         average_latency.map_or_else(|| "—".into(), |value| format!("{value} ms")),
                         latency_color(average_latency, theme),
                         theme,
                     ))
                     .child(metric(
-                        "探测路径",
+                        zenclash_i18n::text("network.metrics.route"),
                         empty_dash(&snapshot.route),
                         theme.warning,
                         theme,
@@ -75,20 +75,20 @@ impl RuntimePage {
             .child(self.render_latency_card(&snapshot, theme, cx))
             .child(self.render_system_network_card(&config, &system, theme, cx))
             .child(
-                setting_card("网络能力", theme)
+                setting_card(zenclash_i18n::text("network.capabilities.title"), theme)
                     .child(info_row("IPv6", super::yes_no(config.ipv6), theme))
                     .child(info_row(
-                        "允许局域网",
+                        zenclash_i18n::text("network.capabilities.lan"),
                         super::yes_no(config.allow_lan),
                         theme,
                     ))
                     .child(info_row(
-                        "TCP 并发",
+                        zenclash_i18n::text("network.capabilities.tcp_concurrent"),
                         super::yes_no(config.tcp_concurrent),
                         theme,
                     ))
                     .child(info_row(
-                        "统一延迟",
+                        zenclash_i18n::text("network.capabilities.unified_delay"),
                         super::yes_no(config.unified_delay),
                         theme,
                     )),
@@ -104,7 +104,7 @@ impl RuntimePage {
     ) -> impl IntoElement {
         let provider = self.preferences.network_ip_provider;
         let info = snapshot.public_ip.as_ref();
-        setting_card("公网出口画像", theme)
+        setting_card(zenclash_i18n::text("network.public_ip.title"), theme)
             .child(
                 h_flex()
                     .min_h(px(58.))
@@ -124,7 +124,7 @@ impl RuntimePage {
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.persist_network_preference(
                                                 NetworkPreferenceChange::Provider(candidate),
-                                                "公网 IP 数据源已保存",
+                                                zenclash_i18n::text("network.notices.provider"),
                                                 cx,
                                             );
                                         }))
@@ -136,9 +136,9 @@ impl RuntimePage {
                         Button::new("refresh-network-probe")
                             .icon(IconName::Redo2)
                             .label(if self.network_probe.loading {
-                                "探测中"
+                                zenclash_i18n::text("network.public_ip.probing")
                             } else {
-                                "重新探测"
+                                zenclash_i18n::text("network.public_ip.refresh")
                             })
                             .small()
                             .primary()
@@ -152,34 +152,42 @@ impl RuntimePage {
                 this.child(message_banner(error, theme.danger, theme))
             })
             .when_some(info, |this, info| {
-                this.child(info_row("公网 IP", &info.ip, theme))
-                    .child(info_row(
-                        "国家 / 地区",
-                        &join_present(&[info.country.as_deref(), info.region.as_deref()]),
-                        theme,
-                    ))
-                    .child(info_row("城市", info.city.as_deref().unwrap_or(""), theme))
-                    .child(info_row(
-                        "ASN / 组织",
-                        &format_asn(info.asn, info.organization.as_deref()),
-                        theme,
-                    ))
-                    .child(info_row("ISP", info.isp.as_deref().unwrap_or(""), theme))
-                    .child(info_row(
-                        "时区",
-                        info.timezone.as_deref().unwrap_or(""),
-                        theme,
-                    ))
-                    .child(info_row(
-                        "坐标",
-                        &format_coordinates(info.latitude, info.longitude),
-                        theme,
-                    ))
-                    .child(info_row(
-                        "代理识别",
-                        &format_proxy_flags(info.is_proxy, info.is_vpn),
-                        theme,
-                    ))
+                this.child(info_row(
+                    zenclash_i18n::text("network.public_ip.ip"),
+                    &info.ip,
+                    theme,
+                ))
+                .child(info_row(
+                    zenclash_i18n::text("network.public_ip.country_region"),
+                    join_present(&[info.country.as_deref(), info.region.as_deref()]),
+                    theme,
+                ))
+                .child(info_row(
+                    zenclash_i18n::text("network.public_ip.city"),
+                    info.city.as_deref().unwrap_or(""),
+                    theme,
+                ))
+                .child(info_row(
+                    zenclash_i18n::text("network.public_ip.organization"),
+                    format_asn(info.asn, info.organization.as_deref()),
+                    theme,
+                ))
+                .child(info_row("ISP", info.isp.as_deref().unwrap_or(""), theme))
+                .child(info_row(
+                    zenclash_i18n::text("network.public_ip.timezone"),
+                    info.timezone.as_deref().unwrap_or(""),
+                    theme,
+                ))
+                .child(info_row(
+                    zenclash_i18n::text("network.public_ip.coordinates"),
+                    format_coordinates(info.latitude, info.longitude),
+                    theme,
+                ))
+                .child(info_row(
+                    zenclash_i18n::text("network.public_ip.proxy_detection"),
+                    format_proxy_flags(info.is_proxy, info.is_vpn),
+                    theme,
+                ))
             })
     }
 
@@ -195,17 +203,17 @@ impl RuntimePage {
             .iter()
             .map(|target| target.url.as_str())
             .collect::<HashSet<_>>();
-        setting_card("独立延迟探测", theme)
+        setting_card(zenclash_i18n::text("network.latency.title"), theme)
             .child(setting_switch(
-                "通过 Mihomo 探测",
-                "使用当前 HTTP 或 Mixed 监听，结果反映真实代理出口；关闭后使用直连",
+                zenclash_i18n::text("network.latency.through_core"),
+                zenclash_i18n::text("network.latency.through_core_description"),
                 self.preferences.network_probe_route == NetworkProbeRoutePreference::Mihomo,
                 "network-probe-through-mihomo",
                 theme,
                 cx.listener(|this, checked, _, cx| {
                     this.persist_network_preference(
                         NetworkPreferenceChange::ThroughMihomo(*checked),
-                        "网络探测路径已保存",
+                        zenclash_i18n::text("network.notices.route"),
                         cx,
                     );
                 }),
@@ -226,14 +234,14 @@ impl RuntimePage {
                     }),
             )
             .child(config_input_row(
-                "目标名称",
-                "最多 64 个字符",
+                zenclash_i18n::text("network.latency.target_name"),
+                zenclash_i18n::text("network.latency.target_name_description"),
                 Input::new(&self.network_latency_name),
                 theme,
             ))
             .child(config_input_row(
-                "探测 URL",
-                "仅接受不含登录凭据的 HTTP(S) 地址",
+                zenclash_i18n::text("network.latency.target_url"),
+                zenclash_i18n::text("network.latency.target_url_description"),
                 Input::new(&self.network_latency_url),
                 theme,
             ))
@@ -241,7 +249,7 @@ impl RuntimePage {
                 h_flex().px_4().py_3().justify_end().child(
                     Button::new("add-network-latency-target")
                         .icon(IconName::Plus)
-                        .label("添加探测目标")
+                        .label(zenclash_i18n::text("network.latency.add"))
                         .small()
                         .outline()
                         .disabled(
@@ -263,7 +271,12 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let value = result.latency_ms.map_or_else(
-            || result.error.as_deref().unwrap_or("请求失败").to_owned(),
+            || {
+                result
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| zenclash_i18n::text("network.latency.failed"))
+            },
             |latency| format!("{latency} ms"),
         );
         let color = result
@@ -302,7 +315,7 @@ impl RuntimePage {
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.persist_network_preference(
                                         NetworkPreferenceChange::RemoveTarget(url.clone()),
-                                        "自定义延迟目标已删除",
+                                        zenclash_i18n::text("network.notices.target_removed"),
                                         cx,
                                     );
                                 })),
@@ -319,11 +332,23 @@ impl RuntimePage {
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        setting_card("默认网络路径", theme)
-            .child(info_row("接口", &system.interface, theme))
-            .child(info_row("网关", &system.gateway, theme))
-            .child(info_row("本地地址", &system.local_ipv4, theme))
-            .child(info_row("DNS", &system.dns_servers.join(", "), theme))
+        setting_card(zenclash_i18n::text("network.system.title"), theme)
+            .child(info_row(
+                zenclash_i18n::text("network.system.interface"),
+                &system.interface,
+                theme,
+            ))
+            .child(info_row(
+                zenclash_i18n::text("network.system.gateway"),
+                &system.gateway,
+                theme,
+            ))
+            .child(info_row(
+                zenclash_i18n::text("network.system.local_address"),
+                &system.local_ipv4,
+                theme,
+            ))
+            .child(info_row("DNS", system.dns_servers.join(", "), theme))
             .when_some(system.error.clone(), |this, error| {
                 this.child(message_banner(error, theme.warning, theme))
             })
@@ -333,22 +358,19 @@ impl RuntimePage {
                     .px_4()
                     .gap_3()
                     .justify_between()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(format!(
-                                "Mihomo 当前固定接口：{}",
-                                empty_dash(&config.interface_name)
-                            )),
-                    )
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(
+                        zenclash_i18n::text_with(
+                            "network.system.pinned",
+                            &[("interface", empty_dash(&config.interface_name))],
+                        ),
+                    ))
                     .child(
                         h_flex()
                             .gap_2()
                             .child(
                                 Button::new("use-system-interface")
                                     .icon(IconName::Check)
-                                    .label("固定为当前接口")
+                                    .label(zenclash_i18n::text("network.system.pin"))
                                     .small()
                                     .primary()
                                     .disabled(system.interface.is_empty() || self.mutating)
@@ -357,7 +379,9 @@ impl RuntimePage {
                                         cx.listener(move |this, _, _, cx| {
                                             this.apply_controlled_config(
                                                 json!({"interface-name": interface}),
-                                                "出口接口已固定并由 Mihomo 验证",
+                                                zenclash_i18n::text(
+                                                    "network.notices.interface_pinned",
+                                                ),
                                                 cx,
                                             );
                                         })
@@ -366,14 +390,14 @@ impl RuntimePage {
                             .child(
                                 Button::new("clear-system-interface")
                                     .icon(IconName::Redo2)
-                                    .label("自动选择")
+                                    .label(zenclash_i18n::text("network.system.automatic"))
                                     .small()
                                     .outline()
                                     .disabled(config.interface_name.is_empty() || self.mutating)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.apply_controlled_config(
                                             json!({"interface-name": ""}),
-                                            "出口接口已恢复自动选择",
+                                            zenclash_i18n::text("network.notices.interface_auto"),
                                             cx,
                                         );
                                     })),

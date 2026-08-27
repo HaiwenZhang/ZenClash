@@ -46,6 +46,7 @@ install -Dm644 "${profile_path}" "${payload_dir}/profile.yaml"
 install -Dm644 "${project_root}/platforms/common/recovery.yaml" "${payload_dir}/recovery.yaml"
 install -Dm644 "${project_root}/platforms/macos/ZenClash.png" "${payload_dir}/zenclash.png"
 install -Dm644 "${project_root}/platforms/linux/zenclash.desktop" "${payload_dir}/zenclash.desktop"
+install -Dm644 "${project_root}/LICENSE" "${payload_dir}/LICENSE"
 mkdir -p "${rpmbuild_dir}" "${output_dir}"
 
 rpmbuild -bb "${project_root}/platforms/linux/zenclash.spec" \
@@ -64,5 +65,6 @@ rpm -qip "${package_path}" >/dev/null
 rpm -qlp "${package_path}" >/dev/null
 rpm -qlp "${package_path}" | grep -Eq '^/usr/lib/zenclash/mihomo$'
 rpm -qlp "${package_path}" | grep -Eq '^/usr/lib/zenclash/recovery.yaml$'
+rpm -qlp "${package_path}" | grep -Eq '^/usr/share/licenses/zenclash/LICENSE$'
 
 echo "Built ${package_path}"

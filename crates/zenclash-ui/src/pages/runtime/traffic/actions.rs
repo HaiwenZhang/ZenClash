@@ -9,7 +9,7 @@ impl RuntimePage {
             return;
         }
         let Some(store) = self.traffic_history_store.clone() else {
-            self.error = Some("无法打开流量历史数据库；请检查应用数据目录权限".into());
+            self.error = Some(zenclash_i18n::text("traffic.errors.database_open"));
             cx.notify();
             return;
         };
@@ -48,12 +48,19 @@ impl RuntimePage {
                 })
             })
             .await
-            .map_err(|error| format!("流量历史查询任务异常结束：{error}"))?
+            .map_err(|error| {
+                zenclash_i18n::text_with(
+                    "traffic.errors.query_task",
+                    &[("error", error.to_string())],
+                )
+            })?
         });
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("流量历史任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with("traffic.errors.task", &[("error", error.to_string())])
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 let refresh_again = finish_history_refresh(this, token, revision, result);
@@ -135,7 +142,7 @@ impl RuntimePage {
 
     pub(super) fn clear_traffic_history(&mut self, cx: &mut Context<Self>) {
         let Some(store) = self.traffic_history_store.clone() else {
-            self.error = Some("流量历史数据库不可用".into());
+            self.error = Some(zenclash_i18n::text("traffic.errors.database_unavailable"));
             cx.notify();
             return;
         };
@@ -146,12 +153,22 @@ impl RuntimePage {
         let task = self.runtime.spawn(async move {
             tokio::task::spawn_blocking(move || store.clear().map_err(|error| error.to_string()))
                 .await
-                .map_err(|error| format!("清空流量历史任务异常结束：{error}"))?
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "traffic.errors.clear_task",
+                        &[("error", error.to_string())],
+                    )
+                })?
         });
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("清空流量历史任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "traffic.errors.clear_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -160,7 +177,7 @@ impl RuntimePage {
                     Ok(()) if this.is_page_task_current(token) => {
                         this.traffic_history.overview = TrafficOverview::default();
                         this.reset_traffic_drill_down();
-                        this.notice = Some("本地流量历史已清空".into());
+                        this.notice = Some(zenclash_i18n::text("traffic.notices.cleared"));
                         this.refresh_traffic_history(cx);
                     }
                     Ok(()) => {}

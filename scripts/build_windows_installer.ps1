@@ -92,6 +92,7 @@ try {
     Copy-Item $ProfilePath (Join-Path $ResourcesDir "profile.yaml")
     Copy-Item (Join-Path $ProjectRoot "platforms\common\recovery.yaml") (Join-Path $ResourcesDir "recovery.yaml")
     Copy-Item (Join-Path $ProjectRoot "platforms\macos\ZenClash.png") (Join-Path $ResourcesDir "ZenClash.png")
+    Copy-Item (Join-Path $ProjectRoot "LICENSE") (Join-Path $StageDir "LICENSE.txt")
     & (Join-Path $ResourcesDir "mihomo.exe") -v
     if ($LASTEXITCODE -ne 0) {
         throw "The packaged Mihomo executable failed its version check"

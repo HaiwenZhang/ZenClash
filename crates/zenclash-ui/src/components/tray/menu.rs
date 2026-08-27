@@ -61,33 +61,36 @@ pub(super) fn build_menu(
     let menu = Menu::new();
     let mut builder = MenuAssembler::new();
 
-    let show_window = builder.item("显示主窗口", TrayCommand::ShowWindow);
+    let show_window = builder.item(
+        zenclash_i18n::text("tray.show_window"),
+        TrayCommand::ShowWindow,
+    );
     let floating = builder.item(
         if state.floating_visible {
-            "隐藏悬浮窗"
+            zenclash_i18n::text("tray.hide_floating")
         } else {
-            "显示悬浮窗"
+            zenclash_i18n::text("tray.show_floating")
         },
         TrayCommand::ToggleFloatingWindow,
     );
     let rule = builder.check(
-        "规则模式",
+        zenclash_i18n::text("outbound_mode.rule_mode"),
         state.mode.eq_ignore_ascii_case("rule"),
         TrayCommand::SetRuleMode,
     );
     let global = builder.check(
-        "全局模式",
+        zenclash_i18n::text("outbound_mode.global_mode"),
         state.mode.eq_ignore_ascii_case("global"),
         TrayCommand::SetGlobalMode,
     );
     let direct = builder.check(
-        "直连模式",
+        zenclash_i18n::text("outbound_mode.direct_mode"),
         state.mode.eq_ignore_ascii_case("direct"),
         TrayCommand::SetDirectMode,
     );
     let separator_1 = PredefinedMenuItem::separator();
     let system_proxy = builder.check(
-        "系统代理",
+        zenclash_i18n::text("tray.system_proxy"),
         state.system_proxy,
         TrayCommand::SetSystemProxy {
             enabled: !state.system_proxy,
@@ -119,7 +122,7 @@ pub(super) fn build_menu(
             };
             let submenu = Submenu::new(label, true);
             let delay_test = builder.item(
-                "测试本组延迟",
+                zenclash_i18n::text("tray.test_group"),
                 TrayCommand::TestGroup {
                     group: group.name.clone(),
                     proxies: group
@@ -136,7 +139,7 @@ pub(super) fn build_menu(
                 .map_err(|error| error.to_string())?;
             for proxy in &group.proxies {
                 let delay = match proxy.delay {
-                    Some(0) => "  （超时）".to_owned(),
+                    Some(0) => zenclash_i18n::text("tray.delay_timeout"),
                     Some(delay) => format!("  （{delay} ms）"),
                     None => String::new(),
                 };
@@ -157,7 +160,7 @@ pub(super) fn build_menu(
     let separator_2 = PredefinedMenuItem::separator();
     menu.append(&separator_2)
         .map_err(|error| error.to_string())?;
-    let profiles = Submenu::new("配置文件", true);
+    let profiles = Submenu::new(zenclash_i18n::text("tray.profiles"), true);
     for profile in &state.profiles {
         let item = builder.check(
             &profile.name,
@@ -169,9 +172,9 @@ pub(super) fn build_menu(
     if state.profiles.is_empty() {
         let current_profile = builder.check(
             if state.profile_name.is_empty() {
-                "当前配置"
+                zenclash_i18n::text("tray.current_profile")
             } else {
-                state.profile_name.as_str()
+                state.profile_name.clone()
             },
             true,
             TrayCommand::OpenProfiles,
@@ -181,14 +184,17 @@ pub(super) fn build_menu(
             .map_err(|error| error.to_string())?;
     }
     let profile_separator = PredefinedMenuItem::separator();
-    let open_profiles = builder.item("打开订阅管理…", TrayCommand::OpenProfiles);
+    let open_profiles = builder.item(
+        zenclash_i18n::text("tray.open_profiles"),
+        TrayCommand::OpenProfiles,
+    );
     profiles
         .append_items(&[&profile_separator, &open_profiles])
         .map_err(|error| error.to_string())?;
     menu.append(&profiles).map_err(|error| error.to_string())?;
 
     if !state.directories.is_empty() {
-        let directories = Submenu::new("打开目录", true);
+        let directories = Submenu::new(zenclash_i18n::text("tray.open_directories"), true);
         for (label, path) in &state.directories {
             let item = builder.item(label, TrayCommand::OpenDirectory(path.clone()));
             directories
@@ -200,7 +206,7 @@ pub(super) fn build_menu(
     }
 
     if state.mixed_port > 0 {
-        let copy_environment = Submenu::new("复制代理环境变量", true);
+        let copy_environment = Submenu::new(zenclash_i18n::text("tray.copy_environment"), true);
         for shell in EnvironmentShell::ALL {
             let item = builder.item(
                 shell.label(),
@@ -218,9 +224,12 @@ pub(super) fn build_menu(
     }
 
     let separator_3 = PredefinedMenuItem::separator();
-    let light_mode = builder.item("轻量模式（隐藏窗口）", TrayCommand::LightMode);
-    let restart = builder.item("重新启动 ZenClash", TrayCommand::Restart);
-    let quit = builder.item("退出 ZenClash", TrayCommand::Quit);
+    let light_mode = builder.item(
+        zenclash_i18n::text("tray.light_mode"),
+        TrayCommand::LightMode,
+    );
+    let restart = builder.item(zenclash_i18n::text("tray.restart"), TrayCommand::Restart);
+    let quit = builder.item(zenclash_i18n::text("tray.quit"), TrayCommand::Quit);
     menu.append_items(&[&separator_3, &light_mode, &restart, &quit])
         .map_err(|error| error.to_string())?;
 

@@ -1,11 +1,13 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use tray_icon::{
     menu::MenuEvent, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
-use zenclash_core::{format_speed, TrafficSnapshot};
+use zenclash_core::{format_speed, TrafficMonitor, TrafficSnapshot};
 
 mod icon;
+#[cfg(target_os = "macos")]
+mod macos;
 mod menu;
 
 use icon::traffic_icon;
@@ -176,6 +178,8 @@ pub enum TrayClick {
 /// Native status-bar indicator. The arrows are rendered as a macOS template
 /// image and the live upload/download rates are shown beside it.
 pub struct NetworkTrayIcon {
+    #[cfg(target_os = "macos")]
+    _native_traffic_updater: macos::NativeTrafficUpdater,
     icon: TrayIcon,
     last_title: String,
     commands: HashMap<String, TrayCommand>,
@@ -187,11 +191,17 @@ impl NetworkTrayIcon {
     /// # Errors
     ///
     /// Returns a platform error when the icon, menu, or native tray cannot be created.
-    pub fn new(core_kind: zenclash_core::CoreKind) -> Result<Self, String> {
+    pub fn new(
+        core_kind: zenclash_core::CoreKind,
+        traffic_monitor: Arc<TrafficMonitor>,
+    ) -> Result<Self, String> {
         let icon = traffic_icon(0, 0)?;
         let (menu, commands) = build_menu(&TrayMenuState::default())?;
         let tray = TrayIconBuilder::new()
-            .with_tooltip(format!("ZenClash · {} 网络流量", core_kind.display_name()))
+            .with_tooltip(zenclash_i18n::text_with(
+                "tray.tooltip",
+                &[("core", core_kind.display_name().to_owned())],
+            ))
             .with_title("↑ 0 B/s  ↓ 0 B/s")
             .with_icon(icon)
             .with_icon_as_template(true)
@@ -200,7 +210,17 @@ impl NetworkTrayIcon {
             .with_menu_on_right_click(false)
             .build()
             .map_err(|error| error.to_string())?;
+        #[cfg(target_os = "macos")]
+        let native_traffic_updater = macos::NativeTrafficUpdater::new(
+            tray.ns_status_item()
+                .ok_or_else(|| "macOS status item is unavailable".to_owned())?,
+            traffic_monitor,
+        )?;
+        #[cfg(not(target_os = "macos"))]
+        drop(traffic_monitor);
         Ok(Self {
+            #[cfg(target_os = "macos")]
+            _native_traffic_updater: native_traffic_updater,
             icon: tray,
             last_title: String::new(),
             commands,
@@ -213,15 +233,7 @@ impl NetworkTrayIcon {
     ///
     /// Returns a platform error when a native property cannot be updated.
     pub fn update(&mut self, traffic: &TrafficSnapshot) -> Result<(), String> {
-        let title = if traffic.connected {
-            format!(
-                "↑ {}  ↓ {}",
-                format_speed(traffic.upload),
-                format_speed(traffic.download)
-            )
-        } else {
-            "内核离线".into()
-        };
+        let title = traffic_title(traffic);
         if title == self.last_title {
             return Ok(());
         }
@@ -245,7 +257,16 @@ impl NetworkTrayIcon {
     pub fn set_visible(&self, visible: bool) -> Result<(), String> {
         self.icon
             .set_visible(visible)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        #[cfg(target_os = "macos")]
+        if visible {
+            self._native_traffic_updater.set_status_item(
+                self.icon
+                    .ns_status_item()
+                    .ok_or_else(|| "macOS status item is unavailable".to_owned())?,
+            );
+        }
+        Ok(())
     }
 
     /// Rebuilds the menu and atomically replaces its command mapping.
@@ -298,5 +319,42 @@ impl NetworkTrayIcon {
     /// Opens the native status menu programmatically.
     pub fn show_menu(&self) {
         self.icon.show_menu();
+    }
+}
+
+fn traffic_title(traffic: &TrafficSnapshot) -> String {
+    if traffic.connected {
+        format!(
+            "↑ {}  ↓ {}",
+            format_speed(traffic.upload),
+            format_speed(traffic.download)
+        )
+    } else {
+        zenclash_i18n::text("tray.core_offline")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connected_traffic_title_formats_both_directions() {
+        let title = traffic_title(&TrafficSnapshot {
+            upload: 1024,
+            download: 2 * 1024 * 1024,
+            connected: true,
+            ..TrafficSnapshot::default()
+        });
+
+        assert_eq!(title, "↑ 1.0 KiB/s  ↓ 2.0 MiB/s");
+    }
+
+    #[test]
+    fn disconnected_traffic_title_uses_offline_copy() {
+        assert_eq!(
+            traffic_title(&TrafficSnapshot::default()),
+            zenclash_i18n::text("tray.core_offline")
+        );
     }
 }

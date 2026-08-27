@@ -22,9 +22,9 @@ impl RuntimePage {
             BuiltinResource::ExternalUi => self.core_kind.capabilities().external_ui_update,
         };
         if !supported {
-            self.error = Some(format!(
-                "{} 暂不支持该 Mihomo 内置资源更新接口",
-                self.core_kind.display_name()
+            self.error = Some(zenclash_i18n::text_with(
+                "resources.errors.unsupported",
+                &[("core", self.core_kind.display_name().to_owned())],
             ));
             cx.notify();
             return;
@@ -44,7 +44,12 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("内置资源更新任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "resources.errors.builtin_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -52,9 +57,11 @@ impl RuntimePage {
                     Ok(data) => {
                         if this.replace_page_data(token, data) {
                             this.notice = Some(match resource {
-                                BuiltinResource::GeoData => "GeoData 已由 Mihomo 下载并更新".into(),
+                                BuiltinResource::GeoData => {
+                                    zenclash_i18n::text("resources.notices.geodata")
+                                }
                                 BuiltinResource::ExternalUi => {
-                                    "External UI 已由 Mihomo 下载并更新".into()
+                                    zenclash_i18n::text("resources.notices.external_ui")
                                 }
                             });
                         }
@@ -85,14 +92,17 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = match task.await {
                 Ok(result) => result,
-                Err(error) => Err(format!("更新外部资源任务异常结束：{error}")),
+                Err(error) => Err(zenclash_i18n::text_with(
+                    "resources.errors.provider_task",
+                    &[("error", error.to_string())],
+                )),
             };
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
                 match result {
                     Ok(data) => {
                         if this.replace_page_data(token, data) {
-                            this.notice = Some("外部资源已更新".into());
+                            this.notice = Some(zenclash_i18n::text("resources.notices.provider"));
                         }
                     }
                     Err(error) => this.set_page_error(token, error),
@@ -125,7 +135,7 @@ impl RuntimePage {
             .child(self.render_builtin_resources(&config, theme, cx))
             .child(self.render_ruleset_converter(theme, cx))
             .child(provider_section(
-                "代理提供者",
+                zenclash_i18n::text("resources.providers.proxy"),
                 proxy,
                 false,
                 self.mutating,
@@ -133,7 +143,7 @@ impl RuntimePage {
                 cx,
             ))
             .child(provider_section(
-                "规则提供者",
+                zenclash_i18n::text("resources.providers.rule"),
                 rules,
                 true,
                 self.mutating,
@@ -154,7 +164,15 @@ impl RuntimePage {
         let geo_auto_update = config_bool(config, controlled, "geo-auto-update");
         let geo_interval = config_value(config, controlled, "geo-update-interval")
             .and_then(serde_json::Value::as_u64)
-            .map_or_else(|| "—".into(), |hours| format!("{hours} 小时"));
+            .map_or_else(
+                || "—".into(),
+                |hours| {
+                    zenclash_i18n::text_with(
+                        "resources.builtin.hours",
+                        &[("hours", hours.to_string())],
+                    )
+                },
+            );
         let geox =
             config_value(config, controlled, "geox-url").and_then(serde_json::Value::as_object);
         let geoip = geox
@@ -169,15 +187,15 @@ impl RuntimePage {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("—");
 
-        setting_card("GeoData 与 External UI", theme)
+        setting_card(zenclash_i18n::text("resources.builtin.title"), theme)
             .when(
                 !self.core_kind.capabilities().geodata_update
                     || !self.core_kind.capabilities().external_ui_update,
                 |card| {
                     card.child(message_banner(
-                        format!(
-                            "{} 可继续使用配置中的资源地址，但不支持 Mihomo 的 GeoData / External UI 在线更新接口。",
-                            self.core_kind.display_name()
+                        zenclash_i18n::text_with(
+                            "resources.builtin.unsupported",
+                            &[("core", self.core_kind.display_name().to_owned())],
                         ),
                         theme.warning,
                         theme,
@@ -185,34 +203,38 @@ impl RuntimePage {
                 },
             )
             .child(setting_switch(
-                "DAT GeoData 模式",
-                "关闭时使用 MMDB/MetaDB；修改后写入受控配置并由 Mihomo 验证",
+                zenclash_i18n::text("resources.builtin.geodata_mode"),
+                zenclash_i18n::text("resources.builtin.geodata_mode_description"),
                 self.controlled_bool("/geodata-mode", geodata_mode),
                 "resource-geodata-mode",
                 theme,
                 cx.listener(|this, checked, _, cx| {
                     this.apply_controlled_config(
                         json!({"geodata-mode": *checked}),
-                        "GeoData 模式已保存并热重载",
+                        zenclash_i18n::text("resources.notices.geodata_mode"),
                         cx,
                     );
                 }),
             ))
             .child(setting_switch(
-                "自动更新 GeoData",
-                "由 Mihomo 按配置的更新间隔维护 GeoData",
+                zenclash_i18n::text("resources.builtin.auto_update"),
+                zenclash_i18n::text("resources.builtin.auto_update_description"),
                 self.controlled_bool("/geo-auto-update", geo_auto_update),
                 "resource-geo-auto-update",
                 theme,
                 cx.listener(|this, checked, _, cx| {
                     this.apply_controlled_config(
                         json!({"geo-auto-update": *checked}),
-                        "GeoData 自动更新设置已保存",
+                        zenclash_i18n::text("resources.notices.geodata_auto"),
                         cx,
                     );
                 }),
             ))
-            .child(info_row("更新间隔", &geo_interval, theme))
+            .child(info_row(
+                zenclash_i18n::text("resources.builtin.interval"),
+                &geo_interval,
+                theme,
+            ))
             .child(info_row("GeoIP", geoip, theme))
             .child(info_row("GeoSite", geosite, theme))
             .child(info_row("External UI", external_ui_url, theme))
@@ -224,7 +246,7 @@ impl RuntimePage {
                     .child(
                         Button::new("update-geodata")
                             .icon(IconName::Redo2)
-                            .label("立即更新 GeoData")
+                            .label(zenclash_i18n::text("resources.builtin.update_geodata"))
                             .small()
                             .primary()
                             .loading(self.mutating)
@@ -238,12 +260,11 @@ impl RuntimePage {
                     .child(
                         Button::new("update-external-ui")
                             .icon(IconName::Redo2)
-                            .label("更新 External UI")
+                            .label(zenclash_i18n::text("resources.builtin.update_ui"))
                             .small()
                             .outline()
                             .disabled(
-                                self.mutating
-                                    || !self.core_kind.capabilities().external_ui_update,
+                                self.mutating || !self.core_kind.capabilities().external_ui_update,
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.update_builtin_resource(BuiltinResource::ExternalUi, cx);
@@ -268,7 +289,7 @@ fn config_bool(config: &RuntimeConfig, controlled: &serde_json::Value, key: &str
 }
 
 fn provider_section(
-    title: &'static str,
+    title: String,
     catalog: ProviderCatalog,
     is_rule: bool,
     mutating: bool,
@@ -287,12 +308,12 @@ fn provider_section(
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .child(title),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(format!("{count} 项")),
-                ),
+                .child(div().text_xs().text_color(theme.muted_foreground).child(
+                    zenclash_i18n::text_with(
+                        "resources.providers.count",
+                        &[("count", count.to_string())],
+                    ),
+                )),
         )
         .child(
             v_flex()
@@ -301,7 +322,10 @@ fn provider_section(
                 .border_color(theme.border)
                 .bg(theme.secondary)
                 .when(count == 0, |this| {
-                    this.child(empty_state("没有提供者", theme))
+                    this.child(empty_state(
+                        zenclash_i18n::text("resources.providers.empty"),
+                        theme,
+                    ))
                 })
                 .children(catalog.providers.into_iter().enumerate().map(
                     |(index, (key, provider))| {
@@ -319,16 +343,24 @@ fn provider_section(
                         let metadata = if is_rule {
                             let behavior = empty_dash(&provider.behavior);
                             let format = empty_dash(&provider.format).to_ascii_uppercase();
-                            format!(
-                                "{} · {behavior} · {format} · {} · {item_count} 项",
-                                provider.vehicle_type,
-                                empty_dash(&provider.updated_at)
+                            zenclash_i18n::text_with(
+                                "resources.providers.rule_metadata",
+                                &[
+                                    ("type", provider.vehicle_type.clone()),
+                                    ("behavior", behavior),
+                                    ("format", format),
+                                    ("updated", empty_dash(&provider.updated_at)),
+                                    ("count", item_count.to_string()),
+                                ],
                             )
                         } else {
-                            format!(
-                                "{} · {} · {item_count} 项",
-                                provider.vehicle_type,
-                                empty_dash(&provider.updated_at)
+                            zenclash_i18n::text_with(
+                                "resources.providers.proxy_metadata",
+                                &[
+                                    ("type", provider.vehicle_type.clone()),
+                                    ("updated", empty_dash(&provider.updated_at)),
+                                    ("count", item_count.to_string()),
+                                ],
                             )
                         };
                         h_flex()
@@ -357,7 +389,7 @@ fn provider_section(
                             .child(
                                 Button::new(("update-provider", index))
                                     .icon(IconName::Redo2)
-                                    .label("更新")
+                                    .label(zenclash_i18n::text("resources.providers.update"))
                                     .small()
                                     .disabled(mutating)
                                     .on_click(cx.listener(move |this, _, _, cx| {

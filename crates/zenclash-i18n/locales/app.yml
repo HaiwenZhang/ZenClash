@@ -1,0 +1,3398 @@
+_version: 2
+
+common:
+  actions:
+    refresh:
+      zh-CN: 刷新
+      en: Refresh
+    loading:
+      zh-CN: 读取中
+      en: Loading
+    show:
+      zh-CN: 显示
+      en: Show
+    hide:
+      zh-CN: 隐藏
+      en: Hide
+    open:
+      zh-CN: 打开
+      en: Open
+    quit:
+      zh-CN: 退出 ZenClash
+      en: Quit ZenClash
+    cancel:
+      zh-CN: 取消
+      en: Cancel
+    delete:
+      zh-CN: 删除
+      en: Delete
+    restore:
+      zh-CN: 恢复
+      en: Restore
+  count:
+    visible_total:
+      zh-CN: "%{visible} / %{total} 条"
+      en: "%{visible} of %{total}"
+  status:
+    "yes":
+      zh-CN: 是
+      en: Yes
+    "no":
+      zh-CN: 否
+      en: No
+    enabled:
+      zh-CN: 已启用
+      en: Enabled
+    disabled:
+      zh-CN: 已关闭
+      en: Disabled
+    unavailable:
+      zh-CN: 不可用
+      en: Unavailable
+    unknown:
+      zh-CN: 未知
+      en: Unknown
+    timeout:
+      zh-CN: 超时
+      en: Timeout
+    not_listening:
+      zh-CN: 未监听
+      en: Not listening
+    misconfigured:
+      zh-CN: 配置异常
+      en: Misconfigured
+  time:
+    just_now:
+      zh-CN: 刚刚
+      en: just now
+    minutes_ago:
+      zh-CN: "%{count} 分钟前"
+      en: "%{count} minutes ago"
+    hours_ago:
+      zh-CN: "%{count} 小时前"
+      en: "%{count} hours ago"
+    days_ago:
+      zh-CN: "%{count} 天前"
+      en: "%{count} days ago"
+
+app:
+  name:
+    zh-CN: ZenClash
+    en: ZenClash
+  description:
+    zh-CN: Mihomo 桌面客户端
+    en: Mihomo desktop client
+  menu:
+    title:
+      zh-CN: ZenClash
+      en: ZenClash
+    quit:
+      zh-CN: 退出 ZenClash
+      en: Quit ZenClash
+  directories:
+    config:
+      zh-CN: 配置文件目录
+      en: Configuration Directory
+    data:
+      zh-CN: 应用数据目录
+      en: Application Data Directory
+    core_working:
+      zh-CN: "%{core} 工作目录"
+      en: "%{core} Working Directory"
+    resources:
+      zh-CN: 内核与资源目录
+      en: Core & Resources Directory
+  errors:
+    preferences_unavailable:
+      zh-CN: 应用设置存储不可用
+      en: Application preferences are unavailable
+    profile_update_task:
+      zh-CN: 自动更新任务异常结束：%{error}
+      en: "The automatic update task ended unexpectedly: %{error}"
+    scheduled_backup_directory:
+      zh-CN: 定时备份目录任务异常结束：%{error}
+      en: "The scheduled backup directory task ended unexpectedly: %{error}"
+  system_proxy:
+    errors:
+      offline_release_task:
+        zh-CN: 离线恢复时关闭系统代理任务异常结束：%{error}
+        en: "The system proxy release task during offline recovery ended unexpectedly: %{error}"
+      missing_port_released:
+        zh-CN: 新配置没有可用的 Mixed/HTTP 端口，ZenClash 已安全关闭系统代理
+        en: The new configuration has no usable Mixed/HTTP port; ZenClash safely disabled the system proxy
+      invalid_release_task:
+        zh-CN: 关闭失效系统代理任务异常结束：%{error}
+        en: "The invalid system proxy release task ended unexpectedly: %{error}"
+      ownership_missing:
+        zh-CN: 系统代理恢复成功但没有返回所有权证据
+        en: The system proxy was restored, but no ownership evidence was returned
+      ownership_save_released:
+        zh-CN: 保存系统代理所有权失败：%{error}；系统代理已安全关闭
+        en: "Could not save system proxy ownership: %{error}; the system proxy was safely disabled"
+      ownership_save_release_failed:
+        zh-CN: 保存系统代理所有权失败：%{error}；安全关闭也失败：%{release_error}
+        en: "Could not save system proxy ownership: %{error}; safe shutdown also failed: %{release_error}"
+      restore_task:
+        zh-CN: 系统代理恢复任务异常结束：%{error}
+        en: "The system proxy restore task ended unexpectedly: %{error}"
+      quit_release:
+        zh-CN: 关闭系统代理失败：%{error}
+        en: "Could not disable the system proxy: %{error}"
+      quit_release_task:
+        zh-CN: 退出前关闭系统代理任务异常结束：%{error}
+        en: "The pre-quit system proxy release task ended unexpectedly: %{error}"
+      quit_core:
+        zh-CN: 停止内核失败：%{error}
+        en: "Could not stop the core: %{error}"
+      quit_core_task:
+        zh-CN: 退出前停止内核任务异常结束：%{error}
+        en: "The pre-quit core stop task ended unexpectedly: %{error}"
+
+startup:
+  separator:
+    zh-CN: ；
+    en: "; "
+  failure:
+    zh-CN: ZenClash 启动失败：%{error}
+    en: "ZenClash failed to start: %{error}"
+  quarantine:
+    profile_index:
+      zh-CN: 损坏的配置索引已隔离到 %{path}，托管 YAML 文件仍保留
+      en: The damaged profile index was quarantined at %{path}; managed YAML files were preserved
+    controlled_config:
+      zh-CN: 损坏的受控配置已隔离到 %{path}，本次从空受控层恢复
+      en: The damaged managed configuration was quarantined at %{path}; this run recovered with an empty managed layer
+    overrides:
+      zh-CN: 损坏的 YAML 覆写清单已隔离到 %{path}，托管 YAML 文件仍保留
+      en: The damaged YAML override catalog was quarantined at %{path}; managed YAML files were preserved
+    preferences:
+      zh-CN: 损坏或不兼容的应用设置已隔离到 %{path}，本次从默认设置恢复
+      en: Damaged or incompatible application preferences were quarantined at %{path}; this run recovered with defaults
+  automatic_discovery:
+    zh-CN: 自动发现
+    en: Automatic discovery
+  core_recovered:
+    zh-CN: 首选 %{requested} 启动失败，已明确恢复到 %{recovered}（%{source}）。首选项没有被覆盖，请在“设置 → 运行内核”重新检测或选择文件。原因：%{error}
+    en: "Preferred core %{requested} failed to start and ZenClash explicitly recovered with %{recovered} (%{source}). The preference was not overwritten; detect again or select a file under Settings → Runtime Core. Reason: %{error}"
+  restart_failed:
+    zh-CN: ZenClash 已退出，但无法从 %{path} 重新启动：%{error}
+    en: "ZenClash exited but could not restart from %{path}: %{error}"
+  elevated_unsupported:
+    zh-CN: 当前平台不支持管理员权限重启
+    en: This platform does not support restarting with administrator privileges
+  explicit_core:
+    zh-CN: 无法启动显式选择的 %{core}：%{error}
+    en: "Could not start the explicitly selected %{core}: %{error}"
+  listener_fallback:
+    zh-CN: 检测到监听端口被其他进程占用，本次运行已临时改用 %{changes}；订阅和持久设置未修改。
+    en: Listener ports were already used by another process. This run temporarily uses %{changes}; profiles and persistent settings were not changed.
+  active_invalid:
+    zh-CN: "%{core} 的活动配置无效：%{error}"
+    en: "The active %{core} configuration is invalid: %{error}"
+  active_precheck:
+    zh-CN: "%{core} 的活动配置未通过内核预检：%{error}"
+    en: "The active %{core} configuration failed core validation: %{error}"
+  controller_allocation:
+    zh-CN: 无法为托管 %{core} 分配隔离控制器，已拒绝连接固定或无鉴权控制器：%{error}
+    en: "Could not allocate an isolated controller for managed %{core}; ZenClash refused a fixed or unauthenticated controller: %{error}"
+  managed_spawn:
+    zh-CN: 无法启动托管 %{core}：%{error}
+    en: "Could not start managed %{core}: %{error}"
+  managed_not_ready_stop:
+    zh-CN: 托管 %{core} 未能就绪：%{error}；停止失败：%{stop_error}
+    en: "Managed %{core} did not become ready: %{error}; stopping it also failed: %{stop_error}"
+  managed_not_ready:
+    zh-CN: 托管 %{core} 未能就绪：%{error}
+    en: "Managed %{core} did not become ready: %{error}"
+  controller_contended:
+    zh-CN: 托管 %{core} 控制器连续 %{count} 次被抢占
+    en: The managed %{core} controller was taken %{count} consecutive times
+  workspace:
+    zh-CN: 无法从 Cargo 清单路径确定 ZenClash 工作区
+    en: Could not determine the ZenClash workspace from the Cargo manifest path
+  offline:
+    zh-CN: 所有可用内核都启动失败，ZenClash 已进入离线恢复模式，未连接默认 9090 控制器。请在“设置 → 运行内核”重新检测或选择可执行文件，然后重启应用。原因：%{error}
+    en: "All available cores failed to start. ZenClash entered offline recovery mode without connecting to a default port 9090 controller. Detect again or select an executable under Settings → Runtime Core, then restart the app. Reason: %{error}"
+  all_cores_failed:
+    zh-CN: 首选内核与恢复内核均启动失败：%{errors}
+    en: "The preferred and recovery cores all failed to start: %{errors}"
+  recovery_missing:
+    zh-CN: 活动配置启动失败，且内置恢复配置缺失：%{path}；原始原因：%{cause}
+    en: "The active profile failed to start and the bundled recovery profile is missing at %{path}; original reason: %{cause}"
+  recovery_active:
+    zh-CN: 活动配置未能启动，已使用内置直连恢复配置运行 %{core}；原活动选择和源文件均未改写。请在“配置”页导入或切换到有效配置。原因：%{cause}
+    en: "The active profile failed to start, so %{core} is running with the bundled direct recovery profile. The active selection and source file were not modified. Import or select a valid profile on the Profiles page. Reason: %{cause}"
+  recovery_failed:
+    zh-CN: 活动配置与内置恢复配置均启动失败：%{errors}
+    en: "The active and bundled recovery profiles both failed to start: %{errors}"
+
+language:
+  title:
+    zh-CN: 语言
+    en: Language
+  description:
+    zh-CN: 切换后立即更新窗口、菜单栏和状态栏菜单
+    en: Updates the window, app menu, and status menu immediately
+  zh_cn:
+    zh-CN: 简体中文
+    en: Simplified Chinese
+  en:
+    zh-CN: English
+    en: English
+  saved:
+    zh-CN: 界面语言已切换为简体中文
+    en: Interface language changed to English
+
+navigation:
+  home:
+    label:
+      zh-CN: 首页
+      en: Home
+    subtitle:
+      zh-CN: 一眼确认当前订阅、节点、代理模式与网络活动。
+      en: Review the active profile, node, proxy mode, and network activity at a glance.
+  system_proxy:
+    label:
+      zh-CN: 系统代理
+      en: System Proxy
+    subtitle:
+      zh-CN: 配置操作系统 HTTP/HTTPS 代理与绕过地址。
+      en: Configure the operating system HTTP/HTTPS proxy and bypass list.
+  tun:
+    label:
+      zh-CN: 虚拟网卡
+      en: TUN
+    subtitle:
+      zh-CN: 管理当前内核的 TUN 虚拟网卡、路由与权限。
+      en: Manage the active core's TUN interface, routing, and permissions.
+  profiles:
+    label:
+      zh-CN: 订阅管理
+      en: Profiles
+    subtitle:
+      zh-CN: 添加、更新、编辑并切换本地或远程订阅。
+      en: Add, update, edit, and activate local or remote profiles.
+  proxies:
+    label:
+      zh-CN: 代理组
+      en: Proxies
+    subtitle:
+      zh-CN: 查看代理组、切换节点并执行延迟测试。
+      en: Browse proxy groups, switch nodes, and run delay tests.
+  mihomo:
+    label:
+      zh-CN: 内核设置
+      en: Core
+    subtitle:
+      zh-CN: 管理内核版本、启动参数与控制器设置。
+      en: Manage the core version, launch options, and controller settings.
+  connections:
+    label:
+      zh-CN: 连接
+      en: Connections
+    subtitle:
+      zh-CN: 查看实时连接、速率、规则链并关闭连接。
+      en: Inspect live connections, traffic, routing chains, and close sessions.
+  dns:
+    label:
+      zh-CN: DNS 覆写
+      en: DNS Override
+    subtitle:
+      zh-CN: 配置 DNS 监听、上游服务器、Fake-IP 与回退策略。
+      en: Configure DNS listeners, upstream servers, Fake-IP, and fallback policy.
+  sniffer:
+    label:
+      zh-CN: 嗅探覆写
+      en: Sniffer Override
+    subtitle:
+      zh-CN: 配置 TLS、HTTP、QUIC 域名嗅探规则。
+      en: Configure TLS, HTTP, and QUIC hostname sniffing.
+  logs:
+    label:
+      zh-CN: 日志
+      en: Logs
+    subtitle:
+      zh-CN: 筛选并跟踪当前内核的实时日志。
+      en: Filter and follow the active core's live logs.
+  rules:
+    label:
+      zh-CN: 规则
+      en: Rules
+    subtitle:
+      zh-CN: 浏览当前运行时规则和命中策略。
+      en: Browse active routing rules and matched policies.
+  resources:
+    label:
+      zh-CN: 外部资源
+      en: Resources
+    subtitle:
+      zh-CN: 更新代理提供者、规则提供者与 GeoData。
+      en: Update proxy providers, rule providers, and GeoData.
+  override:
+    label:
+      zh-CN: 覆写
+      en: Overrides
+    subtitle:
+      zh-CN: 按顺序管理托管 YAML 覆写并预览最终配置。
+      en: Manage ordered YAML overrides and preview the effective configuration.
+  network:
+    label:
+      zh-CN: 网络信息
+      en: Network
+    subtitle:
+      zh-CN: 查看网络接口、出口地址和连通性。
+      en: Inspect network interfaces, public addresses, and connectivity.
+  traffic:
+    label:
+      zh-CN: 用量
+      en: Usage
+    subtitle:
+      zh-CN: 按主机、来源、出站和进程分析历史用量。
+      en: Analyze historical usage by host, source, outbound, and process.
+  settings:
+    label:
+      zh-CN: 应用设置
+      en: Settings
+    subtitle:
+      zh-CN: 配置运行内核、主题、状态栏、流量历史与备份。
+      en: Configure the runtime core, appearance, status menu, traffic history, and backups.
+
+runtime:
+  stream:
+    connected:
+      zh-CN: 实时流已连接
+      en: Live stream connected
+    reconnecting:
+      zh-CN: 实时流重连中
+      en: Reconnecting live stream
+  empty:
+    loading:
+      zh-CN: 正在从内核读取真实状态…
+      en: Loading live state from the core…
+    unavailable:
+      zh-CN: 当前没有可显示的内核状态，请检查上方错误后重试。
+      en: No core state is available. Review the error above and try again.
+  placeholders:
+    network_target:
+      zh-CN: 例如：公司网关
+      en: "For example: Office Gateway"
+    connection_filter:
+      zh-CN: 过滤域名、IP、进程或规则…
+      en: Filter by domain, IP, process, or rule…
+    log_filter:
+      zh-CN: 过滤级别或内容…
+      en: Filter by level or content…
+    rule_filter:
+      zh-CN: 过滤规则类型、内容或策略…
+      en: Filter by rule type, content, or policy…
+  lifecycle:
+    core_exit_prefix:
+      zh-CN: 托管内核意外退出
+      en: Managed core exited unexpectedly
+    core_restarted:
+      zh-CN: 托管内核已重新启动，运行状态与系统代理正在恢复
+      en: The managed core restarted; runtime state and the system proxy are being restored
+    core_exited:
+      zh-CN: 托管内核意外退出，ZenClash 正在释放其接管的系统代理以避免网络中断。请在“内核”页面查看日志并重启。
+      en: The managed core exited unexpectedly. ZenClash is releasing its system proxy ownership to prevent a network outage. Review the Core page logs and restart it.
+    proxy_reconcile:
+      zh-CN: 系统代理与新内核配置同步失败：%{error}
+      en: "Could not synchronize the system proxy with the new core configuration: %{error}"
+    profile_updated:
+      zh-CN: 在线订阅“%{name}”已自动更新
+      en: Online profile “%{name}” was updated automatically
+    profile_update_failed:
+      zh-CN: 自动更新失败：%{error}
+      en: "Automatic update failed: %{error}"
+    page_task:
+      zh-CN: 页面数据任务异常结束：%{error}
+      en: "The page-data task ended unexpectedly: %{error}"
+    profile_missing:
+      zh-CN: 未配置当前配置文件路径
+      en: No active profile path is configured
+    external_reload:
+      zh-CN: 外部 %{core} 不支持完整配置热重载；请由 ZenClash 托管该内核后重试
+      en: External %{core} does not support full configuration reloads; let ZenClash manage the core and try again
+    core_unavailable:
+      zh-CN: 托管内核在配置任务启动前已不可用，请重启 ZenClash
+      en: The managed core became unavailable before the configuration task started; restart ZenClash
+    config_task:
+      zh-CN: 受控配置任务异常结束：%{error}
+      en: "The managed configuration task ended unexpectedly: %{error}"
+    restarted_after_save:
+      zh-CN: "%{message}（%{core} 已重启并通过控制器验收）"
+      en: "%{message} (%{core} restarted and passed controller verification)"
+    hot_reload_term:
+      zh-CN: 热重载
+      en: reloaded
+    save_term:
+      zh-CN: 保存
+      en: saved
+    tray_profile_selected:
+      zh-CN: 已从状态栏切换到“%{name}”
+      en: Switched to “%{name}” from the status menu
+    tray_profile_failed:
+      zh-CN: 状态栏切换配置失败：%{error}
+      en: "Could not switch profiles from the status menu: %{error}"
+  load_errors:
+    system_proxy:
+      zh-CN: 系统代理状态任务异常结束：%{error}
+      en: "The system proxy status task ended unexpectedly: %{error}"
+    system_network:
+      zh-CN: 系统网络状态任务异常结束：%{error}
+      en: "The system network status task ended unexpectedly: %{error}"
+    external_binary:
+      zh-CN: 当前连接的是外部内核，无法确定可执行文件路径
+      en: The active core is external; its executable path cannot be determined
+    tun_permission:
+      zh-CN: TUN 权限状态任务异常结束：%{error}
+      en: "The TUN permission status task ended unexpectedly: %{error}"
+    autostart:
+      zh-CN: 自动启动状态任务异常结束：%{error}
+      en: "The autostart status task ended unexpectedly: %{error}"
+
+home:
+  profile:
+    title:
+      zh-CN: 当前订阅
+      en: Active Profile
+    none:
+      zh-CN: 尚未选择订阅
+      en: No profile selected
+    none_description:
+      zh-CN: 添加订阅后即可在这里查看用量和更新时间
+      en: Add a profile to see its usage and last update here
+    source_updated:
+      zh-CN: "%{source} · 更新于 %{age}"
+      en: "%{source} · updated %{age}"
+    usage:
+      zh-CN: 订阅用量
+      en: Subscription usage
+    usage_unavailable:
+      zh-CN: 未提供流量额度
+      en: Usage quota unavailable
+    details:
+      zh-CN: 订阅详情
+      en: Profile Details
+    switch_current:
+      zh-CN: 切换订阅，当前为“%{name}”
+      en: Switch profile; current selection is “%{name}”
+    used:
+      zh-CN: 已用 %{used}
+      en: "%{used} used"
+    expiry_unavailable:
+      zh-CN: 到期时间未提供
+      en: Expiry unavailable
+    expired:
+      zh-CN: 已到期
+      en: Expired
+    remaining_days:
+      zh-CN: 剩余 %{days} 天
+      en: "%{days} days remaining"
+  proxy:
+    title:
+      zh-CN: 当前节点
+      en: Active Node
+    untested:
+      zh-CN: 未测速
+      en: Not tested
+    details:
+      zh-CN: 代理详情
+      en: Proxy Details
+    switch_current:
+      zh-CN: 切换节点，当前为“%{name}”
+      en: Switch node; current selection is “%{name}”
+    switched:
+      zh-CN: 已切换到节点“%{name}”
+      en: Switched to node “%{name}”
+    direct_description:
+      zh-CN: 所有连接绕过代理节点
+      en: All connections bypass proxy nodes
+    no_group:
+      zh-CN: 没有可用策略组
+      en: No proxy group available
+    no_node:
+      zh-CN: 未选择节点
+      en: No node selected
+    check_configuration:
+      zh-CN: 请到代理详情检查当前配置
+      en: Open Proxy Details to review the active configuration
+  controls:
+    title:
+      zh-CN: 快速控制
+      en: Quick Controls
+    system_proxy_on:
+      zh-CN: 系统流量正通过 ZenClash
+      en: System traffic is routed through ZenClash
+    system_proxy_off:
+      zh-CN: 系统流量尚未接入
+      en: System traffic is not routed through ZenClash
+    no_proxy_port:
+      zh-CN: 未检测到可用代理端口
+      en: No usable proxy port detected
+    local_proxy:
+      zh-CN: 本机代理 127.0.0.1:%{port}
+      en: Local proxy 127.0.0.1:%{port}
+    proxy_settings:
+      zh-CN: 代理设置
+      en: Proxy Settings
+    routing_mode:
+      zh-CN: 路由模式
+      en: Routing Mode
+    mode_rule:
+      zh-CN: 按规则决定每条连接的去向，适合日常使用
+      en: Route each connection by rule; recommended for everyday use
+    mode_global:
+      zh-CN: 全部连接使用当前全局代理节点
+      en: Route every connection through the active global proxy
+    mode_direct:
+      zh-CN: 全部连接直连，不经过代理节点
+      en: Connect directly without using proxy nodes
+  traffic:
+    title:
+      zh-CN: 实时流量
+      en: Live Traffic
+    live:
+      zh-CN: 实时更新
+      en: Live
+    reconnecting:
+      zh-CN: 正在重连
+      en: Reconnecting
+    download:
+      zh-CN: 下载
+      en: Download
+    upload:
+      zh-CN: 上传
+      en: Upload
+    details:
+      zh-CN: 用量详情
+      en: Usage Details
+    current_download:
+      zh-CN: 当前下载
+      en: Current Download
+    current_upload:
+      zh-CN: 当前上传
+      en: Current Upload
+    active_connections:
+      zh-CN: 活动连接
+      en: Active Connections
+    core_memory:
+      zh-CN: 内核内存
+      en: Core Memory
+    now:
+      zh-CN: 现在
+      en: Now
+
+profiles:
+  metrics:
+    proxies:
+      zh-CN: 代理对象
+      en: Proxies
+    groups:
+      zh-CN: 策略组
+      en: Policy Groups
+    rules:
+      zh-CN: 规则
+      en: Rules
+  actions:
+    collapse_form:
+      zh-CN: 收起订阅表单
+      en: Hide Subscription Form
+    add_remote:
+      zh-CN: 添加在线订阅
+      en: Add Subscription
+    import_local:
+      zh-CN: 导入本地 YAML
+      en: Import Local YAML
+    download_enable:
+      zh-CN: 下载并启用
+      en: Download & Enable
+    reload:
+      zh-CN: 热重载配置
+      en: Reload Profile
+    request_settings:
+      zh-CN: 请求设置
+      en: Request Settings
+    update:
+      zh-CN: 更新
+      en: Update
+    active:
+      zh-CN: 使用中
+      en: Active
+    activate:
+      zh-CN: 切换
+      en: Activate
+    cancel:
+      zh-CN: 取消
+      en: Cancel
+    save_request:
+      zh-CN: 保存请求与计划
+      en: Save Request & Schedule
+  form:
+    title:
+      zh-CN: 添加在线订阅
+      en: Add Online Subscription
+    name:
+      zh-CN: 订阅名称
+      en: Subscription Name
+    user_agent:
+      zh-CN: 自定义 User-Agent
+      en: Custom User-Agent
+    url:
+      zh-CN: Clash / Mihomo 订阅 URL
+      en: Clash / Mihomo Subscription URL
+    authorization:
+      zh-CN: Authorization
+      en: Authorization
+    validation_note:
+      zh-CN: 下载后将依次执行 YAML 校验、内核验收并设为当前配置。
+      en: The download is validated as YAML, verified by the core, and then activated.
+    always_proxy:
+      zh-CN: 始终经内核代理下载
+      en: Always Download Through Core Proxy
+    fallback:
+      zh-CN: 失败自动回退
+      en: Automatic Fallback
+    fallback_description:
+      zh-CN: 直连失败后由内核代理重试
+      en: Retry through the core proxy after a direct failure
+    placeholder_name:
+      zh-CN: 例如：机场主订阅
+      en: "Example: Main subscription"
+    placeholder_authorization:
+      zh-CN: Bearer … 或 Basic …（可留空）
+      en: Bearer … or Basic … (optional)
+    placeholder_request_name:
+      zh-CN: 在线订阅名称
+      en: Online subscription name
+    placeholder_request_authorization:
+      zh-CN: Bearer … 或 Basic …（留空即删除）
+      en: Bearer … or Basic … (empty removes it)
+    placeholder_cron:
+      zh-CN: 例如：0 */6 * * *（分 时 日 月 周）
+      en: "Example: 0 */6 * * * (minute hour day month weekday)"
+  current:
+    title:
+      zh-CN: 当前真实配置
+      en: Active Runtime Profile
+    unspecified:
+      zh-CN: 未指定
+      en: Not specified
+    path:
+      zh-CN: 配置路径
+      en: Profile Path
+    mode:
+      zh-CN: 运行模式
+      en: Runtime Mode
+    log_level:
+      zh-CN: 日志等级
+      en: Log Level
+    counts:
+      zh-CN: "%{managed} 份托管配置 · %{remote} 份在线订阅"
+      en: "%{managed} managed profiles · %{remote} online subscriptions"
+  catalog:
+    title:
+      zh-CN: 配置仓库
+      en: Profile Library
+    empty:
+      zh-CN: 还没有托管配置；可下载在线订阅或导入本地 YAML
+      en: No managed profiles yet; download a subscription or import a local YAML file.
+    homepage:
+      zh-CN: 订阅主页：%{url}
+      en: "Subscription page: %{url}"
+    updated:
+      zh-CN: 更新于 %{age}
+      en: Updated %{age}
+    auto_update:
+      zh-CN: 自动更新
+      en: Auto Update
+    interval_hint:
+      zh-CN: 点击间隔可在 1 / 6 / 12 / 24 小时之间切换
+      en: Click the interval to cycle through 1 / 6 / 12 / 24 hours
+    every_days:
+      zh-CN: 每 %{count} 天
+      en: Every %{count} days
+    every_hours:
+      zh-CN: 每 %{count} 小时
+      en: Every %{count} hours
+    every_minutes:
+      zh-CN: 每 %{count} 分钟
+      en: Every %{count} minutes
+    current:
+      zh-CN: 当前使用
+      en: Current
+  source:
+    local:
+      zh-CN: 本地 YAML
+      en: Local YAML
+    remote:
+      zh-CN: 在线订阅
+      en: Online Subscription
+  route:
+    direct:
+      zh-CN: 仅直连下载
+      en: Direct download only
+    fallback:
+      zh-CN: 直连 · 失败经内核代理重试
+      en: Direct · retry through core proxy on failure
+    proxy:
+      zh-CN: 内核代理下载
+      en: Download through core proxy
+    authorization:
+      zh-CN: " · Authorization 已配置"
+      en: " · Authorization configured"
+  usage:
+    no_total:
+      zh-CN: 已用 %{used} · 总量未提供
+      en: "%{used} used · total unavailable"
+    quota:
+      zh-CN: 已用 %{used} / %{total} · %{percent}%
+      en: "%{used} / %{total} used · %{percent}%"
+    expiry_unavailable:
+      zh-CN: 到期时间未提供
+      en: Expiry unavailable
+    expired:
+      zh-CN: 订阅已到期
+      en: Subscription expired
+    remaining:
+      zh-CN: 剩余 %{days} 天 · Unix %{expire}
+      en: "%{days} days remaining · Unix %{expire}"
+  editor:
+    generic_name:
+      zh-CN: 在线订阅
+      en: Online Subscription
+    title:
+      zh-CN: 编辑订阅请求
+      en: Edit Subscription Request
+    save_hint:
+      zh-CN: 保存后下次手动与后台更新立即使用
+      en: Saved values apply to the next manual or background update
+    name_description:
+      zh-CN: 更新展示名称，不改变托管文件 ID
+      en: Change the display name without changing the managed file ID
+    url:
+      zh-CN: 订阅 URL
+      en: Subscription URL
+    url_description:
+      zh-CN: 仅支持不含嵌入凭据的 HTTP(S) 地址
+      en: Supports HTTP(S) addresses without embedded credentials
+    user_agent_description:
+      zh-CN: 留空使用 clash.meta
+      en: Leave empty to use clash.meta
+    authorization_description:
+      zh-CN: Bearer / Basic 等完整头值；留空会删除已保存凭据
+      en: Full Bearer or Basic header value; empty removes the saved credential
+    timeout:
+      zh-CN: 下载超时（秒）
+      en: Download Timeout (seconds)
+    timeout_description:
+      zh-CN: 单个订阅请求允许 1–600 秒；默认 30 秒
+      en: Allow 1–600 seconds per request; default is 30 seconds
+    cron:
+      zh-CN: 5 字段 Cron
+      en: 5-field Cron
+    cron_description:
+      zh-CN: 本地时间：分 时 日 月 周；例如 0 */6 * * *。留空恢复分钟间隔计划
+      en: "Local time: minute hour day month weekday; for example 0 */6 * * *. Empty restores the minute interval."
+    fixed_interval:
+      zh-CN: 锁定更新间隔
+      en: Lock Update Interval
+    fixed_interval_description:
+      zh-CN: 忽略服务端 profile-update-interval，保留本地间隔或 Cron
+      en: Ignore the server profile-update-interval and retain the local interval or Cron
+    proxy:
+      zh-CN: 经内核代理下载
+      en: Download Through Core Proxy
+    proxy_description:
+      zh-CN: 使用更新时的 HTTP 或 Mixed 监听端口
+      en: Use the core HTTP or Mixed listener available during updates
+    fallback:
+      zh-CN: 直连失败自动回退
+      en: Fallback After Direct Failure
+    fallback_description:
+      zh-CN: 直连网络请求失败时，经当前内核 HTTP/Mixed 端口重试一次
+      en: Retry once through the current core HTTP/Mixed port after a direct request fails
+  dialog:
+    choose_yaml:
+      zh-CN: 选择 Clash YAML 配置
+      en: Select a Clash YAML Profile
+  notices:
+    reloaded:
+      zh-CN: 真实配置已由 %{core} 热重载
+      en: The runtime profile was hot-reloaded by %{core}
+    restarted:
+      zh-CN: 真实配置已由 %{core} 重启加载并回读
+      en: The runtime profile was loaded by restarting %{core} and verified
+    imported:
+      zh-CN: 已导入并启用本地配置“%{name}”
+      en: Imported and activated local profile “%{name}”
+    added:
+      zh-CN: 在线订阅“%{name}”已下载并启用
+      en: Downloaded and activated subscription “%{name}”
+    activated:
+      zh-CN: 已切换到“%{name}”
+      en: Activated “%{name}”
+    request_saved:
+      zh-CN: 订阅请求设置与更新计划已保存
+      en: Subscription request settings and schedule saved
+    auto_update_enabled:
+      zh-CN: 已启用自动更新，每 %{minutes} 分钟检查一次
+      en: Auto update enabled; checks every %{minutes} minutes
+    auto_update_disabled:
+      zh-CN: 已关闭该订阅的自动更新
+      en: Auto update disabled for this subscription
+    updated:
+      zh-CN: 在线订阅“%{name}”已更新
+      en: Updated subscription “%{name}”
+    deleted:
+      zh-CN: 配置已从 ZenClash 仓库删除
+      en: Profile removed from the ZenClash library
+  errors:
+    profile_path_missing:
+      zh-CN: 未配置当前配置文件路径
+      en: No active profile path is configured
+    store_unavailable:
+      zh-CN: 配置仓库不可用
+      en: Profile library unavailable
+    required_fields:
+      zh-CN: 请填写订阅名称和订阅 URL
+      en: Enter a subscription name and URL
+    request_invalid:
+      zh-CN: 订阅请求设置无效：%{error}
+      en: "Invalid subscription request settings: %{error}"
+    reload_task:
+      zh-CN: 重载配置任务异常结束：%{error}
+      en: "The profile reload task ended unexpectedly: %{error}"
+    import_task:
+      zh-CN: 本地配置导入任务异常结束：%{error}
+      en: "The local profile import task ended unexpectedly: %{error}"
+    remote_task:
+      zh-CN: 在线订阅任务异常结束：%{error}
+      en: "The online subscription task ended unexpectedly: %{error}"
+    activate_task:
+      zh-CN: 配置切换任务异常结束：%{error}
+      en: "The profile activation task ended unexpectedly: %{error}"
+    chooser:
+      zh-CN: 无法打开配置选择器：%{error}
+      en: "Could not open the profile picker: %{error}"
+    chooser_task:
+      zh-CN: 配置选择器异常结束：%{error}
+      en: "The profile picker ended unexpectedly: %{error}"
+    enabled_refresh:
+      zh-CN: 配置已启用，但刷新页面失败：%{error}
+      en: "The profile was activated, but the page could not refresh: %{error}"
+    remote_not_found:
+      zh-CN: 找不到要编辑的在线订阅
+      en: The online subscription to edit could not be found
+    local_request_unavailable:
+      zh-CN: 本地配置没有订阅请求设置
+      en: Local profiles do not have subscription request settings
+    timeout_integer:
+      zh-CN: 订阅下载超时必须是整数秒数：%{error}
+      en: "The subscription timeout must be an integer number of seconds: %{error}"
+    request_task:
+      zh-CN: 订阅请求设置任务异常结束：%{error}
+      en: "The subscription request settings task ended unexpectedly: %{error}"
+    policy_task:
+      zh-CN: 订阅更新策略任务异常结束：%{error}
+      en: "The subscription update policy task ended unexpectedly: %{error}"
+    update_task:
+      zh-CN: 订阅更新任务异常结束：%{error}
+      en: "The subscription update task ended unexpectedly: %{error}"
+    updated_refresh:
+      zh-CN: 订阅已更新，但刷新页面失败：%{error}
+      en: "The subscription was updated, but the page could not refresh: %{error}"
+    delete_task:
+      zh-CN: 配置删除任务异常结束：%{error}
+      en: "The profile deletion task ended unexpectedly: %{error}"
+    external_reload:
+      zh-CN: 外部 %{core} 不支持完整配置热重载；请由 ZenClash 托管该内核后重试
+      en: External %{core} does not support full configuration reloads; let ZenClash manage the core and try again
+    rejected:
+      zh-CN: "%{core} 拒绝该配置"
+      en: "%{core} rejected the profile"
+    downloaded_rejected:
+      zh-CN: 下载成功，但 %{core} 拒绝该配置
+      en: Download succeeded, but %{core} rejected the profile
+    rejected_rolled_back:
+      zh-CN: "%{core} 拒绝该配置，活动选择已恢复：%{error}"
+      en: "%{core} rejected the profile and the active selection was restored: %{error}"
+    rejected_rollback_failed:
+      zh-CN: "%{core} 拒绝该配置：%{error}；恢复原活动配置失败：%{rollback}"
+      en: "%{core} rejected the profile: %{error}; restoring the previous active profile failed: %{rollback}"
+    proxy_port_read:
+      zh-CN: 无法读取当前内核的订阅代理端口：%{error}
+      en: "Could not read the active core's subscription proxy port: %{error}"
+    proxy_port_missing:
+      zh-CN: 当前内核没有可用的 HTTP/Mixed 订阅代理端口
+      en: The active core has no usable HTTP or Mixed port for subscription downloads
+    active_save:
+      zh-CN: 保存活动配置失败：%{error}
+      en: "Could not save the active profile: %{error}"
+    selection_rolled_back:
+      zh-CN: "%{prefix}，活动选择已恢复：%{error}"
+      en: "%{prefix}; the active selection was restored: %{error}"
+    selection_rollback_failed:
+      zh-CN: "%{prefix}：%{error}；恢复原活动配置失败：%{rollback}"
+      en: "%{prefix}: %{error}; restoring the previous active profile failed: %{rollback}"
+    update_rejected_rolled_back:
+      zh-CN: "%{core} 拒绝订阅更新，已恢复上一版本：%{error}"
+      en: "%{core} rejected the subscription update and the previous version was restored: %{error}"
+    update_rejected_rollback_failed:
+      zh-CN: "%{core} 拒绝订阅更新：%{error}；恢复上一版本失败：%{rollback}"
+      en: "%{core} rejected the subscription update: %{error}; restoring the previous version failed: %{rollback}"
+    override_read_task:
+      zh-CN: 读取 YAML 覆写任务异常结束：%{error}
+      en: "The YAML override read task ended unexpectedly: %{error}"
+    cleanup_disabled:
+      zh-CN: "%{primary}；清理未启用配置失败：%{cleanup}"
+      en: "%{primary}; removing the inactive profile failed: %{cleanup}"
+    repository_task:
+      zh-CN: 配置仓库后台任务异常结束：%{error}
+      en: "The profile repository task ended unexpectedly: %{error}"
+
+proxies:
+  header:
+    title:
+      zh-CN: 代理组
+      en: Proxies
+    description:
+      zh-CN: 选择策略组节点、查看协议能力并执行真实延迟测试。
+      en: Select policy nodes, review protocol capabilities, and run live delay tests.
+  actions:
+    refresh:
+      zh-CN: 刷新状态
+      en: Refresh
+    test_all:
+      zh-CN: 全部测速
+      en: Test All
+    testing:
+      zh-CN: 测速中
+      en: Testing
+    test:
+      zh-CN: 测速
+      en: Test
+    collapse:
+      zh-CN: 收起
+      en: Collapse
+    expand:
+      zh-CN: 展开
+      en: Expand
+    current:
+      zh-CN: 当前节点
+      en: Current
+    switching:
+      zh-CN: 切换中
+      en: Switching
+    select:
+      zh-CN: 选择
+      en: Select
+  summary:
+    current:
+      zh-CN: 当前：%{proxy} · %{count} 个节点
+      en: "Current: %{proxy} · %{count} nodes"
+  status:
+    testing:
+      zh-CN: 测速中…
+      en: Testing…
+    switching:
+      zh-CN: "%{proxy}（切换中…）"
+      en: "%{proxy} (switching…)"
+    timeout:
+      zh-CN: 超时
+      en: Timeout
+    failed:
+      zh-CN: 失败
+      en: Failed
+  loading:
+    zh-CN: 正在读取 Mihomo 代理组…
+    en: Loading Mihomo proxy groups…
+  empty:
+    direct:
+      zh-CN: 当前为 DIRECT 直连模式，无需选择代理策略组。
+      en: DIRECT mode is active; no proxy group selection is needed.
+    global:
+      zh-CN: 当前配置没有可用的 GLOBAL 策略组。
+      en: The active profile has no GLOBAL policy group.
+    rule:
+      zh-CN: 当前配置没有可用的代理组。
+      en: The active profile has no proxy groups.
+  errors:
+    catalog_task:
+      zh-CN: 代理数据任务异常结束：%{error}
+      en: "The proxy catalog task ended unexpectedly: %{error}"
+    switch_task:
+      zh-CN: 切换代理任务异常结束：%{error}
+      en: "The proxy switch task ended unexpectedly: %{error}"
+    delay_task:
+      zh-CN: 延迟测试任务异常结束：%{error}
+      en: "The delay test task ended unexpectedly: %{error}"
+    group_delay_task:
+      zh-CN: 代理组延迟测试任务异常结束：%{error}
+      en: "The group delay test task ended unexpectedly: %{error}"
+    group_failed_detail:
+      zh-CN: "%{count} 个节点延迟测试失败；首个错误：%{error}"
+      en: "%{count} node delay tests failed; first error: %{error}"
+    group_failed:
+      zh-CN: "%{count} 个节点延迟测试失败"
+      en: "%{count} node delay tests failed"
+
+logs:
+  actions:
+    export:
+      zh-CN: 导出
+      en: Export
+    clear:
+      zh-CN: 清空
+      en: Clear
+  persistence:
+    title:
+      zh-CN: 持续日志文件
+      en: Persistent Log File
+    enabled:
+      title:
+        zh-CN: 记录到磁盘
+        en: Save to Disk
+      description:
+        zh-CN: 写入有界日志文件；达到上限后保留最新内容并继续记录
+        en: Write to a bounded log file and retain recent entries after reaching the limit
+    file:
+      zh-CN: 文件
+      en: File
+    state:
+      zh-CN: 写入状态
+      en: Write Status
+    capture:
+      zh-CN: 实时采集
+      en: Live Capture
+    usage:
+      zh-CN: 当前占用
+      en: Current Usage
+    dropped:
+      zh-CN: 队列丢弃
+      en: Queue Drops
+    dropped_count:
+      zh-CN: "%{count} 条"
+      en: "%{count} entries"
+    limit:
+      zh-CN: 文件上限
+      en: File Limit
+    limit_description:
+      zh-CN: 触顶后回落到约一半容量，避免每条日志都重写文件
+      en: Trim to about half the limit when full to avoid rewriting the file for every entry
+    data_directory_unavailable:
+      zh-CN: 应用数据目录不可用
+      en: Application data directory unavailable
+    writing:
+      zh-CN: 新日志正在按接收顺序持续写入
+      en: New entries are being written in receive order
+    paused:
+      zh-CN: 内存日志继续接收，磁盘文件暂停写入
+      en: In-memory capture continues while disk writes are paused
+  notices:
+    cleared:
+      zh-CN: 内存日志已清空
+      en: In-memory logs cleared
+    persistence_enabled:
+      zh-CN: 持续日志文件已启用
+      en: Persistent logging enabled
+    persistence_paused:
+      zh-CN: 持续日志文件已暂停
+      en: Persistent logging paused
+    limit_saved:
+      zh-CN: 日志文件大小上限已保存
+      en: Log file size limit saved
+    exported:
+      zh-CN: 日志已导出到 %{path}
+      en: Logs exported to %{path}
+  errors:
+    preferences_unavailable:
+      zh-CN: 应用设置存储不可用；请检查应用数据目录权限
+      en: Application preferences are unavailable; check the app data directory permissions
+    preferences_task:
+      zh-CN: 日志设置保存任务异常结束：%{error}
+      en: "The log settings task ended unexpectedly: %{error}"
+    export_dialog:
+      zh-CN: 无法打开日志保存对话框：%{error}
+      en: "Could not open the log save dialog: %{error}"
+    export_dialog_task:
+      zh-CN: 日志保存对话框异常结束：%{error}
+      en: "The log save dialog ended unexpectedly: %{error}"
+    export_task:
+      zh-CN: 日志导出任务异常结束：%{error}
+      en: "The log export task ended unexpectedly: %{error}"
+    write:
+      zh-CN: 写入日志失败：%{error}
+      en: "Could not write the log file: %{error}"
+  empty:
+    waiting:
+      zh-CN: 等待内核日志事件…
+      en: Waiting for core log events…
+    filtered:
+      zh-CN: 没有匹配的日志
+      en: No matching log entries
+  metrics:
+    entries:
+      zh-CN: 日志条目
+      en: Log Entries
+    filtered:
+      zh-CN: 过滤结果
+      en: Filtered Results
+    disk_usage:
+      zh-CN: 磁盘占用
+      en: Disk Usage
+    disabled:
+      zh-CN: 已关闭
+      en: Disabled
+  stream:
+    connected:
+      zh-CN: 实时流已连接
+      en: Live stream connected
+    reconnecting:
+      zh-CN: 正在重连
+      en: Reconnecting
+  levels:
+    silent:
+      zh-CN: 静默 · 不接收内核事件
+      en: Silent · do not receive core events
+    error:
+      zh-CN: 错误 · 仅保留故障
+      en: Error · retain failures only
+    warning:
+      zh-CN: 警告 · 推荐日常精简使用
+      en: Warning · recommended for concise daily use
+    info:
+      zh-CN: 信息 · 默认，包含连接与运行事件
+      en: Info · default, including connection and runtime events
+    debug:
+      zh-CN: 调试 · 仅排障时临时开启
+      en: Debug · enable temporarily for troubleshooting
+
+system_proxy:
+  title:
+    zh-CN: 系统代理
+    en: System Proxy
+  enable:
+    title:
+      zh-CN: 启用系统代理
+      en: Enable System Proxy
+    description:
+      zh-CN: 控制原生手动代理或本地 PAC 自动配置
+      en: Control the native manual proxy or local PAC configuration
+  mode:
+    manual_summary:
+      zh-CN: 手动 HTTP/HTTPS
+      en: Manual HTTP/HTTPS
+    manual:
+      zh-CN: 手动代理
+      en: Manual Proxy
+    pac:
+      zh-CN: PAC 自动配置
+      en: PAC Auto Configuration
+    label:
+      zh-CN: 代理方式
+      en: Proxy Mode
+  fields:
+    service:
+      zh-CN: 网络服务
+      en: Network Service
+    http:
+      zh-CN: 当前 HTTP
+      en: Current HTTP
+    https:
+      zh-CN: 当前 HTTPS
+      en: Current HTTPS
+    pac:
+      zh-CN: 当前 PAC
+      en: Current PAC
+    bypass:
+      zh-CN: 系统回读绕过
+      en: Native Bypass Readback
+    port:
+      zh-CN: 内核代理端口
+      en: Core Proxy Port
+    host:
+      zh-CN: 代理主机
+      en: Proxy Host
+    pac_host:
+      zh-CN: PAC 监听主机
+      en: PAC Listener Host
+    bypass_rules:
+      zh-CN: 绕过规则（每行一条）
+      en: Bypass Rules (one per line)
+    pac_script:
+      zh-CN: PAC JavaScript
+      en: PAC JavaScript
+  status:
+    none:
+      zh-CN: 无
+      en: None
+    disabled:
+      zh-CN: 未启用
+      en: Disabled
+    no_bypass:
+      zh-CN: 不绕过任何地址
+      en: No addresses are bypassed
+    pac_summary:
+      zh-CN: "%{lines} 行脚本 · 监听 %{host}"
+      en: "%{lines}-line script · listening on %{host}"
+  editor:
+    edit:
+      zh-CN: 编辑
+      en: Edit
+    pac_help:
+      zh-CN: 必须定义 FindProxyForURL；%mixed-port% 会替换为当前内核端口
+      en: FindProxyForURL is required; %mixed-port% is replaced with the active core port
+    reset:
+      zh-CN: 恢复默认
+      en: Restore Defaults
+    cancel:
+      zh-CN: 取消
+      en: Cancel
+    save:
+      zh-CN: 保存并应用
+      en: Save & Apply
+    bypass_placeholder:
+      zh-CN: 每行一条，例如 localhost、192.168.0.0/16、*.example.com
+      en: One per line, such as localhost, 192.168.0.0/16, or *.example.com
+  notices:
+    manual_enabled:
+      zh-CN: 系统 HTTP/HTTPS 代理已启用
+      en: System HTTP/HTTPS proxy enabled
+    pac_enabled:
+      zh-CN: 系统 PAC 自动代理已启用
+      en: System PAC proxy enabled
+    disabled:
+      zh-CN: 系统代理已停用
+      en: System proxy disabled
+    saved:
+      zh-CN: 系统代理设置已保存，并通过原生状态回读
+      en: System proxy settings saved and verified against native state
+  errors:
+    ownership_store:
+      zh-CN: 应用设置存储不可用；无法记录系统代理所有权
+      en: Application preferences are unavailable; system proxy ownership cannot be recorded
+    settings_store:
+      zh-CN: 应用设置存储不可用；无法保存系统代理设置
+      en: Application preferences are unavailable; system proxy settings cannot be saved
+    active_without_port:
+      zh-CN: 当前系统代理已启用，但内核没有可用代理端口
+      en: The system proxy is enabled, but the core has no usable proxy port
+    editor_closed:
+      zh-CN: 系统代理编辑器尚未打开
+      en: The system proxy editor is not open
+    background_task:
+      zh-CN: 系统代理后台任务异常结束：%{error}
+      en: "The system proxy background task ended unexpectedly: %{error}"
+    workflow_task:
+      zh-CN: 系统代理工作流异常结束：%{error}
+      en: "The system proxy workflow ended unexpectedly: %{error}"
+    refresh_after_toggle:
+      zh-CN: 系统代理已切换并保存，但刷新页面状态失败：%{error}
+      en: "The system proxy was changed and saved, but the page state could not refresh: %{error}"
+    settings_task:
+      zh-CN: 系统代理设置任务异常结束：%{error}
+      en: "The system proxy settings task ended unexpectedly: %{error}"
+    settings_workflow:
+      zh-CN: 系统代理设置工作流异常结束：%{error}
+      en: "The system proxy settings workflow ended unexpectedly: %{error}"
+    refresh_native:
+      zh-CN: 系统代理设置已经保存，但刷新原生状态失败：%{error}
+      en: "The system proxy settings were saved, but native state could not refresh: %{error}"
+    port_in_use:
+      zh-CN: 当前内核的 HTTP/Mixed 监听端口被其他程序占用，无法启用系统代理。请退出其他代理客户端（例如 Clash Party）或修改 ZenClash 监听端口后重试。内核日志：%{error}
+      en: "The active core's HTTP/Mixed listener is already used by another program, so the system proxy cannot be enabled. Quit other proxy clients or change the ZenClash listener port, then try again. Core log: %{error}"
+    port_not_listening:
+      zh-CN: 当前内核没有成功启动 HTTP/Mixed 监听端口，无法启用系统代理。内核日志：%{error}
+      en: "The active core did not start an HTTP/Mixed listener, so the system proxy cannot be enabled. Core log: %{error}"
+    no_http_port:
+      zh-CN: 当前内核没有可用的 HTTP/Mixed 监听端口，无法启用系统代理。SOCKS-only 端口不能用于系统 HTTP/HTTPS 代理；请在核心设置中启用 Mixed 或 HTTP 端口。
+      en: The active core has no usable HTTP/Mixed listener. A SOCKS-only port cannot serve as the system HTTP/HTTPS proxy; enable a Mixed or HTTP port in Core settings.
+    ownership_missing:
+      zh-CN: 系统代理启用成功但没有返回所有权证据
+      en: The system proxy was enabled, but no ownership evidence was returned
+    save_released:
+      zh-CN: 保存系统代理设置失败：%{error}；系统代理已安全关闭
+      en: "Could not save system proxy settings: %{error}; the system proxy was safely disabled"
+    save_release_failed:
+      zh-CN: 保存系统代理设置失败：%{error}；安全关闭也失败：%{rollback}
+      en: "Could not save system proxy settings: %{error}; safe shutdown also failed: %{rollback}"
+    save_rolled_back:
+      zh-CN: 保存系统代理设置失败：%{error}；原状态已恢复
+      en: "Could not save system proxy settings: %{error}; the previous state was restored"
+    save_ownership_released:
+      zh-CN: 保存系统代理设置失败：%{error}；恢复所有权记录也失败：%{ownership_error}，系统代理已安全关闭
+      en: "Could not save system proxy settings: %{error}; restoring the ownership record also failed: %{ownership_error}; the system proxy was safely disabled"
+    save_ownership_release_failed:
+      zh-CN: 保存系统代理设置失败：%{error}；恢复所有权记录失败：%{ownership_error}；安全关闭也失败：%{release_error}
+      en: "Could not save system proxy settings: %{error}; restoring the ownership record failed: %{ownership_error}; safe shutdown also failed: %{release_error}"
+    save_rollback_failed:
+      zh-CN: 保存系统代理设置失败：%{error}；恢复原状态也失败：%{rollback}
+      en: "Could not save system proxy settings: %{error}; restoring the previous state also failed: %{rollback}"
+
+config_inputs:
+  placeholders:
+    one_domain_or_rule:
+      zh-CN: 每行一个域名或规则
+      en: One domain or rule per line
+    one_ip_dns:
+      zh-CN: 每行一个 IP DNS
+      en: One IP DNS server per line
+    one_dns:
+      zh-CN: 每行一个 DNS 地址
+      en: One DNS address per line
+    proxy_resolver:
+      zh-CN: 代理节点域名解析器
+      en: Resolver for proxy node hostnames
+    direct_resolver:
+      zh-CN: 直连域名解析器
+      en: Resolver for direct hostnames
+    one_cidr:
+      zh-CN: 每行一个 CIDR
+      en: One CIDR per line
+    one_domain_rule:
+      zh-CN: 每行一个域名规则
+      en: One domain rule per line
+    dns_mapping:
+      zh-CN: "domain: dns（YAML 映射）"
+      en: "domain: dns (YAML mapping)"
+    address_mapping:
+      zh-CN: "domain: address（YAML 映射）"
+      en: "domain: address (YAML mapping)"
+    one_domain:
+      zh-CN: 每行一个域名
+      en: One domain per line
+    one_address:
+      zh-CN: 每行一个 IP/CIDR
+      en: One IP address or CIDR per line
+    tun_device:
+      zh-CN: TUN 设备名称
+      en: TUN device name
+    default_mtu:
+      zh-CN: 默认 1500
+      en: Default 1500
+    mixed_port:
+      zh-CN: 默认 7890；0 表示关闭
+      en: Default 7890; 0 disables it
+    automatic_interface:
+      zh-CN: 留空自动选择出口接口
+      en: Leave empty to select the outbound interface automatically
+  errors:
+    dns_mode:
+      zh-CN: DNS 增强模式必须是 fake-ip、redir-host 或 normal
+      en: DNS enhanced mode must be fake-ip, redir-host, or normal
+    fake_ip_mode:
+      zh-CN: Fake-IP 过滤模式必须是 blacklist、whitelist 或 rule
+      en: Fake-IP filter mode must be blacklist, whitelist, or rule
+    tun_stack:
+      zh-CN: TUN 网络栈必须是 gvisor、mixed 或 system
+      en: TUN stack must be gvisor, mixed, or system
+    mtu_integer:
+      zh-CN: MTU 必须是 1 到 65535 的整数
+      en: MTU must be an integer from 1 to 65535
+    mtu_positive:
+      zh-CN: MTU 必须大于 0
+      en: MTU must be greater than 0
+    invalid_yaml:
+      zh-CN: "%{label} YAML 无效：%{error}"
+      en: "%{label} YAML is invalid: %{error}"
+    yaml_conversion:
+      zh-CN: "%{label} 无法转换：%{error}"
+      en: "%{label} could not be converted: %{error}"
+    yaml_mapping:
+      zh-CN: "%{label} 必须是 YAML 映射"
+      en: "%{label} must be a YAML mapping"
+    log_level:
+      zh-CN: 日志等级必须是 silent、error、warning、info 或 debug
+      en: Log level must be silent, error, warning, info, or debug
+    bind_address:
+      zh-CN: 监听地址不能为空；仅本机监听可填写 127.0.0.1
+      en: Bind address cannot be empty; use 127.0.0.1 for local-only access
+    port:
+      zh-CN: "%{label} 端口必须是 0 到 65535 的整数"
+      en: "%{label} port must be an integer from 0 to 65535"
+
+tun:
+  permissions:
+    title:
+      zh-CN: TUN 系统权限
+      en: TUN System Permission
+    status:
+      zh-CN: 状态
+      en: Status
+    ready:
+      zh-CN: 已就绪
+      en: Ready
+    relaunch:
+      zh-CN: 需要管理员重启
+      en: Administrator relaunch required
+    install:
+      zh-CN: 需要安装权限
+      en: Permission installation required
+    verification:
+      zh-CN: 校验
+      en: Verification
+    core:
+      zh-CN: 内核
+      en: Core
+    loading:
+      zh-CN: 正在读取 TUN 权限状态…
+      en: Loading TUN permission status…
+    action_ready:
+      zh-CN: 权限已就绪
+      en: Permission Ready
+    action_install:
+      zh-CN: 安装 / 修复 TUN 权限
+      en: Install / Repair TUN Permission
+  switches:
+    title:
+      zh-CN: 虚拟网卡
+      en: Virtual Network Interface
+    enable:
+      zh-CN: 启用 TUN
+      en: Enable TUN
+    enable_description:
+      zh-CN: 通过 %{core} TUN 接管系统网络流量
+      en: Route system network traffic through the %{core} TUN
+    stack:
+      zh-CN: 网络栈
+      en: Network Stack
+    device:
+      zh-CN: 设备
+      en: Device
+    dns_hijack:
+      zh-CN: DNS 劫持
+      en: DNS Hijack
+    auto_route:
+      zh-CN: 自动路由
+      en: Auto Route
+    auto_route_description:
+      zh-CN: 让 %{core} 自动安装 TUN 路由
+      en: Let %{core} install TUN routes automatically
+    auto_interface:
+      zh-CN: 自动检测接口
+      en: Auto-detect Interface
+    auto_interface_description:
+      zh-CN: 自动选择默认出站网络接口
+      en: Select the default outbound network interface automatically
+    strict_route:
+      zh-CN: 严格路由
+      en: Strict Route
+    strict_route_description:
+      zh-CN: 使用严格路由避免流量绕过 TUN
+      en: Use strict routing to prevent traffic from bypassing TUN
+    auto_redirect:
+      zh-CN: 自动重定向
+      en: Auto Redirect
+    auto_redirect_description:
+      zh-CN: Linux 下使用 nftables 提升 TUN 路由性能
+      en: Use nftables on Linux to improve TUN routing performance
+  routes:
+    title:
+      zh-CN: 接口与路由
+      en: Interface & Routes
+    stack_description:
+      zh-CN: gvisor / mixed / system
+      en: gvisor / mixed / system
+    device_name:
+      zh-CN: 设备名称
+      en: Device Name
+    device_description:
+      zh-CN: 系统中的 TUN 设备名称
+      en: TUN device name in the operating system
+    mtu_description:
+      zh-CN: 范围 1 到 65535
+      en: Range 1 to 65535
+    dns_description:
+      zh-CN: 逗号分隔，例如 any:53
+      en: "Comma-separated, for example any:53"
+    include:
+      zh-CN: 包含路由
+      en: Included Routes
+    include_description:
+      zh-CN: 每行一个需要接管的 CIDR
+      en: One CIDR to capture per line
+    exclude:
+      zh-CN: 排除路由
+      en: Excluded Routes
+    exclude_description:
+      zh-CN: 每行一个不接管的 CIDR
+      en: One CIDR to bypass per line
+    save:
+      zh-CN: 保存 TUN 高级配置
+      en: Save Advanced TUN Settings
+  notices:
+    permission_ready:
+      zh-CN: TUN 权限已安装，受管内核已重启并通过控制器就绪检查
+      en: TUN permission installed; the managed core restarted and passed its readiness check
+    enabled:
+      zh-CN: TUN 状态已保存并热重载
+      en: TUN state saved and reloaded
+    auto_route:
+      zh-CN: TUN 自动路由已保存并热重载
+      en: TUN auto-route saved and reloaded
+    auto_interface:
+      zh-CN: TUN 接口检测已保存并热重载
+      en: TUN interface detection saved and reloaded
+    strict_route:
+      zh-CN: TUN 严格路由已保存并热重载
+      en: TUN strict routing saved and reloaded
+    auto_redirect:
+      zh-CN: TUN 自动重定向已保存并热重载
+      en: TUN auto redirect saved and reloaded
+    advanced:
+      zh-CN: TUN 高级配置已保存并热重载
+      en: Advanced TUN settings saved and reloaded
+  errors:
+    external_core:
+      zh-CN: 当前连接的是外部内核，无法确定需要授权的可执行文件
+      en: The current core is external; ZenClash cannot determine which executable to authorize
+    permission_task:
+      zh-CN: TUN 权限任务异常结束：%{error}
+      en: "The TUN permission task ended unexpectedly: %{error}"
+    external_restart:
+      zh-CN: TUN 权限已写入，但当前不是 ZenClash 托管内核；请重启应用后再启用 TUN
+      en: TUN permission was installed, but the active core is not managed by ZenClash; restart the app before enabling TUN
+    restart_task:
+      zh-CN: TUN 授权后重启内核任务异常结束：%{error}
+      en: "The core restart task after TUN authorization ended unexpectedly: %{error}"
+    readiness:
+      zh-CN: TUN 授权后内核未能重新就绪：%{error}
+      en: "The core did not become ready after TUN authorization: %{error}"
+
+dns:
+  status:
+    title:
+      zh-CN: DNS 运行状态
+      en: DNS Runtime
+    enable:
+      zh-CN: 启用 DNS
+      en: Enable DNS
+    enable_description:
+      zh-CN: 使用 Mihomo 内置 DNS 解析器
+      en: Use the built-in Mihomo DNS resolver
+    fallback_geoip_description:
+      zh-CN: 根据 GeoIP 国家代码决定是否使用 Fallback
+      en: Select Fallback based on the GeoIP country code
+    ipv6:
+      zh-CN: IPv6 解析
+      en: IPv6 Resolution
+    ipv6_description:
+      zh-CN: 允许 DNS 返回 AAAA 记录
+      en: Allow DNS to return AAAA records
+    use_hosts:
+      zh-CN: 使用 Hosts
+      en: Use Hosts
+    use_hosts_description:
+      zh-CN: 应用配置文件中的 hosts 映射
+      en: Apply hosts mappings from the profile
+    system_hosts:
+      zh-CN: 使用系统 Hosts
+      en: Use System Hosts
+    system_hosts_description:
+      zh-CN: 读取操作系统 hosts 文件
+      en: Read the operating system hosts file
+    respect_rules:
+      zh-CN: 遵循规则
+      en: Respect Rules
+    respect_rules_description:
+      zh-CN: DNS 查询遵循当前代理规则
+      en: Route DNS queries according to the active proxy rules
+    tun_hijack:
+      zh-CN: TUN DNS 劫持
+      en: TUN DNS Hijack
+    sniffer_mapping:
+      zh-CN: 嗅探 DNS 映射
+      en: Sniffer DNS Mapping
+  resolvers:
+    title:
+      zh-CN: 解析器与 Fake-IP
+      en: Resolvers & Fake-IP
+    enhanced_mode:
+      zh-CN: 增强模式
+      en: Enhanced Mode
+    fake_ip_pool:
+      zh-CN: Fake-IP 地址池
+      en: Fake-IP Pool
+    fake_ip_pool_description:
+      zh-CN: Mihomo Fake-IP CIDR
+      en: Mihomo Fake-IP CIDR
+    filter_mode:
+      zh-CN: 过滤模式
+      en: Filter Mode
+    fake_ip_filter:
+      zh-CN: Fake-IP 过滤
+      en: Fake-IP Filter
+    fake_ip_filter_description:
+      zh-CN: 每行一个域名、通配符或规则
+      en: One domain, wildcard, or rule per line
+    default:
+      zh-CN: 默认解析器
+      en: Default Resolver
+    default_description:
+      zh-CN: 用于解析 DNS 服务器自身域名
+      en: Resolve the hostnames of DNS servers themselves
+    nameserver_description:
+      zh-CN: 主要 DNS 解析器
+      en: Primary DNS resolvers
+    proxy:
+      zh-CN: 代理解析器
+      en: Proxy Resolver
+    proxy_description:
+      zh-CN: 代理节点域名专用解析器
+      en: Resolver dedicated to proxy node hostnames
+    direct:
+      zh-CN: 直连解析器
+      en: Direct Resolver
+    direct_description:
+      zh-CN: 直连请求专用解析器
+      en: Resolver dedicated to direct requests
+    fallback_description:
+      zh-CN: 备用 DNS 解析器
+      en: Backup DNS resolvers
+  policy:
+    title:
+      zh-CN: Fallback、Policy 与 Hosts
+      en: Fallback, Policy & Hosts
+    country:
+      zh-CN: GeoIP 国家代码
+      en: GeoIP Country Code
+    country_description:
+      zh-CN: 例如 CN
+      en: For example, CN
+    cidr_description:
+      zh-CN: 每行一个 CIDR
+      en: One CIDR per line
+    domain:
+      zh-CN: Fallback 域名
+      en: Fallback Domains
+    domain_description:
+      zh-CN: 每行一个域名规则
+      en: One domain rule per line
+    nameserver_policy_description:
+      zh-CN: YAML 映射；值可为单个 DNS 或数组
+      en: YAML mapping; values may be a single DNS server or an array
+    hosts_description:
+      zh-CN: YAML 映射；支持单地址或地址数组
+      en: YAML mapping supporting a single address or address arrays
+    save:
+      zh-CN: 保存 DNS 高级配置
+      en: Save Advanced DNS Settings
+  notices:
+    enabled:
+      zh-CN: DNS 状态已保存并热重载
+      en: DNS state saved and reloaded
+    fallback_geoip:
+      zh-CN: Fallback GeoIP 已保存并热重载
+      en: Fallback GeoIP saved and reloaded
+    ipv6:
+      zh-CN: DNS IPv6 已保存并热重载
+      en: DNS IPv6 saved and reloaded
+    hosts:
+      zh-CN: DNS Hosts 设置已保存并热重载
+      en: DNS Hosts settings saved and reloaded
+    system_hosts:
+      zh-CN: 系统 Hosts 设置已保存并热重载
+      en: System Hosts settings saved and reloaded
+    rules:
+      zh-CN: DNS 规则策略已保存并热重载
+      en: DNS rule policy saved and reloaded
+    advanced:
+      zh-CN: DNS 高级配置已保存并热重载
+      en: Advanced DNS settings saved and reloaded
+
+sniffer:
+  status:
+    title:
+      zh-CN: 域名嗅探运行状态
+      en: Hostname Sniffing Runtime
+    enable:
+      zh-CN: 嗅探
+      en: Sniffing
+    enable_description:
+      zh-CN: 识别连接中的真实域名
+      en: Identify the real hostname in connections
+    dns_mapping:
+      zh-CN: 强制 DNS 映射
+      en: Force DNS Mapping
+    dns_mapping_description:
+      zh-CN: 为嗅探流量强制使用 DNS 映射
+      en: Force DNS mapping for sniffed traffic
+    pure_ip:
+      zh-CN: 解析纯 IP
+      en: Parse Pure IP
+    pure_ip_description:
+      zh-CN: 尝试从纯 IP 连接恢复域名
+      en: Attempt to recover hostnames from IP-only connections
+    override:
+      zh-CN: 覆盖目标地址
+      en: Override Destination
+    override_description:
+      zh-CN: 用嗅探出的域名覆盖原目标地址
+      en: Replace the original destination with the sniffed hostname
+    managed_note:
+      zh-CN: 设置写入独立受控覆写层，不修改订阅源文件。
+      en: Settings are written to a managed override layer without modifying the source profile.
+  filters:
+    title:
+      zh-CN: 协议端口与过滤列表
+      en: Protocol Ports & Filters
+    port_description:
+      zh-CN: 逗号分隔，支持端口范围
+      en: Comma-separated; port ranges are supported
+    http_port:
+      zh-CN: HTTP 端口
+      en: HTTP Ports
+    tls_port:
+      zh-CN: TLS 端口
+      en: TLS Ports
+    quic_port:
+      zh-CN: QUIC 端口
+      en: QUIC Ports
+    skip_domain:
+      zh-CN: 跳过域名
+      en: Skip Domains
+    force_domain:
+      zh-CN: 强制域名
+      en: Force Domains
+    domain_description:
+      zh-CN: 每行一个域名
+      en: One domain per line
+    skip_destination:
+      zh-CN: 跳过目标地址
+      en: Skip Destination Addresses
+    skip_source:
+      zh-CN: 跳过来源地址
+      en: Skip Source Addresses
+    address_description:
+      zh-CN: 每行一个 IP 或 CIDR
+      en: One IP address or CIDR per line
+    save:
+      zh-CN: 保存嗅探高级配置
+      en: Save Advanced Sniffer Settings
+  notices:
+    enabled:
+      zh-CN: 域名嗅探已保存并热重载
+      en: Hostname sniffing saved and reloaded
+    dns_mapping:
+      zh-CN: 强制 DNS 映射已保存并热重载
+      en: Forced DNS mapping saved and reloaded
+    pure_ip:
+      zh-CN: 纯 IP 嗅探已保存并热重载
+      en: Pure-IP sniffing saved and reloaded
+    override:
+      zh-CN: 目标地址覆盖已保存并热重载
+      en: Destination override saved and reloaded
+    advanced:
+      zh-CN: 嗅探高级配置已保存并热重载
+      en: Advanced sniffer settings saved and reloaded
+
+network:
+  metrics:
+    public_exit:
+      zh-CN: 公网出口
+      en: Public Exit
+    waiting:
+      zh-CN: 等待探测
+      en: Waiting
+    average_latency:
+      zh-CN: 平均延迟
+      en: Average Latency
+    route:
+      zh-CN: 探测路径
+      en: Probe Route
+  capabilities:
+    title:
+      zh-CN: 网络能力
+      en: Network Capabilities
+    lan:
+      zh-CN: 允许局域网
+      en: Allow LAN
+    tcp_concurrent:
+      zh-CN: TCP 并发
+      en: Concurrent TCP
+    unified_delay:
+      zh-CN: 统一延迟
+      en: Unified Delay
+  public_ip:
+    title:
+      zh-CN: 公网出口画像
+      en: Public Exit Profile
+    probing:
+      zh-CN: 探测中
+      en: Probing
+    refresh:
+      zh-CN: 重新探测
+      en: Probe Again
+    ip:
+      zh-CN: 公网 IP
+      en: Public IP
+    country_region:
+      zh-CN: 国家 / 地区
+      en: Country / Region
+    city:
+      zh-CN: 城市
+      en: City
+    organization:
+      zh-CN: ASN / 组织
+      en: ASN / Organization
+    timezone:
+      zh-CN: 时区
+      en: Time Zone
+    coordinates:
+      zh-CN: 坐标
+      en: Coordinates
+    proxy_detection:
+      zh-CN: 代理识别
+      en: Proxy Detection
+    not_proxy:
+      zh-CN: 未识别为代理或 VPN
+      en: Not identified as a proxy or VPN
+  latency:
+    title:
+      zh-CN: 独立延迟探测
+      en: Independent Latency Probes
+    through_core:
+      zh-CN: 通过 Mihomo 探测
+      en: Probe Through Mihomo
+    through_core_description:
+      zh-CN: 使用当前 HTTP 或 Mixed 监听，结果反映真实代理出口；关闭后使用直连
+      en: Use the current HTTP or Mixed listener to reflect the real proxy exit; disable for direct probes
+    target_name:
+      zh-CN: 目标名称
+      en: Target Name
+    target_name_description:
+      zh-CN: 最多 64 个字符
+      en: Up to 64 characters
+    target_url:
+      zh-CN: 探测 URL
+      en: Probe URL
+    target_url_description:
+      zh-CN: 仅接受不含登录凭据的 HTTP(S) 地址
+      en: Accepts HTTP(S) addresses without embedded credentials
+    add:
+      zh-CN: 添加探测目标
+      en: Add Probe Target
+    failed:
+      zh-CN: 请求失败
+      en: Request failed
+  system:
+    title:
+      zh-CN: 默认网络路径
+      en: Default Network Path
+    interface:
+      zh-CN: 接口
+      en: Interface
+    gateway:
+      zh-CN: 网关
+      en: Gateway
+    local_address:
+      zh-CN: 本地地址
+      en: Local Address
+    pinned:
+      zh-CN: Mihomo 当前固定接口：%{interface}
+      en: "Mihomo pinned interface: %{interface}"
+    pin:
+      zh-CN: 固定为当前接口
+      en: Pin Current Interface
+    automatic:
+      zh-CN: 自动选择
+      en: Select Automatically
+  notices:
+    provider:
+      zh-CN: 公网 IP 数据源已保存
+      en: Public IP provider saved
+    route:
+      zh-CN: 网络探测路径已保存
+      en: Network probe route saved
+    target_added:
+      zh-CN: 自定义延迟目标已保存
+      en: Custom latency target saved
+    target_removed:
+      zh-CN: 自定义延迟目标已删除
+      en: Custom latency target removed
+    interface_pinned:
+      zh-CN: 出口接口已固定并由 Mihomo 验证
+      en: Outbound interface pinned and verified by Mihomo
+    interface_auto:
+      zh-CN: 出口接口已恢复自动选择
+      en: Outbound interface restored to automatic selection
+  errors:
+    no_proxy_port:
+      zh-CN: 当前内核未开启 HTTP 或 Mixed 代理端口；可切换为直连探测
+      en: The core has no HTTP or Mixed proxy port; switch to direct probing
+    route_no_port:
+      zh-CN: 内核未监听 HTTP/Mixed 端口
+      en: Core is not listening on an HTTP/Mixed port
+    preferences_unavailable:
+      zh-CN: 应用设置存储不可用；请检查应用数据目录权限
+      en: Application preferences are unavailable; check the app data directory permissions
+    probe_task:
+      zh-CN: 网络探测任务异常结束：%{error}
+      en: "The network probe task ended unexpectedly: %{error}"
+    preferences_task:
+      zh-CN: 网络探测设置保存任务异常结束：%{error}
+      en: "The network probe preference save task ended unexpectedly: %{error}"
+
+traffic:
+  range:
+    hour:
+      zh-CN: 1 小时
+      en: 1 hour
+    day:
+      zh-CN: 24 小时
+      en: 24 hours
+    week:
+      zh-CN: 7 天
+      en: 7 days
+    month:
+      zh-CN: 30 天
+      en: 30 days
+  dimension:
+    host:
+      zh-CN: 域名
+      en: Host
+    source:
+      zh-CN: 设备
+      en: Device
+    outbound:
+      zh-CN: 出口
+      en: Outbound
+    process:
+      zh-CN: 进程
+      en: Process
+  metrics:
+    upload:
+      zh-CN: 实时上传
+      en: Live Upload
+    download:
+      zh-CN: 实时下载
+      en: Live Download
+    range_usage:
+      zh-CN: 区间用量
+      en: Range Usage
+    connections:
+      zh-CN: 活动连接
+      en: Active Connections
+  chart:
+    title:
+      zh-CN: 历史流量趋势
+      en: Historical Traffic Trend
+    summary:
+      zh-CN: "%{range} · 上传 %{upload} · 下载 %{download}"
+      en: "%{range} · upload %{upload} · download %{download}"
+    upload:
+      zh-CN: ● 上传
+      en: ● Upload
+    download:
+      zh-CN: ● 下载
+      en: ● Download
+    empty:
+      zh-CN: 这个时间范围还没有流量样本
+      en: No traffic samples in this time range
+  actions:
+    cancel:
+      zh-CN: 取消
+      en: Cancel
+    confirm_clear:
+      zh-CN: 确认清空
+      en: Confirm Clear
+    clear:
+      zh-CN: 清空历史
+      en: Clear History
+  rankings:
+    title:
+      zh-CN: "%{dimension}排名"
+      en: "%{dimension} Ranking"
+    samples:
+      zh-CN: "%{count} 条样本"
+      en: "%{count} samples"
+    empty_enabled:
+      zh-CN: 尚无历史用量；保持内核运行后会自动记录
+      en: No historical usage yet; samples are recorded while the core is running
+    empty_disabled:
+      zh-CN: 流量历史记录已在应用设置中关闭
+      en: Traffic history recording is disabled in Settings
+  inspector:
+    title:
+      zh-CN: 流向检查器
+      en: Traffic Flow Inspector
+    description:
+      zh-CN: 选择排名项，再查看关联目标与实际出口
+      en: Select a ranking item to inspect related targets and actual outbounds
+    empty:
+      zh-CN: 从左侧排名选择一项开始下钻
+      en: Select a ranking item on the left to drill down
+    actual_outbound:
+      zh-CN: "%{detail} · 实际出口"
+      en: "%{detail} · actual outbound"
+  notices:
+    cleared:
+      zh-CN: 本地流量历史已清空
+      en: Local traffic history cleared
+  errors:
+    database_open:
+      zh-CN: 无法打开流量历史数据库；请检查应用数据目录权限
+      en: Could not open the traffic history database; check the app data directory permissions
+    database_unavailable:
+      zh-CN: 流量历史数据库不可用
+      en: Traffic history database unavailable
+    query_task:
+      zh-CN: 流量历史查询任务异常结束：%{error}
+      en: "The traffic history query task ended unexpectedly: %{error}"
+    task:
+      zh-CN: 流量历史任务异常结束：%{error}
+      en: "The traffic history task ended unexpectedly: %{error}"
+    clear_task:
+      zh-CN: 清空流量历史任务异常结束：%{error}
+      en: "The clear traffic history task ended unexpectedly: %{error}"
+
+resources:
+  builtin:
+    title:
+      zh-CN: GeoData 与 External UI
+      en: GeoData & External UI
+    unsupported:
+      zh-CN: "%{core} 可继续使用配置中的资源地址，但不支持 Mihomo 的 GeoData / External UI 在线更新接口。"
+      en: "%{core} can use configured resource URLs, but does not support Mihomo's online GeoData or External UI update APIs."
+    geodata_mode:
+      zh-CN: DAT GeoData 模式
+      en: DAT GeoData Mode
+    geodata_mode_description:
+      zh-CN: 关闭时使用 MMDB/MetaDB；修改后写入受控配置并由 Mihomo 验证
+      en: Use MMDB/MetaDB when disabled; changes are written to managed configuration and verified by Mihomo
+    auto_update:
+      zh-CN: 自动更新 GeoData
+      en: Auto-update GeoData
+    auto_update_description:
+      zh-CN: 由 Mihomo 按配置的更新间隔维护 GeoData
+      en: Let Mihomo maintain GeoData using the configured update interval
+    interval:
+      zh-CN: 更新间隔
+      en: Update Interval
+    hours:
+      zh-CN: "%{hours} 小时"
+      en: "%{hours} hours"
+    update_geodata:
+      zh-CN: 立即更新 GeoData
+      en: Update GeoData Now
+    update_ui:
+      zh-CN: 更新 External UI
+      en: Update External UI
+  providers:
+    proxy:
+      zh-CN: 代理提供者
+      en: Proxy Providers
+    rule:
+      zh-CN: 规则提供者
+      en: Rule Providers
+    count:
+      zh-CN: "%{count} 项"
+      en: "%{count} items"
+    empty:
+      zh-CN: 没有提供者
+      en: No providers
+    update:
+      zh-CN: 更新
+      en: Update
+    proxy_metadata:
+      zh-CN: "%{type} · %{updated} · %{count} 项"
+      en: "%{type} · %{updated} · %{count} items"
+    rule_metadata:
+      zh-CN: "%{type} · %{behavior} · %{format} · %{updated} · %{count} 项"
+      en: "%{type} · %{behavior} · %{format} · %{updated} · %{count} items"
+  notices:
+    geodata:
+      zh-CN: GeoData 已由 Mihomo 下载并更新
+      en: GeoData downloaded and updated by Mihomo
+    external_ui:
+      zh-CN: External UI 已由 Mihomo 下载并更新
+      en: External UI downloaded and updated by Mihomo
+    provider:
+      zh-CN: 外部资源已更新
+      en: External resource updated
+    geodata_mode:
+      zh-CN: GeoData 模式已保存并热重载
+      en: GeoData mode saved and reloaded
+    geodata_auto:
+      zh-CN: GeoData 自动更新设置已保存
+      en: GeoData auto-update setting saved
+  errors:
+    unsupported:
+      zh-CN: "%{core} 暂不支持该 Mihomo 内置资源更新接口"
+      en: "%{core} does not support this Mihomo built-in resource update API"
+    builtin_task:
+      zh-CN: 内置资源更新任务异常结束：%{error}
+      en: "The built-in resource update task ended unexpectedly: %{error}"
+    provider_task:
+      zh-CN: 更新外部资源任务异常结束：%{error}
+      en: "The external resource update task ended unexpectedly: %{error}"
+  ruleset:
+    title:
+      zh-CN: MRS 规则集检查器
+      en: MRS Ruleset Inspector
+    none:
+      zh-CN: 尚未选择 MRS 文件
+      en: No MRS file selected
+    unsupported:
+      zh-CN: "%{core} 不实现 Mihomo 的 MRS 转换命令；请选择 Mihomo 内核后使用此工具。"
+      en: "%{core} does not implement Mihomo's MRS conversion command; select the Mihomo core to use this tool."
+    source:
+      zh-CN: 源文件
+      en: Source File
+    output:
+      zh-CN: UTF-8 输出
+      en: UTF-8 Output
+    description:
+      zh-CN: 用当前 Mihomo 内核解码二进制规则集；不经过 shell，也不会修改源文件。
+      en: Decode a binary ruleset with the active Mihomo core without using a shell or modifying the source file.
+    choose:
+      zh-CN: 选择 MRS
+      en: Select MRS
+    convert:
+      zh-CN: 转换
+      en: Convert
+    preview:
+      zh-CN: 规则预览
+      en: Rules Preview
+    preview_truncated:
+      zh-CN: 规则预览 · 已截断显示，复制与导出仍包含完整内容
+      en: Rules preview · display truncated; copy and export still include the full content
+    copy:
+      zh-CN: 复制完整规则
+      en: Copy Full Rules
+    export:
+      zh-CN: 导出 TXT
+      en: Export TXT
+    choose_prompt:
+      zh-CN: 选择 Mihomo MRS 规则集
+      en: Select a Mihomo MRS Ruleset
+    selected:
+      zh-CN: 已选择 MRS 文件；请选择匹配的行为类型后转换
+      en: MRS file selected; choose the matching behavior before conversion
+    converted:
+      zh-CN: 已用 %{behavior} 行为解码 MRS 规则集
+      en: Decoded the MRS ruleset using %{behavior} behavior
+    exported:
+      zh-CN: 规则已导出到 %{path}
+      en: Rules exported to %{path}
+    errors:
+      picker:
+        zh-CN: 无法打开 MRS 选择器：%{error}
+        en: "Could not open the MRS file picker: %{error}"
+      picker_task:
+        zh-CN: MRS 选择器异常结束：%{error}
+        en: "The MRS file picker ended unexpectedly: %{error}"
+      unsupported:
+        zh-CN: "%{core} 不支持 MRS 规则集转换"
+        en: "%{core} does not support MRS ruleset conversion"
+      binary_missing:
+        zh-CN: 未找到 Mihomo 可执行文件；请先由 ZenClash 启动内核，或设置 ZENCLASH_MIHOMO_BINARY
+        en: Mihomo executable not found; start the core with ZenClash first or set ZENCLASH_MIHOMO_BINARY
+      conversion_task:
+        zh-CN: MRS 转换任务异常结束：%{error}
+        en: "The MRS conversion task ended unexpectedly: %{error}"
+      save_dialog:
+        zh-CN: 无法打开规则保存对话框：%{error}
+        en: "Could not open the rules save dialog: %{error}"
+      save_dialog_task:
+        zh-CN: 规则保存对话框异常结束：%{error}
+        en: "The rules save dialog ended unexpectedly: %{error}"
+      export_task:
+        zh-CN: 规则导出任务异常结束：%{error}
+        en: "The rules export task ended unexpectedly: %{error}"
+      write:
+        zh-CN: 写入规则文件失败：%{error}
+        en: "Could not write the rules file: %{error}"
+
+core_page:
+  status:
+    external_connected:
+      zh-CN: 连接到外部内核
+      en: Connected to external core
+    external_unreachable:
+      zh-CN: 外部内核不可达
+      en: External core unreachable
+    running:
+      zh-CN: 运行中 · PID %{pid}
+      en: Running · PID %{pid}
+    stopped:
+      zh-CN: 已停止
+      en: Stopped
+    unreadable:
+      zh-CN: 无法读取
+      en: Unavailable
+    no_placeholder:
+      zh-CN: 没有使用默认值冒充运行状态。请重启托管内核，或确认外部控制器地址和密钥后刷新。
+      en: No defaults are being shown as runtime state. Restart the managed core, or verify the external controller address and secret, then refresh.
+  metrics:
+    version:
+      zh-CN: 内核版本
+      en: Core Version
+    status:
+      zh-CN: 运行状态
+      en: Runtime Status
+    mode:
+      zh-CN: 运行模式
+      en: Runtime Mode
+  switches:
+    title:
+      zh-CN: 运行时开关
+      en: Runtime Switches
+    ipv6_description:
+      zh-CN: 允许 %{core} 解析和使用 IPv6
+      en: Allow %{core} to resolve and use IPv6
+    allow_lan:
+      zh-CN: 允许局域网
+      en: Allow LAN
+    allow_lan_description:
+      zh-CN: 允许其他设备访问监听端口
+      en: Allow other devices to access listener ports
+    tcp_concurrent:
+      zh-CN: TCP 并发
+      en: Concurrent TCP
+    tcp_concurrent_description:
+      zh-CN: 并行建立目标连接以降低握手等待
+      en: Establish target connections concurrently to reduce handshake wait
+    unified_delay:
+      zh-CN: 统一延迟
+      en: Unified Delay
+    unified_delay_description:
+      zh-CN: 使用统一的延迟计算方式
+      en: Use a unified delay calculation method
+  controller:
+    title:
+      zh-CN: 控制器与监听
+      en: Controller & Listeners
+    log_level:
+      zh-CN: 日志等级
+      en: Log Level
+  maintenance:
+    title:
+      zh-CN: 内核维护
+      en: Core Maintenance
+    channel:
+      zh-CN: 升级通道
+      en: Upgrade Channel
+    official:
+      zh-CN: 官方 Release · SHA-256 校验 · 候选 -t 预检 · 失败回滚
+      en: Official Release · SHA-256 verification · candidate -t validation · rollback on failure
+    unsupported:
+      zh-CN: 当前内核不支持应用内升级
+      en: The active core does not support in-app upgrades
+    restart_capability:
+      zh-CN: 重启能力
+      en: Restart Capability
+    managed:
+      zh-CN: 由 ZenClash 管理并验证就绪
+      en: Managed by ZenClash with readiness verification
+    external:
+      zh-CN: 外部进程需由其服务管理器重启
+      en: External processes must be restarted by their service manager
+    restart:
+      zh-CN: 重启内核
+      en: Restart Core
+    versioned_title:
+      zh-CN: 指定版本安装
+      en: Install a Specific Version
+    trusted_source:
+      zh-CN: 可信来源
+      en: Trusted Source
+    trusted_source_description:
+      zh-CN: MetaCubeX/mihomo 官方 GitHub Release · SHA-256 必须存在且匹配
+      en: Official MetaCubeX/mihomo GitHub Release · SHA-256 must be present and match
+    replacement_strategy:
+      zh-CN: 替换策略
+      en: Replacement Strategy
+    replacement_strategy_description:
+      zh-CN: 同目录 staging · 候选 -v 预检 · 原子替换 · 启动失败自动回滚
+      en: Same-directory staging · candidate -v check · atomic replacement · automatic rollback on startup failure
+    prerelease:
+      zh-CN: 预发布
+      en: Prerelease
+    stable:
+      zh-CN: 稳定版
+      en: Stable
+    current_version:
+      zh-CN: 当前版本
+      en: Current
+    install:
+      zh-CN: 安装
+      en: Install
+    loading_versions:
+      zh-CN: 读取版本中
+      en: Loading Versions
+    load_versions:
+      zh-CN: 读取可安装版本
+      en: Load Available Versions
+    refresh_versions:
+      zh-CN: 刷新版本列表
+      en: Refresh Versions
+  process:
+    title:
+      zh-CN: 内核进程
+      en: Core Process
+    binary:
+      zh-CN: 二进制
+      en: Binary
+    config:
+      zh-CN: 配置文件
+      en: Configuration File
+    directory:
+      zh-CN: 工作目录
+      en: Working Directory
+  listeners:
+    title:
+      zh-CN: 监听端口与出口
+      en: Listener Ports & Outbound
+    http:
+      zh-CN: HTTP 端口
+      en: HTTP Port
+    socks:
+      zh-CN: SOCKS 端口
+      en: SOCKS Port
+    mixed:
+      zh-CN: Mixed 端口
+      en: Mixed Port
+    redir:
+      zh-CN: Redir 端口
+      en: Redir Port
+    tproxy:
+      zh-CN: TPROXY 端口
+      en: TPROXY Port
+    http_description:
+      zh-CN: 0 表示停用独立 HTTP 监听
+      en: 0 disables the dedicated HTTP listener
+    socks_description:
+      zh-CN: 0 表示停用独立 SOCKS 监听
+      en: 0 disables the dedicated SOCKS listener
+    mixed_description:
+      zh-CN: 同时接受 HTTP 与 SOCKS；系统代理优先使用此端口
+      en: Accepts both HTTP and SOCKS; the system proxy prefers this port
+    redir_description:
+      zh-CN: Linux 透明代理 REDIRECT 监听端口
+      en: Linux transparent proxy REDIRECT listener port
+    tproxy_description:
+      zh-CN: Linux TPROXY 透明代理监听端口
+      en: Linux TPROXY transparent proxy listener port
+    bind:
+      zh-CN: 监听地址
+      en: Bind Address
+    bind_description:
+      zh-CN: 使用 127.0.0.1 仅允许本机访问；* 接受配置允许的地址
+      en: Use 127.0.0.1 for local access only; * accepts addresses allowed by the configuration
+    interface:
+      zh-CN: 出口接口
+      en: Outbound Interface
+    interface_description:
+      zh-CN: 留空由当前内核自动选择；填写真实系统接口名称可固定出口
+      en: Leave empty for automatic selection; enter a real interface name to pin the outbound
+    save:
+      zh-CN: 保存并由 %{core} 验证
+      en: Save & Verify with %{core}
+  notices:
+    restarted:
+      zh-CN: "%{core} 内核已重启并通过 /version 验证"
+      en: "%{core} restarted and passed /version verification"
+    ipv6:
+      zh-CN: IPv6 设置已保存并热重载
+      en: IPv6 setting saved and reloaded
+    allow_lan:
+      zh-CN: 局域网访问设置已更新
+      en: LAN access setting updated
+    tcp_concurrent:
+      zh-CN: TCP 并发设置已更新
+      en: Concurrent TCP setting updated
+    unified_delay:
+      zh-CN: 统一延迟设置已更新
+      en: Unified delay setting updated
+    listeners:
+      zh-CN: 监听端口、出口接口和日志等级已保存
+      en: Listener ports, outbound interface, and log level saved
+    release_installed:
+      zh-CN: Mihomo %{version} 已通过 SHA-256、候选程序和 /version 三重验证并启用；Unix TUN 权限需重新核对
+      en: Mihomo %{version} passed SHA-256, candidate executable, and /version verification and is now active; recheck Unix TUN permissions
+  errors:
+    external_restart:
+      zh-CN: 当前连接的是外部内核，ZenClash 无法重启该进程
+      en: The active core is external; ZenClash cannot restart the process
+    restart_task:
+      zh-CN: 内核重启任务异常结束：%{error}
+      en: "The core restart task ended unexpectedly: %{error}"
+    maintenance_task:
+      zh-CN: 内核维护任务异常结束：%{error}
+      en: "The core maintenance task ended unexpectedly: %{error}"
+    release_unsupported:
+      zh-CN: "%{core} 不能安装 Mihomo Release"
+      en: "%{core} cannot install Mihomo releases"
+    release_list_task:
+      zh-CN: Release 列表任务异常结束：%{error}
+      en: "The release-list task ended unexpectedly: %{error}"
+    external_install:
+      zh-CN: 当前连接的是外部内核，无法安全替换其可执行文件
+      en: The active core is external; ZenClash cannot safely replace its executable
+    release_install_task:
+      zh-CN: 指定版本安装任务异常结束：%{error}
+      en: "The version installation task ended unexpectedly: %{error}"
+core_management:
+  title:
+    zh-CN: 运行内核
+    en: Runtime Core
+  summary:
+    online:
+      zh-CN: 当前运行 %{current} · 下次启动 %{requested}
+      en: Running %{current} · next launch %{requested}
+    offline:
+      zh-CN: 内核未运行 · 下次启动 %{requested}
+      en: Core not running · next launch %{requested}
+    offline_description:
+      zh-CN: 应用处于离线恢复模式；选择可用文件后重启即可重新接管
+      en: The app is in offline recovery mode; select a usable binary and restart to resume control
+    recovered_description:
+      zh-CN: 首选内核不可用时已使用最近可运行内核；首选项仍保留
+      en: The most recently working core is in use because the preferred core is unavailable; the preference is retained
+    normal_description:
+      zh-CN: 切换前执行真实 -v 检测；文件移动或损坏时可恢复到最近可运行内核
+      en: A real -v check runs before switching; moved or damaged binaries can fall back to the most recently working core
+    refresh:
+      zh-CN: 重新检测
+      en: Detect Again
+    environment_override:
+      zh-CN: ZENCLASH_CORE 正在覆盖界面选择；移除环境变量后，保存的下次启动内核才会生效。
+      en: ZENCLASH_CORE overrides the UI selection; remove the environment variable for the saved next-launch core to take effect.
+  status:
+    checking:
+      zh-CN: 检测中
+      en: Checking
+    checking_version:
+      zh-CN: 正在执行版本检测…
+      en: Running version check…
+    available:
+      zh-CN: 可用
+      en: Available
+    unavailable:
+      zh-CN: 不可用
+      en: Unavailable
+    not_checked:
+      zh-CN: 尚未检测
+      en: Not checked
+    running:
+      zh-CN: 运行中
+      en: Running
+    next:
+      zh-CN: 下次启动
+      en: Next Launch
+    experimental:
+      zh-CN: 实验
+      en: Experimental
+    source:
+      zh-CN: 来源 · %{source}
+      en: Source · %{source}
+    waiting:
+      zh-CN: 等待检测
+      en: Waiting for detection
+  actions:
+    select_file:
+      zh-CN: 选择文件
+      en: Select File
+    automatic:
+      zh-CN: 自动
+      en: Automatic
+    selected:
+      zh-CN: 已选择
+      en: Selected
+    use_next:
+      zh-CN: 下次使用
+      en: Use Next Launch
+  source:
+    custom:
+      zh-CN: 自定义文件
+      en: Custom file
+    automatic:
+      zh-CN: 自动发现
+      en: Automatic discovery
+    environment:
+      zh-CN: 环境变量 %{variable}
+      en: Environment variable %{variable}
+  dialog:
+    choose:
+      zh-CN: 选择 %{core} 可执行文件
+      en: Select %{core} Executable
+  notices:
+    validated:
+      zh-CN: "%{core} 已通过真实版本检测；可选择为下次启动内核"
+      en: "%{core} passed a real version check and can be selected for the next launch"
+    automatic:
+      zh-CN: "%{core} 已恢复自动发现；正在重新检测"
+      en: "%{core} restored to automatic discovery; checking again"
+    already_current:
+      zh-CN: "%{core} 已是当前与下次启动内核"
+      en: "%{core} is the current and next-launch core"
+    preferred:
+      zh-CN: "%{core} 已通过复检并设为下次启动内核；重启 ZenClash 后生效"
+      en: "%{core} passed revalidation and is set for the next launch; restart ZenClash to apply"
+  errors:
+    detection_task:
+      zh-CN: 内核检测任务异常结束：%{error}
+      en: "The core detection task ended unexpectedly: %{error}"
+    chooser:
+      zh-CN: 无法打开内核选择器：%{error}
+      en: "Could not open the core picker: %{error}"
+    chooser_task:
+      zh-CN: 内核选择器异常结束：%{error}
+      en: "The core picker ended unexpectedly: %{error}"
+    preferences_unavailable:
+      zh-CN: 应用设置存储不可用；请检查应用数据目录权限
+      en: Application preferences are unavailable; check the app data directory permissions
+    validation_task:
+      zh-CN: 内核校验任务异常结束：%{error}
+      en: "The core validation task ended unexpectedly: %{error}"
+    discovery_task:
+      zh-CN: 自动发现设置任务异常结束：%{error}
+      en: "The automatic discovery task ended unexpectedly: %{error}"
+    not_validated:
+      zh-CN: "%{core} 尚未通过检测，不能设为启动内核"
+      en: "%{core} has not passed validation and cannot be selected as the launch core"
+    switch_task:
+      zh-CN: 内核切换校验任务异常结束：%{error}
+      en: "The core switch validation task ended unexpectedly: %{error}"
+    workspace:
+      zh-CN: 无法从 Cargo 清单路径确定 ZenClash 工作区
+      en: Could not determine the ZenClash workspace from the Cargo manifest path
+
+overrides:
+  dialog:
+    import:
+      zh-CN: 导入 YAML 覆写文件或目录
+      en: Import YAML Override Files or Directories
+  chain:
+    title:
+      zh-CN: 配置覆写链
+      en: Configuration Override Chain
+    base:
+      zh-CN: 基础配置
+      en: Base Profile
+    unspecified:
+      zh-CN: 未指定
+      en: Not specified
+    yaml:
+      zh-CN: YAML 覆写
+      en: YAML Overrides
+    count:
+      zh-CN: "%{enabled} 启用 / %{total} 托管"
+      en: "%{enabled} enabled / %{total} managed"
+    explanation:
+      zh-CN: 基础文件保持不变；映射递归合并，后选覆写优先，数组与标量整体替换。
+      en: The base file stays unchanged; mappings merge recursively, later overrides win, and arrays and scalars are replaced as a whole.
+  actions:
+    preview:
+      zh-CN: 预览最终配置
+      en: Preview Effective Profile
+    edit:
+      zh-CN: 编辑原始 YAML
+      en: Edit Source YAML
+    import:
+      zh-CN: 导入文件 / 目录
+      en: Import Files / Directories
+    apply:
+      zh-CN: 合并并热重载
+      en: Merge & Reload
+    copy:
+      zh-CN: 复制完整内容
+      en: Copy Full Content
+  preview:
+    source:
+      zh-CN: 原始 Profile YAML
+      en: Source Profile YAML
+    effective:
+      zh-CN: 最终运行 YAML
+      en: Effective Runtime YAML
+    truncated:
+      zh-CN: 界面仅显示前 64 KiB；复制按钮仍会复制完整 YAML。
+      en: The UI shows only the first 64 KiB; Copy still includes the full YAML.
+  editor:
+    placeholder:
+      zh-CN: 先生成配置预览，再打开原始 YAML 编辑器
+      en: Generate a profile preview before opening the source YAML editor
+    title:
+      zh-CN: 原始 Profile YAML 编辑器
+      en: Source Profile YAML Editor
+    cancel:
+      zh-CN: 取消
+      en: Cancel
+    save:
+      zh-CN: 校验、保存并热重载
+      en: Validate, Save & Reload
+  diff:
+    title:
+      zh-CN: 结构化配置差异
+      en: Structured Configuration Diff
+    summary:
+      zh-CN: 新增 %{added} · 删除 %{removed} · 修改 %{changed}
+      en: Added %{added} · removed %{removed} · changed %{changed}
+    truncated:
+      zh-CN: 仅显示前 200 项
+      en: Showing the first 200 entries
+    path:
+      zh-CN: JSON Pointer 路径
+      en: JSON Pointer paths
+    empty:
+      zh-CN: 原始 Profile 与最终运行配置结构一致
+      en: The source profile and effective runtime configuration have the same structure
+    added:
+      zh-CN: 新增
+      en: Added
+    removed:
+      zh-CN: 删除
+      en: Removed
+    changed:
+      zh-CN: 修改
+      en: Changed
+    source:
+      zh-CN: 原始
+      en: Source
+    effective:
+      zh-CN: 最终
+      en: Effective
+  notices:
+    preview:
+      zh-CN: 已生成原始配置与最终运行配置预览
+      en: Generated source and effective runtime configuration previews
+    applied:
+      zh-CN: "%{count} 份 YAML 覆写已合并并热重载"
+      en: "%{count} YAML overrides merged and reloaded"
+    imported:
+      zh-CN: 已导入并应用 %{count} 份 YAML 覆写
+      en: Imported and applied %{count} YAML overrides
+    enabled:
+      zh-CN: 覆写已启用
+      en: Override enabled
+    disabled:
+      zh-CN: 覆写已停用
+      en: Override disabled
+    reordered:
+      zh-CN: 覆写顺序已更新
+      en: Override order updated
+    deleted:
+      zh-CN: 已删除停用的 YAML 覆写副本
+      en: Deleted the disabled YAML override copy
+    editor_saved:
+      zh-CN: 原始 Profile YAML 已保存并由 %{core} 验收
+      en: Source Profile YAML saved and accepted by %{core}
+  errors:
+    base_missing:
+      zh-CN: 未配置基础配置文件路径
+      en: No base profile path is configured
+    store_unavailable:
+      zh-CN: YAML 覆写仓库不可用
+      en: YAML override library unavailable
+    record_missing:
+      zh-CN: 找不到要切换的 YAML 覆写
+      en: The YAML override to toggle could not be found
+    disable_before_delete:
+      zh-CN: 请先停用覆写，再删除托管副本
+      en: Disable the override before deleting its managed copy
+    preview_required:
+      zh-CN: 请先生成原始配置预览
+      en: Generate the source profile preview first
+    unmanaged_profile:
+      zh-CN: 当前配置不属于 ZenClash 托管仓库，无法安全编辑
+      en: The active profile is not managed by ZenClash and cannot be edited safely
+    editor_expired:
+      zh-CN: Profile 编辑事务已经失效，请重新打开
+      en: The profile edit transaction expired; reopen the editor
+    picker:
+      zh-CN: 无法打开覆写选择器：%{error}
+      en: "Could not open the override picker: %{error}"
+    picker_task:
+      zh-CN: 覆写选择器异常结束：%{error}
+      en: "The override picker ended unexpectedly: %{error}"
+    preview_task:
+      zh-CN: 配置预览任务异常结束：%{error}
+      en: "The configuration preview task ended unexpectedly: %{error}"
+    preview_worker:
+      zh-CN: 配置预览后台任务异常结束：%{error}
+      en: "The configuration preview worker ended unexpectedly: %{error}"
+    reload_task:
+      zh-CN: 覆写热重载任务异常结束：%{error}
+      en: "The override reload task ended unexpectedly: %{error}"
+    editor_save_task:
+      zh-CN: 保存 Profile 编辑任务异常结束：%{error}
+      en: "The profile editor save task ended unexpectedly: %{error}"
+    editor_rejected_rolled_back:
+      zh-CN: "%{core} 拒绝编辑后的 YAML，已恢复原文件：%{error}"
+      en: "%{core} rejected the edited YAML and the original file was restored: %{error}"
+    editor_rejected_rollback_failed:
+      zh-CN: "%{core} 拒绝编辑后的 YAML：%{error}；恢复原文件失败：%{rollback}"
+      en: "%{core} rejected the edited YAML: %{error}; restoring the original file failed: %{rollback}"
+    editor_rejected_rollback_task:
+      zh-CN: "%{core} 拒绝编辑后的 YAML：%{error}；回滚任务异常结束：%{rollback}"
+      en: "%{core} rejected the edited YAML: %{error}; the rollback task ended unexpectedly: %{rollback}"
+    editor_workflow:
+      zh-CN: Profile 编辑工作流异常结束：%{error}
+      en: "The profile editor workflow ended unexpectedly: %{error}"
+    import_task:
+      zh-CN: 导入 YAML 覆写任务异常结束：%{error}
+      en: "The YAML override import task ended unexpectedly: %{error}"
+    catalog_read_task:
+      zh-CN: 读取 YAML 覆写清单任务异常结束：%{error}
+      en: "The YAML override catalog task ended unexpectedly: %{error}"
+    import_rejected_removed:
+      zh-CN: "%{core} 拒绝导入的覆写，已移除副本：%{error}"
+      en: "%{core} rejected the imported override and its copy was removed: %{error}"
+    import_rejected_cleanup_failed:
+      zh-CN: "%{core} 拒绝导入的覆写：%{error}；清理副本失败：%{cleanup}"
+      en: "%{core} rejected the imported override: %{error}; removing its copy failed: %{cleanup}"
+    import_rejected_cleanup_task:
+      zh-CN: "%{core} 拒绝导入的覆写：%{error}；清理任务异常结束：%{cleanup}"
+      en: "%{core} rejected the imported override: %{error}; the cleanup task ended unexpectedly: %{cleanup}"
+    import_workflow:
+      zh-CN: YAML 覆写导入工作流异常结束：%{error}
+      en: "The YAML override import workflow ended unexpectedly: %{error}"
+    delete_task:
+      zh-CN: 删除 YAML 覆写任务异常结束：%{error}
+      en: "The YAML override delete task ended unexpectedly: %{error}"
+    catalog_save_task:
+      zh-CN: 保存 YAML 覆写清单任务异常结束：%{error}
+      en: "The YAML override catalog save task ended unexpectedly: %{error}"
+    change_rejected_rolled_back:
+      zh-CN: "%{core} 拒绝覆写变更，清单已恢复：%{error}"
+      en: "%{core} rejected the override change and the catalog was restored: %{error}"
+    change_rejected_rollback_failed:
+      zh-CN: "%{core} 拒绝覆写变更：%{error}；恢复清单失败：%{rollback}"
+      en: "%{core} rejected the override change: %{error}; restoring the catalog failed: %{rollback}"
+    change_rejected_rollback_task:
+      zh-CN: "%{core} 拒绝覆写变更：%{error}；恢复任务异常结束：%{rollback}"
+      en: "%{core} rejected the override change: %{error}; the restore task ended unexpectedly: %{rollback}"
+    change_workflow:
+      zh-CN: YAML 覆写变更工作流异常结束：%{error}
+      en: "The YAML override change workflow ended unexpectedly: %{error}"
+
+backup:
+  local:
+    title:
+      zh-CN: 本地备份与恢复
+      en: Local Backup & Restore
+    contents:
+      zh-CN: 备份内容
+      en: Backup Contents
+    contents_description:
+      zh-CN: 应用偏好 · 受控覆写 · 订阅与本地 YAML
+      en: App preferences · managed overrides · subscriptions and local YAML
+    validation:
+      zh-CN: 导入前会校验 ZIP 路径、文件白名单、SHA-256 和全部 Clash YAML；%{core} 拒绝时自动恢复原数据。
+      en: ZIP paths, file allowlist, SHA-256, and all Clash YAML are validated before import; original data is restored if %{core} rejects it.
+    snapshot:
+      zh-CN: 完整本地快照
+      en: Complete Local Snapshot
+    snapshot_description:
+      zh-CN: 恢复成功后立即应用主题、状态栏可见性和活动配置
+      en: Apply the theme, status menu visibility, and active profile immediately after a successful restore
+    export:
+      zh-CN: 导出 ZIP
+      en: Export ZIP
+    import:
+      zh-CN: 导入 ZIP
+      en: Import ZIP
+  prompts:
+    import:
+      zh-CN: 选择 ZenClash 备份 ZIP（将替换当前设置与配置）
+      en: Select a ZenClash backup ZIP (this replaces the current settings and configuration)
+  notices:
+    exported:
+      zh-CN: 已导出 %{count} 个文件（%{size}）到 %{path}
+      en: Exported %{count} files (%{size}) to %{path}
+    cleanup_warning:
+      zh-CN: ；但旧快照清理失败：%{warning}
+      en: "; however, old snapshot cleanup failed: %{warning}"
+    restored:
+      zh-CN: 备份已验证并恢复：%{count} 个文件，共 %{size}%{warning}
+      en: "Backup verified and restored: %{count} files, %{size} total%{warning}"
+  errors:
+    save_dialog:
+      zh-CN: 无法打开备份保存对话框：%{error}
+      en: "Could not open the backup save dialog: %{error}"
+    save_dialog_task:
+      zh-CN: 备份保存对话框异常结束：%{error}
+      en: "The backup save dialog ended unexpectedly: %{error}"
+    export_task:
+      zh-CN: 备份导出任务异常结束：%{error}
+      en: "The backup export task ended unexpectedly: %{error}"
+    file_picker:
+      zh-CN: 无法打开备份选择器：%{error}
+      en: "Could not open the backup file picker: %{error}"
+    file_picker_task:
+      zh-CN: 备份选择器异常结束：%{error}
+      en: "The backup file picker ended unexpectedly: %{error}"
+    restore_task:
+      zh-CN: 备份恢复任务异常结束：%{error}
+      en: "The backup restore task ended unexpectedly: %{error}"
+    validation_task:
+      zh-CN: 备份验证任务异常结束：%{error}
+      en: "The backup validation task ended unexpectedly: %{error}"
+    activation_task:
+      zh-CN: 备份激活任务异常结束：%{error}
+      en: "The backup activation task ended unexpectedly: %{error}"
+    state_task:
+      zh-CN: 备份状态读取任务异常结束：%{error}
+      en: "The backup state task ended unexpectedly: %{error}"
+    core_rejected:
+      zh-CN: "%{core} 拒绝备份中的活动配置：%{error}"
+      en: "%{core} rejected the active configuration in the backup: %{error}"
+    restored_settings:
+      zh-CN: 恢复后刷新设置失败：%{error}
+      en: "Could not refresh settings after restore: %{error}"
+    commit_task:
+      zh-CN: 备份提交任务异常结束：%{error}
+      en: "The backup commit task ended unexpectedly: %{error}"
+    missing_profile:
+      zh-CN: 备份没有活动配置，已拒绝替换当前内核启动配置
+      en: The backup has no active profile; replacement of the current core startup configuration was rejected
+    rollback_task:
+      zh-CN: "%{reason}；回滚任务异常结束：%{error}"
+      en: "%{reason}; the rollback task ended unexpectedly: %{error}"
+    rolled_back:
+      zh-CN: "%{reason}；原数据已恢复"
+      en: "%{reason}; the original data was restored"
+    rollback_failed:
+      zh-CN: "%{reason}；恢复原数据失败：%{error}"
+      en: "%{reason}; restoring the original data failed: %{error}"
+    disk_rollback_task:
+      zh-CN: "%{reason}；磁盘回滚任务异常结束：%{error}"
+      en: "%{reason}; the disk rollback task ended unexpectedly: %{error}"
+    disk_rollback_failed:
+      zh-CN: "%{reason}；恢复原磁盘数据失败：%{error}"
+      en: "%{reason}; restoring the original disk data failed: %{error}"
+    no_runtime_profile:
+      zh-CN: "%{reason}；原磁盘数据已恢复，但没有旧配置可恢复内核运行状态"
+      en: "%{reason}; original disk data was restored, but no previous profile was available to restore the core runtime"
+    override_read:
+      zh-CN: "%{reason}；原磁盘数据已恢复，但读取原 YAML 覆写失败：%{error}"
+      en: "%{reason}; original disk data was restored, but the previous YAML overrides could not be read: %{error}"
+    runtime_rolled_back:
+      zh-CN: "%{reason}；原磁盘数据与内核运行配置均已恢复"
+      en: "%{reason}; original disk data and the core runtime configuration were restored"
+    runtime_rollback_failed:
+      zh-CN: "%{reason}；原磁盘数据已恢复，但内核运行配置恢复失败：%{error}"
+      en: "%{reason}; original disk data was restored, but restoring the core runtime configuration failed: %{error}"
+
+webdav:
+  title:
+    zh-CN: WebDAV 远端保险库
+    en: WebDAV Remote Vault
+  empty:
+    verified:
+      zh-CN: 远端目录为空；点击“立即备份”创建第一份快照
+      en: The remote directory is empty; select “Back Up Now” to create the first snapshot
+    unverified:
+      zh-CN: 保存并测试连接后，这里会显示可恢复的 ZIP 快照
+      en: Restorable ZIP snapshots appear here after the connection is saved and tested
+  fields:
+    url:
+      zh-CN: 服务器 URL
+      en: Server URL
+    url_description:
+      zh-CN: 填写 WebDAV 根地址；凭据不能写在 URL 中
+      en: Enter the WebDAV root address without credentials in the URL
+    directory:
+      zh-CN: 远程目录
+      en: Remote Directory
+    directory_description:
+      zh-CN: ZenClash 会逐级创建这个相对目录
+      en: ZenClash creates this relative directory one level at a time
+    username:
+      zh-CN: 用户名
+      en: Username
+    username_description:
+      zh-CN: 留空时不发送 HTTP Basic 凭据
+      en: Leave empty to omit HTTP Basic credentials
+    password:
+      zh-CN: 密码
+      en: Password
+    password_description:
+      zh-CN: 优先使用服务商提供的独立应用密码
+      en: Prefer a dedicated app password from the service provider
+    retention:
+      zh-CN: 保留份数
+      en: Retention Count
+    retention_description:
+      zh-CN: 只清理当前设备生成的旧备份；0 表示不限
+      en: Remove only old backups created by this device; 0 means unlimited
+    schedule:
+      zh-CN: 定时备份
+      en: Scheduled Backup
+    schedule_description:
+      zh-CN: 使用本地时区的 Cron；支持常用 5 字段，留空即停用
+      en: Cron uses the local time zone and common 5-field syntax; empty disables scheduling
+    invalid_tls:
+      zh-CN: 允许无效 TLS 证书
+      en: Allow Invalid TLS Certificates
+    invalid_tls_description:
+      zh-CN: 仅用于你确认可信的自签名服务器
+      en: Use only for a self-signed server you trust
+  actions:
+    manual:
+      zh-CN: 手动同步
+      en: Manual Sync
+    manual_description:
+      zh-CN: 上传真实本地快照；下载后先验证，再事务切换活动配置
+      en: Upload a real local snapshot; downloads are validated before transactional profile activation
+    save_test:
+      zh-CN: 保存并测试
+      en: Save & Test
+    backup_now:
+      zh-CN: 立即备份
+      en: Back Up Now
+    refresh:
+      zh-CN: 刷新
+      en: Refresh
+    restore:
+      zh-CN: 恢复
+      en: Restore
+  status:
+    verified:
+      zh-CN: 连接已验证
+      en: Connection Verified
+    found:
+      zh-CN: 已发现 %{count} 份安全 ZIP
+      en: Found %{count} safe ZIP snapshots
+    waiting:
+      zh-CN: 等待验证
+      en: Waiting for Verification
+    waiting_description:
+      zh-CN: 不会在未验证服务器前自动上传
+      en: Automatic uploads remain disabled until the server is verified
+    size_unknown:
+      zh-CN: 大小未知
+      en: Size unknown
+    time_unknown:
+      zh-CN: 时间未知
+      en: Time unknown
+  storage_note:
+    zh-CN: 连接设置保存在当前用户私有文件中，不写入备份 ZIP；定时任务在应用运行期间按本地时区执行。
+    en: Connection settings are stored in a private per-user file and excluded from backup ZIPs; schedules run in the local time zone while the app is running.
+  placeholders:
+    username:
+      zh-CN: 可选用户名
+      en: Optional username
+    password:
+      zh-CN: 可选密码或应用密码
+      en: Optional password or app password
+    unlimited:
+      zh-CN: 0 表示不限
+      en: 0 means unlimited
+  prompts:
+    restore_title:
+      zh-CN: 恢复这份远端备份？
+      en: Restore This Remote Backup?
+    restore_detail:
+      zh-CN: 将下载并完整验证 %{filename}，随后替换当前偏好、受控设置和配置仓库。%{core} 拒绝配置时会自动回滚。
+      en: Download and fully verify %{filename}, then replace the current preferences, managed settings, and profile repository. Changes roll back automatically if %{core} rejects the configuration.
+    delete_title:
+      zh-CN: 删除这份远端备份？
+      en: Delete This Remote Backup?
+    delete_detail:
+      zh-CN: 将从服务器永久删除 %{filename}。此操作不能撤销。
+      en: Permanently delete %{filename} from the server. This cannot be undone.
+  notices:
+    scheduled_created:
+      zh-CN: 定时远端备份 %{filename} 已创建，清理 %{count} 份当前设备旧备份
+      en: Scheduled remote backup %{filename} created; removed %{count} old backups from this device
+    connection_saved:
+      zh-CN: WebDAV 连接已验证，设置已保存
+      en: WebDAV connection verified and settings saved
+    list_refreshed:
+      zh-CN: WebDAV 备份列表已刷新
+      en: WebDAV backup list refreshed
+    created:
+      zh-CN: 远端备份 %{filename} 已创建
+      en: Remote backup %{filename} created
+    created_cleaned:
+      zh-CN: 远端备份 %{filename} 已创建，并清理 %{count} 份当前设备旧备份
+      en: Remote backup %{filename} created; removed %{count} old backups from this device
+    deleted:
+      zh-CN: 远端备份 %{filename} 已删除
+      en: Remote backup %{filename} deleted
+  errors:
+    settings_read:
+      zh-CN: WebDAV 设置读取失败：%{error}
+      en: "Could not read WebDAV settings: %{error}"
+    directory:
+      zh-CN: WebDAV 设置目录不可用：%{error}
+      en: "WebDAV settings directory unavailable: %{error}"
+    directory_permission:
+      zh-CN: WebDAV 设置目录不可用，请检查应用数据目录权限
+      en: WebDAV settings directory unavailable; check the app data directory permissions
+    retention_integer:
+      zh-CN: 保留份数必须是 0 到 100 的整数：%{error}
+      en: "Retention count must be an integer from 0 to 100: %{error}"
+    scheduled:
+      zh-CN: 定时 WebDAV 备份失败：%{error}
+      en: "Scheduled WebDAV backup failed: %{error}"
+    local_directory_task:
+      zh-CN: 本地备份目录任务异常结束：%{error}
+      en: "The local backup directory task ended unexpectedly: %{error}"
+    restore_task:
+      zh-CN: WebDAV 恢复任务异常结束：%{error}
+      en: "The WebDAV restore task ended unexpectedly: %{error}"
+    action_task:
+      zh-CN: WebDAV 任务异常结束：%{error}
+      en: "The WebDAV task ended unexpectedly: %{error}"
+    save_task:
+      zh-CN: WebDAV 设置保存任务异常结束：%{error}
+      en: "The WebDAV settings save task ended unexpectedly: %{error}"
+
+connections:
+  warnings:
+    udp_tracking:
+      zh-CN: "%{core} 当前不会完整上报 UDP 连接；TCP 连接、累计流量和关闭操作仍来自真实控制器。"
+      en: "%{core} does not report every UDP connection. TCP connections, totals, and close actions still come from the live controller."
+  metrics:
+    active:
+      zh-CN: 活动连接
+      en: Active Connections
+    upload:
+      zh-CN: 累计上传
+      en: Total Upload
+    download:
+      zh-CN: 累计下载
+      en: Total Download
+    memory:
+      zh-CN: 内存
+      en: Memory
+  refresh_hint:
+    zh-CN: 连接数据每 500ms 从真实控制器刷新
+    en: Connection data refreshes from the live controller every 500 ms
+  actions:
+    close_all:
+      zh-CN: 关闭全部
+      en: Close All
+  count:
+    active:
+      zh-CN: "%{total} 条活动连接"
+      en: "%{total} active connections"
+  empty:
+    active:
+      zh-CN: 当前没有活动连接
+      en: No active connections
+    filtered:
+      zh-CN: 没有匹配的连接
+      en: No matching connections
+    details:
+      zh-CN: 连接详情暂不可用
+      en: Connection details unavailable
+  notices:
+    closed_all:
+      zh-CN: 全部连接已关闭
+      en: All connections closed
+  errors:
+    close_task:
+      zh-CN: 关闭连接任务异常结束：%{error}
+      en: "The close-connections task ended unexpectedly: %{error}"
+
+rules:
+  warnings:
+    toggle_unavailable:
+      zh-CN: "%{core} 暂不支持单条规则启停"
+      en: "%{core} does not support toggling individual rules"
+    stats_unavailable:
+      zh-CN: "%{core} 支持规则查看与匹配，但暂不提供单条规则启停和命中统计。"
+      en: "%{core} supports browsing and matching rules, but not individual toggles or hit statistics."
+  errors:
+    status_task:
+      zh-CN: 规则状态任务异常结束：%{error}
+      en: "The rule status task ended unexpectedly: %{error}"
+  notices:
+    enabled:
+      zh-CN: "规则 #%{index} 已启用并通过状态回读"
+      en: "Rule #%{index} was enabled and verified"
+    disabled:
+      zh-CN: "规则 #%{index} 已禁用并通过状态回读"
+      en: "Rule #%{index} was disabled and verified"
+  summary:
+    runtime:
+      zh-CN: 运行时规则
+      en: Runtime Rules
+    filtered:
+      zh-CN: 过滤结果
+      en: Filtered Results
+    limit:
+      zh-CN: 最多显示 %{limit} 条
+      en: Showing up to %{limit}
+  empty:
+    runtime:
+      zh-CN: 当前内核没有返回规则
+      en: The core returned no rules
+    filtered:
+      zh-CN: 没有匹配的规则
+      en: No matching rules
+  row:
+    index:
+      zh-CN: "规则 #%{index}"
+      en: "Rule #%{index}"
+    hits:
+      zh-CN: 命中 %{hits} / %{total}
+      en: Hits %{hits} / %{total}
+    never_hit:
+      zh-CN: 尚无命中时间
+      en: Not hit yet
+    last_hit:
+      zh-CN: 最近命中 %{time}
+      en: Last hit %{time}
+    disable:
+      zh-CN: 禁用规则
+      en: Disable Rule
+    enable:
+      zh-CN: 启用规则
+      en: Enable Rule
+
+outbound_mode:
+  rule:
+    zh-CN: 规则
+    en: Rule
+  global:
+    zh-CN: 全局
+    en: Global
+  direct:
+    zh-CN: 直连
+    en: Direct
+  rule_mode:
+    zh-CN: 规则模式
+    en: Rule Mode
+  global_mode:
+    zh-CN: 全局模式
+    en: Global Mode
+  direct_mode:
+    zh-CN: 直连模式
+    en: Direct Mode
+
+tray:
+  tooltip:
+    zh-CN: ZenClash · %{core} 网络流量
+    en: ZenClash · %{core} Network Traffic
+  core_offline:
+    zh-CN: 内核离线
+    en: Core Offline
+  show_window:
+    zh-CN: 显示主窗口
+    en: Show Main Window
+  show_floating:
+    zh-CN: 显示悬浮窗
+    en: Show Floating Window
+  hide_floating:
+    zh-CN: 隐藏悬浮窗
+    en: Hide Floating Window
+  system_proxy:
+    zh-CN: 系统代理
+    en: System Proxy
+  profiles:
+    zh-CN: 配置文件
+    en: Profiles
+  current_profile:
+    zh-CN: 当前配置
+    en: Current Profile
+  open_profiles:
+    zh-CN: 打开订阅管理…
+    en: Open Profiles…
+  open_directories:
+    zh-CN: 打开目录
+    en: Open Directory
+  copy_environment:
+    zh-CN: 复制代理环境变量
+    en: Copy Proxy Environment
+  test_group:
+    zh-CN: 测试本组延迟
+    en: Test Group Delay
+  delay_timeout:
+    zh-CN: "  （超时）"
+    en: "  (timeout)"
+  light_mode:
+    zh-CN: 轻量模式（隐藏窗口）
+    en: Lightweight Mode (Hide Window)
+  restart:
+    zh-CN: 重新启动 ZenClash
+    en: Restart ZenClash
+  quit:
+    zh-CN: 退出 ZenClash
+    en: Quit ZenClash
+  errors:
+    system_proxy_status:
+      zh-CN: 系统代理状态任务异常结束：%{error}
+      en: "The system proxy status task ended unexpectedly: %{error}"
+    config_directory:
+      zh-CN: 配置目录任务异常结束：%{error}
+      en: "The configuration directory task ended unexpectedly: %{error}"
+    yaml_override_read:
+      zh-CN: 读取 YAML 覆写任务异常结束：%{error}
+      en: "The YAML override read task ended unexpectedly: %{error}"
+    profile_task:
+      zh-CN: 状态栏配置任务异常结束：%{error}
+      en: "The status menu profile task ended unexpectedly: %{error}"
+    toggle_ownership_released:
+      zh-CN: 保存系统代理开关失败：%{error}；恢复所有权记录也失败：%{ownership_error}，系统代理已安全关闭
+      en: "Could not save the system proxy toggle: %{error}; restoring the ownership record also failed: %{ownership_error}; the system proxy was safely disabled"
+    toggle_ownership_release_failed:
+      zh-CN: 保存系统代理开关失败：%{error}；恢复所有权记录失败：%{ownership_error}；安全关闭也失败：%{release_error}
+      en: "Could not save the system proxy toggle: %{error}; restoring the ownership record failed: %{ownership_error}; safe shutdown also failed: %{release_error}"
+    toggle_rolled_back:
+      zh-CN: 保存系统代理开关失败：%{error}；原状态已恢复
+      en: "Could not save the system proxy toggle: %{error}; the previous state was restored"
+    toggle_rollback_failed:
+      zh-CN: 保存系统代理开关失败：%{error}；恢复原状态也失败：%{rollback}
+      en: "Could not save the system proxy toggle: %{error}; restoring the previous state also failed: %{rollback}"
+    external_tun:
+      zh-CN: 外部实验内核不能可靠应用完整 TUN 配置；请改用 ZenClash 托管内核
+      en: An external experimental core cannot reliably apply the full TUN configuration; use a ZenClash-managed core
+
+settings:
+  application:
+    title:
+      zh-CN: 应用与控制器
+      en: Application & Controller
+    controller:
+      zh-CN: 控制器
+      en: Controller
+    autostart:
+      title:
+        zh-CN: 登录时自动启动
+        en: Start at Login
+      current:
+        zh-CN: 使用当前 ZenClash 程序注册原生系统启动项
+        en: Register the current ZenClash executable with the operating system
+      stale:
+        zh-CN: 检测到旧程序路径；重新开启可修复启动项
+        en: An older executable is registered; toggle this setting to repair it
+      location:
+        zh-CN: 自动启动位置
+        en: Startup Location
+      waiting:
+        zh-CN: 等待系统状态
+        en: Waiting for system state
+      enabled:
+        zh-CN: 登录自动启动已启用并通过系统状态回读
+        en: Start at Login was enabled and verified
+      disabled:
+        zh-CN: 登录自动启动已关闭并通过系统状态回读
+        en: Start at Login was disabled and verified
+      task_error:
+        zh-CN: 自动启动设置任务异常结束：%{error}
+        en: "The Start at Login task ended unexpectedly: %{error}"
+    ipv6:
+      description:
+        zh-CN: 同步修改 %{core} 运行时设置
+        en: Update the %{core} runtime setting
+      saved:
+        zh-CN: IPv6 设置已保存并热重载
+        en: IPv6 was saved and hot-reloaded
+  experimental_core:
+    zh-CN: meow-rs 实验模式：代理、流量、日志、连接和 Profile 可复用；完整配置通过托管进程重启应用，规则启停、Mihomo 升级、GeoData/UI 更新与 MRS 转换会被禁用。
+    en: "meow-rs experimental mode reuses proxies, traffic, logs, connections, and profiles. Full configuration changes restart the managed process; rule toggles, Mihomo upgrades, GeoData/UI updates, and MRS conversion are disabled."
+  traffic_history:
+    title:
+      zh-CN: 记录流量历史
+      en: Record Traffic History
+    description:
+      zh-CN: 从真实 %{core} 连接计数器计算增量，并写入本地 SQLite
+      en: Calculate deltas from real %{core} connection counters and store them in local SQLite
+    retention:
+      zh-CN: 历史保留
+      en: Retention
+    retention_description:
+      zh-CN: 写入新样本时自动清理过期记录
+      en: Remove expired records when new samples are stored
+    days:
+      zh-CN: "%{days} 天"
+      en: "%{days} days"
+    enabled:
+      zh-CN: 流量历史记录已启用
+      en: Traffic history recording enabled
+    disabled:
+      zh-CN: 流量历史记录已关闭
+      en: Traffic history recording disabled
+    retention_saved:
+      zh-CN: 流量历史保留策略已保存
+      en: Traffic history retention saved
+  errors:
+    preferences_unavailable:
+      zh-CN: 应用设置存储不可用；请检查应用数据目录权限
+      en: Application preferences are unavailable; check the app data directory permissions
+    preferences_task:
+      zh-CN: 应用设置保存任务异常结束：%{error}
+      en: "The preferences task ended unexpectedly: %{error}"
+  advanced_tools:
+    title:
+      zh-CN: 网络与内核
+      en: Network & Core
+    description:
+      zh-CN: 日常操作保留在首页；只有需要改变接管方式或排查内核时才进入这些工具。
+      en: Everyday controls stay on Home; use these tools when changing traffic ownership or diagnosing the core.
+    proxy:
+      title:
+        zh-CN: 代理接管
+        en: Traffic Control
+      description:
+        zh-CN: 操作系统代理与虚拟网卡
+        en: System proxy and virtual network interface
+    configuration:
+      title:
+        zh-CN: 配置处理
+        en: Configuration
+      description:
+        zh-CN: DNS、嗅探、资源与 YAML 覆写
+        en: DNS, sniffing, providers, and YAML overrides
+    diagnostics:
+      title:
+        zh-CN: 诊断维护
+        en: Diagnostics
+      description:
+        zh-CN: 网络环境与 Mihomo 内核
+        en: Network environment and Mihomo core
+  sections:
+    runtime:
+      title:
+        zh-CN: 运行核心
+        en: Runtime
+      description:
+        zh-CN: 代理接管、内核行为和网络入口
+        en: Proxy ownership, core behavior, and network entry points
+    configuration:
+      title:
+        zh-CN: 配置与规则
+        en: Configuration & Rules
+      description:
+        zh-CN: 不常用的配置编辑集中到独立页面
+        en: Advanced configuration editors live on dedicated pages
+    diagnostics:
+      title:
+        zh-CN: 诊断
+        en: Diagnostics
+      description:
+        zh-CN: 需要时再进入查看详细网络和内核状态
+        en: Open detailed network and core state only when needed
+  appearance:
+    title:
+      zh-CN: 主题
+      en: Appearance
+    description:
+      zh-CN: 固定明暗外观，或实时跟随操作系统
+      en: Choose a fixed appearance or follow the operating system
+    system:
+      zh-CN: 跟随系统
+      en: System
+    light:
+      zh-CN: 浅色
+      en: Light
+    dark:
+      zh-CN: 深色
+      en: Dark
+  tray:
+    title:
+      zh-CN: 状态栏流量图标
+      en: Status Bar Traffic Icon
+    description:
+      zh-CN: 显示实时上传、下载速率和动态箭头图标
+      en: Show live upload/download rates and the animated traffic icon
+  language:
+    save_error:
+      zh-CN: 语言设置保存失败：%{error}
+      en: "Could not save the language preference: %{error}"

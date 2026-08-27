@@ -1,4 +1,4 @@
-use gpui::{AppContext, Context, Entity, Window};
+use gpui::{AppContext, Context, Entity, SharedString, Window};
 use gpui_component::input::InputState;
 use serde_json::{Map, Number, Value};
 
@@ -73,13 +73,13 @@ impl InputFactory<'_, '_> {
     pub(super) fn single(
         &mut self,
         value: String,
-        placeholder: &'static str,
+        placeholder: impl Into<SharedString>,
     ) -> Entity<InputState> {
-        input(value, placeholder, false, self.window, self.cx)
+        input(value, placeholder.into(), false, self.window, self.cx)
     }
 
-    fn multi(&mut self, value: String, placeholder: &'static str) -> Entity<InputState> {
-        input(value, placeholder, true, self.window, self.cx)
+    fn multi(&mut self, value: String, placeholder: impl Into<SharedString>) -> Entity<InputState> {
+        input(value, placeholder.into(), true, self.window, self.cx)
     }
 }
 
@@ -100,20 +100,23 @@ impl DnsInputs {
             ),
             fake_ip_filter: factory.multi(
                 config_lines(config, "/dns/fake-ip-filter"),
-                "每行一个域名或规则",
+                zenclash_i18n::text("config_inputs.placeholders.one_domain_or_rule"),
             ),
             default_nameserver: factory.multi(
                 config_lines(config, "/dns/default-nameserver"),
-                "每行一个 IP DNS",
+                zenclash_i18n::text("config_inputs.placeholders.one_ip_dns"),
             ),
-            nameserver: factory.multi(config_lines(config, "/dns/nameserver"), "每行一个 DNS 地址"),
+            nameserver: factory.multi(
+                config_lines(config, "/dns/nameserver"),
+                zenclash_i18n::text("config_inputs.placeholders.one_dns"),
+            ),
             proxy_server_nameserver: factory.multi(
                 config_lines(config, "/dns/proxy-server-nameserver"),
-                "代理节点域名解析器",
+                zenclash_i18n::text("config_inputs.placeholders.proxy_resolver"),
             ),
             direct_nameserver: factory.multi(
                 config_lines(config, "/dns/direct-nameserver"),
-                "直连域名解析器",
+                zenclash_i18n::text("config_inputs.placeholders.direct_resolver"),
             ),
             fallback: factory.multi(config_lines(config, "/dns/fallback"), "Fallback DNS"),
             fallback_geoip_code: factory.single(
@@ -122,19 +125,19 @@ impl DnsInputs {
             ),
             fallback_ipcidr: factory.multi(
                 config_lines(config, "/dns/fallback-filter/ipcidr"),
-                "每行一个 CIDR",
+                zenclash_i18n::text("config_inputs.placeholders.one_cidr"),
             ),
             fallback_domain: factory.multi(
                 config_lines(config, "/dns/fallback-filter/domain"),
-                "每行一个域名规则",
+                zenclash_i18n::text("config_inputs.placeholders.one_domain_rule"),
             ),
             nameserver_policy: factory.multi(
                 config_mapping(config, "/dns/nameserver-policy"),
-                "domain: dns（YAML 映射）",
+                zenclash_i18n::text("config_inputs.placeholders.dns_mapping"),
             ),
             hosts: factory.multi(
                 config_mapping(config, "/hosts"),
-                "domain: address（YAML 映射）",
+                zenclash_i18n::text("config_inputs.placeholders.address_mapping"),
             ),
             source: config.clone(),
         }
@@ -145,13 +148,13 @@ impl DnsInputs {
         if !enhanced_mode.is_empty()
             && !matches!(enhanced_mode.as_str(), "fake-ip" | "redir-host" | "normal")
         {
-            return Err("DNS 增强模式必须是 fake-ip、redir-host 或 normal".into());
+            return Err(zenclash_i18n::text("config_inputs.errors.dns_mode"));
         }
         let filter_mode = text(&self.fake_ip_filter_mode, cx);
         if !filter_mode.is_empty()
             && !matches!(filter_mode.as_str(), "blacklist" | "whitelist" | "rule")
         {
-            return Err("Fake-IP 过滤模式必须是 blacklist、whitelist 或 rule".into());
+            return Err(zenclash_i18n::text("config_inputs.errors.fake_ip_mode"));
         }
         let mut dns = Map::new();
         insert_optional_string(
@@ -289,19 +292,21 @@ impl SnifferInputs {
                 config_list_csv(config, "/sniffer/sniff/QUIC/ports"),
                 "443, 8443",
             ),
-            skip_domain: factory
-                .multi(config_lines(config, "/sniffer/skip-domain"), "每行一个域名"),
+            skip_domain: factory.multi(
+                config_lines(config, "/sniffer/skip-domain"),
+                zenclash_i18n::text("config_inputs.placeholders.one_domain"),
+            ),
             force_domain: factory.multi(
                 config_lines(config, "/sniffer/force-domain"),
-                "每行一个域名",
+                zenclash_i18n::text("config_inputs.placeholders.one_domain"),
             ),
             skip_dst_address: factory.multi(
                 config_lines(config, "/sniffer/skip-dst-address"),
-                "每行一个 IP/CIDR",
+                zenclash_i18n::text("config_inputs.placeholders.one_address"),
             ),
             skip_src_address: factory.multi(
                 config_lines(config, "/sniffer/skip-src-address"),
-                "每行一个 IP/CIDR",
+                zenclash_i18n::text("config_inputs.placeholders.one_address"),
             ),
             source: config.clone(),
         }
@@ -373,17 +378,25 @@ impl TunInputs {
                 config_string(config, "/tun/stack", ""),
                 "gvisor / mixed / system",
             ),
-            device: factory.single(config_string(config, "/tun/device", ""), "TUN 设备名称"),
-            mtu: factory.single(config_number_or_empty(config, "/tun/mtu"), "默认 1500"),
+            device: factory.single(
+                config_string(config, "/tun/device", ""),
+                zenclash_i18n::text("config_inputs.placeholders.tun_device"),
+            ),
+            mtu: factory.single(
+                config_number_or_empty(config, "/tun/mtu"),
+                zenclash_i18n::text("config_inputs.placeholders.default_mtu"),
+            ),
             dns_hijack: factory.single(
                 config_list_csv(config, "/tun/dns-hijack"),
                 "any:53, tcp://any:53",
             ),
-            route_include_address: factory
-                .multi(config_lines(config, "/tun/route-address"), "每行一个 CIDR"),
+            route_include_address: factory.multi(
+                config_lines(config, "/tun/route-address"),
+                zenclash_i18n::text("config_inputs.placeholders.one_cidr"),
+            ),
             route_exclude_address: factory.multi(
                 config_lines(config, "/tun/route-exclude-address"),
-                "每行一个 CIDR",
+                zenclash_i18n::text("config_inputs.placeholders.one_cidr"),
             ),
             source: config.clone(),
         }
@@ -392,7 +405,7 @@ impl TunInputs {
     pub fn patch(&self, cx: &gpui::App) -> Result<Value, String> {
         let stack = text(&self.stack, cx);
         if !stack.is_empty() && !matches!(stack.as_str(), "gvisor" | "mixed" | "system") {
-            return Err("TUN 网络栈必须是 gvisor、mixed 或 system".into());
+            return Err(zenclash_i18n::text("config_inputs.errors.tun_stack"));
         }
         let mtu_text = text(&self.mtu, cx);
         let mtu = if mtu_text.is_empty() && self.source.pointer("/tun/mtu").is_none() {
@@ -400,9 +413,9 @@ impl TunInputs {
         } else {
             let mtu = mtu_text
                 .parse::<u16>()
-                .map_err(|_| "MTU 必须是 1 到 65535 的整数".to_owned())?;
+                .map_err(|_| zenclash_i18n::text("config_inputs.errors.mtu_integer"))?;
             if mtu == 0 {
-                return Err("MTU 必须大于 0".into());
+                return Err(zenclash_i18n::text("config_inputs.errors.mtu_positive"));
             }
             Some(mtu)
         };
@@ -497,7 +510,7 @@ fn insert_optional_mapping(
 
 fn input(
     value: String,
-    placeholder: &'static str,
+    placeholder: SharedString,
     multiline: bool,
     window: &mut Window,
     cx: &mut Context<super::RuntimePage>,
@@ -551,13 +564,25 @@ fn yaml_mapping(value: &str, label: &str) -> Result<Value, String> {
     if value.trim().is_empty() {
         return Ok(Value::Object(Map::new()));
     }
-    let yaml: serde_yaml::Value =
-        serde_yaml::from_str(value).map_err(|error| format!("{label} YAML 无效：{error}"))?;
-    let json = serde_json::to_value(yaml).map_err(|error| format!("{label} 无法转换：{error}"))?;
+    let yaml: serde_yaml::Value = serde_yaml::from_str(value).map_err(|error| {
+        zenclash_i18n::text_with(
+            "config_inputs.errors.invalid_yaml",
+            &[("label", label.to_owned()), ("error", error.to_string())],
+        )
+    })?;
+    let json = serde_json::to_value(yaml).map_err(|error| {
+        zenclash_i18n::text_with(
+            "config_inputs.errors.yaml_conversion",
+            &[("label", label.to_owned()), ("error", error.to_string())],
+        )
+    })?;
     if json.is_object() {
         Ok(json)
     } else {
-        Err(format!("{label} 必须是 YAML 映射"))
+        Err(zenclash_i18n::text_with(
+            "config_inputs.errors.yaml_mapping",
+            &[("label", label.to_owned())],
+        ))
     }
 }
 

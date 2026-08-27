@@ -19,12 +19,12 @@ pub(super) enum TrafficRange {
 impl TrafficRange {
     const ALL: [Self; 4] = [Self::Hour, Self::Day, Self::Week, Self::Month];
 
-    const fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Self::Hour => "1 小时",
-            Self::Day => "24 小时",
-            Self::Week => "7 天",
-            Self::Month => "30 天",
+            Self::Hour => zenclash_i18n::text("traffic.range.hour"),
+            Self::Day => zenclash_i18n::text("traffic.range.day"),
+            Self::Week => zenclash_i18n::text("traffic.range.week"),
+            Self::Month => zenclash_i18n::text("traffic.range.month"),
         }
     }
 
@@ -90,12 +90,12 @@ fn finish_history_refresh(
     false
 }
 
-const fn dimension_label(dimension: TrafficDimension) -> &'static str {
+fn dimension_label(dimension: TrafficDimension) -> String {
     match dimension {
-        TrafficDimension::Host => "域名",
-        TrafficDimension::SourceIp => "设备",
-        TrafficDimension::Outbound => "出口",
-        TrafficDimension::Process => "进程",
+        TrafficDimension::Host => zenclash_i18n::text("traffic.dimension.host"),
+        TrafficDimension::SourceIp => zenclash_i18n::text("traffic.dimension.source"),
+        TrafficDimension::Outbound => zenclash_i18n::text("traffic.dimension.outbound"),
+        TrafficDimension::Process => zenclash_i18n::text("traffic.dimension.process"),
     }
 }
 
@@ -123,9 +123,19 @@ mod tests {
 
     #[test]
     fn every_traffic_dimension_has_a_distinct_user_label() {
-        assert_eq!(dimension_label(TrafficDimension::Host), "域名");
-        assert_eq!(dimension_label(TrafficDimension::SourceIp), "设备");
-        assert_eq!(dimension_label(TrafficDimension::Outbound), "出口");
-        assert_eq!(dimension_label(TrafficDimension::Process), "进程");
+        let labels = [
+            dimension_label(TrafficDimension::Host),
+            dimension_label(TrafficDimension::SourceIp),
+            dimension_label(TrafficDimension::Outbound),
+            dimension_label(TrafficDimension::Process),
+        ];
+        assert!(labels.iter().all(|label| !label.is_empty()));
+        assert_eq!(
+            labels
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            4
+        );
     }
 }

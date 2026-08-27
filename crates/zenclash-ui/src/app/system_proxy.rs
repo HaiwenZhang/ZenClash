@@ -56,7 +56,12 @@ impl ZenClashApp {
                     })
                 })
                 .await
-                .map_err(|error| format!("离线恢复时关闭系统代理任务异常结束：{error}"))?;
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "app.system_proxy.errors.offline_release_task",
+                        &[("error", error.to_string())],
+                    )
+                })?;
             }
             let config = client
                 .runtime_config()
@@ -77,10 +82,17 @@ impl ZenClashApp {
                             .update(|preferences| preferences.system_proxy_ownership = None)
                             .map_err(|error| error.to_string())?;
                     }
-                    Err("新配置没有可用的 Mixed/HTTP 端口，ZenClash 已安全关闭系统代理".into())
+                    Err(zenclash_i18n::text(
+                        "app.system_proxy.errors.missing_port_released",
+                    ))
                 })
                 .await
-                .map_err(|error| format!("关闭失效系统代理任务异常结束：{error}"))?;
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "app.system_proxy.errors.invalid_release_task",
+                        &[("error", error.to_string())],
+                    )
+                })?;
             };
             tokio::task::spawn_blocking(move || -> Result<ReconcileOutcome, String> {
                 let operation = controller.begin_operation();
@@ -98,22 +110,36 @@ impl ZenClashApp {
                         &preferences.system_proxy_pac_script,
                     )
                     .map_err(|error| error.to_string())?
-                    .ok_or_else(|| "系统代理恢复成功但没有返回所有权证据".to_owned())?;
+                    .ok_or_else(|| {
+                        zenclash_i18n::text("app.system_proxy.errors.ownership_missing")
+                    })?;
                 if let Err(error) = store.update(|preferences| {
                     preferences.system_proxy_ownership = Some(ownership.clone());
                 }) {
                     let release = operation.release_if_owned(&ownership);
                     return Err(match release {
-                        Ok(_) => format!("保存系统代理所有权失败：{error}；系统代理已安全关闭"),
-                        Err(release_error) => format!(
-                            "保存系统代理所有权失败：{error}；安全关闭也失败：{release_error}"
+                        Ok(_) => zenclash_i18n::text_with(
+                            "app.system_proxy.errors.ownership_save_released",
+                            &[("error", error.to_string())],
+                        ),
+                        Err(release_error) => zenclash_i18n::text_with(
+                            "app.system_proxy.errors.ownership_save_release_failed",
+                            &[
+                                ("error", error.to_string()),
+                                ("release_error", release_error.to_string()),
+                            ],
                         ),
                     });
                 }
                 Ok(ReconcileOutcome::Restored)
             })
             .await
-            .map_err(|error| format!("系统代理恢复任务异常结束：{error}"))?
+            .map_err(|error| {
+                zenclash_i18n::text_with(
+                    "app.system_proxy.errors.restore_task",
+                    &[("error", error.to_string())],
+                )
+            })?
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -175,8 +201,14 @@ impl ZenClashApp {
                 .await;
                 match result {
                     Ok(Ok(())) => {}
-                    Ok(Err(error)) => failures.push(format!("关闭系统代理失败：{error}")),
-                    Err(error) => failures.push(format!("退出前关闭系统代理任务异常结束：{error}")),
+                    Ok(Err(error)) => failures.push(zenclash_i18n::text_with(
+                        "app.system_proxy.errors.quit_release",
+                        &[("error", error)],
+                    )),
+                    Err(error) => failures.push(zenclash_i18n::text_with(
+                        "app.system_proxy.errors.quit_release_task",
+                        &[("error", error.to_string())],
+                    )),
                 }
             }
             if let Some(process) = process {
@@ -186,16 +218,22 @@ impl ZenClashApp {
                 .await;
                 match result {
                     Ok(Ok(())) => {}
-                    Ok(Err(error)) => failures.push(format!("停止内核失败：{error}")),
+                    Ok(Err(error)) => failures.push(zenclash_i18n::text_with(
+                        "app.system_proxy.errors.quit_core",
+                        &[("error", error)],
+                    )),
                     Err(error) => {
-                        failures.push(format!("退出前停止内核任务异常结束：{error}"));
+                        failures.push(zenclash_i18n::text_with(
+                            "app.system_proxy.errors.quit_core_task",
+                            &[("error", error.to_string())],
+                        ));
                     }
                 }
             }
             if failures.is_empty() {
                 Ok::<(), String>(())
             } else {
-                Err(failures.join("；"))
+                Err(failures.join("; "))
             }
         });
         cx.spawn(async move |this, cx| {

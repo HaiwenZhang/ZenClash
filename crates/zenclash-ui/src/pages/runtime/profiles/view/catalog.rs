@@ -16,10 +16,10 @@ impl RuntimePage {
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let mut card = setting_card("配置仓库", theme);
+        let mut card = setting_card(zenclash_i18n::text("profiles.catalog.title"), theme);
         if self.profile_catalog.profiles.is_empty() {
             return card.child(empty_state(
-                "还没有托管配置；可下载在线订阅或导入本地 YAML",
+                zenclash_i18n::text("profiles.catalog.empty"),
                 theme,
             ));
         }
@@ -66,7 +66,10 @@ impl RuntimePage {
                         div()
                             .text_size(px(10.))
                             .text_color(theme.muted_foreground)
-                            .child(format!("订阅主页：{}", compact_text(home_url, 90))),
+                            .child(zenclash_i18n::text_with(
+                                "profiles.catalog.homepage",
+                                &[("url", compact_text(home_url, 90))],
+                            )),
                     )
                 },
             )
@@ -78,7 +81,10 @@ impl RuntimePage {
                         div()
                             .text_size(px(10.))
                             .text_color(theme.muted_foreground)
-                            .child(format!("更新于 {}", format_profile_age(profile.updated_at))),
+                            .child(zenclash_i18n::text_with(
+                                "profiles.catalog.updated",
+                                &[("age", format_profile_age(profile.updated_at))],
+                            )),
                     )
                     .child(self.render_profile_actions(index, profile, active, cx)),
             )
@@ -101,7 +107,7 @@ impl RuntimePage {
                 this.child(
                     Button::new(("edit-profile-request", index))
                         .icon(IconName::Settings2)
-                        .label("请求设置")
+                        .label(zenclash_i18n::text("profiles.actions.request_settings"))
                         .small()
                         .ghost()
                         .disabled(self.mutating)
@@ -112,7 +118,7 @@ impl RuntimePage {
                 .child(
                     Button::new(("update-profile", index))
                         .icon(IconName::Redo2)
-                        .label("更新")
+                        .label(zenclash_i18n::text("profiles.actions.update"))
                         .small()
                         .outline()
                         .disabled(self.mutating)
@@ -124,7 +130,11 @@ impl RuntimePage {
             .child(
                 Button::new(("activate-profile", index))
                     .icon(IconName::ArrowRight)
-                    .label(if active { "使用中" } else { "切换" })
+                    .label(if active {
+                        zenclash_i18n::text("profiles.actions.active")
+                    } else {
+                        zenclash_i18n::text("profiles.actions.activate")
+                    })
                     .small()
                     .primary()
                     .disabled(active || self.mutating)
@@ -177,7 +187,7 @@ impl RuntimePage {
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child("自动更新"),
+                    .child(zenclash_i18n::text("profiles.catalog.auto_update")),
             )
             .child(
                 Button::new(("profile-update-interval", index))
@@ -201,7 +211,7 @@ impl RuntimePage {
                 div()
                     .text_size(px(10.))
                     .text_color(theme.muted_foreground)
-                    .child("点击间隔可在 1 / 6 / 12 / 24 小时之间切换"),
+                    .child(zenclash_i18n::text("profiles.catalog.interval_hint")),
             )
     }
 }
@@ -216,11 +226,20 @@ fn next_update_interval(current: u32) -> u32 {
 
 fn format_update_interval(minutes: u32) -> String {
     if minutes % 1_440 == 0 {
-        format!("每 {} 天", minutes / 1_440)
+        zenclash_i18n::text_with(
+            "profiles.catalog.every_days",
+            &[("count", (minutes / 1_440).to_string())],
+        )
     } else if minutes % 60 == 0 {
-        format!("每 {} 小时", minutes / 60)
+        zenclash_i18n::text_with(
+            "profiles.catalog.every_hours",
+            &[("count", (minutes / 60).to_string())],
+        )
     } else {
-        format!("每 {minutes} 分钟")
+        zenclash_i18n::text_with(
+            "profiles.catalog.every_minutes",
+            &[("count", minutes.to_string())],
+        )
     }
 }
 
@@ -233,14 +252,16 @@ fn profile_source(source: &ProfileSource) -> String {
             options,
         } => {
             let route = match options.route() {
-                RemoteProfileRoute::Direct => "仅直连下载",
-                RemoteProfileRoute::DirectWithMihomoFallback => "直连 · 失败经内核代理重试",
-                RemoteProfileRoute::Mihomo => "内核代理下载",
+                RemoteProfileRoute::Direct => zenclash_i18n::text("profiles.route.direct"),
+                RemoteProfileRoute::DirectWithMihomoFallback => {
+                    zenclash_i18n::text("profiles.route.fallback")
+                }
+                RemoteProfileRoute::Mihomo => zenclash_i18n::text("profiles.route.proxy"),
             };
             let authorization = if options.authorization.is_some() {
-                " · Authorization 已配置"
+                zenclash_i18n::text("profiles.route.authorization")
             } else {
-                ""
+                String::new()
             };
             format!(
                 "{} · UA {user_agent} · {route}{authorization}",
@@ -255,13 +276,19 @@ fn render_subscription_usage(
     theme: &gpui_component::Theme,
 ) -> gpui::AnyElement {
     let quota = if usage.total == 0 {
-        format!("已用 {} · 总量未提供", format_bytes(usage.used()))
+        zenclash_i18n::text_with(
+            "profiles.usage.no_total",
+            &[("used", format_bytes(usage.used()))],
+        )
     } else {
         let percent = u128::from(usage.used().min(usage.total)) * 100 / u128::from(usage.total);
-        format!(
-            "已用 {} / {} · {percent}%",
-            format_bytes(usage.used()),
-            format_bytes(usage.total)
+        zenclash_i18n::text_with(
+            "profiles.usage.quota",
+            &[
+                ("used", format_bytes(usage.used())),
+                ("total", format_bytes(usage.total)),
+                ("percent", percent.to_string()),
+            ],
         )
     };
     h_flex()
@@ -275,16 +302,19 @@ fn render_subscription_usage(
 
 fn format_subscription_expiry(expire: u64) -> String {
     if expire == 0 {
-        return "到期时间未提供".into();
+        return zenclash_i18n::text("profiles.usage.expiry_unavailable");
     }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
     if expire <= now {
-        "订阅已到期".into()
+        zenclash_i18n::text("profiles.usage.expired")
     } else {
         let days = expire.saturating_sub(now).saturating_add(86_399) / 86_400;
-        format!("剩余 {days} 天 · Unix {expire}")
+        zenclash_i18n::text_with(
+            "profiles.usage.remaining",
+            &[("days", days.to_string()), ("expire", expire.to_string())],
+        )
     }
 }
 
@@ -323,7 +353,7 @@ fn profile_heading(
                     theme.muted_foreground
                 })
                 .child(if active {
-                    "当前使用"
+                    zenclash_i18n::text("profiles.catalog.current")
                 } else {
                     profile.source_label()
                 }),
@@ -350,14 +380,17 @@ mod tests {
 
     #[test]
     fn update_interval_label_preserves_minutes_and_hours() {
-        assert_eq!(format_update_interval(15), "每 15 分钟");
-        assert_eq!(format_update_interval(360), "每 6 小时");
-        assert_eq!(format_update_interval(1_440), "每 1 天");
+        assert!(format_update_interval(15).contains("15"));
+        assert!(format_update_interval(360).contains('6'));
+        assert!(format_update_interval(1_440).contains('1'));
     }
 
     #[test]
     fn subscription_expiry_distinguishes_missing_and_expired_values() {
-        assert_eq!(format_subscription_expiry(0), "到期时间未提供");
-        assert_eq!(format_subscription_expiry(1), "订阅已到期");
+        let missing = format_subscription_expiry(0);
+        let expired = format_subscription_expiry(1);
+        assert!(!missing.is_empty());
+        assert!(!expired.is_empty());
+        assert_ne!(missing, expired);
     }
 }

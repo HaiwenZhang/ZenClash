@@ -35,25 +35,29 @@ impl RuntimePage {
             .map_or((false, self.mihomo_binary().is_some()), |status| {
                 (status.granted, status.can_request)
             });
-        let mut card = setting_card("TUN 系统权限", theme);
+        let mut card = setting_card(zenclash_i18n::text("tun.permissions.title"), theme);
         match permissions {
             Some(Ok(status)) => {
                 card = card
                     .child(info_row(
-                        "状态",
+                        zenclash_i18n::text("tun.permissions.status"),
                         if status.granted {
-                            "已就绪"
+                            zenclash_i18n::text("tun.permissions.ready")
                         } else if status.requires_relaunch {
-                            "需要管理员重启"
+                            zenclash_i18n::text("tun.permissions.relaunch")
                         } else {
-                            "需要安装权限"
+                            zenclash_i18n::text("tun.permissions.install")
                         },
                         theme,
                     ))
-                    .child(info_row("校验", &status.detail, theme))
                     .child(info_row(
-                        "内核",
-                        &status.binary.display().to_string(),
+                        zenclash_i18n::text("tun.permissions.verification"),
+                        &status.detail,
+                        theme,
+                    ))
+                    .child(info_row(
+                        zenclash_i18n::text("tun.permissions.core"),
+                        status.binary.display().to_string(),
                         theme,
                     ));
             }
@@ -62,7 +66,7 @@ impl RuntimePage {
             }
             None => {
                 card = card.child(message_banner(
-                    "正在读取 TUN 权限状态…".into(),
+                    zenclash_i18n::text("tun.permissions.loading"),
                     theme.primary,
                     theme,
                 ));
@@ -77,9 +81,9 @@ impl RuntimePage {
                         IconName::TriangleAlert
                     })
                     .label(if granted {
-                        "权限已就绪"
+                        zenclash_i18n::text("tun.permissions.action_ready")
                     } else {
-                        "安装 / 修复 TUN 权限"
+                        zenclash_i18n::text("tun.permissions.action_install")
                     })
                     .primary()
                     .loading(self.mutating)
@@ -91,7 +95,7 @@ impl RuntimePage {
 
     fn grant_tun_permissions(&mut self, cx: &mut Context<Self>) {
         let Some(binary) = self.mihomo_binary() else {
-            self.error = Some("当前连接的是外部内核，无法确定需要授权的可执行文件".into());
+            self.error = Some(zenclash_i18n::text("tun.errors.external_core"));
             cx.notify();
             return;
         };
@@ -106,37 +110,54 @@ impl RuntimePage {
                     .map_err(|error| error.to_string())
             })
             .await
-            .map_err(|error| format!("TUN 权限任务异常结束：{error}"))??;
+            .map_err(|error| {
+                zenclash_i18n::text_with(
+                    "tun.errors.permission_task",
+                    &[("error", error.to_string())],
+                )
+            })??;
             #[cfg(unix)]
             if matches!(grant, TunPermissionGrant::Ready(_)) {
-                let process = process.ok_or_else(|| {
-                    "TUN 权限已写入，但当前不是 ZenClash 托管内核；请重启应用后再启用 TUN"
-                        .to_owned()
-                })?;
+                let process =
+                    process.ok_or_else(|| zenclash_i18n::text("tun.errors.external_restart"))?;
                 let restart = process.clone();
                 tokio::task::spawn_blocking(move || restart.restart())
                     .await
-                    .map_err(|error| format!("TUN 授权后重启内核任务异常结束：{error}"))?
+                    .map_err(|error| {
+                        zenclash_i18n::text_with(
+                            "tun.errors.restart_task",
+                            &[("error", error.to_string())],
+                        )
+                    })?
                     .map_err(|error| error.to_string())?;
                 process
                     .wait_until_ready(Duration::from_secs(20))
                     .await
-                    .map_err(|error| format!("TUN 授权后内核未能重新就绪：{error}"))?;
+                    .map_err(|error| {
+                        zenclash_i18n::text_with(
+                            "tun.errors.readiness",
+                            &[("error", error.to_string())],
+                        )
+                    })?;
             }
             Ok::<_, String>(grant)
         });
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("TUN 权限任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "tun.errors.permission_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
                 match result {
                     Ok(TunPermissionGrant::Ready(_)) => {
                         if this.is_page_task_current(token) {
-                            this.notice =
-                                Some("TUN 权限已安装，受管内核已重启并通过控制器就绪检查".into());
+                            this.notice = Some(zenclash_i18n::text("tun.notices.permission_ready"));
                             this.refresh(cx);
                         }
                     }
@@ -158,36 +179,61 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let tun = self.config().cloned().unwrap_or_default().tun;
-        setting_card("虚拟网卡", theme)
+        setting_card(zenclash_i18n::text("tun.switches.title"), theme)
             .child(setting_switch(
-                "启用 TUN",
-                format!(
-                    "通过 {} TUN 接管系统网络流量",
-                    self.core_kind.display_name()
+                zenclash_i18n::text("tun.switches.enable"),
+                zenclash_i18n::text_with(
+                    "tun.switches.enable_description",
+                    &[("core", self.core_kind.display_name().to_owned())],
                 ),
                 self.controlled_bool("/tun/enable", tun.enable),
                 "tun-enable",
                 theme,
                 cx.listener(|this, checked, _, cx| {
-                    this.patch_tun_bool("enable", *checked, "TUN 状态已保存并热重载", cx);
+                    this.patch_tun_bool(
+                        "enable",
+                        *checked,
+                        zenclash_i18n::text("tun.notices.enabled"),
+                        cx,
+                    );
                 }),
             ))
-            .child(info_row("网络栈", &tun.stack, theme))
-            .child(info_row("设备", &empty_dash(&tun.device), theme))
-            .child(info_row("DNS 劫持", &tun.dns_hijack.join(", "), theme))
+            .child(info_row(
+                zenclash_i18n::text("tun.switches.stack"),
+                &tun.stack,
+                theme,
+            ))
+            .child(info_row(
+                zenclash_i18n::text("tun.switches.device"),
+                empty_dash(&tun.device),
+                theme,
+            ))
+            .child(info_row(
+                zenclash_i18n::text("tun.switches.dns_hijack"),
+                tun.dns_hijack.join(", "),
+                theme,
+            ))
             .child(setting_switch(
-                "自动路由",
-                format!("让 {} 自动安装 TUN 路由", self.core_kind.display_name()),
+                zenclash_i18n::text("tun.switches.auto_route"),
+                zenclash_i18n::text_with(
+                    "tun.switches.auto_route_description",
+                    &[("core", self.core_kind.display_name().to_owned())],
+                ),
                 self.controlled_bool("/tun/auto-route", tun.auto_route),
                 "tun-auto-route",
                 theme,
                 cx.listener(|this, checked, _, cx| {
-                    this.patch_tun_bool("auto-route", *checked, "TUN 自动路由已保存并热重载", cx);
+                    this.patch_tun_bool(
+                        "auto-route",
+                        *checked,
+                        zenclash_i18n::text("tun.notices.auto_route"),
+                        cx,
+                    );
                 }),
             ))
             .child(setting_switch(
-                "自动检测接口",
-                "自动选择默认出站网络接口",
+                zenclash_i18n::text("tun.switches.auto_interface"),
+                zenclash_i18n::text("tun.switches.auto_interface_description"),
                 self.controlled_bool("/tun/auto-detect-interface", tun.auto_detect_interface),
                 "tun-auto-detect-interface",
                 theme,
@@ -195,24 +241,29 @@ impl RuntimePage {
                     this.patch_tun_bool(
                         "auto-detect-interface",
                         *checked,
-                        "TUN 接口检测已保存并热重载",
+                        zenclash_i18n::text("tun.notices.auto_interface"),
                         cx,
                     );
                 }),
             ))
             .child(setting_switch(
-                "严格路由",
-                "使用严格路由避免流量绕过 TUN",
+                zenclash_i18n::text("tun.switches.strict_route"),
+                zenclash_i18n::text("tun.switches.strict_route_description"),
                 self.controlled_bool("/tun/strict-route", tun.strict_route),
                 "tun-strict-route",
                 theme,
                 cx.listener(|this, checked, _, cx| {
-                    this.patch_tun_bool("strict-route", *checked, "TUN 严格路由已保存并热重载", cx);
+                    this.patch_tun_bool(
+                        "strict-route",
+                        *checked,
+                        zenclash_i18n::text("tun.notices.strict_route"),
+                        cx,
+                    );
                 }),
             ))
             .child(setting_switch(
-                "自动重定向",
-                "Linux 下使用 nftables 提升 TUN 路由性能",
+                zenclash_i18n::text("tun.switches.auto_redirect"),
+                zenclash_i18n::text("tun.switches.auto_redirect_description"),
                 self.controlled_bool("/tun/auto-redirect", false),
                 "tun-auto-redirect",
                 theme,
@@ -220,7 +271,7 @@ impl RuntimePage {
                     this.patch_tun_bool(
                         "auto-redirect",
                         *checked,
-                        "TUN 自动重定向已保存并热重载",
+                        zenclash_i18n::text("tun.notices.auto_redirect"),
                         cx,
                     );
                 }),
@@ -231,7 +282,7 @@ impl RuntimePage {
         &mut self,
         key: &'static str,
         value: bool,
-        success: &'static str,
+        success: String,
         cx: &mut Context<Self>,
     ) {
         self.apply_controlled_config(json!({"tun": {key: value}}), success, cx);
@@ -243,40 +294,40 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let inputs = &self.config_inputs.tun;
-        setting_card("接口与路由", theme)
+        setting_card(zenclash_i18n::text("tun.routes.title"), theme)
             .child(config_input_row(
-                "网络栈",
-                "gvisor / mixed / system",
+                zenclash_i18n::text("tun.switches.stack"),
+                zenclash_i18n::text("tun.routes.stack_description"),
                 Input::new(&inputs.stack),
                 theme,
             ))
             .child(config_input_row(
-                "设备名称",
-                "系统中的 TUN 设备名称",
+                zenclash_i18n::text("tun.routes.device_name"),
+                zenclash_i18n::text("tun.routes.device_description"),
                 Input::new(&inputs.device),
                 theme,
             ))
             .child(config_input_row(
                 "MTU",
-                "范围 1 到 65535",
+                zenclash_i18n::text("tun.routes.mtu_description"),
                 Input::new(&inputs.mtu),
                 theme,
             ))
             .child(config_input_row(
-                "DNS 劫持",
-                "逗号分隔，例如 any:53",
+                zenclash_i18n::text("tun.switches.dns_hijack"),
+                zenclash_i18n::text("tun.routes.dns_description"),
                 Input::new(&inputs.dns_hijack),
                 theme,
             ))
             .child(config_input_row(
-                "包含路由",
-                "每行一个需要接管的 CIDR",
+                zenclash_i18n::text("tun.routes.include"),
+                zenclash_i18n::text("tun.routes.include_description"),
                 Input::new(&inputs.route_include_address),
                 theme,
             ))
             .child(config_input_row(
-                "排除路由",
-                "每行一个不接管的 CIDR",
+                zenclash_i18n::text("tun.routes.exclude"),
+                zenclash_i18n::text("tun.routes.exclude_description"),
                 Input::new(&inputs.route_exclude_address),
                 theme,
             ))
@@ -284,7 +335,7 @@ impl RuntimePage {
                 h_flex().justify_end().p_4().child(
                     Button::new("save-tun-advanced")
                         .icon(IconName::Check)
-                        .label("保存 TUN 高级配置")
+                        .label(zenclash_i18n::text("tun.routes.save"))
                         .primary()
                         .loading(self.mutating)
                         .disabled(self.mutating)
@@ -292,7 +343,7 @@ impl RuntimePage {
                             match this.config_inputs.tun.patch(cx) {
                                 Ok(patch) => this.apply_controlled_config(
                                     patch,
-                                    "TUN 高级配置已保存并热重载",
+                                    zenclash_i18n::text("tun.notices.advanced"),
                                     cx,
                                 ),
                                 Err(error) => {

@@ -11,7 +11,7 @@ impl RuntimePage {
 
     pub(super) fn import_override_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let Some(store) = self.override_store.clone() else {
-            self.error = Some("YAML 覆写仓库不可用".into());
+            self.error = Some(zenclash_i18n::text("overrides.errors.store_unavailable"));
             cx.notify();
             return;
         };
@@ -31,12 +31,22 @@ impl RuntimePage {
             let import_store = store.clone();
             let imported = tokio::task::spawn_blocking(move || import_store.import_paths(paths))
                 .await
-                .map_err(|error| format!("导入 YAML 覆写任务异常结束：{error}"))?
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "overrides.errors.import_task",
+                        &[("error", error.to_string())],
+                    )
+                })?
                 .map_err(|error| error.to_string())?;
             let catalog_store = store.clone();
             let catalog = tokio::task::spawn_blocking(move || catalog_store.load())
                 .await
-                .map_err(|error| format!("读取 YAML 覆写清单任务异常结束：{error}"))?
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "overrides.errors.catalog_read_task",
+                        &[("error", error.to_string())],
+                    )
+                })?
                 .map_err(|error| error.to_string())?;
             if let Some(profile) = profile {
                 if let Err(error) = super::super::profiles::workflow::reload_effective(
@@ -59,14 +69,25 @@ impl RuntimePage {
                     })
                     .await;
                     return match cleanup {
-                        Ok(Ok(())) => {
-                            Err(format!("{core_name} 拒绝导入的覆写，已移除副本：{error}"))
-                        }
-                        Ok(Err(cleanup)) => Err(format!(
-                            "{core_name} 拒绝导入的覆写：{error}；清理副本失败：{cleanup}"
+                        Ok(Ok(())) => Err(zenclash_i18n::text_with(
+                            "overrides.errors.import_rejected_removed",
+                            &[("core", core_name.to_owned()), ("error", error.clone())],
                         )),
-                        Err(cleanup) => Err(format!(
-                            "{core_name} 拒绝导入的覆写：{error}；清理任务异常结束：{cleanup}"
+                        Ok(Err(cleanup)) => Err(zenclash_i18n::text_with(
+                            "overrides.errors.import_rejected_cleanup_failed",
+                            &[
+                                ("core", core_name.to_owned()),
+                                ("error", error.clone()),
+                                ("cleanup", cleanup.to_string()),
+                            ],
+                        )),
+                        Err(cleanup) => Err(zenclash_i18n::text_with(
+                            "overrides.errors.import_rejected_cleanup_task",
+                            &[
+                                ("core", core_name.to_owned()),
+                                ("error", error),
+                                ("cleanup", cleanup.to_string()),
+                            ],
                         )),
                     };
                 }
@@ -76,7 +97,12 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("YAML 覆写导入工作流异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "overrides.errors.import_workflow",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -84,7 +110,10 @@ impl RuntimePage {
                     Ok((catalog, count)) if this.is_page_task_current(token) => {
                         this.override_catalog = catalog;
                         this.config_preview = None;
-                        this.notice = Some(format!("已导入并应用 {count} 份 YAML 覆写"));
+                        this.notice = Some(zenclash_i18n::text_with(
+                            "overrides.notices.imported",
+                            &[("count", count.to_string())],
+                        ));
                     }
                     Ok(_) => {}
                     Err(error) => this.set_page_error(token, error),
@@ -100,7 +129,7 @@ impl RuntimePage {
         let before = self.override_catalog.clone();
         let mut next = before.clone();
         let Some(record) = next.items.iter_mut().find(|record| record.id == id) else {
-            self.error = Some("找不到要切换的 YAML 覆写".into());
+            self.error = Some(zenclash_i18n::text("overrides.errors.record_missing"));
             cx.notify();
             return;
         };
@@ -109,9 +138,9 @@ impl RuntimePage {
             before,
             next,
             if enabled {
-                "覆写已启用"
+                zenclash_i18n::text("overrides.notices.enabled")
             } else {
-                "覆写已停用"
+                zenclash_i18n::text("overrides.notices.disabled")
             },
             cx,
         );
@@ -129,7 +158,12 @@ impl RuntimePage {
         }
         let record = next.items.remove(current);
         next.items.insert(target, record);
-        self.apply_override_catalog_change(before, next, "覆写顺序已更新", cx);
+        self.apply_override_catalog_change(
+            before,
+            next,
+            zenclash_i18n::text("overrides.notices.reordered"),
+            cx,
+        );
     }
 
     pub(super) fn delete_disabled_override(&mut self, id: String, cx: &mut Context<Self>) {
@@ -142,7 +176,9 @@ impl RuntimePage {
             return;
         };
         if record.enabled {
-            self.error = Some("请先停用覆写，再删除托管副本".into());
+            self.error = Some(zenclash_i18n::text(
+                "overrides.errors.disable_before_delete",
+            ));
             cx.notify();
             return;
         }
@@ -159,7 +195,12 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("删除 YAML 覆写任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "overrides.errors.delete_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result.map_err(|error| error.to_string()));
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -167,7 +208,7 @@ impl RuntimePage {
                     Ok(catalog) if this.is_page_task_current(token) => {
                         this.override_catalog = catalog;
                         this.config_preview = None;
-                        this.notice = Some("已删除停用的 YAML 覆写副本".into());
+                        this.notice = Some(zenclash_i18n::text("overrides.notices.deleted"));
                     }
                     Ok(_) => {}
                     Err(error) => this.set_page_error(token, error),
@@ -183,7 +224,7 @@ impl RuntimePage {
         &mut self,
         before: YamlOverrideCatalog,
         next: YamlOverrideCatalog,
-        success: &'static str,
+        success: String,
         cx: &mut Context<Self>,
     ) {
         let Some(store) = self.override_store.clone() else {
@@ -210,7 +251,12 @@ impl RuntimePage {
                 persist_store.replace_catalog(&expected, &persisted)
             })
             .await
-            .map_err(|error| format!("保存 YAML 覆写清单任务异常结束：{error}"))?
+            .map_err(|error| {
+                zenclash_i18n::text_with(
+                    "overrides.errors.catalog_save_task",
+                    &[("error", error.to_string())],
+                )
+            })?
             .map_err(|error| error.to_string())?;
             if let Some(profile) = profile {
                 if let Err(error) = super::super::profiles::workflow::reload_effective(
@@ -228,12 +274,25 @@ impl RuntimePage {
                     })
                     .await
                     {
-                        Ok(Ok(())) => Err(format!("{core_name} 拒绝覆写变更，清单已恢复：{error}")),
-                        Ok(Err(rollback)) => Err(format!(
-                            "{core_name} 拒绝覆写变更：{error}；恢复清单失败：{rollback}"
+                        Ok(Ok(())) => Err(zenclash_i18n::text_with(
+                            "overrides.errors.change_rejected_rolled_back",
+                            &[("core", core_name.to_owned()), ("error", error.clone())],
                         )),
-                        Err(rollback) => Err(format!(
-                            "{core_name} 拒绝覆写变更：{error}；恢复任务异常结束：{rollback}"
+                        Ok(Err(rollback)) => Err(zenclash_i18n::text_with(
+                            "overrides.errors.change_rejected_rollback_failed",
+                            &[
+                                ("core", core_name.to_owned()),
+                                ("error", error.clone()),
+                                ("rollback", rollback.to_string()),
+                            ],
+                        )),
+                        Err(rollback) => Err(zenclash_i18n::text_with(
+                            "overrides.errors.change_rejected_rollback_task",
+                            &[
+                                ("core", core_name.to_owned()),
+                                ("error", error),
+                                ("rollback", rollback.to_string()),
+                            ],
                         )),
                     };
                 }
@@ -243,7 +302,12 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("YAML 覆写变更工作流异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "overrides.errors.change_workflow",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -251,7 +315,7 @@ impl RuntimePage {
                     Ok(()) if this.is_page_task_current(token) => {
                         this.override_catalog = next;
                         this.config_preview = None;
-                        this.notice = Some(success.into());
+                        this.notice = Some(success);
                     }
                     Ok(()) => {}
                     Err(error) => this.set_page_error(token, error),

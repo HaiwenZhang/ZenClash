@@ -23,7 +23,7 @@ impl CoreInputs {
             socks_port: factory.single(config_number_or_empty(config, "/socks-port"), "0 - 65535"),
             mixed_port: factory.single(
                 config_number_or_empty(config, "/mixed-port"),
-                "默认 7890；0 表示关闭",
+                zenclash_i18n::text("config_inputs.placeholders.mixed_port"),
             ),
             redir_port: factory.single(config_number_or_empty(config, "/redir-port"), "0 - 65535"),
             tproxy_port: factory
@@ -34,7 +34,7 @@ impl CoreInputs {
             ),
             interface_name: factory.single(
                 config_string(config, "/interface-name", ""),
-                "留空自动选择出口接口",
+                zenclash_i18n::text("config_inputs.placeholders.automatic_interface"),
             ),
             log_level: factory.single(
                 config_string(config, "/log-level", ""),
@@ -52,11 +52,11 @@ impl CoreInputs {
                 "silent" | "error" | "warning" | "info" | "debug"
             )
         {
-            return Err("日志等级必须是 silent、error、warning、info 或 debug".into());
+            return Err(zenclash_i18n::text("config_inputs.errors.log_level"));
         }
         let bind_address = text(&self.bind_address, cx);
         if bind_address.is_empty() && self.source.pointer("/bind-address").is_some() {
-            return Err("监听地址不能为空；仅本机监听可填写 127.0.0.1".into());
+            return Err(zenclash_i18n::text("config_inputs.errors.bind_address"));
         }
         let mut patch = Map::new();
         insert_port(
@@ -137,9 +137,9 @@ fn insert_text(patch: &mut Map<String, Value>, key: &str, value: String, existed
 }
 
 fn parse_port(value: &str, label: &str) -> Result<u16, String> {
-    value
-        .parse::<u16>()
-        .map_err(|_| format!("{label} 端口必须是 0 到 65535 的整数"))
+    value.parse::<u16>().map_err(|_| {
+        zenclash_i18n::text_with("config_inputs.errors.port", &[("label", label.to_owned())])
+    })
 }
 
 #[cfg(test)]

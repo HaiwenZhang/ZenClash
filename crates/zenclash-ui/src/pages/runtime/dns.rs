@@ -24,54 +24,69 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let config = self.config().cloned().unwrap_or_default();
-        setting_card("DNS 运行状态", theme)
+        setting_card(zenclash_i18n::text("dns.status.title"), theme)
             .child(setting_switch(
-                "启用 DNS",
-                "使用 Mihomo 内置 DNS 解析器",
+                zenclash_i18n::text("dns.status.enable"),
+                zenclash_i18n::text("dns.status.enable_description"),
                 self.controlled_bool("/dns/enable", true),
                 "dns-enable",
                 theme,
                 cx.listener(|this, checked, _, cx| {
-                    this.patch_dns_bool("enable", *checked, "DNS 状态已保存并热重载", cx);
+                    this.patch_dns_bool(
+                        "enable",
+                        *checked,
+                        zenclash_i18n::text("dns.notices.enabled"),
+                        cx,
+                    );
                 }),
             ))
             .child(setting_switch(
                 "Fallback GeoIP",
-                "根据 GeoIP 国家代码决定是否使用 Fallback",
+                zenclash_i18n::text("dns.status.fallback_geoip_description"),
                 self.controlled_bool("/dns/fallback-filter/geoip", true),
                 "dns-fallback-geoip",
                 theme,
                 cx.listener(|this, checked, _, cx| {
                     this.apply_controlled_config(
                         json!({"dns": {"fallback-filter": {"geoip": *checked}}}),
-                        "Fallback GeoIP 已保存并热重载",
+                        zenclash_i18n::text("dns.notices.fallback_geoip"),
                         cx,
                     );
                 }),
             ))
             .child(setting_switch(
-                "IPv6 解析",
-                "允许 DNS 返回 AAAA 记录",
+                zenclash_i18n::text("dns.status.ipv6"),
+                zenclash_i18n::text("dns.status.ipv6_description"),
                 self.controlled_bool("/dns/ipv6", false),
                 "dns-ipv6",
                 theme,
                 cx.listener(|this, checked, _, cx| {
-                    this.patch_dns_bool("ipv6", *checked, "DNS IPv6 已保存并热重载", cx);
+                    this.patch_dns_bool(
+                        "ipv6",
+                        *checked,
+                        zenclash_i18n::text("dns.notices.ipv6"),
+                        cx,
+                    );
                 }),
             ))
             .child(setting_switch(
-                "使用 Hosts",
-                "应用配置文件中的 hosts 映射",
+                zenclash_i18n::text("dns.status.use_hosts"),
+                zenclash_i18n::text("dns.status.use_hosts_description"),
                 self.controlled_bool("/dns/use-hosts", true),
                 "dns-use-hosts",
                 theme,
                 cx.listener(|this, checked, _, cx| {
-                    this.patch_dns_bool("use-hosts", *checked, "DNS Hosts 设置已保存并热重载", cx);
+                    this.patch_dns_bool(
+                        "use-hosts",
+                        *checked,
+                        zenclash_i18n::text("dns.notices.hosts"),
+                        cx,
+                    );
                 }),
             ))
             .child(setting_switch(
-                "使用系统 Hosts",
-                "读取操作系统 hosts 文件",
+                zenclash_i18n::text("dns.status.system_hosts"),
+                zenclash_i18n::text("dns.status.system_hosts_description"),
                 self.controlled_bool("/dns/use-system-hosts", true),
                 "dns-use-system-hosts",
                 theme,
@@ -79,14 +94,14 @@ impl RuntimePage {
                     this.patch_dns_bool(
                         "use-system-hosts",
                         *checked,
-                        "系统 Hosts 设置已保存并热重载",
+                        zenclash_i18n::text("dns.notices.system_hosts"),
                         cx,
                     );
                 }),
             ))
             .child(setting_switch(
-                "遵循规则",
-                "DNS 查询遵循当前代理规则",
+                zenclash_i18n::text("dns.status.respect_rules"),
+                zenclash_i18n::text("dns.status.respect_rules_description"),
                 self.controlled_bool("/dns/respect-rules", false),
                 "dns-respect-rules",
                 theme,
@@ -94,22 +109,22 @@ impl RuntimePage {
                     this.patch_dns_bool(
                         "respect-rules",
                         *checked,
-                        "DNS 规则策略已保存并热重载",
+                        zenclash_i18n::text("dns.notices.rules"),
                         cx,
                     );
                 }),
             ))
             .child(info_row(
-                "TUN DNS 劫持",
-                &empty_dash(&config.tun.dns_hijack.join(", ")),
+                zenclash_i18n::text("dns.status.tun_hijack"),
+                empty_dash(&config.tun.dns_hijack.join(", ")),
                 theme,
             ))
             .child(info_row(
-                "嗅探 DNS 映射",
+                zenclash_i18n::text("dns.status.sniffer_mapping"),
                 if config.sniffing.force_dns_mapping {
-                    "是"
+                    zenclash_i18n::text("common.status.yes")
                 } else {
-                    "否"
+                    zenclash_i18n::text("common.status.no")
                 },
                 theme,
             ))
@@ -119,7 +134,7 @@ impl RuntimePage {
         &mut self,
         key: &'static str,
         value: bool,
-        success: &'static str,
+        success: String,
         cx: &mut Context<Self>,
     ) {
         self.apply_controlled_config(json!({"dns": {key: value}}), success, cx);
@@ -127,58 +142,58 @@ impl RuntimePage {
 
     fn render_dns_resolvers(&self, theme: &gpui_component::Theme) -> gpui::Div {
         let inputs = &self.config_inputs.dns;
-        setting_card("解析器与 Fake-IP", theme)
+        setting_card(zenclash_i18n::text("dns.resolvers.title"), theme)
             .child(config_input_row(
-                "增强模式",
+                zenclash_i18n::text("dns.resolvers.enhanced_mode"),
                 "fake-ip / redir-host / normal",
                 Input::new(&inputs.enhanced_mode),
                 theme,
             ))
             .child(config_input_row(
-                "Fake-IP 地址池",
-                "Mihomo Fake-IP CIDR",
+                zenclash_i18n::text("dns.resolvers.fake_ip_pool"),
+                zenclash_i18n::text("dns.resolvers.fake_ip_pool_description"),
                 Input::new(&inputs.fake_ip_range),
                 theme,
             ))
             .child(config_input_row(
-                "过滤模式",
+                zenclash_i18n::text("dns.resolvers.filter_mode"),
                 "blacklist / whitelist / rule",
                 Input::new(&inputs.fake_ip_filter_mode),
                 theme,
             ))
             .child(config_input_row(
-                "Fake-IP 过滤",
-                "每行一个域名、通配符或规则",
+                zenclash_i18n::text("dns.resolvers.fake_ip_filter"),
+                zenclash_i18n::text("dns.resolvers.fake_ip_filter_description"),
                 Input::new(&inputs.fake_ip_filter),
                 theme,
             ))
             .child(config_input_row(
-                "默认解析器",
-                "用于解析 DNS 服务器自身域名",
+                zenclash_i18n::text("dns.resolvers.default"),
+                zenclash_i18n::text("dns.resolvers.default_description"),
                 Input::new(&inputs.default_nameserver),
                 theme,
             ))
             .child(config_input_row(
                 "Nameserver",
-                "主要 DNS 解析器",
+                zenclash_i18n::text("dns.resolvers.nameserver_description"),
                 Input::new(&inputs.nameserver),
                 theme,
             ))
             .child(config_input_row(
-                "代理解析器",
-                "代理节点域名专用解析器",
+                zenclash_i18n::text("dns.resolvers.proxy"),
+                zenclash_i18n::text("dns.resolvers.proxy_description"),
                 Input::new(&inputs.proxy_server_nameserver),
                 theme,
             ))
             .child(config_input_row(
-                "直连解析器",
-                "直连请求专用解析器",
+                zenclash_i18n::text("dns.resolvers.direct"),
+                zenclash_i18n::text("dns.resolvers.direct_description"),
                 Input::new(&inputs.direct_nameserver),
                 theme,
             ))
             .child(config_input_row(
                 "Fallback",
-                "备用 DNS 解析器",
+                zenclash_i18n::text("dns.resolvers.fallback_description"),
                 Input::new(&inputs.fallback),
                 theme,
             ))
@@ -190,34 +205,34 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let inputs = &self.config_inputs.dns;
-        setting_card("Fallback、Policy 与 Hosts", theme)
+        setting_card(zenclash_i18n::text("dns.policy.title"), theme)
             .child(config_input_row(
-                "GeoIP 国家代码",
-                "例如 CN",
+                zenclash_i18n::text("dns.policy.country"),
+                zenclash_i18n::text("dns.policy.country_description"),
                 Input::new(&inputs.fallback_geoip_code),
                 theme,
             ))
             .child(config_input_row(
                 "Fallback IP CIDR",
-                "每行一个 CIDR",
+                zenclash_i18n::text("dns.policy.cidr_description"),
                 Input::new(&inputs.fallback_ipcidr),
                 theme,
             ))
             .child(config_input_row(
-                "Fallback 域名",
-                "每行一个域名规则",
+                zenclash_i18n::text("dns.policy.domain"),
+                zenclash_i18n::text("dns.policy.domain_description"),
                 Input::new(&inputs.fallback_domain),
                 theme,
             ))
             .child(config_input_row(
                 "Nameserver Policy",
-                "YAML 映射；值可为单个 DNS 或数组",
+                zenclash_i18n::text("dns.policy.nameserver_policy_description"),
                 Input::new(&inputs.nameserver_policy),
                 theme,
             ))
             .child(config_input_row(
                 "Hosts",
-                "YAML 映射；支持单地址或地址数组",
+                zenclash_i18n::text("dns.policy.hosts_description"),
                 Input::new(&inputs.hosts),
                 theme,
             ))
@@ -225,7 +240,7 @@ impl RuntimePage {
                 h_flex().justify_end().p_4().child(
                     Button::new("save-dns-advanced")
                         .icon(IconName::Check)
-                        .label("保存 DNS 高级配置")
+                        .label(zenclash_i18n::text("dns.policy.save"))
                         .primary()
                         .loading(self.mutating)
                         .disabled(self.mutating)
@@ -233,7 +248,7 @@ impl RuntimePage {
                             match this.config_inputs.dns.patch(cx) {
                                 Ok(patch) => this.apply_controlled_config(
                                     patch,
-                                    "DNS 高级配置已保存并热重载",
+                                    zenclash_i18n::text("dns.notices.advanced"),
                                     cx,
                                 ),
                                 Err(error) => {

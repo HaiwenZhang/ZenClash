@@ -20,61 +20,64 @@ impl RuntimePage {
                     .iter()
                     .find(|profile| profile.id == id)
             })
-            .map_or("在线订阅", |profile| profile.name.as_str());
-        setting_card("编辑订阅请求", theme)
+            .map_or_else(
+                || zenclash_i18n::text("profiles.editor.generic_name"),
+                |profile| profile.name.clone(),
+            );
+        setting_card(zenclash_i18n::text("profiles.editor.title"), theme)
             .child(
                 h_flex()
                     .min_h(px(48.))
                     .px_4()
                     .justify_between()
-                    .child(div().text_sm().child(name.to_owned()))
+                    .child(div().text_sm().child(name))
                     .child(
                         div()
                             .text_size(px(10.))
                             .text_color(theme.muted_foreground)
-                            .child("保存后下次手动与后台更新立即使用"),
+                            .child(zenclash_i18n::text("profiles.editor.save_hint")),
                     ),
             )
             .child(config_input_row(
-                "订阅名称",
-                "更新展示名称，不改变托管文件 ID",
+                zenclash_i18n::text("profiles.form.name"),
+                zenclash_i18n::text("profiles.editor.name_description"),
                 Input::new(&self.profile_forms.request_name),
                 theme,
             ))
             .child(config_input_row(
-                "订阅 URL",
-                "仅支持不含嵌入凭据的 HTTP(S) 地址",
+                zenclash_i18n::text("profiles.editor.url"),
+                zenclash_i18n::text("profiles.editor.url_description"),
                 Input::new(&self.profile_forms.request_url),
                 theme,
             ))
             .child(config_input_row(
                 "User-Agent",
-                "留空使用 clash.meta",
+                zenclash_i18n::text("profiles.editor.user_agent_description"),
                 Input::new(&self.profile_forms.request_user_agent),
                 theme,
             ))
             .child(config_input_row(
                 "Authorization",
-                "Bearer / Basic 等完整头值；留空会删除已保存凭据",
+                zenclash_i18n::text("profiles.editor.authorization_description"),
                 Input::new(&self.profile_forms.request_authorization).mask_toggle(),
                 theme,
             ))
             .child(config_input_row(
-                "下载超时（秒）",
-                "单个订阅请求允许 1–600 秒；默认 30 秒",
+                zenclash_i18n::text("profiles.editor.timeout"),
+                zenclash_i18n::text("profiles.editor.timeout_description"),
                 Input::new(&self.profile_forms.request_timeout_seconds),
                 theme,
             ))
             .child(self.render_remote_profile_route_settings(theme, cx))
             .child(config_input_row(
-                "5 字段 Cron",
-                "本地时间：分 时 日 月 周；例如 0 */6 * * *。留空恢复分钟间隔计划",
+                zenclash_i18n::text("profiles.editor.cron"),
+                zenclash_i18n::text("profiles.editor.cron_description"),
                 Input::new(&self.profile_forms.update_cron),
                 theme,
             ))
             .child(setting_switch(
-                "锁定更新间隔",
-                "忽略服务端 profile-update-interval，保留本地间隔或 Cron",
+                zenclash_i18n::text("profiles.editor.fixed_interval"),
+                zenclash_i18n::text("profiles.editor.fixed_interval_description"),
                 self.profile_forms.editing_fixed_update_interval,
                 "edit-profile-fixed-update-interval",
                 theme,
@@ -93,8 +96,8 @@ impl RuntimePage {
     ) -> gpui::Div {
         v_flex()
             .child(setting_switch(
-                "经内核代理下载",
-                "使用更新时的 HTTP 或 Mixed 监听端口",
+                zenclash_i18n::text("profiles.editor.proxy"),
+                zenclash_i18n::text("profiles.editor.proxy_description"),
                 self.profile_forms.editing_route == RemoteProfileRoute::Mihomo,
                 "edit-profile-use-mihomo-proxy",
                 theme,
@@ -108,8 +111,8 @@ impl RuntimePage {
                 }),
             ))
             .child(setting_switch(
-                "直连失败自动回退",
-                "直连网络请求失败时，经当前内核 HTTP/Mixed 端口重试一次",
+                zenclash_i18n::text("profiles.editor.fallback"),
+                zenclash_i18n::text("profiles.editor.fallback_description"),
                 self.profile_forms.editing_route == RemoteProfileRoute::DirectWithMihomoFallback,
                 "edit-profile-mihomo-fallback",
                 theme,
@@ -134,7 +137,7 @@ impl RuntimePage {
             .justify_end()
             .child(
                 Button::new("cancel-profile-request-edit")
-                    .label("取消")
+                    .label(zenclash_i18n::text("profiles.actions.cancel"))
                     .small()
                     .ghost()
                     .disabled(self.mutating)
@@ -145,7 +148,7 @@ impl RuntimePage {
             .child(
                 Button::new("save-profile-request-edit")
                     .icon(IconName::Check)
-                    .label("保存请求与计划")
+                    .label(zenclash_i18n::text("profiles.actions.save_request"))
                     .small()
                     .primary()
                     .loading(self.mutating)

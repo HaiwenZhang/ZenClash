@@ -2,8 +2,13 @@ use super::{
     div, h_flex, px, v_flex, App, FluentBuilder, Icon, IconName, Input, IntoElement, ParentElement,
     Styled, Switch, Window,
 };
+use gpui::SharedString;
 
-pub(super) fn setting_card(title: &'static str, theme: &gpui_component::Theme) -> gpui::Div {
+pub(super) fn setting_card(
+    title: impl Into<gpui::SharedString>,
+    theme: &gpui_component::Theme,
+) -> gpui::Div {
+    let title = title.into();
     v_flex()
         .rounded(theme.radius_lg)
         .border_1()
@@ -27,11 +32,13 @@ pub(super) fn setting_card(title: &'static str, theme: &gpui_component::Theme) -
 }
 
 pub(super) fn config_input_row(
-    label: &'static str,
-    description: &'static str,
+    label: impl Into<SharedString>,
+    description: impl Into<SharedString>,
     input: Input,
     theme: &gpui_component::Theme,
 ) -> gpui::AnyElement {
+    let label = label.into();
+    let description = description.into();
     h_flex()
         .min_h(px(64.))
         .px_4()
@@ -58,10 +65,12 @@ pub(super) fn config_input_row(
 }
 
 pub(super) fn info_row(
-    label: &'static str,
-    value: &str,
+    label: impl ToString,
+    value: impl ToString,
     theme: &gpui_component::Theme,
 ) -> gpui::AnyElement {
+    let label = SharedString::from(label.to_string());
+    let value = SharedString::from(value.to_string());
     h_flex()
         .min_h(px(50.))
         .px_4()
@@ -77,7 +86,11 @@ pub(super) fn info_row(
                 .text_xs()
                 .font_family(theme.mono_font_family.clone())
                 .text_color(theme.muted_foreground)
-                .child(empty_dash(value)),
+                .child(if value.is_empty() {
+                    SharedString::from("—")
+                } else {
+                    value
+                }),
         )
         .into_any_element()
 }
@@ -115,11 +128,12 @@ where
 }
 
 pub(super) fn metric(
-    label: &'static str,
+    label: impl ToString,
     value: String,
     color: gpui::Hsla,
     theme: &gpui_component::Theme,
 ) -> gpui::AnyElement {
+    let label = SharedString::from(label.to_string());
     v_flex()
         .relative()
         .min_w(px(190.))
@@ -189,9 +203,10 @@ pub(super) fn message_banner(
 }
 
 pub(super) fn empty_state(
-    message: &'static str,
+    message: impl Into<gpui::SharedString>,
     theme: &gpui_component::Theme,
 ) -> gpui::AnyElement {
+    let message = message.into();
     div()
         .p_5()
         .text_center()
@@ -203,7 +218,7 @@ pub(super) fn empty_state(
 
 pub(super) fn format_port(port: u16) -> String {
     if port == 0 {
-        "未监听".into()
+        zenclash_i18n::text("common.status.not_listening")
     } else {
         format!("127.0.0.1:{port}")
     }
@@ -211,9 +226,9 @@ pub(super) fn format_port(port: u16) -> String {
 
 pub(super) fn format_proxy(server: &str, port: u16, enabled: bool) -> String {
     if !enabled {
-        "已停用".into()
+        zenclash_i18n::text("common.status.disabled")
     } else if server.trim().is_empty() || port == 0 {
-        "配置异常".into()
+        zenclash_i18n::text("common.status.misconfigured")
     } else {
         format!("{server}:{port}")
     }
@@ -272,10 +287,19 @@ pub(super) fn format_profile_age(updated_at: u64) -> String {
         .as_secs();
     let elapsed = now.saturating_sub(updated_at);
     match elapsed {
-        0..=59 => "刚刚".into(),
-        60..=3_599 => format!("{} 分钟前", elapsed / 60),
-        3_600..=86_399 => format!("{} 小时前", elapsed / 3_600),
-        _ => format!("{} 天前", elapsed / 86_400),
+        0..=59 => zenclash_i18n::text("common.time.just_now"),
+        60..=3_599 => zenclash_i18n::text_with(
+            "common.time.minutes_ago",
+            &[("count", (elapsed / 60).to_string())],
+        ),
+        3_600..=86_399 => zenclash_i18n::text_with(
+            "common.time.hours_ago",
+            &[("count", (elapsed / 3_600).to_string())],
+        ),
+        _ => zenclash_i18n::text_with(
+            "common.time.days_ago",
+            &[("count", (elapsed / 86_400).to_string())],
+        ),
     }
 }
 
@@ -287,11 +311,11 @@ pub(super) fn empty_dash(value: &str) -> String {
     }
 }
 
-pub(super) const fn yes_no(value: bool) -> &'static str {
+pub(super) fn yes_no(value: bool) -> String {
     if value {
-        "已启用"
+        zenclash_i18n::text("common.status.enabled")
     } else {
-        "已停用"
+        zenclash_i18n::text("common.status.disabled")
     }
 }
 

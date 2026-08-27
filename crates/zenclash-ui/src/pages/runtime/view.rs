@@ -13,9 +13,15 @@ impl RuntimePage {
     ) -> impl IntoElement {
         let traffic = self.traffic_monitor.snapshot();
         let (status, status_color) = if traffic.connected {
-            ("实时流已连接", theme.success)
+            (
+                zenclash_i18n::text("runtime.stream.connected"),
+                theme.success,
+            )
         } else {
-            ("实时流重连中", theme.warning)
+            (
+                zenclash_i18n::text("runtime.stream.reconnecting"),
+                theme.warning,
+            )
         };
         h_flex()
             .h_16()
@@ -63,7 +69,11 @@ impl RuntimePage {
                     .child(
                         Button::new("refresh-runtime-page")
                             .icon(IconName::Redo2)
-                            .label(if self.loading { "读取中" } else { "刷新" })
+                            .label(zenclash_i18n::text(if self.loading {
+                                "common.actions.loading"
+                            } else {
+                                "common.actions.refresh"
+                            }))
                             .small()
                             .ghost()
                             .loading(self.loading)
@@ -101,9 +111,9 @@ impl RuntimePage {
         {
             return empty_state(
                 if self.loading {
-                    "正在从内核读取真实状态…"
+                    zenclash_i18n::text("runtime.empty.loading")
                 } else {
-                    "当前没有可显示的内核状态，请检查上方错误后重试。"
+                    zenclash_i18n::text("runtime.empty.unavailable")
                 },
                 theme,
             )

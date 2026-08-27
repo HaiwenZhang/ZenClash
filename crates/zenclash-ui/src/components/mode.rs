@@ -94,7 +94,12 @@ impl OutboundModeCoordinator {
 async fn load_managed_overrides() -> Result<Vec<PathBuf>, String> {
     tokio::task::spawn_blocking(|| YamlOverrideStore::discover()?.load_enabled_paths())
         .await
-        .map_err(|error| format!("读取 YAML 覆写任务异常结束：{error}"))?
+        .map_err(|error| {
+            zenclash_i18n::text_with(
+                "profiles.errors.override_read_task",
+                &[("error", error.to_string())],
+            )
+        })?
         .map_err(|error| error.to_string())
 }
 

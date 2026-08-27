@@ -89,7 +89,12 @@ async fn run_scheduled_backup(
     let manager = runtime
         .spawn_blocking(BackupManager::discover)
         .await
-        .map_err(|error| format!("定时备份目录任务异常结束：{error}"))?
+        .map_err(|error| {
+            zenclash_i18n::text_with(
+                "app.errors.scheduled_backup_directory",
+                &[("error", error.to_string())],
+            )
+        })?
         .map_err(|error| error.to_string())?;
     let summary = service
         .upload_snapshot(&manager)

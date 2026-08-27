@@ -20,11 +20,23 @@ impl RuntimePage {
                 Ok(Ok(Some(_))) => tracing::info!("discarded backup export after leaving settings"),
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
-                    this.set_page_error(token, format!("无法打开备份保存对话框：{error}"));
+                    this.set_page_error(
+                        token,
+                        zenclash_i18n::text_with(
+                            "backup.errors.save_dialog",
+                            &[("error", error.to_string())],
+                        ),
+                    );
                     cx.notify();
                 }
                 Err(error) => {
-                    this.set_page_error(token, format!("备份保存对话框异常结束：{error}"));
+                    this.set_page_error(
+                        token,
+                        zenclash_i18n::text_with(
+                            "backup.errors.save_dialog_task",
+                            &[("error", error.to_string())],
+                        ),
+                    );
                     cx.notify();
                 }
             });
@@ -44,17 +56,24 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("备份导出任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "backup.errors.export_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
                 match result {
                     Ok(summary) if this.is_page_task_current(token) => {
-                        this.notice = Some(format!(
-                            "已导出 {} 个文件（{}）到 {}",
-                            summary.file_count,
-                            format_backup_size(summary.payload_bytes),
-                            summary.path.display()
+                        this.notice = Some(zenclash_i18n::text_with(
+                            "backup.notices.exported",
+                            &[
+                                ("count", summary.file_count.to_string()),
+                                ("size", format_backup_size(summary.payload_bytes)),
+                                ("path", summary.path.display().to_string()),
+                            ],
                         ));
                     }
                     Ok(_) => {}
@@ -73,7 +92,7 @@ impl RuntimePage {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("选择 ZenClash 备份 ZIP（将替换当前设置与配置）".into()),
+            prompt: Some(zenclash_i18n::text("backup.prompts.import").into()),
         });
         cx.spawn(async move |this, cx| {
             let selection = receiver.await;
@@ -86,11 +105,23 @@ impl RuntimePage {
                 Ok(Ok(Some(_))) => tracing::info!("discarded backup import after leaving settings"),
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
-                    this.set_page_error(token, format!("无法打开备份选择器：{error}"));
+                    this.set_page_error(
+                        token,
+                        zenclash_i18n::text_with(
+                            "backup.errors.file_picker",
+                            &[("error", error.to_string())],
+                        ),
+                    );
                     cx.notify();
                 }
                 Err(error) => {
-                    this.set_page_error(token, format!("备份选择器异常结束：{error}"));
+                    this.set_page_error(
+                        token,
+                        zenclash_i18n::text_with(
+                            "backup.errors.file_picker_task",
+                            &[("error", error.to_string())],
+                        ),
+                    );
                     cx.notify();
                 }
             });
@@ -115,7 +146,12 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("备份恢复任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "backup.errors.restore_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -155,12 +191,15 @@ impl RuntimePage {
         });
         if self.replace_page_data(token, outcome.page_data) {
             let warning = outcome.cleanup_warning.map_or_else(String::new, |warning| {
-                format!("；但旧快照清理失败：{warning}")
+                zenclash_i18n::text_with("backup.notices.cleanup_warning", &[("warning", warning)])
             });
-            self.notice = Some(format!(
-                "备份已验证并恢复：{} 个文件，共 {}{warning}",
-                outcome.file_count,
-                format_backup_size(outcome.payload_bytes)
+            self.notice = Some(zenclash_i18n::text_with(
+                "backup.notices.restored",
+                &[
+                    ("count", outcome.file_count.to_string()),
+                    ("size", format_backup_size(outcome.payload_bytes)),
+                    ("warning", warning),
+                ],
             ));
         }
     }

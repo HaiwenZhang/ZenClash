@@ -32,6 +32,28 @@ pub enum AppearancePreference {
     Light,
 }
 
+/// Language used by ZenClash's window, application menu, and native status menu.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LanguagePreference {
+    /// Use Simplified Chinese.
+    #[default]
+    ZhCn,
+    /// Use English.
+    En,
+}
+
+impl LanguagePreference {
+    /// Returns the rust-i18n locale identifier for this preference.
+    #[must_use]
+    pub const fn locale(self) -> &'static str {
+        match self {
+            Self::ZhCn => zenclash_i18n::ZH_CN,
+            Self::En => zenclash_i18n::EN,
+        }
+    }
+}
+
 /// Route selected for application-level public network diagnostics.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -59,6 +81,8 @@ pub struct AppPreferences {
     pub last_known_good_binary: Option<PathBuf>,
     /// Preferred native application appearance.
     pub appearance: AppearancePreference,
+    /// Preferred language for all user-facing application surfaces.
+    pub language: LanguagePreference,
     /// Whether the live native traffic indicator is visible.
     pub traffic_tray_visible: bool,
     /// Whether real Mihomo connection deltas are persisted for historical reports.
@@ -127,6 +151,7 @@ impl Default for AppPreferences {
             last_known_good_core: None,
             last_known_good_binary: None,
             appearance: AppearancePreference::System,
+            language: LanguagePreference::ZhCn,
             traffic_tray_visible: true,
             traffic_history_enabled: true,
             traffic_retention_days: crate::DEFAULT_TRAFFIC_RETENTION_DAYS,
@@ -443,6 +468,7 @@ mod tests {
             last_known_good_core: Some(CoreKind::Mihomo),
             last_known_good_binary: Some(PathBuf::from("/opt/zenclash/mihomo")),
             appearance: AppearancePreference::Light,
+            language: LanguagePreference::En,
             traffic_tray_visible: false,
             ..AppPreferences::default()
         };
@@ -575,6 +601,7 @@ mod tests {
         let preferences = store.load().unwrap();
 
         assert!(preferences.traffic_history_enabled);
+        assert_eq!(preferences.language, LanguagePreference::ZhCn);
         assert_eq!(preferences.core_kind, CoreKind::Mihomo);
         assert_eq!(preferences.traffic_retention_days, 30);
         assert!(preferences.log_file_enabled);

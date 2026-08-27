@@ -35,20 +35,24 @@ impl ProxiesPage {
                                 div()
                                     .text_lg()
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .child("代理组"),
+                                    .child(zenclash_i18n::text("proxies.header.title")),
                             )
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
-                                    .child("选择策略组节点、查看协议能力并执行真实延迟测试。"),
+                                    .child(zenclash_i18n::text("proxies.header.description")),
                             ),
                     ),
             )
             .child(
                 Button::new("refresh-proxies")
                     .icon(IconName::Redo2)
-                    .label(if loading { "读取中" } else { "刷新状态" })
+                    .label(if loading {
+                        zenclash_i18n::text("common.actions.loading")
+                    } else {
+                        zenclash_i18n::text("proxies.actions.refresh")
+                    })
                     .small()
                     .ghost()
                     .loading(loading)
@@ -128,10 +132,12 @@ impl ProxiesPage {
                                     )
                                     .child(
                                         div().text_xs().text_color(theme.muted_foreground).child(
-                                            format!(
-                                                "当前：{} · {} 个节点",
-                                                group.now,
-                                                group.all.len()
+                                            zenclash_i18n::text_with(
+                                                "proxies.summary.current",
+                                                &[
+                                                    ("proxy", group.now.clone()),
+                                                    ("count", group.all.len().to_string()),
+                                                ],
                                             ),
                                         ),
                                     ),
@@ -144,9 +150,9 @@ impl ProxiesPage {
                                 Button::new(("test-group", group_index))
                                     .icon(IconName::Redo2)
                                     .label(if testing_group {
-                                        "测速中"
+                                        zenclash_i18n::text("proxies.actions.testing")
                                     } else {
-                                        "全部测速"
+                                        zenclash_i18n::text("proxies.actions.test_all")
                                     })
                                     .small()
                                     .ghost()
@@ -163,7 +169,11 @@ impl ProxiesPage {
                                     } else {
                                         IconName::ChevronRight
                                     })
-                                    .label(if expanded { "收起" } else { "展开" })
+                                    .label(if expanded {
+                                        zenclash_i18n::text("proxies.actions.collapse")
+                                    } else {
+                                        zenclash_i18n::text("proxies.actions.expand")
+                                    })
                                     .small()
                                     .outline()
                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -215,14 +225,14 @@ impl ProxiesPage {
             (None, None) => theme.muted_foreground,
         };
         let delay_text = if testing {
-            "测速中…".to_owned()
+            zenclash_i18n::text("proxies.status.testing")
         } else if let Some(failure) = failure {
-            failure.label().to_owned()
+            failure.label()
         } else {
             match delay {
-                Some(0) => "超时".to_owned(),
+                Some(0) => zenclash_i18n::text("proxies.status.timeout"),
                 Some(value) => format!("{value} ms"),
-                None => "测速".to_owned(),
+                None => zenclash_i18n::text("proxies.actions.test"),
             }
         };
         let capabilities = proxy.capabilities().collect::<Vec<_>>().join(" · ");
@@ -282,7 +292,10 @@ impl ProxiesPage {
                             .whitespace_nowrap()
                             .overflow_hidden()
                             .child(if switching {
-                                format!("{}（切换中…）", proxy.name)
+                                zenclash_i18n::text_with(
+                                    "proxies.status.switching",
+                                    &[("proxy", proxy.name.clone())],
+                                )
                             } else {
                                 proxy.name.clone()
                             }),
@@ -313,7 +326,11 @@ impl ProxiesPage {
                             proxy_index.to_string(),
                         ))
                         .icon(IconName::Redo2)
-                        .label(if testing { "测速中" } else { "测速" })
+                        .label(if testing {
+                            zenclash_i18n::text("proxies.actions.testing")
+                        } else {
+                            zenclash_i18n::text("proxies.actions.test")
+                        })
                         .small()
                         .ghost()
                         .loading(testing)
@@ -339,11 +356,11 @@ impl ProxiesPage {
                             IconName::ArrowRight
                         })
                         .label(if selected {
-                            "当前节点"
+                            zenclash_i18n::text("proxies.actions.current")
                         } else if switching {
-                            "切换中"
+                            zenclash_i18n::text("proxies.actions.switching")
                         } else {
-                            "选择"
+                            zenclash_i18n::text("proxies.actions.select")
                         })
                         .small()
                         .outline()

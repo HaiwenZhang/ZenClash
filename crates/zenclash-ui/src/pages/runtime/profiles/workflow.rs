@@ -74,9 +74,9 @@ impl CoreProfileRuntime {
                 .await
                 .map_err(|error| error.to_string())
         } else {
-            Err(format!(
-                "外部 {} 不支持完整配置热重载；请由 ZenClash 托管该内核后重试",
-                self.kind.display_name()
+            Err(zenclash_i18n::text_with(
+                "profiles.errors.external_reload",
+                &[("core", self.kind.display_name().to_owned())],
             ))
         }
     }
@@ -90,7 +90,10 @@ pub(super) async fn import_local(
 ) -> Result<ActivationOutcome, String> {
     let import_store = store.clone();
     let record = run_store(move || import_store.import_local(source)).await?;
-    let rejected = format!("{} 拒绝该配置", runtime.kind.display_name());
+    let rejected = zenclash_i18n::text_with(
+        "profiles.errors.rejected",
+        &[("core", runtime.kind.display_name().to_owned())],
+    );
     activate_new_record(store, controlled, runtime, record, &rejected).await
 }
 
@@ -108,14 +111,11 @@ pub(in super::super) async fn add_remote(
         .add_remote_with_options(name, url, user_agent, options, proxy_port)
         .await
         .map_err(|error| error.to_string())?;
-    activate_new_record(
-        store,
-        controlled,
-        runtime.clone(),
-        record,
-        &format!("下载成功，但 {} 拒绝该配置", runtime.kind.display_name()),
-    )
-    .await
+    let rejected = zenclash_i18n::text_with(
+        "profiles.errors.downloaded_rejected",
+        &[("core", runtime.kind.display_name().to_owned())],
+    );
+    activate_new_record(store, controlled, runtime.clone(), record, &rejected).await
 }
 
 pub(crate) async fn activate_existing(
@@ -123,6 +123,16 @@ pub(crate) async fn activate_existing(
     controlled: ControlledConfigStore,
     runtime: CoreProfileRuntime,
     id: String,
+) -> Result<ActivationOutcome, String> {
+    activate_existing_for_page(store, controlled, runtime, id, Page::Profiles).await
+}
+
+pub(in crate::pages::runtime) async fn activate_existing_for_page(
+    store: ProfileStore,
+    controlled: ControlledConfigStore,
+    runtime: CoreProfileRuntime,
+    id: String,
+    refresh_page: Page,
 ) -> Result<ActivationOutcome, String> {
     let load_store = store.clone();
     let lookup_id = id.clone();
@@ -143,17 +153,24 @@ pub(crate) async fn activate_existing(
     if let Err(error) = reload_effective(controlled, &runtime, &path).await {
         let rollback_store = store.clone();
         return match run_store(move || rollback_store.rollback_activation(activation)).await {
-            Ok(()) => Err(format!(
-                "{} 拒绝该配置，活动选择已恢复：{error}",
-                runtime.kind.display_name()
+            Ok(()) => Err(zenclash_i18n::text_with(
+                "profiles.errors.rejected_rolled_back",
+                &[
+                    ("core", runtime.kind.display_name().to_owned()),
+                    ("error", error.clone()),
+                ],
             )),
-            Err(rollback) => Err(format!(
-                "{} 拒绝该配置：{error}；恢复原活动配置失败：{rollback}",
-                runtime.kind.display_name()
+            Err(rollback) => Err(zenclash_i18n::text_with(
+                "profiles.errors.rejected_rollback_failed",
+                &[
+                    ("core", runtime.kind.display_name().to_owned()),
+                    ("error", error),
+                    ("rollback", rollback),
+                ],
             )),
         };
     }
-    let refresh = load_page(runtime.client, Page::Profiles).await;
+    let refresh = load_page(runtime.client, refresh_page).await;
     Ok(ActivationOutcome {
         refresh,
         path,
@@ -221,7 +238,12 @@ async fn subscription_proxy_port(
     let config = match client.runtime_config().await {
         Ok(config) => config,
         Err(_) if route == RemoteProfileRoute::DirectWithMihomoFallback => return Ok(None),
-        Err(error) => return Err(format!("无法读取当前内核的订阅代理端口：{error}")),
+        Err(error) => {
+            return Err(zenclash_i18n::text_with(
+                "profiles.errors.proxy_port_read",
+                &[("error", error.to_string())],
+            ))
+        }
     };
     let port = if config.mixed_port != 0 {
         config.mixed_port
@@ -233,7 +255,7 @@ async fn subscription_proxy_port(
     } else if route == RemoteProfileRoute::DirectWithMihomoFallback {
         Ok(None)
     } else {
-        Err("当前内核没有可用的 HTTP/Mixed 订阅代理端口".into())
+        Err(zenclash_i18n::text("profiles.errors.proxy_port_missing"))
     }
 }
 
@@ -250,25 +272,35 @@ async fn activate_new_record(
 ) -> Result<ActivationOutcome, String> {
     let activation_store = store.clone();
     let activation_id = record.id.clone();
-    let activation = match run_store(move || activation_store.activate_reversible(&activation_id))
-        .await
-    {
-        Ok(activation) => activation,
-        Err(error) => {
-            return Err(
-                cleanup_new_record(store, record.id, format!("保存活动配置失败：{error}")).await,
-            );
-        }
-    };
+    let activation =
+        match run_store(move || activation_store.activate_reversible(&activation_id)).await {
+            Ok(activation) => activation,
+            Err(error) => {
+                let primary =
+                    zenclash_i18n::text_with("profiles.errors.active_save", &[("error", error)]);
+                return Err(cleanup_new_record(store, record.id, primary).await);
+            }
+        };
     let path = activation.path().to_path_buf();
     if let Err(error) = reload_effective(controlled, &runtime, &path).await {
         let rollback_store = store.clone();
         let primary = match run_store(move || rollback_store.rollback_activation(activation)).await
         {
-            Ok(()) => format!("{rejection_prefix}，活动选择已恢复：{error}"),
+            Ok(()) => zenclash_i18n::text_with(
+                "profiles.errors.selection_rolled_back",
+                &[
+                    ("prefix", rejection_prefix.to_owned()),
+                    ("error", error.clone()),
+                ],
+            ),
             Err(rollback) => {
-                return Err(format!(
-                    "{rejection_prefix}：{error}；恢复原活动配置失败：{rollback}"
+                return Err(zenclash_i18n::text_with(
+                    "profiles.errors.selection_rollback_failed",
+                    &[
+                        ("prefix", rejection_prefix.to_owned()),
+                        ("error", error),
+                        ("rollback", rollback),
+                    ],
                 ));
             }
         };
@@ -292,13 +324,20 @@ async fn reload_updated_profile(
     if let Err(error) = reload_effective(controlled, runtime, path).await {
         let rollback_store = store.clone();
         return match run_store(move || rollback_store.rollback_update(update)).await {
-            Ok(_) => Err(format!(
-                "{} 拒绝订阅更新，已恢复上一版本：{error}",
-                runtime.kind.display_name()
+            Ok(_) => Err(zenclash_i18n::text_with(
+                "profiles.errors.update_rejected_rolled_back",
+                &[
+                    ("core", runtime.kind.display_name().to_owned()),
+                    ("error", error.clone()),
+                ],
             )),
-            Err(rollback) => Err(format!(
-                "{} 拒绝订阅更新：{error}；恢复上一版本失败：{rollback}",
-                runtime.kind.display_name()
+            Err(rollback) => Err(zenclash_i18n::text_with(
+                "profiles.errors.update_rejected_rollback_failed",
+                &[
+                    ("core", runtime.kind.display_name().to_owned()),
+                    ("error", error),
+                    ("rollback", rollback),
+                ],
             )),
         };
     }
@@ -313,7 +352,12 @@ pub(in super::super) async fn reload_effective(
     let overrides =
         tokio::task::spawn_blocking(|| YamlOverrideStore::discover()?.load_enabled_paths())
             .await
-            .map_err(|error| format!("读取 YAML 覆写任务异常结束：{error}"))?
+            .map_err(|error| {
+                zenclash_i18n::text_with(
+                    "profiles.errors.override_read_task",
+                    &[("error", error.to_string())],
+                )
+            })?
             .map_err(|error| error.to_string())?;
     runtime
         .reload_with_overrides(controlled, path, overrides)
@@ -323,7 +367,10 @@ pub(in super::super) async fn reload_effective(
 async fn cleanup_new_record(store: ProfileStore, id: String, primary: String) -> String {
     match run_store(move || store.delete(&id)).await {
         Ok(()) => primary,
-        Err(cleanup) => format!("{primary}；清理未启用配置失败：{cleanup}"),
+        Err(cleanup) => zenclash_i18n::text_with(
+            "profiles.errors.cleanup_disabled",
+            &[("primary", primary), ("cleanup", cleanup)],
+        ),
     }
 }
 
@@ -334,6 +381,11 @@ where
 {
     tokio::task::spawn_blocking(operation)
         .await
-        .map_err(|error| format!("配置仓库后台任务异常结束：{error}"))?
+        .map_err(|error| {
+            zenclash_i18n::text_with(
+                "profiles.errors.repository_task",
+                &[("error", error.to_string())],
+            )
+        })?
         .map_err(|error| error.to_string())
 }

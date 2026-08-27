@@ -1,0 +1,13 @@
+[package]
+name = "zenclash-i18n"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rust-i18n.workspace = true
+
+[dev-dependencies]
+serde_yaml.workspace = true

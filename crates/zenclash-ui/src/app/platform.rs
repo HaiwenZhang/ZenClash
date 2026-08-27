@@ -13,7 +13,10 @@ pub(super) fn tray_directories(
 ) -> Vec<(String, PathBuf)> {
     let mut directories = Vec::new();
     if let Some(config_dir) = profile_path.and_then(Path::parent) {
-        directories.push(("配置文件目录".into(), config_dir.to_path_buf()));
+        directories.push((
+            zenclash_i18n::text("app.directories.config"),
+            config_dir.to_path_buf(),
+        ));
     }
     if let Ok(store) = ProfileStore::discover() {
         let data = store
@@ -21,14 +24,17 @@ pub(super) fn tray_directories(
             .parent()
             .unwrap_or_else(|| store.root())
             .to_path_buf();
-        directories.push(("应用数据目录".into(), data.clone()));
+        directories.push((zenclash_i18n::text("app.directories.data"), data.clone()));
         directories.push((
-            format!("{} 工作目录", core_kind.display_name()),
+            zenclash_i18n::text_with(
+                "app.directories.core_working",
+                &[("core", core_kind.display_name().to_owned())],
+            ),
             data.join(core_kind.executable_stem()),
         ));
     }
     if let Some(resources) = installed_resources_dir() {
-        directories.push(("内核与资源目录".into(), resources));
+        directories.push((zenclash_i18n::text("app.directories.resources"), resources));
     }
     directories
 }

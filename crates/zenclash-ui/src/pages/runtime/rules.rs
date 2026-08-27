@@ -9,9 +9,9 @@ const MAX_VISIBLE_RULES: usize = 800;
 impl RuntimePage {
     fn set_rule_enabled(&mut self, index: usize, enabled: bool, cx: &mut Context<Self>) {
         if !self.core_kind.capabilities().rule_toggle {
-            self.error = Some(format!(
-                "{} 暂不支持单条规则启停",
-                self.core_kind.display_name()
+            self.error = Some(zenclash_i18n::text_with(
+                "rules.warnings.toggle_unavailable",
+                &[("core", self.core_kind.display_name().to_owned())],
             ));
             cx.notify();
             return;
@@ -30,7 +30,12 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("规则状态任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "rules.errors.status_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -38,9 +43,15 @@ impl RuntimePage {
                     Ok(data) => {
                         if this.replace_page_data(token, data) {
                             this.notice = Some(if enabled {
-                                format!("规则 #{index} 已启用并通过状态回读")
+                                zenclash_i18n::text_with(
+                                    "rules.notices.enabled",
+                                    &[("index", index.to_string())],
+                                )
                             } else {
-                                format!("规则 #{index} 已禁用并通过状态回读")
+                                zenclash_i18n::text_with(
+                                    "rules.notices.disabled",
+                                    &[("index", index.to_string())],
+                                )
                             });
                         }
                     }
@@ -73,9 +84,9 @@ impl RuntimePage {
             .gap_3()
             .when(!self.core_kind.capabilities().rule_toggle, |this| {
                 this.child(message_banner(
-                    format!(
-                        "{} 支持规则查看与匹配，但暂不提供单条规则启停和命中统计。",
-                        self.core_kind.display_name()
+                    zenclash_i18n::text_with(
+                        "rules.warnings.stats_unavailable",
+                        &[("core", self.core_kind.display_name().to_owned())],
                     ),
                     theme.warning,
                     theme,
@@ -96,9 +107,9 @@ impl RuntimePage {
                             .gap_3()
                             .child(div().text_sm().text_color(theme.muted_foreground).child(
                                 if query.is_empty() {
-                                    "运行时规则"
+                                    zenclash_i18n::text("rules.summary.runtime")
                                 } else {
-                                    "过滤结果"
+                                    zenclash_i18n::text("rules.summary.filtered")
                                 },
                             ))
                             .child(
@@ -114,12 +125,12 @@ impl RuntimePage {
                                     }),
                             ),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(format!("最多显示 {MAX_VISIBLE_RULES} 条")),
-                    ),
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(
+                        zenclash_i18n::text_with(
+                            "rules.summary.limit",
+                            &[("limit", MAX_VISIBLE_RULES.to_string())],
+                        ),
+                    )),
             )
             .child(Input::new(&self.rule_filter).small())
             .child(
@@ -132,9 +143,9 @@ impl RuntimePage {
                     .when(filtered.is_empty(), |this| {
                         this.child(empty_state(
                             if rules.is_empty() {
-                                "当前内核没有返回规则"
+                                zenclash_i18n::text("rules.empty.runtime")
                             } else {
-                                "没有匹配的规则"
+                                zenclash_i18n::text("rules.empty.filtered")
                             },
                             theme,
                         ))
@@ -182,7 +193,13 @@ impl RuntimePage {
                             .child(rule_badge(rule.kind.clone(), theme.primary, theme))
                             .child(rule_badge(rule.proxy.clone(), theme.success, theme))
                             .child(div().text_xs().text_color(theme.muted_foreground).child(
-                                format!("规则 #{}", runtime_index.map_or(position, |index| index)),
+                                zenclash_i18n::text_with(
+                                    "rules.row.index",
+                                    &[(
+                                        "index",
+                                        runtime_index.map_or(position, |index| index).to_string(),
+                                    )],
+                                ),
                             )),
                     ),
             );
@@ -192,20 +209,25 @@ impl RuntimePage {
                 v_flex()
                     .items_end()
                     .gap_1()
-                    .child(
-                        div()
-                            .text_xs()
-                            .child(format!("命中 {} / {total}", stats.hit_count)),
-                    )
+                    .child(div().text_xs().child(zenclash_i18n::text_with(
+                        "rules.row.hits",
+                        &[
+                            ("hits", stats.hit_count.to_string()),
+                            ("total", total.to_string()),
+                        ],
+                    )))
                     .child(
                         div()
                             .max_w(px(180.))
                             .text_xs()
                             .text_color(theme.muted_foreground)
                             .child(if stats.hit_at.is_empty() {
-                                "尚无命中时间".into()
+                                zenclash_i18n::text("rules.row.never_hit")
                             } else {
-                                format!("最近命中 {}", stats.hit_at)
+                                zenclash_i18n::text_with(
+                                    "rules.row.last_hit",
+                                    &[("time", stats.hit_at.clone())],
+                                )
                             }),
                     ),
             );
@@ -217,9 +239,9 @@ impl RuntimePage {
                     .checked(enabled)
                     .disabled(self.mutating || !self.core_kind.capabilities().rule_toggle)
                     .tooltip(if enabled {
-                        "禁用规则"
+                        zenclash_i18n::text("rules.row.disable")
                     } else {
-                        "启用规则"
+                        zenclash_i18n::text("rules.row.enable")
                     })
                     .on_click(cx.listener(move |this, checked, _, cx| {
                         this.set_rule_enabled(index, *checked, cx);

@@ -9,10 +9,10 @@ impl RuntimePage {
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        setting_card("本地备份与恢复", theme)
+        setting_card(zenclash_i18n::text("backup.local.title"), theme)
             .child(info_row(
-                "备份内容",
-                "应用偏好 · 受控覆写 · 订阅与本地 YAML",
+                zenclash_i18n::text("backup.local.contents"),
+                zenclash_i18n::text("backup.local.contents_description"),
                 theme,
             ))
             .child(
@@ -23,9 +23,9 @@ impl RuntimePage {
                     .text_color(theme.warning)
                     .border_b_1()
                     .border_color(theme.border)
-                    .child(format!(
-                        "导入前会校验 ZIP 路径、文件白名单、SHA-256 和全部 Clash YAML；{} 拒绝时自动恢复原数据。",
-                        self.core_kind.display_name()
+                    .child(zenclash_i18n::text_with(
+                        "backup.local.validation",
+                        &[("core", self.core_kind.display_name().to_owned())],
                     )),
             )
             .child(
@@ -37,12 +37,15 @@ impl RuntimePage {
                     .child(
                         v_flex()
                             .gap_1()
-                            .child(div().text_sm().child("完整本地快照"))
                             .child(
                                 div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child("恢复成功后立即应用主题、状态栏可见性和活动配置"),
+                                    .text_sm()
+                                    .child(zenclash_i18n::text("backup.local.snapshot")),
+                            )
+                            .child(
+                                div().text_xs().text_color(theme.muted_foreground).child(
+                                    zenclash_i18n::text("backup.local.snapshot_description"),
+                                ),
                             ),
                     )
                     .child(
@@ -51,7 +54,7 @@ impl RuntimePage {
                             .child(
                                 Button::new("backup-export")
                                     .icon(IconName::File)
-                                    .label("导出 ZIP")
+                                    .label(zenclash_i18n::text("backup.local.export"))
                                     .small()
                                     .disabled(self.mutating)
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -61,7 +64,7 @@ impl RuntimePage {
                             .child(
                                 Button::new("backup-import")
                                     .icon(IconName::FolderOpen)
-                                    .label("导入 ZIP")
+                                    .label(zenclash_i18n::text("backup.local.import"))
                                     .small()
                                     .disabled(self.mutating)
                                     .on_click(cx.listener(|this, _, _, cx| {

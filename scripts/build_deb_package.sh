@@ -48,6 +48,8 @@ install -Dm644 "${project_root}/platforms/macos/ZenClash.png" \
   "${package_root}/usr/share/icons/hicolor/1024x1024/apps/zenclash.png"
 install -Dm644 "${project_root}/platforms/linux/zenclash.desktop" \
   "${package_root}/usr/share/applications/org.zenclash.ZenClash.desktop"
+install -Dm644 "${project_root}/LICENSE" \
+  "${package_root}/usr/share/doc/zenclash/LICENSE"
 mkdir -p "${package_root}/DEBIAN"
 
 cat >"${package_root}/DEBIAN/control" <<EOF
@@ -70,5 +72,6 @@ dpkg-deb --info "${package_path}" >/dev/null
 dpkg-deb --contents "${package_path}" >/dev/null
 dpkg-deb --contents "${package_path}" | grep -Eq '[[:space:]]\./usr/lib/zenclash/mihomo$'
 dpkg-deb --contents "${package_path}" | grep -Eq '[[:space:]]\./usr/lib/zenclash/recovery.yaml$'
+dpkg-deb --contents "${package_path}" | grep -Eq '[[:space:]]\./usr/share/doc/zenclash/LICENSE$'
 
 echo "Built ${package_path}"

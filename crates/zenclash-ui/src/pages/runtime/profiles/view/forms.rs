@@ -11,7 +11,7 @@ impl RuntimePage {
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        setting_card("添加在线订阅", theme).child(
+        setting_card(zenclash_i18n::text("profiles.form.title"), theme).child(
             v_flex()
                 .p_4()
                 .gap_3()
@@ -19,7 +19,7 @@ impl RuntimePage {
                     h_flex()
                         .gap_3()
                         .child(subscription_input(
-                            "订阅名称",
+                            zenclash_i18n::text("profiles.form.name"),
                             Input::new(&self.profile_forms.subscription_name)
                                 .prefix(Icon::new(IconName::File))
                                 .cleanable(true),
@@ -27,7 +27,7 @@ impl RuntimePage {
                         ))
                         .child(
                             subscription_input(
-                                "自定义 User-Agent",
+                                zenclash_i18n::text("profiles.form.user_agent"),
                                 Input::new(&self.profile_forms.subscription_user_agent)
                                     .prefix(Icon::new(IconName::Bot))
                                     .cleanable(true),
@@ -37,7 +37,7 @@ impl RuntimePage {
                         ),
                 )
                 .child(subscription_input(
-                    "Clash / Mihomo 订阅 URL",
+                    zenclash_i18n::text("profiles.form.url"),
                     Input::new(&self.profile_forms.subscription_url)
                         .prefix(Icon::new(IconName::Globe))
                         .cleanable(true),
@@ -47,7 +47,7 @@ impl RuntimePage {
                     h_flex()
                         .gap_3()
                         .child(subscription_input(
-                            "Authorization",
+                            zenclash_i18n::text("profiles.form.authorization"),
                             Input::new(&self.profile_forms.subscription_authorization)
                                 .prefix(Icon::new(IconName::Asterisk))
                                 .mask_toggle()
@@ -63,12 +63,12 @@ impl RuntimePage {
                             div()
                                 .text_xs()
                                 .text_color(theme.muted_foreground)
-                                .child("下载后将依次执行 YAML 校验、内核验收并设为当前配置。"),
+                                .child(zenclash_i18n::text("profiles.form.validation_note")),
                         )
                         .child(
                             Button::new("download-subscription")
                                 .icon(IconName::Inbox)
-                                .label("下载并启用")
+                                .label(zenclash_i18n::text("profiles.actions.download_enable"))
                                 .primary()
                                 .loading(self.mutating)
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -105,7 +105,11 @@ impl RuntimePage {
                                 cx.notify();
                             })),
                     )
-                    .child(div().text_sm().child("始终经内核代理下载")),
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(zenclash_i18n::text("profiles.form.always_proxy")),
+                    ),
             )
             .child(
                 h_flex()
@@ -137,12 +141,18 @@ impl RuntimePage {
                     .child(
                         v_flex()
                             .gap_1()
-                            .child(div().text_sm().child("失败自动回退"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .child(zenclash_i18n::text("profiles.form.fallback")),
+                            )
                             .child(
                                 div()
                                     .text_size(px(10.))
                                     .text_color(theme.muted_foreground)
-                                    .child("直连失败后由内核代理重试"),
+                                    .child(zenclash_i18n::text(
+                                        "profiles.form.fallback_description",
+                                    )),
                             ),
                     ),
             )
@@ -154,10 +164,10 @@ impl RuntimePage {
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let path = self
-            .profile_path
-            .as_ref()
-            .map_or_else(|| "未指定".into(), |path| path.display().to_string());
+        let path = self.profile_path.as_ref().map_or_else(
+            || zenclash_i18n::text("profiles.current.unspecified"),
+            |path| path.display().to_string(),
+        );
         let remote_count = self
             .profile_catalog
             .profiles
@@ -165,29 +175,40 @@ impl RuntimePage {
             .filter(|profile| profile.is_remote())
             .count();
 
-        setting_card("当前真实配置", theme)
-            .child(info_row("配置路径", &path, theme))
-            .child(info_row("运行模式", &config.mode, theme))
-            .child(info_row("日志等级", &config.log_level, theme))
+        setting_card(zenclash_i18n::text("profiles.current.title"), theme)
+            .child(info_row(
+                zenclash_i18n::text("profiles.current.path"),
+                &path,
+                theme,
+            ))
+            .child(info_row(
+                zenclash_i18n::text("profiles.current.mode"),
+                &config.mode,
+                theme,
+            ))
+            .child(info_row(
+                zenclash_i18n::text("profiles.current.log_level"),
+                &config.log_level,
+                theme,
+            ))
             .child(
                 h_flex()
                     .justify_end()
                     .gap_2()
                     .p_3()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(format!(
-                                "{} 份托管配置 · {} 份在线订阅",
-                                self.profile_catalog.profiles.len(),
-                                remote_count
-                            )),
-                    )
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(
+                        zenclash_i18n::text_with(
+                            "profiles.current.counts",
+                            &[
+                                ("managed", self.profile_catalog.profiles.len().to_string()),
+                                ("remote", remote_count.to_string()),
+                            ],
+                        ),
+                    ))
                     .child(
                         Button::new("reload-profile")
                             .icon(IconName::Redo2)
-                            .label("热重载配置")
+                            .label(zenclash_i18n::text("profiles.actions.reload"))
                             .primary()
                             .loading(self.mutating)
                             .on_click(cx.listener(|this, _, _, cx| this.reload_profile(cx))),
@@ -196,11 +217,7 @@ impl RuntimePage {
     }
 }
 
-fn subscription_input(
-    label: &'static str,
-    input: Input,
-    theme: &gpui_component::Theme,
-) -> gpui::Div {
+fn subscription_input(label: String, input: Input, theme: &gpui_component::Theme) -> gpui::Div {
     v_flex()
         .flex_1()
         .gap_1()

@@ -59,7 +59,7 @@ impl RuntimePage {
         } else {
             theme.success
         };
-        setting_card("运行内核", theme)
+        setting_card(zenclash_i18n::text("core_management.title"), theme)
             .child(
                 h_flex()
                     .min_h(px(76.))
@@ -98,39 +98,61 @@ impl RuntimePage {
                                             .text_sm()
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
                                             .child(if online {
-                                                format!(
-                                                    "当前运行 {} · 下次启动 {}",
-                                                    self.core_kind.display_name(),
-                                                    requested.display_name()
+                                                zenclash_i18n::text_with(
+                                                    "core_management.summary.online",
+                                                    &[
+                                                        (
+                                                            "current",
+                                                            self.core_kind
+                                                                .display_name()
+                                                                .to_owned(),
+                                                        ),
+                                                        (
+                                                            "requested",
+                                                            requested.display_name().to_owned(),
+                                                        ),
+                                                    ],
                                                 )
                                             } else {
-                                                format!(
-                                                    "内核未运行 · 下次启动 {}",
-                                                    requested.display_name()
+                                                zenclash_i18n::text_with(
+                                                    "core_management.summary.offline",
+                                                    &[(
+                                                        "requested",
+                                                        requested.display_name().to_owned(),
+                                                    )],
                                                 )
                                             }),
                                     )
                                     .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                    .child(if !online {
-                                        "应用处于离线恢复模式；选择可用文件后重启即可重新接管"
-                                    } else if recovered {
-                                        "首选内核不可用时已使用最近可运行内核；首选项仍保留"
-                                    } else {
-                                                "切换前执行真实 -v 检测；文件移动或损坏时可恢复到最近可运行内核"
-                                            }),
+                                        div().text_xs().text_color(theme.muted_foreground).child(
+                                            if !online {
+                                                zenclash_i18n::text(
+                                                    "core_management.summary.offline_description",
+                                                )
+                                            } else if recovered {
+                                                zenclash_i18n::text(
+                                                    "core_management.summary.recovered_description",
+                                                )
+                                            } else {
+                                                zenclash_i18n::text(
+                                                    "core_management.summary.normal_description",
+                                                )
+                                            },
+                                        ),
                                     ),
                             ),
                     )
                     .child(
                         Button::new("refresh-core-management")
                             .icon(IconName::Redo2)
-                            .label("重新检测")
+                            .label(zenclash_i18n::text("core_management.summary.refresh"))
                             .small()
                             .outline()
-                            .disabled(self.mutating || self.core_management.mihomo.checking || self.core_management.meow.checking)
+                            .disabled(
+                                self.mutating
+                                    || self.core_management.mihomo.checking
+                                    || self.core_management.meow.checking,
+                            )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.refresh_core_management(cx);
                             })),
@@ -146,7 +168,9 @@ impl RuntimePage {
                         .bg(theme.warning.opacity(0.08))
                         .text_xs()
                         .text_color(theme.warning)
-                        .child("ZENCLASH_CORE 正在覆盖界面选择；移除环境变量后，保存的下次启动内核才会生效。"),
+                        .child(zenclash_i18n::text(
+                            "core_management.summary.environment_override",
+                        )),
                 )
             })
             .child(self.render_core_binary_row(CoreKind::Mihomo, theme, cx))
@@ -165,23 +189,26 @@ impl RuntimePage {
         let index = core_index(kind);
         let (status, status_color, path, version) = if state.checking {
             (
-                "检测中",
+                zenclash_i18n::text("core_management.status.checking"),
                 theme.primary,
-                "正在执行版本检测…".into(),
+                zenclash_i18n::text("core_management.status.checking_version"),
                 String::new(),
             )
         } else if let Some(info) = state.info.as_ref() {
             (
-                "可用",
+                zenclash_i18n::text("core_management.status.available"),
                 theme.success,
                 info.path.display().to_string(),
                 format!("{} · {}", info.version, info.architecture),
             )
         } else {
             (
-                "不可用",
+                zenclash_i18n::text("core_management.status.unavailable"),
                 theme.danger,
-                state.error.clone().unwrap_or_else(|| "尚未检测".into()),
+                state
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| zenclash_i18n::text("core_management.status.not_checked")),
                 String::new(),
             )
         };
@@ -227,21 +254,32 @@ impl RuntimePage {
                                     )
                                     .child(status_badge(status, status_color))
                                     .when(running, |row| {
-                                        row.child(status_badge("运行中", theme.primary))
+                                        row.child(status_badge(
+                                            zenclash_i18n::text("core_management.status.running"),
+                                            theme.primary,
+                                        ))
                                     })
                                     .when(requested, |row| {
-                                        row.child(status_badge("下次启动", theme.warning))
+                                        row.child(status_badge(
+                                            zenclash_i18n::text("core_management.status.next"),
+                                            theme.warning,
+                                        ))
                                     })
                                     .when(kind.is_experimental(), |row| {
-                                        row.child(status_badge("实验", theme.warning))
+                                        row.child(status_badge(
+                                            zenclash_i18n::text(
+                                                "core_management.status.experimental",
+                                            ),
+                                            theme.warning,
+                                        ))
                                     }),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(format!("来源 · {}", empty_source(&state.source))),
-                            )
+                            .child(div().text_xs().text_color(theme.muted_foreground).child(
+                                zenclash_i18n::text_with(
+                                    "core_management.status.source",
+                                    &[("source", empty_source(&state.source))],
+                                ),
+                            ))
                             .child(
                                 div()
                                     .max_w(px(610.))
@@ -274,7 +312,7 @@ impl RuntimePage {
                     .items_end()
                     .child(
                         Button::new(("select-core-binary", index))
-                            .label("选择文件")
+                            .label(zenclash_i18n::text("core_management.actions.select_file"))
                             .icon(IconName::FolderOpen)
                             .small()
                             .outline()
@@ -288,7 +326,7 @@ impl RuntimePage {
                             .gap_2()
                             .child(
                                 Button::new(("auto-core-binary", index))
-                                    .label("自动")
+                                    .label(zenclash_i18n::text("core_management.actions.automatic"))
                                     .small()
                                     .ghost()
                                     .disabled(
@@ -304,9 +342,9 @@ impl RuntimePage {
                             .child(
                                 Button::new(("activate-core", index))
                                     .label(if requested {
-                                        "已选择"
+                                        zenclash_i18n::text("core_management.actions.selected")
                                     } else {
-                                        "下次使用"
+                                        zenclash_i18n::text("core_management.actions.use_next")
                                     })
                                     .small()
                                     .outline()
@@ -346,12 +384,20 @@ impl RuntimePage {
                     .map(|kind| probe_core_binary(kind, binaries.path(kind)))
             })
             .await
-            .map_err(|error| format!("内核检测任务异常结束：{error}"))
+            .map_err(|error| {
+                zenclash_i18n::text_with(
+                    "core_management.errors.detection_task",
+                    &[("error", error.to_string())],
+                )
+            })
         });
         cx.spawn(async move |this, cx| {
-            let result = task
-                .await
-                .map_err(|error| format!("内核检测任务异常结束：{error}"));
+            let result = task.await.map_err(|error| {
+                zenclash_i18n::text_with(
+                    "core_management.errors.detection_task",
+                    &[("error", error.to_string())],
+                )
+            });
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(Ok(results)) => {
@@ -392,7 +438,13 @@ impl RuntimePage {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some(format!("选择 {} 可执行文件", kind.display_name()).into()),
+            prompt: Some(
+                zenclash_i18n::text_with(
+                    "core_management.dialog.choose",
+                    &[("core", kind.display_name().to_owned())],
+                )
+                .into(),
+            ),
         });
         cx.spawn(async move |this, cx| {
             let selection = receiver.await;
@@ -404,11 +456,17 @@ impl RuntimePage {
                 }
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
-                    this.error = Some(format!("无法打开内核选择器：{error}"));
+                    this.error = Some(zenclash_i18n::text_with(
+                        "core_management.errors.chooser",
+                        &[("error", error.to_string())],
+                    ));
                     cx.notify();
                 }
                 Err(error) => {
-                    this.error = Some(format!("内核选择器异常结束：{error}"));
+                    this.error = Some(zenclash_i18n::text_with(
+                        "core_management.errors.chooser_task",
+                        &[("error", error.to_string())],
+                    ));
                     cx.notify();
                 }
             });
@@ -423,7 +481,9 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) {
         let Some(store) = self.preferences_store.clone() else {
-            self.error = Some("应用设置存储不可用；请检查应用数据目录权限".into());
+            self.error = Some(zenclash_i18n::text(
+                "core_management.errors.preferences_unavailable",
+            ));
             cx.notify();
             return;
         };
@@ -444,12 +504,22 @@ impl RuntimePage {
                 Ok::<_, String>((info, preferences))
             })
             .await
-            .map_err(|error| format!("内核校验任务异常结束：{error}"))?
+            .map_err(|error| {
+                zenclash_i18n::text_with(
+                    "core_management.errors.validation_task",
+                    &[("error", error.to_string())],
+                )
+            })?
         });
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("内核校验任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "core_management.errors.validation_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -458,13 +528,13 @@ impl RuntimePage {
                     Ok((info, preferences)) if page_is_current => {
                         let state = this.core_management.get_mut(kind);
                         state.checking = false;
-                        state.source = "自定义文件".into();
+                        state.source = zenclash_i18n::text("core_management.source.custom");
                         state.info = Some(info);
                         state.error = None;
                         this.preferences = preferences.clone();
-                        this.notice = Some(format!(
-                            "{} 已通过真实版本检测；可选择为下次启动内核",
-                            kind.display_name()
+                        this.notice = Some(zenclash_i18n::text_with(
+                            "core_management.notices.validated",
+                            &[("core", kind.display_name().to_owned())],
                         ));
                         cx.emit(PreferencesRestored { preferences });
                     }
@@ -487,7 +557,9 @@ impl RuntimePage {
 
     fn use_automatic_core_binary(&mut self, kind: CoreKind, cx: &mut Context<Self>) {
         let Some(store) = self.preferences_store.clone() else {
-            self.error = Some("应用设置存储不可用；请检查应用数据目录权限".into());
+            self.error = Some(zenclash_i18n::text(
+                "core_management.errors.preferences_unavailable",
+            ));
             cx.notify();
             return;
         };
@@ -501,21 +573,31 @@ impl RuntimePage {
                     .map_err(|error| error.to_string())
             })
             .await
-            .map_err(|error| format!("自动发现设置任务异常结束：{error}"))?
+            .map_err(|error| {
+                zenclash_i18n::text_with(
+                    "core_management.errors.discovery_task",
+                    &[("error", error.to_string())],
+                )
+            })?
         });
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("自动发现设置任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "core_management.errors.discovery_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
                 match result {
                     Ok(preferences) if this.is_page_task_current(token) => {
                         this.preferences = preferences.clone();
-                        this.notice = Some(format!(
-                            "{} 已恢复自动发现；正在重新检测",
-                            kind.display_name()
+                        this.notice = Some(zenclash_i18n::text_with(
+                            "core_management.notices.automatic",
+                            &[("core", kind.display_name().to_owned())],
                         ));
                         cx.emit(PreferencesRestored { preferences });
                         this.refresh_core_management(cx);
@@ -532,15 +614,17 @@ impl RuntimePage {
 
     fn set_preferred_core(&mut self, kind: CoreKind, cx: &mut Context<Self>) {
         let Some(info) = self.core_management.get(kind).info.clone() else {
-            self.error = Some(format!(
-                "{} 尚未通过检测，不能设为启动内核",
-                kind.display_name()
+            self.error = Some(zenclash_i18n::text_with(
+                "core_management.errors.not_validated",
+                &[("core", kind.display_name().to_owned())],
             ));
             cx.notify();
             return;
         };
         let Some(store) = self.preferences_store.clone() else {
-            self.error = Some("应用设置存储不可用；请检查应用数据目录权限".into());
+            self.error = Some(zenclash_i18n::text(
+                "core_management.errors.preferences_unavailable",
+            ));
             cx.notify();
             return;
         };
@@ -556,12 +640,22 @@ impl RuntimePage {
                     .map_err(|error| error.to_string())
             })
             .await
-            .map_err(|error| format!("内核切换校验任务异常结束：{error}"))?
+            .map_err(|error| {
+                zenclash_i18n::text_with(
+                    "core_management.errors.switch_task",
+                    &[("error", error.to_string())],
+                )
+            })?
         });
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("内核切换校验任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "core_management.errors.switch_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -569,11 +663,14 @@ impl RuntimePage {
                     Ok(preferences) if this.is_page_task_current(token) => {
                         this.preferences = preferences.clone();
                         this.notice = Some(if kind == this.core_kind {
-                            format!("{} 已是当前与下次启动内核", kind.display_name())
+                            zenclash_i18n::text_with(
+                                "core_management.notices.already_current",
+                                &[("core", kind.display_name().to_owned())],
+                            )
                         } else {
-                            format!(
-                                "{} 已通过复检并设为下次启动内核；重启 ZenClash 后生效",
-                                kind.display_name()
+                            zenclash_i18n::text_with(
+                                "core_management.notices.preferred",
+                                &[("core", kind.display_name().to_owned())],
                             )
                         });
                         cx.emit(PreferencesRestored { preferences });
@@ -617,7 +714,7 @@ fn project_root() -> Result<PathBuf, String> {
         .parent()
         .and_then(Path::parent)
         .map(Path::to_path_buf)
-        .ok_or_else(|| "无法从 Cargo 清单路径确定 ZenClash 工作区".into())
+        .ok_or_else(|| zenclash_i18n::text("core_management.errors.workspace"))
 }
 
 fn binary_environment_override(kind: CoreKind) -> Option<&'static str> {
@@ -634,12 +731,17 @@ fn binary_source(kind: CoreKind, preferred: Option<&Path>) -> String {
     binary_environment_override(kind).map_or_else(
         || {
             if preferred.is_some() {
-                "自定义文件".into()
+                zenclash_i18n::text("core_management.source.custom")
             } else {
-                "自动发现".into()
+                zenclash_i18n::text("core_management.source.automatic")
             }
         },
-        |variable| format!("环境变量 {variable}"),
+        |variable| {
+            zenclash_i18n::text_with(
+                "core_management.source.environment",
+                &[("variable", variable.to_owned())],
+            )
+        },
     )
 }
 
@@ -650,15 +752,15 @@ fn core_index(kind: CoreKind) -> usize {
     }
 }
 
-fn empty_source(source: &str) -> &str {
+fn empty_source(source: &str) -> String {
     if source.is_empty() {
-        "等待检测"
+        zenclash_i18n::text("core_management.status.waiting")
     } else {
-        source
+        source.to_owned()
     }
 }
 
-fn status_badge(label: &'static str, color: gpui::Hsla) -> gpui::AnyElement {
+fn status_badge(label: String, color: gpui::Hsla) -> gpui::AnyElement {
     div()
         .px_2()
         .py(px(2.))

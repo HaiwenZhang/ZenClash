@@ -41,7 +41,7 @@ impl RuntimePage {
             .child(self.render_application_settings(&config, &autostart, theme, cx))
             .when(self.core_kind.is_experimental(), |this| {
                 this.child(super::message_banner(
-                    "meow-rs 实验模式：代理、流量、日志、连接和 Profile 可复用；完整配置通过托管进程重启应用，规则启停、Mihomo 升级、GeoData/UI 更新与 MRS 转换会被禁用。".into(),
+                    zenclash_i18n::text("settings.experimental_core"),
                     theme.warning,
                     theme,
                 ))
@@ -52,30 +52,31 @@ impl RuntimePage {
     }
 
     fn render_advanced_tools(&self, theme: &gpui_component::Theme) -> impl IntoElement {
-        setting_card("网络与内核", theme).child(
+        setting_card(zenclash_i18n::text("settings.advanced_tools.title"), theme).child(
             v_flex()
                 .p_4()
                 .gap_4()
                 .child(
-                    div().text_xs().text_color(theme.muted_foreground).child(
-                        "日常操作保留在首页；只有需要改变接管方式或排查内核时才进入这些工具。",
-                    ),
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(zenclash_i18n::text("settings.advanced_tools.description")),
                 )
                 .child(advanced_tool_group(
-                    "代理接管",
-                    "操作系统代理与虚拟网卡",
+                    zenclash_i18n::text("settings.advanced_tools.proxy.title"),
+                    zenclash_i18n::text("settings.advanced_tools.proxy.description"),
                     &[Page::SystemProxy, Page::Tun],
                     theme,
                 ))
                 .child(advanced_tool_group(
-                    "配置处理",
-                    "DNS、嗅探、资源与 YAML 覆写",
+                    zenclash_i18n::text("settings.advanced_tools.configuration.title"),
+                    zenclash_i18n::text("settings.advanced_tools.configuration.description"),
                     &[Page::Dns, Page::Sniffer, Page::Resources, Page::Override],
                     theme,
                 ))
                 .child(advanced_tool_group(
-                    "诊断维护",
-                    "网络环境与 Mihomo 内核",
+                    zenclash_i18n::text("settings.advanced_tools.diagnostics.title"),
+                    zenclash_i18n::text("settings.advanced_tools.diagnostics.description"),
                     &[Page::Network, Page::Mihomo],
                     theme,
                 )),
@@ -89,18 +90,18 @@ impl RuntimePage {
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        setting_card("应用与控制器", theme)
+        setting_card(zenclash_i18n::text("settings.application.title"), theme)
             .child(info_row(
-                "控制器",
-                &self.client.endpoint().controller,
+                zenclash_i18n::text("settings.application.controller"),
+                self.client.endpoint().controller.clone(),
                 theme,
             ))
             .child(setting_switch(
-                "登录时自动启动",
+                zenclash_i18n::text("settings.application.autostart.title"),
                 if autostart.enabled && !autostart.matches_current_executable {
-                    "检测到旧程序路径；重新开启可修复启动项"
+                    zenclash_i18n::text("settings.application.autostart.stale")
                 } else {
-                    "使用当前 ZenClash 程序注册原生系统启动项"
+                    zenclash_i18n::text("settings.application.autostart.current")
                 },
                 autostart.enabled,
                 "settings-autostart",
@@ -110,31 +111,154 @@ impl RuntimePage {
                 }),
             ))
             .child(info_row(
-                "自动启动位置",
+                zenclash_i18n::text("settings.application.autostart.location"),
                 if autostart.location.is_empty() {
-                    "等待系统状态"
+                    zenclash_i18n::text("settings.application.autostart.waiting")
                 } else {
-                    &autostart.location
+                    autostart.location.clone()
                 },
                 theme,
             ))
             .child(setting_switch(
                 "IPv6",
-                format!("同步修改 {} 运行时设置", self.core_kind.display_name()),
+                zenclash_i18n::text_with(
+                    "settings.application.ipv6.description",
+                    &[("core", self.core_kind.display_name().to_owned())],
+                ),
                 config.ipv6,
                 "settings-ipv6",
                 theme,
                 cx.listener(|this, checked, _, cx| {
                     this.apply_controlled_config(
                         json!({"ipv6": *checked}),
-                        "IPv6 设置已保存并热重载",
+                        zenclash_i18n::text("settings.application.ipv6.saved"),
                         cx,
                     );
                 }),
             ))
+            .child(self.language_setting(theme, cx))
             .child(theme_setting(theme))
             .child(tray_setting(theme))
             .child(self.traffic_history_setting(theme, cx))
+    }
+
+    fn language_setting(
+        &self,
+        theme: &gpui_component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
+            .min_h(px(58.))
+            .px_4()
+            .gap_3()
+            .justify_between()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().child(zenclash_i18n::text("language.title")))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(zenclash_i18n::text("language.description")),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("language-zh-cn")
+                            .label(zenclash_i18n::text("language.zh_cn"))
+                            .small()
+                            .outline()
+                            .selected(
+                                self.preferences.language
+                                    == zenclash_core::LanguagePreference::ZhCn,
+                            )
+                            .disabled(self.mutating)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_language(zenclash_core::LanguagePreference::ZhCn, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("language-en")
+                            .label(zenclash_i18n::text("language.en"))
+                            .small()
+                            .outline()
+                            .selected(
+                                self.preferences.language == zenclash_core::LanguagePreference::En,
+                            )
+                            .disabled(self.mutating)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_language(zenclash_core::LanguagePreference::En, cx);
+                            })),
+                    ),
+            )
+    }
+
+    fn set_language(
+        &mut self,
+        language: zenclash_core::LanguagePreference,
+        cx: &mut Context<Self>,
+    ) {
+        if language == self.preferences.language {
+            return;
+        }
+        let Some(store) = self.preferences_store.clone() else {
+            self.error = Some(zenclash_i18n::text_with(
+                "settings.language.save_error",
+                &[(
+                    "error",
+                    zenclash_i18n::text("settings.errors.preferences_unavailable"),
+                )],
+            ));
+            cx.notify();
+            return;
+        };
+        let Some(token) = self.begin_mutation(Page::Settings) else {
+            return;
+        };
+        let task = self.runtime.spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                store
+                    .update(|preferences| preferences.language = language)
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .map_err(|error| error.to_string())?
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                this.mutating = false;
+                match result {
+                    Ok(preferences) if this.is_page_task_current(token) => {
+                        zenclash_i18n::set_locale(preferences.language.locale());
+                        this.preferences = preferences.clone();
+                        this.notice = Some(zenclash_i18n::text("language.saved"));
+                        cx.emit(PreferencesRestored { preferences });
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        this.set_page_error(
+                            token,
+                            zenclash_i18n::text_with(
+                                "settings.language.save_error",
+                                &[("error", error)],
+                            ),
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn set_autostart(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -151,7 +275,12 @@ impl RuntimePage {
                     .map_err(|error| error.to_string())
             })
             .await
-            .map_err(|error| format!("自动启动设置任务异常结束：{error}"))??;
+            .map_err(|error| {
+                zenclash_i18n::text_with(
+                    "settings.application.autostart.task_error",
+                    &[("error", error.to_string())],
+                )
+            })??;
             let config = client
                 .runtime_config()
                 .await
@@ -164,7 +293,12 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("自动启动设置任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "settings.application.autostart.task_error",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -172,9 +306,9 @@ impl RuntimePage {
                     Ok(data) => {
                         if this.replace_page_data(token, data) {
                             this.notice = Some(if enabled {
-                                "登录自动启动已启用并通过系统状态回读".into()
+                                zenclash_i18n::text("settings.application.autostart.enabled")
                             } else {
-                                "登录自动启动已关闭并通过系统状态回读".into()
+                                zenclash_i18n::text("settings.application.autostart.disabled")
                             });
                         }
                     }
@@ -194,10 +328,10 @@ impl RuntimePage {
     ) -> impl IntoElement {
         v_flex()
             .child(setting_switch(
-                "记录流量历史",
-                format!(
-                    "从真实 {} 连接计数器计算增量，并写入本地 SQLite",
-                    self.core_kind.display_name()
+                zenclash_i18n::text("settings.traffic_history.title"),
+                zenclash_i18n::text_with(
+                    "settings.traffic_history.description",
+                    &[("core", self.core_kind.display_name().to_owned())],
                 ),
                 self.preferences.traffic_history_enabled,
                 "settings-traffic-history",
@@ -217,13 +351,16 @@ impl RuntimePage {
                     .child(
                         v_flex()
                             .gap_1()
-                            .child(div().text_sm().child("历史保留"))
                             .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child("写入新样本时自动清理过期记录"),
-                            ),
+                                div().text_sm().child(zenclash_i18n::text(
+                                    "settings.traffic_history.retention",
+                                )),
+                            )
+                            .child(div().text_xs().text_color(theme.muted_foreground).child(
+                                zenclash_i18n::text(
+                                    "settings.traffic_history.retention_description",
+                                ),
+                            )),
                     )
                     .child(
                         h_flex()
@@ -231,7 +368,10 @@ impl RuntimePage {
                             .children([7_u16, 30, 90].into_iter().enumerate().map(
                                 |(index, days)| {
                                     Button::new(("traffic-retention", index))
-                                        .label(format!("{days} 天"))
+                                        .label(zenclash_i18n::text_with(
+                                            "settings.traffic_history.days",
+                                            &[("days", days.to_string())],
+                                        ))
                                         .small()
                                         .outline()
                                         .selected(self.preferences.traffic_retention_days == days)
@@ -253,27 +393,34 @@ impl RuntimePage {
             Some(enabled),
             None,
             if enabled {
-                "流量历史记录已启用"
+                zenclash_i18n::text("settings.traffic_history.enabled")
             } else {
-                "流量历史记录已关闭"
+                zenclash_i18n::text("settings.traffic_history.disabled")
             },
             cx,
         );
     }
 
     fn set_traffic_retention(&mut self, days: u16, cx: &mut Context<Self>) {
-        self.persist_traffic_preferences(None, Some(days), "流量历史保留策略已保存", cx);
+        self.persist_traffic_preferences(
+            None,
+            Some(days),
+            zenclash_i18n::text("settings.traffic_history.retention_saved"),
+            cx,
+        );
     }
 
     fn persist_traffic_preferences(
         &mut self,
         history_enabled: Option<bool>,
         retention_days: Option<u16>,
-        success: &'static str,
+        success: String,
         cx: &mut Context<Self>,
     ) {
         let Some(store) = self.preferences_store.clone() else {
-            self.error = Some("应用设置存储不可用；请检查应用数据目录权限".into());
+            self.error = Some(zenclash_i18n::text(
+                "settings.errors.preferences_unavailable",
+            ));
             cx.notify();
             return;
         };
@@ -294,19 +441,29 @@ impl RuntimePage {
                     .map_err(|error| error.to_string())
             })
             .await
-            .map_err(|error| format!("应用设置保存任务异常结束：{error}"))?
+            .map_err(|error| {
+                zenclash_i18n::text_with(
+                    "settings.errors.preferences_task",
+                    &[("error", error.to_string())],
+                )
+            })?
         });
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("应用设置保存任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "settings.errors.preferences_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
                 match result {
                     Ok(preferences) if this.is_page_task_current(token) => {
                         this.preferences = preferences.clone();
-                        this.notice = Some(success.into());
+                        this.notice = Some(success);
                         cx.emit(PreferencesRestored { preferences });
                     }
                     Ok(_) => {}
@@ -321,8 +478,8 @@ impl RuntimePage {
 }
 
 fn advanced_tool_group(
-    label: &'static str,
-    description: &'static str,
+    label: String,
+    description: String,
     pages: &'static [Page],
     theme: &gpui_component::Theme,
 ) -> gpui::AnyElement {
@@ -370,12 +527,19 @@ fn theme_setting(theme: &gpui_component::Theme) -> gpui::Div {
         .border_b_1()
         .border_color(theme.border)
         .child(
-            v_flex().gap_1().child(div().text_sm().child("主题")).child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child("固定明暗外观，或实时跟随操作系统"),
-            ),
+            v_flex()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .child(zenclash_i18n::text("settings.appearance.title")),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(zenclash_i18n::text("settings.appearance.description")),
+                ),
         )
         .child(
             h_flex()
@@ -383,7 +547,7 @@ fn theme_setting(theme: &gpui_component::Theme) -> gpui::Div {
                 .child(
                     Button::new("theme-system")
                         .icon(IconName::Globe)
-                        .label("跟随系统")
+                        .label(zenclash_i18n::text("settings.appearance.system"))
                         .small()
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(SetSystemTheme), cx);
@@ -392,7 +556,7 @@ fn theme_setting(theme: &gpui_component::Theme) -> gpui::Div {
                 .child(
                     Button::new("theme-light")
                         .icon(IconName::Sun)
-                        .label("浅色")
+                        .label(zenclash_i18n::text("settings.appearance.light"))
                         .small()
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(SetLightTheme), cx);
@@ -401,7 +565,7 @@ fn theme_setting(theme: &gpui_component::Theme) -> gpui::Div {
                 .child(
                     Button::new("theme-dark")
                         .icon(IconName::Moon)
-                        .label("深色")
+                        .label(zenclash_i18n::text("settings.appearance.dark"))
                         .small()
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(SetDarkTheme), cx);
@@ -421,12 +585,16 @@ fn tray_setting(theme: &gpui_component::Theme) -> gpui::Div {
         .child(
             v_flex()
                 .gap_1()
-                .child(div().text_sm().child("状态栏流量图标"))
+                .child(
+                    div()
+                        .text_sm()
+                        .child(zenclash_i18n::text("settings.tray.title")),
+                )
                 .child(
                     div()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child("显示实时上传、下载速率和动态箭头图标"),
+                        .child(zenclash_i18n::text("settings.tray.description")),
                 ),
         )
         .child(
@@ -434,7 +602,7 @@ fn tray_setting(theme: &gpui_component::Theme) -> gpui::Div {
                 .gap_2()
                 .child(
                     Button::new("tray-show")
-                        .label("显示")
+                        .label(zenclash_i18n::text("common.actions.show"))
                         .small()
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(ShowTrafficIcon), cx);
@@ -442,7 +610,7 @@ fn tray_setting(theme: &gpui_component::Theme) -> gpui::Div {
                 )
                 .child(
                     Button::new("tray-hide")
-                        .label("隐藏")
+                        .label(zenclash_i18n::text("common.actions.hide"))
                         .small()
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(HideTrafficIcon), cx);

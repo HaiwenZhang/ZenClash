@@ -28,8 +28,10 @@ impl ProfileFormState {
     ) -> Self {
         Self {
             adding_subscription: false,
-            subscription_name: cx
-                .new(|cx| InputState::new(window, cx).placeholder("例如：机场主订阅")),
+            subscription_name: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(zenclash_i18n::text("profiles.form.placeholder_name"))
+            }),
             subscription_url: cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder("https://example.com/api/v1/client/subscribe…")
@@ -39,10 +41,17 @@ impl ProfileFormState {
                     .default_value("clash.meta")
                     .placeholder("clash.meta")
             }),
-            subscription_authorization: cx
-                .new(|cx| InputState::new(window, cx).placeholder("Bearer … 或 Basic …（可留空）")),
+            subscription_authorization: cx.new(|cx| {
+                InputState::new(window, cx).placeholder(zenclash_i18n::text(
+                    "profiles.form.placeholder_authorization",
+                ))
+            }),
             subscription_route: RemoteProfileRoute::DirectWithMihomoFallback,
-            request_name: cx.new(|cx| InputState::new(window, cx).placeholder("在线订阅名称")),
+            request_name: cx.new(|cx| {
+                InputState::new(window, cx).placeholder(zenclash_i18n::text(
+                    "profiles.form.placeholder_request_name",
+                ))
+            }),
             request_url: cx.new(|cx| {
                 InputState::new(window, cx).placeholder("https://example.com/profile.yaml")
             }),
@@ -52,7 +61,9 @@ impl ProfileFormState {
                     .placeholder("clash.meta")
             }),
             request_authorization: cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Bearer … 或 Basic …（留空即删除）")
+                InputState::new(window, cx).placeholder(zenclash_i18n::text(
+                    "profiles.form.placeholder_request_authorization",
+                ))
             }),
             request_timeout_seconds: cx.new(|cx| {
                 InputState::new(window, cx)
@@ -60,11 +71,36 @@ impl ProfileFormState {
                     .placeholder("30")
             }),
             update_cron: cx.new(|cx| {
-                InputState::new(window, cx).placeholder("例如：0 */6 * * *（分 时 日 月 周）")
+                InputState::new(window, cx)
+                    .placeholder(zenclash_i18n::text("profiles.form.placeholder_cron"))
             }),
             editing_profile_id: None,
             editing_route: RemoteProfileRoute::DirectWithMihomoFallback,
             editing_fixed_update_interval: false,
+        }
+    }
+
+    pub(in crate::pages::runtime) fn refresh_localized_placeholders(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<'_, super::super::RuntimePage>,
+    ) {
+        for (input, key) in [
+            (&self.subscription_name, "profiles.form.placeholder_name"),
+            (
+                &self.subscription_authorization,
+                "profiles.form.placeholder_authorization",
+            ),
+            (&self.request_name, "profiles.form.placeholder_request_name"),
+            (
+                &self.request_authorization,
+                "profiles.form.placeholder_request_authorization",
+            ),
+            (&self.update_cron, "profiles.form.placeholder_cron"),
+        ] {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(zenclash_i18n::text(key), window, cx);
+            });
         }
     }
 }

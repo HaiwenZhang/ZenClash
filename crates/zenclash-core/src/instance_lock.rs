@@ -24,6 +24,15 @@ pub struct AppInstanceLock {
     _file: File,
 }
 
+impl Drop for AppInstanceLock {
+    fn drop(&mut self) {
+        // Closing the descriptor/handle also releases the lock, but explicitly
+        // unlocking makes immediate handoff deterministic after a contended
+        // non-blocking acquisition (notably on macOS).
+        let _ = unlock(&self._file);
+    }
+}
+
 impl AppInstanceLock {
     /// Opens and exclusively locks `path` without waiting.
     ///
@@ -75,6 +84,18 @@ fn try_lock(file: &File) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
+fn unlock(file: &File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(unix)]
 fn is_lock_contention(error: &std::io::Error) -> bool {
     matches!(
         error.raw_os_error(),
@@ -112,6 +133,32 @@ fn try_lock(file: &File) -> std::io::Result<()> {
 }
 
 #[cfg(windows)]
+fn unlock(file: &File) -> std::io::Result<()> {
+    use std::{mem::zeroed, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::{
+        Foundation::HANDLE, Storage::FileSystem::UnlockFileEx, System::IO::OVERLAPPED,
+    };
+
+    // SAFETY: mirrors `try_lock`; the handle and OVERLAPPED pointer remain
+    // valid for the duration of the call and cover the same byte range.
+    let mut overlapped: OVERLAPPED = unsafe { zeroed() };
+    let unlocked = unsafe {
+        UnlockFileEx(
+            file.as_raw_handle() as HANDLE,
+            0,
+            u32::MAX,
+            u32::MAX,
+            &mut overlapped,
+        )
+    };
+    if unlocked != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
 fn is_lock_contention(error: &std::io::Error) -> bool {
     use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
 
@@ -127,6 +174,11 @@ fn try_lock(_file: &File) -> std::io::Result<()> {
         std::io::ErrorKind::Unsupported,
         "当前平台不支持 ZenClash 实例锁",
     ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn unlock(_file: &File) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(not(any(unix, windows)))]

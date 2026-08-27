@@ -16,16 +16,22 @@ pub fn init(cx: &mut App) {
             KeyBinding::new("cmd-shift-m", ShowStatusMenu, None),
             KeyBinding::new("cmd-shift-f", ToggleFloatingWindow, None),
         ]);
-        cx.set_menus(vec![Menu {
-            name: "ZenClash".into(),
-            items: vec![MenuItem::action("退出 ZenClash", Quit)],
-        }]);
+        refresh_native_app_menu(cx);
     } else {
         cx.bind_keys([
             KeyBinding::new("ctrl-q", Quit, None),
             KeyBinding::new("ctrl-shift-m", ShowStatusMenu, None),
             KeyBinding::new("ctrl-shift-f", ToggleFloatingWindow, None),
         ]);
+    }
+}
+
+pub(super) fn refresh_native_app_menu(cx: &mut App) {
+    if cfg!(target_os = "macos") {
+        cx.set_menus(vec![Menu {
+            name: zenclash_i18n::text("app.menu.title").into(),
+            items: vec![MenuItem::action(zenclash_i18n::text("app.menu.quit"), Quit)],
+        }]);
     }
 }
 
@@ -79,18 +85,19 @@ pub fn create_main_window(services: AppServices, cx: &mut App) {
             window.activate_window();
             #[cfg(target_os = "macos")]
             keep_main_window_alive_when_closed(window, cx);
-            let network_tray = match NetworkTrayIcon::new(services.core_kind) {
-                Ok(tray) => {
-                    if let Err(error) = tray.set_visible(preferences.traffic_tray_visible) {
-                        tracing::warn!(%error, "failed to restore traffic tray visibility");
+            let network_tray =
+                match NetworkTrayIcon::new(services.core_kind, services.traffic_monitor.clone()) {
+                    Ok(tray) => {
+                        if let Err(error) = tray.set_visible(preferences.traffic_tray_visible) {
+                            tracing::warn!(%error, "failed to restore traffic tray visibility");
+                        }
+                        Some(tray)
                     }
-                    Some(tray)
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "failed to create native traffic tray icon");
-                    None
-                }
-            };
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to create native traffic tray icon");
+                        None
+                    }
+                };
             let app = cx.new(|cx| {
                 ZenClashApp::new(
                     services,
@@ -119,7 +126,7 @@ pub(super) fn configure_log_monitor(
     store: Option<&AppPreferencesStore>,
     preferences: &AppPreferences,
 ) -> Result<(), String> {
-    let store = store.ok_or_else(|| "应用设置存储不可用".to_owned())?;
+    let store = store.ok_or_else(|| zenclash_i18n::text("app.errors.preferences_unavailable"))?;
     monitor
         .configure_persistence(
             store.log_file_path(),

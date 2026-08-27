@@ -27,7 +27,7 @@ impl RuntimePage {
             files: true,
             directories: true,
             multiple: true,
-            prompt: Some("导入 YAML 覆写文件或目录".into()),
+            prompt: Some(zenclash_i18n::text("overrides.dialog.import").into()),
         });
         cx.spawn(async move |this, cx| {
             let selection = receiver.await;
@@ -39,11 +39,23 @@ impl RuntimePage {
                 }
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
-                    this.set_page_error(token, format!("无法打开覆写选择器：{error}"));
+                    this.set_page_error(
+                        token,
+                        zenclash_i18n::text_with(
+                            "overrides.errors.picker",
+                            &[("error", error.to_string())],
+                        ),
+                    );
                     cx.notify();
                 }
                 Err(error) => {
-                    this.set_page_error(token, format!("覆写选择器异常结束：{error}"));
+                    this.set_page_error(
+                        token,
+                        zenclash_i18n::text_with(
+                            "overrides.errors.picker_task",
+                            &[("error", error.to_string())],
+                        ),
+                    );
                     cx.notify();
                 }
             });
@@ -53,7 +65,7 @@ impl RuntimePage {
 
     fn load_config_preview(&mut self, cx: &mut Context<Self>) {
         let Some(profile) = self.profile_path.clone() else {
-            self.error = Some("未配置基础配置文件路径".into());
+            self.error = Some(zenclash_i18n::text("overrides.errors.base_missing"));
             cx.notify();
             return;
         };
@@ -79,19 +91,29 @@ impl RuntimePage {
                 })
             })
             .await
-            .map_err(|error| format!("配置预览任务异常结束：{error}"))?
+            .map_err(|error| {
+                zenclash_i18n::text_with(
+                    "overrides.errors.preview_task",
+                    &[("error", error.to_string())],
+                )
+            })?
         });
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("配置预览后台任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "overrides.errors.preview_worker",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
                 match result {
                     Ok(preview) if this.is_page_task_current(token) => {
                         this.config_preview = Some(preview);
-                        this.notice = Some("已生成原始配置与最终运行配置预览".into());
+                        this.notice = Some(zenclash_i18n::text("overrides.notices.preview"));
                     }
                     Ok(_) => {}
                     Err(error) => this.set_page_error(token, error),
@@ -117,7 +139,7 @@ impl RuntimePage {
 
     fn apply_overrides(&mut self, cx: &mut Context<Self>) {
         let Some(profile) = self.profile_path.clone() else {
-            self.error = Some("未配置基础配置文件路径".into());
+            self.error = Some(zenclash_i18n::text("overrides.errors.base_missing"));
             cx.notify();
             return;
         };
@@ -141,14 +163,20 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = match task.await {
                 Ok(result) => result,
-                Err(error) => Err(format!("覆写热重载任务异常结束：{error}")),
+                Err(error) => Err(zenclash_i18n::text_with(
+                    "overrides.errors.reload_task",
+                    &[("error", error.to_string())],
+                )),
             };
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
                 match result {
                     Ok(data) => {
                         if this.replace_page_data(token, data) {
-                            this.notice = Some(format!("{count} 份 YAML 覆写已合并并热重载"));
+                            this.notice = Some(zenclash_i18n::text_with(
+                                "overrides.notices.applied",
+                                &[("count", count.to_string())],
+                            ));
                         }
                     }
                     Err(error) => this.set_page_error(token, error),
@@ -169,7 +197,7 @@ impl RuntimePage {
             .gap_4()
             .child(self.render_override_chain(theme, cx))
             .child(message_banner(
-                "基础文件保持不变；映射递归合并，后选覆写优先，数组与标量整体替换。".into(),
+                zenclash_i18n::text("overrides.chain.explanation"),
                 theme.primary,
                 theme,
             ))
@@ -178,14 +206,14 @@ impl RuntimePage {
                     .gap_4()
                     .child(render_config_diff(&preview.diff, theme))
                     .child(preview_panel(
-                        "原始 Profile YAML",
+                        zenclash_i18n::text("overrides.preview.source"),
                         &preview.source,
                         "copy-source-config",
                         theme,
                         cx.listener(|this, _, _, cx| this.copy_config_preview(false, cx)),
                     ))
                     .child(preview_panel(
-                        "最终运行 YAML",
+                        zenclash_i18n::text("overrides.preview.effective"),
                         &preview.effective,
                         "copy-effective-config",
                         theme,
@@ -203,10 +231,10 @@ impl RuntimePage {
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let path = self
-            .profile_path
-            .as_ref()
-            .map_or_else(|| "未指定".into(), |path| path.display().to_string());
+        let path = self.profile_path.as_ref().map_or_else(
+            || zenclash_i18n::text("overrides.chain.unspecified"),
+            |path| path.display().to_string(),
+        );
         let count = self.override_catalog.items.len();
         let enabled = self
             .override_catalog
@@ -214,11 +242,21 @@ impl RuntimePage {
             .iter()
             .filter(|record| record.enabled)
             .count();
-        setting_card("配置覆写链", theme)
-            .child(info_row("基础配置", &path, theme))
+        setting_card(zenclash_i18n::text("overrides.chain.title"), theme)
             .child(info_row(
-                "YAML 覆写",
-                &format!("{enabled} 启用 / {count} 托管"),
+                zenclash_i18n::text("overrides.chain.base"),
+                &path,
+                theme,
+            ))
+            .child(info_row(
+                zenclash_i18n::text("overrides.chain.yaml"),
+                zenclash_i18n::text_with(
+                    "overrides.chain.count",
+                    &[
+                        ("enabled", enabled.to_string()),
+                        ("total", count.to_string()),
+                    ],
+                ),
                 theme,
             ))
             .children(
@@ -236,7 +274,7 @@ impl RuntimePage {
                     .child(
                         Button::new("preview-overrides")
                             .icon(IconName::Eye)
-                            .label("预览最终配置")
+                            .label(zenclash_i18n::text("overrides.actions.preview"))
                             .loading(self.mutating)
                             .disabled(self.mutating)
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -246,7 +284,7 @@ impl RuntimePage {
                     .child(
                         Button::new("edit-source-profile")
                             .icon(IconName::File)
-                            .label("编辑原始 YAML")
+                            .label(zenclash_i18n::text("overrides.actions.edit"))
                             .outline()
                             .disabled(
                                 self.mutating
@@ -260,13 +298,13 @@ impl RuntimePage {
                     .child(
                         Button::new("choose-overrides")
                             .icon(IconName::FolderOpen)
-                            .label("导入文件 / 目录")
+                            .label(zenclash_i18n::text("overrides.actions.import"))
                             .on_click(cx.listener(|this, _, _, cx| this.choose_overrides(cx))),
                     )
                     .child(
                         Button::new("apply-overrides")
                             .icon(IconName::Redo2)
-                            .label("合并并热重载")
+                            .label(zenclash_i18n::text("overrides.actions.apply"))
                             .primary()
                             .loading(self.mutating)
                             .disabled(self.profile_path.is_none())
@@ -349,7 +387,7 @@ impl RuntimePage {
 }
 
 fn preview_panel<F>(
-    title: &'static str,
+    title: String,
     payload: &str,
     button_id: &'static str,
     theme: &gpui_component::Theme,
@@ -369,7 +407,7 @@ where
                 .child(
                     Button::new(button_id)
                         .icon(IconName::Copy)
-                        .label("复制完整内容")
+                        .label(zenclash_i18n::text("overrides.actions.copy"))
                         .on_click(copy),
                 ),
         )
@@ -385,7 +423,7 @@ where
         )
         .when(truncated, |panel| {
             panel.child(message_banner(
-                "界面仅显示前 64 KiB；复制按钮仍会复制完整 YAML。".into(),
+                zenclash_i18n::text("overrides.preview.truncated"),
                 theme.warning,
                 theme,
             ))

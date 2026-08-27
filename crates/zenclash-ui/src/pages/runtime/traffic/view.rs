@@ -37,25 +37,25 @@ impl RuntimePage {
                     .gap_3()
                     .flex_wrap()
                     .child(metric(
-                        "实时上传",
+                        zenclash_i18n::text("traffic.metrics.upload"),
                         format_speed(realtime.upload),
                         theme.success,
                         theme,
                     ))
                     .child(metric(
-                        "实时下载",
+                        zenclash_i18n::text("traffic.metrics.download"),
                         format_speed(realtime.download),
                         theme.primary,
                         theme,
                     ))
                     .child(metric(
-                        "区间用量",
+                        zenclash_i18n::text("traffic.metrics.range_usage"),
                         format_bytes(history.overview.totals.total),
                         theme.warning,
                         theme,
                     ))
                     .child(metric(
-                        "活动连接",
+                        zenclash_i18n::text("traffic.metrics.connections"),
                         connections.connections.len().to_string(),
                         theme.foreground,
                         theme,
@@ -107,14 +107,19 @@ impl RuntimePage {
                                 div()
                                     .text_sm()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child("历史流量趋势"),
+                                    .child(zenclash_i18n::text("traffic.chart.title")),
                             )
                             .child(div().text_xs().text_color(theme.muted_foreground).child(
-                                format!(
-                                    "{} · 上传 {} · 下载 {}",
-                                    history.range.label(),
-                                    format_bytes(history.overview.totals.upload),
-                                    format_bytes(history.overview.totals.download)
+                                zenclash_i18n::text_with(
+                                    "traffic.chart.summary",
+                                    &[
+                                        ("range", history.range.label()),
+                                        ("upload", format_bytes(history.overview.totals.upload)),
+                                        (
+                                            "download",
+                                            format_bytes(history.overview.totals.download),
+                                        ),
+                                    ],
                                 ),
                             )),
                     )
@@ -122,8 +127,18 @@ impl RuntimePage {
                         h_flex()
                             .gap_3()
                             .text_xs()
-                            .child(h_flex().gap_1().text_color(theme.chart_2).child("● 上传"))
-                            .child(h_flex().gap_1().text_color(theme.chart_1).child("● 下载")),
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .text_color(theme.chart_2)
+                                    .child(zenclash_i18n::text("traffic.chart.upload")),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .text_color(theme.chart_1)
+                                    .child(zenclash_i18n::text("traffic.chart.download")),
+                            ),
                     ),
             )
             .child(
@@ -139,7 +154,10 @@ impl RuntimePage {
                     .bg(theme.background.opacity(0.36))
                     .when(has_points, |this| this.child(chart))
                     .when(!has_points, |this| {
-                        this.child(empty_state("这个时间范围还没有流量样本", theme))
+                        this.child(empty_state(
+                            zenclash_i18n::text("traffic.chart.empty"),
+                            theme,
+                        ))
                     }),
             )
             .into_any_element()
@@ -182,16 +200,16 @@ impl RuntimePage {
             .child(
                 h_flex().gap_2().children(
                     [
-                        (TrafficDimension::Host, "域名"),
-                        (TrafficDimension::SourceIp, "设备"),
-                        (TrafficDimension::Outbound, "出口"),
-                        (TrafficDimension::Process, "进程"),
+                        TrafficDimension::Host,
+                        TrafficDimension::SourceIp,
+                        TrafficDimension::Outbound,
+                        TrafficDimension::Process,
                     ]
                     .into_iter()
                     .enumerate()
-                    .map(|(index, (dimension, label))| {
+                    .map(|(index, dimension)| {
                         Button::new(("traffic-dimension", index))
-                            .label(label)
+                            .label(dimension_label(dimension))
                             .small()
                             .outline()
                             .selected(history.dimension == dimension)
@@ -210,7 +228,7 @@ impl RuntimePage {
             .when(self.traffic_history.clear_confirmation, |this| {
                 this.child(
                     Button::new("cancel-clear-traffic")
-                        .label("取消")
+                        .label(zenclash_i18n::text("traffic.actions.cancel"))
                         .small()
                         .ghost()
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -220,7 +238,7 @@ impl RuntimePage {
                 .child(
                     Button::new("confirm-clear-traffic")
                         .icon(IconName::Delete)
-                        .label("确认清空")
+                        .label(zenclash_i18n::text("traffic.actions.confirm_clear"))
                         .small()
                         .danger()
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -232,7 +250,7 @@ impl RuntimePage {
                 this.child(
                     Button::new("request-clear-traffic")
                         .icon(IconName::Delete)
-                        .label("清空历史")
+                        .label(zenclash_i18n::text("traffic.actions.clear"))
                         .small()
                         .ghost()
                         .disabled(self.mutating)
@@ -268,21 +286,24 @@ impl RuntimePage {
                         div()
                             .text_sm()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(format!("{}排名", dimension_label(history.dimension))),
+                            .child(zenclash_i18n::text_with(
+                                "traffic.rankings.title",
+                                &[("dimension", dimension_label(history.dimension))],
+                            )),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(format!("{} 条样本", history.overview.totals.samples)),
-                    ),
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(
+                        zenclash_i18n::text_with(
+                            "traffic.rankings.samples",
+                            &[("count", history.overview.totals.samples.to_string())],
+                        ),
+                    )),
             )
             .when(history.overview.rankings.is_empty(), |this| {
                 this.child(empty_state(
                     if self.preferences.traffic_history_enabled {
-                        "尚无历史用量；保持内核运行后会自动记录"
+                        zenclash_i18n::text("traffic.rankings.empty_enabled")
                     } else {
-                        "流量历史记录已在应用设置中关闭"
+                        zenclash_i18n::text("traffic.rankings.empty_disabled")
                     },
                     theme,
                 ))
@@ -352,17 +373,20 @@ impl RuntimePage {
                         div()
                             .text_sm()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("流向检查器"),
+                            .child(zenclash_i18n::text("traffic.inspector.title")),
                     )
                     .child(
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child("选择排名项，再查看关联目标与实际出口"),
+                            .child(zenclash_i18n::text("traffic.inspector.description")),
                     ),
             )
             .when(history.selected_parent.is_none(), |this| {
-                this.child(empty_state("从左侧排名选择一项开始下钻", theme))
+                this.child(empty_state(
+                    zenclash_i18n::text("traffic.inspector.empty"),
+                    theme,
+                ))
             })
             .when_some(history.selected_parent.clone(), |this, parent| {
                 this.child(
@@ -383,12 +407,12 @@ impl RuntimePage {
                             .gap_2()
                             .border_t_1()
                             .border_color(theme.border)
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(format!("{detail} · 实际出口")),
-                            )
+                            .child(div().text_xs().text_color(theme.muted_foreground).child(
+                                zenclash_i18n::text_with(
+                                    "traffic.inspector.actual_outbound",
+                                    &[("detail", detail)],
+                                ),
+                            ))
                             .children(history.proxy_stats.iter().map(|item| {
                                 h_flex()
                                     .justify_between()

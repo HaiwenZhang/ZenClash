@@ -47,8 +47,8 @@ use crate::{
     pages::{
         proxies::ProxiesPage,
         runtime::{
-            ElevatedRestartRequested, PreferencesRestored, ProfileActivated, RuntimeConfigApplied,
-            RuntimePage, RuntimePageServices,
+            ElevatedRestartRequested, PreferencesRestored, ProfileActivated, ProxySelectionChanged,
+            RuntimeConfigApplied, RuntimePage, RuntimePageServices,
         },
         Page,
     },
@@ -232,6 +232,8 @@ impl ZenClashApp {
             )
         });
         let profile_subscription = Self::subscribe_profile_events(&runtime_page, cx);
+        let proxy_selection_subscription =
+            Self::subscribe_proxy_selection_events(&runtime_page, cx);
         let runtime_config_subscription = Self::subscribe_runtime_config_events(&runtime_page, cx);
         let preferences_subscription = Self::subscribe_preference_events(&runtime_page, cx);
         let elevated_restart_subscription =
@@ -276,6 +278,7 @@ impl ZenClashApp {
             traffic_history_policy,
             _subscriptions: vec![
                 profile_subscription,
+                proxy_selection_subscription,
                 runtime_config_subscription,
                 preferences_subscription,
                 elevated_restart_subscription,
@@ -306,6 +309,17 @@ impl ZenClashApp {
         })
     }
 
+    fn subscribe_proxy_selection_events(
+        runtime_page: &Entity<RuntimePage>,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe(runtime_page, |this, _, _: &ProxySelectionChanged, cx| {
+            this.proxies_page
+                .update(cx, super::pages::proxies::ProxiesPage::reload);
+            this.refresh_tray_menu(cx);
+        })
+    }
+
     fn subscribe_runtime_config_events(
         runtime_page: &Entity<RuntimePage>,
         cx: &mut Context<Self>,
@@ -320,33 +334,52 @@ impl ZenClashApp {
         runtime_page: &Entity<RuntimePage>,
         cx: &mut Context<Self>,
     ) -> Subscription {
-        cx.subscribe(runtime_page, |this, _, event: &PreferencesRestored, cx| {
-            this.preferences = event.preferences.clone();
-            this.traffic_history_policy.update(&this.preferences);
-            if let Err(error) = bootstrap::configure_log_monitor(
-                &this.log_monitor,
-                this.preferences_store.as_ref(),
-                &this.preferences,
-            ) {
-                tracing::warn!(%error, "failed to apply restored log persistence settings");
-            }
-            if let Some(tray) = &this.network_tray {
-                if let Err(error) = tray.set_visible(this.preferences.traffic_tray_visible) {
-                    tracing::warn!(%error, "failed to apply restored tray visibility");
+        let runtime_page_for_localization = runtime_page.clone();
+        cx.subscribe(
+            runtime_page,
+            move |this, _, event: &PreferencesRestored, cx| {
+                let locale_changed = this.preferences.language != event.preferences.language;
+                this.preferences = event.preferences.clone();
+                if locale_changed {
+                    zenclash_i18n::set_locale(this.preferences.language.locale());
+                    bootstrap::refresh_native_app_menu(cx);
+                    this.proxies_page.update(cx, |_, cx| cx.notify());
+                    let runtime_page = runtime_page_for_localization.clone();
+                    let main_window = this.main_window;
+                    cx.defer(move |cx| {
+                        let _ = cx.update_window(main_window, |_, window, cx| {
+                            runtime_page.update(cx, |page, cx| {
+                                page.refresh_localized_placeholders(window, cx);
+                            });
+                        });
+                    });
                 }
-            }
-            let appearance = this.preferences.appearance;
-            let _ = cx.update_window(this.main_window, move |_, window, cx| {
-                let mode = match appearance {
-                    AppearancePreference::System => ThemeMode::from(window.appearance()),
-                    AppearancePreference::Light => ThemeMode::Light,
-                    AppearancePreference::Dark => ThemeMode::Dark,
-                };
-                apply_zen_theme(mode, Some(window), cx);
-            });
-            this.refresh_tray_menu(cx);
-            cx.notify();
-        })
+                this.traffic_history_policy.update(&this.preferences);
+                if let Err(error) = bootstrap::configure_log_monitor(
+                    &this.log_monitor,
+                    this.preferences_store.as_ref(),
+                    &this.preferences,
+                ) {
+                    tracing::warn!(%error, "failed to apply restored log persistence settings");
+                }
+                if let Some(tray) = &this.network_tray {
+                    if let Err(error) = tray.set_visible(this.preferences.traffic_tray_visible) {
+                        tracing::warn!(%error, "failed to apply restored tray visibility");
+                    }
+                }
+                let appearance = this.preferences.appearance;
+                let _ = cx.update_window(this.main_window, move |_, window, cx| {
+                    let mode = match appearance {
+                        AppearancePreference::System => ThemeMode::from(window.appearance()),
+                        AppearancePreference::Light => ThemeMode::Light,
+                        AppearancePreference::Dark => ThemeMode::Dark,
+                    };
+                    apply_zen_theme(mode, Some(window), cx);
+                });
+                this.refresh_tray_menu(cx);
+                cx.notify();
+            },
+        )
     }
 
     fn subscribe_elevated_restart_events(

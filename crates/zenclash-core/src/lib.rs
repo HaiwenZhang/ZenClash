@@ -70,7 +70,7 @@ pub use network::{
 };
 pub use preferences::{
     AppPreferences, AppPreferencesError, AppPreferencesResult, AppPreferencesStore,
-    AppearancePreference, CoreBinaryPreferences, NetworkProbeRoutePreference,
+    AppearancePreference, CoreBinaryPreferences, LanguagePreference, NetworkProbeRoutePreference,
 };
 pub use process::{
     bundled_recovery_profile, MihomoLaunchConfig, MihomoProcess, MihomoProcessSnapshot,

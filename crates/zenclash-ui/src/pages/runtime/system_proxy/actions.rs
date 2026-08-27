@@ -44,7 +44,7 @@ impl RuntimePage {
         };
         let Some(store) = self.preferences_store.clone() else {
             self.mutating = false;
-            self.error = Some("应用设置存储不可用；无法记录系统代理所有权".into());
+            self.error = Some(zenclash_i18n::text("system_proxy.errors.ownership_store"));
             cx.notify();
             return;
         };
@@ -56,14 +56,24 @@ impl RuntimePage {
                 persist_system_proxy_enabled(&store, &controller, enabled, port, &settings)
             })
             .await
-            .map_err(|error| format!("系统代理后台任务异常结束：{error}"))??;
+            .map_err(|error| {
+                zenclash_i18n::text_with(
+                    "system_proxy.errors.background_task",
+                    &[("error", error.to_string())],
+                )
+            })??;
             let data = load_page(client, page).await;
             Ok::<_, String>((preferences, data))
         });
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("系统代理工作流异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "system_proxy.errors.workflow_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -76,18 +86,24 @@ impl RuntimePage {
                                 if this.replace_page_data(token, data) {
                                     this.notice = Some(if enabled {
                                         match this.preferences.system_proxy_mode {
-                                            SystemProxyMode::Manual => "系统 HTTP/HTTPS 代理已启用",
-                                            SystemProxyMode::Pac => "系统 PAC 自动代理已启用",
+                                            SystemProxyMode::Manual => zenclash_i18n::text(
+                                                "system_proxy.notices.manual_enabled",
+                                            ),
+                                            SystemProxyMode::Pac => zenclash_i18n::text(
+                                                "system_proxy.notices.pac_enabled",
+                                            ),
                                         }
-                                        .into()
                                     } else {
-                                        "系统代理已停用".into()
+                                        zenclash_i18n::text("system_proxy.notices.disabled")
                                     });
                                 }
                             }
                             Err(error) => this.set_page_error(
                                 token,
-                                format!("系统代理已切换并保存，但刷新页面状态失败：{error}"),
+                                zenclash_i18n::text_with(
+                                    "system_proxy.errors.refresh_after_toggle",
+                                    &[("error", error)],
+                                ),
                             ),
                         }
                     }
@@ -109,7 +125,9 @@ impl RuntimePage {
         });
         let bypass = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("每行一条，例如 localhost、192.168.0.0/16、*.example.com")
+                .placeholder(zenclash_i18n::text(
+                    "system_proxy.editor.bypass_placeholder",
+                ))
                 .default_value(preferences.system_proxy_bypass.join("\n"))
                 .auto_grow(5, 12)
         });
@@ -173,14 +191,16 @@ impl RuntimePage {
             }
         };
         let Some(store) = self.preferences_store.clone() else {
-            self.error = Some("应用设置存储不可用；无法保存系统代理设置".into());
+            self.error = Some(zenclash_i18n::text("system_proxy.errors.settings_store"));
             cx.notify();
             return;
         };
         let active = self.preferences.system_proxy_enabled;
         let port = self.system_proxy_port();
         if active && port == 0 {
-            self.error = Some("当前系统代理已启用，但内核没有可用代理端口".into());
+            self.error = Some(zenclash_i18n::text(
+                "system_proxy.errors.active_without_port",
+            ));
             cx.notify();
             return;
         }
@@ -194,14 +214,24 @@ impl RuntimePage {
                 persist_system_proxy_form(&store, &controller, &form, port)
             })
             .await
-            .map_err(|error| format!("系统代理设置任务异常结束：{error}"))??;
+            .map_err(|error| {
+                zenclash_i18n::text_with(
+                    "system_proxy.errors.settings_task",
+                    &[("error", error.to_string())],
+                )
+            })??;
             let data = load_page(client, Page::SystemProxy).await;
             Ok::<_, String>((preferences, data))
         });
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("系统代理设置工作流异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "system_proxy.errors.settings_workflow",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -215,11 +245,12 @@ impl RuntimePage {
                                 Ok(data) => {
                                     let _ = this.replace_page_data(token, data);
                                     this.notice =
-                                        Some("系统代理设置已保存，并通过原生状态回读".into());
+                                        Some(zenclash_i18n::text("system_proxy.notices.saved"));
                                 }
                                 Err(error) => {
-                                    this.error = Some(format!(
-                                        "系统代理设置已经保存，但刷新原生状态失败：{error}"
+                                    this.error = Some(zenclash_i18n::text_with(
+                                        "system_proxy.errors.refresh_native",
+                                        &[("error", error)],
                                     ));
                                 }
                             }
@@ -238,7 +269,7 @@ impl RuntimePage {
         let editor = self
             .system_proxy_editor
             .as_ref()
-            .ok_or_else(|| "系统代理编辑器尚未打开".to_owned())?;
+            .ok_or_else(|| zenclash_i18n::text("system_proxy.errors.editor_closed"))?;
         let host = normalize_system_proxy_host(&editor.host.read(cx).value())
             .map_err(|error| error.to_string())?;
         let entries = editor
@@ -280,13 +311,21 @@ impl RuntimePage {
 
 fn unavailable_message(listener_error: Option<&str>) -> String {
     match listener_error {
-        Some(error) if error.to_ascii_lowercase().contains("address already in use") => format!(
-            "当前内核的 HTTP/Mixed 监听端口被其他程序占用，无法启用系统代理。请退出其他代理客户端（例如 Clash Party）或修改 ZenClash 监听端口后重试。内核日志：{error}"
+        Some(error)
+            if error
+                .to_ascii_lowercase()
+                .contains("address already in use") =>
+        {
+            zenclash_i18n::text_with(
+                "system_proxy.errors.port_in_use",
+                &[("error", error.to_owned())],
+            )
+        }
+        Some(error) => zenclash_i18n::text_with(
+            "system_proxy.errors.port_not_listening",
+            &[("error", error.to_owned())],
         ),
-        Some(error) => format!(
-            "当前内核没有成功启动 HTTP/Mixed 监听端口，无法启用系统代理。内核日志：{error}"
-        ),
-        None => "当前内核没有可用的 HTTP/Mixed 监听端口，无法启用系统代理。SOCKS-only 端口不能用于系统 HTTP/HTTPS 代理；请在核心设置中启用 Mixed 或 HTTP 端口。".into(),
+        None => zenclash_i18n::text("system_proxy.errors.no_http_port"),
     }
 }
 
@@ -371,7 +410,7 @@ fn apply_owned_system_proxy(
             &form.pac_script,
         )
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "系统代理启用成功但没有返回所有权证据".to_owned())
+        .ok_or_else(|| zenclash_i18n::text("system_proxy.errors.ownership_missing"))
 }
 
 fn release_system_proxy(
@@ -400,37 +439,63 @@ fn restore_after_persist_failure(
 ) -> String {
     if !expected.system_proxy_enabled {
         return match operation.set_enabled(false, previous.mode, "", 0, &[], "") {
-            Ok(()) => format!("保存系统代理设置失败：{error}；系统代理已安全关闭"),
-            Err(rollback) => {
-                format!("保存系统代理设置失败：{error}；安全关闭也失败：{rollback}")
-            }
+            Ok(()) => zenclash_i18n::text_with(
+                "system_proxy.errors.save_released",
+                &[("error", error.to_owned())],
+            ),
+            Err(rollback) => zenclash_i18n::text_with(
+                "system_proxy.errors.save_release_failed",
+                &[
+                    ("error", error.to_owned()),
+                    ("rollback", rollback.to_string()),
+                ],
+            ),
         };
     }
     match apply_owned_system_proxy(operation, port, previous) {
         Ok(ownership) => {
             if expected.system_proxy_ownership.as_ref() == Some(&ownership) {
-                return format!("保存系统代理设置失败：{error}；原状态已恢复");
+                return zenclash_i18n::text_with(
+                    "system_proxy.errors.save_rolled_back",
+                    &[("error", error.to_owned())],
+                );
             }
             match store.update(|preferences| {
                 preferences.system_proxy_ownership = Some(ownership.clone());
             }) {
-                Ok(_) => format!("保存系统代理设置失败：{error}；原状态已恢复"),
+                Ok(_) => zenclash_i18n::text_with(
+                    "system_proxy.errors.save_rolled_back",
+                    &[("error", error.to_owned())],
+                ),
                 Err(ownership_error) => {
                     let release = operation.release_if_owned(&ownership);
                     match release {
-                        Ok(_) => format!(
-                            "保存系统代理设置失败：{error}；恢复所有权记录也失败：{ownership_error}，系统代理已安全关闭"
+                        Ok(_) => zenclash_i18n::text_with(
+                            "system_proxy.errors.save_ownership_released",
+                            &[
+                                ("error", error.to_owned()),
+                                ("ownership_error", ownership_error.to_string()),
+                            ],
                         ),
-                        Err(release_error) => format!(
-                            "保存系统代理设置失败：{error}；恢复所有权记录失败：{ownership_error}；安全关闭也失败：{release_error}"
+                        Err(release_error) => zenclash_i18n::text_with(
+                            "system_proxy.errors.save_ownership_release_failed",
+                            &[
+                                ("error", error.to_owned()),
+                                ("ownership_error", ownership_error.to_string()),
+                                ("release_error", release_error.to_string()),
+                            ],
                         ),
                     }
                 }
             }
         }
-        Err(rollback) => {
-            format!("保存系统代理设置失败：{error}；恢复原状态也失败：{rollback}")
-        }
+        Err(rollback) => zenclash_i18n::text_with(
+            "system_proxy.errors.save_rollback_failed",
+            &[
+                ("error", error.to_owned()),
+                ("rollback", rollback.to_string()),
+            ],
+        ),
     }
 }
 
@@ -444,13 +509,13 @@ mod tests {
             "Start HTTP server error: listen tcp 127.0.0.1:7890: bind: address already in use",
         ));
 
-        assert!(message.contains("Clash Party") && message.contains("7890"));
+        assert!(message.contains("HTTP/Mixed") && message.contains("7890"));
     }
 
     #[test]
     fn unavailable_message_rejects_socks_only_system_proxying() {
         let message = unavailable_message(None);
 
-        assert!(message.contains("SOCKS-only") && message.contains("Mixed 或 HTTP"));
+        assert!(message.contains("SOCKS-only") && message.contains("Mixed"));
     }
 }

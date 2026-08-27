@@ -28,14 +28,18 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = match task.await {
                 Ok(result) => result,
-                Err(error) => Err(format!("关闭连接任务异常结束：{error}")),
+                Err(error) => Err(zenclash_i18n::text_with(
+                    "connections.errors.close_task",
+                    &[("error", error.to_string())],
+                )),
             };
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
                 match result {
                     Ok(data) => {
                         if this.replace_page_data(token, data) {
-                            this.notice = Some("全部连接已关闭".into());
+                            this.notice =
+                                Some(zenclash_i18n::text("connections.notices.closed_all"));
                         }
                     }
                     Err(error) => this.set_page_error(token, error),
@@ -65,7 +69,10 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = match task.await {
                 Ok(result) => result,
-                Err(error) => Err(format!("关闭连接任务异常结束：{error}")),
+                Err(error) => Err(zenclash_i18n::text_with(
+                    "connections.errors.close_task",
+                    &[("error", error.to_string())],
+                )),
             };
             let _ = this.update(cx, |this, cx| {
                 this.closing_connections.remove(&id);
@@ -108,9 +115,9 @@ impl RuntimePage {
                 !self.core_kind.capabilities().udp_connection_tracking,
                 |this| {
                     this.child(message_banner(
-                        format!(
-                            "{} 当前不会完整上报 UDP 连接；TCP 连接、累计流量和关闭操作仍来自真实控制器。",
-                            self.core_kind.display_name()
+                        zenclash_i18n::text_with(
+                            "connections.warnings.udp_tracking",
+                            &[("core", self.core_kind.display_name().to_owned())],
                         ),
                         theme.warning,
                         theme,
@@ -121,21 +128,26 @@ impl RuntimePage {
                 h_flex()
                     .gap_3()
                     .flex_wrap()
-                    .child(metric("活动连接", total.to_string(), theme.primary, theme))
                     .child(metric(
-                        "累计上传",
+                        zenclash_i18n::text("connections.metrics.active"),
+                        total.to_string(),
+                        theme.primary,
+                        theme,
+                    ))
+                    .child(metric(
+                        zenclash_i18n::text("connections.metrics.upload"),
                         format_bytes(data.upload_total),
                         theme.success,
                         theme,
                     ))
                     .child(metric(
-                        "累计下载",
+                        zenclash_i18n::text("connections.metrics.download"),
                         format_bytes(data.download_total),
                         theme.primary,
                         theme,
                     ))
                     .child(metric(
-                        "内存",
+                        zenclash_i18n::text("connections.metrics.memory"),
                         format_bytes(data.memory),
                         theme.warning,
                         theme,
@@ -148,12 +160,12 @@ impl RuntimePage {
                         div()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child("连接数据每 500ms 从真实控制器刷新"),
+                            .child(zenclash_i18n::text("connections.refresh_hint")),
                     )
                     .child(
                         Button::new("close-all-connections")
                             .icon(IconName::CircleX)
-                            .label("关闭全部")
+                            .label(zenclash_i18n::text("connections.actions.close_all"))
                             .danger()
                             .small()
                             .disabled(
@@ -166,17 +178,27 @@ impl RuntimePage {
                 h_flex()
                     .gap_3()
                     .items_center()
-                    .child(div().flex_1().child(Input::new(&self.connection_filter).small()))
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(if query.is_empty() {
-                                format!("{total} 条活动连接")
-                            } else {
-                                format!("{visible} / {total} 条")
-                            }),
-                    ),
+                            .flex_1()
+                            .child(Input::new(&self.connection_filter).small()),
+                    )
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(
+                        if query.is_empty() {
+                            zenclash_i18n::text_with(
+                                "connections.count.active",
+                                &[("total", total.to_string())],
+                            )
+                        } else {
+                            zenclash_i18n::text_with(
+                                "common.count.visible_total",
+                                &[
+                                    ("visible", visible.to_string()),
+                                    ("total", total.to_string()),
+                                ],
+                            )
+                        },
+                    )),
             )
             .child(
                 v_flex()
@@ -187,72 +209,64 @@ impl RuntimePage {
                     .when(filtered.is_empty(), |this| {
                         this.child(empty_state(
                             if total == 0 {
-                                "当前没有活动连接"
+                                zenclash_i18n::text("connections.empty.active")
                             } else {
-                                "没有匹配的连接"
+                                zenclash_i18n::text("connections.empty.filtered")
                             },
                             theme,
                         ))
                     })
-                    .children(
-                        filtered
-                            .into_iter()
-                            .enumerate()
-                            .map(|(index, connection)| {
-                                let id = connection.id.clone();
-                                let closing = self.closing_connections.contains(&id);
-                                let host = if connection.metadata.host.is_empty() {
-                                    connection.metadata.destination_ip.clone()
-                                } else {
-                                    connection.metadata.host.clone()
-                                };
-                                let summary = connection_summary(connection);
-                                h_flex()
-                                    .id(("connection-row", index))
-                                    .min_h(px(58.))
-                                    .px_4()
-                                    .gap_3()
-                                    .items_center()
-                                    .border_b_1()
-                                    .border_color(theme.border)
-                                    .child(Icon::new(IconName::ExternalLink).size_4())
+                    .children(filtered.into_iter().enumerate().map(|(index, connection)| {
+                        let id = connection.id.clone();
+                        let closing = self.closing_connections.contains(&id);
+                        let host = if connection.metadata.host.is_empty() {
+                            connection.metadata.destination_ip.clone()
+                        } else {
+                            connection.metadata.host.clone()
+                        };
+                        let summary = connection_summary(connection);
+                        h_flex()
+                            .id(("connection-row", index))
+                            .min_h(px(58.))
+                            .px_4()
+                            .gap_3()
+                            .items_center()
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .child(Icon::new(IconName::ExternalLink).size_4())
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(div().text_sm().child(format!(
+                                        "{}:{}",
+                                        host, connection.metadata.destination_port
+                                    )))
                                     .child(
-                                        v_flex()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .child(div().text_sm().child(format!(
-                                                "{}:{}",
-                                                host, connection.metadata.destination_port
-                                            )))
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(theme.muted_foreground)
-                                                    .child(summary),
-                                            ),
-                                    )
-                                    .child(
-                                        v_flex()
-                                            .items_end()
+                                        div()
                                             .text_xs()
-                                            .child(format!("↑ {}", format_bytes(connection.upload)))
-                                            .child(format!(
-                                                "↓ {}",
-                                                format_bytes(connection.download)
-                                            )),
-                                    )
-                                    .child(
-                                        Button::new(("close-connection", index))
-                                            .icon(IconName::CircleX)
-                                            .ghost()
-                                            .small()
-                                            .disabled(self.mutating || closing)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.close_connection(id.clone(), cx);
-                                            })),
-                                    )
-                            }),
-                    ),
+                                            .text_color(theme.muted_foreground)
+                                            .child(summary),
+                                    ),
+                            )
+                            .child(
+                                v_flex()
+                                    .items_end()
+                                    .text_xs()
+                                    .child(format!("↑ {}", format_bytes(connection.upload)))
+                                    .child(format!("↓ {}", format_bytes(connection.download))),
+                            )
+                            .child(
+                                Button::new(("close-connection", index))
+                                    .icon(IconName::CircleX)
+                                    .ghost()
+                                    .small()
+                                    .disabled(self.mutating || closing)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.close_connection(id.clone(), cx);
+                                    })),
+                            )
+                    })),
             )
             .into_any_element()
     }
@@ -307,7 +321,7 @@ fn connection_summary(connection: &zenclash_core::Connection) -> String {
         parts.push(connection.chains.join(" → "));
     }
     if parts.is_empty() {
-        "连接详情暂不可用".into()
+        zenclash_i18n::text("connections.empty.details")
     } else {
         parts.join(" · ")
     }

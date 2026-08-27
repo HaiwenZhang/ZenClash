@@ -13,28 +13,35 @@ pub(super) fn render_config_diff(
     let added = count_kind(report, ConfigDiffKind::Added);
     let removed = count_kind(report, ConfigDiffKind::Removed);
     let changed = count_kind(report, ConfigDiffKind::Changed);
-    setting_card("结构化配置差异", theme)
+    setting_card(zenclash_i18n::text("overrides.diff.title"), theme)
         .child(
             h_flex()
                 .justify_between()
                 .px_4()
                 .py_3()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(format!("新增 {added} · 删除 {removed} · 修改 {changed}")),
-                )
+                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(
+                    zenclash_i18n::text_with(
+                        "overrides.diff.summary",
+                        &[
+                            ("added", added.to_string()),
+                            ("removed", removed.to_string()),
+                            ("changed", changed.to_string()),
+                        ],
+                    ),
+                ))
                 .child(div().text_xs().text_color(theme.muted_foreground).child(
                     if report.truncated {
-                        "仅显示前 200 项"
+                        zenclash_i18n::text("overrides.diff.truncated")
                     } else {
-                        "JSON Pointer 路径"
+                        zenclash_i18n::text("overrides.diff.path")
                     },
                 )),
         )
         .when(report.entries.is_empty(), |this| {
-            this.child(empty_state("原始 Profile 与最终运行配置结构一致", theme))
+            this.child(empty_state(
+                zenclash_i18n::text("overrides.diff.empty"),
+                theme,
+            ))
         })
         .children(
             report
@@ -46,9 +53,9 @@ pub(super) fn render_config_diff(
 
 fn render_diff_entry(entry: &ConfigDiffEntry, theme: &gpui_component::Theme) -> AnyElement {
     let (label, color) = match entry.kind {
-        ConfigDiffKind::Added => ("新增", theme.success),
-        ConfigDiffKind::Removed => ("删除", theme.danger),
-        ConfigDiffKind::Changed => ("修改", theme.warning),
+        ConfigDiffKind::Added => (zenclash_i18n::text("overrides.diff.added"), theme.success),
+        ConfigDiffKind::Removed => (zenclash_i18n::text("overrides.diff.removed"), theme.danger),
+        ConfigDiffKind::Changed => (zenclash_i18n::text("overrides.diff.changed"), theme.warning),
     };
     v_flex()
         .gap_2()
@@ -84,16 +91,20 @@ fn render_values(entry: &ConfigDiffEntry, theme: &gpui_component::Theme) -> gpui
     h_flex()
         .items_start()
         .gap_3()
-        .child(value_column("原始", entry.source.as_deref(), theme))
+        .child(value_column(
+            zenclash_i18n::text("overrides.diff.source"),
+            entry.source.as_deref(),
+            theme,
+        ))
         .child(div().pt_1().text_color(theme.muted_foreground).child("→"))
-        .child(value_column("最终", entry.effective.as_deref(), theme))
+        .child(value_column(
+            zenclash_i18n::text("overrides.diff.effective"),
+            entry.effective.as_deref(),
+            theme,
+        ))
 }
 
-fn value_column(
-    label: &'static str,
-    value: Option<&str>,
-    theme: &gpui_component::Theme,
-) -> gpui::Div {
+fn value_column(label: String, value: Option<&str>, theme: &gpui_component::Theme) -> gpui::Div {
     v_flex()
         .min_w_0()
         .flex_1()

@@ -28,6 +28,7 @@ SolidCompression=yes
 WizardStyle=modern
 SetupIconFile={#ProjectRoot}\platforms\windows\ZenClash.ico
 UninstallDisplayIcon={app}\zenclash.exe
+LicenseFile={#ProjectRoot}\LICENSE
 OutputDir={#OutputDir}
 OutputBaseFilename=ZenClash-{#AppVersion}-windows-x64-setup
 

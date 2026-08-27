@@ -80,8 +80,8 @@ impl ZenClashApp {
         let store = self.preferences_store.clone();
         let task = self.runtime.spawn(async move {
             tokio::task::spawn_blocking(move || {
-                let store =
-                    store.ok_or_else(|| "应用设置存储不可用；无法记录系统代理所有权".to_owned())?;
+                let store = store
+                    .ok_or_else(|| zenclash_i18n::text("system_proxy.errors.ownership_store"))?;
                 let operation = controller.begin_operation();
                 let expected = store.load().map_err(|error| error.to_string())?;
                 let ownership = if enabled {
@@ -97,7 +97,7 @@ impl ZenClashApp {
                             )
                             .map_err(|error| error.to_string())?
                             .ok_or_else(|| {
-                                "系统代理启用成功但没有返回所有权证据".to_owned()
+                                zenclash_i18n::text("system_proxy.errors.ownership_missing")
                             })?,
                     )
                 } else {
@@ -107,14 +107,7 @@ impl ZenClashApp {
                             .map_err(|error| error.to_string())?;
                     } else {
                         operation
-                            .set_enabled(
-                                false,
-                                expected.system_proxy_mode,
-                                "",
-                                0,
-                                &[],
-                                "",
-                            )
+                            .set_enabled(false, expected.system_proxy_mode, "", 0, &[], "")
                             .map_err(|error| error.to_string())?;
                     }
                     None
@@ -144,27 +137,57 @@ impl ZenClashApp {
                                             let release =
                                                 operation.release_if_owned(&restored_ownership);
                                             return Err(match release {
-                                                Ok(_) => format!(
-                                                    "保存系统代理开关失败：{error}；恢复所有权记录也失败：{ownership_error}，系统代理已安全关闭"
+                                                Ok(_) => zenclash_i18n::text_with(
+                                                    "tray.errors.toggle_ownership_released",
+                                                    &[
+                                                        ("error", error.to_string()),
+                                                        (
+                                                            "ownership_error",
+                                                            ownership_error.to_string(),
+                                                        ),
+                                                    ],
                                                 ),
-                                                Err(release_error) => format!(
-                                                    "保存系统代理开关失败：{error}；恢复所有权记录失败：{ownership_error}；安全关闭也失败：{release_error}"
+                                                Err(release_error) => zenclash_i18n::text_with(
+                                                    "tray.errors.toggle_ownership_release_failed",
+                                                    &[
+                                                        ("error", error.to_string()),
+                                                        (
+                                                            "ownership_error",
+                                                            ownership_error.to_string(),
+                                                        ),
+                                                        (
+                                                            "release_error",
+                                                            release_error.to_string(),
+                                                        ),
+                                                    ],
                                                 ),
                                             });
                                         }
                                     }
                                 }
-                                Err(format!("保存系统代理开关失败：{error}；原状态已恢复"))
+                                Err(zenclash_i18n::text_with(
+                                    "tray.errors.toggle_rolled_back",
+                                    &[("error", error.to_string())],
+                                ))
                             }
-                            Err(rollback) => Err(format!(
-                                "保存系统代理开关失败：{error}；恢复原状态也失败：{rollback}"
+                            Err(rollback) => Err(zenclash_i18n::text_with(
+                                "tray.errors.toggle_rollback_failed",
+                                &[
+                                    ("error", error.to_string()),
+                                    ("rollback", rollback.to_string()),
+                                ],
                             )),
                         }
                     }
                 }
             })
             .await
-            .map_err(|error| format!("系统代理后台任务异常结束：{error}"))?
+            .map_err(|error| {
+                zenclash_i18n::text_with(
+                    "system_proxy.errors.background_task",
+                    &[("error", error.to_string())],
+                )
+            })?
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -203,7 +226,7 @@ impl ZenClashApp {
         let process = self.mihomo_process.clone();
         let task = self.runtime.spawn(async move {
             let Some(profile) = profile else {
-                return Err("未配置当前配置文件路径".to_owned());
+                return Err(zenclash_i18n::text("runtime.lifecycle.profile_missing"));
             };
             let body = if enabled {
                 serde_json::json!({"tun": {"enable": true}, "dns": {"enable": true}})
@@ -213,12 +236,16 @@ impl ZenClashApp {
             let overrides =
                 tokio::task::spawn_blocking(|| YamlOverrideStore::discover()?.load_enabled_paths())
                     .await
-                    .map_err(|error| format!("读取 YAML 覆写任务异常结束：{error}"))?
+                    .map_err(|error| {
+                        zenclash_i18n::text_with(
+                            "tray.errors.yaml_override_read",
+                            &[("error", error.to_string())],
+                        )
+                    })?
                     .map_err(|error| error.to_string())?;
             if uses_restart {
-                let process = process.ok_or_else(|| {
-                    "外部实验内核不能可靠应用完整 TUN 配置；请改用 ZenClash 托管内核".to_owned()
-                })?;
+                let process =
+                    process.ok_or_else(|| zenclash_i18n::text("tray.errors.external_tun"))?;
                 controlled
                     .apply_json_update_with_restart(process, profile, &body, overrides)
                     .await
@@ -317,7 +344,12 @@ impl ZenClashApp {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("状态栏配置任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "tray.errors.profile_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 match result {

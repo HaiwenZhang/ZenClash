@@ -2,7 +2,7 @@ Name:           zenclash
 Version:        %{app_version}
 Release:        1%{?dist}
 Summary:        Native Mihomo client built with Rust and GPUI
-License:        MIT
+License:        GPL-3.0-only
 URL:            https://github.com/HaiwenZhang/zenclash
 BuildArch:      x86_64
 Requires:       alsa-lib
@@ -30,8 +30,10 @@ install -Dpm0644 %{payload_dir}/profile.yaml %{buildroot}%{_prefix}/lib/zenclash
 install -Dpm0644 %{payload_dir}/recovery.yaml %{buildroot}%{_prefix}/lib/zenclash/recovery.yaml
 install -Dpm0644 %{payload_dir}/zenclash.png %{buildroot}%{_datadir}/icons/hicolor/1024x1024/apps/zenclash.png
 install -Dpm0644 %{payload_dir}/zenclash.desktop %{buildroot}%{_datadir}/applications/org.zenclash.ZenClash.desktop
+install -Dpm0644 %{payload_dir}/LICENSE %{buildroot}%{_licensedir}/zenclash/LICENSE
 
 %files
+%license %{_licensedir}/zenclash/LICENSE
 %{_bindir}/zenclash
 %{_prefix}/lib/zenclash/mihomo
 %{_prefix}/lib/zenclash/profile.yaml

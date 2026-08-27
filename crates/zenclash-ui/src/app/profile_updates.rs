@@ -41,7 +41,12 @@ impl ZenClashApp {
                         ));
                         let result = task
                             .await
-                            .map_err(|error| format!("自动更新任务异常结束：{error}"))
+                            .map_err(|error| {
+                                zenclash_i18n::text_with(
+                                    "app.errors.profile_update_task",
+                                    &[("error", error.to_string())],
+                                )
+                            })
                             .and_then(|result| result);
                         if this
                             .update(cx, |this, cx| {

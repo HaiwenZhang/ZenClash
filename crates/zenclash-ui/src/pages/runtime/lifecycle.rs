@@ -1,8 +1,8 @@
 use super::{
     load_page, load_page_with_binary, AppContext, ConfigInputs, Context, ControlledConfigStore,
-    Duration, HashSet, InputEvent, InputState, LiveTrafficSample, MihomoLogLevel, Page,
+    Duration, HashSet, InputEvent, InputState, LiveTrafficSeries, MihomoLogLevel, Page,
     PageTaskToken, ProfileActivated, ProfileCatalog, ProfileStore, RuntimeConfig,
-    RuntimeConfigApplied, RuntimeData, RuntimePage, RuntimePageServices, Value, VecDeque, Window,
+    RuntimeConfigApplied, RuntimeData, RuntimePage, RuntimePageServices, Value, Window,
     YamlOverrideCatalog, YamlOverrideStore,
 };
 
@@ -82,20 +82,22 @@ fn empty_json_object() -> Value {
 
 impl RuntimePage {
     pub(crate) fn report_managed_core_state(&mut self, running: bool, cx: &mut Context<Self>) {
-        const FAILURE_PREFIX: &str = "托管内核意外退出";
         if running {
-            if self
-                .startup_error
-                .as_deref()
-                .is_some_and(|error| error.starts_with(FAILURE_PREFIX))
-            {
+            if self.startup_error.as_deref().is_some_and(|error| {
+                [zenclash_i18n::ZH_CN, zenclash_i18n::EN]
+                    .into_iter()
+                    .any(|locale| {
+                        error.starts_with(&zenclash_i18n::text_for(
+                            locale,
+                            "runtime.lifecycle.core_exit_prefix",
+                        ))
+                    })
+            }) {
                 self.startup_error = None;
-                self.notice = Some("托管内核已重新启动，运行状态与系统代理正在恢复".into());
+                self.notice = Some(zenclash_i18n::text("runtime.lifecycle.core_restarted"));
             }
         } else {
-            self.startup_error = Some(format!(
-                "{FAILURE_PREFIX}，ZenClash 正在释放其接管的系统代理以避免网络中断。请在“内核”页面查看日志并重启。"
-            ));
+            self.startup_error = Some(zenclash_i18n::text("runtime.lifecycle.core_exited"));
         }
         cx.notify();
     }
@@ -109,12 +111,124 @@ impl RuntimePage {
         cx.notify();
     }
 
+    /// Refreshes placeholders stored inside long-lived input entities after a
+    /// process-wide locale change. Regular page labels update on the next render,
+    /// while `InputState` requires an explicit update.
+    pub(crate) fn refresh_localized_placeholders(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let localized_inputs = [
+            (
+                self.network_latency_name.clone(),
+                "runtime.placeholders.network_target",
+            ),
+            (
+                self.connection_filter.clone(),
+                "runtime.placeholders.connection_filter",
+            ),
+            (self.log_filter.clone(), "runtime.placeholders.log_filter"),
+            (self.rule_filter.clone(), "runtime.placeholders.rule_filter"),
+            (
+                self.config_inputs.core.mixed_port.clone(),
+                "config_inputs.placeholders.mixed_port",
+            ),
+            (
+                self.config_inputs.core.interface_name.clone(),
+                "config_inputs.placeholders.automatic_interface",
+            ),
+            (
+                self.config_inputs.dns.fake_ip_filter.clone(),
+                "config_inputs.placeholders.one_domain_or_rule",
+            ),
+            (
+                self.config_inputs.dns.default_nameserver.clone(),
+                "config_inputs.placeholders.one_ip_dns",
+            ),
+            (
+                self.config_inputs.dns.nameserver.clone(),
+                "config_inputs.placeholders.one_dns",
+            ),
+            (
+                self.config_inputs.dns.proxy_server_nameserver.clone(),
+                "config_inputs.placeholders.proxy_resolver",
+            ),
+            (
+                self.config_inputs.dns.direct_nameserver.clone(),
+                "config_inputs.placeholders.direct_resolver",
+            ),
+            (
+                self.config_inputs.dns.fallback_ipcidr.clone(),
+                "config_inputs.placeholders.one_cidr",
+            ),
+            (
+                self.config_inputs.dns.fallback_domain.clone(),
+                "config_inputs.placeholders.one_domain_rule",
+            ),
+            (
+                self.config_inputs.dns.nameserver_policy.clone(),
+                "config_inputs.placeholders.dns_mapping",
+            ),
+            (
+                self.config_inputs.dns.hosts.clone(),
+                "config_inputs.placeholders.address_mapping",
+            ),
+            (
+                self.config_inputs.sniffer.skip_domain.clone(),
+                "config_inputs.placeholders.one_domain",
+            ),
+            (
+                self.config_inputs.sniffer.force_domain.clone(),
+                "config_inputs.placeholders.one_domain",
+            ),
+            (
+                self.config_inputs.sniffer.skip_dst_address.clone(),
+                "config_inputs.placeholders.one_address",
+            ),
+            (
+                self.config_inputs.sniffer.skip_src_address.clone(),
+                "config_inputs.placeholders.one_address",
+            ),
+            (
+                self.config_inputs.tun.device.clone(),
+                "config_inputs.placeholders.tun_device",
+            ),
+            (
+                self.config_inputs.tun.mtu.clone(),
+                "config_inputs.placeholders.default_mtu",
+            ),
+            (
+                self.config_inputs.tun.route_include_address.clone(),
+                "config_inputs.placeholders.one_cidr",
+            ),
+            (
+                self.config_inputs.tun.route_exclude_address.clone(),
+                "config_inputs.placeholders.one_cidr",
+            ),
+        ];
+        for (input, key) in localized_inputs {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(zenclash_i18n::text(key), window, cx);
+            });
+        }
+        self.profile_forms
+            .refresh_localized_placeholders(window, cx);
+        self.profile_editor
+            .refresh_localized_placeholder(window, cx);
+        self.webdav.refresh_localized_placeholders(window, cx);
+        cx.notify();
+    }
+
     pub(crate) fn report_system_proxy_reconcile_error(
         &mut self,
         error: &str,
         cx: &mut Context<Self>,
     ) {
-        self.error = Some(format!("系统代理与新内核配置同步失败：{error}"));
+        self.error = Some(zenclash_i18n::text_with(
+            "runtime.lifecycle.proxy_reconcile",
+            &[("error", error.to_owned())],
+        ));
         cx.notify();
     }
 
@@ -126,7 +240,10 @@ impl RuntimePage {
         if let Err(error) = self.reload_profile_catalog() {
             tracing::warn!(%error, "failed to reload profile catalog after background update");
         }
-        self.notice = Some(format!("在线订阅“{}”已自动更新", outcome.name));
+        self.notice = Some(zenclash_i18n::text_with(
+            "runtime.lifecycle.profile_updated",
+            &[("name", outcome.name)],
+        ));
         if outcome.active {
             self.profile_path = Some(outcome.path.clone());
             self.invalidate_config_inputs();
@@ -139,7 +256,10 @@ impl RuntimePage {
     pub(crate) fn report_background_profile_error(&mut self, error: &str, cx: &mut Context<Self>) {
         tracing::warn!(%error, "automatic profile update failed");
         if self.page == Page::Profiles {
-            self.error = Some(format!("自动更新失败：{error}"));
+            self.error = Some(zenclash_i18n::text_with(
+                "runtime.lifecycle.profile_update_failed",
+                &[("error", error.to_owned())],
+            ));
             cx.notify();
         }
     }
@@ -181,26 +301,36 @@ impl RuntimePage {
         let config_inputs_profile = profile_path.clone();
         let profile_forms = super::profiles::ProfileFormState::new(window, cx);
         let profile_editor = super::overrides::ProfileEditorState::new(window, cx);
-        let network_latency_name =
-            cx.new(|cx| InputState::new(window, cx).placeholder("例如：公司网关"));
+        let network_latency_name = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(zenclash_i18n::text("runtime.placeholders.network_target"))
+        });
         let network_latency_url = cx
             .new(|cx| InputState::new(window, cx).placeholder("https://example.com/generate_204"));
-        let connection_filter =
-            cx.new(|cx| InputState::new(window, cx).placeholder("过滤域名、IP、进程或规则…"));
+        let connection_filter = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(zenclash_i18n::text(
+                "runtime.placeholders.connection_filter",
+            ))
+        });
         let connection_filter_subscription =
             cx.subscribe(&connection_filter, |_, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     cx.notify();
                 }
             });
-        let log_filter = cx.new(|cx| InputState::new(window, cx).placeholder("过滤级别或内容…"));
+        let log_filter = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(zenclash_i18n::text("runtime.placeholders.log_filter"))
+        });
         let log_filter_subscription = cx.subscribe(&log_filter, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 cx.notify();
             }
         });
-        let rule_filter =
-            cx.new(|cx| InputState::new(window, cx).placeholder("过滤规则类型、内容或策略…"));
+        let rule_filter = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(zenclash_i18n::text("runtime.placeholders.rule_filter"))
+        });
         let rule_filter_subscription =
             cx.subscribe(&rule_filter, |_, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -241,7 +371,9 @@ impl RuntimePage {
             config_preview: None,
             profile_editor,
             data: RuntimeData::Empty,
-            traffic_samples: VecDeque::from(vec![LiveTrafficSample::default(); 48]),
+            home_profile_switching: None,
+            home_proxy_switching: None,
+            live_traffic: LiveTrafficSeries::default(),
             traffic_history: super::traffic::TrafficHistoryUiState::default(),
             network_probe: super::network::NetworkProbeUiState::default(),
             ruleset: super::resources::RulesetUiState::default(),
@@ -303,13 +435,7 @@ impl RuntimePage {
             if this
                 .update(cx, |this, cx| {
                     let traffic = this.traffic_monitor.snapshot();
-                    if this.traffic_samples.len() >= 48 {
-                        this.traffic_samples.pop_front();
-                    }
-                    this.traffic_samples.push_back(LiveTrafficSample {
-                        upload: traffic.upload,
-                        download: traffic.download,
-                    });
+                    let traffic_changed = this.live_traffic.observe(&traffic);
                     if matches!(this.page, Page::Logs) {
                         cx.notify();
                     }
@@ -330,7 +456,9 @@ impl RuntimePage {
                         history_ticks = 0;
                     }
                     if this.page == Page::Home {
-                        cx.notify();
+                        if traffic_changed {
+                            cx.notify();
+                        }
                         dashboard_ticks = dashboard_ticks.saturating_add(1);
                         if dashboard_ticks >= 4 && !this.loading && !this.mutating {
                             dashboard_ticks = 0;
@@ -365,7 +493,10 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = match task.await {
                 Ok(result) => result,
-                Err(error) => Err(format!("页面数据任务异常结束：{error}")),
+                Err(error) => Err(zenclash_i18n::text_with(
+                    "runtime.lifecycle.page_task",
+                    &[("error", error.to_string())],
+                )),
             };
             let _ = this.update(cx, |this, cx| {
                 if this.load_generation != generation {
@@ -400,15 +531,16 @@ impl RuntimePage {
     pub(super) fn apply_controlled_config(
         &mut self,
         patch: Value,
-        success: &'static str,
+        success: impl Into<String>,
         cx: &mut Context<Self>,
     ) {
+        let success = success.into();
         let requested_log_level = patch
             .get("log-level")
             .and_then(Value::as_str)
             .and_then(MihomoLogLevel::from_api);
         let Some(profile) = self.profile_path.clone() else {
-            self.error = Some("未配置当前配置文件路径".into());
+            self.error = Some(zenclash_i18n::text("runtime.lifecycle.profile_missing"));
             cx.notify();
             return;
         };
@@ -423,18 +555,17 @@ impl RuntimePage {
         let process = self.process.clone();
         if uses_restart && process.is_none() {
             self.mutating = false;
-            self.error = Some(format!(
-                "外部 {} 不支持完整配置热重载；请由 ZenClash 托管该内核后重试",
-                self.core_kind.display_name()
+            self.error = Some(zenclash_i18n::text_with(
+                "runtime.lifecycle.external_reload",
+                &[("core", self.core_kind.display_name().to_owned())],
             ));
             cx.notify();
             return;
         }
         let task = self.runtime.spawn(async move {
             if uses_restart {
-                let process = process.ok_or_else(|| {
-                    "托管内核在配置任务启动前已不可用，请重启 ZenClash".to_owned()
-                })?;
+                let process = process
+                    .ok_or_else(|| zenclash_i18n::text("runtime.lifecycle.core_unavailable"))?;
                 controlled
                     .apply_json_update_with_restart(process, profile, &patch, overrides)
                     .await
@@ -452,7 +583,12 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("受控配置任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "runtime.lifecycle.config_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -466,13 +602,19 @@ impl RuntimePage {
                         cx.emit(RuntimeConfigApplied);
                         if this.replace_page_data(token, data) {
                             this.notice = Some(if uses_restart {
-                                format!(
-                                    "{}（{} 已重启并通过控制器验收）",
-                                    success.replace("热重载", "保存"),
-                                    this.core_kind.display_name()
+                                let saved = success.replace(
+                                    &zenclash_i18n::text("runtime.lifecycle.hot_reload_term"),
+                                    &zenclash_i18n::text("runtime.lifecycle.save_term"),
+                                );
+                                zenclash_i18n::text_with(
+                                    "runtime.lifecycle.restarted_after_save",
+                                    &[
+                                        ("message", saved),
+                                        ("core", this.core_kind.display_name().to_owned()),
+                                    ],
                                 )
                             } else {
-                                success.into()
+                                success
                             });
                         }
                     }
@@ -537,13 +679,19 @@ impl RuntimePage {
         if let Err(error) = self.reload_profile_catalog() {
             self.error = Some(error);
         }
-        self.notice = Some(format!("已从状态栏切换到“{name}”"));
+        self.notice = Some(zenclash_i18n::text_with(
+            "runtime.lifecycle.tray_profile_selected",
+            &[("name", name.to_owned())],
+        ));
         cx.emit(super::ProfileActivated { path });
         self.refresh(cx);
     }
 
     pub(crate) fn report_tray_profile_error(&mut self, error: &str, cx: &mut Context<Self>) {
-        self.error = Some(format!("状态栏切换配置失败：{error}"));
+        self.error = Some(zenclash_i18n::text_with(
+            "runtime.lifecycle.tray_profile_failed",
+            &[("error", error.to_owned())],
+        ));
         cx.notify();
     }
 

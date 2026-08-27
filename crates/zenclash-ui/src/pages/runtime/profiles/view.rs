@@ -35,18 +35,23 @@ impl RuntimePage {
                             .gap_3()
                             .flex_wrap()
                             .child(metric(
-                                "代理对象",
+                                zenclash_i18n::text("profiles.metrics.proxies"),
                                 proxy_count.to_string(),
                                 theme.primary,
                                 theme,
                             ))
                             .child(metric(
-                                "策略组",
+                                zenclash_i18n::text("profiles.metrics.groups"),
                                 group_count.to_string(),
                                 theme.success,
                                 theme,
                             ))
-                            .child(metric("规则", rule_count.to_string(), theme.warning, theme)),
+                            .child(metric(
+                                zenclash_i18n::text("profiles.metrics.rules"),
+                                rule_count.to_string(),
+                                theme.warning,
+                                theme,
+                            )),
                     )
                     .child(
                         h_flex()
@@ -59,9 +64,9 @@ impl RuntimePage {
                                         IconName::Plus
                                     })
                                     .label(if self.profile_forms.adding_subscription {
-                                        "收起订阅表单"
+                                        zenclash_i18n::text("profiles.actions.collapse_form")
                                     } else {
-                                        "添加在线订阅"
+                                        zenclash_i18n::text("profiles.actions.add_remote")
                                     })
                                     .small()
                                     .outline()
@@ -75,7 +80,7 @@ impl RuntimePage {
                             .child(
                                 Button::new("choose-profile")
                                     .icon(IconName::FolderOpen)
-                                    .label("导入本地 YAML")
+                                    .label(zenclash_i18n::text("profiles.actions.import_local"))
                                     .small()
                                     .primary()
                                     .disabled(self.mutating)

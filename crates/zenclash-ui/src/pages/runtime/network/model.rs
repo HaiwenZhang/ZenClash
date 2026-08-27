@@ -18,7 +18,7 @@ pub(super) fn network_probe_route(
         config.port
     };
     if port == 0 {
-        return Err("当前内核未开启 HTTP 或 Mixed 代理端口；可切换为直连探测".into());
+        return Err(zenclash_i18n::text("network.errors.no_proxy_port"));
     }
     Ok(NetworkProbeRoute::MihomoHttp {
         host: "127.0.0.1".into(),
@@ -88,7 +88,7 @@ pub(super) fn format_coordinates(latitude: Option<f64>, longitude: Option<f64>) 
 pub(super) fn format_proxy_flags(is_proxy: Option<bool>, is_vpn: Option<bool>) -> String {
     match (is_proxy, is_vpn) {
         (None, None) => String::new(),
-        (Some(false), Some(false)) => "未识别为代理或 VPN".into(),
+        (Some(false), Some(false)) => zenclash_i18n::text("network.public_ip.not_proxy"),
         _ => join_present(&[
             is_proxy.filter(|value| *value).map(|_| "Proxy"),
             is_vpn.filter(|value| *value).map(|_| "VPN"),

@@ -20,9 +20,12 @@ impl RuntimePage {
         self.webdav.backups = backups;
         self.webdav.verified = !self.webdav.dirty;
         if self.page == Page::Settings {
-            self.notice = Some(format!(
-                "定时远端备份 {} 已创建，清理 {} 份当前设备旧备份",
-                summary.backup.filename, summary.removed_backups
+            self.notice = Some(zenclash_i18n::text_with(
+                "webdav.notices.scheduled_created",
+                &[
+                    ("filename", summary.backup.filename.clone()),
+                    ("count", summary.removed_backups.to_string()),
+                ],
             ));
             cx.notify();
         }
@@ -31,7 +34,10 @@ impl RuntimePage {
     pub(crate) fn report_background_webdav_error(&mut self, error: &str, cx: &mut Context<Self>) {
         self.webdav.verified = false;
         if self.page == Page::Settings {
-            self.error = Some(format!("定时 WebDAV 备份失败：{error}"));
+            self.error = Some(zenclash_i18n::text_with(
+                "webdav.errors.scheduled",
+                &[("error", error.to_owned())],
+            ));
             cx.notify();
         }
     }
@@ -43,17 +49,20 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) {
         let token = self.page_task_token_for(Page::Settings);
-        let detail = format!(
-            "将下载并完整验证 {filename}，随后替换当前偏好、受控设置和配置仓库。{} 拒绝配置时会自动回滚。",
-            self.core_kind.display_name()
+        let detail = zenclash_i18n::text_with(
+            "webdav.prompts.restore_detail",
+            &[
+                ("filename", filename.clone()),
+                ("core", self.core_kind.display_name().to_owned()),
+            ],
         );
         let receiver = window.prompt(
             gpui::PromptLevel::Warning,
-            "恢复这份远端备份？",
+            &zenclash_i18n::text("webdav.prompts.restore_title"),
             Some(&detail),
             &[
-                gpui::PromptButton::cancel("取消"),
-                gpui::PromptButton::ok("恢复"),
+                gpui::PromptButton::cancel(zenclash_i18n::text("common.actions.cancel")),
+                gpui::PromptButton::ok(zenclash_i18n::text("common.actions.restore")),
             ],
             cx,
         );
@@ -75,14 +84,17 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) {
         let token = self.page_task_token_for(Page::Settings);
-        let detail = format!("将从服务器永久删除 {filename}。此操作不能撤销。");
+        let detail = zenclash_i18n::text_with(
+            "webdav.prompts.delete_detail",
+            &[("filename", filename.clone())],
+        );
         let receiver = window.prompt(
             gpui::PromptLevel::Critical,
-            "删除这份远端备份？",
+            &zenclash_i18n::text("webdav.prompts.delete_title"),
             Some(&detail),
             &[
-                gpui::PromptButton::cancel("取消"),
-                gpui::PromptButton::ok("删除"),
+                gpui::PromptButton::cancel(zenclash_i18n::text("common.actions.cancel")),
+                gpui::PromptButton::ok(zenclash_i18n::text("common.actions.delete")),
             ],
             cx,
         );
@@ -98,17 +110,17 @@ impl RuntimePage {
     }
 
     pub(in crate::pages::runtime::settings) fn test_webdav(&mut self, cx: &mut Context<Self>) {
-        self.list_webdav_backups("WebDAV 连接已验证，设置已保存", cx);
+        self.list_webdav_backups(zenclash_i18n::text("webdav.notices.connection_saved"), cx);
     }
 
     pub(in crate::pages::runtime::settings) fn refresh_webdav_backups(
         &mut self,
         cx: &mut Context<Self>,
     ) {
-        self.list_webdav_backups("WebDAV 备份列表已刷新", cx);
+        self.list_webdav_backups(zenclash_i18n::text("webdav.notices.list_refreshed"), cx);
     }
 
-    fn list_webdav_backups(&mut self, success: &'static str, cx: &mut Context<Self>) {
+    fn list_webdav_backups(&mut self, success: String, cx: &mut Context<Self>) {
         let Some((token, settings, store)) = self.begin_webdav_action(cx) else {
             return;
         };
@@ -121,7 +133,7 @@ impl RuntimePage {
                 .map_err(|error| error.to_string())?;
             Ok::<_, String>(WebDavActionOutcome {
                 backups,
-                notice: success.into(),
+                notice: success,
             })
         });
         Self::finish_webdav_action(token, task, cx);
@@ -139,7 +151,12 @@ impl RuntimePage {
             let service = WebDavService::new(settings).map_err(|error| error.to_string())?;
             let manager = tokio::task::spawn_blocking(BackupManager::discover)
                 .await
-                .map_err(|error| format!("本地备份目录任务异常结束：{error}"))?
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "webdav.errors.local_directory_task",
+                        &[("error", error.to_string())],
+                    )
+                })?
                 .map_err(|error| error.to_string())?;
             let summary = service
                 .upload_snapshot(&manager)
@@ -152,11 +169,17 @@ impl RuntimePage {
             Ok::<_, String>(WebDavActionOutcome {
                 backups,
                 notice: if summary.removed_backups == 0 {
-                    format!("远端备份 {} 已创建", summary.backup.filename)
+                    zenclash_i18n::text_with(
+                        "webdav.notices.created",
+                        &[("filename", summary.backup.filename)],
+                    )
                 } else {
-                    format!(
-                        "远端备份 {} 已创建，并清理 {} 份当前设备旧备份",
-                        summary.backup.filename, summary.removed_backups
+                    zenclash_i18n::text_with(
+                        "webdav.notices.created_cleaned",
+                        &[
+                            ("filename", summary.backup.filename),
+                            ("count", summary.removed_backups.to_string()),
+                        ],
                     )
                 },
             })
@@ -185,7 +208,10 @@ impl RuntimePage {
                 .map_err(|error| error.to_string())?;
             Ok::<_, String>(WebDavActionOutcome {
                 backups,
-                notice: format!("远端备份 {filename} 已删除"),
+                notice: zenclash_i18n::text_with(
+                    "webdav.notices.deleted",
+                    &[("filename", filename)],
+                ),
             })
         });
         Self::finish_webdav_action(token, task, cx);
@@ -213,7 +239,12 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("WebDAV 恢复任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "webdav.errors.restore_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -278,7 +309,12 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("WebDAV 任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "webdav.errors.action_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -309,6 +345,8 @@ async fn save_webdav_settings(
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || store.save(&settings))
         .await
-        .map_err(|error| format!("WebDAV 设置保存任务异常结束：{error}"))?
+        .map_err(|error| {
+            zenclash_i18n::text_with("webdav.errors.save_task", &[("error", error.to_string())])
+        })?
         .map_err(|error| error.to_string())
 }

@@ -21,9 +21,9 @@ pub(crate) struct CoreReleaseState {
 impl RuntimePage {
     fn fetch_core_releases(&mut self, cx: &mut Context<Self>) {
         if !self.core_kind.capabilities().core_upgrade {
-            self.core_releases.error = Some(format!(
-                "{} 不能安装 Mihomo Release",
-                self.core_kind.display_name()
+            self.core_releases.error = Some(zenclash_i18n::text_with(
+                "core_page.errors.release_unsupported",
+                &[("core", self.core_kind.display_name().to_owned())],
             ));
             cx.notify();
             return;
@@ -43,7 +43,12 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("Release 列表任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "core_page.errors.release_list_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.core_releases.loading = false;
@@ -63,15 +68,15 @@ impl RuntimePage {
 
     fn install_core_release(&mut self, release: MihomoRelease, cx: &mut Context<Self>) {
         if !self.core_kind.capabilities().core_upgrade {
-            self.error = Some(format!(
-                "{} 不能安装 Mihomo Release",
-                self.core_kind.display_name()
+            self.error = Some(zenclash_i18n::text_with(
+                "core_page.errors.release_unsupported",
+                &[("core", self.core_kind.display_name().to_owned())],
             ));
             cx.notify();
             return;
         }
         let Some(process) = self.process.clone() else {
-            self.error = Some("当前连接的是外部内核，无法安全替换其可执行文件".into());
+            self.error = Some(zenclash_i18n::text("core_page.errors.external_install"));
             cx.notify();
             return;
         };
@@ -87,15 +92,21 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("指定版本安装任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "core_page.errors.release_install_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
                 match result {
                     Ok(data) => {
                         if this.replace_page_data(token, data) {
-                            this.notice = Some(format!(
-                                "Mihomo {tag} 已通过 SHA-256、候选程序和 /version 三重验证并启用；Unix TUN 权限需重新核对"
+                            this.notice = Some(zenclash_i18n::text_with(
+                                "core_page.notices.release_installed",
+                                &[("version", tag)],
                             ));
                         }
                     }
@@ -116,102 +127,109 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let releases = self.core_releases.releases.clone();
-        setting_card("指定版本安装", theme)
-            .child(info_row(
-                "可信来源",
-                "MetaCubeX/mihomo 官方 GitHub Release · SHA-256 必须存在且匹配",
-                theme,
-            ))
-            .child(info_row(
-                "替换策略",
-                "同目录 staging · 候选 -v 预检 · 原子替换 · 启动失败自动回滚",
-                theme,
-            ))
-            .when_some(self.core_releases.error.clone(), |this, error| {
-                this.child(message_banner(error, theme.danger, theme))
-            })
-            .children(releases.into_iter().enumerate().map(|(index, release)| {
-                let is_current = versions_match(current_version, &release.tag);
-                let release_for_action = release.clone();
-                let digest = format!("{}…", &release.asset.sha256[..12]);
-                h_flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
-                    .px_4()
-                    .py_3()
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .child(
-                        v_flex()
-                            .min_w_0()
-                            .gap_1()
-                            .child(
-                                h_flex().gap_2().child(release.tag.clone()).child(
-                                    gpui::div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(if release.prerelease {
-                                            "预发布"
-                                        } else {
-                                            "稳定版"
-                                        }),
-                                ),
-                            )
-                            .child(
+        setting_card(
+            zenclash_i18n::text("core_page.maintenance.versioned_title"),
+            theme,
+        )
+        .child(info_row(
+            zenclash_i18n::text("core_page.maintenance.trusted_source"),
+            zenclash_i18n::text("core_page.maintenance.trusted_source_description"),
+            theme,
+        ))
+        .child(info_row(
+            zenclash_i18n::text("core_page.maintenance.replacement_strategy"),
+            zenclash_i18n::text("core_page.maintenance.replacement_strategy_description"),
+            theme,
+        ))
+        .when_some(self.core_releases.error.clone(), |this, error| {
+            this.child(message_banner(error, theme.danger, theme))
+        })
+        .children(releases.into_iter().enumerate().map(|(index, release)| {
+            let is_current = versions_match(current_version, &release.tag);
+            let release_for_action = release.clone();
+            let digest = format!("{}…", &release.asset.sha256[..12]);
+            h_flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .px_4()
+                .py_3()
+                .border_t_1()
+                .border_color(theme.border)
+                .child(
+                    v_flex()
+                        .min_w_0()
+                        .gap_1()
+                        .child(
+                            h_flex().gap_2().child(release.tag.clone()).child(
                                 gpui::div()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
-                                    .child(format!(
-                                        "{} · {} · SHA-256 {digest}",
-                                        release.published_at,
-                                        format_bytes(release.asset.size)
-                                    )),
+                                    .child(if release.prerelease {
+                                        zenclash_i18n::text("core_page.maintenance.prerelease")
+                                    } else {
+                                        zenclash_i18n::text("core_page.maintenance.stable")
+                                    }),
                             ),
-                    )
-                    .child(
-                        Button::new(("install-core", index))
-                            .icon(IconName::ArrowDown)
-                            .label(if is_current { "当前版本" } else { "安装" })
-                            .small()
-                            .outline()
-                            .loading(self.mutating && !is_current)
-                            .disabled(
-                                self.mutating
-                                    || !managed_process
-                                    || is_current
-                                    || !self.core_kind.capabilities().core_upgrade,
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.install_core_release(release_for_action.clone(), cx);
-                            })),
-                    )
-            }))
-            .child(
-                h_flex().justify_end().p_4().child(
-                    Button::new("fetch-mihomo-releases")
-                        .icon(IconName::Redo2)
-                        .label(if self.core_releases.loading {
-                            "读取版本中"
-                        } else if self.core_releases.releases.is_empty() {
-                            "读取可安装版本"
+                        )
+                        .child(
+                            gpui::div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(format!(
+                                    "{} · {} · SHA-256 {digest}",
+                                    release.published_at,
+                                    format_bytes(release.asset.size)
+                                )),
+                        ),
+                )
+                .child(
+                    Button::new(("install-core", index))
+                        .icon(IconName::ArrowDown)
+                        .label(zenclash_i18n::text(if is_current {
+                            "core_page.maintenance.current_version"
                         } else {
-                            "刷新版本列表"
-                        })
+                            "core_page.maintenance.install"
+                        }))
                         .small()
-                        .primary()
-                        .loading(self.core_releases.loading)
+                        .outline()
+                        .loading(self.mutating && !is_current)
                         .disabled(
-                            self.core_releases.loading
-                                || self.mutating
+                            self.mutating
+                                || !managed_process
+                                || is_current
                                 || !self.core_kind.capabilities().core_upgrade,
                         )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.fetch_core_releases(cx);
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.install_core_release(release_for_action.clone(), cx);
                         })),
-                ),
-            )
-            .into_any_element()
+                )
+        }))
+        .child(
+            h_flex().justify_end().p_4().child(
+                Button::new("fetch-mihomo-releases")
+                    .icon(IconName::Redo2)
+                    .label(zenclash_i18n::text(if self.core_releases.loading {
+                        "core_page.maintenance.loading_versions"
+                    } else if self.core_releases.releases.is_empty() {
+                        "core_page.maintenance.load_versions"
+                    } else {
+                        "core_page.maintenance.refresh_versions"
+                    }))
+                    .small()
+                    .primary()
+                    .loading(self.core_releases.loading)
+                    .disabled(
+                        self.core_releases.loading
+                            || self.mutating
+                            || !self.core_kind.capabilities().core_upgrade,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.fetch_core_releases(cx);
+                    })),
+            ),
+        )
+        .into_any_element()
     }
 }
 

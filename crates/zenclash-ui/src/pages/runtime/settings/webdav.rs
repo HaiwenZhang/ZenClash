@@ -34,13 +34,19 @@ impl WebDavUiState {
                 Err(error) => (
                     Some(store),
                     WebDavSettings::default(),
-                    Some(format!("WebDAV 设置读取失败：{error}")),
+                    Some(zenclash_i18n::text_with(
+                        "webdav.errors.settings_read",
+                        &[("error", error.to_string())],
+                    )),
                 ),
             },
             Err(error) => (
                 None,
                 WebDavSettings::default(),
-                Some(format!("WebDAV 设置目录不可用：{error}")),
+                Some(zenclash_i18n::text_with(
+                    "webdav.errors.directory",
+                    &[("error", error.to_string())],
+                )),
             ),
         };
         let url = cx.new(|cx| {
@@ -56,18 +62,18 @@ impl WebDavUiState {
         let username = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(settings.username)
-                .placeholder("可选用户名")
+                .placeholder(zenclash_i18n::text("webdav.placeholders.username"))
         });
         let password = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(settings.password)
-                .placeholder("可选密码或应用密码")
+                .placeholder(zenclash_i18n::text("webdav.placeholders.password"))
                 .masked(true)
         });
         let max_backups = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(settings.max_backups.to_string())
-                .placeholder("0 表示不限")
+                .placeholder(zenclash_i18n::text("webdav.placeholders.unlimited"))
         });
         let backup_cron = cx.new(|cx| {
             InputState::new(window, cx)
@@ -127,7 +133,23 @@ impl WebDavUiState {
     fn store(&self) -> Result<WebDavSettingsStore, String> {
         self.store
             .clone()
-            .ok_or_else(|| "WebDAV 设置目录不可用，请检查应用数据目录权限".into())
+            .ok_or_else(|| zenclash_i18n::text("webdav.errors.directory_permission"))
+    }
+
+    pub(in crate::pages::runtime) fn refresh_localized_placeholders(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<super::super::RuntimePage>,
+    ) {
+        for (input, key) in [
+            (&self.username, "webdav.placeholders.username"),
+            (&self.password, "webdav.placeholders.password"),
+            (&self.max_backups, "webdav.placeholders.unlimited"),
+        ] {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(zenclash_i18n::text(key), window, cx);
+            });
+        }
     }
 }
 
@@ -139,10 +161,12 @@ fn parse_max_backups(input: &str) -> Result<usize, String> {
     if input.trim().is_empty() {
         return Ok(0);
     }
-    input
-        .trim()
-        .parse::<usize>()
-        .map_err(|error| format!("保留份数必须是 0 到 100 的整数：{error}"))
+    input.trim().parse::<usize>().map_err(|error| {
+        zenclash_i18n::text_with(
+            "webdav.errors.retention_integer",
+            &[("error", error.to_string())],
+        )
+    })
 }
 
 #[cfg(test)]
@@ -156,6 +180,6 @@ mod tests {
 
     #[test]
     fn invalid_retention_is_reported() {
-        assert!(parse_max_backups("daily").unwrap_err().contains("整数"));
+        assert!(!parse_max_backups("daily").unwrap_err().is_empty());
     }
 }

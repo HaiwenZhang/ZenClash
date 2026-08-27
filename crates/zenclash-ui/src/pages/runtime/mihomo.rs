@@ -12,7 +12,7 @@ pub(super) use maintenance::CoreReleaseState;
 impl RuntimePage {
     fn restart_managed_core(&mut self, cx: &mut Context<Self>) {
         let Some(process) = self.process.clone() else {
-            self.error = Some("当前连接的是外部内核，ZenClash 无法重启该进程".into());
+            self.error = Some(zenclash_i18n::text("core_page.errors.external_restart"));
             cx.notify();
             return;
         };
@@ -24,7 +24,12 @@ impl RuntimePage {
             let restarting = process.clone();
             tokio::task::spawn_blocking(move || restarting.restart())
                 .await
-                .map_err(|error| format!("内核重启任务异常结束：{error}"))?
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "core_page.errors.restart_task",
+                        &[("error", error.to_string())],
+                    )
+                })?
                 .map_err(|error| error.to_string())?;
             process
                 .wait_until_ready(Duration::from_secs(20))
@@ -35,9 +40,9 @@ impl RuntimePage {
         Self::finish_core_maintenance(
             task,
             token,
-            format!(
-                "{} 内核已重启并通过 /version 验证",
-                self.core_kind.display_name()
+            zenclash_i18n::text_with(
+                "core_page.notices.restarted",
+                &[("core", self.core_kind.display_name().to_owned())],
             ),
             cx,
         );
@@ -52,7 +57,12 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("内核维护任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "core_page.errors.maintenance_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -92,16 +102,19 @@ impl RuntimePage {
         let process_status = process.as_ref().map_or_else(
             || {
                 if has_runtime_data {
-                    "连接到外部内核".into()
+                    zenclash_i18n::text("core_page.status.external_connected")
                 } else {
-                    "外部内核不可达".into()
+                    zenclash_i18n::text("core_page.status.external_unreachable")
                 }
             },
             |snapshot| {
                 if snapshot.running {
-                    format!("运行中 · PID {}", snapshot.pid.unwrap_or_default())
+                    zenclash_i18n::text_with(
+                        "core_page.status.running",
+                        &[("pid", snapshot.pid.unwrap_or_default().to_string())],
+                    )
                 } else {
-                    "已停止".into()
+                    zenclash_i18n::text("core_page.status.stopped")
                 }
             },
         );
@@ -113,17 +126,17 @@ impl RuntimePage {
                     .gap_3()
                     .flex_wrap()
                     .child(metric(
-                        "内核版本",
+                        zenclash_i18n::text("core_page.metrics.version"),
                         if has_runtime_data && !version.version.is_empty() {
                             version.version.clone()
                         } else {
-                            "无法读取".into()
+                            zenclash_i18n::text("core_page.status.unreadable")
                         },
                         theme.primary,
                         theme,
                     ))
                     .child(metric(
-                        "运行状态",
+                        zenclash_i18n::text("core_page.metrics.status"),
                         process_status,
                         if process_running {
                             theme.success
@@ -133,11 +146,11 @@ impl RuntimePage {
                         theme,
                     ))
                     .child(metric(
-                        "运行模式",
+                        zenclash_i18n::text("core_page.metrics.mode"),
                         if has_runtime_data && !config.mode.is_empty() {
                             config.mode.clone()
                         } else {
-                            "无法读取".into()
+                            zenclash_i18n::text("core_page.status.unreadable")
                         },
                         theme.warning,
                         theme,
@@ -145,66 +158,69 @@ impl RuntimePage {
             )
             .when(!has_runtime_data, |this| {
                 this.child(message_banner(
-                    "没有使用默认值冒充运行状态。请重启托管内核，或确认外部控制器地址和密钥后刷新。".into(),
+                    zenclash_i18n::text("core_page.status.no_placeholder"),
                     theme.danger,
                     theme,
                 ))
             })
             .when(has_runtime_data, |this| {
                 this.child(
-                    setting_card("运行时开关", theme)
+                    setting_card(zenclash_i18n::text("core_page.switches.title"), theme)
                         .child(setting_switch(
                             "IPv6",
-                            format!("允许 {} 解析和使用 IPv6", self.core_kind.display_name()),
+                            zenclash_i18n::text_with(
+                                "core_page.switches.ipv6_description",
+                                &[("core", self.core_kind.display_name().to_owned())],
+                            ),
                             config.ipv6,
                             "runtime-ipv6",
                             theme,
                             cx.listener(|this, checked, _, cx| {
                                 this.apply_controlled_config(
                                     json!({"ipv6": *checked}),
-                                    "IPv6 设置已保存并热重载",
+                                    zenclash_i18n::text("core_page.notices.ipv6"),
                                     cx,
                                 );
                             }),
                         ))
                         .child(setting_switch(
-                            "允许局域网",
-                            "允许其他设备访问监听端口",
+                            zenclash_i18n::text("core_page.switches.allow_lan"),
+                            zenclash_i18n::text("core_page.switches.allow_lan_description"),
                             config.allow_lan,
                             "runtime-allow-lan",
                             theme,
                             cx.listener(|this, checked, _, cx| {
                                 this.apply_controlled_config(
                                     json!({"allow-lan": *checked}),
-                                    "局域网访问设置已更新",
+                                    zenclash_i18n::text("core_page.notices.allow_lan"),
                                     cx,
                                 );
                             }),
                         ))
                         .child(setting_switch(
-                            "TCP 并发",
-                            "并行建立目标连接以降低握手等待",
+                            zenclash_i18n::text("core_page.switches.tcp_concurrent"),
+                            zenclash_i18n::text("core_page.switches.tcp_concurrent_description"),
                             config.tcp_concurrent,
                             "runtime-tcp-concurrent",
                             theme,
                             cx.listener(|this, checked, _, cx| {
                                 this.apply_controlled_config(
                                     json!({"tcp-concurrent": *checked}),
-                                    "TCP 并发设置已更新",
+                                    zenclash_i18n::text("core_page.notices.tcp_concurrent"),
                                     cx,
                                 );
                             }),
                         ))
                         .child(setting_switch(
-                            "统一延迟",
-                            "使用统一的延迟计算方式",
+                            zenclash_i18n::text("core_page.switches.unified_delay"),
+                            zenclash_i18n::text("core_page.switches.unified_delay_description"),
                             config.unified_delay,
                             "runtime-unified-delay",
                             theme,
                             cx.listener(|this, checked, _, cx| {
                                 this.apply_controlled_config(
                                     json!({"unified-delay": *checked}),
-                                    "统一延迟设置已更新",
+                                    zenclash_i18n::text("core_page.notices.unified_delay"),
                                     cx,
                                 );
                             }),
@@ -213,38 +229,42 @@ impl RuntimePage {
             })
             .when(has_runtime_data, |this| {
                 this.child(
-                    setting_card("控制器与监听", theme)
+                    setting_card(zenclash_i18n::text("core_page.controller.title"), theme)
                         .child(info_row(
                             "External Controller",
                             &self.client.endpoint().controller,
                             theme,
                         ))
-                        .child(info_row("HTTP", &format_port(config.port), theme))
-                        .child(info_row("SOCKS", &format_port(config.socks_port), theme))
-                        .child(info_row("Mixed", &format_port(config.mixed_port), theme))
-                        .child(info_row("日志等级", &config.log_level, theme)),
+                        .child(info_row("HTTP", format_port(config.port), theme))
+                        .child(info_row("SOCKS", format_port(config.socks_port), theme))
+                        .child(info_row("Mixed", format_port(config.mixed_port), theme))
+                        .child(info_row(
+                            zenclash_i18n::text("core_page.controller.log_level"),
+                            &config.log_level,
+                            theme,
+                        )),
                 )
             })
             .when(has_runtime_data, |this| {
                 this.child(self.render_core_inputs(theme, cx))
             })
             .child(
-                setting_card("内核维护", theme)
+                setting_card(zenclash_i18n::text("core_page.maintenance.title"), theme)
                     .child(info_row(
-                        "升级通道",
+                        zenclash_i18n::text("core_page.maintenance.channel"),
                         if self.core_kind.capabilities().core_upgrade {
-                            "官方 Release · SHA-256 校验 · 候选 -t 预检 · 失败回滚"
+                            zenclash_i18n::text("core_page.maintenance.official")
                         } else {
-                            "当前内核不支持应用内升级"
+                            zenclash_i18n::text("core_page.maintenance.unsupported")
                         },
                         theme,
                     ))
                     .child(info_row(
-                        "重启能力",
+                        zenclash_i18n::text("core_page.maintenance.restart_capability"),
                         if managed_process {
-                            "由 ZenClash 管理并验证就绪"
+                            zenclash_i18n::text("core_page.maintenance.managed")
                         } else {
-                            "外部进程需由其服务管理器重启"
+                            zenclash_i18n::text("core_page.maintenance.external")
                         },
                         theme,
                     ))
@@ -252,7 +272,7 @@ impl RuntimePage {
                         h_flex().justify_end().gap_2().p_4().child(
                             Button::new("restart-mihomo-core")
                                 .icon(IconName::Redo2)
-                                .label("重启内核")
+                                .label(zenclash_i18n::text("core_page.maintenance.restart"))
                                 .small()
                                 .outline()
                                 .loading(self.mutating)
@@ -266,20 +286,20 @@ impl RuntimePage {
             .child(self.render_versioned_core_updates(&version.version, managed_process, theme, cx))
             .when_some(process, |this, snapshot| {
                 this.child(
-                    setting_card("内核进程", theme)
+                    setting_card(zenclash_i18n::text("core_page.process.title"), theme)
                         .child(info_row(
-                            "二进制",
-                            &snapshot.binary.display().to_string(),
+                            zenclash_i18n::text("core_page.process.binary"),
+                            snapshot.binary.display().to_string(),
                             theme,
                         ))
                         .child(info_row(
-                            "配置文件",
-                            &snapshot.config_file.display().to_string(),
+                            zenclash_i18n::text("core_page.process.config"),
+                            snapshot.config_file.display().to_string(),
                             theme,
                         ))
                         .child(info_row(
-                            "工作目录",
-                            &snapshot.home_dir.display().to_string(),
+                            zenclash_i18n::text("core_page.process.directory"),
+                            snapshot.home_dir.display().to_string(),
                             theme,
                         )),
                 )
@@ -293,51 +313,51 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let inputs = &self.config_inputs.core;
-        setting_card("监听端口与出口", theme)
+        setting_card(zenclash_i18n::text("core_page.listeners.title"), theme)
             .child(config_input_row(
-                "HTTP 端口",
-                "0 表示停用独立 HTTP 监听",
+                zenclash_i18n::text("core_page.listeners.http"),
+                zenclash_i18n::text("core_page.listeners.http_description"),
                 Input::new(&inputs.port),
                 theme,
             ))
             .child(config_input_row(
-                "SOCKS 端口",
-                "0 表示停用独立 SOCKS 监听",
+                zenclash_i18n::text("core_page.listeners.socks"),
+                zenclash_i18n::text("core_page.listeners.socks_description"),
                 Input::new(&inputs.socks_port),
                 theme,
             ))
             .child(config_input_row(
-                "Mixed 端口",
-                "同时接受 HTTP 与 SOCKS；系统代理优先使用此端口",
+                zenclash_i18n::text("core_page.listeners.mixed"),
+                zenclash_i18n::text("core_page.listeners.mixed_description"),
                 Input::new(&inputs.mixed_port),
                 theme,
             ))
             .child(config_input_row(
-                "Redir 端口",
-                "Linux 透明代理 REDIRECT 监听端口",
+                zenclash_i18n::text("core_page.listeners.redir"),
+                zenclash_i18n::text("core_page.listeners.redir_description"),
                 Input::new(&inputs.redir_port),
                 theme,
             ))
             .child(config_input_row(
-                "TPROXY 端口",
-                "Linux TPROXY 透明代理监听端口",
+                zenclash_i18n::text("core_page.listeners.tproxy"),
+                zenclash_i18n::text("core_page.listeners.tproxy_description"),
                 Input::new(&inputs.tproxy_port),
                 theme,
             ))
             .child(config_input_row(
-                "监听地址",
-                "使用 127.0.0.1 仅允许本机访问；* 接受配置允许的地址",
+                zenclash_i18n::text("core_page.listeners.bind"),
+                zenclash_i18n::text("core_page.listeners.bind_description"),
                 Input::new(&inputs.bind_address),
                 theme,
             ))
             .child(config_input_row(
-                "出口接口",
-                "留空由当前内核自动选择；填写真实系统接口名称可固定出口",
+                zenclash_i18n::text("core_page.listeners.interface"),
+                zenclash_i18n::text("core_page.listeners.interface_description"),
                 Input::new(&inputs.interface_name),
                 theme,
             ))
             .child(config_input_row(
-                "日志等级",
+                zenclash_i18n::text("core_page.controller.log_level"),
                 "silent / error / warning / info / debug",
                 Input::new(&inputs.log_level),
                 theme,
@@ -346,7 +366,10 @@ impl RuntimePage {
                 h_flex().justify_end().p_4().child(
                     Button::new("save-core-listeners")
                         .icon(IconName::Check)
-                        .label(format!("保存并由 {} 验证", self.core_kind.display_name()))
+                        .label(zenclash_i18n::text_with(
+                            "core_page.listeners.save",
+                            &[("core", self.core_kind.display_name().to_owned())],
+                        ))
                         .primary()
                         .loading(self.mutating)
                         .disabled(self.mutating)
@@ -354,7 +377,7 @@ impl RuntimePage {
                             match this.config_inputs.core.patch(cx) {
                                 Ok(patch) => this.apply_controlled_config(
                                     patch,
-                                    "监听端口、出口接口和日志等级已保存",
+                                    zenclash_i18n::text("core_page.notices.listeners"),
                                     cx,
                                 ),
                                 Err(error) => {

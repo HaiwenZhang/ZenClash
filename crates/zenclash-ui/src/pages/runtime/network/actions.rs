@@ -28,7 +28,7 @@ impl RuntimePage {
             Ok(route) => route,
             Err(error) => {
                 self.network_probe.snapshot = Some(NetworkProbeSnapshot {
-                    route: "内核未监听 HTTP/Mixed 端口".into(),
+                    route: zenclash_i18n::text("network.errors.route_no_port"),
                     public_ip_error: Some(error),
                     ..Default::default()
                 });
@@ -58,7 +58,12 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("网络探测任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "network.errors.probe_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result.map_err(|error| error.to_string()));
             let _ = this.update(cx, |this, cx| {
                 if this.page != Page::Network || this.network_probe.revision != revision {
@@ -87,7 +92,7 @@ impl RuntimePage {
         match NetworkLatencyTarget::new(name, url) {
             Ok(target) => self.persist_network_preference(
                 NetworkPreferenceChange::AddTarget(target),
-                "自定义延迟目标已保存",
+                zenclash_i18n::text("network.notices.target_added"),
                 cx,
             ),
             Err(error) => {
@@ -100,11 +105,13 @@ impl RuntimePage {
     pub(super) fn persist_network_preference(
         &mut self,
         change: NetworkPreferenceChange,
-        success: &'static str,
+        success: String,
         cx: &mut Context<Self>,
     ) {
         let Some(store) = self.preferences_store.clone() else {
-            self.error = Some("应用设置存储不可用；请检查应用数据目录权限".into());
+            self.error = Some(zenclash_i18n::text(
+                "network.errors.preferences_unavailable",
+            ));
             cx.notify();
             return;
         };
@@ -141,14 +148,19 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("网络探测设置保存任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "network.errors.preferences_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
                 match result {
                     Ok(preferences) if this.is_page_task_current(token) => {
                         this.preferences = preferences.clone();
-                        this.notice = Some(success.into());
+                        this.notice = Some(success);
                         cx.emit(PreferencesRestored { preferences });
                         this.cancel_network_probe();
                         this.refresh_network_probe(cx);

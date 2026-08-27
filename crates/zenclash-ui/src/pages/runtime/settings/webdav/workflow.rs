@@ -14,7 +14,12 @@ pub(super) async fn restore_remote_backup(
     let service = WebDavService::new(settings).map_err(|error| error.to_string())?;
     let manager = tokio::task::spawn_blocking(BackupManager::discover)
         .await
-        .map_err(|error| format!("本地备份目录任务异常结束：{error}"))?
+        .map_err(|error| {
+            zenclash_i18n::text_with(
+                "webdav.errors.local_directory_task",
+                &[("error", error.to_string())],
+            )
+        })?
         .map_err(|error| error.to_string())?;
     let prepared = service
         .prepare_restore(&manager, &filename)

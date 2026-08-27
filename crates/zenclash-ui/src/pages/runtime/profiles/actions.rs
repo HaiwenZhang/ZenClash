@@ -11,7 +11,7 @@ mod catalog;
 impl RuntimePage {
     pub(super) fn reload_profile(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.profile_path.clone() else {
-            self.error = Some("未配置当前配置文件路径".into());
+            self.error = Some(zenclash_i18n::text("profiles.errors.profile_path_missing"));
             cx.notify();
             return;
         };
@@ -29,7 +29,10 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = match task.await {
                 Ok(result) => result,
-                Err(error) => Err(format!("重载配置任务异常结束：{error}")),
+                Err(error) => Err(zenclash_i18n::text_with(
+                    "profiles.errors.reload_task",
+                    &[("error", error.to_string())],
+                )),
             };
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -38,11 +41,14 @@ impl RuntimePage {
                         if this.replace_page_data(token, data) {
                             this.notice =
                                 Some(if this.core_kind.capabilities().full_config_reload {
-                                    format!("真实配置已由 {} 热重载", this.core_kind.display_name())
+                                    zenclash_i18n::text_with(
+                                        "profiles.notices.reloaded",
+                                        &[("core", this.core_kind.display_name().to_owned())],
+                                    )
                                 } else {
-                                    format!(
-                                        "真实配置已由 {} 重启加载并回读",
-                                        this.core_kind.display_name()
+                                    zenclash_i18n::text_with(
+                                        "profiles.notices.restarted",
+                                        &[("core", this.core_kind.display_name().to_owned())],
                                     )
                                 });
                         }
@@ -71,7 +77,7 @@ impl RuntimePage {
 
     fn import_local_profile(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let Some(store) = self.profile_store.clone() else {
-            self.error = Some("配置仓库不可用".into());
+            self.error = Some(zenclash_i18n::text("profiles.errors.store_unavailable"));
             cx.notify();
             return;
         };
@@ -91,14 +97,24 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("本地配置导入任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "profiles.errors.import_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
                 match result {
                     Ok(outcome) => this.apply_profile_activation(
                         outcome,
-                        |name| format!("已导入并启用本地配置“{name}”"),
+                        |name| {
+                            zenclash_i18n::text_with(
+                                "profiles.notices.imported",
+                                &[("name", name.to_owned())],
+                            )
+                        },
                         token,
                         cx,
                     ),
@@ -113,7 +129,7 @@ impl RuntimePage {
 
     pub(super) fn add_remote_profile(&mut self, cx: &mut Context<Self>) {
         let Some(store) = self.profile_store.clone() else {
-            self.error = Some("配置仓库不可用".into());
+            self.error = Some(zenclash_i18n::text("profiles.errors.store_unavailable"));
             cx.notify();
             return;
         };
@@ -145,14 +161,17 @@ impl RuntimePage {
             .value()
             .to_string();
         if name.trim().is_empty() || url.trim().is_empty() {
-            self.error = Some("请填写订阅名称和订阅 URL".into());
+            self.error = Some(zenclash_i18n::text("profiles.errors.required_fields"));
             cx.notify();
             return;
         }
         let options = match RemoteProfileOptions::new(authorization, false) {
             Ok(options) => options.with_route(self.profile_forms.subscription_route),
             Err(error) => {
-                self.error = Some(format!("订阅请求设置无效：{error}"));
+                self.error = Some(zenclash_i18n::text_with(
+                    "profiles.errors.request_invalid",
+                    &[("error", error.to_string())],
+                ));
                 cx.notify();
                 return;
             }
@@ -176,7 +195,12 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("在线订阅任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "profiles.errors.remote_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -185,7 +209,12 @@ impl RuntimePage {
                         this.profile_forms.adding_subscription = false;
                         this.apply_profile_activation(
                             outcome,
-                            |name| format!("在线订阅“{name}”已下载并启用"),
+                            |name| {
+                                zenclash_i18n::text_with(
+                                    "profiles.notices.added",
+                                    &[("name", name.to_owned())],
+                                )
+                            },
                             token,
                             cx,
                         );
@@ -200,33 +229,65 @@ impl RuntimePage {
     }
 
     pub(super) fn activate_managed_profile(&mut self, id: String, cx: &mut Context<Self>) {
+        self.activate_managed_profile_for_page(id, Page::Profiles, cx);
+    }
+
+    pub(in crate::pages::runtime) fn activate_home_profile(
+        &mut self,
+        id: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_managed_profile_for_page(id, Page::Home, cx);
+    }
+
+    fn activate_managed_profile_for_page(
+        &mut self,
+        id: String,
+        page: Page,
+        cx: &mut Context<Self>,
+    ) {
         let Some(store) = self.profile_store.clone() else {
             return;
         };
-        let Some(token) = self.begin_mutation(Page::Profiles) else {
+        let Some(token) = self.begin_mutation(page) else {
             return;
         };
+        if page == Page::Home {
+            self.home_profile_switching = Some(id.clone());
+        }
         let client = self.client.clone();
         let controlled = self.controlled_config_store.clone();
         let core_runtime =
             workflow::CoreProfileRuntime::new(self.core_kind, client, self.process.clone());
-        let task = self.runtime.spawn(workflow::activate_existing(
+        let task = self.runtime.spawn(workflow::activate_existing_for_page(
             store,
             controlled,
             core_runtime,
             id,
+            page,
         ));
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("配置切换任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "profiles.errors.activate_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
+                this.home_profile_switching = None;
                 match result {
                     Ok(outcome) => this.apply_profile_activation(
                         outcome,
-                        |name| format!("已切换到“{name}”"),
+                        |name| {
+                            zenclash_i18n::text_with(
+                                "profiles.notices.activated",
+                                &[("name", name.to_owned())],
+                            )
+                        },
                         token,
                         cx,
                     ),
@@ -245,7 +306,7 @@ impl RuntimePage {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("选择 Clash YAML 配置".into()),
+            prompt: Some(zenclash_i18n::text("profiles.dialog.choose_yaml").into()),
         });
         cx.spawn(async move |this, cx| {
             let selection = receiver.await;
@@ -261,11 +322,23 @@ impl RuntimePage {
                 }
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
-                    this.set_page_error(token, format!("无法打开配置选择器：{error}"));
+                    this.set_page_error(
+                        token,
+                        zenclash_i18n::text_with(
+                            "profiles.errors.chooser",
+                            &[("error", error.to_string())],
+                        ),
+                    );
                     cx.notify();
                 }
                 Err(error) => {
-                    this.set_page_error(token, format!("配置选择器异常结束：{error}"));
+                    this.set_page_error(
+                        token,
+                        zenclash_i18n::text_with(
+                            "profiles.errors.chooser_task",
+                            &[("error", error.to_string())],
+                        ),
+                    );
                     cx.notify();
                 }
             });
@@ -294,7 +367,13 @@ impl RuntimePage {
                 }
             }
             Err(error) => {
-                self.set_page_error(token, format!("配置已启用，但刷新页面失败：{error}"));
+                self.set_page_error(
+                    token,
+                    zenclash_i18n::text_with(
+                        "profiles.errors.enabled_refresh",
+                        &[("error", error)],
+                    ),
+                );
             }
         }
     }

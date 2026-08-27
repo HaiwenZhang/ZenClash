@@ -1,8 +1,9 @@
-use gpui::{div, rems, App, IntoElement, ParentElement, RenderOnce, Styled, Window};
+use gpui::{
+    div, prelude::FluentBuilder as _, rems, App, InteractiveElement as _, IntoElement,
+    ParentElement, RenderOnce, StatefulInteractiveElement as _, Styled, Window,
+};
 use gpui_component::{
-    h_flex,
-    sidebar::{Sidebar as GpuiSidebar, SidebarMenu, SidebarMenuItem},
-    v_flex, ActiveTheme, Icon, IconName,
+    h_flex, sidebar::Sidebar as GpuiSidebar, v_flex, ActiveTheme, Collapsible, Icon,
 };
 
 use crate::{
@@ -12,6 +13,7 @@ use crate::{
         NavigateRules, NavigateSettings, NavigateSniffer, NavigateSystemProxy, NavigateTraffic,
         NavigateTun,
     },
+    assets::ZENCLASH_MARK_PATH,
     pages::Page,
 };
 
@@ -30,12 +32,12 @@ pub enum OutboundMode {
 impl OutboundMode {
     /// Returns the localized user-facing label.
     #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Rule => "规则",
-            Self::Global => "全局",
-            Self::Direct => "直连",
-        }
+    pub fn label(self) -> String {
+        zenclash_i18n::text(match self {
+            Self::Rule => "outbound_mode.rule",
+            Self::Global => "outbound_mode.global",
+            Self::Direct => "outbound_mode.direct",
+        })
     }
 
     /// Returns the compact uppercase UI code.
@@ -81,12 +83,74 @@ impl Sidebar {
     pub const fn new(current_page: Page) -> Self {
         Self { current_page }
     }
+}
 
-    fn menu_item(&self, page: Page) -> SidebarMenuItem {
-        SidebarMenuItem::new(page.label())
-            .icon(page.icon())
-            .active(page == self.current_page)
-            .on_click(move |_, window, cx| dispatch_navigate(page, window, cx))
+#[derive(IntoElement)]
+struct SidebarNavigation {
+    current_page: Page,
+    pages: Vec<Page>,
+    collapsed: bool,
+}
+
+impl SidebarNavigation {
+    fn new(current_page: Page, pages: impl IntoIterator<Item = Page>) -> Self {
+        Self {
+            current_page,
+            pages: pages.into_iter().collect(),
+            collapsed: false,
+        }
+    }
+}
+
+impl Collapsible for SidebarNavigation {
+    fn collapsed(mut self, collapsed: bool) -> Self {
+        self.collapsed = collapsed;
+        self
+    }
+
+    fn is_collapsed(&self) -> bool {
+        self.collapsed
+    }
+}
+
+impl RenderOnce for SidebarNavigation {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        let accent = theme.sidebar_accent;
+        let accent_foreground = theme.sidebar_accent_foreground;
+        let radius = theme.radius_lg;
+
+        v_flex()
+            .gap_2()
+            .children(self.pages.into_iter().map(|page| {
+                let active = page == self.current_page;
+
+                h_flex()
+                    .id(page.route())
+                    .w_full()
+                    .h(rems(3.))
+                    .px_3()
+                    .gap_3()
+                    .overflow_x_hidden()
+                    .cursor_pointer()
+                    .rounded(radius)
+                    .text_base()
+                    .when(active, |this| {
+                        this.bg(accent)
+                            .text_color(accent_foreground)
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                    })
+                    .when(!active, |this| {
+                        this.hover(move |this| {
+                            this.bg(accent.opacity(0.82)).text_color(accent_foreground)
+                        })
+                    })
+                    .child(Icon::new(page.icon()).size(rems(1.25)))
+                    .when(!self.collapsed, |this| {
+                        this.child(div().flex_1().overflow_x_hidden().child(page.label()))
+                    })
+                    .on_click(move |_, window, cx| dispatch_navigate(page, window, cx))
+            }))
     }
 }
 
@@ -97,50 +161,53 @@ impl RenderOnce for Sidebar {
         let navigation = std::iter::once(Page::Home).chain(Page::PRIMARY);
 
         GpuiSidebar::left()
-            .w(rems(14.))
+            .w(rems(15.))
             .collapsible(false)
             .header(
                 h_flex()
-                    .h(rems(4.5))
+                    .h(rems(5.25))
                     .w_full()
                     .pt_8()
                     .gap_3()
                     .child(
                         div()
-                            .size_8()
-                            .rounded(theme.radius)
-                            .bg(theme.primary.opacity(0.13))
+                            .size(rems(3.))
+                            .rounded(theme.radius_lg)
+                            .bg(theme.sidebar_foreground.opacity(0.065))
+                            .border_1()
+                            .border_color(theme.sidebar_foreground.opacity(0.08))
                             .flex()
                             .items_center()
                             .justify_center()
                             .child(
-                                Icon::new(IconName::Globe)
-                                    .size_4()
-                                    .text_color(theme.primary),
+                                Icon::empty()
+                                    .path(ZENCLASH_MARK_PATH)
+                                    .size(rems(1.8))
+                                    .text_color(theme.muted_foreground),
                             ),
                     )
                     .child(
                         v_flex()
-                            .gap_0()
+                            .gap_0p5()
                             .child(
                                 div()
-                                    .text_sm()
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .child("ZenClash"),
+                                    .text_lg()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(zenclash_i18n::text("app.name")),
                             )
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_sm()
                                     .text_color(theme.muted_foreground)
-                                    .child("Mihomo 桌面客户端"),
+                                    .child(zenclash_i18n::text("app.description")),
                             ),
                     ),
             )
-            .child(SidebarMenu::new().children(navigation.map(|page| self.menu_item(page))))
+            .child(SidebarNavigation::new(self.current_page, navigation))
             .footer(
                 div()
                     .w_full()
-                    .child(SidebarMenu::new().child(self.menu_item(Page::Settings))),
+                    .child(SidebarNavigation::new(self.current_page, [Page::Settings])),
             )
     }
 }

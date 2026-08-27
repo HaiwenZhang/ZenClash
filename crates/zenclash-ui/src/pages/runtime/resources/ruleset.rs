@@ -22,11 +22,10 @@ impl RuntimePage {
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let source = self
-            .ruleset
-            .source
-            .as_deref()
-            .map_or_else(|| "尚未选择 MRS 文件".into(), compact_path);
+        let source = self.ruleset.source.as_deref().map_or_else(
+            || zenclash_i18n::text("resources.ruleset.none"),
+            compact_path,
+        );
         let conversion = self.ruleset.conversion.as_ref();
         let output_size = conversion.map_or_else(
             || "—".into(),
@@ -37,20 +36,28 @@ impl RuntimePage {
             |result| super::super::format_bytes(result.source_bytes),
         );
 
-        setting_card("MRS 规则集检查器", theme)
+        setting_card(zenclash_i18n::text("resources.ruleset.title"), theme)
             .when(!self.core_kind.capabilities().ruleset_conversion, |card| {
                 card.child(super::super::message_banner(
-                    format!(
-                        "{} 不实现 Mihomo 的 MRS 转换命令；请选择 Mihomo 内核后使用此工具。",
-                        self.core_kind.display_name()
+                    zenclash_i18n::text_with(
+                        "resources.ruleset.unsupported",
+                        &[("core", self.core_kind.display_name().to_owned())],
                     ),
                     theme.warning,
                     theme,
                 ))
             })
             .child(self.render_ruleset_controls(source, theme, cx))
-            .child(info_row("源文件", &source_size, theme))
-            .child(info_row("UTF-8 输出", &output_size, theme))
+            .child(info_row(
+                zenclash_i18n::text("resources.ruleset.source"),
+                &source_size,
+                theme,
+            ))
+            .child(info_row(
+                zenclash_i18n::text("resources.ruleset.output"),
+                &output_size,
+                theme,
+            ))
             .when_some(conversion, |card, result| {
                 card.child(self.render_ruleset_result(result, theme, cx))
             })
@@ -70,7 +77,7 @@ impl RuntimePage {
                 div()
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .child("用当前 Mihomo 内核解码二进制规则集；不经过 shell，也不会修改源文件。"),
+                    .child(zenclash_i18n::text("resources.ruleset.description")),
             )
             .child(
                 h_flex()
@@ -121,7 +128,7 @@ impl RuntimePage {
                     .child(
                         Button::new("choose-ruleset")
                             .icon(IconName::FolderOpen)
-                            .label("选择 MRS")
+                            .label(zenclash_i18n::text("resources.ruleset.choose"))
                             .small()
                             .outline()
                             .disabled(
@@ -134,7 +141,7 @@ impl RuntimePage {
                     .child(
                         Button::new("convert-ruleset")
                             .icon(IconName::ArrowRight)
-                            .label("转换")
+                            .label(zenclash_i18n::text("resources.ruleset.convert"))
                             .small()
                             .primary()
                             .loading(self.mutating)
@@ -168,9 +175,9 @@ impl RuntimePage {
                             .text_xs()
                             .text_color(theme.muted_foreground)
                             .child(if truncated {
-                                "规则预览 · 已截断显示，复制与导出仍包含完整内容"
+                                zenclash_i18n::text("resources.ruleset.preview_truncated")
                             } else {
-                                "规则预览"
+                                zenclash_i18n::text("resources.ruleset.preview")
                             }),
                     )
                     .child(
@@ -179,7 +186,7 @@ impl RuntimePage {
                             .child(
                                 Button::new("copy-ruleset")
                                     .icon(IconName::Copy)
-                                    .label("复制完整规则")
+                                    .label(zenclash_i18n::text("resources.ruleset.copy"))
                                     .small()
                                     .ghost()
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -189,7 +196,7 @@ impl RuntimePage {
                             .child(
                                 Button::new("export-ruleset")
                                     .icon(IconName::File)
-                                    .label("导出 TXT")
+                                    .label(zenclash_i18n::text("resources.ruleset.export"))
                                     .small()
                                     .outline()
                                     .disabled(self.mutating)
@@ -219,7 +226,7 @@ impl RuntimePage {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("选择 Mihomo MRS 规则集".into()),
+            prompt: Some(zenclash_i18n::text("resources.ruleset.choose_prompt").into()),
         });
         cx.spawn(async move |this, cx| {
             let selection = receiver.await;
@@ -229,7 +236,7 @@ impl RuntimePage {
                         this.ruleset.source = Some(path);
                         this.ruleset.conversion = None;
                         this.error = None;
-                        this.notice = Some("已选择 MRS 文件；请选择匹配的行为类型后转换".into());
+                        this.notice = Some(zenclash_i18n::text("resources.ruleset.selected"));
                         cx.notify();
                     }
                 }
@@ -238,11 +245,23 @@ impl RuntimePage {
                 }
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
-                    this.set_page_error(token, format!("无法打开 MRS 选择器：{error}"));
+                    this.set_page_error(
+                        token,
+                        zenclash_i18n::text_with(
+                            "resources.ruleset.errors.picker",
+                            &[("error", error.to_string())],
+                        ),
+                    );
                     cx.notify();
                 }
                 Err(error) => {
-                    this.set_page_error(token, format!("MRS 选择器异常结束：{error}"));
+                    this.set_page_error(
+                        token,
+                        zenclash_i18n::text_with(
+                            "resources.ruleset.errors.picker_task",
+                            &[("error", error.to_string())],
+                        ),
+                    );
                     cx.notify();
                 }
             });
@@ -252,9 +271,9 @@ impl RuntimePage {
 
     fn convert_ruleset(&mut self, cx: &mut Context<Self>) {
         if !self.core_kind.capabilities().ruleset_conversion {
-            self.error = Some(format!(
-                "{} 不支持 MRS 规则集转换",
-                self.core_kind.display_name()
+            self.error = Some(zenclash_i18n::text_with(
+                "resources.ruleset.errors.unsupported",
+                &[("core", self.core_kind.display_name().to_owned())],
             ));
             cx.notify();
             return;
@@ -263,10 +282,9 @@ impl RuntimePage {
             return;
         };
         let Some(binary) = self.mihomo_binary() else {
-            self.error = Some(
-                "未找到 Mihomo 可执行文件；请先由 ZenClash 启动内核，或设置 ZENCLASH_MIHOMO_BINARY"
-                    .into(),
-            );
+            self.error = Some(zenclash_i18n::text(
+                "resources.ruleset.errors.binary_missing",
+            ));
             cx.notify();
             return;
         };
@@ -282,15 +300,20 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("MRS 转换任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "resources.ruleset.errors.conversion_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
                 match result {
                     Ok(conversion) if this.is_page_task_current(token) => {
-                        this.notice = Some(format!(
-                            "已用 {} 行为解码 MRS 规则集",
-                            conversion.behavior.as_str()
+                        this.notice = Some(zenclash_i18n::text_with(
+                            "resources.ruleset.converted",
+                            &[("behavior", conversion.behavior.as_str().to_owned())],
                         ));
                         this.ruleset.conversion = Some(conversion);
                     }
@@ -334,11 +357,23 @@ impl RuntimePage {
                 }
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
-                    this.set_page_error(token, format!("无法打开规则保存对话框：{error}"));
+                    this.set_page_error(
+                        token,
+                        zenclash_i18n::text_with(
+                            "resources.ruleset.errors.save_dialog",
+                            &[("error", error.to_string())],
+                        ),
+                    );
                     cx.notify();
                 }
                 Err(error) => {
-                    this.set_page_error(token, format!("规则保存对话框异常结束：{error}"));
+                    this.set_page_error(
+                        token,
+                        zenclash_i18n::text_with(
+                            "resources.ruleset.errors.save_dialog_task",
+                            &[("error", error.to_string())],
+                        ),
+                    );
                     cx.notify();
                 }
             });
@@ -361,13 +396,28 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("规则导出任务异常结束：{error}"))
-                .and_then(|result| result.map_err(|error| format!("写入规则文件失败：{error}")));
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "resources.ruleset.errors.export_task",
+                        &[("error", error.to_string())],
+                    )
+                })
+                .and_then(|result| {
+                    result.map_err(|error| {
+                        zenclash_i18n::text_with(
+                            "resources.ruleset.errors.write",
+                            &[("error", error.to_string())],
+                        )
+                    })
+                });
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
                 match result {
                     Ok(()) if this.is_page_task_current(token) => {
-                        this.notice = Some(format!("规则已导出到 {display_path}"));
+                        this.notice = Some(zenclash_i18n::text_with(
+                            "resources.ruleset.exported",
+                            &[("path", display_path)],
+                        ));
                     }
                     Ok(()) => {}
                     Err(error) => this.set_page_error(token, error),

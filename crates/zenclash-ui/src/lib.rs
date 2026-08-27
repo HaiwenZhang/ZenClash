@@ -8,6 +8,8 @@
 
 /// Application lifecycle, windows, actions, and native tray coordination.
 pub mod app;
+/// Embedded application-owned and component icon assets.
+pub mod assets;
 /// Reusable GPUI widgets used by the application shell and pages.
 pub mod components;
 /// `ZenClash` colors and gpui-component theme configuration.

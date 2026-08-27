@@ -28,7 +28,7 @@ use zenclash_core::{
     NetworkProbeSnapshot, ProfileCatalog, ProfileStore, ProviderCatalog, PublicIpProvider,
     RemoteProfileOptions, RemoteProfileRoute, RuleCatalog, RuntimeConfig, SystemNetworkSnapshot,
     SystemProxyController, SystemProxyManager, SystemProxyMode, SystemProxyStatus,
-    TrafficHistoryStore, TrafficMonitor, TunPermissionGrant, TunPermissionManager,
+    TrafficHistoryStore, TrafficMonitor, TrafficSnapshot, TunPermissionGrant, TunPermissionManager,
     TunPermissionStatus, VersionInfo, YamlOverrideCatalog, YamlOverrideStore,
 };
 
@@ -104,7 +104,9 @@ pub struct RuntimePage {
     config_preview: Option<ConfigPreview>,
     profile_editor: overrides::ProfileEditorState,
     data: RuntimeData,
-    traffic_samples: VecDeque<LiveTrafficSample>,
+    home_profile_switching: Option<String>,
+    home_proxy_switching: Option<(String, String)>,
+    live_traffic: LiveTrafficSeries,
     traffic_history: traffic::TrafficHistoryUiState,
     network_probe: network::NetworkProbeUiState,
     ruleset: resources::RulesetUiState,
@@ -124,6 +126,55 @@ pub struct RuntimePage {
 struct LiveTrafficSample {
     upload: u64,
     download: u64,
+}
+
+const LIVE_TRAFFIC_SAMPLE_COUNT: usize = 24;
+
+#[derive(Debug)]
+struct LiveTrafficSeries {
+    samples: VecDeque<LiveTrafficSample>,
+    last_frame_at_ms: u64,
+    connected: bool,
+}
+
+impl Default for LiveTrafficSeries {
+    fn default() -> Self {
+        Self {
+            samples: VecDeque::from(vec![
+                LiveTrafficSample::default();
+                LIVE_TRAFFIC_SAMPLE_COUNT
+            ]),
+            last_frame_at_ms: 0,
+            connected: false,
+        }
+    }
+}
+
+impl LiveTrafficSeries {
+    fn samples(&self) -> &VecDeque<LiveTrafficSample> {
+        &self.samples
+    }
+
+    fn observe(&mut self, snapshot: &TrafficSnapshot) -> bool {
+        let connection_changed = self.connected != snapshot.connected;
+        self.connected = snapshot.connected;
+        if !snapshot.connected
+            || snapshot.updated_at_ms == 0
+            || snapshot.updated_at_ms == self.last_frame_at_ms
+        {
+            return connection_changed;
+        }
+
+        self.last_frame_at_ms = snapshot.updated_at_ms;
+        if self.samples.len() >= LIVE_TRAFFIC_SAMPLE_COUNT {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(LiveTrafficSample {
+            upload: snapshot.upload,
+            download: snapshot.download,
+        });
+        true
+    }
 }
 
 /// Runtime services shared by the native Mihomo management pages.
@@ -166,6 +217,12 @@ pub struct ProfileActivated {
 }
 
 impl EventEmitter<ProfileActivated> for RuntimePage {}
+
+/// Event emitted after the active member of a Mihomo proxy group changes.
+#[derive(Clone, Copy, Debug)]
+pub struct ProxySelectionChanged;
+
+impl EventEmitter<ProxySelectionChanged> for RuntimePage {}
 
 /// Event emitted after a controlled runtime configuration is accepted.
 #[derive(Clone, Copy, Debug)]

@@ -15,7 +15,7 @@ impl RuntimePage {
             .iter()
             .find(|profile| profile.id == id)
         else {
-            self.error = Some("找不到要编辑的在线订阅".into());
+            self.error = Some(zenclash_i18n::text("profiles.errors.remote_not_found"));
             cx.notify();
             return;
         };
@@ -25,7 +25,9 @@ impl RuntimePage {
             options,
         } = &profile.source
         else {
-            self.error = Some("本地配置没有订阅请求设置".into());
+            self.error = Some(zenclash_i18n::text(
+                "profiles.errors.local_request_unavailable",
+            ));
             cx.notify();
             return;
         };
@@ -73,7 +75,7 @@ impl RuntimePage {
             return;
         };
         let Some(store) = self.profile_store.clone() else {
-            self.error = Some("配置仓库不可用".into());
+            self.error = Some(zenclash_i18n::text("profiles.errors.store_unavailable"));
             cx.notify();
             return;
         };
@@ -101,7 +103,10 @@ impl RuntimePage {
         {
             Ok(value) => value,
             Err(error) => {
-                self.error = Some(format!("订阅下载超时必须是整数秒数：{error}"));
+                self.error = Some(zenclash_i18n::text_with(
+                    "profiles.errors.timeout_integer",
+                    &[("error", error.to_string())],
+                ));
                 cx.notify();
                 return;
             }
@@ -117,7 +122,10 @@ impl RuntimePage {
         let options = match options {
             Ok(options) => options,
             Err(error) => {
-                self.error = Some(format!("订阅请求设置无效：{error}"));
+                self.error = Some(zenclash_i18n::text_with(
+                    "profiles.errors.request_invalid",
+                    &[("error", error.to_string())],
+                ));
                 cx.notify();
                 return;
             }
@@ -135,7 +143,12 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("订阅请求设置任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "profiles.errors.request_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -145,7 +158,8 @@ impl RuntimePage {
                             this.set_page_error(token, error);
                         } else {
                             this.profile_forms.editing_profile_id = None;
-                            this.notice = Some("订阅请求设置与更新计划已保存".into());
+                            this.notice =
+                                Some(zenclash_i18n::text("profiles.notices.request_saved"));
                         }
                     }
                     Ok(()) => {}
@@ -176,13 +190,23 @@ impl RuntimePage {
                 store.set_update_policy(&id, enabled, interval_minutes)
             })
             .await
-            .map_err(|error| format!("订阅更新策略任务异常结束：{error}"))?
+            .map_err(|error| {
+                zenclash_i18n::text_with(
+                    "profiles.errors.policy_task",
+                    &[("error", error.to_string())],
+                )
+            })?
             .map_err(|error| error.to_string())
         });
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("订阅更新策略任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "profiles.errors.policy_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -192,9 +216,12 @@ impl RuntimePage {
                             this.set_page_error(token, error);
                         } else if this.is_page_task_current(token) {
                             this.notice = Some(if enabled {
-                                format!("已启用自动更新，每 {interval_minutes} 分钟检查一次")
+                                zenclash_i18n::text_with(
+                                    "profiles.notices.auto_update_enabled",
+                                    &[("minutes", interval_minutes.to_string())],
+                                )
                             } else {
-                                "已关闭该订阅的自动更新".into()
+                                zenclash_i18n::text("profiles.notices.auto_update_disabled")
                             });
                         }
                     }
@@ -224,7 +251,12 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("订阅更新任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "profiles.errors.update_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -235,7 +267,10 @@ impl RuntimePage {
                             Err(error) => {
                                 this.set_page_error(
                                     token,
-                                    format!("订阅已更新，但刷新页面失败：{error}"),
+                                    zenclash_i18n::text_with(
+                                        "profiles.errors.updated_refresh",
+                                        &[("error", error)],
+                                    ),
                                 );
                                 false
                             }
@@ -244,7 +279,10 @@ impl RuntimePage {
                             this.set_page_error(token, error);
                         }
                         if is_profile_page {
-                            this.notice = Some(format!("在线订阅“{}”已更新", outcome.name));
+                            this.notice = Some(zenclash_i18n::text_with(
+                                "profiles.notices.updated",
+                                &[("name", outcome.name)],
+                            ));
                         }
                         if outcome.active {
                             this.profile_path = Some(outcome.path.clone());
@@ -273,7 +311,12 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("配置删除任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "profiles.errors.delete_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -283,7 +326,7 @@ impl RuntimePage {
                             this.set_page_error(token, error);
                         }
                         if this.is_page_task_current(token) {
-                            this.notice = Some("配置已从 ZenClash 仓库删除".into());
+                            this.notice = Some(zenclash_i18n::text("profiles.notices.deleted"));
                         }
                     }
                     Err(error) => this.set_page_error(token, error),

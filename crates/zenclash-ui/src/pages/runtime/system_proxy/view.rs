@@ -19,33 +19,42 @@ impl RuntimePage {
         let active = status.active();
         let port = config.system_proxy_port().unwrap_or_default();
         let native_bypass = if status.bypass.is_empty() {
-            "无".to_owned()
+            zenclash_i18n::text("system_proxy.status.none")
         } else {
             status.bypass.join(" · ")
         };
         let mode = match self.preferences.system_proxy_mode {
-            SystemProxyMode::Manual => "手动 HTTP/HTTPS",
-            SystemProxyMode::Pac => "PAC 自动配置",
+            SystemProxyMode::Manual => zenclash_i18n::text("system_proxy.mode.manual_summary"),
+            SystemProxyMode::Pac => zenclash_i18n::text("system_proxy.mode.pac"),
         };
-        let mut card = setting_card("系统代理", theme)
+        let current_pac = if status.auto_enabled {
+            status.auto_url.clone()
+        } else {
+            zenclash_i18n::text("system_proxy.status.disabled")
+        };
+        let mut card = setting_card(zenclash_i18n::text("system_proxy.title"), theme)
             .child(setting_switch(
-                "启用系统代理",
-                "控制原生手动代理或本地 PAC 自动配置",
+                zenclash_i18n::text("system_proxy.enable.title"),
+                zenclash_i18n::text("system_proxy.enable.description"),
                 active,
                 "system-proxy-enable",
                 theme,
                 cx.listener(|this, checked, _, cx| this.toggle_system_proxy(*checked, cx)),
             ))
-            .child(self.render_proxy_settings_summary(mode, theme, cx))
-            .child(info_row("网络服务", &status.service, theme))
+            .child(self.render_proxy_settings_summary(&mode, theme, cx))
             .child(info_row(
-                "当前 HTTP",
-                &format_proxy(&status.server, status.port, status.enabled),
+                zenclash_i18n::text("system_proxy.fields.service"),
+                &status.service,
                 theme,
             ))
             .child(info_row(
-                "当前 HTTPS",
-                &format_proxy(
+                zenclash_i18n::text("system_proxy.fields.http"),
+                format_proxy(&status.server, status.port, status.enabled),
+                theme,
+            ))
+            .child(info_row(
+                zenclash_i18n::text("system_proxy.fields.https"),
+                format_proxy(
                     &status.secure_server,
                     status.secure_port,
                     status.secure_enabled,
@@ -53,16 +62,20 @@ impl RuntimePage {
                 theme,
             ))
             .child(info_row(
-                "当前 PAC",
-                if status.auto_enabled {
-                    &status.auto_url
-                } else {
-                    "未启用"
-                },
+                zenclash_i18n::text("system_proxy.fields.pac"),
+                current_pac,
                 theme,
             ))
-            .child(info_row("系统回读绕过", &native_bypass, theme))
-            .child(info_row("内核代理端口", &format_port(port), theme));
+            .child(info_row(
+                zenclash_i18n::text("system_proxy.fields.bypass"),
+                &native_bypass,
+                theme,
+            ))
+            .child(info_row(
+                zenclash_i18n::text("system_proxy.fields.port"),
+                format_port(port),
+                theme,
+            ));
         if let Some(editor) = self.system_proxy_editor.as_ref() {
             card = card.child(self.render_system_proxy_editor(editor, theme, cx));
         }
@@ -77,13 +90,22 @@ impl RuntimePage {
     ) -> gpui::AnyElement {
         let detail = match self.preferences.system_proxy_mode {
             SystemProxyMode::Manual if self.preferences.system_proxy_bypass.is_empty() => {
-                "不绕过任何地址".to_owned()
+                zenclash_i18n::text("system_proxy.status.no_bypass")
             }
             SystemProxyMode::Manual => self.preferences.system_proxy_bypass.join(" · "),
-            SystemProxyMode::Pac => format!(
-                "{} 行脚本 · 监听 {}",
-                self.preferences.system_proxy_pac_script.lines().count(),
-                self.preferences.system_proxy_host
+            SystemProxyMode::Pac => zenclash_i18n::text_with(
+                "system_proxy.status.pac_summary",
+                &[
+                    (
+                        "lines",
+                        self.preferences
+                            .system_proxy_pac_script
+                            .lines()
+                            .count()
+                            .to_string(),
+                    ),
+                    ("host", self.preferences.system_proxy_host.clone()),
+                ],
             ),
         };
         h_flex()
@@ -107,7 +129,7 @@ impl RuntimePage {
             )
             .child(
                 Button::new("edit-system-proxy")
-                    .label("编辑")
+                    .label(zenclash_i18n::text("system_proxy.editor.edit"))
                     .small()
                     .outline()
                     .disabled(self.mutating)
@@ -137,9 +159,9 @@ impl RuntimePage {
                         div()
                             .text_sm()
                             .child(if editor.mode == SystemProxyMode::Pac {
-                                "PAC 监听主机"
+                                zenclash_i18n::text("system_proxy.fields.pac_host")
                             } else {
-                                "代理主机"
+                                zenclash_i18n::text("system_proxy.fields.host")
                             }),
                     )
                     .child(Input::new(&editor.host).disabled(self.mutating)),
@@ -148,7 +170,11 @@ impl RuntimePage {
                 this.child(
                     v_flex()
                         .gap_2()
-                        .child(div().text_sm().child("绕过规则（每行一条）"))
+                        .child(
+                            div()
+                                .text_sm()
+                                .child(zenclash_i18n::text("system_proxy.fields.bypass_rules")),
+                        )
                         .child(Input::new(&editor.bypass).disabled(self.mutating)),
                 )
             })
@@ -156,11 +182,16 @@ impl RuntimePage {
                 this.child(
                     v_flex()
                         .gap_2()
-                        .child(div().text_sm().child("PAC JavaScript"))
                         .child(
-                            div().text_xs().text_color(theme.muted_foreground).child(
-                                "必须定义 FindProxyForURL；%mixed-port% 会替换为当前内核端口",
-                            ),
+                            div()
+                                .text_sm()
+                                .child(zenclash_i18n::text("system_proxy.fields.pac_script")),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(zenclash_i18n::text("system_proxy.editor.pac_help")),
                         )
                         .child(Input::new(&editor.pac_script).disabled(self.mutating)),
                 )
@@ -171,7 +202,7 @@ impl RuntimePage {
                     .gap_2()
                     .child(
                         Button::new("reset-system-proxy")
-                            .label("恢复默认")
+                            .label(zenclash_i18n::text("system_proxy.editor.reset"))
                             .small()
                             .outline()
                             .disabled(self.mutating)
@@ -181,7 +212,7 @@ impl RuntimePage {
                     )
                     .child(
                         Button::new("cancel-system-proxy")
-                            .label("取消")
+                            .label(zenclash_i18n::text("system_proxy.editor.cancel"))
                             .small()
                             .ghost()
                             .disabled(self.mutating)
@@ -191,7 +222,7 @@ impl RuntimePage {
                     )
                     .child(
                         Button::new("save-system-proxy")
-                            .label("保存并应用")
+                            .label(zenclash_i18n::text("system_proxy.editor.save"))
                             .small()
                             .primary()
                             .disabled(self.mutating)
@@ -210,13 +241,17 @@ impl RuntimePage {
     ) -> gpui::AnyElement {
         v_flex()
             .gap_2()
-            .child(div().text_sm().child("代理方式"))
+            .child(
+                div()
+                    .text_sm()
+                    .child(zenclash_i18n::text("system_proxy.mode.label")),
+            )
             .child(
                 h_flex()
                     .gap_2()
                     .child(
                         Button::new("system-proxy-mode-manual")
-                            .label("手动代理")
+                            .label(zenclash_i18n::text("system_proxy.mode.manual"))
                             .small()
                             .outline()
                             .selected(mode == SystemProxyMode::Manual)
@@ -227,7 +262,7 @@ impl RuntimePage {
                     )
                     .child(
                         Button::new("system-proxy-mode-pac")
-                            .label("PAC 自动配置")
+                            .label(zenclash_i18n::text("system_proxy.mode.pac"))
                             .small()
                             .outline()
                             .selected(mode == SystemProxyMode::Pac)

@@ -43,7 +43,7 @@ impl RuntimePage {
                     .child(
                         Button::new("export-logs")
                             .icon(IconName::File)
-                            .label("导出")
+                            .label(zenclash_i18n::text("logs.actions.export"))
                             .small()
                             .outline()
                             .disabled(all_entries.is_empty() || self.mutating)
@@ -52,13 +52,13 @@ impl RuntimePage {
                     .child(
                         Button::new("clear-logs")
                             .icon(IconName::Delete)
-                            .label("清空")
+                            .label(zenclash_i18n::text("logs.actions.clear"))
                             .small()
                             .outline()
                             .disabled(all_entries.is_empty())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.log_monitor.clear();
-                                this.notice = Some("内存日志已清空".into());
+                                this.notice = Some(zenclash_i18n::text("logs.notices.cleared"));
                                 cx.notify();
                             })),
                     ),
@@ -78,19 +78,21 @@ impl RuntimePage {
     ) -> gpui::Div {
         let status = self.log_monitor.persistence_status();
         let path = status.path.as_deref().map_or_else(
-            || "应用数据目录不可用".into(),
+            || zenclash_i18n::text("logs.persistence.data_directory_unavailable"),
             |path| path.display().to_string(),
         );
-        let state = status.last_error.as_deref().unwrap_or(if status.enabled {
-            "新日志正在按接收顺序持续写入"
-        } else {
-            "内存日志继续接收，磁盘文件暂停写入"
+        let state = status.last_error.clone().unwrap_or_else(|| {
+            if status.enabled {
+                zenclash_i18n::text("logs.persistence.writing")
+            } else {
+                zenclash_i18n::text("logs.persistence.paused")
+            }
         });
 
-        setting_card("持续日志文件", theme)
+        setting_card(zenclash_i18n::text("logs.persistence.title"), theme)
             .child(setting_switch(
-                "记录到磁盘",
-                "写入有界日志文件；达到上限后保留最新内容并继续记录",
+                zenclash_i18n::text("logs.persistence.enabled.title"),
+                zenclash_i18n::text("logs.persistence.enabled.description"),
                 self.preferences.log_file_enabled,
                 "logs-file-enabled",
                 theme,
@@ -98,18 +100,33 @@ impl RuntimePage {
                     this.set_log_file_enabled(*checked, cx);
                 }),
             ))
-            .child(info_row("文件", &path, theme))
-            .child(info_row("写入状态", state, theme))
             .child(info_row(
-                "实时采集",
+                zenclash_i18n::text("logs.persistence.file"),
+                &path,
+                theme,
+            ))
+            .child(info_row(
+                zenclash_i18n::text("logs.persistence.state"),
+                state,
+                theme,
+            ))
+            .child(info_row(
+                zenclash_i18n::text("logs.persistence.capture"),
                 log_level_description(self.log_monitor.level()),
                 theme,
             ))
-            .child(info_row("当前占用", &format_log_disk_usage(&status), theme))
+            .child(info_row(
+                zenclash_i18n::text("logs.persistence.usage"),
+                format_log_disk_usage(&status),
+                theme,
+            ))
             .when(status.dropped_entries > 0, |card| {
                 card.child(info_row(
-                    "队列丢弃",
-                    &format!("{} 条", status.dropped_entries),
+                    zenclash_i18n::text("logs.persistence.dropped"),
+                    zenclash_i18n::text_with(
+                        "logs.persistence.dropped_count",
+                        &[("count", status.dropped_entries.to_string())],
+                    ),
                     theme,
                 ))
             })
@@ -122,12 +139,15 @@ impl RuntimePage {
                     .child(
                         v_flex()
                             .gap_1()
-                            .child(div().text_sm().child("文件上限"))
                             .child(
                                 div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child("触顶后回落到约一半容量，避免每条日志都重写文件"),
+                                    .text_sm()
+                                    .child(zenclash_i18n::text("logs.persistence.limit")),
+                            )
+                            .child(
+                                div().text_xs().text_color(theme.muted_foreground).child(
+                                    zenclash_i18n::text("logs.persistence.limit_description"),
+                                ),
                             ),
                     )
                     .child(
@@ -159,27 +179,32 @@ impl RuntimePage {
             Some(enabled),
             None,
             if enabled {
-                "持续日志文件已启用"
+                zenclash_i18n::text("logs.notices.persistence_enabled")
             } else {
-                "持续日志文件已暂停"
+                zenclash_i18n::text("logs.notices.persistence_paused")
             },
             cx,
         );
     }
 
     fn set_log_file_limit(&mut self, mebibytes: u16, cx: &mut Context<Self>) {
-        self.persist_log_preferences(None, Some(mebibytes), "日志文件大小上限已保存", cx);
+        self.persist_log_preferences(
+            None,
+            Some(mebibytes),
+            zenclash_i18n::text("logs.notices.limit_saved"),
+            cx,
+        );
     }
 
     fn persist_log_preferences(
         &mut self,
         enabled: Option<bool>,
         max_mebibytes: Option<u16>,
-        success: &'static str,
+        success: String,
         cx: &mut Context<Self>,
     ) {
         let Some(store) = self.preferences_store.clone() else {
-            self.error = Some("应用设置存储不可用；请检查应用数据目录权限".into());
+            self.error = Some(zenclash_i18n::text("logs.errors.preferences_unavailable"));
             cx.notify();
             return;
         };
@@ -202,7 +227,12 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("日志设置保存任务异常结束：{error}"))
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "logs.errors.preferences_task",
+                        &[("error", error.to_string())],
+                    )
+                })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
@@ -215,7 +245,7 @@ impl RuntimePage {
                         ) {
                             Ok(()) => {
                                 this.preferences = preferences.clone();
-                                this.notice = Some(success.into());
+                                this.notice = Some(success);
                                 cx.emit(PreferencesRestored { preferences });
                             }
                             Err(error) => this.set_page_error(token, error.to_string()),
@@ -244,9 +274,9 @@ impl RuntimePage {
             .when(entries.is_empty(), |this| {
                 this.child(empty_state(
                     if all_empty {
-                        "等待内核日志事件…"
+                        zenclash_i18n::text("logs.empty.waiting")
                     } else {
-                        "没有匹配的日志"
+                        zenclash_i18n::text("logs.empty.filtered")
                     },
                     theme,
                 ))
@@ -291,11 +321,23 @@ impl RuntimePage {
                 Ok(Ok(Some(_))) => tracing::info!("discarded log export after leaving logs page"),
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
-                    this.set_page_error(token, format!("无法打开日志保存对话框：{error}"));
+                    this.set_page_error(
+                        token,
+                        zenclash_i18n::text_with(
+                            "logs.errors.export_dialog",
+                            &[("error", error.to_string())],
+                        ),
+                    );
                     cx.notify();
                 }
                 Err(error) => {
-                    this.set_page_error(token, format!("日志保存对话框异常结束：{error}"));
+                    this.set_page_error(
+                        token,
+                        zenclash_i18n::text_with(
+                            "logs.errors.export_dialog_task",
+                            &[("error", error.to_string())],
+                        ),
+                    );
                     cx.notify();
                 }
             });
@@ -318,13 +360,28 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
-                .map_err(|error| format!("日志导出任务异常结束：{error}"))
-                .and_then(|result| result.map_err(|error| format!("写入日志失败：{error}")));
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "logs.errors.export_task",
+                        &[("error", error.to_string())],
+                    )
+                })
+                .and_then(|result| {
+                    result.map_err(|error| {
+                        zenclash_i18n::text_with(
+                            "logs.errors.write",
+                            &[("error", error.to_string())],
+                        )
+                    })
+                });
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
                 match result {
                     Ok(()) if this.is_page_task_current(token) => {
-                        this.notice = Some(format!("日志已导出到 {display_path}"));
+                        this.notice = Some(zenclash_i18n::text_with(
+                            "logs.notices.exported",
+                            &[("path", display_path)],
+                        ));
                     }
                     Ok(()) => {}
                     Err(error) => this.set_page_error(token, error),
@@ -356,9 +413,9 @@ fn render_log_header(
         .justify_between()
         .child(metric(
             if query_is_empty {
-                "日志条目"
+                zenclash_i18n::text("logs.metrics.entries")
             } else {
-                "过滤结果"
+                zenclash_i18n::text("logs.metrics.filtered")
             },
             if query_is_empty {
                 total_entries.to_string()
@@ -369,11 +426,11 @@ fn render_log_header(
             theme,
         ))
         .child(metric(
-            "磁盘占用",
+            zenclash_i18n::text("logs.metrics.disk_usage"),
             if persistence.enabled {
                 format_log_disk_usage(persistence)
             } else {
-                "已关闭".into()
+                zenclash_i18n::text("logs.metrics.disabled")
             },
             disk_color,
             theme,
@@ -393,9 +450,9 @@ fn render_log_header(
                     theme.danger
                 }))
                 .child(if connected {
-                    "实时流已连接"
+                    zenclash_i18n::text("logs.stream.connected")
                 } else {
-                    "正在重连"
+                    zenclash_i18n::text("logs.stream.reconnecting")
                 }),
         )
 }
@@ -411,13 +468,13 @@ fn format_log_disk_usage(persistence: &zenclash_core::LogPersistenceStatus) -> S
     )
 }
 
-const fn log_level_description(level: MihomoLogLevel) -> &'static str {
+fn log_level_description(level: MihomoLogLevel) -> String {
     match level {
-        MihomoLogLevel::Silent => "静默 · 不接收内核事件",
-        MihomoLogLevel::Error => "错误 · 仅保留故障",
-        MihomoLogLevel::Warning => "警告 · 推荐日常精简使用",
-        MihomoLogLevel::Info => "信息 · 默认，包含连接与运行事件",
-        MihomoLogLevel::Debug => "调试 · 仅排障时临时开启",
+        MihomoLogLevel::Silent => zenclash_i18n::text("logs.levels.silent"),
+        MihomoLogLevel::Error => zenclash_i18n::text("logs.levels.error"),
+        MihomoLogLevel::Warning => zenclash_i18n::text("logs.levels.warning"),
+        MihomoLogLevel::Info => zenclash_i18n::text("logs.levels.info"),
+        MihomoLogLevel::Debug => zenclash_i18n::text("logs.levels.debug"),
     }
 }
 
@@ -464,7 +521,10 @@ mod tests {
 
     #[test]
     fn log_level_descriptions_distinguish_daily_use_from_diagnostics() {
-        assert!(log_level_description(MihomoLogLevel::Warning).contains("推荐"));
-        assert!(log_level_description(MihomoLogLevel::Debug).contains("排障"));
+        let warning = log_level_description(MihomoLogLevel::Warning);
+        let debug = log_level_description(MihomoLogLevel::Debug);
+        assert!(!warning.is_empty());
+        assert!(!debug.is_empty());
+        assert_ne!(warning, debug);
     }
 }

@@ -22,7 +22,12 @@ pub(super) async fn restore_backup(
         Ok::<_, String>((manager, prepared))
     })
     .await
-    .map_err(|error| format!("备份验证任务异常结束：{error}"))??;
+    .map_err(|error| {
+        zenclash_i18n::text_with(
+            "backup.errors.validation_task",
+            &[("error", error.to_string())],
+        )
+    })??;
 
     restore_prepared(manager, prepared, runtime, previous_profile).await
 }
@@ -38,13 +43,20 @@ pub(in crate::pages::runtime::settings) async fn restore_prepared(
     let transaction =
         tokio::task::spawn_blocking(move || prepared.activate().map_err(|error| error.to_string()))
             .await
-            .map_err(|error| format!("备份激活任务异常结束：{error}"))??;
+            .map_err(|error| {
+                zenclash_i18n::text_with(
+                    "backup.errors.activation_task",
+                    &[("error", error.to_string())],
+                )
+            })??;
 
     let root = manager.data_root().to_path_buf();
     let load_root = root.clone();
     let loaded = tokio::task::spawn_blocking(move || load_restored_state(&load_root))
         .await
-        .map_err(|error| format!("备份状态读取任务异常结束：{error}"))?;
+        .map_err(|error| {
+            zenclash_i18n::text_with("backup.errors.state_task", &[("error", error.to_string())])
+        })?;
     let (
         preferences,
         catalog,
@@ -66,9 +78,12 @@ pub(in crate::pages::runtime::settings) async fn restore_prepared(
     {
         return rollback_restore(
             transaction,
-            format!(
-                "{} 拒绝备份中的活动配置：{error}",
-                runtime.kind().display_name()
+            zenclash_i18n::text_with(
+                "backup.errors.core_rejected",
+                &[
+                    ("core", runtime.kind().display_name().to_owned()),
+                    ("error", error),
+                ],
             ),
         )
         .await;
@@ -76,7 +91,8 @@ pub(in crate::pages::runtime::settings) async fn restore_prepared(
     let page_data = match load_page(runtime.client().clone(), Page::Settings).await {
         Ok(data) => data,
         Err(error) => {
-            let runtime_restore = format!("恢复后刷新设置失败：{error}");
+            let runtime_restore =
+                zenclash_i18n::text_with("backup.errors.restored_settings", &[("error", error)]);
             return rollback_after_runtime_accept(
                 transaction,
                 runtime,
@@ -89,7 +105,9 @@ pub(in crate::pages::runtime::settings) async fn restore_prepared(
     };
     let cleanup_warning = tokio::task::spawn_blocking(move || transaction.commit())
         .await
-        .map_err(|error| format!("备份提交任务异常结束：{error}"))?
+        .map_err(|error| {
+            zenclash_i18n::text_with("backup.errors.commit_task", &[("error", error.to_string())])
+        })?
         .err()
         .map(|error| error.to_string());
     Ok(RestoreOutcome {
@@ -129,7 +147,7 @@ fn load_restored_state(root: &Path) -> Result<RestoredState, String> {
     let profile_path = profile_store
         .active_path()
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "备份没有活动配置，已拒绝替换当前内核启动配置".to_owned())?;
+        .ok_or_else(|| zenclash_i18n::text("backup.errors.missing_profile"))?;
     let controlled_store = ControlledConfigStore::new(root.join("controlled-config"));
     let controlled_config = controlled_store
         .load_json()
@@ -155,10 +173,21 @@ async fn rollback_restore<T>(
 ) -> Result<T, String> {
     let rollback = tokio::task::spawn_blocking(move || transaction.rollback())
         .await
-        .map_err(|error| format!("{reason}；回滚任务异常结束：{error}"))?;
+        .map_err(|error| {
+            zenclash_i18n::text_with(
+                "backup.errors.rollback_task",
+                &[("reason", reason.clone()), ("error", error.to_string())],
+            )
+        })?;
     match rollback {
-        Ok(()) => Err(format!("{reason}；原数据已恢复")),
-        Err(error) => Err(format!("{reason}；恢复原数据失败：{error}")),
+        Ok(()) => Err(zenclash_i18n::text_with(
+            "backup.errors.rolled_back",
+            &[("reason", reason)],
+        )),
+        Err(error) => Err(zenclash_i18n::text_with(
+            "backup.errors.rollback_failed",
+            &[("reason", reason), ("error", error.to_string())],
+        )),
     }
 }
 
@@ -171,13 +200,22 @@ async fn rollback_after_runtime_accept<T>(
 ) -> Result<T, String> {
     let rollback = tokio::task::spawn_blocking(move || transaction.rollback())
         .await
-        .map_err(|error| format!("{reason}；磁盘回滚任务异常结束：{error}"))?;
+        .map_err(|error| {
+            zenclash_i18n::text_with(
+                "backup.errors.disk_rollback_task",
+                &[("reason", reason.clone()), ("error", error.to_string())],
+            )
+        })?;
     if let Err(error) = rollback {
-        return Err(format!("{reason}；恢复原磁盘数据失败：{error}"));
+        return Err(zenclash_i18n::text_with(
+            "backup.errors.disk_rollback_failed",
+            &[("reason", reason), ("error", error.to_string())],
+        ));
     }
     let Some(previous_profile) = previous_profile else {
-        return Err(format!(
-            "{reason}；原磁盘数据已恢复，但没有旧配置可恢复内核运行状态"
+        return Err(zenclash_i18n::text_with(
+            "backup.errors.no_runtime_profile",
+            &[("reason", reason)],
         ));
     };
     let controlled = ControlledConfigStore::new(data_root.join("controlled-config"));
@@ -191,15 +229,20 @@ async fn rollback_after_runtime_accept<T>(
                 .await
         }
         Err(error) => {
-            return Err(format!(
-                "{reason}；原磁盘数据已恢复，但读取原 YAML 覆写失败：{error}"
+            return Err(zenclash_i18n::text_with(
+                "backup.errors.override_read",
+                &[("reason", reason), ("error", error)],
             ))
         }
     };
     match runtime_restore {
-        Ok(()) => Err(format!("{reason}；原磁盘数据与内核运行配置均已恢复")),
-        Err(error) => Err(format!(
-            "{reason}；原磁盘数据已恢复，但内核运行配置恢复失败：{error}"
+        Ok(()) => Err(zenclash_i18n::text_with(
+            "backup.errors.runtime_rolled_back",
+            &[("reason", reason)],
+        )),
+        Err(error) => Err(zenclash_i18n::text_with(
+            "backup.errors.runtime_rollback_failed",
+            &[("reason", reason), ("error", error)],
         )),
     }
 }

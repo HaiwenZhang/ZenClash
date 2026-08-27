@@ -31,7 +31,10 @@ impl ProxiesPage {
         cx.spawn(async move |this, cx| {
             let result = match task.await {
                 Ok(result) => result,
-                Err(error) => Err(format!("代理数据任务异常结束：{error}")),
+                Err(error) => Err(zenclash_i18n::text_with(
+                    "proxies.errors.catalog_task",
+                    &[("error", error.to_string())],
+                )),
             };
             let _ = this.update(cx, |this, cx| {
                 if !token.is_current(this.catalog_generation) {
@@ -111,7 +114,10 @@ impl ProxiesPage {
         cx.spawn(async move |this, cx| {
             let result = match task.await {
                 Ok(result) => result.map_err(|error| error.to_string()),
-                Err(error) => Err(format!("切换代理任务异常结束：{error}")),
+                Err(error) => Err(zenclash_i18n::text_with(
+                    "proxies.errors.switch_task",
+                    &[("error", error.to_string())],
+                )),
             };
             let _ = this.update(cx, |this, cx| {
                 if !token.is_current(this.catalog_generation) {
@@ -163,7 +169,10 @@ impl ProxiesPage {
         cx.spawn(async move |this, cx| {
             let result = match task.await {
                 Ok(result) => result,
-                Err(error) => Err(format!("延迟测试任务异常结束：{error}")),
+                Err(error) => Err(zenclash_i18n::text_with(
+                    "proxies.errors.delay_task",
+                    &[("error", error.to_string())],
+                )),
             };
             let _ = this.update(cx, |this, cx| {
                 if !token.is_current(this.catalog_generation) {
@@ -228,9 +237,12 @@ impl ProxiesPage {
         });
 
         cx.spawn(async move |this, cx| {
-            let result = task
-                .await
-                .map_err(|error| format!("代理组延迟测试任务异常结束：{error}"));
+            let result = task.await.map_err(|error| {
+                zenclash_i18n::text_with(
+                    "proxies.errors.group_delay_task",
+                    &[("error", error.to_string())],
+                )
+            });
             let _ = this.update(cx, |this, cx| {
                 if !token.is_current(this.catalog_generation) {
                     return;
@@ -263,10 +275,14 @@ impl ProxiesPage {
                         }
                         if failed > 0 {
                             this.error = Some(match first_error {
-                                Some(error) => {
-                                    format!("{failed} 个节点延迟测试失败；首个错误：{error}")
-                                }
-                                None => format!("{failed} 个节点延迟测试失败"),
+                                Some(error) => zenclash_i18n::text_with(
+                                    "proxies.errors.group_failed_detail",
+                                    &[("count", failed.to_string()), ("error", error)],
+                                ),
+                                None => zenclash_i18n::text_with(
+                                    "proxies.errors.group_failed",
+                                    &[("count", failed.to_string())],
+                                ),
                             });
                         }
                     }

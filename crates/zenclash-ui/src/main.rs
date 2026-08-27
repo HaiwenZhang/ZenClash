@@ -14,14 +14,13 @@ use std::{
 };
 
 use gpui::Application;
-use gpui_component_assets::Assets;
 use tracing_subscriber::{filter::Directive, EnvFilter};
 use zenclash_core::{
     bundled_recovery_profile, AppInstanceLock, AppPreferences, AppPreferencesStore,
     ControlledConfigStore, CoreKind, LogMonitor, MihomoClient, MihomoEndpoint, MihomoLaunchConfig,
     MihomoProcess, ProfileStore, TrafficMonitor, YamlOverrideStore,
 };
-use zenclash_ui::app;
+use zenclash_ui::{app, assets::Assets};
 
 const DEFAULT_TRACING_FILTER: &str = "zenclash=info,zenclash_core=info,zenclash_ui=info";
 const MANAGED_CONTROLLER_ATTEMPTS: usize = 3;
@@ -66,7 +65,10 @@ fn main() {
 
     if let Err(error) = run() {
         tracing::error!(%error, "ZenClash startup failed");
-        eprintln!("ZenClash 启动失败：{error}");
+        eprintln!(
+            "{}",
+            zenclash_i18n::text_with("startup.failure", &[("error", error.to_string())],)
+        );
     }
 }
 
@@ -87,7 +89,7 @@ fn tracing_filter(requested: Option<&str>) -> EnvFilter {
 
 fn append_startup_notice(target: &mut Option<String>, notice: String) {
     if let Some(current) = target {
-        current.push('；');
+        current.push_str(&zenclash_i18n::text("startup.separator"));
         current.push_str(&notice);
     } else {
         *target = Some(notice);
@@ -117,6 +119,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let (mut preferences, preferences_recovery_notice) =
         load_preferences(preferences_store.as_ref())?;
+    zenclash_i18n::set_locale(preferences.language.locale());
     let environment_core = std::env::var("ZENCLASH_CORE")
         .ok()
         .map(|value| value.parse())
@@ -126,22 +129,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut recovery_notices = preferences_recovery_notice.into_iter().collect::<Vec<_>>();
     let profile_store = ProfileStore::discover()?;
     if let Some(path) = profile_store.quarantine_invalid_index()? {
-        recovery_notices.push(format!(
-            "损坏的配置索引已隔离到 {}，托管 YAML 文件仍保留",
-            path.display()
+        recovery_notices.push(zenclash_i18n::text_with(
+            "startup.quarantine.profile_index",
+            &[("path", path.display().to_string())],
         ));
     }
     if let Some(path) = controlled_config_store.quarantine_invalid_patch()? {
-        recovery_notices.push(format!(
-            "损坏的受控配置已隔离到 {}，本次从空受控层恢复",
-            path.display()
+        recovery_notices.push(zenclash_i18n::text_with(
+            "startup.quarantine.controlled_config",
+            &[("path", path.display().to_string())],
         ));
     }
     let override_store = YamlOverrideStore::discover()?;
     if let Some(path) = override_store.quarantine_invalid_manifest()? {
-        recovery_notices.push(format!(
-            "损坏的 YAML 覆写清单已隔离到 {}，托管 YAML 文件仍保留",
-            path.display()
+        recovery_notices.push(zenclash_i18n::text_with(
+            "startup.quarantine.overrides",
+            &[("path", path.display().to_string())],
         ));
     }
     let override_paths = override_store.load_enabled_paths()?;
@@ -175,16 +178,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &initial_error,
             ) {
                 Ok(recovered) => {
-                    let source = recovered
-                        .binary
-                        .as_ref()
-                        .map_or_else(|| "自动发现".to_owned(), |path| path.display().to_string());
-                    let mut notice = format!(
-                        "首选 {} 启动失败，已明确恢复到 {}（{}）。首选项没有被覆盖，请在“设置 → 运行内核”重新检测或选择文件。原因：{}",
-                        requested_core, recovered.kind, source, initial_error
+                    let source = recovered.binary.as_ref().map_or_else(
+                        || zenclash_i18n::text("startup.automatic_discovery"),
+                        |path| path.display().to_string(),
+                    );
+                    let mut notice = zenclash_i18n::text_with(
+                        "startup.core_recovered",
+                        &[
+                            ("requested", requested_core.to_string()),
+                            ("recovered", recovered.kind.to_string()),
+                            ("source", source),
+                            ("error", initial_error.to_string()),
+                        ],
                     );
                     if let Some(listener_notice) = recovered.startup_notice {
-                        notice.push('；');
+                        notice.push_str(&zenclash_i18n::text("startup.separator"));
                         notice.push_str(&listener_notice);
                     }
                     tracing::warn!(requested = %requested_core, fallback = %recovered.kind, %initial_error, "recovered with last usable core");
@@ -306,9 +314,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             restart_elevated_after_exit.load(Ordering::Acquire),
         )
         .map_err(|error| {
-            std::io::Error::other(format!(
-                "ZenClash 已退出，但无法从 {} 重新启动：{error}",
-                executable.display()
+            std::io::Error::other(zenclash_i18n::text_with(
+                "startup.restart_failed",
+                &[
+                    ("path", executable.display().to_string()),
+                    ("error", error.to_string()),
+                ],
             ))
         })?;
     }
@@ -339,7 +350,9 @@ fn spawn_restarted_process(executable: &Path, elevated: bool) -> std::io::Result
             return Ok(());
         }
         #[cfg(not(target_os = "windows"))]
-        return Err(std::io::Error::other("当前平台不支持管理员权限重启"));
+        return Err(std::io::Error::other(zenclash_i18n::text(
+            "startup.elevated_unsupported",
+        )));
     }
     Command::new(executable).spawn()?;
     Ok(())
@@ -354,9 +367,9 @@ fn load_preferences(
     if let Some(path) = store.quarantine_invalid_preferences()? {
         return Ok((
             AppPreferences::default(),
-            Some(format!(
-                "损坏或不兼容的应用设置已隔离到 {}，本次从默认设置恢复",
-                path.display()
+            Some(zenclash_i18n::text_with(
+                "startup.quarantine.preferences",
+                &[("path", path.display().to_string())],
             )),
         ));
     }
@@ -398,8 +411,12 @@ fn bootstrap_core(
     ) {
         Ok(launch) => launch,
         Err(error) => {
-            return Err(std::io::Error::other(format!(
-                "无法启动显式选择的 {core_kind}：{error}"
+            return Err(std::io::Error::other(zenclash_i18n::text_with(
+                "startup.explicit_core",
+                &[
+                    ("core", core_kind.to_string()),
+                    ("error", error.to_string()),
+                ],
             )));
         }
     };
@@ -432,9 +449,7 @@ fn bootstrap_core(
             })
             .collect::<Vec<_>>()
             .join("、");
-        format!(
-            "检测到监听端口被其他进程占用，本次运行已临时改用 {changes}；订阅和持久设置未修改。"
-        )
+        zenclash_i18n::text_with("startup.listener_fallback", &[("changes", changes)])
     });
     let launch = match MihomoLaunchConfig::for_kind(
         core_kind,
@@ -444,24 +459,45 @@ fn bootstrap_core(
     ) {
         Ok(launch) => launch,
         Err(error) => {
-            return Err(std::io::Error::other(format!(
-                "{core_kind} 的活动配置无效：{error}"
+            return Err(std::io::Error::other(zenclash_i18n::text_with(
+                "startup.active_invalid",
+                &[
+                    ("core", core_kind.to_string()),
+                    ("error", error.to_string()),
+                ],
             )));
         }
     };
     launch.validate_config().map_err(|error| {
-        std::io::Error::other(format!("{core_kind} 的活动配置未通过内核预检：{error}"))
+        std::io::Error::other(zenclash_i18n::text_with(
+            "startup.active_precheck",
+            &[
+                ("core", core_kind.to_string()),
+                ("error", error.to_string()),
+            ],
+        ))
     })?;
     for attempt in 1..=MANAGED_CONTROLLER_ATTEMPTS {
         let controller = allocate_managed_controller().map_err(|error| {
-            std::io::Error::other(format!(
-                "无法为托管 {core_kind} 分配隔离控制器，已拒绝连接固定或无鉴权控制器：{error}"
+            std::io::Error::other(zenclash_i18n::text_with(
+                "startup.controller_allocation",
+                &[
+                    ("core", core_kind.to_string()),
+                    ("error", error.to_string()),
+                ],
             ))
         })?;
         let launch = launch.clone().with_controller_endpoint(controller);
         let endpoint = launch.endpoint.clone();
-        let process = MihomoProcess::spawn(launch)
-            .map_err(|error| std::io::Error::other(format!("无法启动托管 {core_kind}：{error}")))?;
+        let process = MihomoProcess::spawn(launch).map_err(|error| {
+            std::io::Error::other(zenclash_i18n::text_with(
+                "startup.managed_spawn",
+                &[
+                    ("core", core_kind.to_string()),
+                    ("error", error.to_string()),
+                ],
+            ))
+        })?;
         match runtime.block_on(process.wait_until_ready(Duration::from_secs(20))) {
             Ok(()) => {
                 tracing::info!(core = %core_kind, controller = %endpoint.controller, attempt, "managed core is ready");
@@ -479,22 +515,35 @@ fn bootstrap_core(
                     tracing::error!("{line}");
                 }
                 if let Err(stop_error) = process.stop() {
-                    return Err(std::io::Error::other(format!(
-                        "托管 {core_kind} 未能就绪：{error}；停止失败：{stop_error}"
+                    return Err(std::io::Error::other(zenclash_i18n::text_with(
+                        "startup.managed_not_ready_stop",
+                        &[
+                            ("core", core_kind.to_string()),
+                            ("error", error.to_string()),
+                            ("stop_error", stop_error.to_string()),
+                        ],
                     )));
                 }
                 if controller_conflict && attempt < MANAGED_CONTROLLER_ATTEMPTS {
                     tracing::warn!(core = %core_kind, attempt, "managed controller port was taken before core bind; retrying");
                     continue;
                 }
-                return Err(std::io::Error::other(format!(
-                    "托管 {core_kind} 未能就绪：{error}"
+                return Err(std::io::Error::other(zenclash_i18n::text_with(
+                    "startup.managed_not_ready",
+                    &[
+                        ("core", core_kind.to_string()),
+                        ("error", error.to_string()),
+                    ],
                 )));
             }
         }
     }
-    Err(std::io::Error::other(format!(
-        "托管 {core_kind} 控制器连续 {MANAGED_CONTROLLER_ATTEMPTS} 次被抢占"
+    Err(std::io::Error::other(zenclash_i18n::text_with(
+        "startup.controller_contended",
+        &[
+            ("core", core_kind.to_string()),
+            ("count", MANAGED_CONTROLLER_ATTEMPTS.to_string()),
+        ],
     )))
 }
 
@@ -508,7 +557,7 @@ fn project_root() -> std::io::Result<PathBuf> {
     Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|path| path.parent())
-        .ok_or_else(|| std::io::Error::other("无法从 Cargo 清单路径确定 ZenClash 工作区"))?
+        .ok_or_else(|| std::io::Error::other(zenclash_i18n::text("startup.workspace")))?
         .to_path_buf())
 }
 
@@ -539,8 +588,9 @@ fn offline_core_state(requested_core: CoreKind, error: &std::io::Error) -> CoreS
         process: None,
         profile,
         notice: None,
-        error: Some(format!(
-            "所有可用内核都启动失败，ZenClash 已进入离线恢复模式，未连接默认 9090 控制器。请在“设置 → 运行内核”重新检测或选择可执行文件，然后重启应用。原因：{error}"
+        error: Some(zenclash_i18n::text_with(
+            "startup.offline",
+            &[("error", error.to_string())],
         )),
     }
 }
@@ -597,9 +647,12 @@ fn recover_core(
             Err(error) => failures.push(error.to_string()),
         }
     }
-    Err(std::io::Error::other(format!(
-        "首选内核与恢复内核均启动失败：{}",
-        failures.join("；")
+    Err(std::io::Error::other(zenclash_i18n::text_with(
+        "startup.all_cores_failed",
+        &[(
+            "errors",
+            failures.join(&zenclash_i18n::text("startup.separator")),
+        )],
     )))
 }
 
@@ -615,9 +668,12 @@ fn recover_safe_profile(
     let recovery_profile = bundled_recovery_profile()
         .unwrap_or(project_root()?.join("platforms/common/recovery.yaml"));
     if !recovery_profile.is_file() {
-        return Err(std::io::Error::other(format!(
-            "活动配置启动失败，且内置恢复配置缺失：{}；原始原因：{cause}",
-            recovery_profile.display()
+        return Err(std::io::Error::other(zenclash_i18n::text_with(
+            "startup.recovery_missing",
+            &[
+                ("path", recovery_profile.display().to_string()),
+                ("cause", cause.to_string()),
+            ],
         )));
     }
     let mut candidates = vec![(requested_core, requested_binary.map(Path::to_path_buf))];
@@ -648,12 +704,15 @@ fn recover_safe_profile(
             false,
         ) {
             Ok(bootstrapped) => {
-                let mut notice = format!(
-                    "活动配置未能启动，已使用内置直连恢复配置运行 {}；原活动选择和源文件均未改写。请在“配置”页导入或切换到有效配置。原因：{cause}",
-                    kind.display_name()
+                let mut notice = zenclash_i18n::text_with(
+                    "startup.recovery_active",
+                    &[
+                        ("core", kind.display_name().to_owned()),
+                        ("cause", cause.to_string()),
+                    ],
                 );
                 if let Some(listener_notice) = bootstrapped.startup_notice {
-                    notice.push('；');
+                    notice.push_str(&zenclash_i18n::text("startup.separator"));
                     notice.push_str(&listener_notice);
                 }
                 tracing::warn!(core = %kind, %cause, "started with the packaged recovery profile");
@@ -669,9 +728,12 @@ fn recover_safe_profile(
             Err(error) => failures.push(error.to_string()),
         }
     }
-    Err(std::io::Error::other(format!(
-        "活动配置与内置恢复配置均启动失败：{}",
-        failures.join("；")
+    Err(std::io::Error::other(zenclash_i18n::text_with(
+        "startup.recovery_failed",
+        &[(
+            "errors",
+            failures.join(&zenclash_i18n::text("startup.separator")),
+        )],
     )))
 }
 
@@ -731,9 +793,9 @@ mod tracing_tests {
         assert_eq!(state.endpoint.controller, "127.0.0.1:0");
         assert!(state.process.is_none());
         assert!(state.notice.is_none());
-        assert!(state.error.is_some_and(|message| {
-            message.contains("离线恢复模式") && message.contains("运行内核")
-        }));
+        assert!(state.error.is_some_and(
+            |message| message.contains("9090") && message.contains("no eligible binary")
+        ));
     }
 
     #[test]
@@ -769,7 +831,13 @@ mod tracing_tests {
         let mut notice = Some("活动配置无效".to_owned());
         append_startup_notice(&mut notice, "受控层已隔离".to_owned());
 
-        assert_eq!(notice.as_deref(), Some("活动配置无效；受控层已隔离"));
+        assert_eq!(
+            notice,
+            Some(format!(
+                "活动配置无效{}受控层已隔离",
+                zenclash_i18n::text("startup.separator")
+            ))
+        );
     }
 
     #[test]

@@ -28,6 +28,8 @@
     <string>11.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 Haiwen Zhang. Licensed under GNU GPL v3.0 only.</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
 </dict>
