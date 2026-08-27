@@ -21,7 +21,6 @@ mod system_proxy;
 mod traffic_history;
 mod tray;
 mod view;
-mod webdav_backups;
 
 pub use bootstrap::{create_main_window, init};
 use platform::{open_directory, tray_directories};
@@ -87,6 +86,7 @@ mod action_types {
             ShowTrafficIcon,
             HideTrafficIcon,
             ShowStatusMenu,
+            ToggleSidebar,
             ToggleFloatingWindow,
         ]
     );
@@ -97,6 +97,7 @@ pub use action_types::*;
 /// Root GPUI entity coordinating pages, windows, Mihomo state, and native tray.
 pub struct ZenClashApp {
     current_page: Page,
+    sidebar_collapsed: bool,
     outbound_mode: OutboundModeCoordinator,
     core_kind: CoreKind,
     core_session: CoreSession,
@@ -273,6 +274,7 @@ impl ZenClashApp {
         });
         let mut app = Self {
             current_page: Page::default(),
+            sidebar_collapsed: false,
             outbound_mode: OutboundModeCoordinator::new_unsynchronized(OutboundMode::default()),
             core_kind,
             core_session,
@@ -315,7 +317,6 @@ impl ZenClashApp {
         app.restore_system_proxy(cx);
         app.start_mode_sync(cx);
         app.start_profile_updates(cx);
-        app.start_webdav_backups(cx);
         app.start_traffic_history(traffic_history_store);
         Self::start_tray_updates(cx);
         app.refresh_tray_menu(cx);

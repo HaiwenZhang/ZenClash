@@ -45,7 +45,7 @@ The home page brings together the active profile, four-layer operational status,
 - **Connections and rules**: Inspect and close active connections, search rules, and review proxy and rule providers.
 - **YAML overrides**: Compose configurations through ordered override layers, preview the effective result, and leave imported source files untouched.
 - **Status bar menu**: Shows live upload and download rates with quick access to routing mode, system proxy, TUN, nodes, and profiles.
-- **Backup and restore**: Supports complete local ZIP snapshots and optional remote WebDAV backups.
+- **Backup and restore**: Supports exporting and restoring complete local ZIP snapshots.
 - **Core management**: Mihomo is the default production core. meow-rs is experimental and is used only when selected explicitly.
 - **Verifiable updates**: Mihomo updates require the GitHub-published SHA-256 and roll back after a failed start. ZenClash application updates only notify and open the official Release page; they never download or install silently.
 

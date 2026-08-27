@@ -87,7 +87,6 @@ pub struct RuntimePage {
     config_inputs: ConfigInputs,
     config_inputs_profile: Option<PathBuf>,
     profile_catalog: ProfileCatalog,
-    webdav: settings::webdav::WebDavUiState,
     preferences_store: Option<AppPreferencesStore>,
     preferences: AppPreferences,
     core_management: settings::CoreManagementUiState,

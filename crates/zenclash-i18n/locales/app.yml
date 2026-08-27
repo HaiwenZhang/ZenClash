@@ -240,6 +240,14 @@ language:
     zh-CN: 界面语言已切换为简体中文
     en: Interface language changed to English
 
+sidebar:
+  collapse:
+    zh-CN: 收起侧边栏
+    en: Collapse sidebar
+  expand:
+    zh-CN: 展开侧边栏
+    en: Expand sidebar
+
 navigation:
   home:
     label:
@@ -3269,172 +3277,6 @@ backup:
     runtime_rollback_failed:
       zh-CN: "%{reason}；原磁盘数据已恢复，但内核运行配置恢复失败：%{error}"
       en: "%{reason}; original disk data was restored, but restoring the core runtime configuration failed: %{error}"
-
-webdav:
-  title:
-    zh-CN: WebDAV 远端保险库
-    en: WebDAV Remote Vault
-  empty:
-    verified:
-      zh-CN: 远端目录为空；点击“立即备份”创建第一份快照
-      en: The remote directory is empty; select “Back Up Now” to create the first snapshot
-    unverified:
-      zh-CN: 保存并测试连接后，这里会显示可恢复的 ZIP 快照
-      en: Restorable ZIP snapshots appear here after the connection is saved and tested
-  fields:
-    url:
-      zh-CN: 服务器 URL
-      en: Server URL
-    url_description:
-      zh-CN: 填写 WebDAV 根地址；凭据不能写在 URL 中
-      en: Enter the WebDAV root address without credentials in the URL
-    directory:
-      zh-CN: 远程目录
-      en: Remote Directory
-    directory_description:
-      zh-CN: ZenClash 会逐级创建这个相对目录
-      en: ZenClash creates this relative directory one level at a time
-    username:
-      zh-CN: 用户名
-      en: Username
-    username_description:
-      zh-CN: 留空时不发送 HTTP Basic 凭据
-      en: Leave empty to omit HTTP Basic credentials
-    password:
-      zh-CN: 密码
-      en: Password
-    password_description:
-      zh-CN: 优先使用服务商提供的独立应用密码
-      en: Prefer a dedicated app password from the service provider
-    retention:
-      zh-CN: 保留份数
-      en: Retention Count
-    retention_description:
-      zh-CN: 只清理当前设备生成的旧备份；0 表示不限
-      en: Remove only old backups created by this device; 0 means unlimited
-    schedule:
-      zh-CN: 定时备份
-      en: Scheduled Backup
-    schedule_description:
-      zh-CN: 使用本地时区的 Cron；支持常用 5 字段，留空即停用
-      en: Cron uses the local time zone and common 5-field syntax; empty disables scheduling
-    invalid_tls:
-      zh-CN: 允许无效 TLS 证书
-      en: Allow Invalid TLS Certificates
-    invalid_tls_description:
-      zh-CN: 仅用于你确认可信的自签名服务器
-      en: Use only for a self-signed server you trust
-  actions:
-    manual:
-      zh-CN: 手动同步
-      en: Manual Sync
-    manual_description:
-      zh-CN: 上传真实本地快照；下载后先验证，再事务切换活动配置
-      en: Upload a real local snapshot; downloads are validated before transactional profile activation
-    save_test:
-      zh-CN: 保存并测试
-      en: Save & Test
-    backup_now:
-      zh-CN: 立即备份
-      en: Back Up Now
-    refresh:
-      zh-CN: 刷新
-      en: Refresh
-    restore:
-      zh-CN: 恢复
-      en: Restore
-  status:
-    verified:
-      zh-CN: 连接已验证
-      en: Connection Verified
-    found:
-      zh-CN: 已发现 %{count} 份安全 ZIP
-      en: Found %{count} safe ZIP snapshots
-    waiting:
-      zh-CN: 等待验证
-      en: Waiting for Verification
-    waiting_description:
-      zh-CN: 不会在未验证服务器前自动上传
-      en: Automatic uploads remain disabled until the server is verified
-    size_unknown:
-      zh-CN: 大小未知
-      en: Size unknown
-    time_unknown:
-      zh-CN: 时间未知
-      en: Time unknown
-  storage_note:
-    zh-CN: 连接设置保存在当前用户私有文件中，不写入备份 ZIP；定时任务在应用运行期间按本地时区执行。
-    en: Connection settings are stored in a private per-user file and excluded from backup ZIPs; schedules run in the local time zone while the app is running.
-  placeholders:
-    username:
-      zh-CN: 可选用户名
-      en: Optional username
-    password:
-      zh-CN: 可选密码或应用密码
-      en: Optional password or app password
-    unlimited:
-      zh-CN: 0 表示不限
-      en: 0 means unlimited
-  prompts:
-    restore_title:
-      zh-CN: 恢复这份远端备份？
-      en: Restore This Remote Backup?
-    restore_detail:
-      zh-CN: 将下载并完整验证 %{filename}，随后替换当前偏好、受控设置和配置仓库。%{core} 拒绝配置时会自动回滚。
-      en: Download and fully verify %{filename}, then replace the current preferences, managed settings, and profile repository. Changes roll back automatically if %{core} rejects the configuration.
-    delete_title:
-      zh-CN: 删除这份远端备份？
-      en: Delete This Remote Backup?
-    delete_detail:
-      zh-CN: 将从服务器永久删除 %{filename}。此操作不能撤销。
-      en: Permanently delete %{filename} from the server. This cannot be undone.
-  notices:
-    scheduled_created:
-      zh-CN: 定时远端备份 %{filename} 已创建，清理 %{count} 份当前设备旧备份
-      en: Scheduled remote backup %{filename} created; removed %{count} old backups from this device
-    connection_saved:
-      zh-CN: WebDAV 连接已验证，设置已保存
-      en: WebDAV connection verified and settings saved
-    list_refreshed:
-      zh-CN: WebDAV 备份列表已刷新
-      en: WebDAV backup list refreshed
-    created:
-      zh-CN: 远端备份 %{filename} 已创建
-      en: Remote backup %{filename} created
-    created_cleaned:
-      zh-CN: 远端备份 %{filename} 已创建，并清理 %{count} 份当前设备旧备份
-      en: Remote backup %{filename} created; removed %{count} old backups from this device
-    deleted:
-      zh-CN: 远端备份 %{filename} 已删除
-      en: Remote backup %{filename} deleted
-  errors:
-    settings_read:
-      zh-CN: WebDAV 设置读取失败：%{error}
-      en: "Could not read WebDAV settings: %{error}"
-    directory:
-      zh-CN: WebDAV 设置目录不可用：%{error}
-      en: "WebDAV settings directory unavailable: %{error}"
-    directory_permission:
-      zh-CN: WebDAV 设置目录不可用，请检查应用数据目录权限
-      en: WebDAV settings directory unavailable; check the app data directory permissions
-    retention_integer:
-      zh-CN: 保留份数必须是 0 到 100 的整数：%{error}
-      en: "Retention count must be an integer from 0 to 100: %{error}"
-    scheduled:
-      zh-CN: 定时 WebDAV 备份失败：%{error}
-      en: "Scheduled WebDAV backup failed: %{error}"
-    local_directory_task:
-      zh-CN: 本地备份目录任务异常结束：%{error}
-      en: "The local backup directory task ended unexpectedly: %{error}"
-    restore_task:
-      zh-CN: WebDAV 恢复任务异常结束：%{error}
-      en: "The WebDAV restore task ended unexpectedly: %{error}"
-    action_task:
-      zh-CN: WebDAV 任务异常结束：%{error}
-      en: "The WebDAV task ended unexpectedly: %{error}"
-    save_task:
-      zh-CN: WebDAV 设置保存任务异常结束：%{error}
-      en: "The WebDAV settings save task ended unexpectedly: %{error}"
 
 connections:
   warnings:

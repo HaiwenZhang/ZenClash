@@ -50,13 +50,14 @@ impl Render for ZenClashApp {
             .on_action(cx.listener(Self::on_show_traffic_icon))
             .on_action(cx.listener(Self::on_hide_traffic_icon))
             .on_action(cx.listener(Self::on_show_status_menu))
+            .on_action(cx.listener(Self::on_toggle_sidebar))
             .on_action(cx.listener(Self::on_toggle_floating_window))
             .child(
                 h_flex()
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .child(Sidebar::new(self.current_page))
+                    .child(Sidebar::new(self.current_page).collapsed(self.sidebar_collapsed))
                     .child(div().flex_1().h_full().min_w_0().child(content)),
             )
     }

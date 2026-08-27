@@ -4,8 +4,8 @@ use super::{
     NavigateProfiles, NavigateProxies, NavigateResources, NavigateRules, NavigateSettings,
     NavigateSniffer, NavigateSystemProxy, NavigateTraffic, NavigateTun, OutboundMode, Page, Quit,
     SetDarkTheme, SetDirectMode, SetGlobalMode, SetLightTheme, SetRuleMode, SetSystemTheme,
-    ShowStatusMenu, ShowTrafficIcon, ThemeMode, ToggleFloatingWindow, Window, ZenClashApp,
-    apply_zen_theme,
+    ShowStatusMenu, ShowTrafficIcon, ThemeMode, ToggleFloatingWindow, ToggleSidebar, Window,
+    ZenClashApp, apply_zen_theme,
 };
 
 impl ZenClashApp {
@@ -274,6 +274,16 @@ impl ZenClashApp {
     ) {
         self.tray_menu_requested = true;
         self.refresh_tray_menu(cx);
+    }
+
+    pub(super) fn on_toggle_sidebar(
+        &mut self,
+        _: &ToggleSidebar,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar_collapsed = !self.sidebar_collapsed;
+        cx.notify();
     }
 
     pub(super) fn on_toggle_floating_window(

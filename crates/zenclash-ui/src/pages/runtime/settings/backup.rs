@@ -11,8 +11,6 @@ mod actions;
 mod view;
 mod workflow;
 
-pub(super) use workflow::restore_prepared;
-
 pub(super) struct RestoreOutcome {
     preferences: AppPreferences,
     catalog: ProfileCatalog,

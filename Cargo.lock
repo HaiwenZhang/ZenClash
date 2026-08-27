@@ -8607,7 +8607,6 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "reqwest",
- "roxmltree",
  "rusqlite",
  "serde",
  "serde_json",

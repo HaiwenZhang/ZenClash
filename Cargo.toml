@@ -32,7 +32,6 @@ objc2-foundation = { version = "0.3.2", default-features = false }
 parking_lot = "0.12"
 percent-encoding = "2.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-roxmltree = "0.20"
 rust-i18n = "4"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }

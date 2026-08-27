@@ -32,7 +32,7 @@ pub(super) async fn restore_backup(
     restore_prepared(manager, prepared, runtime, previous_profile).await
 }
 
-pub(in crate::pages::runtime::settings) async fn restore_prepared(
+async fn restore_prepared(
     manager: BackupManager,
     prepared: PreparedBackupRestore,
     runtime: CoreProfileRuntime,

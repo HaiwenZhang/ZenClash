@@ -9,7 +9,6 @@ use crate::components::sidebar::dispatch_navigate;
 mod app_update;
 mod backup;
 mod core_management;
-pub(in crate::pages::runtime) mod webdav;
 pub(in crate::pages::runtime) use app_update::AppUpdateUiState;
 pub(in crate::pages::runtime) use core_management::CoreManagementUiState;
 
@@ -50,7 +49,6 @@ impl RuntimePage {
                 ))
             })
             .child(self.render_backup_card(theme, cx))
-            .child(self.render_webdav_card(theme, cx))
             .into_any_element()
     }
 

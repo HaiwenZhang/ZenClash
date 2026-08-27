@@ -202,7 +202,6 @@ impl RuntimePage {
             .refresh_localized_placeholders(window, cx);
         self.profile_editor
             .refresh_localized_placeholder(window, cx);
-        self.webdav.refresh_localized_placeholders(window, cx);
         cx.notify();
     }
 
@@ -285,7 +284,6 @@ impl RuntimePage {
             override_catalog,
             error,
         } = load_initial_persistent_state(profile_path.as_deref(), &controlled_config_store);
-        let (webdav, webdav_error) = super::settings::webdav::WebDavUiState::discover(window, cx);
         let config_inputs = ConfigInputs::new(&effective_config, window, cx);
         let config_inputs_profile = profile_path.clone();
         let profile_forms = super::profiles::ProfileFormState::new(window, cx);
@@ -314,7 +312,6 @@ impl RuntimePage {
             config_inputs,
             config_inputs_profile,
             profile_catalog,
-            webdav,
             preferences_store,
             preferences,
             core_management: super::settings::CoreManagementUiState::default(),
@@ -341,7 +338,7 @@ impl RuntimePage {
             load_generation: 0,
             loading: false,
             mutating: false,
-            error: error.or(webdav_error),
+            error,
             startup_error,
             notice: startup_notice,
             focus_handle: cx.focus_handle(),

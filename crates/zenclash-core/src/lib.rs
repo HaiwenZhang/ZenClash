@@ -37,7 +37,6 @@ mod traffic_capture;
 mod traffic_history;
 mod tun_permissions;
 mod tun_runtime;
-mod webdav;
 mod websocket;
 mod yaml_overrides;
 
@@ -155,10 +154,6 @@ pub use tun_permissions::{
     TunPermissionError, TunPermissionManager, TunPermissionResult, TunPermissionStatus,
 };
 pub use tun_runtime::{TunRuntimeObservation, TunRuntimeObserver};
-pub use webdav::{
-    WebDavBackup, WebDavError, WebDavResult, WebDavService, WebDavSettings, WebDavSettingsStore,
-    WebDavUploadSummary,
-};
 pub use yaml_overrides::{
     YamlOverrideCatalog, YamlOverrideError, YamlOverrideRecord, YamlOverrideResult,
     YamlOverrideStore,
