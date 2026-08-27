@@ -1,8 +1,11 @@
+#[cfg(target_os = "macos")]
 use std::process::Output;
 
+#[cfg(target_os = "macos")]
 use super::SystemProxyStatus;
 use crate::{MihomoError, MihomoResult};
 
+#[cfg(target_os = "macos")]
 pub(super) fn detect() -> MihomoResult<String> {
     if let Ok(service) = std::env::var("ZENCLASH_NETWORK_SERVICE")
         && !service.trim().is_empty()
@@ -30,6 +33,7 @@ pub(super) fn detect() -> MihomoResult<String> {
         .ok_or_else(|| MihomoError::Process("未找到可用的 macOS 网络服务".into()))
 }
 
+#[cfg(target_os = "macos")]
 pub(super) fn status(service: &str) -> MihomoResult<SystemProxyStatus> {
     let web = run_networksetup(["-getwebproxy", service])?;
     let secure = run_networksetup(["-getsecurewebproxy", service])?;
@@ -52,6 +56,7 @@ pub(super) fn status(service: &str) -> MihomoResult<SystemProxyStatus> {
     })
 }
 
+#[cfg(target_os = "macos")]
 fn active_network_service() -> Option<String> {
     let route = crate::platform_command::output("/sbin/route", &["-n", "get", "default"])
         .ok()
@@ -61,6 +66,7 @@ fn active_network_service() -> Option<String> {
     parse_service_for_interface(&order.stdout, &interface)
 }
 
+#[cfg(target_os = "macos")]
 pub(super) fn set_enabled(
     service: &str,
     enabled: bool,
@@ -94,6 +100,7 @@ pub(super) fn set_enabled(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 pub(super) fn set_pac_enabled(service: &str, enabled: bool, url: &str) -> MihomoResult<()> {
     set_proxy_states(service, false)?;
     set_auto_proxy_state(service, false)?;
@@ -108,6 +115,7 @@ pub(super) fn set_pac_enabled(service: &str, enabled: bool, url: &str) -> Mihomo
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn set_proxy_states(service: &str, enabled: bool) -> MihomoResult<()> {
     let state = if enabled { "on" } else { "off" };
     let web = run_networksetup(["-setwebproxystate", service, state]);
@@ -115,6 +123,7 @@ fn set_proxy_states(service: &str, enabled: bool) -> MihomoResult<()> {
     web.and(secure).map(|_| ())
 }
 
+#[cfg(target_os = "macos")]
 fn set_auto_proxy_state(service: &str, enabled: bool) -> MihomoResult<()> {
     run_networksetup([
         "-setautoproxystate",
@@ -124,10 +133,12 @@ fn set_auto_proxy_state(service: &str, enabled: bool) -> MihomoResult<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn run_networksetup<const N: usize>(args: [&str; N]) -> MihomoResult<Output> {
     run_networksetup_slice(&args)
 }
 
+#[cfg(target_os = "macos")]
 fn run_networksetup_slice(args: &[&str]) -> MihomoResult<Output> {
     let output = crate::platform_command::output("/usr/sbin/networksetup", args)
         .map_err(MihomoError::Process)?;

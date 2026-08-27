@@ -107,7 +107,7 @@ impl AutostartManager {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     fn with_entry_path(executable: impl Into<PathBuf>, entry_path: impl Into<PathBuf>) -> Self {
         Self {
             executable: executable.into(),

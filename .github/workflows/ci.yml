@@ -13,10 +13,10 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
-  verify:
-    name: Test, Clippy and rustfmt
+  formatting:
+    name: rustfmt
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    timeout-minutes: 10
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -25,13 +25,38 @@ jobs:
         run: |
           rustup update stable
           rustup default stable
-          rustup component add clippy rustfmt
-
-      - name: Install Linux dependencies
-        run: sudo scripts/install_linux_build_deps.sh
+          rustup component add rustfmt
 
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+  verify:
+    name: ${{ matrix.name }} tests and Clippy
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 22.04
+            os: ubuntu-22.04
+          - name: macOS 15
+            os: macos-15
+          - name: Windows 2022
+            os: windows-2022
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install the stable Rust toolchain
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add clippy
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo scripts/install_linux_build_deps.sh
 
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
