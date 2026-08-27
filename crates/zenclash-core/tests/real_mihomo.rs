@@ -822,10 +822,7 @@ fn start_test_dns_server() -> (String, thread::JoinHandle<Vec<u16>>) {
     let server = thread::spawn(move || {
         let mut queried_types = Vec::new();
         let mut buffer = [0_u8; 2_048];
-        loop {
-            let Ok((length, peer)) = socket.recv_from(&mut buffer) else {
-                break;
-            };
+        while let Ok((length, peer)) = socket.recv_from(&mut buffer) {
             let Some((question_end, record_type)) = dns_question(&buffer[..length]) else {
                 continue;
             };
