@@ -2,6 +2,7 @@ use super::{
     AppContext, Context, OutboundMode, TrayMenuState, TrayProfile, TrayProxyGroup, TrayProxyNode,
     ZenClashApp, tray_directories,
 };
+use zenclash_core::{Observation, ProxyGroupBehavior, ProxyOperations, ProxyVisibility};
 
 struct TrayMenuSnapshot {
     config: zenclash_core::RuntimeConfig,
@@ -25,34 +26,28 @@ impl ZenClashApp {
         self.tray_refresh_pending = false;
         let mode_generation = self.outbound_mode.generation();
         let client = self.client.clone();
+        let operational_status = self.operational_status.clone();
         let task = self.runtime.spawn(async move {
-            let system_proxy_task = tokio::task::spawn_blocking(|| {
-                zenclash_core::SystemProxyManager::detect()
-                    .and_then(|manager| manager.status())
-                    .map(|status| status.active())
-                    .map_err(|error| error.to_string())
-            });
+            let proxy_operations = ProxyOperations::new(client.clone());
             let profile_catalog_task = tokio::task::spawn_blocking(|| {
                 let store =
                     zenclash_core::ProfileStore::discover().map_err(|error| error.to_string())?;
                 store.load().map_err(|error| error.to_string())
             });
-            let (config, catalog, system_proxy, profiles) = tokio::join!(
+            let (config, catalog, profiles) = tokio::join!(
                 client.runtime_config(),
-                client.proxy_catalog(),
-                system_proxy_task,
+                proxy_operations.catalog(ProxyVisibility::VisibleOnly),
                 profile_catalog_task
             );
             let config = config.map_err(|error| error.to_string())?;
             let catalog = catalog.map_err(|error| error.to_string())?;
-            let system_proxy = system_proxy
-                .map_err(|error| {
-                    zenclash_i18n::text_with(
-                        "tray.errors.system_proxy_status",
-                        &[("error", error.to_string())],
-                    )
-                })
-                .and_then(|result| result);
+            let system_proxy = match operational_status.snapshot().capture.system_proxy {
+                Observation::Fresh { value, .. } | Observation::Stale { value, .. } => {
+                    Ok(value.actual.active())
+                }
+                Observation::Failed { failure, .. } => Err(failure.message),
+                Observation::Loading => Err(zenclash_i18n::text("system_proxy.status.loading")),
+            };
             let profiles = profiles
                 .map_err(|error| {
                     zenclash_i18n::text_with(
@@ -118,6 +113,10 @@ impl ZenClashApp {
         let groups = catalog
             .into_groups_for_mode(&outbound_mode)
             .map(|group| TrayProxyGroup {
+                selectable: matches!(
+                    group.behavior,
+                    ProxyGroupBehavior::Selector | ProxyGroupBehavior::Automatic { .. }
+                ),
                 name: group.name,
                 now: group.now,
                 test_url: group.test_url,

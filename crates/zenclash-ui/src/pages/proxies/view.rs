@@ -2,8 +2,8 @@ use gpui_component::{Selectable, button::ButtonVariants};
 
 use super::{
     Button, Context, Disableable, FluentBuilder, Icon, IconName, IntoElement, ParentElement,
-    Progress, ProxiesPage, ProxyGroup, ProxyNode, Sizable, Styled, div, h_flex, px, test_key,
-    v_flex,
+    Progress, ProxiesPage, ProxyGroup, ProxyGroupBehavior, ProxyNode, Sizable, Styled, Switch, div,
+    group_allows_manual_selection, group_has_unique_current, h_flex, px, test_key, v_flex,
 };
 
 impl ProxiesPage {
@@ -13,7 +13,8 @@ impl ProxiesPage {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let loading = self.loading;
-        let refreshing_disabled = self.switching.is_some();
+        let operation_pending = self.operation_pending();
+        let show_hidden = self.show_hidden;
         h_flex()
             .h_16()
             .px_5()
@@ -47,18 +48,42 @@ impl ProxiesPage {
                     ),
             )
             .child(
-                Button::new("refresh-proxies")
-                    .icon(IconName::Redo2)
-                    .label(if loading {
-                        zenclash_i18n::text("common.actions.loading")
-                    } else {
-                        zenclash_i18n::text("proxies.actions.refresh")
-                    })
-                    .small()
-                    .ghost()
-                    .loading(loading)
-                    .disabled(refreshing_disabled)
-                    .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(zenclash_i18n::text("proxies.actions.show_hidden")),
+                            )
+                            .child(
+                                Switch::new("proxies-show-hidden")
+                                    .checked(show_hidden)
+                                    .disabled(loading || operation_pending)
+                                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                        this.set_show_hidden(*checked, cx);
+                                    })),
+                            ),
+                    )
+                    .child(
+                        Button::new("refresh-proxies")
+                            .icon(IconName::Redo2)
+                            .label(if loading {
+                                zenclash_i18n::text("common.actions.loading")
+                            } else {
+                                zenclash_i18n::text("proxies.actions.refresh")
+                            })
+                            .small()
+                            .ghost()
+                            .loading(loading)
+                            .disabled(operation_pending)
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                    ),
             )
     }
 
@@ -71,7 +96,13 @@ impl ProxiesPage {
     ) -> gpui::AnyElement {
         let expanded = self.expanded.contains(&group.name);
         let group_name = group.name.clone();
+        let group_for_restore = group.name.clone();
         let group_for_test = group.clone();
+        let restoring_auto = self.restoring_auto.as_deref() == Some(group.name.as_str());
+        let measuring_and_restoring =
+            self.measuring_and_restoring_auto.as_deref() == Some(group.name.as_str());
+        let group_for_measure_restore = group.name.clone();
+        let group_test_url = group.test_url.clone();
         let testing_group = group
             .all
             .iter()
@@ -133,13 +164,50 @@ impl ProxiesPage {
                                     )
                                     .child(
                                         div().text_xs().text_color(theme.muted_foreground).child(
-                                            zenclash_i18n::text_with(
-                                                "proxies.summary.current",
-                                                &[
-                                                    ("proxy", group.now.clone()),
-                                                    ("count", group.all.len().to_string()),
-                                                ],
-                                            ),
+                                            match &group.behavior {
+                                                ProxyGroupBehavior::Selector => {
+                                                    zenclash_i18n::text_with(
+                                                        "proxies.summary.current",
+                                                        &[
+                                                            ("proxy", group.now.clone()),
+                                                            ("count", group.all.len().to_string()),
+                                                        ],
+                                                    )
+                                                }
+                                                ProxyGroupBehavior::Automatic { fixed: true } => {
+                                                    zenclash_i18n::text_with(
+                                                        "proxies.summary.fixed",
+                                                        &[
+                                                            ("proxy", group.now.clone()),
+                                                            ("count", group.all.len().to_string()),
+                                                        ],
+                                                    )
+                                                }
+                                                ProxyGroupBehavior::Automatic { fixed: false } => {
+                                                    zenclash_i18n::text_with(
+                                                        "proxies.summary.automatic",
+                                                        &[
+                                                            ("proxy", group.now.clone()),
+                                                            ("count", group.all.len().to_string()),
+                                                        ],
+                                                    )
+                                                }
+                                                ProxyGroupBehavior::LoadBalance => {
+                                                    zenclash_i18n::text_with(
+                                                        "proxies.summary.load_balance",
+                                                        &[("count", group.all.len().to_string())],
+                                                    )
+                                                }
+                                                ProxyGroupBehavior::Unknown(kind) => {
+                                                    zenclash_i18n::text_with(
+                                                        "proxies.summary.unknown",
+                                                        &[
+                                                            ("type", kind.clone()),
+                                                            ("count", group.all.len().to_string()),
+                                                        ],
+                                                    )
+                                                }
+                                            },
                                         ),
                                     ),
                             ),
@@ -147,6 +215,59 @@ impl ProxiesPage {
                     .child(
                         h_flex()
                             .gap_1()
+                            .when(
+                                matches!(group.behavior, ProxyGroupBehavior::Automatic { .. }),
+                                |this| {
+                                    this.child(
+                                        Button::new(("measure-restore-auto", group_index))
+                                            .icon(IconName::Redo2)
+                                            .label(if measuring_and_restoring {
+                                                zenclash_i18n::text("proxies.actions.testing")
+                                            } else {
+                                                zenclash_i18n::text(
+                                                    "proxies.actions.measure_restore_auto",
+                                                )
+                                            })
+                                            .small()
+                                            .ghost()
+                                            .loading(measuring_and_restoring)
+                                            .disabled(self.operation_pending())
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.measure_group_and_restore_auto(
+                                                    group_for_measure_restore.clone(),
+                                                    group_test_url.clone(),
+                                                    cx,
+                                                );
+                                            })),
+                                    )
+                                },
+                            )
+                            .when(
+                                matches!(
+                                    group.behavior,
+                                    ProxyGroupBehavior::Automatic { fixed: true }
+                                ),
+                                |this| {
+                                    this.child(
+                                        Button::new(("restore-auto", group_index))
+                                            .icon(IconName::Redo2)
+                                            .label(if restoring_auto {
+                                                zenclash_i18n::text(
+                                                    "proxies.actions.restoring_auto",
+                                                )
+                                            } else {
+                                                zenclash_i18n::text("proxies.actions.restore_auto")
+                                            })
+                                            .small()
+                                            .outline()
+                                            .loading(restoring_auto)
+                                            .disabled(self.operation_pending())
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.restore_auto(group_for_restore.clone(), cx);
+                                            })),
+                                    )
+                                },
+                            )
                             .child(
                                 Button::new(("test-group", group_index))
                                     .icon(IconName::Redo2)
@@ -208,7 +329,8 @@ impl ProxiesPage {
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let selected = group.now == proxy.name;
+        let selected = group_has_unique_current(&group.behavior) && group.now == proxy.name;
+        let selectable = group_allows_manual_selection(&group.behavior);
         let testing = self.testing.contains(&test_key(&group.name, &proxy.name));
         let switching = self.switching.as_ref() == Some(&(group.name.clone(), proxy.name.clone()));
         let group_name = group.name.clone();
@@ -347,32 +469,36 @@ impl ProxiesPage {
                             );
                         })),
                     )
-                    .child(
-                        Button::new((
-                            gpui::ElementId::from(("select-proxy", group_index)),
-                            proxy_index.to_string(),
-                        ))
-                        .icon(if selected {
-                            IconName::Check
-                        } else {
-                            IconName::ArrowRight
-                        })
-                        .label(if selected {
-                            zenclash_i18n::text("proxies.actions.current")
-                        } else if switching {
-                            zenclash_i18n::text("proxies.actions.switching")
-                        } else {
-                            zenclash_i18n::text("proxies.actions.select")
-                        })
-                        .small()
-                        .outline()
-                        .selected(selected)
-                        .loading(switching)
-                        .disabled(selected || self.switching.is_some())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.change_proxy(group_name.clone(), proxy_name.clone(), cx);
-                        })),
-                    ),
+                    .when(selectable, |this| {
+                        this.child(
+                            Button::new((
+                                gpui::ElementId::from(("select-proxy", group_index)),
+                                proxy_index.to_string(),
+                            ))
+                            .icon(if selected {
+                                IconName::Check
+                            } else {
+                                IconName::ArrowRight
+                            })
+                            .label(if selected {
+                                zenclash_i18n::text("proxies.actions.current")
+                            } else if switching {
+                                zenclash_i18n::text("proxies.actions.switching")
+                            } else {
+                                zenclash_i18n::text("proxies.actions.select")
+                            })
+                            .small()
+                            .outline()
+                            .selected(selected)
+                            .loading(switching)
+                            .disabled(selected || self.operation_pending())
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.change_proxy(group_name.clone(), proxy_name.clone(), cx);
+                                },
+                            )),
+                        )
+                    }),
             )
             .into_any_element()
     }

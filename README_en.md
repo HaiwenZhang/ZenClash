@@ -30,7 +30,7 @@
 
 ![ZenClash home page](docs/home_en.png)
 
-The home page brings together the active profile, selected node, proxy status, routing mode, and live traffic. Profiles and nodes can be switched directly, while detailed configuration and diagnostics remain in their dedicated pages.
+The home page brings together the active profile, four-layer operational status, selected node, capture mode, routing mode, and live traffic. Primary navigation is limited to Home, Proxies, Profiles, Connections, and Settings; rules, traffic, logs, and core tools are reached from Settings by task.
 
 ## Features
 
@@ -38,7 +38,8 @@ The home page brings together the active profile, selected node, proxy status, r
 - **Profile management**: Supports online subscriptions and local Clash/Mihomo YAML files, including traffic quota, update time, and expiration information.
 - **Proxy groups and nodes**: Browse proxy groups, switch nodes, run delay tests, and retain local test history.
 - **Quick controls**: Toggle the system proxy and switch between Rule, Global, and Direct routing modes from the home page.
-- **TUN and system proxy**: Cross-platform system proxy management, TUN configuration, and runtime status checks.
+- **TUN and system proxy**: Native System Proxy state and ownership readback, plus separate TUN permission, device, and route evidence so a configured switch is never presented as proven capture.
+- **Network diagnostics**: Independently checks the controller, capture, DNS A/AAAA, DIRECT/Mihomo paths, and providers, with a strictly redacted support summary.
 - **Live monitoring**: Inspect upload, download, active connections, runtime logs, and real-time traffic trends.
 - **Traffic history**: Stores history in a local SQLite database and aggregates usage by domain, device, outbound, and process.
 - **Connections and rules**: Inspect and close active connections, search rules, and review proxy and rule providers.
@@ -46,6 +47,7 @@ The home page brings together the active profile, selected node, proxy status, r
 - **Status bar menu**: Shows live upload and download rates with quick access to routing mode, system proxy, TUN, nodes, and profiles.
 - **Backup and restore**: Supports complete local ZIP snapshots and optional remote WebDAV backups.
 - **Core management**: Mihomo is the default production core. meow-rs is experimental and is used only when selected explicitly.
+- **Verifiable updates**: Mihomo updates require the GitHub-published SHA-256 and roll back after a failed start. ZenClash application updates only notify and open the official Release page; they never download or install silently.
 
 ## Supported Platforms
 
@@ -56,7 +58,9 @@ The home page brings together the active profile, selected node, proxy status, r
 | Ubuntu 22.04 and newer | DEB | amd64 |
 | Fedora / Rocky Linux | RPM | x86_64 |
 
-Release packages bundle a Mihomo binary whose SHA-256 digest is verified during the build, so no additional core download is required on first launch. Development builds may also connect to an existing Mihomo controller.
+Release packages bundle a Mihomo binary whose SHA-256 digest is verified during the build, so no additional core download is required on first launch. Releases also publish `SHA256SUMS` and GitHub build attestations. Development builds may connect to an existing Mihomo controller.
+
+On macOS and Linux, the native authorization flow runs only after an explicit TUN action and binds the managed core path to its digest. Windows never elevates the whole ZenClash GUI; until an on-demand helper with caller ACLs exists, in-app automatic TUN authorization is explicitly unavailable.
 
 ## Quick Start
 
@@ -72,7 +76,7 @@ If the current configuration fails core validation, ZenClash keeps the original 
 
 ### Requirements
 
-- Rust 1.80 or newer
+- A current stable toolchain with Rust edition 2024 support
 - The native build toolchain for your platform
 - A real Mihomo executable
 

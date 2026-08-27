@@ -1,9 +1,10 @@
 use gpui::{
-    App, InteractiveElement as _, IntoElement, ParentElement, RenderOnce,
-    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, rems,
+    App, IntoElement, ParentElement, RenderOnce, Styled, Window, div, prelude::FluentBuilder as _,
+    rems,
 };
 use gpui_component::{
-    ActiveTheme, Collapsible, Icon, h_flex, sidebar::Sidebar as GpuiSidebar, v_flex,
+    ActiveTheme, Collapsible, Icon, Selectable, button::Button, button::ButtonVariants, h_flex,
+    sidebar::Sidebar as GpuiSidebar, v_flex,
 };
 
 use crate::{
@@ -13,7 +14,7 @@ use crate::{
         NavigateRules, NavigateSettings, NavigateSniffer, NavigateSystemProxy, NavigateTraffic,
         NavigateTun,
     },
-    assets::ZENCLASH_MARK_PATH,
+    assets::{GROUP_ICON_PATH, RADIO_ICON_PATH, RULER_ICON_PATH, ZENCLASH_MARK_PATH},
     pages::Page,
 };
 
@@ -114,41 +115,20 @@ impl Collapsible for SidebarNavigation {
 }
 
 impl RenderOnce for SidebarNavigation {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = cx.theme();
-        let accent = theme.sidebar_accent;
-        let accent_foreground = theme.sidebar_accent_foreground;
-        let radius = theme.radius_lg;
-
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         v_flex()
             .gap_2()
             .children(self.pages.into_iter().map(|page| {
                 let active = page == self.current_page;
 
-                h_flex()
-                    .id(page.route())
+                Button::new(page.route())
+                    .icon(sidebar_icon(page).size(rems(1.25)))
                     .w_full()
                     .h(rems(3.))
-                    .px_3()
-                    .gap_3()
-                    .overflow_x_hidden()
-                    .cursor_pointer()
-                    .rounded(radius)
-                    .text_base()
-                    .when(active, |this| {
-                        this.bg(accent)
-                            .text_color(accent_foreground)
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                    })
-                    .when(!active, |this| {
-                        this.hover(move |this| {
-                            this.bg(accent.opacity(0.82)).text_color(accent_foreground)
-                        })
-                    })
-                    .child(Icon::new(page.icon()).size(rems(1.25)))
-                    .when(!self.collapsed, |this| {
-                        this.child(div().flex_1().overflow_x_hidden().child(page.label()))
-                    })
+                    .ghost()
+                    .selected(active)
+                    .when(!self.collapsed, |this| this.label(page.label()))
+                    .tooltip(page.label())
                     .on_click(move |_, window, cx| dispatch_navigate(page, window, cx))
             }))
     }
@@ -212,6 +192,23 @@ impl RenderOnce for Sidebar {
     }
 }
 
+fn sidebar_icon(page: Page) -> Icon {
+    if let Some(path) = sidebar_icon_path(page) {
+        Icon::empty().path(path)
+    } else {
+        Icon::new(page.icon())
+    }
+}
+
+const fn sidebar_icon_path(page: Page) -> Option<&'static str> {
+    match page {
+        Page::Proxies => Some(GROUP_ICON_PATH),
+        Page::Connections => Some(RADIO_ICON_PATH),
+        Page::Rules => Some(RULER_ICON_PATH),
+        _ => None,
+    }
+}
+
 pub(crate) fn dispatch_navigate(page: Page, window: &mut Window, cx: &mut App) {
     match page {
         Page::Home => window.dispatch_action(Box::new(NavigateHome), cx),
@@ -235,7 +232,20 @@ pub(crate) fn dispatch_navigate(page: Page, window: &mut Window, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::OutboundMode;
+    use crate::{
+        assets::{GROUP_ICON_PATH, RADIO_ICON_PATH, RULER_ICON_PATH},
+        pages::Page,
+    };
+
+    use super::{OutboundMode, sidebar_icon_path};
+
+    #[test]
+    fn sidebar_uses_requested_custom_icons() {
+        assert_eq!(sidebar_icon_path(Page::Proxies), Some(GROUP_ICON_PATH));
+        assert_eq!(sidebar_icon_path(Page::Connections), Some(RADIO_ICON_PATH));
+        assert_eq!(sidebar_icon_path(Page::Rules), Some(RULER_ICON_PATH));
+        assert_eq!(sidebar_icon_path(Page::Home), None);
+    }
 
     #[test]
     fn outbound_mode_parses_mihomo_values_case_insensitively() {

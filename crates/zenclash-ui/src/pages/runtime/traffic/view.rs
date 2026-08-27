@@ -3,12 +3,12 @@ use gpui::SharedString;
 use gpui_component::chart::AreaChart;
 use zenclash_core::{TrafficDimension, TrafficTrendPoint};
 
-use super::{TrafficRange, dimension_label};
+use super::{TrafficHistoryFreshness, TrafficRange, dimension_label};
 use crate::pages::runtime::{
     Button, ButtonVariants, ConnectionsSnapshot, Context, Disableable, FluentBuilder, IconName,
     InteractiveElement, IntoElement, ParentElement, RuntimeData, RuntimePage, Selectable, Sizable,
-    StatefulInteractiveElement, Styled, div, empty_state, format_bytes, format_speed, h_flex,
-    metric, px, v_flex,
+    StatefulInteractiveElement, Styled, div, empty_state, format_bytes, format_profile_age,
+    format_speed, h_flex, metric, px, v_flex,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -78,6 +78,29 @@ impl RuntimePage {
         let history = &self.traffic_history;
         let points = historical_traffic_points(&history.overview.trend, history.range);
         let has_points = !points.is_empty();
+        let (freshness, freshness_color) = match history.freshness() {
+            TrafficHistoryFreshness::Loading => (
+                zenclash_i18n::text("traffic.chart.loading"),
+                theme.muted_foreground,
+            ),
+            TrafficHistoryFreshness::Fresh { observed_at_ms } => (
+                zenclash_i18n::text_with(
+                    "traffic.chart.updated",
+                    &[("age", format_profile_age(observed_at_ms / 1_000))],
+                ),
+                theme.success,
+            ),
+            TrafficHistoryFreshness::Stale { observed_at_ms } => (
+                zenclash_i18n::text_with(
+                    "traffic.chart.stale",
+                    &[("age", format_profile_age(observed_at_ms / 1_000))],
+                ),
+                theme.warning,
+            ),
+            TrafficHistoryFreshness::Failed => {
+                (zenclash_i18n::text("traffic.chart.failed"), theme.danger)
+            }
+        };
         let tick_margin = (points.len() / 6).max(1);
         let chart = AreaChart::new(points)
             .x(|point| point.label.clone())
@@ -124,20 +147,33 @@ impl RuntimePage {
                             )),
                     )
                     .child(
-                        h_flex()
-                            .gap_3()
-                            .text_xs()
+                        v_flex()
+                            .items_end()
+                            .gap_2()
                             .child(
                                 h_flex()
-                                    .gap_1()
-                                    .text_color(theme.chart_2)
-                                    .child(zenclash_i18n::text("traffic.chart.upload")),
+                                    .gap_2()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(div().size_2().rounded_full().bg(freshness_color))
+                                    .child(freshness),
                             )
                             .child(
                                 h_flex()
-                                    .gap_1()
-                                    .text_color(theme.chart_1)
-                                    .child(zenclash_i18n::text("traffic.chart.download")),
+                                    .gap_3()
+                                    .text_xs()
+                                    .child(
+                                        h_flex()
+                                            .gap_1()
+                                            .text_color(theme.chart_2)
+                                            .child(zenclash_i18n::text("traffic.chart.upload")),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .gap_1()
+                                            .text_color(theme.chart_1)
+                                            .child(zenclash_i18n::text("traffic.chart.download")),
+                                    ),
                             ),
                     ),
             )

@@ -6,9 +6,11 @@ use super::{
 };
 use crate::components::sidebar::dispatch_navigate;
 
+mod app_update;
 mod backup;
 mod core_management;
 pub(in crate::pages::runtime) mod webdav;
+pub(in crate::pages::runtime) use app_update::AppUpdateUiState;
 pub(in crate::pages::runtime) use core_management::CoreManagementUiState;
 
 impl RuntimePage {
@@ -38,6 +40,7 @@ impl RuntimePage {
             .gap_4()
             .child(self.render_advanced_tools(theme))
             .child(self.render_core_management(theme, cx))
+            .child(self.render_app_update(theme, cx))
             .child(self.render_application_settings(&config, &autostart, theme, cx))
             .when(self.core_kind.is_experimental(), |this| {
                 this.child(super::message_banner(
@@ -71,13 +74,19 @@ impl RuntimePage {
                 .child(advanced_tool_group(
                     zenclash_i18n::text("settings.advanced_tools.configuration.title"),
                     zenclash_i18n::text("settings.advanced_tools.configuration.description"),
-                    &[Page::Dns, Page::Sniffer, Page::Resources, Page::Override],
+                    &[
+                        Page::Rules,
+                        Page::Dns,
+                        Page::Sniffer,
+                        Page::Resources,
+                        Page::Override,
+                    ],
                     theme,
                 ))
                 .child(advanced_tool_group(
                     zenclash_i18n::text("settings.advanced_tools.diagnostics.title"),
                     zenclash_i18n::text("settings.advanced_tools.diagnostics.description"),
-                    &[Page::Network, Page::Mihomo],
+                    &[Page::Network, Page::Traffic, Page::Logs, Page::Mihomo],
                     theme,
                 )),
         )

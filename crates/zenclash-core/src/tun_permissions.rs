@@ -46,21 +46,10 @@ pub struct TunPermissionStatus {
     pub granted: bool,
     /// Whether `ZenClash` can offer a native, user-confirmed authorization action.
     pub can_request: bool,
-    /// Whether authorizing requires replacing the current application process.
-    pub requires_relaunch: bool,
     /// Canonical Mihomo executable inspected by the manager.
     pub binary: PathBuf,
     /// Human-readable platform evidence behind the state.
     pub detail: String,
-}
-
-/// Outcome of a user-requested TUN authorization operation.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TunPermissionGrant {
-    /// Permission was installed and verified in the current process.
-    Ready(TunPermissionStatus),
-    /// The operating system accepted a request to relaunch `ZenClash` elevated.
-    RelaunchRequested,
 }
 
 /// Inspects and explicitly grants privileges to one trusted runtime core.
@@ -107,17 +96,18 @@ impl TunPermissionManager {
 
     /// Opens the native authorization flow after an explicit user action.
     ///
-    /// Unix platforms verify the executable owner and set-user-ID bit before
-    /// returning. Windows asks the shell to relaunch the application elevated.
+    /// Supported Unix platforms verify the executable owner and set-user-ID
+    /// bit before returning. Platforms without a scoped authorization flow are
+    /// rejected instead of elevating the long-running GUI process.
     ///
     /// # Errors
     ///
     /// Returns an error when the prompt is declined, the native operation
     /// fails, or Unix permission readback does not confirm the requested state.
-    pub fn request_grant(&self) -> TunPermissionResult<TunPermissionGrant> {
+    pub fn request_grant(&self) -> TunPermissionResult<TunPermissionStatus> {
         let current = self.status()?;
         if current.granted {
-            return Ok(TunPermissionGrant::Ready(current));
+            return Ok(current);
         }
         platform::request_grant(&self.binary)
     }

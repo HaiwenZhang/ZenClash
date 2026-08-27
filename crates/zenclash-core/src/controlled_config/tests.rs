@@ -296,7 +296,7 @@ async fn reload_profile_updates_managed_startup_cache_after_mihomo_accepts_paylo
     let second = root.join("second.yaml");
     fs::write(
         &second,
-        "mixed-port: 9888\ndns:\n  enable: true\nrules: [MATCH,DIRECT]\n",
+        "mixed-port: 0\ndns:\n  enable: true\nrules: [MATCH,DIRECT]\n",
     )
     .unwrap();
     let store = ControlledConfigStore::new(root.join("store"));
@@ -321,9 +321,9 @@ async fn reload_profile_updates_managed_startup_cache_after_mihomo_accepts_paylo
     assert!(
         fs::read_to_string(runtime_path)
             .unwrap()
-            .contains("mixed-port: 9888")
+            .contains("mixed-port: 0")
     );
-    assert!(server.join().unwrap().contains("mixed-port: 9888"));
+    assert!(server.join().unwrap().contains("mixed-port: 0"));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -332,7 +332,7 @@ async fn reload_profile_restores_startup_cache_when_mihomo_rejects_payload() {
     let root = test_root("runtime-cache-reject");
     let first = write_profile(&root);
     let second = root.join("second.yaml");
-    fs::write(&second, "mixed-port: 9888\nrules: [MATCH,DIRECT]\n").unwrap();
+    fs::write(&second, "mixed-port: 0\nrules: [MATCH,DIRECT]\n").unwrap();
     let store = ControlledConfigStore::new(root.join("store"));
     let runtime_path = store.materialize(&first).unwrap();
     let previous = fs::read(&runtime_path).unwrap();

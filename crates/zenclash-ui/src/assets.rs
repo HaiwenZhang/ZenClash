@@ -7,6 +7,12 @@ use gpui_component_assets::Assets as ComponentAssets;
 
 /// Asset path for the monochrome `ZenClash` brand mark.
 pub const ZENCLASH_MARK_PATH: &str = "icons/zenclash-mark.svg";
+/// Asset path for the group icon used by the proxies sidebar destination.
+pub const GROUP_ICON_PATH: &str = "icons/group.svg";
+/// Asset path for the radio icon used by the connections sidebar destination.
+pub const RADIO_ICON_PATH: &str = "icons/radio.svg";
+/// Asset path for the ruler icon used by the rules sidebar destination.
+pub const RULER_ICON_PATH: &str = "icons/ruler.svg";
 
 /// Combined application and gpui-component asset source.
 pub struct Assets;
@@ -18,14 +24,36 @@ impl AssetSource for Assets {
                 "../assets/icons/zenclash-mark.svg"
             ))));
         }
+        if path == GROUP_ICON_PATH {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/group.svg"
+            ))));
+        }
+        if path == RADIO_ICON_PATH {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/radio.svg"
+            ))));
+        }
+        if path == RULER_ICON_PATH {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/ruler.svg"
+            ))));
+        }
 
         ComponentAssets.load(path)
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut assets = ComponentAssets.list(path)?;
-        if ZENCLASH_MARK_PATH.starts_with(path) {
-            assets.push(ZENCLASH_MARK_PATH.into());
+        for app_asset in [
+            ZENCLASH_MARK_PATH,
+            GROUP_ICON_PATH,
+            RADIO_ICON_PATH,
+            RULER_ICON_PATH,
+        ] {
+            if app_asset.starts_with(path) {
+                assets.push(app_asset.into());
+            }
         }
         Ok(assets)
     }
@@ -35,7 +63,7 @@ impl AssetSource for Assets {
 mod tests {
     use gpui::AssetSource as _;
 
-    use super::{Assets, ZENCLASH_MARK_PATH};
+    use super::{Assets, GROUP_ICON_PATH, RADIO_ICON_PATH, RULER_ICON_PATH, ZENCLASH_MARK_PATH};
 
     #[test]
     fn application_assets_include_the_brand_mark() {
@@ -45,6 +73,18 @@ mod tests {
             .expect("brand mark asset should exist");
 
         assert!(mark.starts_with(b"<svg"));
+    }
+
+    #[test]
+    fn application_assets_include_the_sidebar_icons() {
+        for path in [GROUP_ICON_PATH, RADIO_ICON_PATH, RULER_ICON_PATH] {
+            let icon = Assets
+                .load(path)
+                .expect("sidebar icon asset should load")
+                .expect("sidebar icon asset should exist");
+
+            assert!(icon.starts_with(b"<svg"));
+        }
     }
 
     #[test]

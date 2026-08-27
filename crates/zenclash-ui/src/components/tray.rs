@@ -50,6 +50,8 @@ pub struct TrayProfile {
 #[derive(Clone, Debug, Default)]
 /// One selectable Mihomo proxy group shown as a submenu.
 pub struct TrayProxyGroup {
+    /// Whether the group accepts an explicit member selection.
+    pub selectable: bool,
     /// Mihomo proxy-group name.
     pub name: String,
     /// Currently selected member.

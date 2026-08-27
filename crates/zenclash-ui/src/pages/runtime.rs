@@ -1,4 +1,4 @@
-use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::{
     App, AppContext, ClipboardItem, Context, Entity, EventEmitter, Focusable, InteractiveElement,
@@ -17,15 +17,18 @@ use gpui_component::{
 use serde_json::{Value, json};
 use zenclash_core::{
     AppPreferences, AppPreferencesStore, AutostartStatus, ConfigDiffReport, ConnectionsSnapshot,
-    ControlledConfigStore, CoreBinaryInfo, CoreKind, CoreSession, LogMonitor, MihomoClient,
+    ControlledConfigStore, CoreBinaryInfo, CoreKind, CoreSession, DiagnosticData, DiagnosticReport,
+    DiagnosticRoute, DiagnosticStep, DiagnosticStepKind, LogMonitor, LogTimeSource, MihomoClient,
     MihomoLaunchConfig, MihomoLogLevel, MihomoProcess, NetworkLatencyTarget,
-    NetworkProbeRoutePreference, NetworkProbeSnapshot, ProfileCatalog, ProfileStore,
-    ProviderCatalog, PublicIpProvider, RemoteProfileOptions, RemoteProfileRoute, RuleCatalog,
-    RuntimeConfig, SystemNetworkSnapshot, SystemProxyController, SystemProxyManager,
-    SystemProxyMode, SystemProxyStatus, TrafficHistoryStore, TrafficMonitor, TunPermissionGrant,
-    TunPermissionManager, TunPermissionStatus, VersionInfo, YamlOverrideCatalog, YamlOverrideStore,
-    default_pac_script, default_system_proxy_bypass, diff_yaml_configs, format_log_entries,
-    format_speed, normalize_pac_script, normalize_system_proxy_bypass, normalize_system_proxy_host,
+    NetworkProbeRoutePreference, NetworkProbeSnapshot, Observation, OperationalStatus,
+    ProfileCatalog, ProfileStore, ProviderCatalog, ProviderKind, ProviderOperations,
+    ProxyOperations, ProxyVisibility, PublicIpProvider, RecoveryAction, RemoteProfileOptions,
+    RemoteProfileRoute, RuleCatalog, RuntimeConfig, SystemNetworkSnapshot, SystemProxyManager,
+    SystemProxyMode, SystemProxySession, SystemProxyStatus, TrafficCaptureSession,
+    TrafficHistoryStore, TrafficMonitor, TunPermissionManager, TunPermissionStatus, VersionInfo,
+    YamlOverrideCatalog, YamlOverrideStore, default_pac_script, default_system_proxy_bypass,
+    diff_yaml_configs, format_log_entries, format_log_entries_support_safe, format_speed,
+    normalize_pac_script, normalize_system_proxy_bypass, normalize_system_proxy_host,
 };
 
 use crate::app::{HideTrafficIcon, SetDarkTheme, SetLightTheme, SetSystemTheme, ShowTrafficIcon};
@@ -74,6 +77,8 @@ pub struct RuntimePage {
     runtime: tokio::runtime::Handle,
     traffic_monitor: Arc<TrafficMonitor>,
     log_monitor: Arc<LogMonitor>,
+    operational_status: Arc<OperationalStatus>,
+    traffic_capture: TrafficCaptureSession,
     process: Option<Arc<MihomoProcess>>,
     profile_path: Option<PathBuf>,
     profile_store: Option<ProfileStore>,
@@ -86,14 +91,13 @@ pub struct RuntimePage {
     preferences_store: Option<AppPreferencesStore>,
     preferences: AppPreferences,
     core_management: settings::CoreManagementUiState,
-    system_proxy_controller: SystemProxyController,
+    app_update: settings::AppUpdateUiState,
+    system_proxy_session: Option<SystemProxySession>,
     traffic_history_store: Option<TrafficHistoryStore>,
     profile_forms: profiles::ProfileFormState,
-    network_latency_name: Entity<InputState>,
-    network_latency_url: Entity<InputState>,
-    connection_filter: Entity<InputState>,
-    log_filter: Entity<InputState>,
-    rule_filter: Entity<InputState>,
+    connections: connections::ConnectionsUiState,
+    logs: logs::LogUiState,
+    rules: rules::RulesUiState,
     system_proxy_editor: Option<system_proxy::SystemProxyEditorState>,
     core_releases: CoreReleaseState,
     override_store: Option<YamlOverrideStore>,
@@ -101,16 +105,15 @@ pub struct RuntimePage {
     config_preview: Option<ConfigPreview>,
     profile_editor: overrides::ProfileEditorState,
     data: RuntimeData,
-    home_profile_switching: Option<String>,
-    home_proxy_switching: Option<(String, String)>,
+    home: home::HomeUiState,
     traffic_history: traffic::TrafficHistoryUiState,
     network_probe: network::NetworkProbeUiState,
+    provider_operations: ProviderOperations,
     ruleset: resources::RulesetUiState,
     navigation_generation: u64,
     load_generation: u64,
     loading: bool,
     mutating: bool,
-    closing_connections: HashSet<String>,
     error: Option<String>,
     startup_error: Option<String>,
     notice: Option<String>,
@@ -132,6 +135,10 @@ pub struct RuntimePageServices {
     pub traffic_monitor: Arc<TrafficMonitor>,
     /// Shared live log stream.
     pub log_monitor: Arc<LogMonitor>,
+    /// Shared four-layer runtime and stream observation owner.
+    pub operational_status: Arc<OperationalStatus>,
+    /// Serialized System Proxy/TUN capture plan owner.
+    pub traffic_capture: TrafficCaptureSession,
     /// Managed Mihomo process, when `ZenClash` launched the core.
     pub process: Option<Arc<MihomoProcess>>,
     /// Active YAML path used by the managed core.
@@ -142,8 +149,8 @@ pub struct RuntimePageServices {
     pub preferences_store: Option<AppPreferencesStore>,
     /// Application preferences loaded before the first page is rendered.
     pub preferences: AppPreferences,
-    /// Shared native/PAC controller also used by the app tray.
-    pub system_proxy_controller: SystemProxyController,
+    /// Persistent native/PAC transaction owner used for editing proxy settings.
+    pub system_proxy_session: Option<SystemProxySession>,
     /// Native `SQLite` traffic database, when the platform data directory is available.
     pub traffic_history_store: Option<TrafficHistoryStore>,
     /// Visible explanation when startup recovered from the requested core.
@@ -181,9 +188,3 @@ pub struct PreferencesRestored {
 }
 
 impl EventEmitter<PreferencesRestored> for RuntimePage {}
-
-/// Event requesting a graceful exit followed by a Windows RunAs relaunch.
-#[derive(Clone, Copy, Debug)]
-pub struct ElevatedRestartRequested;
-
-impl EventEmitter<ElevatedRestartRequested> for RuntimePage {}

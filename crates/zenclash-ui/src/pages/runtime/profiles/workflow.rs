@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use zenclash_core::{
     ControlledConfigStore, CoreKind, CoreSession, EffectiveConfigIntent, MihomoClient,
-    ProfileRecord, ProfileStore, ProfileStoreResult, ProfileUpdate, RemoteProfileOptions,
-    RemoteProfileRoute, YamlOverrideStore,
+    ProfileApplication, ProfileApplyOutcome, ProfileChange, ProfileStore, ProfileStoreResult,
+    RemoteProfileOptions, YamlOverrideStore,
 };
 
 use super::super::{Page, RuntimeData, load_page};
@@ -70,14 +70,22 @@ pub(super) async fn import_local(
     controlled: ControlledConfigStore,
     runtime: CoreProfileRuntime,
     source: PathBuf,
+    refresh_page: Page,
 ) -> Result<ActivationOutcome, String> {
-    let import_store = store.clone();
-    let record = run_store(move || import_store.import_local(source)).await?;
+    let overrides = load_enabled_overrides().await?;
     let rejected = zenclash_i18n::text_with(
         "profiles.errors.rejected",
         &[("core", runtime.kind().display_name().to_owned())],
     );
-    activate_new_record(store, controlled, runtime, record, &rejected).await
+    apply_new_profile_change(
+        store,
+        controlled,
+        runtime,
+        ProfileChange::ImportLocal { source, overrides },
+        &rejected,
+        refresh_page,
+    )
+    .await
 }
 
 pub(in super::super) async fn add_remote(
@@ -89,16 +97,26 @@ pub(in super::super) async fn add_remote(
     user_agent: String,
     options: RemoteProfileOptions,
 ) -> Result<ActivationOutcome, String> {
-    let proxy_port = subscription_proxy_port(runtime.client(), options.route()).await?;
-    let record = store
-        .add_remote_with_options(name, url, user_agent, options, proxy_port)
-        .await
-        .map_err(|error| error.to_string())?;
+    let overrides = load_enabled_overrides().await?;
     let rejected = zenclash_i18n::text_with(
         "profiles.errors.downloaded_rejected",
         &[("core", runtime.kind().display_name().to_owned())],
     );
-    activate_new_record(store, controlled, runtime.clone(), record, &rejected).await
+    apply_new_profile_change(
+        store,
+        controlled,
+        runtime,
+        ProfileChange::AddRemote {
+            name,
+            url,
+            user_agent,
+            options,
+            overrides,
+        },
+        &rejected,
+        Page::Profiles,
+    )
+    .await
 }
 
 pub(crate) async fn activate_existing(
@@ -117,48 +135,49 @@ pub(in crate::pages::runtime) async fn activate_existing_for_page(
     id: String,
     refresh_page: Page,
 ) -> Result<ActivationOutcome, String> {
-    let load_store = store.clone();
-    let lookup_id = id.clone();
-    let record = run_store(move || {
-        let catalog = load_store.load()?;
-        catalog
-            .profiles
-            .into_iter()
-            .find(|profile| profile.id == lookup_id)
-            .ok_or_else(|| zenclash_core::ProfileStoreError::NotFound(lookup_id))
-    })
-    .await?;
-    let activation_store = store.clone();
-    let activation_id = id.clone();
-    let activation =
-        run_store(move || activation_store.activate_reversible(&activation_id)).await?;
-    let path = activation.path().to_path_buf();
-    if let Err(error) = reload_effective(controlled, &runtime, &path).await {
-        let rollback_store = store.clone();
-        return match run_store(move || rollback_store.rollback_activation(activation)).await {
-            Ok(()) => Err(zenclash_i18n::text_with(
-                "profiles.errors.rejected_rolled_back",
-                &[
-                    ("core", runtime.kind().display_name().to_owned()),
-                    ("error", error.clone()),
-                ],
-            )),
-            Err(rollback) => Err(zenclash_i18n::text_with(
-                "profiles.errors.rejected_rollback_failed",
-                &[
-                    ("core", runtime.kind().display_name().to_owned()),
-                    ("error", error),
-                    ("rollback", rollback),
-                ],
-            )),
-        };
+    let overrides = load_enabled_overrides().await?;
+    let application = ProfileApplication::new(store, controlled, runtime.session.clone());
+    match application
+        .apply(ProfileChange::ActivateExisting { id, overrides })
+        .await
+    {
+        ProfileApplyOutcome::Applied { profile, path, .. } => {
+            let refresh = load_page(runtime.client().clone(), refresh_page).await;
+            Ok(ActivationOutcome {
+                refresh,
+                path,
+                name: profile.name,
+            })
+        }
+        ProfileApplyOutcome::Stored { .. } => {
+            Err(zenclash_i18n::text("profiles.errors.not_applied"))
+        }
+        ProfileApplyOutcome::Rejected { cause, .. } => Err(cause.to_string()),
+        ProfileApplyOutcome::RolledBack { cause, .. } => Err(zenclash_i18n::text_with(
+            "profiles.errors.rejected_rolled_back",
+            &[
+                ("core", runtime.kind().display_name().to_owned()),
+                ("error", cause.to_string()),
+            ],
+        )),
+        ProfileApplyOutcome::RuntimeUnknown { cause, .. } => Err(zenclash_i18n::text_with(
+            "profiles.errors.runtime_unknown",
+            &[
+                ("core", runtime.kind().display_name().to_owned()),
+                ("error", cause.to_string()),
+            ],
+        )),
+        ProfileApplyOutcome::PersistedButRuntimeUnknown {
+            cause, rollback, ..
+        } => Err(zenclash_i18n::text_with(
+            "profiles.errors.rejected_rollback_failed",
+            &[
+                ("core", runtime.kind().display_name().to_owned()),
+                ("error", cause.to_string()),
+                ("rollback", rollback.to_string()),
+            ],
+        )),
     }
-    let refresh = load_page(runtime.client().clone(), refresh_page).await;
-    Ok(ActivationOutcome {
-        refresh,
-        path,
-        name: record.name,
-    })
 }
 
 pub(super) async fn update_remote(
@@ -183,62 +202,47 @@ pub(crate) async fn update_remote_background(
     runtime: CoreProfileRuntime,
     id: String,
 ) -> Result<BackgroundUpdateOutcome, String> {
-    let route = store
-        .remote_route(&id)
+    let overrides = load_enabled_overrides().await?;
+    let application = ProfileApplication::new(store, controlled, runtime.session.clone());
+    match application
+        .apply(ProfileChange::UpdateRemote { id, overrides })
         .await
-        .map_err(|error| error.to_string())?;
-    let proxy_port = subscription_proxy_port(runtime.client(), route).await?;
-    let update = store
-        .update_remote_with_proxy(&id, proxy_port)
-        .await
-        .map_err(|error| error.to_string())?;
-    let record = update.record.clone();
-    let path = store.profile_path(&record);
-    let load_store = store.clone();
-    let active_id = id.clone();
-    let is_active = run_store(move || load_store.load())
-        .await?
-        .active
-        .as_deref()
-        == Some(active_id.as_str());
-    if is_active {
-        reload_updated_profile(&store, controlled, &runtime, &path, update).await?;
-    }
-    Ok(BackgroundUpdateOutcome {
-        path,
-        name: record.name,
-        active: is_active,
-    })
-}
-
-async fn subscription_proxy_port(
-    client: &MihomoClient,
-    route: RemoteProfileRoute,
-) -> Result<Option<u16>, String> {
-    if route == RemoteProfileRoute::Direct {
-        return Ok(None);
-    }
-    let config = match client.runtime_config().await {
-        Ok(config) => config,
-        Err(_) if route == RemoteProfileRoute::DirectWithMihomoFallback => return Ok(None),
-        Err(error) => {
-            return Err(zenclash_i18n::text_with(
-                "profiles.errors.proxy_port_read",
-                &[("error", error.to_string())],
-            ));
-        }
-    };
-    let port = if config.mixed_port != 0 {
-        config.mixed_port
-    } else {
-        config.port
-    };
-    if port != 0 {
-        Ok(Some(port))
-    } else if route == RemoteProfileRoute::DirectWithMihomoFallback {
-        Ok(None)
-    } else {
-        Err(zenclash_i18n::text("profiles.errors.proxy_port_missing"))
+    {
+        ProfileApplyOutcome::Applied { profile, path, .. } => Ok(BackgroundUpdateOutcome {
+            path,
+            name: profile.name,
+            active: true,
+        }),
+        ProfileApplyOutcome::Stored { profile, path, .. } => Ok(BackgroundUpdateOutcome {
+            path,
+            name: profile.name,
+            active: false,
+        }),
+        ProfileApplyOutcome::Rejected { cause, .. } => Err(cause.to_string()),
+        ProfileApplyOutcome::RolledBack { cause, .. } => Err(zenclash_i18n::text_with(
+            "profiles.errors.update_rejected_rolled_back",
+            &[
+                ("core", runtime.kind().display_name().to_owned()),
+                ("error", cause.to_string()),
+            ],
+        )),
+        ProfileApplyOutcome::RuntimeUnknown { cause, .. } => Err(zenclash_i18n::text_with(
+            "profiles.errors.runtime_unknown",
+            &[
+                ("core", runtime.kind().display_name().to_owned()),
+                ("error", cause.to_string()),
+            ],
+        )),
+        ProfileApplyOutcome::PersistedButRuntimeUnknown {
+            cause, rollback, ..
+        } => Err(zenclash_i18n::text_with(
+            "profiles.errors.update_rejected_rollback_failed",
+            &[
+                ("core", runtime.kind().display_name().to_owned()),
+                ("error", cause.to_string()),
+                ("rollback", rollback.to_string()),
+            ],
+        )),
     }
 }
 
@@ -246,85 +250,53 @@ pub(super) async fn delete(store: ProfileStore, id: String) -> Result<(), String
     run_store(move || store.delete(&id)).await
 }
 
-async fn activate_new_record(
+async fn apply_new_profile_change(
     store: ProfileStore,
     controlled: ControlledConfigStore,
     runtime: CoreProfileRuntime,
-    record: ProfileRecord,
+    change: ProfileChange,
     rejection_prefix: &str,
+    refresh_page: Page,
 ) -> Result<ActivationOutcome, String> {
-    let activation_store = store.clone();
-    let activation_id = record.id.clone();
-    let activation =
-        match run_store(move || activation_store.activate_reversible(&activation_id)).await {
-            Ok(activation) => activation,
-            Err(error) => {
-                let primary =
-                    zenclash_i18n::text_with("profiles.errors.active_save", &[("error", error)]);
-                return Err(cleanup_new_record(store, record.id, primary).await);
-            }
-        };
-    let path = activation.path().to_path_buf();
-    if let Err(error) = reload_effective(controlled, &runtime, &path).await {
-        let rollback_store = store.clone();
-        let primary = match run_store(move || rollback_store.rollback_activation(activation)).await
-        {
-            Ok(()) => zenclash_i18n::text_with(
-                "profiles.errors.selection_rolled_back",
-                &[
-                    ("prefix", rejection_prefix.to_owned()),
-                    ("error", error.clone()),
-                ],
-            ),
-            Err(rollback) => {
-                return Err(zenclash_i18n::text_with(
-                    "profiles.errors.selection_rollback_failed",
-                    &[
-                        ("prefix", rejection_prefix.to_owned()),
-                        ("error", error),
-                        ("rollback", rollback),
-                    ],
-                ));
-            }
-        };
-        return Err(cleanup_new_record(store, record.id, primary).await);
+    let application = ProfileApplication::new(store, controlled, runtime.session.clone());
+    match application.apply(change).await {
+        ProfileApplyOutcome::Applied { profile, path, .. } => {
+            let refresh = load_page(runtime.client().clone(), refresh_page).await;
+            Ok(ActivationOutcome {
+                refresh,
+                path,
+                name: profile.name,
+            })
+        }
+        ProfileApplyOutcome::Stored { .. } => {
+            Err(zenclash_i18n::text("profiles.errors.not_applied"))
+        }
+        ProfileApplyOutcome::Rejected { cause, .. } => Err(cause.to_string()),
+        ProfileApplyOutcome::RolledBack { cause, .. } => Err(zenclash_i18n::text_with(
+            "profiles.errors.selection_rolled_back",
+            &[
+                ("prefix", rejection_prefix.to_owned()),
+                ("error", cause.to_string()),
+            ],
+        )),
+        ProfileApplyOutcome::RuntimeUnknown { cause, .. } => Err(zenclash_i18n::text_with(
+            "profiles.errors.runtime_unknown",
+            &[
+                ("core", runtime.kind().display_name().to_owned()),
+                ("error", cause.to_string()),
+            ],
+        )),
+        ProfileApplyOutcome::PersistedButRuntimeUnknown {
+            cause, rollback, ..
+        } => Err(zenclash_i18n::text_with(
+            "profiles.errors.selection_rollback_failed",
+            &[
+                ("prefix", rejection_prefix.to_owned()),
+                ("error", cause.to_string()),
+                ("rollback", rollback.to_string()),
+            ],
+        )),
     }
-    let refresh = load_page(runtime.client().clone(), Page::Profiles).await;
-    Ok(ActivationOutcome {
-        refresh,
-        path,
-        name: record.name,
-    })
-}
-
-async fn reload_updated_profile(
-    store: &ProfileStore,
-    controlled: ControlledConfigStore,
-    runtime: &CoreProfileRuntime,
-    path: &Path,
-    update: ProfileUpdate,
-) -> Result<(), String> {
-    if let Err(error) = reload_effective(controlled, runtime, path).await {
-        let rollback_store = store.clone();
-        return match run_store(move || rollback_store.rollback_update(update)).await {
-            Ok(_) => Err(zenclash_i18n::text_with(
-                "profiles.errors.update_rejected_rolled_back",
-                &[
-                    ("core", runtime.kind().display_name().to_owned()),
-                    ("error", error.clone()),
-                ],
-            )),
-            Err(rollback) => Err(zenclash_i18n::text_with(
-                "profiles.errors.update_rejected_rollback_failed",
-                &[
-                    ("core", runtime.kind().display_name().to_owned()),
-                    ("error", error),
-                    ("rollback", rollback),
-                ],
-            )),
-        };
-    }
-    Ok(())
 }
 
 pub(in super::super) async fn reload_effective(
@@ -332,29 +304,22 @@ pub(in super::super) async fn reload_effective(
     runtime: &CoreProfileRuntime,
     path: &Path,
 ) -> Result<(), String> {
-    let overrides =
-        tokio::task::spawn_blocking(|| YamlOverrideStore::discover()?.load_enabled_paths())
-            .await
-            .map_err(|error| {
-                zenclash_i18n::text_with(
-                    "profiles.errors.override_read_task",
-                    &[("error", error.to_string())],
-                )
-            })?
-            .map_err(|error| error.to_string())?;
+    let overrides = load_enabled_overrides().await?;
     runtime
         .reload_with_overrides(controlled, path, overrides)
         .await
 }
 
-async fn cleanup_new_record(store: ProfileStore, id: String, primary: String) -> String {
-    match run_store(move || store.delete(&id)).await {
-        Ok(()) => primary,
-        Err(cleanup) => zenclash_i18n::text_with(
-            "profiles.errors.cleanup_disabled",
-            &[("primary", primary), ("cleanup", cleanup)],
-        ),
-    }
+pub(in crate::pages::runtime) async fn load_enabled_overrides() -> Result<Vec<PathBuf>, String> {
+    tokio::task::spawn_blocking(|| YamlOverrideStore::discover()?.load_enabled_paths())
+        .await
+        .map_err(|error| {
+            zenclash_i18n::text_with(
+                "profiles.errors.override_read_task",
+                &[("error", error.to_string())],
+            )
+        })?
+        .map_err(|error| error.to_string())
 }
 
 async fn run_store<T, F>(operation: F) -> Result<T, String>

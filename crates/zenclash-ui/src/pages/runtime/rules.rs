@@ -1,10 +1,29 @@
 use super::{
-    Context, Disableable, FluentBuilder, Input, InteractiveElement, IntoElement, Page,
-    ParentElement, RuntimeData, RuntimePage, Sizable, Styled, Switch, div, empty_state, h_flex,
-    message_banner, px, v_flex,
+    AppContext, Context, Disableable, Entity, FluentBuilder, Input, InputEvent, InputState,
+    InteractiveElement, IntoElement, Page, ParentElement, RuntimeData, RuntimePage, Sizable,
+    Styled, Subscription, Switch, Window, div, empty_state, h_flex, message_banner, px, v_flex,
 };
 
 const MAX_VISIBLE_RULES: usize = 800;
+
+pub(super) struct RulesUiState {
+    pub(super) filter: Entity<InputState>,
+}
+
+impl RulesUiState {
+    pub(super) fn new(window: &mut Window, cx: &mut Context<RuntimePage>) -> (Self, Subscription) {
+        let filter = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(zenclash_i18n::text("runtime.placeholders.rule_filter"))
+        });
+        let subscription = cx.subscribe(&filter, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
+        (Self { filter }, subscription)
+    }
+}
 
 impl RuntimePage {
     fn set_rule_enabled(&mut self, index: usize, enabled: bool, cx: &mut Context<Self>) {
@@ -73,7 +92,7 @@ impl RuntimePage {
             RuntimeData::Rules(data) => data.rules.as_slice(),
             _ => &[],
         };
-        let query = normalize_rule_query(&self.rule_filter.read(cx).value());
+        let query = normalize_rule_query(&self.rules.filter.read(cx).value());
         let filtered = rules
             .iter()
             .filter(|rule| rule_matches(rule, &query))
@@ -132,7 +151,7 @@ impl RuntimePage {
                         ),
                     )),
             )
-            .child(Input::new(&self.rule_filter).small())
+            .child(Input::new(&self.rules.filter).small())
             .child(
                 v_flex()
                     .rounded(theme.radius)

@@ -1,19 +1,24 @@
 use std::{
     collections::VecDeque,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use futures_util::StreamExt;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tokio::{runtime::Handle, task::JoinHandle};
+use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
 
 use crate::{MihomoEndpoint, websocket::connect_stream};
 
 /// Latest values and connection health from Mihomo's `/traffic` stream.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrafficSnapshot {
+    /// Core-session generation that produced the last accepted frame.
+    pub generation: u64,
     /// Current upload rate in bytes per second.
     pub upload: u64,
     /// Current download rate in bytes per second.
@@ -51,6 +56,8 @@ struct TrafficFrame {
 pub struct TrafficMonitor {
     snapshot: Arc<RwLock<TrafficSnapshot>>,
     samples: Arc<RwLock<VecDeque<TrafficSample>>>,
+    expected_generation: Arc<AtomicU64>,
+    generation: watch::Sender<u64>,
     task: JoinHandle<()>,
 }
 
@@ -60,10 +67,20 @@ impl TrafficMonitor {
     pub fn start(runtime: &Handle, endpoint: MihomoEndpoint) -> Arc<Self> {
         let snapshot = Arc::new(RwLock::new(TrafficSnapshot::default()));
         let samples = Arc::new(RwLock::new(initial_samples()));
-        let task = runtime.spawn(run_monitor(endpoint, snapshot.clone(), samples.clone()));
+        let expected_generation = Arc::new(AtomicU64::new(0));
+        let (generation, generation_updates) = watch::channel(0);
+        let task = runtime.spawn(run_monitor(
+            endpoint,
+            snapshot.clone(),
+            samples.clone(),
+            expected_generation.clone(),
+            generation_updates,
+        ));
         Arc::new(Self {
             snapshot,
             samples,
+            expected_generation,
+            generation,
             task,
         })
     }
@@ -83,6 +100,18 @@ impl TrafficMonitor {
         self.samples.read().clone()
     }
 
+    /// Changes the accepted core generation and reconnects the WebSocket.
+    ///
+    /// Frames already queued by the older socket are rejected before they can
+    /// update the snapshot or chart samples.
+    pub fn synchronize_generation(&self, generation: u64) {
+        if self.expected_generation.swap(generation, Ordering::AcqRel) == generation {
+            return;
+        }
+        self.snapshot.write().connected = false;
+        self.generation.send_replace(generation);
+    }
+
     /// Returns whether the background monitor task has terminated unexpectedly.
     #[must_use]
     pub fn is_finished(&self) -> bool {
@@ -100,22 +129,55 @@ async fn run_monitor(
     endpoint: MihomoEndpoint,
     snapshot: Arc<RwLock<TrafficSnapshot>>,
     samples: Arc<RwLock<VecDeque<TrafficSample>>>,
+    expected_generation: Arc<AtomicU64>,
+    mut generation_updates: watch::Receiver<u64>,
 ) {
     loop {
+        let generation = *generation_updates.borrow_and_update();
+        let mut generation_changed = false;
         match connect_stream(&endpoint, "/traffic", &[], "连接 Mihomo 流量流超时").await {
             Ok(mut socket) => {
-                update_connection(&snapshot, true, None);
-                while let Some(message) = socket.next().await {
+                update_connection_for_generation(
+                    &snapshot,
+                    true,
+                    None,
+                    generation,
+                    &expected_generation,
+                );
+                loop {
+                    let message = tokio::select! {
+                        changed = generation_updates.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                            generation_changed = true;
+                            break;
+                        }
+                        message = socket.next() => message,
+                    };
+                    let Some(message) = message else {
+                        break;
+                    };
                     match message {
                         Ok(message) if message.is_text() || message.is_binary() => {
                             match serde_json::from_slice::<TrafficFrame>(&message.into_data()) {
-                                Ok(frame) => update_frame(&snapshot, &samples, frame),
+                                Ok(frame) => {
+                                    update_frame_for_generation(
+                                        &snapshot,
+                                        &samples,
+                                        frame,
+                                        generation,
+                                        &expected_generation,
+                                    );
+                                }
                                 Err(error) => {
                                     tracing::debug!(%error, "ignored malformed Mihomo traffic frame");
-                                    update_connection(
+                                    update_connection_for_generation(
                                         &snapshot,
                                         true,
                                         Some(format!("流量帧解析失败：{error}")),
+                                        generation,
+                                        &expected_generation,
                                     );
                                 }
                             }
@@ -123,26 +185,66 @@ async fn run_monitor(
                         Ok(message) if message.is_close() => break,
                         Ok(_) => {}
                         Err(error) => {
-                            update_connection(&snapshot, false, Some(error.to_string()));
+                            update_connection_for_generation(
+                                &snapshot,
+                                false,
+                                Some(error.to_string()),
+                                generation,
+                                &expected_generation,
+                            );
                             break;
                         }
                     }
                 }
             }
-            Err(error) => update_connection(&snapshot, false, Some(error)),
+            Err(error) => {
+                update_connection_for_generation(
+                    &snapshot,
+                    false,
+                    Some(error),
+                    generation,
+                    &expected_generation,
+                );
+            }
         }
 
-        update_connection(&snapshot, false, None);
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        if generation_changed {
+            continue;
+        }
+        update_connection_for_generation(&snapshot, false, None, generation, &expected_generation);
+        tokio::select! {
+            changed = generation_updates.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+            () = tokio::time::sleep(Duration::from_secs(2)) => {}
+        }
     }
+}
+
+fn update_frame_for_generation(
+    snapshot: &RwLock<TrafficSnapshot>,
+    samples: &RwLock<VecDeque<TrafficSample>>,
+    frame: TrafficFrame,
+    generation: u64,
+    expected_generation: &AtomicU64,
+) -> bool {
+    if expected_generation.load(Ordering::Acquire) != generation {
+        return false;
+    }
+    update_frame(snapshot, samples, frame, generation);
+    true
 }
 
 fn update_frame(
     snapshot: &RwLock<TrafficSnapshot>,
     samples: &RwLock<VecDeque<TrafficSample>>,
     frame: TrafficFrame,
+    generation: u64,
 ) {
     let mut snapshot = snapshot.write();
+    snapshot.generation = generation;
     snapshot.upload = frame.up;
     snapshot.download = frame.down;
     snapshot.connected = true;
@@ -164,15 +266,31 @@ fn initial_samples() -> VecDeque<TrafficSample> {
     VecDeque::from(vec![TrafficSample::default(); LIVE_TRAFFIC_SAMPLE_COUNT])
 }
 
-fn update_connection(snapshot: &RwLock<TrafficSnapshot>, connected: bool, error: Option<String>) {
+fn update_connection_for_generation(
+    snapshot: &RwLock<TrafficSnapshot>,
+    connected: bool,
+    error: Option<String>,
+    generation: u64,
+    expected_generation: &AtomicU64,
+) -> bool {
+    if expected_generation.load(Ordering::Acquire) != generation {
+        return false;
+    }
+    update_connection(snapshot, connected, error, generation);
+    true
+}
+
+fn update_connection(
+    snapshot: &RwLock<TrafficSnapshot>,
+    connected: bool,
+    error: Option<String>,
+    generation: u64,
+) {
     let mut snapshot = snapshot.write();
+    snapshot.generation = generation;
     snapshot.connected = connected;
     if connected && error.is_none() {
         snapshot.last_error = None;
-    }
-    if !connected {
-        snapshot.upload = 0;
-        snapshot.download = 0;
     }
     if let Some(error) = error {
         snapshot.last_error = Some(error);
@@ -230,6 +348,7 @@ mod tests {
                 up: 1_024,
                 down: 2_048,
             },
+            0,
         );
 
         let samples = samples.read();
@@ -247,10 +366,10 @@ mod tests {
     fn disconnect_does_not_append_synthetic_zero_samples() {
         let snapshot = RwLock::new(TrafficSnapshot::default());
         let samples = RwLock::new(initial_samples());
-        update_frame(&snapshot, &samples, TrafficFrame { up: 10, down: 20 });
+        update_frame(&snapshot, &samples, TrafficFrame { up: 10, down: 20 }, 0);
         let before_disconnect = samples.read().clone();
 
-        update_connection(&snapshot, false, Some("offline".into()));
+        update_connection(&snapshot, false, Some("offline".into()), 0);
 
         assert_eq!(*samples.read(), before_disconnect);
     }
@@ -271,7 +390,7 @@ mod tests {
             ..TrafficSnapshot::default()
         });
 
-        update_connection(&snapshot, true, None);
+        update_connection(&snapshot, true, None, 0);
 
         assert_eq!(
             snapshot.read().clone(),
@@ -283,22 +402,52 @@ mod tests {
     }
 
     #[test]
-    fn disconnect_zeroes_rates_and_preserves_transport_error() {
+    fn disconnect_preserves_last_successful_rates_and_timestamp() {
         let snapshot = RwLock::new(TrafficSnapshot {
             upload: 1_024,
             download: 2_048,
             connected: true,
+            updated_at_ms: 42,
             ..TrafficSnapshot::default()
         });
 
-        update_connection(&snapshot, false, Some("socket closed".into()));
+        update_connection(&snapshot, false, Some("socket closed".into()), 0);
 
         assert_eq!(
             snapshot.read().clone(),
             TrafficSnapshot {
+                upload: 1_024,
+                download: 2_048,
+                updated_at_ms: 42,
                 last_error: Some("socket closed".into()),
                 ..TrafficSnapshot::default()
             }
         );
+    }
+
+    #[test]
+    fn late_frame_from_an_old_generation_is_rejected() {
+        let snapshot = RwLock::new(TrafficSnapshot {
+            generation: 2,
+            upload: 30,
+            download: 40,
+            updated_at_ms: 50,
+            ..TrafficSnapshot::default()
+        });
+        let samples = RwLock::new(initial_samples());
+        let expected_generation = AtomicU64::new(2);
+
+        let accepted = update_frame_for_generation(
+            &snapshot,
+            &samples,
+            TrafficFrame { up: 100, down: 200 },
+            1,
+            &expected_generation,
+        );
+
+        assert!(!accepted);
+        assert_eq!(snapshot.read().upload, 30);
+        assert_eq!(snapshot.read().generation, 2);
+        assert_eq!(*samples.read(), initial_samples());
     }
 }

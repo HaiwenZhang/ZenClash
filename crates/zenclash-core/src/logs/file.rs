@@ -346,6 +346,7 @@ mod tests {
             level: "info".into(),
             payload: payload.into(),
             timestamp_ms,
+            ..LogEntry::default()
         }
     }
 

@@ -169,28 +169,7 @@ impl ProfileStore {
     ) -> ProfileStoreResult<ProfileRecord> {
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
-        let id = unique_id(&catalog, &name);
-        let file_name = format!("{id}.yaml");
-        let accepts_suggested_interval = matches!(
-            &source,
-            ProfileSource::Remote { options, .. } if !options.fixed_update_interval
-        );
-        let update_interval_minutes = accepts_suggested_interval
-            .then_some(subscription.suggested_update_interval_minutes)
-            .flatten()
-            .unwrap_or(super::DEFAULT_PROFILE_UPDATE_INTERVAL_MINUTES);
-        let record = ProfileRecord {
-            id,
-            name,
-            file_name,
-            source,
-            updated_at: unix_timestamp(),
-            size_bytes: payload.len() as u64,
-            auto_update: false,
-            update_interval_minutes,
-            update_cron: None,
-            subscription,
-        };
+        let record = Self::new_profile_record(&catalog, name, source, payload.len(), subscription);
         let path = self.profile_path(&record);
         atomic_write(&path, payload.as_bytes())?;
         catalog.profiles.push(record.clone());
@@ -203,6 +182,37 @@ impl ProfileStore {
             };
         }
         Ok(record)
+    }
+
+    pub(super) fn new_profile_record(
+        catalog: &super::ProfileCatalog,
+        name: String,
+        source: ProfileSource,
+        payload_len: usize,
+        subscription: SubscriptionMetadata,
+    ) -> ProfileRecord {
+        let id = unique_id(catalog, &name);
+        let file_name = format!("{id}.yaml");
+        let accepts_suggested_interval = matches!(
+            &source,
+            ProfileSource::Remote { options, .. } if !options.fixed_update_interval
+        );
+        let update_interval_minutes = accepts_suggested_interval
+            .then_some(subscription.suggested_update_interval_minutes)
+            .flatten()
+            .unwrap_or(super::DEFAULT_PROFILE_UPDATE_INTERVAL_MINUTES);
+        ProfileRecord {
+            id,
+            name,
+            file_name,
+            source,
+            updated_at: unix_timestamp(),
+            size_bytes: payload_len as u64,
+            auto_update: false,
+            update_interval_minutes,
+            update_cron: None,
+            subscription,
+        }
     }
 
     pub(super) fn load_unlocked(&self) -> ProfileStoreResult<ProfileCatalog> {

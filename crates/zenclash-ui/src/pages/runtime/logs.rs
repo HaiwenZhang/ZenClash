@@ -1,11 +1,32 @@
 use super::{
-    Button, Context, Disableable, FluentBuilder, IconName, Input, InteractiveElement, IntoElement,
-    MihomoLogLevel, Page, ParentElement, PreferencesRestored, RuntimePage, Selectable, Sizable,
-    Styled, div, empty_state, format_bytes, format_log_entries, h_flex, info_row, metric, px,
-    setting_card, setting_switch, v_flex,
+    AppContext, Button, ClipboardItem, Context, Disableable, Entity, FluentBuilder, IconName,
+    Input, InputEvent, InputState, InteractiveElement, IntoElement, LogTimeSource, MihomoLogLevel,
+    Page, ParentElement, PreferencesRestored, RuntimePage, Selectable, Sizable, Styled,
+    Subscription, Window, compact_text, div, empty_state, format_bytes, format_log_entries,
+    format_log_entries_support_safe, h_flex, info_row, metric, px, setting_card, setting_switch,
+    v_flex,
 };
 
 const MAX_VISIBLE_LOGS: usize = 500;
+
+pub(super) struct LogUiState {
+    pub(super) filter: Entity<InputState>,
+}
+
+impl LogUiState {
+    pub(super) fn new(window: &mut Window, cx: &mut Context<RuntimePage>) -> (Self, Subscription) {
+        let filter = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(zenclash_i18n::text("runtime.placeholders.log_filter"))
+        });
+        let subscription = cx.subscribe(&filter, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
+        (Self { filter }, subscription)
+    }
+}
 
 impl RuntimePage {
     pub(super) fn render_logs(
@@ -16,7 +37,7 @@ impl RuntimePage {
         let all_entries = self.log_monitor.entries();
         let connected = self.log_monitor.connected();
         let persistence = self.log_monitor.persistence_status();
-        let query = normalize_log_query(&self.log_filter.read(cx).value());
+        let query = normalize_log_query(&self.logs.filter.read(cx).value());
         let entries = all_entries
             .iter()
             .filter(|entry| log_matches(entry, &query))
@@ -39,7 +60,7 @@ impl RuntimePage {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().flex_1().child(Input::new(&self.log_filter).small()))
+                    .child(div().flex_1().child(Input::new(&self.logs.filter).small()))
                     .child(
                         Button::new("export-logs")
                             .icon(IconName::File)
@@ -48,6 +69,21 @@ impl RuntimePage {
                             .outline()
                             .disabled(all_entries.is_empty() || self.mutating)
                             .on_click(cx.listener(|this, _, _, cx| this.choose_log_export(cx))),
+                    )
+                    .child(
+                        Button::new("copy-support-safe-logs")
+                            .icon(IconName::Copy)
+                            .label(zenclash_i18n::text("logs.actions.copy_safe"))
+                            .small()
+                            .outline()
+                            .disabled(all_entries.is_empty())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let payload =
+                                    format_log_entries_support_safe(&this.log_monitor.entries());
+                                cx.write_to_clipboard(ClipboardItem::new_string(payload));
+                                this.notice = Some(zenclash_i18n::text("logs.notices.safe_copied"));
+                                cx.notify();
+                            })),
                     )
                     .child(
                         Button::new("clear-logs")
@@ -288,6 +324,20 @@ impl RuntimePage {
                     "debug" => theme.muted_foreground,
                     _ => theme.success,
                 };
+                let time_source = match entry.time_source {
+                    LogTimeSource::Core => zenclash_i18n::text("logs.time.core"),
+                    LogTimeSource::LocalReceive => zenclash_i18n::text("logs.time.local_receive"),
+                };
+                let time = entry
+                    .core_time
+                    .clone()
+                    .unwrap_or_else(|| entry.timestamp_ms.to_string());
+                let fields = (!entry.fields.is_null()).then(|| {
+                    compact_text(
+                        &serde_json::to_string(&entry.fields).unwrap_or_else(|_| "{}".into()),
+                        180,
+                    )
+                });
                 h_flex()
                     .id(("log-row", index))
                     .items_start()
@@ -303,7 +353,27 @@ impl RuntimePage {
                             .text_color(color)
                             .child(entry.level.to_uppercase()),
                     )
-                    .child(div().flex_1().text_xs().child(entry.payload))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .gap_1()
+                            .child(div().text_xs().child(entry.payload))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("{time} · {time_source}")),
+                            )
+                            .when_some(fields, |this, fields| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .font_family(theme.mono_font_family.clone())
+                                        .text_color(theme.muted_foreground)
+                                        .child(fields),
+                                )
+                            }),
+                    )
             }))
     }
 
@@ -482,6 +552,18 @@ fn log_matches(entry: &zenclash_core::LogEntry, query: &str) -> bool {
     query.is_empty()
         || entry.level.to_ascii_lowercase().contains(query)
         || entry.payload.to_ascii_lowercase().contains(query)
+        || entry.fields.as_object().is_some_and(|fields| {
+            fields.iter().any(|(key, value)| {
+                key.to_ascii_lowercase().contains(query)
+                    || value.to_string().to_ascii_lowercase().contains(query)
+            })
+        })
+        || (!entry.fields.is_object()
+            && entry
+                .fields
+                .to_string()
+                .to_ascii_lowercase()
+                .contains(query))
 }
 
 fn normalize_log_query(query: &str) -> String {
@@ -498,6 +580,7 @@ mod tests {
             level: "warning".into(),
             payload: "Proxy connection timeout".into(),
             timestamp_ms: 0,
+            ..zenclash_core::LogEntry::default()
         };
 
         assert!(log_matches(&entry, &normalize_log_query("WARN")));
@@ -506,6 +589,18 @@ mod tests {
             &normalize_log_query(" PROXY connection ")
         ));
         assert!(!log_matches(&entry, "dns"));
+    }
+
+    #[test]
+    fn log_filter_matches_structured_field_names_and_values() {
+        let entry = zenclash_core::LogEntry {
+            fields: serde_json::json!({"network": "tcp"}),
+            ..zenclash_core::LogEntry::default()
+        };
+
+        assert!(log_matches(&entry, "network"));
+        assert!(log_matches(&entry, "tcp"));
+        assert!(!log_matches(&entry, "udp"));
     }
 
     #[test]

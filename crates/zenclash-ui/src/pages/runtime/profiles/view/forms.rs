@@ -1,9 +1,9 @@
 use zenclash_core::RuntimeConfig;
 
 use super::super::super::{
-    Button, ButtonVariants, Context, Disableable, Icon, IconName, Input, ParentElement,
-    RemoteProfileRoute, RuntimePage, Styled, Switch, div, h_flex, info_row, px, setting_card,
-    v_flex,
+    Button, ButtonVariants, Context, Disableable, FluentBuilder, Icon, IconName, Input,
+    ParentElement, RemoteProfileRoute, RuntimePage, Styled, Switch, div, h_flex, info_row,
+    message_banner, px, setting_card, v_flex,
 };
 
 impl RuntimePage {
@@ -56,6 +56,10 @@ impl RuntimePage {
                             theme,
                         ))
                         .child(self.render_subscription_route_controls(theme, cx)),
+                )
+                .when_some(
+                    self.profile_forms.subscription_error.clone(),
+                    |this, error| this.child(message_banner(error, theme.danger, theme)),
                 )
                 .child(
                     h_flex()

@@ -4,7 +4,7 @@ use crate::pages::runtime::{
     default_pac_script, default_system_proxy_bypass, load_page, normalize_pac_script,
     normalize_system_proxy_bypass, normalize_system_proxy_host,
 };
-use zenclash_core::{SystemProxySession, SystemProxySettings};
+use zenclash_core::{CaptureOutcome, CapturePlan, SystemProxySettings};
 
 impl SystemProxyForm {
     fn to_settings(&self) -> SystemProxySettings {
@@ -40,22 +40,27 @@ impl RuntimePage {
             return;
         };
         let client = self.client.clone();
-        let controller = self.system_proxy_controller.clone();
+        let capture = self.traffic_capture.clone();
         let task = self.runtime.spawn(async move {
-            let preferences = tokio::task::spawn_blocking(move || {
-                SystemProxySession::new(store, controller)
-                    .set_enabled(enabled, port)
-                    .map_err(|error| error.to_string())
-            })
-            .await
-            .map_err(|error| {
-                zenclash_i18n::text_with(
-                    "system_proxy.errors.background_task",
-                    &[("error", error.to_string())],
-                )
-            })??;
+            let outcome = capture
+                .apply(if enabled {
+                    CapturePlan::SystemProxy
+                } else {
+                    CapturePlan::Off
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+            let preferences = tokio::task::spawn_blocking(move || store.load())
+                .await
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "system_proxy.errors.background_task",
+                        &[("error", error.to_string())],
+                    )
+                })?
+                .map_err(|error| error.to_string())?;
             let data = load_page(client, page).await;
-            Ok::<_, String>((preferences, data))
+            Ok::<_, String>((outcome, preferences, data))
         });
         cx.spawn(async move |this, cx| {
             let result = task
@@ -70,9 +75,16 @@ impl RuntimePage {
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
                 match result {
-                    Ok((preferences, data)) => {
+                    Ok((outcome, preferences, data)) => {
                         this.preferences = preferences.clone();
                         cx.emit(super::super::PreferencesRestored { preferences });
+                        if let CaptureOutcome::RolledBack { failure, .. }
+                        | CaptureOutcome::ReconcileNeeded { failure, .. } = outcome
+                        {
+                            this.set_page_error(token, failure);
+                            cx.notify();
+                            return;
+                        }
                         match data {
                             Ok(data) => {
                                 if this.replace_page_data(token, data) {
@@ -182,7 +194,7 @@ impl RuntimePage {
                 return;
             }
         };
-        let Some(store) = self.preferences_store.clone() else {
+        let Some(session) = self.system_proxy_session.clone() else {
             self.error = Some(zenclash_i18n::text("system_proxy.errors.settings_store"));
             cx.notify();
             return;
@@ -199,12 +211,11 @@ impl RuntimePage {
         let Some(token) = self.begin_mutation(Page::SystemProxy) else {
             return;
         };
-        let controller = self.system_proxy_controller.clone();
         let client = self.client.clone();
         let settings = form.to_settings();
         let task = self.runtime.spawn(async move {
             let preferences = tokio::task::spawn_blocking(move || {
-                SystemProxySession::new(store, controller)
+                session
                     .save_settings(settings, port)
                     .map_err(|error| error.to_string())
             })

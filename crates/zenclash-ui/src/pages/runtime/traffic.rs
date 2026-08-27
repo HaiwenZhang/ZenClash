@@ -58,7 +58,28 @@ pub(super) struct TrafficHistoryUiState {
     pub(super) selected_detail: Option<String>,
     pub(super) loading: bool,
     pub(super) clear_confirmation: bool,
+    pub(super) last_success_at_ms: Option<u64>,
+    pub(super) last_error: Option<String>,
     revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TrafficHistoryFreshness {
+    Loading,
+    Fresh { observed_at_ms: u64 },
+    Stale { observed_at_ms: u64 },
+    Failed,
+}
+
+impl TrafficHistoryUiState {
+    fn freshness(&self) -> TrafficHistoryFreshness {
+        match (self.last_success_at_ms, self.last_error.is_some()) {
+            (Some(observed_at_ms), false) => TrafficHistoryFreshness::Fresh { observed_at_ms },
+            (Some(observed_at_ms), true) => TrafficHistoryFreshness::Stale { observed_at_ms },
+            (None, true) => TrafficHistoryFreshness::Failed,
+            (None, false) => TrafficHistoryFreshness::Loading,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -83,9 +104,14 @@ fn finish_history_refresh(
             page.traffic_history.overview = payload.overview;
             page.traffic_history.details = payload.details;
             page.traffic_history.proxy_stats = payload.proxy_stats;
+            page.traffic_history.last_success_at_ms = Some(unix_millis());
+            page.traffic_history.last_error = None;
         }
         Ok(_) => {}
-        Err(error) => page.set_page_error(token, error),
+        Err(error) => {
+            page.traffic_history.last_error = Some(error.clone());
+            page.set_page_error(token, error);
+        }
     }
     false
 }
@@ -136,6 +162,22 @@ mod tests {
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
             4
+        );
+    }
+
+    #[test]
+    fn historical_data_becomes_stale_instead_of_disappearing_after_failure() {
+        let state = TrafficHistoryUiState {
+            last_success_at_ms: Some(5_000),
+            last_error: Some("database busy".into()),
+            ..TrafficHistoryUiState::default()
+        };
+
+        assert_eq!(
+            state.freshness(),
+            TrafficHistoryFreshness::Stale {
+                observed_at_ms: 5_000
+            }
         );
     }
 }

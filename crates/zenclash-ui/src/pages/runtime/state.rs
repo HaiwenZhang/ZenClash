@@ -1,6 +1,6 @@
 use super::{
-    AutostartStatus, ConnectionsSnapshot, Page, ProviderCatalog, RuleCatalog, RuntimeConfig,
-    SystemNetworkSnapshot, SystemProxyStatus, TunPermissionStatus, VersionInfo,
+    AutostartStatus, ConnectionsSnapshot, Observation, Page, ProviderCatalog, RuleCatalog,
+    RuntimeConfig, SystemNetworkSnapshot, SystemProxyStatus, TunPermissionStatus, VersionInfo,
 };
 use zenclash_core::ProxyCatalog;
 
@@ -8,10 +8,9 @@ use zenclash_core::ProxyCatalog;
 pub(super) enum RuntimeData {
     Empty,
     Dashboard {
-        config: RuntimeConfig,
-        proxies: ProxyCatalog,
-        connections: ConnectionsSnapshot,
-        system_proxy: SystemProxyStatus,
+        config: Observation<RuntimeConfig>,
+        proxies: Observation<ProxyCatalog>,
+        connections: Observation<ConnectionsSnapshot>,
     },
     Config(RuntimeConfig),
     Core {
@@ -49,6 +48,36 @@ pub(super) enum RuntimeData {
     },
 }
 
+impl RuntimeData {
+    pub(super) fn retain_dashboard_successes(self, previous: &Self) -> Self {
+        let Self::Dashboard {
+            config,
+            proxies,
+            connections,
+        } = self
+        else {
+            return self;
+        };
+        let Self::Dashboard {
+            config: previous_config,
+            proxies: previous_proxies,
+            connections: previous_connections,
+        } = previous
+        else {
+            return Self::Dashboard {
+                config,
+                proxies,
+                connections,
+            };
+        };
+        Self::Dashboard {
+            config: Observation::retain_last_success(previous_config, config),
+            proxies: Observation::retain_last_success(previous_proxies, proxies),
+            connections: Observation::retain_last_success(previous_connections, connections),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct PageTaskToken {
     pub(super) page: Page,
@@ -64,6 +93,7 @@ impl PageTaskToken {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zenclash_core::{OperationalFailure, RecoveryAction};
 
     #[test]
     fn page_task_token_rejects_same_page_after_navigation_round_trip() {
@@ -83,5 +113,72 @@ mod tests {
         };
 
         assert!(token.is_current(Page::Resources, 8));
+    }
+
+    #[test]
+    fn dashboard_failure_keeps_only_the_affected_last_successful_slice() {
+        let previous = RuntimeData::Dashboard {
+            config: Observation::Fresh {
+                value: RuntimeConfig {
+                    mode: "rule".into(),
+                    ..RuntimeConfig::default()
+                },
+                observed_at_ms: 10,
+            },
+            proxies: Observation::Fresh {
+                value: ProxyCatalog::default(),
+                observed_at_ms: 10,
+            },
+            connections: Observation::Fresh {
+                value: ConnectionsSnapshot {
+                    memory: 42,
+                    ..ConnectionsSnapshot::default()
+                },
+                observed_at_ms: 10,
+            },
+        };
+        let failure = Observation::Failed {
+            failure: OperationalFailure {
+                message: "offline".into(),
+                occurred_at_ms: 20,
+            },
+            recovery: RecoveryAction::Retry,
+        };
+        let next = RuntimeData::Dashboard {
+            config: Observation::Fresh {
+                value: RuntimeConfig {
+                    mode: "direct".into(),
+                    ..RuntimeConfig::default()
+                },
+                observed_at_ms: 20,
+            },
+            proxies: Observation::Fresh {
+                value: ProxyCatalog::default(),
+                observed_at_ms: 20,
+            },
+            connections: failure,
+        }
+        .retain_dashboard_successes(&previous);
+
+        let RuntimeData::Dashboard {
+            config,
+            connections,
+            ..
+        } = next
+        else {
+            panic!("expected dashboard data");
+        };
+        assert_eq!(
+            config.value().map(|config| config.mode.as_str()),
+            Some("direct")
+        );
+        assert!(matches!(
+            connections,
+            Observation::Stale {
+                value: ConnectionsSnapshot { memory: 42, .. },
+                observed_at_ms: 10,
+                ..
+            }
+        ));
     }
 }

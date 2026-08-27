@@ -6,6 +6,7 @@ use parking_lot::Mutex;
 use thiserror::Error;
 
 mod activation;
+mod application;
 mod download;
 mod edit;
 mod model;
@@ -18,6 +19,10 @@ mod validation;
 #[cfg(test)]
 mod tests;
 
+pub use application::{
+    ProfileApplication, ProfileApplicationError, ProfileApplyOutcome, ProfileChange,
+    ProfileRecovery, ProfileVersion,
+};
 use download::download_profile;
 pub use model::{
     ProfileActivation, ProfileCatalog, ProfileRecord, ProfileSource, ProfileUpdate,

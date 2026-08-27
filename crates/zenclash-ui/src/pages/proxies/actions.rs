@@ -1,6 +1,6 @@
 use super::{
-    CatalogTaskToken, Context, ProxiesPage, ProxyDelayTarget, ProxyGroup, ProxyOperations,
-    append_delay, take_untested_proxies, test_key,
+    CatalogTaskToken, ConnectionPolicy, Context, ProxiesPage, ProxyDelayTarget, ProxyGroup,
+    ProxyOperations, ProxyVisibility, append_delay, take_untested_proxies, test_key,
 };
 use futures_util::{StreamExt, stream};
 
@@ -12,18 +12,25 @@ impl ProxiesPage {
     }
 
     fn start_refresh(&mut self, force: bool, cx: &mut Context<Self>) {
-        if !force && (self.loading || self.switching.is_some()) {
+        if !force && (self.loading || self.operation_pending()) {
             return;
         }
         let token = self.begin_catalog_operation();
         self.loading = true;
         self.error = None;
+        self.notice = None;
         cx.notify();
 
         let client = self.client.clone();
+        let visibility = if self.show_hidden {
+            ProxyVisibility::IncludeHidden
+        } else {
+            ProxyVisibility::VisibleOnly
+        };
         let task = self.runtime.spawn(async move {
+            let operations = ProxyOperations::new(client.clone());
             let (catalog, config) =
-                tokio::try_join!(client.proxy_catalog(), client.runtime_config())
+                tokio::try_join!(operations.catalog(visibility), client.runtime_config())
                     .map_err(|error| error.to_string())?;
             Ok::<_, String>((catalog, config.mode))
         });
@@ -71,6 +78,17 @@ impl ProxiesPage {
         self.catalog = None;
         self.expanded.clear();
         self.test_failures.clear();
+        self.show_hidden = false;
+        self.notice = None;
+        self.start_refresh(true, cx);
+    }
+
+    pub(super) fn set_show_hidden(&mut self, show_hidden: bool, cx: &mut Context<Self>) {
+        if self.show_hidden == show_hidden || self.loading || self.operation_pending() {
+            return;
+        }
+        self.show_hidden = show_hidden;
+        self.expanded.clear();
         self.start_refresh(true, cx);
     }
 
@@ -96,18 +114,21 @@ impl ProxiesPage {
     }
 
     pub(super) fn change_proxy(&mut self, group: String, proxy: String, cx: &mut Context<Self>) {
-        if self.switching.is_some() || self.loading {
+        if self.operation_pending() || self.loading {
             return;
         }
         let token = self.begin_catalog_operation();
         self.switching = Some((group.clone(), proxy.clone()));
         self.error = None;
+        self.notice = None;
         cx.notify();
 
         let client = self.client.clone();
-        let task = self
-            .runtime
-            .spawn(async move { ProxyOperations::new(client).select(&group, &proxy).await });
+        let task = self.runtime.spawn(async move {
+            ProxyOperations::new(client)
+                .select(&group, &proxy, ConnectionPolicy::KeepExisting)
+                .await
+        });
 
         cx.spawn(async move |this, cx| {
             let result = match task.await {
@@ -124,6 +145,12 @@ impl ProxiesPage {
                 this.switching = None;
                 match result {
                     Ok(outcome) => {
+                        let warning = (!outcome.warnings.is_empty()).then(|| {
+                            zenclash_i18n::text_with(
+                                "proxies.notices.applied_with_warning",
+                                &[("warning", outcome.warnings.join("; "))],
+                            )
+                        });
                         for warning in outcome.warnings {
                             tracing::warn!(%warning, "proxy selection completed with a warning");
                         }
@@ -131,6 +158,130 @@ impl ProxiesPage {
                             this.catalog = Some(catalog);
                         }
                         this.error = None;
+                        this.notice = warning;
+                    }
+                    Err(error) => this.error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn restore_auto(&mut self, group: String, cx: &mut Context<Self>) {
+        if self.operation_pending() || self.loading {
+            return;
+        }
+        let token = self.begin_catalog_operation();
+        self.restoring_auto = Some(group.clone());
+        self.error = None;
+        self.notice = None;
+        cx.notify();
+
+        let client = self.client.clone();
+        let task = self
+            .runtime
+            .spawn(async move { ProxyOperations::new(client).restore_auto(&group).await });
+
+        cx.spawn(async move |this, cx| {
+            let result = match task.await {
+                Ok(result) => result.map_err(|error| error.to_string()),
+                Err(error) => Err(zenclash_i18n::text_with(
+                    "proxies.errors.restore_auto_task",
+                    &[("error", error.to_string())],
+                )),
+            };
+            let _ = this.update(cx, |this, cx| {
+                if !token.is_current(this.catalog_generation) {
+                    return;
+                }
+                this.restoring_auto = None;
+                match result {
+                    Ok(outcome) => {
+                        let warning = (!outcome.warnings.is_empty()).then(|| {
+                            zenclash_i18n::text_with(
+                                "proxies.notices.restored_with_warning",
+                                &[("warning", outcome.warnings.join("; "))],
+                            )
+                        });
+                        for warning in outcome.warnings {
+                            tracing::warn!(%warning, "automatic proxy group restored with a warning");
+                        }
+                        if let Some(catalog) = outcome.catalog {
+                            this.catalog = Some(catalog);
+                        }
+                        this.error = None;
+                        this.notice = warning.or_else(|| {
+                            Some(zenclash_i18n::text("proxies.notices.restored_auto"))
+                        });
+                    }
+                    Err(error) => this.error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn measure_group_and_restore_auto(
+        &mut self,
+        group: String,
+        test_url: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.operation_pending() || self.loading || !self.testing.is_empty() {
+            return;
+        }
+        let token = self.begin_catalog_operation();
+        self.measuring_and_restoring_auto = Some(group.clone());
+        self.error = None;
+        self.notice = None;
+        cx.notify();
+
+        let client = self.client.clone();
+        let task = self.runtime.spawn(async move {
+            ProxyOperations::new(client)
+                .measure_group_and_restore_auto(&group, test_url.as_deref(), 5_000)
+                .await
+                .map(|outcome| (group, outcome))
+        });
+
+        cx.spawn(async move |this, cx| {
+            let result = match task.await {
+                Ok(result) => result.map_err(|error| error.to_string()),
+                Err(error) => Err(zenclash_i18n::text_with(
+                    "proxies.errors.measure_restore_task",
+                    &[("error", error.to_string())],
+                )),
+            };
+            let _ = this.update(cx, |this, cx| {
+                if !token.is_current(this.catalog_generation) {
+                    return;
+                }
+                this.measuring_and_restoring_auto = None;
+                match result {
+                    Ok((group, outcome)) => {
+                        let warning = (!outcome.selection.warnings.is_empty()).then(|| {
+                            zenclash_i18n::text_with(
+                                "proxies.notices.restored_with_warning",
+                                &[("warning", outcome.selection.warnings.join("; "))],
+                            )
+                        });
+                        for warning in outcome.selection.warnings {
+                            tracing::warn!(%warning, "group delay completed with a readback warning");
+                        }
+                        if let Some(catalog) = outcome.selection.catalog {
+                            this.catalog = Some(catalog);
+                        }
+                        for (proxy, delay) in outcome.delays {
+                            this.record_delay(&group, &proxy, delay, delay);
+                        }
+                        this.error = None;
+                        this.notice = warning.or_else(|| {
+                            Some(zenclash_i18n::text(
+                                "proxies.notices.measured_and_restored_auto",
+                            ))
+                        });
                     }
                     Err(error) => this.error = Some(error),
                 }
@@ -148,6 +299,9 @@ impl ProxiesPage {
         provider: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        if self.operation_pending() || self.loading {
+            return;
+        }
         let test_key = test_key(&group, &proxy);
         if !self.testing.insert(test_key.clone()) {
             return;
@@ -201,6 +355,9 @@ impl ProxiesPage {
     }
 
     pub(super) fn test_group(&mut self, group: &ProxyGroup, cx: &mut Context<Self>) {
+        if self.operation_pending() || self.loading {
+            return;
+        }
         let proxies = take_untested_proxies(&mut self.testing, group);
         if proxies.is_empty() {
             return;
@@ -312,6 +469,14 @@ impl ProxiesPage {
         self.testing.clear();
         self.test_failures.clear();
         self.switching = None;
+        self.restoring_auto = None;
+        self.measuring_and_restoring_auto = None;
         CatalogTaskToken(self.catalog_generation)
+    }
+
+    pub(super) fn operation_pending(&self) -> bool {
+        self.switching.is_some()
+            || self.restoring_auto.is_some()
+            || self.measuring_and_restoring_auto.is_some()
     }
 }

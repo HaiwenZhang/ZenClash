@@ -439,7 +439,7 @@ fn listener_supported_on_platform(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        SessionListenerFallback, apply_session_fallbacks, resolve_conflicts,
+        SessionListenerFallback, apply_session_fallbacks, mapping_port, resolve_conflicts,
         validate_listener_change,
     };
     use serde_yaml::Value;
@@ -556,7 +556,12 @@ mod tests {
         let resolved = resolve_conflicts(&mut document, &mut session).unwrap();
 
         assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].0, "port");
+        assert!(matches!(resolved[0].0.as_str(), "mixed-port" | "port"));
         assert_ne!(resolved[0].1.current, port);
+        let root = document.as_mapping().unwrap();
+        assert_ne!(
+            mapping_port(root, "mixed-port").unwrap(),
+            mapping_port(root, "port").unwrap()
+        );
     }
 }

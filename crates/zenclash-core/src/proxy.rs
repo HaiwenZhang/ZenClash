@@ -84,6 +84,42 @@ impl ProxyNode {
     }
 }
 
+/// Selection behavior exposed by a Mihomo proxy group.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum ProxyGroupBehavior {
+    /// A selector whose current member is controlled explicitly.
+    Selector,
+    /// A URL-test or fallback group that can be pinned to one member.
+    Automatic {
+        /// Whether Mihomo currently pins the group instead of selecting automatically.
+        fixed: bool,
+    },
+    /// A load-balancing group without one user-selected current member.
+    LoadBalance,
+    /// A group type unknown to this ZenClash version.
+    Unknown(String),
+}
+
+impl Default for ProxyGroupBehavior {
+    fn default() -> Self {
+        Self::Unknown(String::new())
+    }
+}
+
+impl ProxyGroupBehavior {
+    fn from_mihomo(kind: &str, fixed: bool) -> Self {
+        if kind.eq_ignore_ascii_case("selector") {
+            Self::Selector
+        } else if kind.eq_ignore_ascii_case("urltest") || kind.eq_ignore_ascii_case("fallback") {
+            Self::Automatic { fixed }
+        } else if kind.eq_ignore_ascii_case("loadbalance") {
+            Self::LoadBalance
+        } else {
+            Self::Unknown(kind.to_owned())
+        }
+    }
+}
+
 /// Selectable Mihomo proxy group with its resolved member nodes.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProxyGroup {
@@ -91,6 +127,9 @@ pub struct ProxyGroup {
     pub name: String,
     /// Mihomo group implementation type.
     pub kind: String,
+    /// Domain behavior derived from the Mihomo group type and fixed state.
+    #[serde(default)]
+    pub behavior: ProxyGroupBehavior,
     /// Currently selected member name.
     pub now: String,
     /// Resolved member nodes in Mihomo order.
@@ -180,6 +219,24 @@ struct RawProxy {
     test_url: Option<String>,
     #[serde(default)]
     hidden: bool,
+    #[serde(default, deserialize_with = "deserialize_fixed")]
+    fixed: bool,
+}
+
+fn deserialize_fixed<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Bool(fixed) => Ok(fixed),
+        serde_json::Value::String(member) => Ok(!member.trim().is_empty()),
+        serde_json::Value::Null => Ok(false),
+        value => Err(D::Error::custom(format!(
+            "fixed must be a boolean, member name, or null; got {value}"
+        ))),
+    }
 }
 
 impl RawProxy {
@@ -237,6 +294,7 @@ impl From<RawProxyCatalog> for ProxyCatalog {
                     proxy.name.clone()
                 },
                 kind: proxy.kind.clone(),
+                behavior: ProxyGroupBehavior::from_mihomo(&proxy.kind, proxy.fixed),
                 now: proxy.now.clone(),
                 all,
                 test_url: proxy
@@ -323,6 +381,102 @@ mod tests {
         let catalog = ProxyCatalog::from(raw);
 
         assert_eq!(catalog.groups[0].test_url, None);
+    }
+
+    #[test]
+    fn automatic_group_preserves_fixed_state() {
+        let raw: RawProxyCatalog = serde_json::from_str(
+            r#"{"proxies":{"DIRECT":{"name":"DIRECT","type":"Direct"},"Auto":{"name":"Auto","type":"URLTest","now":"DIRECT","all":["DIRECT"],"fixed":true}}}"#,
+        )
+        .unwrap();
+
+        let catalog = ProxyCatalog::from(raw);
+
+        assert_eq!(
+            catalog.groups[0].behavior,
+            ProxyGroupBehavior::Automatic { fixed: true }
+        );
+    }
+
+    #[test]
+    fn automatic_group_accepts_real_mihomo_fixed_member_encoding() {
+        let raw: RawProxyCatalog = serde_json::from_str(
+            r#"{"proxies":{"DIRECT":{"name":"DIRECT","type":"Direct"},"Auto":{"name":"Auto","type":"URLTest","now":"DIRECT","all":["DIRECT"],"fixed":"DIRECT"}}}"#,
+        )
+        .unwrap();
+
+        let catalog = ProxyCatalog::from(raw);
+
+        assert_eq!(
+            catalog.groups[0].behavior,
+            ProxyGroupBehavior::Automatic { fixed: true }
+        );
+    }
+
+    #[test]
+    fn selector_group_has_explicit_selection_behavior() {
+        let raw: RawProxyCatalog = serde_json::from_str(
+            r#"{"proxies":{"DIRECT":{"name":"DIRECT","type":"Direct"},"Proxy":{"name":"Proxy","type":"Selector","now":"DIRECT","all":["DIRECT"]}}}"#,
+        )
+        .unwrap();
+
+        let catalog = ProxyCatalog::from(raw);
+
+        assert_eq!(catalog.groups[0].behavior, ProxyGroupBehavior::Selector);
+    }
+
+    #[test]
+    fn fallback_group_without_a_pin_remains_automatic() {
+        let raw: RawProxyCatalog = serde_json::from_str(
+            r#"{"proxies":{"DIRECT":{"name":"DIRECT","type":"Direct"},"Fallback":{"name":"Fallback","type":"Fallback","now":"DIRECT","all":["DIRECT"]}}}"#,
+        )
+        .unwrap();
+
+        let catalog = ProxyCatalog::from(raw);
+
+        assert_eq!(
+            catalog.groups[0].behavior,
+            ProxyGroupBehavior::Automatic { fixed: false }
+        );
+    }
+
+    #[test]
+    fn load_balance_group_has_non_selectable_behavior() {
+        let raw: RawProxyCatalog = serde_json::from_str(
+            r#"{"proxies":{"DIRECT":{"name":"DIRECT","type":"Direct"},"Balance":{"name":"Balance","type":"LoadBalance","now":"DIRECT","all":["DIRECT"]}}}"#,
+        )
+        .unwrap();
+
+        let catalog = ProxyCatalog::from(raw);
+
+        assert_eq!(catalog.groups[0].behavior, ProxyGroupBehavior::LoadBalance);
+    }
+
+    #[test]
+    fn unknown_group_behavior_preserves_the_mihomo_type() {
+        let raw: RawProxyCatalog = serde_json::from_str(
+            r#"{"proxies":{"DIRECT":{"name":"DIRECT","type":"Direct"},"Future":{"name":"Future","type":"ConsistentHashV2","now":"DIRECT","all":["DIRECT"]}}}"#,
+        )
+        .unwrap();
+
+        let catalog = ProxyCatalog::from(raw);
+
+        assert_eq!(
+            catalog.groups[0].behavior,
+            ProxyGroupBehavior::Unknown("ConsistentHashV2".into())
+        );
+    }
+
+    #[test]
+    fn hidden_group_state_is_preserved_for_visibility_filtering() {
+        let raw: RawProxyCatalog = serde_json::from_str(
+            r#"{"proxies":{"DIRECT":{"name":"DIRECT","type":"Direct"},"Internal":{"name":"Internal","type":"Selector","now":"DIRECT","all":["DIRECT"],"hidden":true}}}"#,
+        )
+        .unwrap();
+
+        let catalog = ProxyCatalog::from(raw);
+
+        assert!(catalog.groups[0].hidden);
     }
 
     #[test]

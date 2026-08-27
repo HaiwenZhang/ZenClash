@@ -1,8 +1,8 @@
 use std::{os::unix::fs::MetadataExt, path::Path, time::Duration};
 
 use crate::{
-    TunPermissionError, TunPermissionGrant, TunPermissionResult, TunPermissionStatus,
-    platform_command, tun_permissions::binary_sha256,
+    TunPermissionError, TunPermissionResult, TunPermissionStatus, platform_command,
+    tun_permissions::binary_sha256,
 };
 
 const AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -29,7 +29,6 @@ pub(super) fn status(binary: &Path) -> TunPermissionResult<TunPermissionStatus> 
     Ok(TunPermissionStatus {
         granted: root_owned && setuid,
         can_request: true,
-        requires_relaunch: false,
         binary: binary.to_path_buf(),
         detail: format!(
             "所有者 UID {} · setuid {}",
@@ -39,7 +38,7 @@ pub(super) fn status(binary: &Path) -> TunPermissionResult<TunPermissionStatus> 
     })
 }
 
-pub(super) fn request_grant(binary: &Path) -> TunPermissionResult<TunPermissionGrant> {
+pub(super) fn request_grant(binary: &Path) -> TunPermissionResult<TunPermissionStatus> {
     let path = binary
         .to_str()
         .ok_or_else(|| TunPermissionError::InvalidBinary("macOS 内核路径不是有效 UTF-8".into()))?;
@@ -59,7 +58,7 @@ pub(super) fn request_grant(binary: &Path) -> TunPermissionResult<TunPermissionG
     if !verified.granted {
         return Err(TunPermissionError::Verification(verified.detail));
     }
-    Ok(TunPermissionGrant::Ready(verified))
+    Ok(verified)
 }
 
 #[cfg(test)]

@@ -166,6 +166,43 @@ fn transaction_commit_keeps_candidate() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
+#[test]
+fn abandoned_staging_and_failed_activation_leave_the_old_core_intact() {
+    let directory = unique_directory("activation-failure");
+    std::fs::create_dir_all(&directory).unwrap();
+    let target = directory.join(if cfg!(windows) {
+        "mihomo.exe"
+    } else {
+        "mihomo"
+    });
+    let abandoned = sibling_path(&target, "abandoned").unwrap();
+    std::fs::write(&target, b"old").unwrap();
+    std::fs::write(&abandoned, b"unused").unwrap();
+    drop(PreparedCoreUpdate {
+        staging: Some(abandoned.clone()),
+        target: target.clone(),
+        tag: "v9.9.9".into(),
+    });
+    assert!(!abandoned.exists());
+
+    let missing = sibling_path(&target, "missing").unwrap();
+    let prepared = PreparedCoreUpdate {
+        staging: Some(missing.clone()),
+        target: target.clone(),
+        tag: "v9.9.9".into(),
+    };
+
+    assert!(prepared.activate().is_err());
+    assert_eq!(std::fs::read(&target).unwrap(), b"old");
+    assert!(!missing.exists());
+    assert_eq!(
+        std::fs::read_dir(&directory).unwrap().count(),
+        1,
+        "failed activation must not leave backup or staging files"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn release_download_activation_and_rollback_are_transactional() {

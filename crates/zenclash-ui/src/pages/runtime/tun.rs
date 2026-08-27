@@ -1,10 +1,9 @@
 use super::{
     Button, ButtonVariants, Context, Disableable, IconName, Input, IntoElement, Page,
-    ParentElement, RuntimeData, RuntimePage, Styled, TunPermissionGrant, TunPermissionManager,
-    config_input_row, empty_dash, h_flex, info_row, json, message_banner, setting_card,
-    setting_switch, v_flex,
+    ParentElement, RuntimeData, RuntimePage, Styled, config_input_row, empty_dash, h_flex,
+    info_row, json, message_banner, setting_card, setting_switch, v_flex,
 };
-use zenclash_core::CoreMaintenanceIntent;
+use zenclash_core::{CapabilityState, CaptureOutcome, CapturePlan};
 
 impl RuntimePage {
     pub(super) fn render_tun(
@@ -15,9 +14,55 @@ impl RuntimePage {
         v_flex()
             .gap_4()
             .child(self.render_tun_permissions(theme, cx))
+            .child(self.render_tun_runtime(theme))
             .child(self.render_tun_switches(theme, cx))
             .child(self.render_tun_routes(theme, cx))
             .into_any_element()
+    }
+
+    fn render_tun_runtime(&self, theme: &gpui_component::Theme) -> gpui::Div {
+        let snapshot = self.operational_status.snapshot();
+        let tun = snapshot.capture.tun.value();
+        let mut card = setting_card(zenclash_i18n::text("tun.runtime.title"), theme);
+        if let Some(tun) = tun {
+            card = card
+                .child(info_row(
+                    zenclash_i18n::text("tun.runtime.aggregate"),
+                    tun_state_label(tun.observed),
+                    theme,
+                ))
+                .child(info_row(
+                    zenclash_i18n::text("tun.runtime.permission"),
+                    tun_state_label(tun.permission),
+                    theme,
+                ))
+                .child(info_row(
+                    zenclash_i18n::text("tun.runtime.device"),
+                    format!(
+                        "{} · {}",
+                        tun.runtime.device_name.as_deref().unwrap_or("—"),
+                        tun_state_label(tun.runtime.device)
+                    ),
+                    theme,
+                ))
+                .child(info_row(
+                    zenclash_i18n::text("tun.runtime.route"),
+                    tun_state_label(tun.runtime.route),
+                    theme,
+                ))
+                .child(info_row(
+                    zenclash_i18n::text("tun.runtime.evidence"),
+                    &tun.runtime.detail,
+                    theme,
+                ));
+        } else {
+            card = card.child(message_banner(
+                zenclash_i18n::text("tun.runtime.loading"),
+                theme.primary,
+                theme,
+            ));
+        }
+        card
     }
 
     fn render_tun_permissions(
@@ -42,8 +87,8 @@ impl RuntimePage {
                         zenclash_i18n::text("tun.permissions.status"),
                         if status.granted {
                             zenclash_i18n::text("tun.permissions.ready")
-                        } else if status.requires_relaunch {
-                            zenclash_i18n::text("tun.permissions.relaunch")
+                        } else if !status.can_request {
+                            zenclash_i18n::text("tun.permissions.unavailable")
                         } else {
                             zenclash_i18n::text("tun.permissions.install")
                         },
@@ -93,71 +138,16 @@ impl RuntimePage {
     }
 
     fn grant_tun_permissions(&mut self, cx: &mut Context<Self>) {
-        let Some(binary) = self.mihomo_binary() else {
+        if self.mihomo_binary().is_none() {
             self.error = Some(zenclash_i18n::text("tun.errors.external_core"));
             cx.notify();
             return;
-        };
-        let Some(token) = self.begin_mutation(Page::Tun) else {
-            return;
-        };
-        let core_session = self.core_session.clone();
-        let task = self.runtime.spawn(async move {
-            let grant = tokio::task::spawn_blocking(move || {
-                TunPermissionManager::new(binary)
-                    .and_then(|manager| manager.request_grant())
-                    .map_err(|error| error.to_string())
-            })
-            .await
-            .map_err(|error| {
-                zenclash_i18n::text_with(
-                    "tun.errors.permission_task",
-                    &[("error", error.to_string())],
-                )
-            })??;
-            #[cfg(unix)]
-            if matches!(grant, TunPermissionGrant::Ready(_)) {
-                core_session
-                    .maintain(CoreMaintenanceIntent::Restart)
-                    .await
-                    .map_err(|error| {
-                        zenclash_i18n::text_with(
-                            "tun.errors.readiness",
-                            &[("error", error.to_string())],
-                        )
-                    })?;
-            }
-            Ok::<_, String>(grant)
-        });
-        cx.spawn(async move |this, cx| {
-            let result = task
-                .await
-                .map_err(|error| {
-                    zenclash_i18n::text_with(
-                        "tun.errors.permission_task",
-                        &[("error", error.to_string())],
-                    )
-                })
-                .and_then(|result| result);
-            let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
-                match result {
-                    Ok(TunPermissionGrant::Ready(_)) => {
-                        if this.is_page_task_current(token) {
-                            this.notice = Some(zenclash_i18n::text("tun.notices.permission_ready"));
-                            this.refresh(cx);
-                        }
-                    }
-                    Ok(TunPermissionGrant::RelaunchRequested) => {
-                        cx.emit(super::ElevatedRestartRequested);
-                    }
-                    Err(error) => this.set_page_error(token, error),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
+        }
+        self.apply_tun_plan(
+            true,
+            zenclash_i18n::text("tun.notices.permission_ready"),
+            cx,
+        );
     }
 
     fn render_tun_switches(
@@ -177,12 +167,7 @@ impl RuntimePage {
                 "tun-enable",
                 theme,
                 cx.listener(|this, checked, _, cx| {
-                    this.patch_tun_bool(
-                        "enable",
-                        *checked,
-                        zenclash_i18n::text("tun.notices.enabled"),
-                        cx,
-                    );
+                    this.apply_tun_plan(*checked, zenclash_i18n::text("tun.notices.enabled"), cx);
                 }),
             ))
             .child(info_row(
@@ -275,6 +260,54 @@ impl RuntimePage {
         self.apply_controlled_config(json!({"tun": {key: value}}), success, cx);
     }
 
+    fn apply_tun_plan(&mut self, enabled: bool, success: String, cx: &mut Context<Self>) {
+        let Some(token) = self.begin_mutation(Page::Tun) else {
+            return;
+        };
+        let capture = self.traffic_capture.clone();
+        let task = self.runtime.spawn(async move {
+            capture
+                .apply(if enabled {
+                    CapturePlan::Tun
+                } else {
+                    CapturePlan::Off
+                })
+                .await
+                .map_err(|error| error.to_string())
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "tun.errors.permission_task",
+                        &[("error", error.to_string())],
+                    )
+                })
+                .and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                this.mutating = false;
+                match result {
+                    Ok(CaptureOutcome::Applied { .. } | CaptureOutcome::Unchanged { .. }) => {
+                        if this.is_page_task_current(token) {
+                            this.notice = Some(success);
+                            this.reload_controlled_config(cx);
+                            this.refresh(cx);
+                        }
+                    }
+                    Ok(
+                        CaptureOutcome::RolledBack { failure, .. }
+                        | CaptureOutcome::ReconcileNeeded { failure, .. },
+                    ) => this.set_page_error(token, failure),
+                    Err(error) => this.set_page_error(token, error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn render_tun_routes(
         &self,
         theme: &gpui_component::Theme,
@@ -342,4 +375,13 @@ impl RuntimePage {
                 ),
             )
     }
+}
+
+fn tun_state_label(state: CapabilityState) -> String {
+    zenclash_i18n::text(match state {
+        CapabilityState::Active => "tun.runtime.states.active",
+        CapabilityState::Inactive => "tun.runtime.states.inactive",
+        CapabilityState::Unknown => "tun.runtime.states.unknown",
+        CapabilityState::Unsupported => "tun.runtime.states.unsupported",
+    })
 }

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use zenclash_core::{
     DEFAULT_NETWORK_LATENCY_TARGETS, NetworkLatencyTarget, NetworkProbeRoute, NetworkProbeSnapshot,
-    RuntimeConfig,
+    ObservedPathRoute, PathStatus, RuntimeConfig,
 };
 
 pub(super) fn network_probe_route(
@@ -49,6 +49,43 @@ pub(super) fn average_latency(snapshot: &NetworkProbeSnapshot) -> Option<u64> {
     } else {
         Some(values.iter().sum::<u64>() / u64::try_from(values.len()).unwrap_or(1))
     }
+}
+
+pub(super) fn path_observation(
+    route: &NetworkProbeRoute,
+    generation: u64,
+    snapshot: &NetworkProbeSnapshot,
+) -> Result<PathStatus, String> {
+    let succeeded = snapshot.public_ip.is_some()
+        || snapshot
+            .latencies
+            .iter()
+            .any(|result| result.latency_ms.is_some());
+    if !succeeded {
+        let error = snapshot
+            .public_ip_error
+            .clone()
+            .or_else(|| {
+                snapshot
+                    .latencies
+                    .iter()
+                    .find_map(|result| result.error.clone())
+            })
+            .unwrap_or_else(|| zenclash_i18n::text("network.errors.no_successful_probe"));
+        return Err(error);
+    }
+    Ok(PathStatus {
+        route: match route {
+            NetworkProbeRoute::Direct => ObservedPathRoute::Direct,
+            NetworkProbeRoute::MihomoHttp { .. } => ObservedPathRoute::Mihomo,
+        },
+        target: if snapshot.route.is_empty() {
+            route.label()
+        } else {
+            snapshot.route.clone()
+        },
+        generation,
+    })
 }
 
 pub(super) fn latency_color(latency: Option<u64>, theme: &gpui_component::Theme) -> gpui::Hsla {
@@ -154,5 +191,36 @@ mod tests {
         };
 
         assert_eq!(average_latency(&snapshot), Some(40));
+    }
+
+    #[test]
+    fn explicit_path_observation_requires_at_least_one_success() {
+        let route = NetworkProbeRoute::MihomoHttp {
+            host: "127.0.0.1".into(),
+            port: 7890,
+        };
+        let success = NetworkProbeSnapshot {
+            route: "Mihomo 127.0.0.1:7890".into(),
+            latencies: vec![NetworkLatencyResult {
+                target: NetworkLatencyTarget::new("one", "https://example.com/one").unwrap(),
+                latency_ms: Some(42),
+                error: None,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            path_observation(&route, 7, &success).unwrap(),
+            PathStatus {
+                route: ObservedPathRoute::Mihomo,
+                target: "Mihomo 127.0.0.1:7890".into(),
+                generation: 7,
+            }
+        );
+
+        let failed = NetworkProbeSnapshot {
+            public_ip_error: Some("offline".into()),
+            ..Default::default()
+        };
+        assert_eq!(path_observation(&route, 7, &failed), Err("offline".into()));
     }
 }

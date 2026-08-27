@@ -103,6 +103,9 @@ impl RuntimePage {
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        if self.page == Page::Home {
+            return self.render_home(theme, cx);
+        }
         if matches!(self.data, RuntimeData::Empty) && self.page == Page::Settings {
             return self.render_offline_settings(theme, cx).into_any_element();
         }
@@ -120,7 +123,7 @@ impl RuntimePage {
             .into_any_element();
         }
         match self.page {
-            Page::Home => self.render_home(theme, cx),
+            Page::Home => unreachable!("home is rendered before the empty-data fallback"),
             Page::Mihomo => self.render_core(theme, cx),
             Page::Profiles => self.render_profile(theme, cx),
             Page::Connections => self.render_connections(theme, cx),

@@ -244,6 +244,9 @@ fn handle_connection(
     files: &Mutex<HashMap<String, Vec<u8>>>,
     methods: &Mutex<Vec<String>>,
 ) {
+    // Accepted sockets may inherit O_NONBLOCK from the listener on macOS.
+    // Request parsing below is intentionally blocking and bounded by a timeout.
+    stream.set_nonblocking(false).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();

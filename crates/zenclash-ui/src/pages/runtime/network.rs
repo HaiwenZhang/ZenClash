@@ -9,18 +9,54 @@ use model::{
 };
 
 use super::{
-    Button, ButtonVariants, Context, Disableable, FluentBuilder, IconName, Input, IntoElement,
-    NetworkLatencyTarget, NetworkProbeRoutePreference, NetworkProbeSnapshot, ParentElement,
-    PublicIpProvider, RuntimeConfig, RuntimeData, RuntimePage, Selectable, Sizable, Styled,
-    SystemNetworkSnapshot, config_input_row, div, empty_dash, h_flex, info_row, json,
-    message_banner, metric, px, setting_card, setting_switch, v_flex,
+    AppContext, Button, ButtonVariants, Context, DiagnosticData, DiagnosticReport, DiagnosticRoute,
+    DiagnosticStep, DiagnosticStepKind, Disableable, Entity, FluentBuilder, IconName, Input,
+    InputState, IntoElement, NetworkLatencyTarget, NetworkProbeRoutePreference,
+    NetworkProbeSnapshot, ParentElement, PublicIpProvider, RuntimeConfig, RuntimeData, RuntimePage,
+    Selectable, Sizable, Styled, SystemNetworkSnapshot, Window, config_input_row, div, empty_dash,
+    h_flex, info_row, json, message_banner, metric, px, setting_card, setting_switch, v_flex,
 };
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(super) struct NetworkProbeUiState {
+    pub(super) latency_name: Entity<InputState>,
+    pub(super) latency_url: Entity<InputState>,
+    pub(super) dns_name: Entity<InputState>,
     snapshot: Option<NetworkProbeSnapshot>,
+    report: Option<DiagnosticReport>,
     loading: bool,
     revision: u64,
+    cache_confirmation: Option<DnsCacheAction>,
+}
+
+impl NetworkProbeUiState {
+    pub(super) fn new(window: &mut Window, cx: &mut Context<RuntimePage>) -> Self {
+        Self {
+            latency_name: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(zenclash_i18n::text("runtime.placeholders.network_target"))
+            }),
+            latency_url: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("https://example.com/generate_204")
+            }),
+            dns_name: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .default_value("example.com")
+                    .placeholder(zenclash_i18n::text("runtime.placeholders.dns_name"))
+            }),
+            snapshot: None,
+            report: None,
+            loading: false,
+            revision: 0,
+            cache_confirmation: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DnsCacheAction {
+    Dns,
+    FakeIp,
 }
 
 #[derive(Clone, Debug)]
@@ -71,6 +107,7 @@ impl RuntimePage {
                         theme,
                     )),
             )
+            .child(self.render_diagnostics_card(theme, cx))
             .child(self.render_public_ip_card(&snapshot, theme, cx))
             .child(self.render_latency_card(&snapshot, theme, cx))
             .child(self.render_system_network_card(&config, &system, theme, cx))
@@ -94,6 +131,97 @@ impl RuntimePage {
                     )),
             )
             .into_any_element()
+    }
+
+    fn render_diagnostics_card(
+        &self,
+        theme: &gpui_component::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let report = self.network_probe.report.as_ref();
+        setting_card(zenclash_i18n::text("network.diagnostics.title"), theme)
+            .child(config_input_row(
+                zenclash_i18n::text("network.diagnostics.dns_name"),
+                zenclash_i18n::text("network.diagnostics.dns_name_description"),
+                Input::new(&self.network_probe.dns_name),
+                theme,
+            ))
+            .children(report.into_iter().flat_map(|report| {
+                report
+                    .steps
+                    .iter()
+                    .map(|step| render_diagnostic_step(step, theme))
+            }))
+            .child(
+                h_flex()
+                    .px_4()
+                    .py_3()
+                    .gap_2()
+                    .flex_wrap()
+                    .justify_end()
+                    .when_some(self.network_probe.cache_confirmation, |this, action| {
+                        this.child(
+                            Button::new("cancel-network-cache-flush")
+                                .label(zenclash_i18n::text("network.diagnostics.cancel"))
+                                .small()
+                                .ghost()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.cancel_network_cache_flush(cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("confirm-network-cache-flush")
+                                .icon(IconName::Delete)
+                                .label(match action {
+                                    DnsCacheAction::Dns => {
+                                        zenclash_i18n::text("network.diagnostics.confirm_dns_flush")
+                                    }
+                                    DnsCacheAction::FakeIp => zenclash_i18n::text(
+                                        "network.diagnostics.confirm_fake_ip_flush",
+                                    ),
+                                })
+                                .small()
+                                .danger()
+                                .disabled(self.mutating)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.flush_network_cache(action, cx);
+                                })),
+                        )
+                    })
+                    .when(self.network_probe.cache_confirmation.is_none(), |this| {
+                        this.child(
+                            Button::new("request-dns-cache-flush")
+                                .label(zenclash_i18n::text("network.diagnostics.flush_dns"))
+                                .small()
+                                .outline()
+                                .disabled(self.mutating)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.request_network_cache_flush(DnsCacheAction::Dns, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("request-fake-ip-cache-flush")
+                                .label(zenclash_i18n::text("network.diagnostics.flush_fake_ip"))
+                                .small()
+                                .outline()
+                                .disabled(self.mutating)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.request_network_cache_flush(DnsCacheAction::FakeIp, cx);
+                                })),
+                        )
+                    })
+                    .child(
+                        Button::new("copy-support-bundle")
+                            .icon(IconName::Copy)
+                            .label(zenclash_i18n::text("network.diagnostics.copy_support"))
+                            .small()
+                            .primary()
+                            .disabled(report.is_none())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.copy_network_support_bundle(cx);
+                            })),
+                    ),
+            )
     }
 
     fn render_public_ip_card(
@@ -236,13 +364,13 @@ impl RuntimePage {
             .child(config_input_row(
                 zenclash_i18n::text("network.latency.target_name"),
                 zenclash_i18n::text("network.latency.target_name_description"),
-                Input::new(&self.network_latency_name),
+                Input::new(&self.network_probe.latency_name),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("network.latency.target_url"),
                 zenclash_i18n::text("network.latency.target_url_description"),
-                Input::new(&self.network_latency_url),
+                Input::new(&self.network_probe.latency_url),
                 theme,
             ))
             .child(
@@ -404,5 +532,133 @@ impl RuntimePage {
                             ),
                     ),
             )
+    }
+}
+
+fn render_diagnostic_step(
+    step: &DiagnosticStep,
+    theme: &gpui_component::Theme,
+) -> gpui::AnyElement {
+    let (status, color) = match &step.outcome {
+        Ok(data) => (diagnostic_data_summary(data), theme.success),
+        Err(error) => (error.message.clone(), theme.danger),
+    };
+    h_flex()
+        .min_h(px(54.))
+        .px_4()
+        .gap_3()
+        .justify_between()
+        .border_b_1()
+        .border_color(theme.border)
+        .child(
+            v_flex()
+                .gap_1()
+                .child(div().text_sm().child(diagnostic_step_label(step.kind)))
+                .child(div().text_xs().text_color(theme.muted_foreground).child(
+                    zenclash_i18n::text_with(
+                        "network.diagnostics.route_time",
+                        &[
+                            ("route", diagnostic_route_label(step.route)),
+                            ("duration", step.duration_ms.to_string()),
+                        ],
+                    ),
+                )),
+        )
+        .child(
+            div()
+                .max_w(px(620.))
+                .text_right()
+                .text_xs()
+                .text_color(color)
+                .child(status),
+        )
+        .into_any_element()
+}
+
+fn diagnostic_step_label(kind: DiagnosticStepKind) -> String {
+    let key = match kind {
+        DiagnosticStepKind::Controller => "network.diagnostics.steps.controller",
+        DiagnosticStepKind::Capture => "network.diagnostics.steps.capture",
+        DiagnosticStepKind::DnsA => "network.diagnostics.steps.dns_a",
+        DiagnosticStepKind::DnsAaaa => "network.diagnostics.steps.dns_aaaa",
+        DiagnosticStepKind::NetworkDirect => "network.diagnostics.steps.direct",
+        DiagnosticStepKind::NetworkMihomo => "network.diagnostics.steps.mihomo",
+        DiagnosticStepKind::ProxyProviders => "network.diagnostics.steps.proxy_providers",
+        DiagnosticStepKind::RuleProviders => "network.diagnostics.steps.rule_providers",
+    };
+    zenclash_i18n::text(key)
+}
+
+fn diagnostic_route_label(route: DiagnosticRoute) -> String {
+    let key = match route {
+        DiagnosticRoute::Controller => "network.diagnostics.routes.controller",
+        DiagnosticRoute::Local => "network.diagnostics.routes.local",
+        DiagnosticRoute::Direct => "network.diagnostics.routes.direct",
+        DiagnosticRoute::Mihomo => "network.diagnostics.routes.mihomo",
+    };
+    zenclash_i18n::text(key)
+}
+
+fn diagnostic_data_summary(data: &DiagnosticData) -> String {
+    match data {
+        DiagnosticData::Controller(version) => zenclash_i18n::text_with(
+            "network.diagnostics.results.controller",
+            &[("version", empty_dash(&version.version))],
+        ),
+        DiagnosticData::Capture(capture) => zenclash_i18n::text_with(
+            "network.diagnostics.results.capture",
+            &[
+                (
+                    "system_proxy",
+                    super::yes_no(
+                        capture
+                            .system_proxy
+                            .value()
+                            .is_some_and(|value| value.actual.active()),
+                    ),
+                ),
+                (
+                    "tun",
+                    super::yes_no(capture.tun.value().is_some_and(|value| {
+                        value.observed == zenclash_core::CapabilityState::Active
+                    })),
+                ),
+            ],
+        ),
+        DiagnosticData::Dns(response) => {
+            let answers = response
+                .answer
+                .iter()
+                .map(|answer| format!("{} (TTL {}s)", answer.data, answer.ttl))
+                .collect::<Vec<_>>()
+                .join(", ");
+            zenclash_i18n::text_with(
+                "network.diagnostics.results.dns",
+                &[
+                    ("status", response.status.to_string()),
+                    ("count", response.answer.len().to_string()),
+                    ("answers", empty_dash(&answers)),
+                ],
+            )
+        }
+        DiagnosticData::Network(snapshot) => {
+            let succeeded = snapshot
+                .latencies
+                .iter()
+                .filter(|result| result.latency_ms.is_some())
+                .count();
+            zenclash_i18n::text_with(
+                "network.diagnostics.results.network",
+                &[
+                    ("ip", super::yes_no(snapshot.public_ip.is_some())),
+                    ("success", succeeded.to_string()),
+                    ("total", snapshot.latencies.len().to_string()),
+                ],
+            )
+        }
+        DiagnosticData::Providers(catalog) => zenclash_i18n::text_with(
+            "network.diagnostics.results.providers",
+            &[("count", catalog.providers.len().to_string())],
+        ),
     }
 }

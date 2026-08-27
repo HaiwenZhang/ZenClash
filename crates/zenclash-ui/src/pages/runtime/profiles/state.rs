@@ -5,6 +5,7 @@ use zenclash_core::RemoteProfileRoute;
 /// Input and editor state owned by the profiles page.
 pub(crate) struct ProfileFormState {
     pub(super) adding_subscription: bool,
+    pub(super) subscription_error: Option<String>,
     pub(super) subscription_name: Entity<InputState>,
     pub(super) subscription_url: Entity<InputState>,
     pub(super) subscription_user_agent: Entity<InputState>,
@@ -28,6 +29,7 @@ impl ProfileFormState {
     ) -> Self {
         Self {
             adding_subscription: false,
+            subscription_error: None,
             subscription_name: cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder(zenclash_i18n::text("profiles.form.placeholder_name"))

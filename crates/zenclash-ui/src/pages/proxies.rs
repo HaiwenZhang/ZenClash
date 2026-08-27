@@ -6,11 +6,11 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Sizable, button::Button, h_flex, progress::Progress,
-    scroll::ScrollableElement, v_flex,
+    scroll::ScrollableElement, switch::Switch, v_flex,
 };
 use zenclash_core::{
-    DelayHistory, MihomoClient, ProxyCatalog, ProxyDelayTarget, ProxyGroup, ProxyNode,
-    ProxyOperations,
+    ConnectionPolicy, DelayHistory, MihomoClient, ProxyCatalog, ProxyDelayTarget, ProxyGroup,
+    ProxyGroupBehavior, ProxyNode, ProxyOperations, ProxyVisibility,
 };
 
 mod actions;
@@ -28,9 +28,13 @@ pub struct ProxiesPage {
     testing: HashSet<String>,
     test_failures: HashMap<String, DelayTestFailure>,
     switching: Option<(String, String)>,
+    restoring_auto: Option<String>,
+    measuring_and_restoring_auto: Option<String>,
+    show_hidden: bool,
     loading: bool,
     catalog_generation: u64,
     error: Option<String>,
+    notice: Option<String>,
     focus_handle: gpui::FocusHandle,
 }
 
@@ -50,9 +54,13 @@ impl ProxiesPage {
             testing: HashSet::new(),
             test_failures: HashMap::new(),
             switching: None,
+            restoring_auto: None,
+            measuring_and_restoring_auto: None,
+            show_hidden: false,
             loading: false,
             catalog_generation: 0,
             error: None,
+            notice: None,
             focus_handle: cx.focus_handle(),
         };
         page.refresh(cx);
@@ -104,6 +112,7 @@ impl Render for ProxiesPage {
         let theme = cx.theme().clone();
         let catalog = self.catalog.clone();
         let error = self.error.clone();
+        let notice = self.notice.clone();
 
         v_flex()
             .track_focus(&self.focus_handle)
@@ -133,6 +142,21 @@ impl Render for ProxiesPage {
                                 .child(error),
                         )
                     })
+                    .when_some(notice, |this, notice| {
+                        this.child(
+                            h_flex()
+                                .gap_2()
+                                .p_3()
+                                .rounded(theme.radius)
+                                .border_1()
+                                .border_color(theme.primary.opacity(0.5))
+                                .bg(theme.primary.opacity(0.08))
+                                .text_sm()
+                                .text_color(theme.foreground)
+                                .child(Icon::new(IconName::Info).size_4())
+                                .child(notice),
+                        )
+                    })
                     .when(self.loading && catalog.is_none(), |this| {
                         this.child(
                             div()
@@ -147,6 +171,7 @@ impl Render for ProxiesPage {
                     .when_some(catalog, |this, catalog| {
                         let groups = catalog
                             .groups_for_mode(&self.outbound_mode)
+                            .filter(|group| self.show_hidden || !group.hidden)
                             .collect::<Vec<_>>();
                         if groups.is_empty() {
                             let message = if self.outbound_mode.eq_ignore_ascii_case("direct") {
@@ -174,6 +199,17 @@ impl Render for ProxiesPage {
                     }),
             )
     }
+}
+
+fn group_allows_manual_selection(behavior: &ProxyGroupBehavior) -> bool {
+    matches!(
+        behavior,
+        ProxyGroupBehavior::Selector | ProxyGroupBehavior::Automatic { .. }
+    )
+}
+
+fn group_has_unique_current(behavior: &ProxyGroupBehavior) -> bool {
+    !matches!(behavior, ProxyGroupBehavior::LoadBalance)
 }
 
 fn test_key(group: &str, proxy: &str) -> String {
@@ -247,6 +283,22 @@ mod tests {
         assert_eq!(proxy.history.len(), MAX_LOCAL_DELAY_HISTORY);
         assert_eq!(proxy.history.first().map(|sample| sample.delay), Some(2));
         assert_eq!(proxy.latest_delay(), Some(21));
+    }
+
+    #[test]
+    fn load_balance_group_has_no_manual_selection_or_unique_current() {
+        assert!(!group_allows_manual_selection(
+            &ProxyGroupBehavior::LoadBalance
+        ));
+        assert!(!group_has_unique_current(&ProxyGroupBehavior::LoadBalance));
+    }
+
+    #[test]
+    fn selector_and_automatic_groups_allow_manual_selection() {
+        assert!(group_allows_manual_selection(&ProxyGroupBehavior::Selector));
+        assert!(group_allows_manual_selection(
+            &ProxyGroupBehavior::Automatic { fixed: false }
+        ));
     }
 
     #[test]

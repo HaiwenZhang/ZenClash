@@ -1,6 +1,6 @@
 use super::{
     super::{
-        Context, Page, PageTaskToken, PathBuf, PathPromptOptions, ProfileActivated,
+        AppContext, Context, Page, PageTaskToken, PathBuf, PathPromptOptions, ProfileActivated,
         RemoteProfileOptions, RuntimePage, Window, load_page,
     },
     workflow,
@@ -52,7 +52,7 @@ impl RuntimePage {
                                 });
                         }
                     }
-                    Err(error) => this.set_page_error(token, error),
+                    Err(error) => this.set_profile_page_error(token, error),
                 }
                 cx.notify();
             });
@@ -74,15 +74,24 @@ impl RuntimePage {
         }
     }
 
-    fn import_local_profile(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    fn import_local_profile_for_page(&mut self, path: PathBuf, page: Page, cx: &mut Context<Self>) {
         let Some(store) = self.profile_store.clone() else {
-            self.error = Some(zenclash_i18n::text("profiles.errors.store_unavailable"));
+            let error = zenclash_i18n::text("profiles.errors.store_unavailable");
+            if page == Page::Home {
+                self.home.action_error = Some(error);
+            } else {
+                self.error = Some(error);
+            }
             cx.notify();
             return;
         };
-        let Some(token) = self.begin_mutation(Page::Profiles) else {
+        let Some(token) = self.begin_mutation(page) else {
             return;
         };
+        if page == Page::Home {
+            self.home.profile_switching = Some("local-import".into());
+            self.home.action_error = None;
+        }
         let controlled = self.controlled_config_store.clone();
         let core_runtime = workflow::CoreProfileRuntime::new(self.core_session.clone());
         let task = self.runtime.spawn(workflow::import_local(
@@ -90,6 +99,7 @@ impl RuntimePage {
             controlled,
             core_runtime,
             path,
+            page,
         ));
         cx.spawn(async move |this, cx| {
             let result = task
@@ -103,6 +113,7 @@ impl RuntimePage {
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
+                this.home.profile_switching = None;
                 match result {
                     Ok(outcome) => this.apply_profile_activation(
                         outcome,
@@ -115,7 +126,7 @@ impl RuntimePage {
                         token,
                         cx,
                     ),
-                    Err(error) => this.set_page_error(token, error),
+                    Err(error) => this.set_profile_page_error(token, error),
                 }
                 cx.notify();
             });
@@ -126,13 +137,15 @@ impl RuntimePage {
 
     pub(super) fn add_remote_profile(&mut self, cx: &mut Context<Self>) {
         let Some(store) = self.profile_store.clone() else {
-            self.error = Some(zenclash_i18n::text("profiles.errors.store_unavailable"));
+            self.profile_forms.subscription_error =
+                Some(zenclash_i18n::text("profiles.errors.store_unavailable"));
             cx.notify();
             return;
         };
         if self.mutating {
             return;
         }
+        self.profile_forms.subscription_error = None;
         let name = self
             .profile_forms
             .subscription_name
@@ -158,14 +171,15 @@ impl RuntimePage {
             .value()
             .to_string();
         if name.trim().is_empty() || url.trim().is_empty() {
-            self.error = Some(zenclash_i18n::text("profiles.errors.required_fields"));
+            self.profile_forms.subscription_error =
+                Some(zenclash_i18n::text("profiles.errors.required_fields"));
             cx.notify();
             return;
         }
         let options = match RemoteProfileOptions::new(authorization, false) {
             Ok(options) => options.with_route(self.profile_forms.subscription_route),
             Err(error) => {
-                self.error = Some(zenclash_i18n::text_with(
+                self.profile_forms.subscription_error = Some(zenclash_i18n::text_with(
                     "profiles.errors.request_invalid",
                     &[("error", error.to_string())],
                 ));
@@ -201,6 +215,7 @@ impl RuntimePage {
                 this.mutating = false;
                 match result {
                     Ok(outcome) => {
+                        this.profile_forms.subscription_error = None;
                         this.profile_forms.adding_subscription = false;
                         this.apply_profile_activation(
                             outcome,
@@ -214,7 +229,7 @@ impl RuntimePage {
                             cx,
                         );
                     }
-                    Err(error) => this.set_page_error(token, error),
+                    Err(error) => this.profile_forms.subscription_error = Some(error),
                 }
                 cx.notify();
             });
@@ -248,7 +263,8 @@ impl RuntimePage {
             return;
         };
         if page == Page::Home {
-            self.home_profile_switching = Some(id.clone());
+            self.home.profile_switching = Some(id.clone());
+            self.home.action_error = None;
         }
         let controlled = self.controlled_config_store.clone();
         let core_runtime = workflow::CoreProfileRuntime::new(self.core_session.clone());
@@ -271,7 +287,7 @@ impl RuntimePage {
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
-                this.home_profile_switching = None;
+                this.home.profile_switching = None;
                 match result {
                     Ok(outcome) => this.apply_profile_activation(
                         outcome,
@@ -284,7 +300,7 @@ impl RuntimePage {
                         token,
                         cx,
                     ),
-                    Err(error) => this.set_page_error(token, error),
+                    Err(error) => this.set_profile_page_error(token, error),
                 }
                 cx.notify();
             });
@@ -293,8 +309,22 @@ impl RuntimePage {
         cx.notify();
     }
 
-    pub(super) fn choose_profile(&mut self, cx: &mut Context<Self>) {
-        let token = self.page_task_token_for(Page::Profiles);
+    pub(super) fn choose_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.choose_profile_for_page(Page::Profiles, window, cx);
+    }
+
+    pub(in crate::pages::runtime) fn choose_home_profile(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.choose_profile_for_page(Page::Home, window, cx);
+    }
+
+    fn choose_profile_for_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        let token = self.page_task_token_for(page);
+        let restore_focus = window.focused(cx);
+        let window_handle = window.window_handle();
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -307,7 +337,7 @@ impl RuntimePage {
                 Ok(Ok(Some(paths))) => {
                     if this.is_page_task_current(token) {
                         if let Some(path) = paths.into_iter().next() {
-                            this.import_local_profile(path, cx);
+                            this.import_local_profile_for_page(path, page, cx);
                         }
                     } else {
                         tracing::info!("discarded profile selection after leaving profile page");
@@ -335,8 +365,23 @@ impl RuntimePage {
                     cx.notify();
                 }
             });
+            if let Some(focus) = restore_focus {
+                let _ = cx.update_window(window_handle, |_, window, _| focus.focus(window));
+            }
         })
         .detach();
+    }
+
+    pub(in crate::pages::runtime) fn prepare_remote_profile_import(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.profile_forms.adding_subscription = true;
+        self.profile_forms
+            .subscription_url
+            .update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
     }
 
     fn apply_profile_activation(
@@ -350,17 +395,20 @@ impl RuntimePage {
         self.invalidate_config_inputs();
         self.config_preview = None;
         if let Err(error) = self.reload_profile_catalog() {
-            self.set_page_error(token, error);
+            self.set_profile_page_error(token, error);
         }
         cx.emit(ProfileActivated { path: outcome.path });
         match outcome.refresh {
             Ok(data) => {
                 if self.replace_page_data(token, data) {
+                    if token.page == Page::Home {
+                        self.home.action_error = None;
+                    }
                     self.notice = Some(notice(&outcome.name));
                 }
             }
             Err(error) => {
-                self.set_page_error(
+                self.set_profile_page_error(
                     token,
                     zenclash_i18n::text_with(
                         "profiles.errors.enabled_refresh",
@@ -368,6 +416,14 @@ impl RuntimePage {
                     ),
                 );
             }
+        }
+    }
+
+    fn set_profile_page_error(&mut self, token: PageTaskToken, error: String) {
+        if token.page == Page::Home && self.is_page_task_current(token) {
+            self.home.action_error = Some(error);
+        } else {
+            self.set_page_error(token, error);
         }
     }
 }

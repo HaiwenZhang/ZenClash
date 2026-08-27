@@ -59,6 +59,27 @@ pub(super) fn open_directory(path: PathBuf) -> io::Result<()> {
     Ok(())
 }
 
+pub(crate) fn open_external_url(value: String) -> io::Result<()> {
+    let url = zenclash_core::validate_external_https_url(&value).map_err(io::Error::other)?;
+    thread::Builder::new()
+        .name("zenclash-url-opener".into())
+        .spawn(move || {
+            let opener = if cfg!(target_os = "macos") {
+                "open"
+            } else if cfg!(target_os = "windows") {
+                "explorer.exe"
+            } else {
+                "xdg-open"
+            };
+            match Command::new(opener).arg(&url).status() {
+                Ok(status) if status.success() => {}
+                Ok(status) => tracing::warn!(%status, %url, "URL opener exited unsuccessfully"),
+                Err(error) => tracing::warn!(%error, %url, "failed to open URL"),
+            }
+        })?;
+    Ok(())
+}
+
 fn installed_resources_dir() -> Option<PathBuf> {
     let executable_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
     resource_candidates(&executable_dir)

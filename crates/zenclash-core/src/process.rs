@@ -3,7 +3,10 @@ use std::{
     io::{BufRead, BufReader},
     path::PathBuf,
     process::{Child, Command, Stdio},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -33,6 +36,7 @@ const QUIET_MEOW_PROTOCOL_LOGS: &str = "tokio_tungstenite=warn,tungstenite=warn"
 pub struct MihomoProcess {
     child: Mutex<Option<Child>>,
     logs: Arc<RwLock<VecDeque<String>>>,
+    last_exit_reason: RwLock<Option<String>>,
     config: MihomoLaunchConfig,
 }
 
@@ -45,6 +49,8 @@ pub struct MihomoProcessSnapshot {
     pub running: bool,
     /// Live process identifier, absent after exit or stop.
     pub pid: Option<u32>,
+    /// Last unexpected child exit status observed through the owned handle.
+    pub exit_reason: Option<String>,
     /// Executable used to launch the child.
     pub binary: PathBuf,
     /// Active YAML configuration passed to the child.
@@ -69,6 +75,7 @@ impl MihomoProcess {
         Ok(Arc::new(Self {
             child: Mutex::new(Some(child)),
             logs,
+            last_exit_reason: RwLock::new(None),
             config,
         }))
     }
@@ -90,6 +97,7 @@ impl MihomoProcess {
         let mut child_slot = self.child.lock();
         stop_child(&mut child_slot)?;
         let child = spawn_child(&self.config, self.logs.clone())?;
+        *self.last_exit_reason.write() = None;
         *child_slot = Some(child);
         Ok(())
     }
@@ -104,13 +112,37 @@ impl MihomoProcess {
     ///
     /// Returns validation, stop, spawn, task, early-exit, or readiness errors.
     pub async fn restart_and_wait(self: &Arc<Self>, timeout: Duration) -> MihomoResult<()> {
+        self.restart_and_wait_until(timeout, None).await
+    }
+
+    pub(crate) async fn restart_and_wait_until(
+        self: &Arc<Self>,
+        timeout: Duration,
+        cancelled: Option<Arc<AtomicBool>>,
+    ) -> MihomoResult<()> {
+        if cancelled
+            .as_ref()
+            .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+        {
+            return Err(MihomoError::Process(
+                "内核重启在停止阶段开始前已取消".into(),
+            ));
+        }
         let process = self.clone();
         tokio::task::spawn_blocking(move || process.restart())
             .await
             .map_err(|error| {
                 MihomoError::Process(format!("内核重启后台任务异常结束：{error}"))
             })??;
-        self.wait_until_ready(timeout).await
+        let ready = self.wait_until_ready_until(timeout, cancelled).await;
+        if let Err(error) = ready {
+            let stop = self.stop_async().await;
+            return Err(match stop {
+                Ok(()) => MihomoError::Process(format!("{error}；已停止未就绪内核")),
+                Err(stop) => MihomoError::Process(format!("{error}；停止未就绪内核失败：{stop}")),
+            });
+        }
+        Ok(())
     }
 
     /// Polls the real `/version` endpoint until it responds, the child exits,
@@ -120,9 +152,23 @@ impl MihomoProcess {
     ///
     /// Returns the last process log when Mihomo exits early, or a timeout error.
     pub async fn wait_until_ready(&self, timeout: Duration) -> MihomoResult<()> {
+        self.wait_until_ready_until(timeout, None).await
+    }
+
+    async fn wait_until_ready_until(
+        &self,
+        timeout: Duration,
+        cancelled: Option<Arc<AtomicBool>>,
+    ) -> MihomoResult<()> {
         let client = MihomoClient::new(self.config.endpoint.clone())?;
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
+            if cancelled
+                .as_ref()
+                .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+            {
+                return Err(MihomoError::Process("等待内核控制器时收到停止请求".into()));
+            }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 return Err(self.readiness_timeout_error());
@@ -192,7 +238,10 @@ impl MihomoProcess {
         let mut child = self.child.lock();
         child.as_mut().is_some_and(|child| match child.try_wait() {
             Ok(None) => true,
-            Ok(Some(_)) => false,
+            Ok(Some(status)) => {
+                *self.last_exit_reason.write() = Some(format!("内核退出状态：{status}"));
+                false
+            }
             Err(error) => {
                 tracing::warn!(%error, "failed to query Mihomo process status");
                 false
@@ -209,7 +258,10 @@ impl MihomoProcess {
                 .as_mut()
                 .map_or((false, None), |process| match process.try_wait() {
                     Ok(None) => (true, Some(process.id())),
-                    Ok(Some(_)) => (false, None),
+                    Ok(Some(status)) => {
+                        *self.last_exit_reason.write() = Some(format!("内核退出状态：{status}"));
+                        (false, None)
+                    }
                     Err(error) => {
                         tracing::warn!(%error, "failed to snapshot Mihomo process status");
                         (false, None)
@@ -220,6 +272,7 @@ impl MihomoProcess {
             kind: self.config.kind,
             running,
             pid,
+            exit_reason: self.last_exit_reason.read().clone(),
             binary: self.config.binary.clone(),
             config_file: self.config.config_file.clone(),
             home_dir: self.config.home_dir.clone(),

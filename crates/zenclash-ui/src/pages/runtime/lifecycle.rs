@@ -1,9 +1,8 @@
 use super::{
-    AppContext, ConfigInputs, Context, ControlledConfigStore, Duration, HashSet, InputEvent,
-    InputState, MihomoLogLevel, Page, PageTaskToken, ProfileActivated, ProfileCatalog,
-    ProfileStore, RuntimeConfig, RuntimeConfigApplied, RuntimeData, RuntimePage,
-    RuntimePageServices, Value, Window, YamlOverrideCatalog, YamlOverrideStore, load_page,
-    load_page_with_binary,
+    ConfigInputs, Context, ControlledConfigStore, Duration, MihomoLogLevel, Page, PageTaskToken,
+    ProfileActivated, ProfileCatalog, ProfileStore, RuntimeConfig, RuntimeConfigApplied,
+    RuntimeData, RuntimePage, RuntimePageServices, Value, Window, YamlOverrideCatalog,
+    YamlOverrideStore, load_page, load_page_with_binary,
 };
 use zenclash_core::{CoreApplyKind, EffectiveConfigIntent};
 
@@ -82,27 +81,6 @@ fn empty_json_object() -> Value {
 }
 
 impl RuntimePage {
-    pub(crate) fn report_managed_core_state(&mut self, running: bool, cx: &mut Context<Self>) {
-        if running {
-            if self.startup_error.as_deref().is_some_and(|error| {
-                [zenclash_i18n::ZH_CN, zenclash_i18n::EN]
-                    .into_iter()
-                    .any(|locale| {
-                        error.starts_with(&zenclash_i18n::text_for(
-                            locale,
-                            "runtime.lifecycle.core_exit_prefix",
-                        ))
-                    })
-            }) {
-                self.startup_error = None;
-                self.notice = Some(zenclash_i18n::text("runtime.lifecycle.core_restarted"));
-            }
-        } else {
-            self.startup_error = Some(zenclash_i18n::text("runtime.lifecycle.core_exited"));
-        }
-        cx.notify();
-    }
-
     pub(crate) fn preferences_restored_from_app(
         &mut self,
         preferences: super::AppPreferences,
@@ -122,15 +100,22 @@ impl RuntimePage {
     ) {
         let localized_inputs = [
             (
-                self.network_latency_name.clone(),
+                self.network_probe.latency_name.clone(),
                 "runtime.placeholders.network_target",
             ),
             (
-                self.connection_filter.clone(),
+                self.network_probe.dns_name.clone(),
+                "runtime.placeholders.dns_name",
+            ),
+            (
+                self.connections.filter.clone(),
                 "runtime.placeholders.connection_filter",
             ),
-            (self.log_filter.clone(), "runtime.placeholders.log_filter"),
-            (self.rule_filter.clone(), "runtime.placeholders.rule_filter"),
+            (self.logs.filter.clone(), "runtime.placeholders.log_filter"),
+            (
+                self.rules.filter.clone(),
+                "runtime.placeholders.rule_filter",
+            ),
             (
                 self.config_inputs.core.mixed_port.clone(),
                 "config_inputs.placeholders.mixed_port",
@@ -279,12 +264,14 @@ impl RuntimePage {
             runtime,
             traffic_monitor,
             log_monitor,
+            operational_status,
+            traffic_capture,
             process,
             profile_path,
             controlled_config_store,
             preferences_store,
             preferences,
-            system_proxy_controller,
+            system_proxy_session,
             traffic_history_store,
             startup_notice,
             startup_error,
@@ -303,42 +290,12 @@ impl RuntimePage {
         let config_inputs_profile = profile_path.clone();
         let profile_forms = super::profiles::ProfileFormState::new(window, cx);
         let profile_editor = super::overrides::ProfileEditorState::new(window, cx);
-        let network_latency_name = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(zenclash_i18n::text("runtime.placeholders.network_target"))
-        });
-        let network_latency_url = cx
-            .new(|cx| InputState::new(window, cx).placeholder("https://example.com/generate_204"));
-        let connection_filter = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(zenclash_i18n::text(
-                "runtime.placeholders.connection_filter",
-            ))
-        });
-        let connection_filter_subscription =
-            cx.subscribe(&connection_filter, |_, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    cx.notify();
-                }
-            });
-        let log_filter = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(zenclash_i18n::text("runtime.placeholders.log_filter"))
-        });
-        let log_filter_subscription = cx.subscribe(&log_filter, |_, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                cx.notify();
-            }
-        });
-        let rule_filter = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(zenclash_i18n::text("runtime.placeholders.rule_filter"))
-        });
-        let rule_filter_subscription =
-            cx.subscribe(&rule_filter, |_, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    cx.notify();
-                }
-            });
+        let provider_operations = super::ProviderOperations::new(client.clone());
+        let network_probe = super::network::NetworkProbeUiState::new(window, cx);
+        let (connections, connection_filter_subscription) =
+            super::connections::ConnectionsUiState::new(window, cx);
+        let (logs, log_filter_subscription) = super::logs::LogUiState::new(window, cx);
+        let (rules, rule_filter_subscription) = super::rules::RulesUiState::new(window, cx);
         let mut this = Self {
             page,
             core_kind,
@@ -347,6 +304,8 @@ impl RuntimePage {
             runtime,
             traffic_monitor,
             log_monitor,
+            operational_status,
+            traffic_capture,
             process,
             profile_path,
             profile_store,
@@ -359,14 +318,13 @@ impl RuntimePage {
             preferences_store,
             preferences,
             core_management: super::settings::CoreManagementUiState::default(),
-            system_proxy_controller,
+            app_update: super::settings::AppUpdateUiState::default(),
+            system_proxy_session,
             traffic_history_store,
             profile_forms,
-            network_latency_name,
-            network_latency_url,
-            connection_filter,
-            log_filter,
-            rule_filter,
+            connections,
+            logs,
+            rules,
             system_proxy_editor: None,
             core_releases: super::CoreReleaseState::default(),
             override_store,
@@ -374,16 +332,15 @@ impl RuntimePage {
             config_preview: None,
             profile_editor,
             data: RuntimeData::Empty,
-            home_profile_switching: None,
-            home_proxy_switching: None,
+            home: super::home::HomeUiState::default(),
             traffic_history: super::traffic::TrafficHistoryUiState::default(),
-            network_probe: super::network::NetworkProbeUiState::default(),
+            network_probe,
+            provider_operations,
             ruleset: super::resources::RulesetUiState::default(),
             navigation_generation: 0,
             load_generation: 0,
             loading: false,
             mutating: false,
-            closing_connections: HashSet::new(),
             error: error.or(webdav_error),
             startup_error,
             notice: startup_notice,
@@ -395,8 +352,31 @@ impl RuntimePage {
             ],
         };
         this.refresh(cx);
+        this.refresh_app_update(cx);
+        Self::start_operational_updates(this.operational_status.subscribe(), cx);
         Self::start_live_updates(cx);
         this
+    }
+
+    fn start_operational_updates(
+        mut updates: zenclash_core::OperationalStatusStream,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            while updates.changed().await.is_ok() {
+                if this
+                    .update(cx, |this, cx| {
+                        if this.page == Page::Home {
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// Switches the active tab and invalidates results from older page tasks.
@@ -423,6 +403,9 @@ impl RuntimePage {
         self.refresh(cx);
         if page == Page::Settings {
             self.refresh_core_management(cx);
+            if !self.app_update.checked {
+                self.refresh_app_update(cx);
+            }
         }
         if page == Page::Traffic {
             self.refresh_traffic_history(cx);
@@ -443,7 +426,7 @@ impl RuntimePage {
                         if matches!(this.page, Page::Connections | Page::Traffic)
                             && !this.loading
                             && !this.mutating
-                            && this.closing_connections.is_empty()
+                            && this.connections.closing.is_empty()
                         {
                             this.refresh(cx);
                         }
@@ -508,8 +491,8 @@ impl RuntimePage {
                 }
                 match result {
                     Ok(data) => {
-                        this.data = data;
-                        if page == Page::Network {
+                        let token = this.page_task_token_for(page);
+                        if this.replace_page_data(token, data) && page == Page::Network {
                             this.refresh_network_probe(cx);
                         }
                     }
@@ -714,7 +697,13 @@ impl RuntimePage {
         if !self.is_page_task_current(token) {
             return false;
         }
-        self.data = data;
+        if let RuntimeData::Resources { proxy, rules, .. } = &data {
+            self.provider_operations
+                .observe_catalog(super::ProviderKind::Proxy, proxy);
+            self.provider_operations
+                .observe_catalog(super::ProviderKind::Rule, rules);
+        }
+        self.data = data.retain_dashboard_successes(&self.data);
         true
     }
 
@@ -728,8 +717,8 @@ impl RuntimePage {
 
     pub(super) const fn config(&self) -> Option<&RuntimeConfig> {
         match &self.data {
-            RuntimeData::Dashboard { config, .. }
-            | RuntimeData::Config(config)
+            RuntimeData::Dashboard { config, .. } => config.value(),
+            RuntimeData::Config(config)
             | RuntimeData::Core { config, .. }
             | RuntimeData::Profile { config, .. }
             | RuntimeData::Resources { config, .. }

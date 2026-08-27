@@ -60,6 +60,7 @@ fn exited_process_snapshot_does_not_expose_a_stale_pid() {
     let process = MihomoProcess {
         child: Mutex::new(Some(child)),
         logs: Arc::new(RwLock::new(VecDeque::new())),
+        last_exit_reason: RwLock::new(None),
         config: MihomoLaunchConfig {
             kind: CoreKind::Mihomo,
             binary: PathBuf::from("/usr/bin/true"),
@@ -73,6 +74,7 @@ fn exited_process_snapshot_does_not_expose_a_stale_pid() {
     let snapshot = process.snapshot();
 
     assert_eq!((snapshot.running, snapshot.pid), (false, None));
+    assert!(snapshot.exit_reason.is_some());
     assert_eq!(snapshot.kind, CoreKind::Mihomo);
 }
 
@@ -160,6 +162,55 @@ async fn async_restart_rejection_does_not_stop_the_running_child() {
     assert!(error.to_string().contains("当前内核保持运行"));
     assert_eq!(process.snapshot().pid, Some(first_pid));
     process.stop().unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readiness_timeout_stops_and_reaps_the_unconfirmed_child() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = std::env::temp_dir().join(format!(
+        "zenclash-process-ready-timeout-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let binary = directory.join("mihomo");
+    std::fs::write(
+        &binary,
+        "#!/bin/sh\nif [ \"$1\" = '-t' ]; then exit 0; fi\ntrap 'exit 0' TERM\nwhile true; do sleep 0.05; done\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let profile = directory.join("profile.yaml");
+    std::fs::write(&profile, "rules:\n  - MATCH,DIRECT\n").unwrap();
+    let controller = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let process = MihomoProcess::spawn(MihomoLaunchConfig {
+        kind: CoreKind::Mihomo,
+        binary,
+        config_file: profile,
+        home_dir: directory.join("data"),
+        endpoint: MihomoEndpoint::with_random_secret(controller.to_string()).unwrap(),
+        controller_override: None,
+    })
+    .unwrap();
+
+    let error = process
+        .restart_and_wait(Duration::from_millis(75))
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("超时"));
+    assert!(error.contains("已停止未就绪内核"));
+    assert!(!process.is_running());
     std::fs::remove_dir_all(directory).unwrap();
 }
 

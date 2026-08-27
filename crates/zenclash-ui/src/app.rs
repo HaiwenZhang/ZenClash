@@ -1,11 +1,4 @@
-use std::{
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::{
     AnyWindowHandle, App, AppContext, ClipboardItem, Context, Entity, Focusable,
@@ -15,13 +8,14 @@ use gpui::{
 use gpui_component::{ActiveTheme, Root, ThemeMode, TitleBar, h_flex, v_flex};
 use zenclash_core::{
     AppPreferences, AppPreferencesStore, AppearancePreference, ControlledConfigStore, CoreKind,
-    CoreSession, LogMonitor, MihomoClient, MihomoLogLevel, MihomoProcess, SystemProxyController,
-    TrafficHistoryStore, TrafficMonitor,
+    CoreSession, LogMonitor, MihomoClient, MihomoLogLevel, MihomoProcess, OperationalStatus,
+    SystemProxyController, SystemProxySession, TrafficCaptureSession, TrafficHistoryStore,
+    TrafficMonitor, TunPermissionManager,
 };
 
 mod actions;
 mod bootstrap;
-mod platform;
+pub(crate) mod platform;
 mod profile_updates;
 mod system_proxy;
 mod traffic_history;
@@ -48,8 +42,8 @@ use crate::{
         Page,
         proxies::ProxiesPage,
         runtime::{
-            ElevatedRestartRequested, PreferencesRestored, ProfileActivated, ProxySelectionChanged,
-            RuntimeConfigApplied, RuntimePage, RuntimePageServices,
+            PreferencesRestored, ProfileActivated, ProxySelectionChanged, RuntimeConfigApplied,
+            RuntimePage, RuntimePageServices,
         },
     },
 };
@@ -112,8 +106,7 @@ pub struct ZenClashApp {
     focus_handle: gpui::FocusHandle,
     proxies_page: Entity<ProxiesPage>,
     runtime_page: Entity<RuntimePage>,
-    mihomo_process: Option<Arc<MihomoProcess>>,
-    managed_core_running: Option<bool>,
+    tray_core_running: Option<bool>,
     profile_path: Option<PathBuf>,
     controlled_config_store: ControlledConfigStore,
     main_window: AnyWindowHandle,
@@ -122,7 +115,8 @@ pub struct ZenClashApp {
     tray_refresh_pending: bool,
     tray_menu_requested: bool,
     system_proxy_commands: LatestCommandQueue<(bool, u16)>,
-    system_proxy_controller: SystemProxyController,
+    operational_status: Arc<OperationalStatus>,
+    traffic_capture: TrafficCaptureSession,
     quit_state: system_proxy::QuitState,
     tun_commands: LatestCommandQueue<bool>,
     proxy_selection_commands: LatestCommandQueue<(String, String)>,
@@ -131,7 +125,6 @@ pub struct ZenClashApp {
     preferences_store: Option<AppPreferencesStore>,
     preferences: AppPreferences,
     restart_after_exit: Arc<parking_lot::Mutex<Option<PathBuf>>>,
-    restart_elevated_after_exit: Arc<AtomicBool>,
     log_monitor: Arc<LogMonitor>,
     traffic_history_policy: Arc<traffic_history::TrafficHistoryPolicy>,
     _subscriptions: Vec<Subscription>,
@@ -167,8 +160,6 @@ pub struct AppServices {
     pub startup_error: Option<String>,
     /// Deferred application restart request consumed after the instance lock is released.
     pub restart_after_exit: Arc<parking_lot::Mutex<Option<PathBuf>>>,
-    /// Whether the deferred restart must use the Windows RunAs verb.
-    pub restart_elevated_after_exit: Arc<AtomicBool>,
 }
 
 impl ZenClashApp {
@@ -195,7 +186,6 @@ impl ZenClashApp {
             startup_notice,
             startup_error,
             restart_after_exit,
-            restart_elevated_after_exit,
         } = services;
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
@@ -203,7 +193,6 @@ impl ZenClashApp {
         let proxies_page = cx.new(|cx| ProxiesPage::new(client.clone(), runtime.clone(), cx));
         let app_profile_path = profile_path.clone();
         let app_controlled_config_store = controlled_config_store.clone();
-        let managed_core_running = mihomo_process.as_ref().map(|process| process.is_running());
         let traffic_history_store = TrafficHistoryStore::discover()
             .inspect_err(
                 |error| tracing::warn!(%error, "failed to discover traffic-history database"),
@@ -212,6 +201,39 @@ impl ZenClashApp {
         let traffic_history_policy =
             Arc::new(traffic_history::TrafficHistoryPolicy::new(&preferences));
         let system_proxy_controller = SystemProxyController::default();
+        let system_proxy_session = preferences_store
+            .clone()
+            .map(|store| SystemProxySession::new(store, system_proxy_controller.clone()));
+        let tun_permissions = mihomo_process
+            .as_ref()
+            .map(|process| process.snapshot().binary)
+            .or_else(|| {
+                std::env::var_os(core_kind.binary_environment_variable()).map(PathBuf::from)
+            })
+            .and_then(|binary| {
+                TunPermissionManager::new(&binary)
+                    .inspect_err(|error| {
+                        tracing::warn!(%error, path = %binary.display(), "TUN permission manager unavailable");
+                    })
+                    .ok()
+            });
+        let traffic_capture = TrafficCaptureSession::new(
+            core_session.clone(),
+            controlled_config_store.clone(),
+            system_proxy_session.clone(),
+            tun_permissions.clone(),
+            profile_path.clone(),
+        );
+        let _supervisor_started =
+            core_session.start_supervisor_with_capture(&runtime, traffic_capture.clone());
+        let operational_status = OperationalStatus::start(
+            &runtime,
+            core_session.clone(),
+            system_proxy_session.clone(),
+            tun_permissions,
+            traffic_monitor.clone(),
+            log_monitor.clone(),
+        );
         let runtime_page = cx.new(|cx| {
             RuntimePage::new(
                 Page::Home,
@@ -222,12 +244,14 @@ impl ZenClashApp {
                     runtime: runtime.clone(),
                     traffic_monitor: traffic_monitor.clone(),
                     log_monitor: log_monitor.clone(),
+                    operational_status: operational_status.clone(),
+                    traffic_capture: traffic_capture.clone(),
                     process: mihomo_process.clone(),
                     profile_path,
                     controlled_config_store,
                     preferences_store: preferences_store.clone(),
                     preferences: preferences.clone(),
-                    system_proxy_controller: system_proxy_controller.clone(),
+                    system_proxy_session,
                     traffic_history_store: traffic_history_store.clone(),
                     startup_notice,
                     startup_error,
@@ -241,8 +265,6 @@ impl ZenClashApp {
             Self::subscribe_proxy_selection_events(&runtime_page, cx);
         let runtime_config_subscription = Self::subscribe_runtime_config_events(&runtime_page, cx);
         let preferences_subscription = Self::subscribe_preference_events(&runtime_page, cx);
-        let elevated_restart_subscription =
-            Self::subscribe_elevated_restart_events(&runtime_page, cx);
         let appearance_subscription = cx.observe_window_appearance(window, |this, window, cx| {
             if this.preferences.appearance == AppearancePreference::System {
                 apply_zen_theme(ThemeMode::from(window.appearance()), Some(window), cx);
@@ -260,8 +282,7 @@ impl ZenClashApp {
             focus_handle,
             proxies_page,
             runtime_page,
-            mihomo_process,
-            managed_core_running,
+            tray_core_running: None,
             profile_path: app_profile_path,
             controlled_config_store: app_controlled_config_store,
             main_window,
@@ -270,7 +291,8 @@ impl ZenClashApp {
             tray_refresh_pending: false,
             tray_menu_requested: false,
             system_proxy_commands: LatestCommandQueue::default(),
-            system_proxy_controller,
+            operational_status,
+            traffic_capture,
             quit_state: system_proxy::QuitState::default(),
             tun_commands: LatestCommandQueue::default(),
             proxy_selection_commands: LatestCommandQueue::default(),
@@ -279,7 +301,6 @@ impl ZenClashApp {
             preferences_store,
             preferences,
             restart_after_exit,
-            restart_elevated_after_exit,
             log_monitor,
             traffic_history_policy,
             _subscriptions: vec![
@@ -287,7 +308,6 @@ impl ZenClashApp {
                 proxy_selection_subscription,
                 runtime_config_subscription,
                 preferences_subscription,
-                elevated_restart_subscription,
                 appearance_subscription,
             ],
         };
@@ -308,6 +328,7 @@ impl ZenClashApp {
     ) -> Subscription {
         cx.subscribe(runtime_page, |this, _, event: &ProfileActivated, cx| {
             this.profile_path = Some(event.path.clone());
+            this.traffic_capture.set_profile(Some(event.path.clone()));
             this.proxies_page
                 .update(cx, super::pages::proxies::ProxiesPage::profile_activated);
             this.restore_system_proxy(cx);
@@ -388,24 +409,6 @@ impl ZenClashApp {
         )
     }
 
-    fn subscribe_elevated_restart_events(
-        runtime_page: &Entity<RuntimePage>,
-        cx: &mut Context<Self>,
-    ) -> Subscription {
-        cx.subscribe(runtime_page, |this, _, _: &ElevatedRestartRequested, cx| {
-            let executable = match std::env::current_exe() {
-                Ok(executable) => executable,
-                Err(error) => {
-                    tracing::warn!(%error, "failed to resolve executable for elevated restart");
-                    return;
-                }
-            };
-            this.restart_elevated_after_exit
-                .store(true, Ordering::Release);
-            this.begin_quit(Some(executable), cx);
-        })
-    }
-
     fn start_traffic_updates(&mut self, cx: &mut Context<Self>) {
         let monitor = self.traffic_monitor.clone();
         let mode = self.outbound_mode.clone();
@@ -425,19 +428,15 @@ impl ZenClashApp {
                             });
                             this.refresh_tray_menu(cx);
                         }
-                        let managed_core_running = this
-                            .mihomo_process
-                            .as_ref()
-                            .map(|process| process.is_running());
-                        if managed_core_running != this.managed_core_running {
-                            this.managed_core_running = managed_core_running;
-                            if let Some(running) = managed_core_running {
-                                this.runtime_page.update(cx, |page, cx| {
-                                    page.report_managed_core_state(running, cx);
-                                });
-                                this.restore_system_proxy(cx);
-                                this.refresh_tray_menu(cx);
-                            }
+                        let tray_core_running = this
+                            .operational_status
+                            .snapshot()
+                            .process
+                            .value()
+                            .map(|process| process.running);
+                        if tray_core_running != this.tray_core_running {
+                            this.tray_core_running = tray_core_running;
+                            this.refresh_tray_menu(cx);
                         }
                         if let Some(tray) = this.network_tray.as_mut()
                             && let Err(error) = tray.update(&snapshot)

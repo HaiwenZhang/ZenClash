@@ -2,6 +2,7 @@
 
 #![deny(missing_docs)]
 
+mod app_update;
 mod autostart;
 mod backup;
 mod client;
@@ -18,23 +19,32 @@ mod listener_fallback;
 mod logs;
 mod models;
 mod network;
+mod network_diagnostics;
+mod operational_status;
 mod platform_command;
 mod preferences;
 mod process;
 mod profile;
 mod profiles;
+mod provider_operations;
 mod proxy;
 mod proxy_operations;
 mod ruleset;
 mod substore;
 mod system_proxy;
 mod traffic;
+mod traffic_capture;
 mod traffic_history;
 mod tun_permissions;
+mod tun_runtime;
 mod webdav;
 mod websocket;
 mod yaml_overrides;
 
+pub use app_update::{
+    AppRelease, AppUpdateError, AppUpdateResult, AppUpdateService, AppUpdateStatus,
+    validate_external_https_url,
+};
 pub use autostart::{AutostartError, AutostartManager, AutostartResult, AutostartStatus};
 pub use backup::{
     BackupError, BackupExportSummary, BackupManager, BackupRestoreTransaction, BackupResult,
@@ -51,8 +61,9 @@ pub use controlled_config::{
 pub use core_backend::{CoreCapabilities, CoreKind, ParseCoreKindError};
 pub use core_installation::{CoreBinaryError, CoreBinaryInfo, validate_core_binary};
 pub use core_session::{
-    CoreApplyKind, CoreApplyOutcome, CoreMaintenanceIntent, CoreSession, CoreSessionError,
-    CoreSessionSnapshot, EffectiveConfigIntent,
+    CoreApplyKind, CoreApplyOutcome, CoreLifecyclePhase, CoreLifecycleSnapshot,
+    CoreMaintenanceIntent, CoreSession, CoreSessionError, CoreSessionSnapshot,
+    EffectiveConfigIntent,
 };
 pub use core_update::{
     CoreUpdateError, CoreUpdateResult, CoreUpdateTransaction, MihomoRelease, MihomoReleaseAsset,
@@ -63,16 +74,29 @@ pub use endpoint::MihomoEndpoint;
 pub use instance_lock::{AppInstanceLock, AppInstanceLockError};
 pub use logs::{
     LogEntry, LogMonitor, LogPersistenceError, LogPersistenceResult, LogPersistenceStatus,
-    MihomoLogLevel, format_log_entries,
+    LogStreamFormat, LogStreamSnapshot, LogTimeSource, MihomoLogLevel, format_log_entries,
+    format_log_entries_support_safe,
 };
 pub use models::{
-    Connection, ConnectionMetadata, ConnectionsSnapshot, MemorySnapshot, Provider, ProviderCatalog,
-    Rule, RuleCatalog, RuleRuntimeStats, RuntimeConfig, SnifferConfig, TunConfig,
+    Connection, ConnectionMetadata, ConnectionsSnapshot, DnsAnswer, DnsQueryResponse, DnsQuestion,
+    DnsRecordType, MemorySnapshot, Provider, ProviderCatalog, Rule, RuleCatalog, RuleRuntimeStats,
+    RuntimeConfig, SnifferConfig, TunConfig,
 };
 pub use network::{
     DEFAULT_NETWORK_LATENCY_TARGETS, NetworkLatencyResult, NetworkLatencyTarget, NetworkProbeError,
     NetworkProbeResult, NetworkProbeRoute, NetworkProbeService, NetworkProbeSnapshot, PublicIpInfo,
     PublicIpProvider, SystemNetworkSnapshot,
+};
+pub use network_diagnostics::{
+    DiagnosticData, DiagnosticFailure, DiagnosticPlan, DiagnosticReport, DiagnosticRoute,
+    DiagnosticStep, DiagnosticStepKind, NetworkDiagnostics, NetworkDiagnosticsError,
+    NetworkDiagnosticsResult, SupportBundle, SupportSafe,
+};
+pub use operational_status::{
+    CapabilityState, CaptureStatus, ControllerCompatibility, ControllerStatus, FirstRunStage,
+    Observation, ObservedPathRoute, OperationalFailure, OperationalSnapshot, OperationalStatus,
+    OperationalStatusStream, PathStatus, ProcessRecoveryStatus, ProcessStatus, RecoveryAction,
+    StreamStatus, StreamStatuses, TunCaptureStatus,
 };
 pub use preferences::{
     AppPreferences, AppPreferencesError, AppPreferencesResult, AppPreferencesStore,
@@ -86,12 +110,22 @@ pub use profiles::{
     DEFAULT_PROFILE_DOWNLOAD_TIMEOUT_SECONDS, DEFAULT_PROFILE_UPDATE_INTERVAL_MINUTES,
     MAX_PROFILE_DOWNLOAD_TIMEOUT_SECONDS, MAX_PROFILE_UPDATE_INTERVAL_MINUTES,
     MIN_PROFILE_DOWNLOAD_TIMEOUT_SECONDS, MIN_PROFILE_UPDATE_INTERVAL_MINUTES, ProfileActivation,
-    ProfileCatalog, ProfileRecord, ProfileSource, ProfileStore, ProfileStoreError,
-    ProfileStoreResult, ProfileUpdate, RemoteProfileOptions, RemoteProfileRoute,
+    ProfileApplication, ProfileApplicationError, ProfileApplyOutcome, ProfileCatalog,
+    ProfileChange, ProfileRecord, ProfileRecovery, ProfileSource, ProfileStore, ProfileStoreError,
+    ProfileStoreResult, ProfileUpdate, ProfileVersion, RemoteProfileOptions, RemoteProfileRoute,
     SubscriptionAuthorization, SubscriptionMetadata, SubscriptionUsage, validate_clash_yaml,
 };
-pub use proxy::{DelayHistory, DelayResult, ProxyCatalog, ProxyGroup, ProxyNode};
-pub use proxy_operations::{ProxyDelayTarget, ProxyOperations, ProxySelectionOutcome};
+pub use provider_operations::{
+    ProviderActionStatus, ProviderKind, ProviderOperationError, ProviderOperationFailure,
+    ProviderOperationResult, ProviderOperationalStatus, ProviderOperations,
+};
+pub use proxy::{
+    DelayHistory, DelayResult, ProxyCatalog, ProxyGroup, ProxyGroupBehavior, ProxyNode,
+};
+pub use proxy_operations::{
+    ConnectionPolicy, ProxyDelayTarget, ProxyGroupMeasurementOutcome, ProxyOperations,
+    ProxySelectionOutcome, ProxyVisibility,
+};
 pub use ruleset::{
     RulesetBehavior, RulesetConversion, RulesetConversionError, RulesetConversionResult,
     RulesetConverter,
@@ -99,14 +133,18 @@ pub use ruleset::{
 pub use substore::{SubStoreClient, SubStoreItem, SubStoreItemKind, SubStoreSnapshot};
 pub use system_proxy::{
     PacServer, PacServerStatus, SystemProxyController, SystemProxyManager, SystemProxyMode,
-    SystemProxyOperation, SystemProxyOwnership, SystemProxyReconcileOutcome,
-    SystemProxyReleaseReason, SystemProxySession, SystemProxySessionError,
-    SystemProxySessionResult, SystemProxySettings, SystemProxyStatus, default_pac_script,
-    default_system_proxy_bypass, normalize_pac_script, normalize_system_proxy_bypass,
-    normalize_system_proxy_host,
+    SystemProxyOperation, SystemProxyOwnership, SystemProxyOwnershipState,
+    SystemProxyReconcileOutcome, SystemProxyReleaseReason, SystemProxySession,
+    SystemProxySessionError, SystemProxySessionResult, SystemProxySessionSnapshot,
+    SystemProxySettings, SystemProxyStatus, default_pac_script, default_system_proxy_bypass,
+    normalize_pac_script, normalize_system_proxy_bypass, normalize_system_proxy_host,
 };
 pub use traffic::{
     LIVE_TRAFFIC_SAMPLE_COUNT, TrafficMonitor, TrafficSample, TrafficSnapshot, format_speed,
+};
+pub use traffic_capture::{
+    CaptureOutcome, CapturePlan, ObservedCapturePlan, TrafficCaptureError, TrafficCaptureSession,
+    TrafficCaptureSnapshot,
 };
 pub use traffic_history::{
     DEFAULT_TRAFFIC_RETENTION_DAYS, TrafficAggregate, TrafficDeltaLogger, TrafficDimension,
@@ -114,9 +152,9 @@ pub use traffic_history::{
     TrafficHistoryStore, TrafficOverview, TrafficTotals, TrafficTrendPoint,
 };
 pub use tun_permissions::{
-    TunPermissionError, TunPermissionGrant, TunPermissionManager, TunPermissionResult,
-    TunPermissionStatus,
+    TunPermissionError, TunPermissionManager, TunPermissionResult, TunPermissionStatus,
 };
+pub use tun_runtime::{TunRuntimeObservation, TunRuntimeObserver};
 pub use webdav::{
     WebDavBackup, WebDavError, WebDavResult, WebDavService, WebDavSettings, WebDavSettingsStore,
     WebDavUploadSummary,

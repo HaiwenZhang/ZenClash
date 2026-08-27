@@ -15,25 +15,36 @@ use gpui_component::{
     v_flex,
 };
 use zenclash_core::{
-    ProxyCatalog, ProxyGroup, ProxyOperations, RuntimeConfig, SubscriptionUsage, SystemProxyStatus,
-    TrafficSample, format_speed,
+    CapabilityState, CaptureOutcome, CapturePlan, CaptureStatus, ConnectionPolicy, FirstRunStage,
+    Observation, OperationalSnapshot, ProcessRecoveryStatus, ProcessStatus, ProxyCatalog,
+    ProxyGroup, ProxyGroupBehavior, ProxyOperations, RuntimeConfig, StreamStatus, StreamStatuses,
+    SubscriptionUsage, SystemProxyOwnershipState, TrafficSample, format_speed,
 };
 
 use crate::{
     app::{
-        NavigateProfiles, NavigateProxies, NavigateSystemProxy, NavigateTraffic, SetDirectMode,
-        SetGlobalMode, SetRuleMode,
+        NavigateMihomo, NavigateNetwork, NavigateProfiles, NavigateProxies, NavigateSystemProxy,
+        NavigateTraffic, NavigateTun, SetDirectMode, SetGlobalMode, SetRuleMode,
     },
     components::sidebar::OutboundMode,
 };
 
 use super::{
     Context, FluentBuilder, Page, ProxySelectionChanged, RuntimeData, RuntimePage, format_bytes,
-    format_profile_age, load_page, normalized_fraction,
+    format_profile_age, load_page, message_banner, normalized_fraction,
 };
 
 const LIVE_TRAFFIC_TICK_MARGIN: usize = 6;
 const MIN_TRAFFIC_CHART_CEILING: u64 = 1_024;
+
+#[derive(Default)]
+pub(super) struct HomeUiState {
+    pub(super) profile_switching: Option<String>,
+    pub(super) proxy_switching: Option<(String, String)>,
+    pub(super) proxy_error: Option<String>,
+    pub(super) capture_pending: Option<CapturePlan>,
+    pub(super) action_error: Option<String>,
+}
 
 impl RuntimePage {
     pub(in crate::pages::runtime) fn render_home(
@@ -44,24 +55,68 @@ impl RuntimePage {
         let fallback_config = RuntimeConfig::default();
         let fallback_proxies = ProxyCatalog::default();
         let fallback_connections = zenclash_core::ConnectionsSnapshot::default();
-        let fallback_system_proxy = SystemProxyStatus::default();
-        let (config, proxies, connections, system_proxy) = match &self.data {
+        let (config, proxies, connections) = match &self.data {
             RuntimeData::Dashboard {
                 config,
                 proxies,
                 connections,
-                system_proxy,
-            } => (config, proxies, connections, system_proxy),
-            _ => (
-                &fallback_config,
-                &fallback_proxies,
-                &fallback_connections,
-                &fallback_system_proxy,
+            } => (
+                config.value().unwrap_or(&fallback_config),
+                proxies.value().unwrap_or(&fallback_proxies),
+                connections.value().unwrap_or(&fallback_connections),
             ),
+            _ => (&fallback_config, &fallback_proxies, &fallback_connections),
         };
+        let operational = self.operational_status.snapshot();
+        let first_run =
+            operational.first_run_stage(self.profile_catalog.active_profile().is_some());
 
         v_flex()
             .gap_4()
+            .when_some(
+                self.app_update
+                    .status
+                    .as_ref()
+                    .and_then(|status| match status {
+                        zenclash_core::AppUpdateStatus::Available { release, .. } => {
+                            Some(release.tag.clone())
+                        }
+                        zenclash_core::AppUpdateStatus::NoPublishedRelease { .. }
+                        | zenclash_core::AppUpdateStatus::UpToDate { .. } => None,
+                    }),
+                |this, version| {
+                    this.child(
+                        h_flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .px_4()
+                            .py_3()
+                            .rounded(theme.radius)
+                            .border_1()
+                            .border_color(theme.success.opacity(0.35))
+                            .bg(theme.success.opacity(0.08))
+                            .child(div().text_sm().child(zenclash_i18n::text_with(
+                                "home.app_update.available",
+                                &[("version", version)],
+                            )))
+                            .child(
+                                Button::new("home-view-app-update")
+                                    .icon(IconName::ExternalLink)
+                                    .label(zenclash_i18n::text("home.app_update.action"))
+                                    .small()
+                                    .outline()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.switch_to(Page::Settings, cx);
+                                    })),
+                            ),
+                    )
+                },
+            )
+            .when(first_run != FirstRunStage::Ready, |this| {
+                this.child(self.render_first_run_setup(first_run, &operational, theme, cx))
+            })
+            .child(self.render_home_evidence(&operational, theme))
             .child(
                 h_flex()
                     .items_start()
@@ -70,8 +125,231 @@ impl RuntimePage {
                     .child(self.render_home_profile(theme, cx))
                     .child(self.render_home_proxy(config, proxies, theme, cx)),
             )
-            .child(self.render_home_controls(config, system_proxy, theme, cx))
-            .child(self.render_home_traffic(connections, theme))
+            .child(self.render_home_controls(config, &operational.capture, first_run, theme, cx))
+            .child(self.render_home_traffic(connections, &operational.streams, theme))
+            .into_any_element()
+    }
+
+    fn render_first_run_setup(
+        &self,
+        stage: FirstRunStage,
+        operational: &OperationalSnapshot,
+        theme: &gpui_component::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let (step, title_key, description_key) = first_run_copy(stage);
+        let actions = h_flex()
+            .gap_2()
+            .flex_wrap()
+            .when(stage == FirstRunStage::NoProfile, |this| {
+                this.child(
+                    Button::new("home-import-subscription")
+                        .icon(IconName::Globe)
+                        .label(zenclash_i18n::text(
+                            "home.setup.actions.import_subscription",
+                        ))
+                        .primary()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.prepare_remote_profile_import(window, cx);
+                            window.dispatch_action(Box::new(NavigateProfiles), cx);
+                        })),
+                )
+                .child(
+                    Button::new("home-import-local-profile")
+                        .icon(IconName::FolderOpen)
+                        .label(zenclash_i18n::text("home.setup.actions.import_local"))
+                        .outline()
+                        .loading(self.home.profile_switching.is_some())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.choose_home_profile(window, cx);
+                        })),
+                )
+            })
+            .when(stage == FirstRunStage::CoreUnavailable, |this| {
+                this.child(
+                    Button::new("home-inspect-core")
+                        .icon(IconName::SquareTerminal)
+                        .label(zenclash_i18n::text("home.setup.actions.inspect_core"))
+                        .primary()
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(NavigateMihomo), cx);
+                        }),
+                )
+            })
+            .when(stage == FirstRunStage::CaptureNotSelected, |this| {
+                this.child(
+                    Button::new("home-use-system-proxy")
+                        .label(zenclash_i18n::text("home.setup.actions.use_system_proxy"))
+                        .primary()
+                        .loading(self.home.capture_pending == Some(CapturePlan::SystemProxy))
+                        .disabled(self.home.capture_pending.is_some())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.apply_home_capture_plan(CapturePlan::SystemProxy, cx);
+                        })),
+                )
+                .child(
+                    Button::new("home-use-tun")
+                        .label(zenclash_i18n::text("home.setup.actions.use_tun"))
+                        .outline()
+                        .loading(self.home.capture_pending == Some(CapturePlan::Tun))
+                        .disabled(self.home.capture_pending.is_some())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.apply_home_capture_plan(CapturePlan::Tun, cx);
+                        })),
+                )
+            })
+            .when(stage == FirstRunStage::CaptureUnconfirmed, |this| {
+                let review_tun = operational
+                    .capture
+                    .tun
+                    .value()
+                    .is_some_and(|tun| tun.requested || tun.configured);
+                this.child(
+                    Button::new("home-review-capture")
+                        .icon(IconName::Inspector)
+                        .label(zenclash_i18n::text("home.setup.actions.review_capture"))
+                        .primary()
+                        .on_click(move |_, window, cx| {
+                            if review_tun {
+                                window.dispatch_action(Box::new(NavigateTun), cx);
+                            } else {
+                                window.dispatch_action(Box::new(NavigateSystemProxy), cx);
+                            }
+                        }),
+                )
+            })
+            .when(
+                matches!(
+                    stage,
+                    FirstRunStage::PathUnknown | FirstRunStage::PathFailed
+                ),
+                |this| {
+                    this.child(
+                        Button::new("home-run-path-probe")
+                            .icon(IconName::Globe)
+                            .label(zenclash_i18n::text(if stage == FirstRunStage::PathFailed {
+                                "home.setup.actions.retry_probe"
+                            } else {
+                                "home.setup.actions.run_probe"
+                            }))
+                            .primary()
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(NavigateNetwork), cx);
+                            }),
+                    )
+                },
+            );
+
+        home_card(
+            zenclash_i18n::text("home.setup.title"),
+            IconName::CircleCheck,
+            theme,
+        )
+        .w_full()
+        .child(
+            v_flex()
+                .p_4()
+                .gap_3()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_family(theme.mono_font_family.clone())
+                        .text_color(theme.muted_foreground)
+                        .child(zenclash_i18n::text_with(
+                            "home.setup.step",
+                            &[("step", step.to_string())],
+                        )),
+                )
+                .child(
+                    div()
+                        .text_base()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(zenclash_i18n::text(title_key)),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(zenclash_i18n::text(description_key)),
+                )
+                .when_some(self.home.action_error.clone(), |this, error| {
+                    this.child(message_banner(error, theme.danger, theme))
+                })
+                .child(actions),
+        )
+        .into_any_element()
+    }
+
+    fn render_home_evidence(
+        &self,
+        operational: &OperationalSnapshot,
+        theme: &gpui_component::Theme,
+    ) -> gpui::AnyElement {
+        let process = operational.process.value();
+        let controller = operational.controller.value();
+        let controller_ready = controller.is_some_and(|controller| controller.authenticated);
+        let path_ready = operational.path.value().is_some();
+        let (process_text, process_color) = process_evidence(process, theme);
+        v_flex()
+            .gap_2()
+            .px_4()
+            .py_3()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.secondary)
+            .child(
+                h_flex()
+                    .gap_4()
+                    .flex_wrap()
+                    .child(status_label(process_text, process_color, theme))
+                    .child(status_label(
+                        zenclash_i18n::text(if controller_ready {
+                            "home.evidence.controller_verified"
+                        } else {
+                            "home.evidence.controller_unverified"
+                        }),
+                        if controller_ready {
+                            theme.success
+                        } else {
+                            theme.warning
+                        },
+                        theme,
+                    ))
+                    .child(status_label(
+                        capture_status_text(&operational.capture),
+                        if operational.capture.is_active() {
+                            theme.success
+                        } else {
+                            theme.warning
+                        },
+                        theme,
+                    ))
+                    .child(status_label(
+                        zenclash_i18n::text(if path_ready {
+                            "home.evidence.path_observed"
+                        } else {
+                            "home.evidence.path_unknown"
+                        }),
+                        if path_ready {
+                            theme.success
+                        } else {
+                            theme.muted_foreground
+                        },
+                        theme,
+                    )),
+            )
+            .when_some(
+                process.and_then(|process| process.exit_reason.as_ref()),
+                |this, reason| {
+                    this.child(div().text_xs().text_color(theme.muted_foreground).child(
+                        zenclash_i18n::text_with(
+                            "home.evidence.core_exit_reason",
+                            &[("reason", reason.clone())],
+                        ),
+                    ))
+                },
+            )
             .into_any_element()
     }
 
@@ -122,7 +400,7 @@ impl RuntimePage {
             .outline()
             .dropdown_caret(true)
             .tooltip(profile_switch_tooltip)
-            .loading(self.home_profile_switching.is_some())
+            .loading(self.home.profile_switching.is_some())
             .disabled(self.mutating || !can_switch)
             .dropdown_menu(move |mut menu, _, _| {
                 menu = menu
@@ -228,14 +506,15 @@ impl RuntimePage {
         let group = current_proxy_group(config, proxies).cloned();
         let group_name = group.as_ref().map(|group| group.name.clone());
         let active_node = group.as_ref().map(|group| group.now.clone());
-        let nodes = group.map_or_else(Vec::new, |group| {
+        let can_switch = group.as_ref().is_some_and(home_group_can_switch);
+        let nodes = group.as_ref().map_or_else(Vec::new, |group| {
             group
                 .all
-                .into_iter()
-                .map(|node| node.name)
+                .iter()
+                .map(|node| node.name.clone())
                 .collect::<Vec<_>>()
         });
-        let can_switch = group_name.is_some() && !nodes.is_empty();
+        let can_switch = can_switch && !nodes.is_empty();
         let runtime_page = cx.entity().downgrade();
         let node_switch_tooltip = zenclash_i18n::text_with(
             "home.proxy.switch_current",
@@ -249,7 +528,7 @@ impl RuntimePage {
             .outline()
             .dropdown_caret(true)
             .tooltip(node_switch_tooltip)
-            .loading(self.home_proxy_switching.is_some())
+            .loading(self.home.proxy_switching.is_some())
             .disabled(self.mutating || !can_switch)
             .dropdown_menu(move |mut menu, _, _| {
                 menu = menu
@@ -317,6 +596,9 @@ impl RuntimePage {
                         .text_color(theme.muted_foreground)
                         .child(selection.kind),
                 )
+                .when_some(self.home.proxy_error.clone(), |this, error| {
+                    this.child(message_banner(error, theme.danger, theme))
+                })
                 .child(div().flex_1())
                 .child(
                     h_flex().justify_end().child(
@@ -337,11 +619,17 @@ impl RuntimePage {
     fn render_home_controls(
         &self,
         config: &RuntimeConfig,
-        status: &SystemProxyStatus,
+        capture: &CaptureStatus,
+        first_run: FirstRunStage,
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let active = status.active();
+        let proxy = capture.system_proxy.value();
+        let intent_enabled = proxy.map_or(self.preferences.system_proxy_enabled, |snapshot| {
+            snapshot.intent_enabled
+        });
+        let proxy_status = system_proxy_status_text(capture);
+        let capture_status = capture_status_text(capture);
         let mode = OutboundMode::from_api(&config.mode);
         let port = config.system_proxy_port().map_or_else(
             || zenclash_i18n::text("home.controls.no_proxy_port"),
@@ -362,6 +650,15 @@ impl RuntimePage {
                 .flex_wrap()
                 .gap_5()
                 .p_4()
+                .when(first_run == FirstRunStage::Ready, |this| {
+                    this.when_some(self.home.action_error.clone(), |this, error| {
+                        this.child(
+                            div()
+                                .w_full()
+                                .child(message_banner(error, theme.danger, theme)),
+                        )
+                    })
+                })
                 .child(
                     v_flex()
                         .min_w(rems(18.))
@@ -384,23 +681,22 @@ impl RuntimePage {
                                             div()
                                                 .text_xs()
                                                 .text_color(theme.muted_foreground)
-                                                .child(if active {
-                                                    zenclash_i18n::text(
-                                                        "home.controls.system_proxy_on",
-                                                    )
-                                                } else {
-                                                    zenclash_i18n::text(
-                                                        "home.controls.system_proxy_off",
-                                                    )
-                                                }),
+                                                .child(proxy_status),
                                         ),
                                 )
                                 .child(
                                     Switch::new("home-system-proxy")
-                                        .checked(active)
-                                        .disabled(self.mutating)
+                                        .checked(intent_enabled)
+                                        .disabled(self.home.capture_pending.is_some())
                                         .on_click(cx.listener(|this, checked, _, cx| {
-                                            this.toggle_system_proxy(*checked, cx);
+                                            this.apply_home_capture_plan(
+                                                if *checked {
+                                                    CapturePlan::SystemProxy
+                                                } else {
+                                                    CapturePlan::Off
+                                                },
+                                                cx,
+                                            );
                                         })),
                                 ),
                         )
@@ -413,7 +709,7 @@ impl RuntimePage {
                                         .text_xs()
                                         .font_family(theme.mono_font_family.clone())
                                         .text_color(theme.muted_foreground)
-                                        .child(port),
+                                        .child(format!("{port} · {capture_status}")),
                                 )
                                 .child(
                                     Button::new("home-open-system-proxy")
@@ -479,14 +775,13 @@ impl RuntimePage {
     fn render_home_traffic(
         &self,
         connections: &zenclash_core::ConnectionsSnapshot,
+        streams: &StreamStatuses,
         theme: &gpui_component::Theme,
     ) -> gpui::AnyElement {
         let traffic = self.traffic_monitor.snapshot();
-        let status_color = if traffic.connected {
-            theme.success
-        } else {
-            theme.warning
-        };
+        let (traffic_status, status_color) = stream_status_text(&streams.traffic, theme);
+        let (connections_status, connections_color) =
+            stream_status_text(&streams.connections, theme);
         let samples = self.traffic_monitor.samples();
         let points = traffic_chart_points(&samples);
         let chart = AreaChart::new(points)
@@ -523,13 +818,13 @@ impl RuntimePage {
                         .child(
                             h_flex()
                                 .gap_4()
+                                .child(status_label(traffic_status, status_color, theme))
                                 .child(status_label(
-                                    if traffic.connected {
-                                        zenclash_i18n::text("home.traffic.live")
-                                    } else {
-                                        zenclash_i18n::text("home.traffic.reconnecting")
-                                    },
-                                    status_color,
+                                    zenclash_i18n::text_with(
+                                        "home.traffic.connections_status",
+                                        &[("status", connections_status)],
+                                    ),
+                                    connections_color,
                                     theme,
                                 ))
                                 .child(series_label(
@@ -607,12 +902,13 @@ impl RuntimePage {
         let Some(token) = self.begin_mutation(Page::Home) else {
             return;
         };
-        self.home_proxy_switching = Some((group.clone(), proxy.clone()));
+        self.home.proxy_switching = Some((group.clone(), proxy.clone()));
+        self.home.proxy_error = None;
         let client = self.client.clone();
         let selected_proxy = proxy.clone();
         let task = self.runtime.spawn(async move {
             let outcome = ProxyOperations::new(client.clone())
-                .select(&group, &proxy)
+                .select(&group, &proxy, ConnectionPolicy::KeepExisting)
                 .await
                 .map_err(|error| error.to_string())?;
             let data = load_page(client, Page::Home).await?;
@@ -630,7 +926,7 @@ impl RuntimePage {
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
-                this.home_proxy_switching = None;
+                this.home.proxy_switching = None;
                 match result {
                     Ok((data, warnings)) => {
                         for warning in warnings {
@@ -644,13 +940,108 @@ impl RuntimePage {
                             ));
                         }
                     }
-                    Err(error) => this.set_page_error(token, error),
+                    Err(error) => {
+                        if this.is_page_task_current(token) {
+                            this.home.proxy_error = Some(error);
+                        }
+                    }
                 }
                 cx.notify();
             });
         })
         .detach();
         cx.notify();
+    }
+
+    fn apply_home_capture_plan(&mut self, plan: CapturePlan, cx: &mut Context<Self>) {
+        if self.page != Page::Home || self.home.capture_pending.is_some() {
+            return;
+        }
+        self.home.capture_pending = Some(plan);
+        self.home.action_error = None;
+        let token = self.page_task_token_for(Page::Home);
+        let capture = self.traffic_capture.clone();
+        let client = self.client.clone();
+        let preferences_store = self.preferences_store.clone();
+        let task = self.runtime.spawn(async move {
+            let outcome = capture
+                .apply(plan)
+                .await
+                .map_err(|error| error.to_string())?;
+            let preferences = if let Some(store) = preferences_store {
+                Some(
+                    tokio::task::spawn_blocking(move || store.load())
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .map_err(|error| error.to_string())?,
+                )
+            } else {
+                None
+            };
+            let data = load_page(client, Page::Home).await;
+            Ok::<_, String>((outcome, preferences, data))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                this.home.capture_pending = None;
+                match result {
+                    Ok((CaptureOutcome::RolledBack { failure, .. }, _, _))
+                    | Ok((CaptureOutcome::ReconcileNeeded { failure, .. }, _, _)) => {
+                        this.home.action_error = Some(failure);
+                    }
+                    Ok((_, preferences, data)) => {
+                        if let Some(preferences) = preferences {
+                            this.preferences = preferences.clone();
+                            cx.emit(super::PreferencesRestored { preferences });
+                        }
+                        match data {
+                            Ok(data) => {
+                                this.replace_page_data(token, data);
+                            }
+                            Err(error) => this.home.action_error = Some(error),
+                        }
+                    }
+                    Err(error) => this.home.action_error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+}
+
+fn first_run_copy(stage: FirstRunStage) -> (u8, &'static str, &'static str) {
+    match stage {
+        FirstRunStage::NoProfile => (
+            1,
+            "home.setup.no_profile.title",
+            "home.setup.no_profile.description",
+        ),
+        FirstRunStage::CoreUnavailable => {
+            (2, "home.setup.core.title", "home.setup.core.description")
+        }
+        FirstRunStage::CaptureNotSelected => (
+            3,
+            "home.setup.capture.title",
+            "home.setup.capture.description",
+        ),
+        FirstRunStage::CaptureUnconfirmed => (
+            3,
+            "home.setup.capture_unconfirmed.title",
+            "home.setup.capture_unconfirmed.description",
+        ),
+        FirstRunStage::PathUnknown => (4, "home.setup.path.title", "home.setup.path.description"),
+        FirstRunStage::PathFailed => (
+            4,
+            "home.setup.path_failed.title",
+            "home.setup.path_failed.description",
+        ),
+        FirstRunStage::Ready => (5, "home.setup.ready.title", "home.setup.ready.description"),
     }
 }
 
@@ -728,23 +1119,48 @@ fn current_proxy_summary(config: &RuntimeConfig, proxies: &ProxyCatalog) -> Curr
             delay: None,
         };
     };
+    if matches!(group.behavior, ProxyGroupBehavior::LoadBalance) {
+        return CurrentProxySummary {
+            group: group.name.clone(),
+            node: zenclash_i18n::text("home.proxy.load_balance"),
+            kind: zenclash_i18n::text("home.proxy.load_balance_description"),
+            delay: None,
+        };
+    }
     let node = group.all.iter().find(|node| node.name == group.now);
+    let behavior = match group.behavior {
+        ProxyGroupBehavior::Automatic { fixed: true } => {
+            Some(zenclash_i18n::text("home.proxy.fixed"))
+        }
+        ProxyGroupBehavior::Automatic { fixed: false } => {
+            Some(zenclash_i18n::text("home.proxy.automatic"))
+        }
+        _ => None,
+    };
     CurrentProxySummary {
         group: group.name.clone(),
         node: group.now.clone(),
-        kind: node.map_or_else(
-            || group.kind.clone(),
-            |node| {
+        kind: behavior
+            .into_iter()
+            .chain(node.map(|node| {
                 let capabilities = node.capabilities().collect::<Vec<_>>().join(" · ");
                 if capabilities.is_empty() {
                     node.kind.clone()
                 } else {
                     format!("{} · {capabilities}", node.kind)
                 }
-            },
-        ),
+            }))
+            .collect::<Vec<_>>()
+            .join(" · "),
         delay: node.and_then(zenclash_core::ProxyNode::latest_delay),
     }
+}
+
+fn home_group_can_switch(group: &ProxyGroup) -> bool {
+    matches!(
+        group.behavior,
+        ProxyGroupBehavior::Selector | ProxyGroupBehavior::Automatic { .. }
+    )
 }
 
 fn current_proxy_group<'a>(
@@ -796,6 +1212,144 @@ fn remaining_days(expire: u64) -> Option<u64> {
         Some(0)
     } else {
         Some(expire.saturating_sub(now).saturating_add(86_399) / 86_400)
+    }
+}
+
+fn system_proxy_status_text(capture: &CaptureStatus) -> String {
+    match &capture.system_proxy {
+        Observation::Loading => zenclash_i18n::text("home.controls.system_proxy_loading"),
+        Observation::Failed { .. } => zenclash_i18n::text("home.controls.system_proxy_unavailable"),
+        Observation::Fresh { value, .. } => describe_system_proxy(value),
+        Observation::Stale {
+            value,
+            observed_at_ms,
+            ..
+        } => zenclash_i18n::text_with(
+            "home.controls.system_proxy_stale",
+            &[
+                ("status", describe_system_proxy(value)),
+                ("age", format_profile_age(observed_at_ms / 1_000)),
+            ],
+        ),
+    }
+}
+
+fn describe_system_proxy(snapshot: &zenclash_core::SystemProxySessionSnapshot) -> String {
+    if snapshot.ownership == SystemProxyOwnershipState::Lost {
+        return zenclash_i18n::text("home.controls.system_proxy_ownership_lost");
+    }
+    if snapshot.intent_enabled
+        && snapshot.actual.active()
+        && snapshot.ownership == SystemProxyOwnershipState::Unowned
+    {
+        return zenclash_i18n::text("home.controls.system_proxy_ownership_unknown");
+    }
+    match (snapshot.intent_enabled, snapshot.actual.active()) {
+        (true, true) => zenclash_i18n::text("home.controls.system_proxy_on"),
+        (true, false) => zenclash_i18n::text("home.controls.system_proxy_intent_only"),
+        (false, true) => zenclash_i18n::text("home.controls.system_proxy_external"),
+        (false, false) => zenclash_i18n::text("home.controls.system_proxy_off"),
+    }
+}
+
+fn capture_status_text(capture: &CaptureStatus) -> String {
+    if capture.is_active() {
+        return zenclash_i18n::text("home.controls.capture_active");
+    }
+    if capture
+        .tun
+        .value()
+        .is_some_and(|tun| tun.configured && matches!(tun.observed, CapabilityState::Unknown))
+    {
+        return zenclash_i18n::text("home.controls.capture_unverified");
+    }
+    if matches!(
+        &capture.system_proxy,
+        Observation::Failed { .. } | Observation::Loading
+    ) || matches!(
+        &capture.tun,
+        Observation::Failed { .. } | Observation::Loading
+    ) {
+        return zenclash_i18n::text("home.controls.capture_unknown");
+    }
+    zenclash_i18n::text("home.controls.capture_off")
+}
+
+fn process_evidence(
+    process: Option<&ProcessStatus>,
+    theme: &gpui_component::Theme,
+) -> (String, gpui::Hsla) {
+    let (key, attempts) = process_evidence_copy(process);
+    let text = attempts.map_or_else(
+        || zenclash_i18n::text(key),
+        |attempt| zenclash_i18n::text_with(key, &[("attempt", attempt.to_string())]),
+    );
+    let color = match process.map(|process| process.recovery) {
+        Some(ProcessRecoveryStatus::Stable | ProcessRecoveryStatus::External)
+            if process.is_some_and(|process| process.running) =>
+        {
+            theme.success
+        }
+        Some(ProcessRecoveryStatus::Recovering) => theme.warning,
+        Some(
+            ProcessRecoveryStatus::Stable
+            | ProcessRecoveryStatus::Failed
+            | ProcessRecoveryStatus::Stopped
+            | ProcessRecoveryStatus::External,
+        )
+        | None => theme.danger,
+    };
+    (text, color)
+}
+
+fn process_evidence_copy(process: Option<&ProcessStatus>) -> (&'static str, Option<u32>) {
+    let Some(process) = process else {
+        return ("home.evidence.core_unavailable", None);
+    };
+    match process.recovery {
+        ProcessRecoveryStatus::Recovering => (
+            "home.evidence.core_recovering",
+            Some(process.recovery_attempts),
+        ),
+        ProcessRecoveryStatus::Failed => (
+            "home.evidence.core_recovery_failed",
+            Some(process.recovery_attempts),
+        ),
+        ProcessRecoveryStatus::Stopped => ("home.evidence.core_stopped", None),
+        ProcessRecoveryStatus::Stable if process.running && process.recovery_attempts > 0 => (
+            "home.evidence.core_recovered",
+            Some(process.recovery_attempts),
+        ),
+        ProcessRecoveryStatus::Stable | ProcessRecoveryStatus::External if process.running => {
+            ("home.evidence.core_running", None)
+        }
+        ProcessRecoveryStatus::Stable | ProcessRecoveryStatus::External => {
+            ("home.evidence.core_unavailable", None)
+        }
+    }
+}
+
+fn stream_status_text(
+    observation: &Observation<StreamStatus>,
+    theme: &gpui_component::Theme,
+) -> (String, gpui::Hsla) {
+    match observation {
+        Observation::Fresh { .. } => (zenclash_i18n::text("home.traffic.live"), theme.success),
+        Observation::Stale { observed_at_ms, .. } => (
+            zenclash_i18n::text_with(
+                "home.traffic.stale",
+                &[("age", format_profile_age(observed_at_ms / 1_000))],
+            ),
+            theme.warning,
+        ),
+        Observation::Failed { .. } => (
+            zenclash_i18n::text("home.traffic.unavailable"),
+            theme.danger,
+        ),
+        Observation::Loading => (
+            zenclash_i18n::text("home.traffic.reconnecting"),
+            theme.warning,
+        ),
     }
 }
 
@@ -934,9 +1488,57 @@ fn traffic_metric(
 
 #[cfg(test)]
 mod tests {
-    use zenclash_core::{DelayHistory, ProxyGroup, ProxyNode};
+    use zenclash_core::{
+        DelayHistory, ProxyGroup, ProxyGroupBehavior, ProxyNode, SystemProxySessionSnapshot,
+        SystemProxyStatus,
+    };
 
     use super::*;
+
+    #[test]
+    fn process_recovery_attempts_have_a_visible_non_color_label() {
+        let process = ProcessStatus {
+            kind: zenclash_core::CoreKind::Mihomo,
+            managed: true,
+            running: false,
+            generation: 3,
+            exit_reason: Some("exit status: 23".into()),
+            recovery_attempts: 2,
+            recovery: ProcessRecoveryStatus::Recovering,
+        };
+
+        assert_eq!(
+            process_evidence_copy(Some(&process)),
+            ("home.evidence.core_recovering", Some(2))
+        );
+        assert_eq!(
+            process_evidence_copy(Some(&ProcessStatus {
+                recovery: ProcessRecoveryStatus::Failed,
+                ..process.clone()
+            })),
+            ("home.evidence.core_recovery_failed", Some(2))
+        );
+        assert_eq!(
+            process_evidence_copy(Some(&ProcessStatus {
+                running: true,
+                recovery: ProcessRecoveryStatus::Stable,
+                ..process
+            })),
+            ("home.evidence.core_recovered", Some(2))
+        );
+    }
+
+    #[test]
+    fn captured_but_failed_path_uses_the_explicit_path_failure_copy() {
+        assert_eq!(
+            first_run_copy(FirstRunStage::PathFailed),
+            (
+                4,
+                "home.setup.path_failed.title",
+                "home.setup.path_failed.description"
+            )
+        );
+    }
 
     #[test]
     fn direct_mode_summary_does_not_require_a_proxy_group() {
@@ -980,6 +1582,71 @@ mod tests {
         );
 
         assert_eq!(summary.delay, Some(42));
+    }
+
+    #[test]
+    fn load_balance_summary_does_not_offer_a_fake_manual_selection() {
+        let group = ProxyGroup {
+            name: "Balance".into(),
+            behavior: ProxyGroupBehavior::LoadBalance,
+            now: "HK 01".into(),
+            all: vec![ProxyNode {
+                name: "HK 01".into(),
+                ..ProxyNode::default()
+            }],
+            ..ProxyGroup::default()
+        };
+        let catalog = ProxyCatalog {
+            groups: vec![group.clone()],
+            proxy_count: 2,
+        };
+
+        let summary = current_proxy_summary(
+            &RuntimeConfig {
+                mode: "rule".into(),
+                ..RuntimeConfig::default()
+            },
+            &catalog,
+        );
+
+        assert!(!home_group_can_switch(&group));
+        assert_eq!(summary.node, zenclash_i18n::text("home.proxy.load_balance"));
+        assert_eq!(summary.delay, None);
+    }
+
+    #[test]
+    fn system_proxy_intent_actual_and_lost_ownership_have_distinct_copy() {
+        let intent_only = SystemProxySessionSnapshot {
+            intent_enabled: true,
+            actual: SystemProxyStatus::default(),
+            ownership: SystemProxyOwnershipState::Unowned,
+        };
+        let external = SystemProxySessionSnapshot {
+            intent_enabled: false,
+            actual: SystemProxyStatus {
+                enabled: true,
+                ..SystemProxyStatus::default()
+            },
+            ownership: SystemProxyOwnershipState::Unowned,
+        };
+        let lost = SystemProxySessionSnapshot {
+            intent_enabled: true,
+            actual: external.actual.clone(),
+            ownership: SystemProxyOwnershipState::Lost,
+        };
+
+        assert_eq!(
+            describe_system_proxy(&intent_only),
+            zenclash_i18n::text("home.controls.system_proxy_intent_only")
+        );
+        assert_eq!(
+            describe_system_proxy(&external),
+            zenclash_i18n::text("home.controls.system_proxy_external")
+        );
+        assert_eq!(
+            describe_system_proxy(&lost),
+            zenclash_i18n::text("home.controls.system_proxy_ownership_lost")
+        );
     }
 
     #[test]

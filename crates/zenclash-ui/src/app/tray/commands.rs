@@ -1,6 +1,6 @@
 use futures_util::{StreamExt, stream};
 use zenclash_core::{
-    EffectiveConfigIntent, ProxyDelayTarget, ProxyOperations, SystemProxySession, YamlOverrideStore,
+    CaptureOutcome, CapturePlan, ConnectionPolicy, ProxyDelayTarget, ProxyOperations,
 };
 
 use super::{
@@ -71,34 +71,47 @@ impl ZenClashApp {
         }
     }
 
-    fn start_system_proxy_command(&mut self, enabled: bool, port: u16, cx: &mut Context<Self>) {
-        let controller = self.system_proxy_controller.clone();
+    fn start_system_proxy_command(&mut self, enabled: bool, _port: u16, cx: &mut Context<Self>) {
+        let capture = self.traffic_capture.clone();
         let store = self.preferences_store.clone();
         let task = self.runtime.spawn(async move {
-            tokio::task::spawn_blocking(move || {
-                let store = store
-                    .ok_or_else(|| zenclash_i18n::text("system_proxy.errors.ownership_store"))?;
-                SystemProxySession::new(store, controller)
-                    .set_enabled(enabled, port)
-                    .map_err(|error| error.to_string())
-            })
-            .await
-            .map_err(|error| {
-                zenclash_i18n::text_with(
-                    "system_proxy.errors.background_task",
-                    &[("error", error.to_string())],
-                )
-            })?
+            let outcome = capture
+                .apply(if enabled {
+                    CapturePlan::SystemProxy
+                } else {
+                    CapturePlan::Off
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+            let preferences = match store {
+                Some(store) => Some(
+                    tokio::task::spawn_blocking(move || store.load())
+                        .await
+                        .map_err(|error| format!("preference task failed: {error}"))?
+                        .map_err(|error| error.to_string())?,
+                ),
+                None => None,
+            };
+            Ok::<_, String>((outcome, preferences))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    Ok(Ok(preferences)) => {
-                        this.preferences = preferences.clone();
-                        this.runtime_page.update(cx, |page, cx| {
-                            page.preferences_restored_from_app(preferences, cx);
-                        });
+                    Ok(Ok((outcome, preferences))) => {
+                        if let Some(preferences) = preferences {
+                            this.preferences = preferences.clone();
+                            this.runtime_page.update(cx, |page, cx| {
+                                page.preferences_restored_from_app(preferences, cx);
+                            });
+                        }
+                        if matches!(
+                            outcome,
+                            CaptureOutcome::RolledBack { .. }
+                                | CaptureOutcome::ReconcileNeeded { .. }
+                        ) {
+                            tracing::warn!(?outcome, "system proxy tray command did not converge");
+                        }
                     }
                     Ok(Err(error)) => tracing::warn!(%error, "system proxy tray command failed"),
                     Err(error) => tracing::warn!(%error, "system proxy tray task failed"),
@@ -120,46 +133,29 @@ impl ZenClashApp {
     }
 
     fn start_tun_command(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        let controlled = self.controlled_config_store.clone();
-        let profile = self.profile_path.clone();
-        let core_session = self.core_session.clone();
+        let capture = self.traffic_capture.clone();
         let task = self.runtime.spawn(async move {
-            let Some(profile) = profile else {
-                return Err(zenclash_i18n::text("runtime.lifecycle.profile_missing"));
-            };
-            let body = if enabled {
-                serde_json::json!({"tun": {"enable": true}, "dns": {"enable": true}})
-            } else {
-                serde_json::json!({"tun": {"enable": false}})
-            };
-            let overrides =
-                tokio::task::spawn_blocking(|| YamlOverrideStore::discover()?.load_enabled_paths())
-                    .await
-                    .map_err(|error| {
-                        zenclash_i18n::text_with(
-                            "tray.errors.yaml_override_read",
-                            &[("error", error.to_string())],
-                        )
-                    })?
-                    .map_err(|error| error.to_string())?;
-            core_session
-                .apply(
-                    &controlled,
-                    EffectiveConfigIntent::Patch {
-                        profile,
-                        patch: body,
-                        overrides,
-                    },
-                )
+            capture
+                .apply(if enabled {
+                    CapturePlan::Tun
+                } else {
+                    CapturePlan::Off
+                })
                 .await
-                .map(|_| ())
                 .map_err(|error| error.to_string())
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    Ok(Ok(())) => {
+                    Ok(Ok(outcome)) => {
+                        if matches!(
+                            outcome,
+                            CaptureOutcome::RolledBack { .. }
+                                | CaptureOutcome::ReconcileNeeded { .. }
+                        ) {
+                            tracing::warn!(?outcome, "TUN tray command did not converge");
+                        }
                         this.runtime_page.update(cx, |runtime_page, cx| {
                             runtime_page.reload_controlled_config(cx);
                         });
@@ -297,9 +293,11 @@ impl ZenClashApp {
 
     fn start_proxy_selection(&mut self, group: String, proxy: String, cx: &mut Context<Self>) {
         let operations = ProxyOperations::new(self.client.clone());
-        let task = self
-            .runtime
-            .spawn(async move { operations.select(&group, &proxy).await });
+        let task = self.runtime.spawn(async move {
+            operations
+                .select(&group, &proxy, ConnectionPolicy::KeepExisting)
+                .await
+        });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {

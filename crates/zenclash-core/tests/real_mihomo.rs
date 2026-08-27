@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{Read, Write},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpStream, UdpSocket},
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
@@ -10,10 +10,12 @@ use std::{
 };
 
 use zenclash_core::{
-    ControlledConfigStore, LogMonitor, MihomoClient, MihomoEndpoint, MihomoLaunchConfig,
+    CapabilityState, ConnectionPolicy, ControlledConfigStore, CoreKind, CoreSession, DnsRecordType,
+    LogMonitor, LogStreamFormat, LogTimeSource, MihomoClient, MihomoEndpoint, MihomoLaunchConfig,
     MihomoLogLevel, MihomoProcess, NetworkLatencyTarget, NetworkProbeRoute, NetworkProbeService,
-    ProfileStore, RemoteProfileOptions, RulesetBehavior, RulesetConverter, SystemNetworkSnapshot,
-    TrafficMonitor, YamlOverrideStore,
+    Observation, OperationalStatus, ProfileApplication, ProfileApplyOutcome, ProfileChange,
+    ProfileStore, ProxyGroupBehavior, ProxyOperations, ProxyVisibility, RemoteProfileOptions,
+    RulesetBehavior, RulesetConverter, SystemNetworkSnapshot, TrafficMonitor, YamlOverrideStore,
 };
 
 /// This test intentionally has no mock server. Set `ZENCLASH_MIHOMO_BINARY` to
@@ -29,6 +31,7 @@ async fn drives_the_supplied_profile_through_a_real_mihomo_process() {
     let client = MihomoClient::new(process.endpoint().clone())
         .expect("real client")
         .with_config_validator(process.config_validator());
+    verify_real_operational_status(&client, process.clone()).await;
     let persistent_logs = LogMonitor::start(
         &tokio::runtime::Handle::current(),
         process.endpoint().clone(),
@@ -40,6 +43,7 @@ async fn drives_the_supplied_profile_through_a_real_mihomo_process() {
         .expect("configure production persistent log writer");
 
     verify_real_direct_proxy_delay(&client).await;
+    verify_real_proxy_operations(&client, &inputs.profile, &inputs.home).await;
     verify_persistent_log_stream(
         &client,
         &persistent_logs,
@@ -49,12 +53,47 @@ async fn drives_the_supplied_profile_through_a_real_mihomo_process() {
     .await;
     verify_runtime_api(&client, &inputs.profile, &inputs.home).await;
     verify_controlled_mode_switch(&client, &inputs.profile, &inputs.home).await;
-    verify_profile_workflows(&client, &inputs.profile, &inputs.home).await;
+    verify_profile_workflows(&client, process.clone(), &inputs.profile, &inputs.home).await;
     verify_catalog_apis(&client).await;
     verify_traffic_stream(&process).await;
     verify_managed_restart(&process, &client, &inputs.profile, &inputs.home).await;
 
     process.stop().expect("stop real Mihomo");
+}
+
+async fn verify_real_operational_status(client: &MihomoClient, process: Arc<MihomoProcess>) {
+    let runtime = tokio::runtime::Handle::current();
+    let traffic = TrafficMonitor::start(&runtime, process.endpoint().clone());
+    let logs = LogMonitor::start(&runtime, process.endpoint().clone(), MihomoLogLevel::Info);
+    let session = CoreSession::open(CoreKind::Mihomo, client.clone(), Some(process));
+    let status = OperationalStatus::start(&runtime, session, None, None, traffic, logs);
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let snapshot = status.snapshot();
+            if snapshot.controller.is_fresh()
+                && snapshot.streams.traffic.is_fresh()
+                && snapshot.capture.tun.is_fresh()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("real operational status did not become fresh");
+
+    let snapshot = status.snapshot();
+    assert!(matches!(
+        snapshot.capture.system_proxy,
+        Observation::Failed { .. }
+    ));
+    assert_eq!(
+        snapshot.capture.tun.value().map(|tun| tun.observed),
+        Some(CapabilityState::Inactive)
+    );
+    assert!(snapshot.streams.traffic.is_fresh());
+    assert!(!snapshot.capture.is_active());
 }
 
 async fn verify_real_listener_conflict_fallback(inputs: &IntegrationInputs) {
@@ -145,6 +184,106 @@ async fn verify_real_direct_proxy_delay(client: &MihomoClient) {
     assert!(result.delay > 0, "real DIRECT delay must be positive");
 }
 
+async fn verify_real_proxy_operations(client: &MihomoClient, profile: &Path, home: &Path) {
+    fs::create_dir_all(home).expect("create real proxy-operation integration home");
+    let operation_profile = home.join("proxy-operations-integration.yaml");
+    fs::write(
+        &operation_profile,
+        concat!(
+            "mode: rule\n",
+            "log-level: info\n",
+            "proxies: []\n",
+            "proxy-groups:\n",
+            "  - name: Selector Test\n",
+            "    type: select\n",
+            "    proxies: [DIRECT]\n",
+            "  - name: Automatic Test\n",
+            "    type: url-test\n",
+            "    proxies: [DIRECT]\n",
+            "    url: https://www.gstatic.com/generate_204\n",
+            "    interval: 300\n",
+            "rules:\n",
+            "  - MATCH,Selector Test\n",
+        ),
+    )
+    .expect("write real proxy-operation profile");
+    client
+        .reload_config(&operation_profile, true)
+        .await
+        .expect("load real proxy-operation profile");
+
+    let operations = ProxyOperations::new(client.clone());
+    let initial_connections = client
+        .connections_snapshot()
+        .await
+        .expect("read connections before real selection");
+    let selected = operations
+        .select("Selector Test", "DIRECT", ConnectionPolicy::KeepExisting)
+        .await
+        .expect("select through real Mihomo without rebuilding connections");
+    assert_eq!(selected.actual.as_deref(), Some("DIRECT"));
+    assert_eq!(
+        client
+            .connections_snapshot()
+            .await
+            .expect("read connections after real selection")
+            .connections,
+        initial_connections.connections
+    );
+
+    let fixed = operations
+        .select("Automatic Test", "DIRECT", ConnectionPolicy::KeepExisting)
+        .await
+        .expect("fix real automatic group");
+    let fixed_group = fixed
+        .catalog
+        .as_ref()
+        .and_then(|catalog| {
+            catalog
+                .groups
+                .iter()
+                .find(|group| group.name == "Automatic Test")
+        })
+        .expect("read back real automatic group after selection");
+    assert_eq!(
+        fixed_group.behavior,
+        ProxyGroupBehavior::Automatic { fixed: true }
+    );
+
+    let restored = operations
+        .restore_auto("Automatic Test")
+        .await
+        .expect("restore real automatic group");
+    let restored_group = restored
+        .catalog
+        .as_ref()
+        .and_then(|catalog| {
+            catalog
+                .groups
+                .iter()
+                .find(|group| group.name == "Automatic Test")
+        })
+        .expect("read back real automatic group after restore");
+    assert_eq!(
+        restored_group.behavior,
+        ProxyGroupBehavior::Automatic { fixed: false }
+    );
+    assert!(
+        operations
+            .catalog(ProxyVisibility::VisibleOnly)
+            .await
+            .expect("read real visible proxy catalog")
+            .groups
+            .iter()
+            .all(|group| !group.hidden)
+    );
+
+    client
+        .reload_config(profile, true)
+        .await
+        .expect("restore supplied profile after real proxy-operation verification");
+}
+
 async fn verify_persistent_log_stream(
     client: &MihomoClient,
     monitor: &LogMonitor,
@@ -194,6 +333,25 @@ async fn verify_persistent_log_stream(
     assert!(status.last_error.is_none(), "log writer error: {status:?}");
     let content = std::fs::read_to_string(log_path).expect("read persisted real Mihomo log");
     assert!(content.contains("INFO") || content.contains("DEBUG"));
+    assert_eq!(
+        monitor.stream_snapshot().format,
+        LogStreamFormat::Structured,
+        "real Mihomo should honor format=structured"
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if monitor.entries().iter().any(|entry| {
+                entry.time_source == LogTimeSource::Core
+                    && entry.core_time.is_some()
+                    && !entry.fields.is_null()
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("real structured log entry did not arrive");
     client
         .reload_config(profile, true)
         .await
@@ -507,7 +665,8 @@ async fn verify_runtime_api(client: &MihomoClient, profile: &Path, home: &Path) 
 async fn verify_controlled_advanced_config(client: &MihomoClient, profile: &Path, home: &Path) {
     let controlled = ControlledConfigStore::new(home.join("controlled-config-integration"));
     let system_interface = SystemNetworkSnapshot::detect().interface;
-    let update = advanced_config_update(&system_interface);
+    let (dns_server, dns_thread) = start_test_dns_server();
+    let update = advanced_config_update(&system_interface, &dns_server);
     controlled
         .apply_json_update(client, profile, &update)
         .await
@@ -526,6 +685,39 @@ async fn verify_controlled_advanced_config(client: &MihomoClient, profile: &Path
     if !system_interface.is_empty() {
         assert_eq!(runtime.interface_name, system_interface);
     }
+    let dns_a = client
+        .dns_query("diagnostics.zenclash.test", DnsRecordType::A)
+        .await
+        .expect("query a deterministic A record through real Mihomo DNS");
+    assert_eq!(dns_a.status, 0);
+    assert!(
+        dns_a
+            .answer
+            .iter()
+            .any(|answer| answer.record_type == 1 && answer.ttl > 0)
+    );
+    let dns_aaaa = client
+        .dns_query("diagnostics.zenclash.test", DnsRecordType::Aaaa)
+        .await
+        .expect("query an independent AAAA record through real Mihomo DNS");
+    assert_eq!(dns_aaaa.status, 0);
+    client
+        .flush_dns_cache()
+        .await
+        .expect("flush the real Mihomo DNS cache independently");
+    client
+        .flush_fake_ip_cache()
+        .await
+        .expect("flush the real Mihomo fake-IP cache independently");
+    let queried_types = dns_thread.join().expect("local DNS server completed");
+    assert!(
+        queried_types.contains(&1),
+        "real Mihomo did not send an A query"
+    );
+    assert!(
+        queried_types.contains(&28),
+        "real Mihomo did not send an AAAA query"
+    );
     let persisted = controlled
         .load_json()
         .expect("load persisted advanced controlled config");
@@ -533,7 +725,7 @@ async fn verify_controlled_advanced_config(client: &MihomoClient, profile: &Path
         persisted
             .pointer("/dns/ipv6")
             .and_then(serde_json::Value::as_bool),
-        Some(false)
+        Some(true)
     );
     assert_eq!(
         persisted
@@ -550,7 +742,7 @@ async fn verify_controlled_advanced_config(client: &MihomoClient, profile: &Path
     verify_explicit_override_preserves_controlled(client, profile, home, &controlled).await;
 }
 
-fn advanced_config_update(system_interface: &str) -> serde_json::Value {
+fn advanced_config_update(system_interface: &str, dns_server: &str) -> serde_json::Value {
     let mut update = serde_json::json!({
         "port": 0,
         "socks-port": 0,
@@ -576,16 +768,16 @@ fn advanced_config_update(system_interface: &str) -> serde_json::Value {
         },
         "dns": {
             "enable": true,
-            "ipv6": false,
+            "ipv6": true,
             "enhanced-mode": "fake-ip",
             "fake-ip-range": "198.18.0.1/16",
             "fake-ip-filter-mode": "blacklist",
             "fake-ip-filter": ["*.lan"],
             "default-nameserver": ["223.5.5.5"],
-            "nameserver": ["https://dns.alidns.com/dns-query"],
-            "proxy-server-nameserver": ["https://1.1.1.1/dns-query"],
+            "nameserver": [dns_server],
+            "proxy-server-nameserver": [dns_server],
             "direct-nameserver": ["223.5.5.5"],
-            "fallback": ["https://1.1.1.1/dns-query"],
+            "fallback": [dns_server],
             "fallback-filter": {
                 "geoip": false,
                 "geoip-code": "CN",
@@ -618,6 +810,77 @@ fn advanced_config_update(system_interface: &str) -> serde_json::Value {
             );
     }
     update
+}
+
+fn start_test_dns_server() -> (String, thread::JoinHandle<Vec<u16>>) {
+    let socket =
+        UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).expect("bind deterministic DNS server");
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set deterministic DNS timeout");
+    let address = socket.local_addr().expect("deterministic DNS address");
+    let server = thread::spawn(move || {
+        let mut queried_types = Vec::new();
+        let mut buffer = [0_u8; 2_048];
+        loop {
+            let Ok((length, peer)) = socket.recv_from(&mut buffer) else {
+                break;
+            };
+            let Some((question_end, record_type)) = dns_question(&buffer[..length]) else {
+                continue;
+            };
+            queried_types.push(record_type);
+            let response = dns_response(&buffer[..length], question_end, record_type);
+            socket
+                .send_to(&response, peer)
+                .expect("reply from deterministic DNS server");
+        }
+        queried_types
+    });
+    (format!("udp://{address}"), server)
+}
+
+fn dns_question(query: &[u8]) -> Option<(usize, u16)> {
+    if query.len() < 17 {
+        return None;
+    }
+    let mut cursor = 12;
+    while *query.get(cursor)? != 0 {
+        let label_len = usize::from(*query.get(cursor)?);
+        cursor = cursor.checked_add(label_len + 1)?;
+    }
+    let question_end = cursor.checked_add(5)?;
+    let record_type = u16::from_be_bytes([*query.get(cursor + 1)?, *query.get(cursor + 2)?]);
+    (question_end <= query.len()).then_some((question_end, record_type))
+}
+
+fn dns_response(query: &[u8], question_end: usize, record_type: u16) -> Vec<u8> {
+    let answer = match record_type {
+        1 => Some(vec![192, 0, 2, 1]),
+        28 => Some(
+            std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)
+                .octets()
+                .to_vec(),
+        ),
+        _ => None,
+    };
+    let mut response =
+        Vec::with_capacity(question_end + answer.as_ref().map_or(0, |data| data.len() + 12));
+    response.extend_from_slice(&query[..2]);
+    response.extend_from_slice(&[0x81, 0x80]);
+    response.extend_from_slice(&[0, 1]);
+    response.extend_from_slice(&[0, u8::from(answer.is_some())]);
+    response.extend_from_slice(&[0, 0, 0, 0]);
+    response.extend_from_slice(&query[12..question_end]);
+    if let Some(answer) = answer {
+        response.extend_from_slice(&[0xc0, 0x0c]);
+        response.extend_from_slice(&record_type.to_be_bytes());
+        response.extend_from_slice(&[0, 1]);
+        response.extend_from_slice(&120_u32.to_be_bytes());
+        response.extend_from_slice(&u16::try_from(answer.len()).unwrap().to_be_bytes());
+        response.extend_from_slice(&answer);
+    }
+    response
 }
 
 async fn verify_explicit_override_preserves_controlled(
@@ -698,40 +961,51 @@ async fn verify_explicit_override_preserves_controlled(
     assert!(updated.ipv6);
 }
 
-async fn verify_profile_workflows(client: &MihomoClient, profile: &Path, home: &Path) {
+async fn verify_profile_workflows(
+    client: &MihomoClient,
+    process: Arc<MihomoProcess>,
+    profile: &Path,
+    home: &Path,
+) {
     let profile_store = ProfileStore::new(home.join("profile-integration-store"))
         .expect("create integration profile store");
-    let local = profile_store
-        .import_local(profile)
-        .expect("import the real local Clash YAML");
-    let local_path = profile_store
-        .activate(&local.id)
-        .expect("persist local profile as active");
-    client
-        .reload_config(&local_path, true)
+    let controlled = ControlledConfigStore::new(home.join("profile-integration-controlled"));
+    let session = CoreSession::open(CoreKind::Mihomo, client.clone(), Some(process));
+    let application = ProfileApplication::new(profile_store.clone(), controlled, session);
+    let local = match application
+        .apply(ProfileChange::ImportLocal {
+            source: profile.to_path_buf(),
+            overrides: Vec::new(),
+        })
         .await
-        .expect("real Mihomo accepts the managed local profile");
+    {
+        ProfileApplyOutcome::Applied { profile, .. } => profile,
+        outcome => panic!("real ProfileApplication local import failed: {outcome:?}"),
+    };
 
     let (subscription_url, subscription_server) = serve_subscription(profile);
-    let remote = profile_store
-        .add_remote("真实在线订阅", subscription_url, "ZenClash-Integration")
+    let remote = match application
+        .apply(ProfileChange::AddRemote {
+            name: "真实在线订阅".into(),
+            url: subscription_url,
+            user_agent: "ZenClash-Integration".into(),
+            options: RemoteProfileOptions::default(),
+            overrides: Vec::new(),
+        })
         .await
-        .expect("download real Clash YAML through subscription workflow");
+    {
+        ProfileApplyOutcome::Applied { profile, .. } => profile,
+        outcome => panic!("real ProfileApplication remote add failed: {outcome:?}"),
+    };
     subscription_server
         .join()
         .expect("subscription server completed");
     let remote_path = profile_store.profile_path(&remote);
-    client
-        .reload_config(&remote_path, true)
-        .await
-        .expect("real Mihomo accepts the downloaded subscription");
-    profile_store
-        .activate(&remote.id)
-        .expect("persist remote subscription as active");
     assert_eq!(
         profile_store.active_path().expect("read active profile"),
         Some(remote_path)
     );
+    assert_ne!(local.id, remote.id);
 }
 
 fn serve_subscription(profile: &Path) -> (String, thread::JoinHandle<()>) {

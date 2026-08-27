@@ -1,8 +1,9 @@
 use super::{
     Button, ButtonVariants, Context, Disableable, FluentBuilder, Icon, IconName,
-    InteractiveElement, IntoElement, Page, ParentElement, ProviderCatalog, RuntimeConfig,
-    RuntimeData, RuntimePage, Sizable, Styled, div, empty_dash, empty_state, h_flex, info_row,
-    json, load_page, message_banner, px, setting_card, setting_switch, v_flex,
+    InteractiveElement, IntoElement, Page, ParentElement, ProviderCatalog, ProviderKind,
+    RuntimeConfig, RuntimeData, RuntimePage, Sizable, Styled, div, empty_dash, empty_state,
+    format_profile_age, h_flex, info_row, json, load_page, message_banner, px, setting_card,
+    setting_switch, v_flex,
 };
 
 mod ruleset;
@@ -79,14 +80,20 @@ impl RuntimePage {
         let Some(token) = self.begin_mutation(Page::Resources) else {
             return;
         };
+        let operations = self.provider_operations.clone();
         let client = self.client.clone();
         let task = self.runtime.spawn(async move {
-            if is_rule {
-                client.update_rule_provider(&name).await
-            } else {
-                client.update_proxy_provider(&name).await
-            }
-            .map_err(|error| error.to_string())?;
+            operations
+                .update(
+                    if is_rule {
+                        ProviderKind::Rule
+                    } else {
+                        ProviderKind::Proxy
+                    },
+                    &name,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
             load_page(client, Page::Resources).await
         });
         cx.spawn(async move |this, cx| {
@@ -103,6 +110,44 @@ impl RuntimePage {
                     Ok(data) => {
                         if this.replace_page_data(token, data) {
                             this.notice = Some(zenclash_i18n::text("resources.notices.provider"));
+                        }
+                    }
+                    Err(error) => this.set_page_error(token, error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn healthcheck_provider(&mut self, name: String, cx: &mut Context<Self>) {
+        let Some(token) = self.begin_mutation(Page::Resources) else {
+            return;
+        };
+        let operations = self.provider_operations.clone();
+        let client = self.client.clone();
+        let task = self.runtime.spawn(async move {
+            operations
+                .healthcheck_proxy(&name)
+                .await
+                .map_err(|error| error.to_string())?;
+            load_page(client, Page::Resources).await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = match task.await {
+                Ok(result) => result,
+                Err(error) => Err(zenclash_i18n::text_with(
+                    "resources.errors.healthcheck_task",
+                    &[("error", error.to_string())],
+                )),
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.mutating = false;
+                match result {
+                    Ok(data) => {
+                        if this.replace_page_data(token, data) {
+                            this.notice =
+                                Some(zenclash_i18n::text("resources.notices.healthcheck"));
                         }
                     }
                     Err(error) => this.set_page_error(token, error),
@@ -139,6 +184,7 @@ impl RuntimePage {
                 proxy,
                 false,
                 self.mutating,
+                &self.provider_operations,
                 theme,
                 cx,
             ))
@@ -147,6 +193,7 @@ impl RuntimePage {
                 rules,
                 true,
                 self.mutating,
+                &self.provider_operations,
                 theme,
                 cx,
             ))
@@ -293,6 +340,7 @@ fn provider_section(
     catalog: ProviderCatalog,
     is_rule: bool,
     mutating: bool,
+    operations: &super::ProviderOperations,
     theme: &gpui_component::Theme,
     cx: &mut Context<RuntimePage>,
 ) -> gpui::AnyElement {
@@ -335,6 +383,15 @@ fn provider_section(
                             provider.name
                         };
                         let name_for_click = name.clone();
+                        let name_for_healthcheck = name.clone();
+                        let status = operations.status(
+                            if is_rule {
+                                ProviderKind::Rule
+                            } else {
+                                ProviderKind::Proxy
+                            },
+                            &name,
+                        );
                         let item_count = if is_rule {
                             provider.rule_count
                         } else {
@@ -349,7 +406,7 @@ fn provider_section(
                                     ("type", provider.vehicle_type.clone()),
                                     ("behavior", behavior),
                                     ("format", format),
-                                    ("updated", empty_dash(&provider.updated_at)),
+                                    ("updated", provider_updated_at(&provider.updated_at)),
                                     ("count", item_count.to_string()),
                                 ],
                             )
@@ -358,11 +415,34 @@ fn provider_section(
                                 "resources.providers.proxy_metadata",
                                 &[
                                     ("type", provider.vehicle_type.clone()),
-                                    ("updated", empty_dash(&provider.updated_at)),
+                                    ("updated", provider_updated_at(&provider.updated_at)),
                                     ("count", item_count.to_string()),
                                 ],
                             )
                         };
+                        let operation_metadata = status.as_ref().map(|status| {
+                            zenclash_i18n::text_with(
+                                "resources.providers.operation_metadata",
+                                &[
+                                    ("success", provider_event_age(status.last_success_at_ms)),
+                                    (
+                                        "failure",
+                                        provider_failure_age(status.last_failure.as_ref()),
+                                    ),
+                                    ("update", provider_action_summary(&status.update)),
+                                    (
+                                        "health",
+                                        if is_rule {
+                                            zenclash_i18n::text(
+                                                "resources.providers.not_applicable",
+                                            )
+                                        } else {
+                                            provider_action_summary(&status.healthcheck)
+                                        },
+                                    ),
+                                ],
+                            )
+                        });
                         h_flex()
                             .id((
                                 if is_rule {
@@ -379,13 +459,42 @@ fn provider_section(
                             .border_color(theme.border)
                             .child(Icon::new(IconName::Inbox).size_4())
                             .child(
-                                v_flex().flex_1().child(div().text_sm().child(name)).child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(metadata),
-                                ),
+                                v_flex()
+                                    .flex_1()
+                                    .child(div().text_sm().child(name))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(metadata),
+                                    )
+                                    .when_some(operation_metadata, |this, metadata| {
+                                        this.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child(metadata),
+                                        )
+                                    }),
                             )
+                            .when(!is_rule, |row| {
+                                row.child(
+                                    Button::new(("healthcheck-provider", index))
+                                        .icon(IconName::Heart)
+                                        .label(zenclash_i18n::text(
+                                            "resources.providers.healthcheck",
+                                        ))
+                                        .small()
+                                        .outline()
+                                        .disabled(mutating)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.healthcheck_provider(
+                                                name_for_healthcheck.clone(),
+                                                cx,
+                                            );
+                                        })),
+                                )
+                            })
                             .child(
                                 Button::new(("update-provider", index))
                                     .icon(IconName::Redo2)
@@ -400,4 +509,62 @@ fn provider_section(
                 )),
         )
         .into_any_element()
+}
+
+fn provider_event_age(timestamp_ms: Option<u64>) -> String {
+    timestamp_ms.map_or_else(
+        || zenclash_i18n::text("resources.providers.never"),
+        |timestamp| format_profile_age(timestamp / 1_000),
+    )
+}
+
+fn provider_updated_at(value: &str) -> String {
+    let value = value.trim();
+    if value.is_empty() || value.starts_with("0001-01-01T00:00:00") {
+        "—".into()
+    } else {
+        value.into()
+    }
+}
+
+fn provider_failure_age(failure: Option<&zenclash_core::ProviderOperationFailure>) -> String {
+    failure.map_or_else(
+        || zenclash_i18n::text("resources.providers.never"),
+        |failure| format_profile_age(failure.occurred_at_ms / 1_000),
+    )
+}
+
+fn provider_action_summary(status: &zenclash_core::ProviderActionStatus) -> String {
+    match (&status.last_success_at_ms, &status.last_failure) {
+        (Some(success), Some(failure)) if failure.occurred_at_ms > *success => {
+            zenclash_i18n::text_with(
+                "resources.providers.failed_age",
+                &[("age", format_profile_age(failure.occurred_at_ms / 1_000))],
+            )
+        }
+        (Some(success), _) => zenclash_i18n::text_with(
+            "resources.providers.success_age",
+            &[("age", format_profile_age(success / 1_000))],
+        ),
+        (None, Some(failure)) => zenclash_i18n::text_with(
+            "resources.providers.failed_age",
+            &[("age", format_profile_age(failure.occurred_at_ms / 1_000))],
+        ),
+        (None, None) => zenclash_i18n::text("resources.providers.never"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_updated_at;
+
+    #[test]
+    fn provider_update_sentinel_is_presented_as_unknown() {
+        assert_eq!(provider_updated_at("0001-01-01T00:00:00Z"), "—");
+        assert_eq!(provider_updated_at(""), "—");
+        assert_eq!(
+            provider_updated_at("2026-08-27T12:34:56Z"),
+            "2026-08-27T12:34:56Z"
+        );
+    }
 }

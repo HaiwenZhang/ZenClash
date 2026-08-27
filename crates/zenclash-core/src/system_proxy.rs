@@ -94,6 +94,29 @@ pub enum SystemProxyOwnership {
     },
 }
 
+/// Relationship between the current native proxy state and ZenClash's last
+/// verified write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SystemProxyOwnershipState {
+    /// ZenClash has no persisted claim over the current native proxy state.
+    Unowned,
+    /// The native state still matches ZenClash's last verified write.
+    Owned,
+    /// ZenClash previously owned the proxy, but another actor replaced it.
+    Lost,
+}
+
+/// Read-only view of persistent intent, native state, and ownership.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SystemProxySessionSnapshot {
+    /// Whether the user asked ZenClash to keep system proxying enabled.
+    pub intent_enabled: bool,
+    /// Current native proxy state reported by the operating system.
+    pub actual: SystemProxyStatus,
+    /// Whether the current native state is still owned by ZenClash.
+    pub ownership: SystemProxyOwnershipState,
+}
+
 pub(crate) fn validate_system_proxy_ownership(
     ownership: &SystemProxyOwnership,
 ) -> MihomoResult<()> {
@@ -230,6 +253,17 @@ pub enum SystemProxyReconcileOutcome {
         /// Whether the operating-system state still matched ZenClash ownership.
         native_matched: bool,
     },
+    /// Native proxying is active but no longer matches a ZenClash-owned write.
+    /// The external state is preserved until the user explicitly chooses a plan.
+    OwnershipLost,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SystemProxyReconcileDecision {
+    Unchanged,
+    Restore,
+    Release(SystemProxyReleaseReason),
+    OwnershipLost,
 }
 
 /// Errors produced by native-state and preference transactions.
@@ -268,6 +302,32 @@ impl SystemProxySession {
     #[must_use]
     pub fn new(store: AppPreferencesStore, controller: SystemProxyController) -> Self {
         Self { store, controller }
+    }
+
+    /// Reads persistent intent and native state without changing either one.
+    ///
+    /// # Errors
+    ///
+    /// Returns preference, platform-detection, or native-readback errors.
+    pub fn snapshot(&self) -> SystemProxySessionResult<SystemProxySessionSnapshot> {
+        let _operation = self.controller.begin_operation();
+        let preferences = self.store.load()?;
+        let manager = SystemProxyManager::detect()?;
+        let actual = manager.status()?;
+        let ownership = match preferences.system_proxy_ownership.as_ref() {
+            Some(ownership)
+                if system_proxy_status_matches_ownership(manager.service(), &actual, ownership) =>
+            {
+                SystemProxyOwnershipState::Owned
+            }
+            Some(_) => SystemProxyOwnershipState::Lost,
+            None => SystemProxyOwnershipState::Unowned,
+        };
+        Ok(SystemProxySessionSnapshot {
+            intent_enabled: preferences.system_proxy_enabled,
+            actual,
+            ownership,
+        })
     }
 
     /// Applies enabled intent and commits verified ownership atomically.
@@ -367,32 +427,46 @@ impl SystemProxySession {
     ) -> SystemProxySessionResult<SystemProxyReconcileOutcome> {
         let operation = self.controller.begin_operation();
         let preferences = self.store.load()?;
-        if !preferences.system_proxy_enabled {
-            return Ok(SystemProxyReconcileOutcome::Unchanged);
-        }
-        let release_reason = if !core_available {
-            Some(SystemProxyReleaseReason::CoreUnavailable)
-        } else if port.is_none() {
-            Some(SystemProxyReleaseReason::MissingPort)
+        let native = if core_available && port.is_some() {
+            let manager = SystemProxyManager::detect()?;
+            Some((manager.service().to_owned(), manager.status()?))
         } else {
             None
         };
-        if let Some(reason) = release_reason {
-            let Some(ownership) = preferences.system_proxy_ownership else {
+        let decision = decide_system_proxy_reconcile(
+            &preferences,
+            core_available,
+            port,
+            native
+                .as_ref()
+                .map(|(service, status)| (service.as_str(), status)),
+        );
+        let restore_port = match decision {
+            SystemProxyReconcileDecision::Unchanged => {
                 return Ok(SystemProxyReconcileOutcome::Unchanged);
-            };
-            let native_matched = operation.release_if_owned(&ownership)?;
-            self.store
-                .update(|preferences| preferences.system_proxy_ownership = None)?;
-            return Ok(SystemProxyReconcileOutcome::Released {
-                reason,
-                native_matched,
-            });
-        }
+            }
+            SystemProxyReconcileDecision::OwnershipLost => {
+                return Ok(SystemProxyReconcileOutcome::OwnershipLost);
+            }
+            SystemProxyReconcileDecision::Release(reason) => {
+                let Some(ownership) = preferences.system_proxy_ownership else {
+                    return Ok(SystemProxyReconcileOutcome::Unchanged);
+                };
+                let native_matched = operation.release_if_owned(&ownership)?;
+                self.store
+                    .update(|preferences| preferences.system_proxy_ownership = None)?;
+                return Ok(SystemProxyReconcileOutcome::Released {
+                    reason,
+                    native_matched,
+                });
+            }
+            SystemProxyReconcileDecision::Restore => {
+                port.ok_or(SystemProxySessionError::MissingPort)?
+            }
+        };
 
         let settings = SystemProxySettings::from_preferences(&preferences);
-        let ownership =
-            apply_owned_system_proxy(&operation, port.expect("available port checked"), &settings)?;
+        let ownership = apply_owned_system_proxy(&operation, restore_port, &settings)?;
         if let Err(error) = self.store.update(|preferences| {
             preferences.system_proxy_ownership = Some(ownership.clone());
         }) {
@@ -428,6 +502,54 @@ impl SystemProxySession {
     }
 }
 
+fn decide_system_proxy_reconcile(
+    preferences: &AppPreferences,
+    core_available: bool,
+    port: Option<u16>,
+    native: Option<(&str, &SystemProxyStatus)>,
+) -> SystemProxyReconcileDecision {
+    if !preferences.system_proxy_enabled {
+        return SystemProxyReconcileDecision::Unchanged;
+    }
+    if !core_available {
+        return preferences
+            .system_proxy_ownership
+            .as_ref()
+            .map_or(SystemProxyReconcileDecision::Unchanged, |_| {
+                SystemProxyReconcileDecision::Release(SystemProxyReleaseReason::CoreUnavailable)
+            });
+    }
+    let Some(port) = port else {
+        return preferences
+            .system_proxy_ownership
+            .as_ref()
+            .map_or(SystemProxyReconcileDecision::Unchanged, |_| {
+                SystemProxyReconcileDecision::Release(SystemProxyReleaseReason::MissingPort)
+            });
+    };
+    let Some((service, actual)) = native else {
+        return SystemProxyReconcileDecision::Restore;
+    };
+    let Some(ownership) = preferences.system_proxy_ownership.as_ref() else {
+        return if actual.active() {
+            SystemProxyReconcileDecision::OwnershipLost
+        } else {
+            SystemProxyReconcileDecision::Restore
+        };
+    };
+    if !system_proxy_status_matches_ownership(service, actual, ownership) {
+        return SystemProxyReconcileDecision::OwnershipLost;
+    }
+    match ownership {
+        SystemProxyOwnership::Manual {
+            port: owned_port, ..
+        } if *owned_port == port => SystemProxyReconcileDecision::Unchanged,
+        SystemProxyOwnership::Manual { .. } | SystemProxyOwnership::Pac { .. } => {
+            SystemProxyReconcileDecision::Restore
+        }
+    }
+}
+
 fn apply_owned_system_proxy(
     operation: &SystemProxyOperation<'_>,
     port: u16,
@@ -454,8 +576,6 @@ fn release_system_proxy(
 ) -> SystemProxySessionResult<()> {
     if let Some(ownership) = &preferences.system_proxy_ownership {
         operation.release_if_owned(ownership)?;
-    } else {
-        operation.set_enabled(false, preferences.system_proxy_mode, "", 0, &[], "")?;
     }
     Ok(())
 }
@@ -648,31 +768,7 @@ impl SystemProxyOperation<'_> {
     pub fn release_if_owned(&self, ownership: &SystemProxyOwnership) -> MihomoResult<bool> {
         let manager = SystemProxyManager::detect()?;
         let status = manager.status()?;
-        let matches = match ownership {
-            SystemProxyOwnership::Manual {
-                service,
-                host,
-                port,
-                bypass,
-            } => {
-                manager.service() == service
-                    && !status.auto_enabled
-                    && status.enabled
-                    && status.secure_enabled
-                    && status.server == *host
-                    && status.secure_server == *host
-                    && status.port == *port
-                    && status.secure_port == *port
-                    && status.bypass == *bypass
-            }
-            SystemProxyOwnership::Pac { service, url } => {
-                manager.service() == service
-                    && status.auto_enabled
-                    && status.auto_url == *url
-                    && !status.enabled
-                    && !status.secure_enabled
-            }
-        };
+        let matches = system_proxy_status_matches_ownership(manager.service(), &status, ownership);
         if matches {
             manager.set_enabled_with_bypass(false, "", 0, &[])?;
         }
@@ -680,6 +776,41 @@ impl SystemProxyOperation<'_> {
             self.controller.pac_server.stop();
         }
         Ok(matches)
+    }
+}
+
+fn system_proxy_status_matches_ownership(
+    service: &str,
+    status: &SystemProxyStatus,
+    ownership: &SystemProxyOwnership,
+) -> bool {
+    match ownership {
+        SystemProxyOwnership::Manual {
+            service: owned_service,
+            host,
+            port,
+            bypass,
+        } => {
+            service == owned_service
+                && !status.auto_enabled
+                && status.enabled
+                && status.secure_enabled
+                && status.server == *host
+                && status.secure_server == *host
+                && status.port == *port
+                && status.secure_port == *port
+                && status.bypass == *bypass
+        }
+        SystemProxyOwnership::Pac {
+            service: owned_service,
+            url,
+        } => {
+            service == owned_service
+                && status.auto_enabled
+                && status.auto_url == *url
+                && !status.enabled
+                && !status.secure_enabled
+        }
     }
 }
 
@@ -993,11 +1124,13 @@ mod tests {
     };
 
     use super::{
-        SystemProxyController, SystemProxyManager, SystemProxyMode, SystemProxySession,
-        SystemProxySessionError, SystemProxySettings, normalize_system_proxy_bypass,
-        normalize_system_proxy_host,
+        SystemProxyController, SystemProxyManager, SystemProxyMode, SystemProxyOwnership,
+        SystemProxyReconcileDecision, SystemProxyReleaseReason, SystemProxySession,
+        SystemProxySessionError, SystemProxySettings, SystemProxyStatus,
+        decide_system_proxy_reconcile, normalize_system_proxy_bypass, normalize_system_proxy_host,
+        system_proxy_status_matches_ownership,
     };
-    use crate::AppPreferencesStore;
+    use crate::{AppPreferences, AppPreferencesStore};
 
     #[test]
     fn controller_clones_serialize_complete_native_operations() {
@@ -1090,6 +1223,90 @@ mod tests {
             "localhost"
         );
         assert!(normalize_system_proxy_host("0.0.0.0").is_err());
+    }
+
+    #[test]
+    fn ownership_requires_the_complete_native_state_to_still_match() {
+        let ownership = SystemProxyOwnership::Manual {
+            service: "Wi-Fi".into(),
+            host: "127.0.0.1".into(),
+            port: 7890,
+            bypass: vec!["localhost".into()],
+        };
+        let owned = SystemProxyStatus {
+            service: "Wi-Fi".into(),
+            enabled: true,
+            server: "127.0.0.1".into(),
+            port: 7890,
+            secure_enabled: true,
+            secure_server: "127.0.0.1".into(),
+            secure_port: 7890,
+            bypass: vec!["localhost".into()],
+            ..SystemProxyStatus::default()
+        };
+        let mut replaced = owned.clone();
+        replaced.port = 8080;
+
+        assert!(system_proxy_status_matches_ownership(
+            "Wi-Fi", &owned, &ownership
+        ));
+        assert!(!system_proxy_status_matches_ownership(
+            "Wi-Fi", &replaced, &ownership
+        ));
+    }
+
+    #[test]
+    fn reconciliation_preserves_external_replacement_and_recovers_after_core_restart() {
+        let ownership = SystemProxyOwnership::Manual {
+            service: "Wi-Fi".into(),
+            host: "127.0.0.1".into(),
+            port: 7890,
+            bypass: vec!["localhost".into()],
+        };
+        let owned = SystemProxyStatus {
+            service: "Wi-Fi".into(),
+            enabled: true,
+            server: "127.0.0.1".into(),
+            port: 7890,
+            secure_enabled: true,
+            secure_server: "127.0.0.1".into(),
+            secure_port: 7890,
+            bypass: vec!["localhost".into()],
+            ..SystemProxyStatus::default()
+        };
+        let mut preferences = AppPreferences {
+            system_proxy_enabled: true,
+            system_proxy_ownership: Some(ownership),
+            ..AppPreferences::default()
+        };
+
+        assert_eq!(
+            decide_system_proxy_reconcile(&preferences, false, None, None),
+            SystemProxyReconcileDecision::Release(SystemProxyReleaseReason::CoreUnavailable)
+        );
+
+        preferences.system_proxy_ownership = None;
+        assert_eq!(
+            decide_system_proxy_reconcile(
+                &preferences,
+                true,
+                Some(7890),
+                Some(("Wi-Fi", &SystemProxyStatus::default())),
+            ),
+            SystemProxyReconcileDecision::Restore
+        );
+
+        let mut external = owned;
+        external.port = 8080;
+        assert_eq!(
+            decide_system_proxy_reconcile(
+                &preferences,
+                true,
+                Some(7890),
+                Some(("Wi-Fi", &external)),
+            ),
+            SystemProxyReconcileDecision::OwnershipLost
+        );
     }
 
     #[test]

@@ -1,7 +1,8 @@
 use super::{
-    MihomoClient, Page, PathBuf, RuntimeData, SystemNetworkSnapshot, SystemProxyManager,
-    TunPermissionManager,
+    MihomoClient, Observation, Page, PathBuf, ProxyOperations, ProxyVisibility, RecoveryAction,
+    RuntimeData, SystemNetworkSnapshot, SystemProxyManager, TunPermissionManager,
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) async fn load_page(client: MihomoClient, page: Page) -> Result<RuntimeData, String> {
     load_page_with_binary(client, page, None).await
@@ -70,27 +71,43 @@ pub(super) async fn load_page_with_binary(
 }
 
 async fn load_dashboard(client: MihomoClient) -> Result<RuntimeData, String> {
-    let system_proxy_task = tokio::task::spawn_blocking(|| {
-        let manager = SystemProxyManager::detect().map_err(|error| error.to_string())?;
-        manager.status().map_err(|error| error.to_string())
-    });
-    let (config, proxies, connections, system_proxy) = tokio::join!(
+    let proxy_operations = ProxyOperations::new(client.clone());
+    let (config, proxies, connections) = tokio::join!(
         client.runtime_config(),
-        client.proxy_catalog(),
+        proxy_operations.catalog(ProxyVisibility::VisibleOnly),
         client.connections_snapshot(),
-        system_proxy_task
     );
+    let observed_at_ms = now_ms();
     Ok(RuntimeData::Dashboard {
-        config: config.map_err(|error| error.to_string())?,
-        proxies: proxies.map_err(|error| error.to_string())?,
-        connections: connections.map_err(|error| error.to_string())?,
-        system_proxy: system_proxy.map_err(|error| {
-            zenclash_i18n::text_with(
-                "runtime.load_errors.system_proxy",
-                &[("error", error.to_string())],
-            )
-        })??,
+        config: Observation::record(
+            &Observation::Loading,
+            config.map_err(|error| error.to_string()),
+            observed_at_ms,
+            RecoveryAction::Retry,
+        ),
+        proxies: Observation::record(
+            &Observation::Loading,
+            proxies.map_err(|error| error.to_string()),
+            observed_at_ms,
+            RecoveryAction::Retry,
+        ),
+        connections: Observation::record(
+            &Observation::Loading,
+            connections.map_err(|error| error.to_string()),
+            observed_at_ms,
+            RecoveryAction::Retry,
+        ),
     })
+}
+
+fn now_ms() -> u64 {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
 }
 
 async fn load_system_proxy(client: MihomoClient) -> Result<RuntimeData, String> {
@@ -162,4 +179,68 @@ async fn load_settings(client: MihomoClient) -> Result<RuntimeData, String> {
         )
     })??;
     Ok(RuntimeData::Settings { config, autostart })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+    };
+
+    use zenclash_core::MihomoEndpoint;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn dashboard_keeps_successful_slices_when_connections_fail() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 2_048];
+                let bytes = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..bytes]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap();
+                let (status, body) = match path {
+                    "/configs" => ("200 OK", r#"{"mode":"rule"}"#),
+                    "/proxies" => ("200 OK", r#"{"proxies":{}}"#),
+                    "/connections" => ("503 Service Unavailable", r#"{"message":"busy"}"#),
+                    _ => ("404 Not Found", r#"{"message":"missing"}"#),
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let client =
+            MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+
+        let data = load_dashboard(client).await.unwrap();
+        server.join().unwrap();
+
+        let RuntimeData::Dashboard {
+            config,
+            proxies,
+            connections,
+        } = data
+        else {
+            panic!("expected dashboard data");
+        };
+        assert_eq!(
+            config.value().map(|config| config.mode.as_str()),
+            Some("rule")
+        );
+        assert!(proxies.is_fresh());
+        assert!(matches!(connections, Observation::Failed { .. }));
+    }
 }

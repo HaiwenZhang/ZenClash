@@ -31,6 +31,83 @@ mod tests;
 
 use storage::{RuntimeCacheTransaction, default_data_dir, require_mapping};
 
+#[must_use]
+pub(crate) struct RuntimeApplicationTransaction {
+    cache: RuntimeCacheTransaction,
+    recovery: RuntimeApplicationRecovery,
+    _mutation_guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+#[must_use]
+pub(crate) struct RuntimeCandidateValidation {
+    _mutation_guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+enum RuntimeApplicationRecovery {
+    HotReload {
+        client: MihomoClient,
+        previous_payload: Option<String>,
+    },
+    Restart {
+        process: Arc<MihomoProcess>,
+    },
+}
+
+impl RuntimeApplicationTransaction {
+    pub(crate) fn commit(self) {
+        self.cache.commit();
+    }
+
+    pub(crate) async fn rollback(self) -> ControlledConfigResult<()> {
+        match self.recovery {
+            RuntimeApplicationRecovery::HotReload {
+                client,
+                previous_payload,
+            } => {
+                let cache = rollback_runtime_cache(self.cache).await;
+                let runtime = match previous_payload {
+                    Some(payload) => client
+                        .reload_payload(payload, true)
+                        .await
+                        .map_err(ControlledConfigError::Profile),
+                    None => Err(ControlledConfigError::Transaction(
+                        "没有可用于恢复的上一运行配置".into(),
+                    )),
+                };
+                match (cache, runtime) {
+                    (Ok(()), Ok(())) => Ok(()),
+                    (cache, runtime) => Err(ControlledConfigError::Transaction(format!(
+                        "缓存恢复：{}；运行内核恢复：{}",
+                        result_label(cache),
+                        result_label(runtime)
+                    ))),
+                }
+            }
+            RuntimeApplicationRecovery::Restart { process } => {
+                let cache = rollback_runtime_cache(self.cache).await;
+                let runtime = if cache.is_ok() {
+                    process
+                        .restart_and_wait(std::time::Duration::from_secs(20))
+                        .await
+                        .map_err(ControlledConfigError::Profile)
+                } else {
+                    Err(ControlledConfigError::Transaction(
+                        "启动缓存未恢复，拒绝使用候选缓存再次启动内核".into(),
+                    ))
+                };
+                match (cache, runtime) {
+                    (Ok(()), Ok(())) => Ok(()),
+                    (cache, runtime) => Err(ControlledConfigError::Transaction(format!(
+                        "缓存恢复：{}；运行内核恢复：{}",
+                        result_label(cache),
+                        result_label(runtime)
+                    ))),
+                }
+            }
+        }
+    }
+}
+
 /// Errors produced while preparing or persisting controlled configuration.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -664,6 +741,64 @@ impl ControlledConfigStore {
         Ok(())
     }
 
+    pub(crate) async fn stage_profile_reload(
+        &self,
+        client: &MihomoClient,
+        candidate: PathBuf,
+        previous: Option<PathBuf>,
+        overrides: Vec<PathBuf>,
+    ) -> ControlledConfigResult<RuntimeApplicationTransaction> {
+        let mutation_guard = self.mutation_gate.clone().lock_owned().await;
+        let store = self.clone();
+        let previous_cached = self.cached_runtime_payload()?;
+        let (candidate_payload, previous_payload) = tokio::task::spawn_blocking(move || {
+            let candidate_payload = store.effective_with_overrides(candidate, &overrides)?;
+            let previous_payload = previous
+                .map(|path| store.effective_with_overrides(path, &overrides))
+                .transpose()?;
+            Ok::<_, ControlledConfigError>((candidate_payload, previous_payload))
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let previous_payload = previous_payload
+            .map(|payload| self.apply_session_listener_fallbacks(&payload))
+            .transpose()?
+            .or(previous_cached);
+        let candidate_payload = self.validate_candidate_listeners(candidate_payload, true)?;
+        let cache = self
+            .accept_runtime_payload(client, candidate_payload)
+            .await?;
+        Ok(RuntimeApplicationTransaction {
+            cache,
+            recovery: RuntimeApplicationRecovery::HotReload {
+                client: client.clone(),
+                previous_payload,
+            },
+            _mutation_guard: mutation_guard,
+        })
+    }
+
+    pub(crate) async fn stage_profile_validation(
+        &self,
+        kind: CoreKind,
+        client: &MihomoClient,
+        candidate: PathBuf,
+        overrides: Vec<PathBuf>,
+    ) -> ControlledConfigResult<RuntimeCandidateValidation> {
+        let mutation_guard = self.mutation_gate.clone().lock_owned().await;
+        let store = self.clone();
+        let payload = tokio::task::spawn_blocking(move || {
+            store.effective_with_overrides(candidate, &overrides)
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let payload = normalize_runtime_payload(kind, payload)?;
+        client.validate_config_payload(&payload).await?;
+        Ok(RuntimeCandidateValidation {
+            _mutation_guard: mutation_guard,
+        })
+    }
+
     /// Materializes a complete effective profile and restarts a managed core.
     ///
     /// This provides real profile switching for cores whose hot-reload API is
@@ -693,6 +828,31 @@ impl ControlledConfigStore {
             .await?
             .commit();
         Ok(())
+    }
+
+    pub(crate) async fn stage_profile_restart(
+        &self,
+        process: Arc<MihomoProcess>,
+        candidate: PathBuf,
+        overrides: Vec<PathBuf>,
+    ) -> ControlledConfigResult<RuntimeApplicationTransaction> {
+        let mutation_guard = self.mutation_gate.clone().lock_owned().await;
+        let store = self.clone();
+        let payload = tokio::task::spawn_blocking(move || {
+            store.effective_with_overrides(candidate, &overrides)
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let payload = normalize_runtime_payload(process.kind(), payload)?;
+        let payload = self.validate_candidate_listeners(payload, process.is_running())?;
+        let cache = self
+            .accept_runtime_payload_with_restart(process.clone(), payload)
+            .await?;
+        Ok(RuntimeApplicationTransaction {
+            cache,
+            recovery: RuntimeApplicationRecovery::Restart { process },
+            _mutation_guard: mutation_guard,
+        })
     }
 
     /// Persists a prepared update if the controlled layer has not changed.

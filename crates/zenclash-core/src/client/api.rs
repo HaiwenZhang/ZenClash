@@ -1,11 +1,12 @@
-use std::{path::Path, time::Duration};
+use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use reqwest::Method;
 use serde::Serialize;
 
 use super::{MihomoClient, MihomoError, MihomoResult, VersionInfo, request};
 use crate::{
-    ConnectionsSnapshot, DelayResult, ProviderCatalog, ProxyCatalog, RuleCatalog, RuntimeConfig,
+    ConnectionsSnapshot, DelayResult, DnsQueryResponse, DnsRecordType, ProviderCatalog,
+    ProxyCatalog, RuleCatalog, RuntimeConfig,
     profiles::{MAX_PROFILE_BYTES, read_profile_bytes},
     proxy::RawProxyCatalog,
 };
@@ -50,6 +51,34 @@ impl MihomoClient {
         let path = format!("/proxies/{}", encode_path_segment(group));
         self.put_json(&path, &serde_json::json!({ "name": proxy }))
             .await
+    }
+
+    pub(crate) async fn restore_proxy_group(&self, group: &str) -> MihomoResult<()> {
+        require_non_empty(group, "代理组名称")?;
+        let path = format!("/proxies/{}", encode_path_segment(group));
+        self.send_empty(Method::DELETE, &path).await
+    }
+
+    pub(crate) async fn proxy_group_delay(
+        &self,
+        group: &str,
+        test_url: Option<&str>,
+        timeout_ms: u64,
+    ) -> MihomoResult<BTreeMap<String, u32>> {
+        require_non_empty(group, "代理组名称")?;
+        if timeout_ms == 0 {
+            return Err(MihomoError::InvalidInput("延迟测试超时必须大于 0".into()));
+        }
+        let path = format!("/group/{}/delay", encode_path_segment(group));
+        let timeout = timeout_ms.to_string();
+        let url = validated_test_url(test_url)?;
+        let response = self
+            .request(Method::GET, &path)?
+            .query(&[("url", url.as_str()), ("timeout", timeout.as_str())])
+            .send()
+            .await?;
+        let response = request::ensure_success(response).await?;
+        Ok(response.json().await?)
     }
 
     /// Measures one proxy's delay through Mihomo.
@@ -133,6 +162,45 @@ impl MihomoClient {
     /// Returns transport, API-status or response-decoding errors.
     pub async fn rule_provider_catalog(&self) -> MihomoResult<ProviderCatalog> {
         self.get_json("/providers/rules").await
+    }
+
+    /// Resolves one DNS record through Mihomo's configured resolver.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty name and propagates transport, API-status or
+    /// response-decoding errors.
+    pub async fn dns_query(
+        &self,
+        name: &str,
+        record_type: DnsRecordType,
+    ) -> MihomoResult<DnsQueryResponse> {
+        require_non_empty(name, "DNS 查询名称")?;
+        let response = self
+            .request(Method::GET, "/dns/query")?
+            .query(&[("name", name.trim()), ("type", record_type.api_value())])
+            .send()
+            .await?;
+        let response = request::ensure_success(response).await?;
+        Ok(response.json().await?)
+    }
+
+    /// Flushes Mihomo's regular DNS cache without changing fake-IP mappings.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport or API-status errors.
+    pub async fn flush_dns_cache(&self) -> MihomoResult<()> {
+        self.send_empty(Method::POST, "/cache/dns/flush").await
+    }
+
+    /// Flushes Mihomo's fake-IP cache without changing the regular DNS cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport or API-status errors.
+    pub async fn flush_fake_ip_cache(&self) -> MihomoResult<()> {
+        self.send_empty(Method::POST, "/cache/fakeip/flush").await
     }
 
     /// Fetches the current connection snapshot.
@@ -237,6 +305,24 @@ impl MihomoClient {
         force: bool,
     ) -> MihomoResult<()> {
         let payload = payload.into();
+        let _mutation_guard = self.mutation_gate.lock().await;
+        self.validate_config_payload_unlocked(&payload).await?;
+        let response = self
+            .request(Method::PUT, "/configs")?
+            .query(&[("force", force)])
+            .json(&serde_json::json!({ "payload": payload }))
+            .send()
+            .await?;
+        request::ensure_success(response).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn validate_config_payload(&self, payload: &str) -> MihomoResult<()> {
+        let _mutation_guard = self.mutation_gate.lock().await;
+        self.validate_config_payload_unlocked(payload).await
+    }
+
+    async fn validate_config_payload_unlocked(&self, payload: &str) -> MihomoResult<()> {
         if payload.trim().is_empty() {
             return Err(MihomoError::InvalidInput("重载配置内容不能为空".into()));
         }
@@ -246,9 +332,8 @@ impl MihomoClient {
                 MAX_PROFILE_BYTES / 1024 / 1024
             )));
         }
-        let _mutation_guard = self.mutation_gate.lock().await;
         if let Some(validator) = self.config_validator.clone() {
-            let validation_payload = payload.clone();
+            let validation_payload = payload.to_owned();
             tokio::task::spawn_blocking(move || validator.validate_payload(&validation_payload))
                 .await
                 .map_err(|error| {
@@ -256,13 +341,6 @@ impl MihomoClient {
                 })?
                 .map_err(|error| MihomoError::Process(error.to_string()))?;
         }
-        let response = self
-            .request(Method::PUT, "/configs")?
-            .query(&[("force", force)])
-            .json(&serde_json::json!({ "payload": payload }))
-            .send()
-            .await?;
-        request::ensure_success(response).await?;
         Ok(())
     }
 
@@ -286,6 +364,24 @@ impl MihomoClient {
         require_non_empty(provider, "代理 Provider 名称")?;
         let path = format!("/providers/proxies/{}", encode_path_segment(provider));
         self.send_empty(Method::PUT, &path).await
+    }
+
+    /// Requests an immediate health check for every node in a proxy provider.
+    ///
+    /// This operation is separate from downloading a new provider document.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty name and propagates transport or API-status errors.
+    pub async fn healthcheck_proxy_provider(&self, provider: &str) -> MihomoResult<()> {
+        require_non_empty(provider, "代理 Provider 名称")?;
+        let path = format!(
+            "/providers/proxies/{}/healthcheck",
+            encode_path_segment(provider)
+        );
+        let response = self.request(Method::GET, &path)?.send().await?;
+        request::ensure_success(response).await?;
+        Ok(())
     }
 
     /// Requests a rule-provider refresh.

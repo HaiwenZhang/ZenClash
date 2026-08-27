@@ -133,6 +133,10 @@ pub(super) fn build_menu(
             submenu
                 .append_items(&[&delay_test, &separator])
                 .map_err(|error| error.to_string())?;
+            if !group.selectable {
+                menu.append(&submenu).map_err(|error| error.to_string())?;
+                continue;
+            }
             for proxy in &group.proxies {
                 let delay = match proxy.delay {
                     Some(0) => zenclash_i18n::text("tray.delay_timeout"),

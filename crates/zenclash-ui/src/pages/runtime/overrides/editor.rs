@@ -1,5 +1,6 @@
 use gpui::{AppContext, Context, Entity, Window};
 use gpui_component::input::InputState;
+use zenclash_core::{ProfileApplication, ProfileApplyOutcome, ProfileChange};
 
 use super::super::{
     Button, ButtonVariants, Disableable, IconName, Input, ParentElement, RuntimePage, Styled,
@@ -10,6 +11,11 @@ pub(crate) struct ProfileEditorState {
     pub(super) input: Entity<InputState>,
     pub(super) original: Option<String>,
     pub(super) profile_id: Option<String>,
+}
+
+enum ProfileEditorSaveOutcome {
+    Applied(std::path::PathBuf),
+    Stored,
 }
 
 impl ProfileEditorState {
@@ -84,57 +90,44 @@ impl RuntimePage {
             return;
         };
         let controlled = self.controlled_config_store.clone();
-        let core_runtime =
-            super::super::profiles::workflow::CoreProfileRuntime::new(self.core_session.clone());
+        let core_session = self.core_session.clone();
         let core_name = self.core_kind.display_name();
         let task = self.runtime.spawn(async move {
-            let edit_store = store.clone();
-            let edit_id = id.clone();
-            let update = tokio::task::spawn_blocking(move || {
-                edit_store.replace_payload(&edit_id, &original, &candidate)
-            })
-            .await
-            .map_err(|error| {
-                zenclash_i18n::text_with(
-                    "overrides.errors.editor_save_task",
-                    &[("error", error.to_string())],
-                )
-            })?
-            .map_err(|error| error.to_string())?;
-            let path = store.profile_path(&update.record);
-            if let Err(error) =
-                super::super::profiles::workflow::reload_effective(controlled, &core_runtime, &path)
-                    .await
-            {
-                let rollback_store = store.clone();
-                return match tokio::task::spawn_blocking(move || {
-                    rollback_store.rollback_update(update)
+            let overrides = super::super::profiles::workflow::load_enabled_overrides().await?;
+            let application = ProfileApplication::new(store, controlled, core_session);
+            match application
+                .apply(ProfileChange::EditYaml {
+                    id,
+                    expected_payload: original,
+                    new_payload: candidate,
+                    overrides,
                 })
                 .await
-                {
-                    Ok(Ok(_)) => Err(zenclash_i18n::text_with(
-                        "overrides.errors.editor_rejected_rolled_back",
-                        &[("core", core_name.to_owned()), ("error", error.clone())],
-                    )),
-                    Ok(Err(rollback)) => Err(zenclash_i18n::text_with(
-                        "overrides.errors.editor_rejected_rollback_failed",
-                        &[
-                            ("core", core_name.to_owned()),
-                            ("error", error.clone()),
-                            ("rollback", rollback.to_string()),
-                        ],
-                    )),
-                    Err(rollback) => Err(zenclash_i18n::text_with(
-                        "overrides.errors.editor_rejected_rollback_task",
-                        &[
-                            ("core", core_name.to_owned()),
-                            ("error", error),
-                            ("rollback", rollback.to_string()),
-                        ],
-                    )),
-                };
+            {
+                ProfileApplyOutcome::Applied { path, .. } => {
+                    Ok(ProfileEditorSaveOutcome::Applied(path))
+                }
+                ProfileApplyOutcome::Stored { .. } => Ok(ProfileEditorSaveOutcome::Stored),
+                ProfileApplyOutcome::Rejected { cause, .. } => Err(cause.to_string()),
+                ProfileApplyOutcome::RolledBack { cause, .. } => Err(zenclash_i18n::text_with(
+                    "overrides.errors.editor_rejected_rolled_back",
+                    &[("core", core_name.to_owned()), ("error", cause.to_string())],
+                )),
+                ProfileApplyOutcome::RuntimeUnknown { cause, .. } => Err(zenclash_i18n::text_with(
+                    "overrides.errors.editor_runtime_unknown",
+                    &[("core", core_name.to_owned()), ("error", cause.to_string())],
+                )),
+                ProfileApplyOutcome::PersistedButRuntimeUnknown {
+                    cause, rollback, ..
+                } => Err(zenclash_i18n::text_with(
+                    "overrides.errors.editor_rejected_rollback_failed",
+                    &[
+                        ("core", core_name.to_owned()),
+                        ("error", cause.to_string()),
+                        ("rollback", rollback.to_string()),
+                    ],
+                )),
             }
-            Ok::<_, String>(path)
         });
         cx.spawn(async move |this, cx| {
             let result = task
@@ -149,7 +142,9 @@ impl RuntimePage {
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
                 match result {
-                    Ok(path) if this.is_page_task_current(token) => {
+                    Ok(ProfileEditorSaveOutcome::Applied(path))
+                        if this.is_page_task_current(token) =>
+                    {
                         this.profile_path = Some(path.clone());
                         this.profile_editor.original = None;
                         this.profile_editor.profile_id = None;
@@ -163,6 +158,19 @@ impl RuntimePage {
                                 &[("core", this.core_kind.display_name().to_owned())],
                             ));
                             cx.emit(super::super::ProfileActivated { path });
+                        }
+                    }
+                    Ok(ProfileEditorSaveOutcome::Stored) if this.is_page_task_current(token) => {
+                        this.profile_editor.original = None;
+                        this.profile_editor.profile_id = None;
+                        this.config_preview = None;
+                        this.invalidate_config_inputs();
+                        if let Err(error) = this.reload_profile_catalog() {
+                            this.set_page_error(token, error);
+                        } else {
+                            this.notice = Some(zenclash_i18n::text(
+                                "overrides.notices.editor_saved_inactive",
+                            ));
                         }
                     }
                     Ok(_) => {}

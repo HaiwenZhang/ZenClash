@@ -6,6 +6,7 @@ use std::{
 };
 
 use super::{api::encode_path_segment, *};
+use crate::DnsRecordType;
 
 #[test]
 fn encodes_proxy_names_as_single_path_segments() {
@@ -132,6 +133,91 @@ async fn blank_provider_proxy_delay_uses_the_regular_proxy_endpoint() {
 
     assert_eq!(result.delay, 21);
     assert!(request.starts_with("GET /proxies/DIRECT/delay?"));
+}
+
+#[tokio::test]
+async fn dns_a_and_aaaa_queries_preserve_independent_answers() {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut requests = Vec::new();
+        for body in [
+            r#"{"Status":0,"Question":[{"name":"example.com.","type":1}],"Answer":[{"name":"example.com.","type":1,"TTL":120,"data":"192.0.2.1"}]}"#,
+            r#"{"Status":0,"Question":[{"name":"example.com.","type":28}],"Answer":[{"name":"example.com.","type":28,"TTL":60,"data":"2001:db8::1"}]}"#,
+        ] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2_048];
+            let bytes = stream.read(&mut request).unwrap();
+            requests.push(String::from_utf8_lossy(&request[..bytes]).into_owned());
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        }
+        requests
+    });
+    let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+
+    let a = client
+        .dns_query("example.com", DnsRecordType::A)
+        .await
+        .unwrap();
+    let aaaa = client
+        .dns_query("example.com", DnsRecordType::Aaaa)
+        .await
+        .unwrap();
+    let requests = server.join().unwrap();
+
+    assert_eq!(
+        (a.status, a.answer[0].ttl, a.answer[0].data.as_str()),
+        (0, 120, "192.0.2.1")
+    );
+    assert_eq!(
+        (
+            aaaa.status,
+            aaaa.answer[0].ttl,
+            aaaa.answer[0].data.as_str()
+        ),
+        (0, 60, "2001:db8::1")
+    );
+    assert!(requests[0].starts_with("GET /dns/query?name=example.com&type=A HTTP/1.1"));
+    assert!(requests[1].starts_with("GET /dns/query?name=example.com&type=AAAA HTTP/1.1"));
+}
+
+#[tokio::test]
+async fn dns_and_fake_ip_cache_flushes_use_separate_endpoints() {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut first_lines = Vec::new();
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2_048];
+            let bytes = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..bytes]);
+            first_lines.push(request.lines().next().unwrap_or_default().to_owned());
+            write!(
+                stream,
+                "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+        }
+        first_lines
+    });
+    let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+
+    client.flush_dns_cache().await.unwrap();
+    client.flush_fake_ip_cache().await.unwrap();
+
+    assert_eq!(
+        server.join().unwrap(),
+        [
+            "POST /cache/dns/flush HTTP/1.1",
+            "POST /cache/fakeip/flush HTTP/1.1",
+        ]
+    );
 }
 
 #[tokio::test]

@@ -1,5 +1,9 @@
 //! Shared compile-time translations for ZenClash's native UI and platform surfaces.
 
+// Keep Cargo's non-test dependency graph aware of locale-only edits so
+// incremental release builds regenerate rust-i18n's embedded catalog.
+const _: &str = include_str!("../locales/app.yml");
+
 rust_i18n::i18n!("locales", fallback = "zh-CN");
 
 /// Simplified Chinese locale identifier used by the application preferences.
@@ -72,6 +76,11 @@ mod tests {
         );
         assert_eq!(text_for(EN, "common.actions.refresh"), "Refresh");
         assert_eq!(text_for(ZH_CN, "common.actions.refresh"), "刷新");
+        assert_eq!(text("network.diagnostics.title"), "分层诊断与支持");
+        assert_eq!(
+            text_for(EN, "resources.providers.healthcheck"),
+            "Health Check"
+        );
     }
 
     #[test]

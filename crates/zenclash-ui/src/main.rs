@@ -6,10 +6,7 @@ use std::{
     net::TcpListener,
     path::{Path, PathBuf},
     process::Command,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
     time::Duration,
 };
 
@@ -285,8 +282,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_handle = runtime.handle().clone();
     let restart_after_exit = Arc::new(parking_lot::Mutex::new(None));
     let app_restart_after_exit = Arc::clone(&restart_after_exit);
-    let restart_elevated_after_exit = Arc::new(AtomicBool::new(false));
-    let app_restart_elevated_after_exit = Arc::clone(&restart_elevated_after_exit);
 
     Application::new().with_assets(Assets).run(move |cx| {
         app::init(cx);
@@ -306,7 +301,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 startup_notice,
                 startup_error,
                 restart_after_exit: app_restart_after_exit,
-                restart_elevated_after_exit: app_restart_elevated_after_exit,
             },
             cx,
         );
@@ -314,11 +308,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     });
     drop(_instance_lock);
     if let Some(executable) = restart_after_exit.lock().take() {
-        spawn_restarted_process(
-            &executable,
-            restart_elevated_after_exit.load(Ordering::Acquire),
-        )
-        .map_err(|error| {
+        spawn_restarted_process(&executable).map_err(|error| {
             std::io::Error::other(zenclash_i18n::text_with(
                 "startup.restart_failed",
                 &[
@@ -331,34 +321,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn spawn_restarted_process(executable: &Path, elevated: bool) -> std::io::Result<()> {
-    if elevated {
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            let script = "Start-Process -FilePath $args[0] -Verb RunAs";
-            let mut command = Command::new("powershell.exe");
-            command
-                .args([
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-WindowStyle",
-                    "Hidden",
-                    "-Command",
-                    script,
-                ])
-                .arg(executable)
-                .creation_flags(CREATE_NO_WINDOW);
-            command.spawn()?;
-            return Ok(());
-        }
-        #[cfg(not(target_os = "windows"))]
-        return Err(std::io::Error::other(zenclash_i18n::text(
-            "startup.elevated_unsupported",
-        )));
-    }
+fn spawn_restarted_process(executable: &Path) -> std::io::Result<()> {
     Command::new(executable).spawn()?;
     Ok(())
 }

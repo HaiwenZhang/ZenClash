@@ -84,8 +84,8 @@ impl RuntimePage {
                                     .small()
                                     .primary()
                                     .disabled(self.mutating)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.choose_profile(cx);
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.choose_profile(window, cx);
                                     })),
                             ),
                     ),
