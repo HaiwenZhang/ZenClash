@@ -145,7 +145,7 @@ impl RuntimePage {
         card.child(
             h_flex().justify_end().p_4().child(
                 Button::new("check-app-update")
-                    .icon(IconName::Redo2)
+                    .icon(crate::assets::AppIcon::RefreshCw)
                     .label(zenclash_i18n::text(if state.loading {
                         "settings.app_update.checking"
                     } else {

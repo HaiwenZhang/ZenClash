@@ -209,7 +209,7 @@ impl RuntimePage {
         .child(
             h_flex().justify_end().p_4().child(
                 Button::new("fetch-mihomo-releases")
-                    .icon(IconName::Redo2)
+                    .icon(crate::assets::AppIcon::RefreshCw)
                     .label(zenclash_i18n::text(if self.core_releases.loading {
                         "core_page.maintenance.loading_versions"
                     } else if self.core_releases.releases.is_empty() {

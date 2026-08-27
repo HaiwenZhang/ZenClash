@@ -212,7 +212,7 @@ impl RuntimePage {
                     ))
                     .child(
                         Button::new("reload-profile")
-                            .icon(IconName::Redo2)
+                            .icon(crate::assets::AppIcon::RefreshCw)
                             .label(zenclash_i18n::text("profiles.actions.reload"))
                             .primary()
                             .loading(self.mutating)

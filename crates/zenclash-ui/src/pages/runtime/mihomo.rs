@@ -263,7 +263,7 @@ impl RuntimePage {
                     .child(
                         h_flex().justify_end().gap_2().p_4().child(
                             Button::new("restart-mihomo-core")
-                                .icon(IconName::Redo2)
+                                .icon(crate::assets::AppIcon::RefreshCw)
                                 .label(zenclash_i18n::text("core_page.maintenance.restart"))
                                 .small()
                                 .outline()

@@ -262,7 +262,7 @@ impl RuntimePage {
                     )
                     .child(
                         Button::new("refresh-network-probe")
-                            .icon(IconName::Redo2)
+                            .icon(crate::assets::AppIcon::RefreshCw)
                             .label(if self.network_probe.loading {
                                 zenclash_i18n::text("network.public_ip.probing")
                             } else {
@@ -517,7 +517,7 @@ impl RuntimePage {
                             )
                             .child(
                                 Button::new("clear-system-interface")
-                                    .icon(IconName::Redo2)
+                                    .icon(crate::assets::AppIcon::RefreshCw)
                                     .label(zenclash_i18n::text("network.system.automatic"))
                                     .small()
                                     .outline()

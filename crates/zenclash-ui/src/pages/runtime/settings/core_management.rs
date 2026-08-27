@@ -144,7 +144,7 @@ impl RuntimePage {
                     )
                     .child(
                         Button::new("refresh-core-management")
-                            .icon(IconName::Redo2)
+                            .icon(crate::assets::AppIcon::RefreshCw)
                             .label(zenclash_i18n::text("core_management.summary.refresh"))
                             .small()
                             .outline()

@@ -14,7 +14,7 @@ use crate::{
         NavigateRules, NavigateSettings, NavigateSniffer, NavigateSystemProxy, NavigateTraffic,
         NavigateTun, ToggleSidebar,
     },
-    assets::{GROUP_ICON_PATH, RADIO_ICON_PATH, RULER_ICON_PATH, ZENCLASH_MARK_PATH},
+    assets::{AppIcon, GROUP_ICON_PATH, RADIO_ICON_PATH, RULER_ICON_PATH, ZENCLASH_MARK_PATH},
     pages::Page,
 };
 
@@ -168,9 +168,11 @@ impl RenderOnce for Sidebar {
             .collapsed(self.collapsed)
             .header(
                 h_flex()
+                    .h(rems(5.25))
                     .w_full()
+                    .pt_8()
                     .when(!self.collapsed, |this| {
-                        this.h(rems(5.25)).pt_8().gap_3().justify_between().child(
+                        this.gap_3().justify_between().child(
                             h_flex()
                                 .min_w_0()
                                 .gap_3()
@@ -234,7 +236,9 @@ impl RenderOnce for Sidebar {
 }
 
 fn sidebar_icon(page: Page) -> Icon {
-    if let Some(path) = sidebar_icon_path(page) {
+    if page == Page::Home {
+        Icon::new(AppIcon::House)
+    } else if let Some(path) = sidebar_icon_path(page) {
         Icon::empty().path(path)
     } else {
         Icon::new(page.icon())

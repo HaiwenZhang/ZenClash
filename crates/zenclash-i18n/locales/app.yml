@@ -80,8 +80,8 @@ app:
     zh-CN: ZenClash
     en: ZenClash
   description:
-    zh-CN: Mihomo 桌面客户端
-    en: Mihomo desktop client
+    zh-CN: Mihomo 客户端
+    en: Mihomo Client
   menu:
     title:
       zh-CN: ZenClash
@@ -458,87 +458,6 @@ home:
     action:
       zh-CN: 查看更新
       en: View Update
-  setup:
-    title:
-      zh-CN: 完成连接准备
-      en: Finish Connection Setup
-    step:
-      zh-CN: 步骤 %{step} / 5
-      en: Step %{step} of 5
-    no_profile:
-      title:
-        zh-CN: 先添加一份可用配置
-        en: Add a Working Profile
-      description:
-        zh-CN: 在线订阅和本地 YAML 都会先验证；候选配置失败时不会替换当前运行配置。
-        en: Subscriptions and local YAML files are validated first; a rejected candidate never replaces the active runtime profile.
-    core:
-      title:
-        zh-CN: 让内核与控制器就绪
-        en: Bring the Core and Controller Online
-      description:
-        zh-CN: 当前配置已保存，但尚未同时确认内核进程和控制器响应。
-        en: The profile is saved, but both the core process and controller response have not been verified.
-    capture:
-      title:
-        zh-CN: 选择流量接管方式
-        en: Choose a Traffic Capture Method
-      description:
-        zh-CN: 系统代理适合普通桌面流量；TUN 可覆盖更多应用，但可能需要系统权限。
-        en: System Proxy suits ordinary desktop traffic; TUN covers more apps but may require system permission.
-    capture_unconfirmed:
-      title:
-        zh-CN: 确认流量接管已生效
-        en: Verify Traffic Capture
-      description:
-        zh-CN: 已记录接管意图，但原生状态或 TUN 运行状态尚未验证。
-        en: Capture was requested, but native state or TUN runtime activation is not yet verified.
-    path:
-      title:
-        zh-CN: 验证真实出口路径
-        en: Verify the Real Exit Path
-      description:
-        zh-CN: 运行一次明确经过 Mihomo 的公网与延迟探测，完成端到端验证。
-        en: Run an explicit public-IP and latency probe through Mihomo to verify the end-to-end path.
-    path_failed:
-      title:
-        zh-CN: 路径探测尚未通过
-        en: Path Verification Did Not Pass
-      description:
-        zh-CN: 流量接管已生效，但上次目标路径探测失败、已过期或没有经过 Mihomo；修复后可安全重试。
-        en: Traffic capture is active, but the last target-path probe failed, became stale, or bypassed Mihomo; fix the issue and retry safely.
-    ready:
-      title:
-        zh-CN: 连接已就绪
-        en: Connection Ready
-      description:
-        zh-CN: 配置、内核、流量接管和出口路径均已验证。
-        en: Profile, core, traffic capture, and exit path are verified.
-    actions:
-      import_subscription:
-        zh-CN: 导入订阅
-        en: Import Subscription
-      import_local:
-        zh-CN: 选择本地 YAML
-        en: Choose Local YAML
-      inspect_core:
-        zh-CN: 检查内核
-        en: Inspect Core
-      use_system_proxy:
-        zh-CN: 使用系统代理
-        en: Use System Proxy
-      use_tun:
-        zh-CN: 使用 TUN
-        en: Use TUN
-      review_capture:
-        zh-CN: 检查接管状态
-        en: Review Capture Status
-      run_probe:
-        zh-CN: 运行路径探测
-        en: Run Path Probe
-      retry_probe:
-        zh-CN: 重试路径探测
-        en: Retry Path Probe
   evidence:
     core_running:
       zh-CN: L1 内核运行中
@@ -654,6 +573,9 @@ home:
     title:
       zh-CN: 快速控制
       en: Quick Controls
+    capture_description:
+      zh-CN: 系统代理适合普通桌面流量；TUN 可覆盖更多应用，但可能需要系统权限。
+      en: System Proxy suits ordinary desktop traffic; TUN covers more apps but may require system permission.
     system_proxy_on:
       zh-CN: 系统流量正通过 ZenClash
       en: System traffic is routed through ZenClash
@@ -702,6 +624,30 @@ home:
     proxy_settings:
       zh-CN: 代理设置
       en: Proxy Settings
+    tun:
+      zh-CN: TUN
+      en: TUN
+    tun_on:
+      zh-CN: TUN 已启用并验证
+      en: TUN is enabled and verified
+    tun_off:
+      zh-CN: TUN 未启用
+      en: TUN is off
+    tun_loading:
+      zh-CN: 正在读取 TUN 状态
+      en: Reading TUN status
+    tun_unavailable:
+      zh-CN: TUN 状态不可用
+      en: TUN status unavailable
+    tun_unverified:
+      zh-CN: TUN 已配置，运行状态待验证
+      en: TUN is configured; runtime state is unverified
+    tun_inactive:
+      zh-CN: TUN 已配置但未生效
+      en: TUN is configured but inactive
+    tun_unsupported:
+      zh-CN: 当前内核不支持 TUN
+      en: The active core does not support TUN
     routing_mode:
       zh-CN: 路由模式
       en: Routing Mode

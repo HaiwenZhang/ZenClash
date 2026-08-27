@@ -300,7 +300,7 @@ impl RuntimePage {
                     )
                     .child(
                         Button::new("apply-overrides")
-                            .icon(IconName::Redo2)
+                            .icon(crate::assets::AppIcon::RefreshCw)
                             .label(zenclash_i18n::text("overrides.actions.apply"))
                             .primary()
                             .loading(self.mutating)

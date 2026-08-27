@@ -120,7 +120,7 @@ impl Page {
             Self::Rules => IconName::Menu,
             Self::Resources => IconName::Inbox,
             Self::Override => IconName::Replace,
-            Self::Network => IconName::Inspector,
+            Self::Network => IconName::Globe,
             Self::Traffic => IconName::ChartPie,
             Self::Settings => IconName::Settings2,
         }

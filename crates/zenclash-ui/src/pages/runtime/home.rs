@@ -15,16 +15,16 @@ use gpui_component::{
     v_flex,
 };
 use zenclash_core::{
-    CapabilityState, CaptureOutcome, CapturePlan, CaptureStatus, ConnectionPolicy, FirstRunStage,
-    Observation, OperationalSnapshot, ProcessRecoveryStatus, ProcessStatus, ProxyCatalog,
-    ProxyGroup, ProxyGroupBehavior, ProxyOperations, RuntimeConfig, StreamStatus, StreamStatuses,
+    CapabilityState, CaptureOutcome, CapturePlan, CaptureStatus, ConnectionPolicy, Observation,
+    OperationalSnapshot, ProcessRecoveryStatus, ProcessStatus, ProxyCatalog, ProxyGroup,
+    ProxyGroupBehavior, ProxyOperations, RuntimeConfig, StreamStatus, StreamStatuses,
     SubscriptionUsage, SystemProxyOwnershipState, TrafficSample, format_speed,
 };
 
 use crate::{
     app::{
-        NavigateMihomo, NavigateNetwork, NavigateProfiles, NavigateProxies, NavigateSystemProxy,
-        NavigateTraffic, NavigateTun, SetDirectMode, SetGlobalMode, SetRuleMode,
+        NavigateProfiles, NavigateProxies, NavigateSystemProxy, NavigateTraffic, SetDirectMode,
+        SetGlobalMode, SetRuleMode,
     },
     components::sidebar::OutboundMode,
 };
@@ -68,11 +68,10 @@ impl RuntimePage {
             _ => (&fallback_config, &fallback_proxies, &fallback_connections),
         };
         let operational = self.operational_status.snapshot();
-        let first_run =
-            operational.first_run_stage(self.profile_catalog.active_profile().is_some());
 
         v_flex()
             .gap_4()
+            .child(self.render_home_controls(config, &operational.capture, theme, cx))
             .when_some(
                 self.app_update
                     .status
@@ -113,9 +112,6 @@ impl RuntimePage {
                     )
                 },
             )
-            .when(first_run != FirstRunStage::Ready, |this| {
-                this.child(self.render_first_run_setup(first_run, &operational, theme, cx))
-            })
             .child(self.render_home_evidence(&operational, theme))
             .child(
                 h_flex()
@@ -125,159 +121,8 @@ impl RuntimePage {
                     .child(self.render_home_profile(theme, cx))
                     .child(self.render_home_proxy(config, proxies, theme, cx)),
             )
-            .child(self.render_home_controls(config, &operational.capture, first_run, theme, cx))
             .child(self.render_home_traffic(connections, &operational.streams, theme))
             .into_any_element()
-    }
-
-    fn render_first_run_setup(
-        &self,
-        stage: FirstRunStage,
-        operational: &OperationalSnapshot,
-        theme: &gpui_component::Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let (step, title_key, description_key) = first_run_copy(stage);
-        let actions = h_flex()
-            .gap_2()
-            .flex_wrap()
-            .when(stage == FirstRunStage::NoProfile, |this| {
-                this.child(
-                    Button::new("home-import-subscription")
-                        .icon(IconName::Globe)
-                        .label(zenclash_i18n::text(
-                            "home.setup.actions.import_subscription",
-                        ))
-                        .primary()
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.prepare_remote_profile_import(window, cx);
-                            window.dispatch_action(Box::new(NavigateProfiles), cx);
-                        })),
-                )
-                .child(
-                    Button::new("home-import-local-profile")
-                        .icon(IconName::FolderOpen)
-                        .label(zenclash_i18n::text("home.setup.actions.import_local"))
-                        .outline()
-                        .loading(self.home.profile_switching.is_some())
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.choose_home_profile(window, cx);
-                        })),
-                )
-            })
-            .when(stage == FirstRunStage::CoreUnavailable, |this| {
-                this.child(
-                    Button::new("home-inspect-core")
-                        .icon(IconName::SquareTerminal)
-                        .label(zenclash_i18n::text("home.setup.actions.inspect_core"))
-                        .primary()
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(NavigateMihomo), cx);
-                        }),
-                )
-            })
-            .when(stage == FirstRunStage::CaptureNotSelected, |this| {
-                this.child(
-                    Button::new("home-use-system-proxy")
-                        .label(zenclash_i18n::text("home.setup.actions.use_system_proxy"))
-                        .primary()
-                        .loading(self.home.capture_pending == Some(CapturePlan::SystemProxy))
-                        .disabled(self.home.capture_pending.is_some())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.apply_home_capture_plan(CapturePlan::SystemProxy, cx);
-                        })),
-                )
-                .child(
-                    Button::new("home-use-tun")
-                        .label(zenclash_i18n::text("home.setup.actions.use_tun"))
-                        .outline()
-                        .loading(self.home.capture_pending == Some(CapturePlan::Tun))
-                        .disabled(self.home.capture_pending.is_some())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.apply_home_capture_plan(CapturePlan::Tun, cx);
-                        })),
-                )
-            })
-            .when(stage == FirstRunStage::CaptureUnconfirmed, |this| {
-                let review_tun = operational
-                    .capture
-                    .tun
-                    .value()
-                    .is_some_and(|tun| tun.requested || tun.configured);
-                this.child(
-                    Button::new("home-review-capture")
-                        .icon(IconName::Inspector)
-                        .label(zenclash_i18n::text("home.setup.actions.review_capture"))
-                        .primary()
-                        .on_click(move |_, window, cx| {
-                            if review_tun {
-                                window.dispatch_action(Box::new(NavigateTun), cx);
-                            } else {
-                                window.dispatch_action(Box::new(NavigateSystemProxy), cx);
-                            }
-                        }),
-                )
-            })
-            .when(
-                matches!(
-                    stage,
-                    FirstRunStage::PathUnknown | FirstRunStage::PathFailed
-                ),
-                |this| {
-                    this.child(
-                        Button::new("home-run-path-probe")
-                            .icon(IconName::Globe)
-                            .label(zenclash_i18n::text(if stage == FirstRunStage::PathFailed {
-                                "home.setup.actions.retry_probe"
-                            } else {
-                                "home.setup.actions.run_probe"
-                            }))
-                            .primary()
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(NavigateNetwork), cx);
-                            }),
-                    )
-                },
-            );
-
-        home_card(
-            zenclash_i18n::text("home.setup.title"),
-            IconName::CircleCheck,
-            theme,
-        )
-        .w_full()
-        .child(
-            v_flex()
-                .p_4()
-                .gap_3()
-                .child(
-                    div()
-                        .text_xs()
-                        .font_family(theme.mono_font_family.clone())
-                        .text_color(theme.muted_foreground)
-                        .child(zenclash_i18n::text_with(
-                            "home.setup.step",
-                            &[("step", step.to_string())],
-                        )),
-                )
-                .child(
-                    div()
-                        .text_base()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(zenclash_i18n::text(title_key)),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child(zenclash_i18n::text(description_key)),
-                )
-                .when_some(self.home.action_error.clone(), |this, error| {
-                    this.child(message_banner(error, theme.danger, theme))
-                })
-                .child(actions),
-        )
-        .into_any_element()
     }
 
     fn render_home_evidence(
@@ -620,7 +465,6 @@ impl RuntimePage {
         &self,
         config: &RuntimeConfig,
         capture: &CaptureStatus,
-        first_run: FirstRunStage,
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -629,6 +473,15 @@ impl RuntimePage {
             snapshot.intent_enabled
         });
         let proxy_status = system_proxy_status_text(capture);
+        let tun_enabled = capture
+            .tun
+            .value()
+            .map_or(config.tun.enable, |tun| tun.requested || tun.configured);
+        let tun_supported = capture
+            .tun
+            .value()
+            .is_none_or(|tun| tun.observed != CapabilityState::Unsupported);
+        let tun_status = tun_status_text(capture);
         let capture_status = capture_status_text(capture);
         let mode = OutboundMode::from_api(&config.mode);
         let port = config.system_proxy_port().map_or_else(
@@ -650,20 +503,24 @@ impl RuntimePage {
                 .flex_wrap()
                 .gap_5()
                 .p_4()
-                .when(first_run == FirstRunStage::Ready, |this| {
-                    this.when_some(self.home.action_error.clone(), |this, error| {
-                        this.child(
-                            div()
-                                .w_full()
-                                .child(message_banner(error, theme.danger, theme)),
-                        )
-                    })
+                .when_some(self.home.action_error.clone(), |this, error| {
+                    this.child(
+                        div()
+                            .w_full()
+                            .child(message_banner(error, theme.danger, theme)),
+                    )
                 })
                 .child(
                     v_flex()
                         .min_w(rems(18.))
                         .flex_1()
                         .gap_3()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(zenclash_i18n::text("home.controls.capture_description")),
+                        )
                         .child(
                             h_flex()
                                 .justify_between()
@@ -692,6 +549,44 @@ impl RuntimePage {
                                             this.apply_home_capture_plan(
                                                 if *checked {
                                                     CapturePlan::SystemProxy
+                                                } else {
+                                                    CapturePlan::Off
+                                                },
+                                                cx,
+                                            );
+                                        })),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    v_flex()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .child(zenclash_i18n::text("home.controls.tun")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child(tun_status),
+                                        ),
+                                )
+                                .child(
+                                    Switch::new("home-tun")
+                                        .checked(tun_enabled)
+                                        .disabled(
+                                            self.home.capture_pending.is_some() || !tun_supported,
+                                        )
+                                        .on_click(cx.listener(|this, checked, _, cx| {
+                                            this.apply_home_capture_plan(
+                                                if *checked {
+                                                    CapturePlan::Tun
                                                 } else {
                                                     CapturePlan::Off
                                                 },
@@ -1015,36 +910,6 @@ impl RuntimePage {
     }
 }
 
-fn first_run_copy(stage: FirstRunStage) -> (u8, &'static str, &'static str) {
-    match stage {
-        FirstRunStage::NoProfile => (
-            1,
-            "home.setup.no_profile.title",
-            "home.setup.no_profile.description",
-        ),
-        FirstRunStage::CoreUnavailable => {
-            (2, "home.setup.core.title", "home.setup.core.description")
-        }
-        FirstRunStage::CaptureNotSelected => (
-            3,
-            "home.setup.capture.title",
-            "home.setup.capture.description",
-        ),
-        FirstRunStage::CaptureUnconfirmed => (
-            3,
-            "home.setup.capture_unconfirmed.title",
-            "home.setup.capture_unconfirmed.description",
-        ),
-        FirstRunStage::PathUnknown => (4, "home.setup.path.title", "home.setup.path.description"),
-        FirstRunStage::PathFailed => (
-            4,
-            "home.setup.path_failed.title",
-            "home.setup.path_failed.description",
-        ),
-        FirstRunStage::Ready => (5, "home.setup.ready.title", "home.setup.ready.description"),
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 struct TrafficChartPoint {
     label: SharedString,
@@ -1252,6 +1117,30 @@ fn describe_system_proxy(snapshot: &zenclash_core::SystemProxySessionSnapshot) -
     }
 }
 
+fn tun_status_text(capture: &CaptureStatus) -> String {
+    match &capture.tun {
+        Observation::Loading => zenclash_i18n::text("home.controls.tun_loading"),
+        Observation::Failed { .. } => zenclash_i18n::text("home.controls.tun_unavailable"),
+        Observation::Fresh { value, .. } | Observation::Stale { value, .. } => describe_tun(value),
+    }
+}
+
+fn describe_tun(snapshot: &zenclash_core::TunCaptureStatus) -> String {
+    match snapshot.observed {
+        CapabilityState::Active => zenclash_i18n::text("home.controls.tun_on"),
+        CapabilityState::Unsupported => zenclash_i18n::text("home.controls.tun_unsupported"),
+        CapabilityState::Unknown if snapshot.requested || snapshot.configured => {
+            zenclash_i18n::text("home.controls.tun_unverified")
+        }
+        CapabilityState::Inactive if snapshot.requested || snapshot.configured => {
+            zenclash_i18n::text("home.controls.tun_inactive")
+        }
+        CapabilityState::Inactive | CapabilityState::Unknown => {
+            zenclash_i18n::text("home.controls.tun_off")
+        }
+    }
+}
+
 fn capture_status_text(capture: &CaptureStatus) -> String {
     if capture.is_active() {
         return zenclash_i18n::text("home.controls.capture_active");
@@ -1404,11 +1293,13 @@ fn mode_button<A>(
 where
     A: gpui::Action + Clone + 'static,
 {
+    let is_selected = value == selected;
     Button::new(id)
         .label(value.label())
         .small()
-        .outline()
-        .selected(value == selected)
+        .when(is_selected, |this| this.icon(IconName::Check).primary())
+        .when(!is_selected, |this| this.outline())
+        .selected(is_selected)
         .on_click(move |_, window, cx| {
             window.dispatch_action(Box::new(action.clone()), cx);
         })
@@ -1490,7 +1381,7 @@ fn traffic_metric(
 mod tests {
     use zenclash_core::{
         DelayHistory, ProxyGroup, ProxyGroupBehavior, ProxyNode, SystemProxySessionSnapshot,
-        SystemProxyStatus,
+        SystemProxyStatus, TunCaptureStatus, TunRuntimeObservation,
     };
 
     use super::*;
@@ -1525,18 +1416,6 @@ mod tests {
                 ..process
             })),
             ("home.evidence.core_recovered", Some(2))
-        );
-    }
-
-    #[test]
-    fn captured_but_failed_path_uses_the_explicit_path_failure_copy() {
-        assert_eq!(
-            first_run_copy(FirstRunStage::PathFailed),
-            (
-                4,
-                "home.setup.path_failed.title",
-                "home.setup.path_failed.description"
-            )
         );
     }
 
@@ -1646,6 +1525,47 @@ mod tests {
         assert_eq!(
             describe_system_proxy(&lost),
             zenclash_i18n::text("home.controls.system_proxy_ownership_lost")
+        );
+    }
+
+    #[test]
+    fn tun_status_copy_distinguishes_off_unverified_active_and_unsupported() {
+        let mut status = TunCaptureStatus {
+            requested: false,
+            configured: false,
+            permission: CapabilityState::Inactive,
+            runtime: TunRuntimeObservation {
+                device_name: None,
+                device: CapabilityState::Inactive,
+                route: CapabilityState::Inactive,
+                detail: String::new(),
+            },
+            observed: CapabilityState::Inactive,
+        };
+
+        assert_eq!(
+            describe_tun(&status),
+            zenclash_i18n::text("home.controls.tun_off")
+        );
+
+        status.requested = true;
+        status.configured = true;
+        status.observed = CapabilityState::Unknown;
+        assert_eq!(
+            describe_tun(&status),
+            zenclash_i18n::text("home.controls.tun_unverified")
+        );
+
+        status.observed = CapabilityState::Active;
+        assert_eq!(
+            describe_tun(&status),
+            zenclash_i18n::text("home.controls.tun_on")
+        );
+
+        status.observed = CapabilityState::Unsupported;
+        assert_eq!(
+            describe_tun(&status),
+            zenclash_i18n::text("home.controls.tun_unsupported")
         );
     }
 

@@ -53,7 +53,7 @@ impl RuntimePage {
                             .gap_2()
                             .child(
                                 Button::new("backup-export")
-                                    .icon(IconName::File)
+                                    .icon(crate::assets::AppIcon::SquareArrowRightExit)
                                     .label(zenclash_i18n::text("backup.local.export"))
                                     .small()
                                     .disabled(self.mutating)

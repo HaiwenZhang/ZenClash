@@ -72,7 +72,7 @@ impl ProxiesPage {
                     )
                     .child(
                         Button::new("refresh-proxies")
-                            .icon(IconName::Redo2)
+                            .icon(crate::assets::AppIcon::RefreshCw)
                             .label(if loading {
                                 zenclash_i18n::text("common.actions.loading")
                             } else {
@@ -220,7 +220,7 @@ impl ProxiesPage {
                                 |this| {
                                     this.child(
                                         Button::new(("measure-restore-auto", group_index))
-                                            .icon(IconName::Redo2)
+                                            .icon(crate::assets::AppIcon::Gauge)
                                             .label(if measuring_and_restoring {
                                                 zenclash_i18n::text("proxies.actions.testing")
                                             } else {
@@ -250,7 +250,7 @@ impl ProxiesPage {
                                 |this| {
                                     this.child(
                                         Button::new(("restore-auto", group_index))
-                                            .icon(IconName::Redo2)
+                                            .icon(crate::assets::AppIcon::RefreshCw)
                                             .label(if restoring_auto {
                                                 zenclash_i18n::text(
                                                     "proxies.actions.restoring_auto",
@@ -270,7 +270,7 @@ impl ProxiesPage {
                             )
                             .child(
                                 Button::new(("test-group", group_index))
-                                    .icon(IconName::Redo2)
+                                    .icon(crate::assets::AppIcon::Gauge)
                                     .label(if testing_group {
                                         zenclash_i18n::text("proxies.actions.testing")
                                     } else {
@@ -449,7 +449,7 @@ impl ProxiesPage {
                             gpui::ElementId::from(("test-proxy", group_index)),
                             proxy_index.to_string(),
                         ))
-                        .icon(IconName::Redo2)
+                        .icon(crate::assets::AppIcon::Gauge)
                         .label(if testing {
                             zenclash_i18n::text("proxies.actions.testing")
                         } else {
@@ -476,9 +476,9 @@ impl ProxiesPage {
                                 proxy_index.to_string(),
                             ))
                             .icon(if selected {
-                                IconName::Check
+                                Icon::new(IconName::Check)
                             } else {
-                                IconName::ArrowRight
+                                Icon::new(crate::assets::AppIcon::SquareMousePointer)
                             })
                             .label(if selected {
                                 zenclash_i18n::text("proxies.actions.current")

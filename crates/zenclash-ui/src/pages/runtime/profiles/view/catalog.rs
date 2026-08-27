@@ -117,7 +117,7 @@ impl RuntimePage {
                 )
                 .child(
                     Button::new(("update-profile", index))
-                        .icon(IconName::Redo2)
+                        .icon(crate::assets::AppIcon::RefreshCw)
                         .label(zenclash_i18n::text("profiles.actions.update"))
                         .small()
                         .outline()

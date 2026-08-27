@@ -313,14 +313,6 @@ impl RuntimePage {
         self.choose_profile_for_page(Page::Profiles, window, cx);
     }
 
-    pub(in crate::pages::runtime) fn choose_home_profile(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.choose_profile_for_page(Page::Home, window, cx);
-    }
-
     fn choose_profile_for_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         let token = self.page_task_token_for(page);
         let restore_focus = window.focused(cx);
@@ -370,18 +362,6 @@ impl RuntimePage {
             }
         })
         .detach();
-    }
-
-    pub(in crate::pages::runtime) fn prepare_remote_profile_import(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.profile_forms.adding_subscription = true;
-        self.profile_forms
-            .subscription_url
-            .update(cx, |input, cx| input.focus(window, cx));
-        cx.notify();
     }
 
     fn apply_profile_activation(

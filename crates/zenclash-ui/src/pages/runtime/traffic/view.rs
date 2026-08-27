@@ -273,7 +273,7 @@ impl RuntimePage {
                 )
                 .child(
                     Button::new("confirm-clear-traffic")
-                        .icon(IconName::Delete)
+                        .icon(IconName::Globe)
                         .label(zenclash_i18n::text("traffic.actions.confirm_clear"))
                         .small()
                         .danger()
@@ -285,7 +285,7 @@ impl RuntimePage {
             .when(!self.traffic_history.clear_confirmation, |this| {
                 this.child(
                     Button::new("request-clear-traffic")
-                        .icon(IconName::Delete)
+                        .icon(IconName::Globe)
                         .label(zenclash_i18n::text("traffic.actions.clear"))
                         .small()
                         .ghost()

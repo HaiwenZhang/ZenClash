@@ -63,7 +63,7 @@ impl RuntimePage {
                     .child(div().flex_1().child(Input::new(&self.logs.filter).small()))
                     .child(
                         Button::new("export-logs")
-                            .icon(IconName::File)
+                            .icon(crate::assets::AppIcon::SquareArrowRightExit)
                             .label(zenclash_i18n::text("logs.actions.export"))
                             .small()
                             .outline()
@@ -87,7 +87,7 @@ impl RuntimePage {
                     )
                     .child(
                         Button::new("clear-logs")
-                            .icon(IconName::Delete)
+                            .icon(IconName::Globe)
                             .label(zenclash_i18n::text("logs.actions.clear"))
                             .small()
                             .outline()

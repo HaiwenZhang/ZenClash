@@ -1,9 +1,9 @@
 use super::{
     ActiveTheme, App, Button, ButtonVariants, Context, Disableable, FluentBuilder, Focusable, Icon,
-    IconName, InteractiveElement, IntoElement, Page, ParentElement, Render, RuntimeData,
-    RuntimePage, ScrollableElement, Sizable, Styled, Window, div, empty_state, h_flex,
-    message_banner, v_flex,
+    InteractiveElement, IntoElement, Page, ParentElement, Render, RuntimeData, RuntimePage,
+    ScrollableElement, Sizable, Styled, Window, div, empty_state, h_flex, message_banner, v_flex,
 };
+use crate::assets::AppIcon;
 
 impl RuntimePage {
     fn render_header(
@@ -23,6 +23,11 @@ impl RuntimePage {
                 theme.warning,
             )
         };
+        let page_icon = if self.page == Page::Home {
+            Icon::new(AppIcon::House)
+        } else {
+            Icon::new(self.page.icon())
+        };
         h_flex()
             .h_16()
             .px_5()
@@ -33,11 +38,7 @@ impl RuntimePage {
             .child(
                 h_flex()
                     .gap_3()
-                    .child(
-                        Icon::new(self.page.icon())
-                            .size_5()
-                            .text_color(theme.primary),
-                    )
+                    .child(page_icon.size_5().text_color(theme.primary))
                     .child(
                         v_flex()
                             .gap_0()
@@ -68,7 +69,7 @@ impl RuntimePage {
                     )
                     .child(
                         Button::new("refresh-runtime-page")
-                            .icon(IconName::Redo2)
+                            .icon(AppIcon::RefreshCw)
                             .label(zenclash_i18n::text(if self.loading {
                                 "common.actions.loading"
                             } else {

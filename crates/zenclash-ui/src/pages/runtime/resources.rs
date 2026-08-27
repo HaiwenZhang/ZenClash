@@ -292,7 +292,7 @@ impl RuntimePage {
                     .p_4()
                     .child(
                         Button::new("update-geodata")
-                            .icon(IconName::Redo2)
+                            .icon(crate::assets::AppIcon::RefreshCw)
                             .label(zenclash_i18n::text("resources.builtin.update_geodata"))
                             .small()
                             .primary()
@@ -306,7 +306,7 @@ impl RuntimePage {
                     )
                     .child(
                         Button::new("update-external-ui")
-                            .icon(IconName::Redo2)
+                            .icon(crate::assets::AppIcon::RefreshCw)
                             .label(zenclash_i18n::text("resources.builtin.update_ui"))
                             .small()
                             .outline()
@@ -497,7 +497,7 @@ fn provider_section(
                             })
                             .child(
                                 Button::new(("update-provider", index))
-                                    .icon(IconName::Redo2)
+                                    .icon(crate::assets::AppIcon::RefreshCw)
                                     .label(zenclash_i18n::text("resources.providers.update"))
                                     .small()
                                     .disabled(mutating)

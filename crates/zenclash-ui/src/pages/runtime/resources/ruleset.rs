@@ -195,7 +195,7 @@ impl RuntimePage {
                             )
                             .child(
                                 Button::new("export-ruleset")
-                                    .icon(IconName::File)
+                                    .icon(crate::assets::AppIcon::SquareArrowRightExit)
                                     .label(zenclash_i18n::text("resources.ruleset.export"))
                                     .small()
                                     .outline()

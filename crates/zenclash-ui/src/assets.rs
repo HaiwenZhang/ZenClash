@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
+use gpui_component::IconNamed;
 use gpui_component_assets::Assets as ComponentAssets;
 
 /// Asset path for the monochrome `ZenClash` brand mark.
@@ -13,6 +14,44 @@ pub const GROUP_ICON_PATH: &str = "icons/group.svg";
 pub const RADIO_ICON_PATH: &str = "icons/radio.svg";
 /// Asset path for the ruler icon used by the rules sidebar destination.
 pub const RULER_ICON_PATH: &str = "icons/ruler.svg";
+/// Asset path for the house icon used by the home destination.
+pub const HOUSE_ICON_PATH: &str = "icons/house.svg";
+/// Asset path for the clockwise refresh icon used by refresh commands.
+pub const REFRESH_CW_ICON_PATH: &str = "icons/refresh-cw.svg";
+/// Asset path for the gauge icon used by delay-test commands.
+pub const GAUGE_ICON_PATH: &str = "icons/gauge.svg";
+/// Asset path for the square pointer icon used by selection commands.
+pub const SQUARE_MOUSE_POINTER_ICON_PATH: &str = "icons/square-mouse-pointer.svg";
+/// Asset path for the square exit icon used by export commands.
+pub const SQUARE_ARROW_RIGHT_EXIT_ICON_PATH: &str = "icons/square-arrow-right-exit.svg";
+
+/// Application-owned icons that are not included in gpui-component's bundle.
+#[derive(Clone, Copy)]
+pub enum AppIcon {
+    /// Home destination.
+    House,
+    /// Refresh the current data clockwise.
+    RefreshCw,
+    /// Measure proxy latency.
+    Gauge,
+    /// Select an item with the pointer.
+    SquareMousePointer,
+    /// Export data from the application.
+    SquareArrowRightExit,
+}
+
+impl IconNamed for AppIcon {
+    fn path(self) -> SharedString {
+        match self {
+            Self::House => HOUSE_ICON_PATH,
+            Self::RefreshCw => REFRESH_CW_ICON_PATH,
+            Self::Gauge => GAUGE_ICON_PATH,
+            Self::SquareMousePointer => SQUARE_MOUSE_POINTER_ICON_PATH,
+            Self::SquareArrowRightExit => SQUARE_ARROW_RIGHT_EXIT_ICON_PATH,
+        }
+        .into()
+    }
+}
 
 /// Combined application and gpui-component asset source.
 pub struct Assets;
@@ -39,6 +78,31 @@ impl AssetSource for Assets {
                 "../assets/icons/ruler.svg"
             ))));
         }
+        if path == HOUSE_ICON_PATH {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/house.svg"
+            ))));
+        }
+        if path == REFRESH_CW_ICON_PATH {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/refresh-cw.svg"
+            ))));
+        }
+        if path == GAUGE_ICON_PATH {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/gauge.svg"
+            ))));
+        }
+        if path == SQUARE_MOUSE_POINTER_ICON_PATH {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/square-mouse-pointer.svg"
+            ))));
+        }
+        if path == SQUARE_ARROW_RIGHT_EXIT_ICON_PATH {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/square-arrow-right-exit.svg"
+            ))));
+        }
 
         ComponentAssets.load(path)
     }
@@ -50,6 +114,11 @@ impl AssetSource for Assets {
             GROUP_ICON_PATH,
             RADIO_ICON_PATH,
             RULER_ICON_PATH,
+            HOUSE_ICON_PATH,
+            REFRESH_CW_ICON_PATH,
+            GAUGE_ICON_PATH,
+            SQUARE_MOUSE_POINTER_ICON_PATH,
+            SQUARE_ARROW_RIGHT_EXIT_ICON_PATH,
         ] {
             if app_asset.starts_with(path) {
                 assets.push(app_asset.into());
@@ -63,7 +132,11 @@ impl AssetSource for Assets {
 mod tests {
     use gpui::AssetSource as _;
 
-    use super::{Assets, GROUP_ICON_PATH, RADIO_ICON_PATH, RULER_ICON_PATH, ZENCLASH_MARK_PATH};
+    use super::{
+        Assets, GAUGE_ICON_PATH, GROUP_ICON_PATH, HOUSE_ICON_PATH, RADIO_ICON_PATH,
+        REFRESH_CW_ICON_PATH, RULER_ICON_PATH, SQUARE_ARROW_RIGHT_EXIT_ICON_PATH,
+        SQUARE_MOUSE_POINTER_ICON_PATH, ZENCLASH_MARK_PATH,
+    };
 
     #[test]
     fn application_assets_include_the_brand_mark() {
@@ -77,7 +150,16 @@ mod tests {
 
     #[test]
     fn application_assets_include_the_sidebar_icons() {
-        for path in [GROUP_ICON_PATH, RADIO_ICON_PATH, RULER_ICON_PATH] {
+        for path in [
+            GROUP_ICON_PATH,
+            RADIO_ICON_PATH,
+            RULER_ICON_PATH,
+            HOUSE_ICON_PATH,
+            REFRESH_CW_ICON_PATH,
+            GAUGE_ICON_PATH,
+            SQUARE_MOUSE_POINTER_ICON_PATH,
+            SQUARE_ARROW_RIGHT_EXIT_ICON_PATH,
+        ] {
             let icon = Assets
                 .load(path)
                 .expect("sidebar icon asset should load")
