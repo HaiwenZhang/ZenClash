@@ -5,7 +5,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use parking_lot::Mutex;
@@ -795,7 +795,10 @@ impl ControlledConfigStore {
         let cache = tokio::task::spawn_blocking(move || store.stage_runtime_payload(&payload))
             .await
             .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        if let Err(error) = restart_and_wait(process.clone()).await {
+        if let Err(error) = process
+            .restart_and_wait(std::time::Duration::from_secs(20))
+            .await
+        {
             let rollback = rollback_cache_and_restart(cache, process).await;
             return Err(ControlledConfigError::Transaction(format!(
                 "新配置启动失败：{error}；上一配置恢复：{rollback}"
@@ -912,18 +915,6 @@ fn yaml_value_is_nonempty(value: &Value) -> bool {
     }
 }
 
-async fn restart_and_wait(process: Arc<MihomoProcess>) -> ControlledConfigResult<()> {
-    let restart_process = process.clone();
-    tokio::task::spawn_blocking(move || restart_process.restart())
-        .await
-        .map_err(|error| ControlledConfigError::Task(error.to_string()))?
-        .map_err(ControlledConfigError::Profile)?;
-    process
-        .wait_until_ready(Duration::from_secs(20))
-        .await
-        .map_err(ControlledConfigError::Profile)
-}
-
 async fn rollback_runtime_cache(cache: RuntimeCacheTransaction) -> ControlledConfigResult<()> {
     tokio::task::spawn_blocking(move || cache.rollback())
         .await
@@ -941,7 +932,11 @@ async fn rollback_cache_and_restart(
     if let Err(error) = cache_rollback {
         return format!("失败（缓存恢复失败：{error}）");
     }
-    result_label(restart_and_wait(process).await)
+    result_label(
+        process
+            .restart_and_wait(std::time::Duration::from_secs(20))
+            .await,
+    )
 }
 
 fn result_label<T, E: std::fmt::Display>(result: Result<T, E>) -> String {

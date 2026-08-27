@@ -165,7 +165,7 @@ impl RuntimePage {
         rule: &zenclash_core::Rule,
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> gpui::AnyElement {
         let runtime_index = rule.index;
         let stats = rule.extra.as_ref();
         let disabled = stats.is_some_and(|stats| stats.disabled);
@@ -248,7 +248,7 @@ impl RuntimePage {
                     })),
             );
         }
-        row
+        row.into_any_element()
     }
 }
 

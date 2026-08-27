@@ -19,13 +19,9 @@ impl RuntimePage {
             return;
         };
         let controlled = self.controlled_config_store.clone();
-        let client = self.client.clone();
         let profile = self.profile_path.clone();
-        let core_runtime = super::super::profiles::workflow::CoreProfileRuntime::new(
-            self.core_kind,
-            client,
-            self.process.clone(),
-        );
+        let core_runtime =
+            super::super::profiles::workflow::CoreProfileRuntime::new(self.core_session.clone());
         let core_name = self.core_kind.display_name();
         let task = self.runtime.spawn(async move {
             let import_store = store.clone();
@@ -235,12 +231,8 @@ impl RuntimePage {
         };
         let profile = self.profile_path.clone();
         let controlled = self.controlled_config_store.clone();
-        let client = self.client.clone();
-        let core_runtime = super::super::profiles::workflow::CoreProfileRuntime::new(
-            self.core_kind,
-            client,
-            self.process.clone(),
-        );
+        let core_runtime =
+            super::super::profiles::workflow::CoreProfileRuntime::new(self.core_session.clone());
         let core_name = self.core_kind.display_name();
         let next_for_task = next.clone();
         let task = self.runtime.spawn(async move {

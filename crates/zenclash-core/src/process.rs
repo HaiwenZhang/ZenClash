@@ -94,6 +94,25 @@ impl MihomoProcess {
         Ok(())
     }
 
+    /// Restarts the managed child away from an async caller and waits for its controller.
+    ///
+    /// This is the single lifecycle transition for runtime callers. Blocking
+    /// process operations run on Tokio's blocking pool before readiness is
+    /// checked asynchronously.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation, stop, spawn, task, early-exit, or readiness errors.
+    pub async fn restart_and_wait(self: &Arc<Self>, timeout: Duration) -> MihomoResult<()> {
+        let process = self.clone();
+        tokio::task::spawn_blocking(move || process.restart())
+            .await
+            .map_err(|error| {
+                MihomoError::Process(format!("内核重启后台任务异常结束：{error}"))
+            })??;
+        self.wait_until_ready(timeout).await
+    }
+
     /// Polls the real `/version` endpoint until it responds, the child exits,
     /// or the supplied timeout elapses.
     ///
@@ -217,6 +236,18 @@ impl MihomoProcess {
     pub fn stop(&self) -> MihomoResult<()> {
         let mut child = self.child.lock();
         stop_child(&mut child)
+    }
+
+    /// Stops and reaps the managed child without blocking an async caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns process or blocking-task failures. Repeated calls are safe.
+    pub async fn stop_async(self: &Arc<Self>) -> MihomoResult<()> {
+        let process = self.clone();
+        tokio::task::spawn_blocking(move || process.stop())
+            .await
+            .map_err(|error| MihomoError::Process(format!("内核停止后台任务异常结束：{error}")))?
     }
 }
 

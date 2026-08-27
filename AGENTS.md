@@ -39,7 +39,7 @@
 
 ## 工程约束
 
-- 使用 Rust 1.80、edition 2021，并遵循现有 crate 边界和 lint 设置。
+- 使用 Rust edition 2024，并遵循现有 crate 边界和 lint 设置；不在清单中固定 Rust 版本。
 - 优先复用已有模块、状态和工具，不为单次使用新增抽象或配置项。
 - 公共 API 按 crate 的 `missing_docs` 规则补充文档。
 - 阻塞式文件、网络和进程操作不得运行在 GPUI 主线程；使用现有 Tokio runtime 或后台任务。

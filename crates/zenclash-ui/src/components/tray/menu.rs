@@ -125,11 +125,7 @@ pub(super) fn build_menu(
                 zenclash_i18n::text("tray.test_group"),
                 TrayCommand::TestGroup {
                     group: group.name.clone(),
-                    proxies: group
-                        .proxies
-                        .iter()
-                        .map(|proxy| proxy.name.clone())
-                        .collect(),
+                    proxies: group.proxies.clone(),
                     test_url: group.test_url.clone(),
                 },
             );

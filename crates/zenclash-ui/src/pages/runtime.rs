@@ -1,9 +1,4 @@
-use std::{
-    collections::{HashSet, VecDeque},
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::{
     div, prelude::FluentBuilder, px, App, AppContext, ClipboardItem, Context, Entity, EventEmitter,
@@ -23,13 +18,13 @@ use zenclash_core::{
     default_pac_script, default_system_proxy_bypass, diff_yaml_configs, format_log_entries,
     format_speed, normalize_pac_script, normalize_system_proxy_bypass, normalize_system_proxy_host,
     AppPreferences, AppPreferencesStore, AutostartStatus, ConfigDiffReport, ConnectionsSnapshot,
-    ControlledConfigStore, CoreBinaryInfo, CoreKind, LogMonitor, MihomoClient, MihomoLaunchConfig,
-    MihomoLogLevel, MihomoProcess, NetworkLatencyTarget, NetworkProbeRoutePreference,
-    NetworkProbeSnapshot, ProfileCatalog, ProfileStore, ProviderCatalog, PublicIpProvider,
-    RemoteProfileOptions, RemoteProfileRoute, RuleCatalog, RuntimeConfig, SystemNetworkSnapshot,
-    SystemProxyController, SystemProxyManager, SystemProxyMode, SystemProxyStatus,
-    TrafficHistoryStore, TrafficMonitor, TrafficSnapshot, TunPermissionGrant, TunPermissionManager,
-    TunPermissionStatus, VersionInfo, YamlOverrideCatalog, YamlOverrideStore,
+    ControlledConfigStore, CoreBinaryInfo, CoreKind, CoreSession, LogMonitor, MihomoClient,
+    MihomoLaunchConfig, MihomoLogLevel, MihomoProcess, NetworkLatencyTarget,
+    NetworkProbeRoutePreference, NetworkProbeSnapshot, ProfileCatalog, ProfileStore,
+    ProviderCatalog, PublicIpProvider, RemoteProfileOptions, RemoteProfileRoute, RuleCatalog,
+    RuntimeConfig, SystemNetworkSnapshot, SystemProxyController, SystemProxyManager,
+    SystemProxyMode, SystemProxyStatus, TrafficHistoryStore, TrafficMonitor, TunPermissionGrant,
+    TunPermissionManager, TunPermissionStatus, VersionInfo, YamlOverrideCatalog, YamlOverrideStore,
 };
 
 use crate::app::{HideTrafficIcon, SetDarkTheme, SetLightTheme, SetSystemTheme, ShowTrafficIcon};
@@ -73,6 +68,7 @@ use state::{PageTaskToken, RuntimeData};
 pub struct RuntimePage {
     page: Page,
     core_kind: CoreKind,
+    core_session: CoreSession,
     client: MihomoClient,
     runtime: tokio::runtime::Handle,
     traffic_monitor: Arc<TrafficMonitor>,
@@ -106,7 +102,6 @@ pub struct RuntimePage {
     data: RuntimeData,
     home_profile_switching: Option<String>,
     home_proxy_switching: Option<(String, String)>,
-    live_traffic: LiveTrafficSeries,
     traffic_history: traffic::TrafficHistoryUiState,
     network_probe: network::NetworkProbeUiState,
     ruleset: resources::RulesetUiState,
@@ -122,65 +117,12 @@ pub struct RuntimePage {
     _subscriptions: Vec<Subscription>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct LiveTrafficSample {
-    upload: u64,
-    download: u64,
-}
-
-const LIVE_TRAFFIC_SAMPLE_COUNT: usize = 24;
-
-#[derive(Debug)]
-struct LiveTrafficSeries {
-    samples: VecDeque<LiveTrafficSample>,
-    last_frame_at_ms: u64,
-    connected: bool,
-}
-
-impl Default for LiveTrafficSeries {
-    fn default() -> Self {
-        Self {
-            samples: VecDeque::from(vec![
-                LiveTrafficSample::default();
-                LIVE_TRAFFIC_SAMPLE_COUNT
-            ]),
-            last_frame_at_ms: 0,
-            connected: false,
-        }
-    }
-}
-
-impl LiveTrafficSeries {
-    fn samples(&self) -> &VecDeque<LiveTrafficSample> {
-        &self.samples
-    }
-
-    fn observe(&mut self, snapshot: &TrafficSnapshot) -> bool {
-        let connection_changed = self.connected != snapshot.connected;
-        self.connected = snapshot.connected;
-        if !snapshot.connected
-            || snapshot.updated_at_ms == 0
-            || snapshot.updated_at_ms == self.last_frame_at_ms
-        {
-            return connection_changed;
-        }
-
-        self.last_frame_at_ms = snapshot.updated_at_ms;
-        if self.samples.len() >= LIVE_TRAFFIC_SAMPLE_COUNT {
-            self.samples.pop_front();
-        }
-        self.samples.push_back(LiveTrafficSample {
-            upload: snapshot.upload,
-            download: snapshot.download,
-        });
-        true
-    }
-}
-
 /// Runtime services shared by the native Mihomo management pages.
 pub struct RuntimePageServices {
     /// Explicit runtime core selected for this application process.
     pub core_kind: CoreKind,
+    /// Serialized runtime-core transition owner.
+    pub core_session: CoreSession,
     /// Typed Mihomo controller client.
     pub client: MihomoClient,
     /// Tokio runtime used for controller and filesystem work.

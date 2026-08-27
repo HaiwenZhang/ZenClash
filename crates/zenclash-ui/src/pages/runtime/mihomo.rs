@@ -1,9 +1,10 @@
 use super::{
     config_input_row, format_port, h_flex, info_row, json, load_page, message_banner, metric,
-    setting_card, setting_switch, v_flex, Button, ButtonVariants, Context, Disableable, Duration,
+    setting_card, setting_switch, v_flex, Button, ButtonVariants, Context, Disableable,
     FluentBuilder, IconName, Input, IntoElement, Page, ParentElement, RuntimeConfig, RuntimeData,
     RuntimePage, Sizable, Styled, VersionInfo,
 };
+use zenclash_core::CoreMaintenanceIntent;
 
 mod maintenance;
 
@@ -11,28 +12,19 @@ pub(super) use maintenance::CoreReleaseState;
 
 impl RuntimePage {
     fn restart_managed_core(&mut self, cx: &mut Context<Self>) {
-        let Some(process) = self.process.clone() else {
+        if !self.core_session.snapshot().managed {
             self.error = Some(zenclash_i18n::text("core_page.errors.external_restart"));
             cx.notify();
             return;
-        };
+        }
         let Some(token) = self.begin_mutation(Page::Mihomo) else {
             return;
         };
         let client = self.client.clone();
+        let core_session = self.core_session.clone();
         let task = self.runtime.spawn(async move {
-            let restarting = process.clone();
-            tokio::task::spawn_blocking(move || restarting.restart())
-                .await
-                .map_err(|error| {
-                    zenclash_i18n::text_with(
-                        "core_page.errors.restart_task",
-                        &[("error", error.to_string())],
-                    )
-                })?
-                .map_err(|error| error.to_string())?;
-            process
-                .wait_until_ready(Duration::from_secs(20))
+            core_session
+                .maintain(CoreMaintenanceIntent::Restart)
                 .await
                 .map_err(|error| error.to_string())?;
             load_page(client, Page::Mihomo).await

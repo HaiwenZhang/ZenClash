@@ -17,8 +17,9 @@ use gpui::Application;
 use tracing_subscriber::{filter::Directive, EnvFilter};
 use zenclash_core::{
     bundled_recovery_profile, AppInstanceLock, AppPreferences, AppPreferencesStore,
-    ControlledConfigStore, CoreKind, LogMonitor, MihomoClient, MihomoEndpoint, MihomoLaunchConfig,
-    MihomoProcess, ProfileStore, TrafficMonitor, YamlOverrideStore,
+    ControlledConfigStore, CoreKind, CoreSession, EffectiveConfigIntent, LogMonitor, MihomoClient,
+    MihomoEndpoint, MihomoLaunchConfig, MihomoProcess, ProfileStore, TrafficMonitor,
+    YamlOverrideStore,
 };
 use zenclash_ui::{app, assets::Assets};
 
@@ -256,15 +257,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let client = mihomo_process.as_ref().map_or(client.clone(), |process| {
         client.with_config_validator(process.config_validator())
     });
+    let core_session = CoreSession::open(core_kind, client.clone(), mihomo_process.clone());
     if startup_error.is_none()
         && mihomo_process.is_none()
         && core_kind.capabilities().full_config_reload
     {
         if let Some(profile) = profile_path.as_ref() {
-            if let Err(error) = runtime.block_on(controlled_config_store.reload_with_overrides(
-                &client,
-                profile,
-                override_paths,
+            if let Err(error) = runtime.block_on(core_session.apply(
+                &controlled_config_store,
+                EffectiveConfigIntent::ActivateProfile {
+                    profile: profile.clone(),
+                    overrides: override_paths,
+                },
             )) {
                 tracing::warn!(%error, core = %core_kind, "initial core configuration synchronization failed");
             }
@@ -291,6 +295,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 preferences_store,
                 preferences,
                 core_kind,
+                core_session,
                 client,
                 traffic_monitor: traffic,
                 log_monitor: logs,

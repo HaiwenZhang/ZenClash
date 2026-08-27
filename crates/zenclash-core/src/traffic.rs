@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -25,6 +26,18 @@ pub struct TrafficSnapshot {
     pub last_error: Option<String>,
 }
 
+/// One ordered sample from Mihomo's traffic stream.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrafficSample {
+    /// Upload rate in bytes per second.
+    pub upload: u64,
+    /// Download rate in bytes per second.
+    pub download: u64,
+}
+
+/// Number of logical traffic frames retained for charts.
+pub const LIVE_TRAFFIC_SAMPLE_COUNT: usize = 24;
+
 #[derive(Clone, Copy, Debug, Deserialize)]
 struct TrafficFrame {
     #[serde(default)]
@@ -37,6 +50,7 @@ struct TrafficFrame {
 /// suitable for polling from GPUI's foreground executor.
 pub struct TrafficMonitor {
     snapshot: Arc<RwLock<TrafficSnapshot>>,
+    samples: Arc<RwLock<VecDeque<TrafficSample>>>,
     task: JoinHandle<()>,
 }
 
@@ -45,14 +59,28 @@ impl TrafficMonitor {
     #[must_use]
     pub fn start(runtime: &Handle, endpoint: MihomoEndpoint) -> Arc<Self> {
         let snapshot = Arc::new(RwLock::new(TrafficSnapshot::default()));
-        let task = runtime.spawn(run_monitor(endpoint, snapshot.clone()));
-        Arc::new(Self { snapshot, task })
+        let samples = Arc::new(RwLock::new(initial_samples()));
+        let task = runtime.spawn(run_monitor(endpoint, snapshot.clone(), samples.clone()));
+        Arc::new(Self {
+            snapshot,
+            samples,
+            task,
+        })
     }
 
     /// Returns a cheap point-in-time copy of the latest traffic state.
     #[must_use]
     pub fn snapshot(&self) -> TrafficSnapshot {
         self.snapshot.read().clone()
+    }
+
+    /// Returns the shared ordered frame history used by every traffic display.
+    ///
+    /// Frames are appended by the WebSocket reader, not by UI polling timers,
+    /// so repeated renders cannot create duplicate or contradictory samples.
+    #[must_use]
+    pub fn samples(&self) -> VecDeque<TrafficSample> {
+        self.samples.read().clone()
     }
 
     /// Returns whether the background monitor task has terminated unexpectedly.
@@ -68,7 +96,11 @@ impl Drop for TrafficMonitor {
     }
 }
 
-async fn run_monitor(endpoint: MihomoEndpoint, snapshot: Arc<RwLock<TrafficSnapshot>>) {
+async fn run_monitor(
+    endpoint: MihomoEndpoint,
+    snapshot: Arc<RwLock<TrafficSnapshot>>,
+    samples: Arc<RwLock<VecDeque<TrafficSample>>>,
+) {
     loop {
         match connect_stream(&endpoint, "/traffic", &[], "连接 Mihomo 流量流超时").await {
             Ok(mut socket) => {
@@ -77,7 +109,7 @@ async fn run_monitor(endpoint: MihomoEndpoint, snapshot: Arc<RwLock<TrafficSnaps
                     match message {
                         Ok(message) if message.is_text() || message.is_binary() => {
                             match serde_json::from_slice::<TrafficFrame>(&message.into_data()) {
-                                Ok(frame) => update_frame(&snapshot, frame),
+                                Ok(frame) => update_frame(&snapshot, &samples, frame),
                                 Err(error) => {
                                     tracing::debug!(%error, "ignored malformed Mihomo traffic frame");
                                     update_connection(
@@ -105,13 +137,31 @@ async fn run_monitor(endpoint: MihomoEndpoint, snapshot: Arc<RwLock<TrafficSnaps
     }
 }
 
-fn update_frame(snapshot: &RwLock<TrafficSnapshot>, frame: TrafficFrame) {
+fn update_frame(
+    snapshot: &RwLock<TrafficSnapshot>,
+    samples: &RwLock<VecDeque<TrafficSample>>,
+    frame: TrafficFrame,
+) {
     let mut snapshot = snapshot.write();
     snapshot.upload = frame.up;
     snapshot.download = frame.down;
     snapshot.connected = true;
     snapshot.updated_at_ms = now_ms();
     snapshot.last_error = None;
+    drop(snapshot);
+
+    let mut samples = samples.write();
+    if samples.len() >= LIVE_TRAFFIC_SAMPLE_COUNT {
+        samples.pop_front();
+    }
+    samples.push_back(TrafficSample {
+        upload: frame.up,
+        download: frame.down,
+    });
+}
+
+fn initial_samples() -> VecDeque<TrafficSample> {
+    VecDeque::from(vec![TrafficSample::default(); LIVE_TRAFFIC_SAMPLE_COUNT])
 }
 
 fn update_connection(snapshot: &RwLock<TrafficSnapshot>, connected: bool, error: Option<String>) {
@@ -166,6 +216,43 @@ mod tests {
         let frame: TrafficFrame = serde_json::from_str(r#"{"up":1024,"down":2048}"#).unwrap();
         assert_eq!(frame.up, 1024);
         assert_eq!(frame.down, 2048);
+    }
+
+    #[test]
+    fn each_stream_frame_advances_the_single_logical_sample_series() {
+        let snapshot = RwLock::new(TrafficSnapshot::default());
+        let samples = RwLock::new(initial_samples());
+
+        update_frame(
+            &snapshot,
+            &samples,
+            TrafficFrame {
+                up: 1_024,
+                down: 2_048,
+            },
+        );
+
+        let samples = samples.read();
+        assert_eq!(samples.len(), LIVE_TRAFFIC_SAMPLE_COUNT);
+        assert_eq!(
+            samples.back(),
+            Some(&TrafficSample {
+                upload: 1_024,
+                download: 2_048,
+            })
+        );
+    }
+
+    #[test]
+    fn disconnect_does_not_append_synthetic_zero_samples() {
+        let snapshot = RwLock::new(TrafficSnapshot::default());
+        let samples = RwLock::new(initial_samples());
+        update_frame(&snapshot, &samples, TrafficFrame { up: 10, down: 20 });
+        let before_disconnect = samples.read().clone();
+
+        update_connection(&snapshot, false, Some("offline".into()));
+
+        assert_eq!(*samples.read(), before_disconnect);
     }
 
     #[test]

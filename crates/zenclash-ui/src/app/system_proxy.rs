@@ -1,19 +1,13 @@
 use std::path::PathBuf;
 
 use super::{Context, ZenClashApp};
+use zenclash_core::{SystemProxyReconcileOutcome, SystemProxyReleaseReason, SystemProxySession};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum QuitState {
     #[default]
     Idle,
     InProgress,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ReconcileOutcome {
-    Unchanged,
-    Restored,
-    Released,
 }
 
 impl ZenClashApp {
@@ -34,26 +28,10 @@ impl ZenClashApp {
         let controller = self.system_proxy_controller.clone();
         let task = self.runtime.spawn(async move {
             if core_unavailable {
-                return tokio::task::spawn_blocking(move || -> Result<ReconcileOutcome, String> {
-                    let operation = controller.begin_operation();
-                    let preferences = store.load().map_err(|error| error.to_string())?;
-                    if !preferences.system_proxy_enabled {
-                        return Ok(ReconcileOutcome::Unchanged);
-                    }
-                    let Some(ownership) = preferences.system_proxy_ownership else {
-                        return Ok(ReconcileOutcome::Unchanged);
-                    };
-                    let released = operation
-                        .release_if_owned(&ownership)
-                        .map_err(|error| error.to_string())?;
-                    store
-                        .update(|preferences| preferences.system_proxy_ownership = None)
-                        .map_err(|error| error.to_string())?;
-                    Ok(if released {
-                        ReconcileOutcome::Released
-                    } else {
-                        ReconcileOutcome::Unchanged
-                    })
+                return tokio::task::spawn_blocking(move || {
+                    SystemProxySession::new(store, controller)
+                        .reconcile(false, None)
+                        .map_err(|error| error.to_string())
                 })
                 .await
                 .map_err(|error| {
@@ -68,23 +46,10 @@ impl ZenClashApp {
                 .await
                 .map_err(|error| error.to_string())?;
             let Some(port) = config.system_proxy_port() else {
-                return tokio::task::spawn_blocking(move || -> Result<ReconcileOutcome, String> {
-                    let operation = controller.begin_operation();
-                    let preferences = store.load().map_err(|error| error.to_string())?;
-                    if !preferences.system_proxy_enabled {
-                        return Ok(ReconcileOutcome::Unchanged);
-                    }
-                    if let Some(ownership) = preferences.system_proxy_ownership {
-                        operation
-                            .release_if_owned(&ownership)
-                            .map_err(|error| error.to_string())?;
-                        store
-                            .update(|preferences| preferences.system_proxy_ownership = None)
-                            .map_err(|error| error.to_string())?;
-                    }
-                    Err(zenclash_i18n::text(
-                        "app.system_proxy.errors.missing_port_released",
-                    ))
+                return tokio::task::spawn_blocking(move || {
+                    SystemProxySession::new(store, controller)
+                        .reconcile(true, None)
+                        .map_err(|error| error.to_string())
                 })
                 .await
                 .map_err(|error| {
@@ -94,44 +59,10 @@ impl ZenClashApp {
                     )
                 })?;
             };
-            tokio::task::spawn_blocking(move || -> Result<ReconcileOutcome, String> {
-                let operation = controller.begin_operation();
-                let preferences = store.load().map_err(|error| error.to_string())?;
-                if !preferences.system_proxy_enabled {
-                    return Ok(ReconcileOutcome::Unchanged);
-                }
-                let ownership = operation
-                    .apply(
-                        true,
-                        preferences.system_proxy_mode,
-                        &preferences.system_proxy_host,
-                        port,
-                        &preferences.system_proxy_bypass,
-                        &preferences.system_proxy_pac_script,
-                    )
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| {
-                        zenclash_i18n::text("app.system_proxy.errors.ownership_missing")
-                    })?;
-                if let Err(error) = store.update(|preferences| {
-                    preferences.system_proxy_ownership = Some(ownership.clone());
-                }) {
-                    let release = operation.release_if_owned(&ownership);
-                    return Err(match release {
-                        Ok(_) => zenclash_i18n::text_with(
-                            "app.system_proxy.errors.ownership_save_released",
-                            &[("error", error.to_string())],
-                        ),
-                        Err(release_error) => zenclash_i18n::text_with(
-                            "app.system_proxy.errors.ownership_save_release_failed",
-                            &[
-                                ("error", error.to_string()),
-                                ("release_error", release_error.to_string()),
-                            ],
-                        ),
-                    });
-                }
-                Ok(ReconcileOutcome::Restored)
+            tokio::task::spawn_blocking(move || {
+                SystemProxySession::new(store, controller)
+                    .reconcile(true, Some(port))
+                    .map_err(|error| error.to_string())
             })
             .await
             .map_err(|error| {
@@ -145,15 +76,26 @@ impl ZenClashApp {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    Ok(Ok(ReconcileOutcome::Released)) => {
-                        tracing::warn!(
-                            "disabled owned system proxy because the managed core is unavailable"
-                        );
+                    Ok(Ok(SystemProxyReconcileOutcome::Released {
+                        reason: SystemProxyReleaseReason::CoreUnavailable,
+                        native_matched,
+                    })) => {
+                        tracing::warn!(native_matched, "released owned system proxy because the core is unavailable");
                     }
-                    Ok(Ok(ReconcileOutcome::Restored)) => {
+                    Ok(Ok(SystemProxyReconcileOutcome::Released {
+                        reason: SystemProxyReleaseReason::MissingPort,
+                        native_matched,
+                    })) => {
+                        let error = zenclash_i18n::text("app.system_proxy.errors.missing_port_released");
+                        tracing::warn!(native_matched, %error, "released owned system proxy without a runtime port");
+                        this.runtime_page.update(cx, |page, cx| {
+                            page.report_system_proxy_reconcile_error(&error, cx);
+                        });
+                    }
+                    Ok(Ok(SystemProxyReconcileOutcome::Restored)) => {
                         tracing::info!("reconciled owned system proxy with runtime port");
                     }
-                    Ok(Ok(ReconcileOutcome::Unchanged)) => {}
+                    Ok(Ok(SystemProxyReconcileOutcome::Unchanged)) => {}
                     Ok(Err(error)) => {
                         tracing::warn!(%error, "failed to reconcile owned system proxy");
                         this.runtime_page.update(cx, |page, cx| {
@@ -180,21 +122,13 @@ impl ZenClashApp {
         self.quit_state = QuitState::InProgress;
         let controller = self.system_proxy_controller.clone();
         let store = self.preferences_store.clone();
-        let process = self.mihomo_process.clone();
+        let core_session = self.core_session.clone();
         let task = self.runtime.spawn(async move {
             let mut failures = Vec::new();
             if let Some(store) = store {
                 let result = tokio::task::spawn_blocking(move || {
-                    let operation = controller.begin_operation();
-                    let preferences = store.load().map_err(|error| error.to_string())?;
-                    if !preferences.system_proxy_enabled {
-                        return Ok(());
-                    }
-                    let Some(ownership) = preferences.system_proxy_ownership else {
-                        return Ok(());
-                    };
-                    operation
-                        .release_if_owned(&ownership)
+                    SystemProxySession::new(store, controller)
+                        .release_owned()
                         .map(|_| ())
                         .map_err(|error| error.to_string())
                 })
@@ -211,24 +145,11 @@ impl ZenClashApp {
                     )),
                 }
             }
-            if let Some(process) = process {
-                let result = tokio::task::spawn_blocking(move || {
-                    process.stop().map_err(|error| error.to_string())
-                })
-                .await;
-                match result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => failures.push(zenclash_i18n::text_with(
-                        "app.system_proxy.errors.quit_core",
-                        &[("error", error)],
-                    )),
-                    Err(error) => {
-                        failures.push(zenclash_i18n::text_with(
-                            "app.system_proxy.errors.quit_core_task",
-                            &[("error", error.to_string())],
-                        ));
-                    }
-                }
+            if let Err(error) = core_session.shutdown().await {
+                failures.push(zenclash_i18n::text_with(
+                    "app.system_proxy.errors.quit_core",
+                    &[("error", error.to_string())],
+                ));
             }
             if failures.is_empty() {
                 Ok::<(), String>(())

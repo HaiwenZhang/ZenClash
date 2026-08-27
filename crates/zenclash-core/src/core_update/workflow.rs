@@ -84,20 +84,15 @@ impl MihomoReleaseService {
 }
 
 async fn stop_process(process: Arc<MihomoProcess>) -> CoreUpdateResult<()> {
-    tokio::task::spawn_blocking(move || process.stop())
+    process
+        .stop_async()
         .await
-        .map_err(|error| CoreUpdateError::Runtime(format!("停止内核任务异常结束：{error}")))?
         .map_err(|error| CoreUpdateError::Runtime(error.to_string()))
 }
 
 async fn restart_process(process: Arc<MihomoProcess>) -> CoreUpdateResult<()> {
-    let restarting = process.clone();
-    tokio::task::spawn_blocking(move || restarting.restart())
-        .await
-        .map_err(|error| CoreUpdateError::Runtime(format!("启动内核任务异常结束：{error}")))?
-        .map_err(|error| CoreUpdateError::Runtime(error.to_string()))?;
     process
-        .wait_until_ready(Duration::from_secs(20))
+        .restart_and_wait(Duration::from_secs(20))
         .await
         .map_err(|error| CoreUpdateError::Runtime(error.to_string()))
 }

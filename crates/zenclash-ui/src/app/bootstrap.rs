@@ -62,14 +62,14 @@ pub fn create_main_window(services: AppServices, cx: &mut App) {
         tracing::warn!(%error, "failed to configure continuous core log persistence");
     }
 
-    let managed_process = services.mihomo_process.clone();
+    let core_session = services.core_session.clone();
     cx.on_app_quit(move |_| {
-        if let Some(process) = managed_process.as_ref() {
-            if let Err(error) = process.stop() {
+        let core_session = core_session.clone();
+        async move {
+            if let Err(error) = core_session.shutdown().await {
                 tracing::warn!(%error, "failed to stop managed core during native application quit");
             }
         }
-        std::future::ready(())
     })
     .detach();
 

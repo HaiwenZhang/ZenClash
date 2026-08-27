@@ -14,7 +14,8 @@ use gpui_component::{
     v_flex, Disableable, Icon, IconName, Selectable, Sizable,
 };
 use zenclash_core::{
-    format_speed, ProxyCatalog, ProxyGroup, RuntimeConfig, SubscriptionUsage, SystemProxyStatus,
+    format_speed, ProxyCatalog, ProxyGroup, ProxyOperations, RuntimeConfig, SubscriptionUsage,
+    SystemProxyStatus, TrafficSample,
 };
 
 use crate::{
@@ -26,8 +27,8 @@ use crate::{
 };
 
 use super::{
-    format_bytes, format_profile_age, load_page, normalized_fraction, Context, FluentBuilder,
-    LiveTrafficSample, Page, ProxySelectionChanged, RuntimeData, RuntimePage,
+    format_bytes, format_profile_age, load_page, normalized_fraction, Context, FluentBuilder, Page,
+    ProxySelectionChanged, RuntimeData, RuntimePage,
 };
 
 const LIVE_TRAFFIC_TICK_MARGIN: usize = 6;
@@ -485,7 +486,8 @@ impl RuntimePage {
         } else {
             theme.warning
         };
-        let points = traffic_chart_points(self.live_traffic.samples());
+        let samples = self.traffic_monitor.samples();
+        let points = traffic_chart_points(&samples);
         let chart = AreaChart::new(points)
             .x(|point| point.label.clone())
             .y(|point| point.download)
@@ -608,15 +610,12 @@ impl RuntimePage {
         let client = self.client.clone();
         let selected_proxy = proxy.clone();
         let task = self.runtime.spawn(async move {
-            client
-                .change_proxy(&group, &proxy)
+            let outcome = ProxyOperations::new(client.clone())
+                .select(&group, &proxy)
                 .await
                 .map_err(|error| error.to_string())?;
-            client
-                .close_all_connections()
-                .await
-                .map_err(|error| error.to_string())?;
-            load_page(client, Page::Home).await
+            let data = load_page(client, Page::Home).await?;
+            Ok::<_, String>((data, outcome.warnings))
         });
         cx.spawn(async move |this, cx| {
             let result = task
@@ -632,7 +631,10 @@ impl RuntimePage {
                 this.mutating = false;
                 this.home_proxy_switching = None;
                 match result {
-                    Ok(data) => {
+                    Ok((data, warnings)) => {
+                        for warning in warnings {
+                            tracing::warn!(%warning, "home proxy selection completed with a warning");
+                        }
                         cx.emit(ProxySelectionChanged);
                         if this.replace_page_data(token, data) {
                             this.notice = Some(zenclash_i18n::text_with(
@@ -659,7 +661,7 @@ struct TrafficChartPoint {
     ceiling: f64,
 }
 
-fn traffic_chart_points(samples: &VecDeque<LiveTrafficSample>) -> Vec<TrafficChartPoint> {
+fn traffic_chart_points(samples: &VecDeque<TrafficSample>) -> Vec<TrafficChartPoint> {
     let last_ix = samples.len().saturating_sub(1);
     let ceiling = traffic_chart_ceiling(samples);
     samples
@@ -682,7 +684,7 @@ fn traffic_chart_points(samples: &VecDeque<LiveTrafficSample>) -> Vec<TrafficCha
         .collect()
 }
 
-fn traffic_chart_ceiling(samples: &VecDeque<LiveTrafficSample>) -> f64 {
+fn traffic_chart_ceiling(samples: &VecDeque<TrafficSample>) -> f64 {
     let peak = samples
         .iter()
         .map(|sample| sample.upload.max(sample.download))
@@ -934,7 +936,6 @@ mod tests {
     use zenclash_core::{DelayHistory, ProxyGroup, ProxyNode};
 
     use super::*;
-    use crate::pages::runtime::LiveTrafficSeries;
 
     #[test]
     fn direct_mode_summary_does_not_require_a_proxy_group() {
@@ -983,11 +984,11 @@ mod tests {
     #[test]
     fn traffic_chart_points_keep_upload_and_download_separate() {
         let samples = VecDeque::from([
-            LiveTrafficSample {
+            TrafficSample {
                 upload: 10,
                 download: 20,
             },
-            LiveTrafficSample {
+            TrafficSample {
                 upload: 30,
                 download: 40,
             },
@@ -1000,7 +1001,7 @@ mod tests {
 
     #[test]
     fn traffic_chart_points_have_unique_x_axis_labels() {
-        let samples = VecDeque::from([LiveTrafficSample::default(); 24]);
+        let samples = VecDeque::from([TrafficSample::default(); 24]);
 
         let points = traffic_chart_points(&samples);
 
@@ -1009,13 +1010,13 @@ mod tests {
 
     #[test]
     fn traffic_chart_ceiling_is_stable_within_one_power_of_two_band() {
-        let lower = VecDeque::from([LiveTrafficSample {
+        let lower = VecDeque::from([TrafficSample {
             download: 700 * 1_024,
-            ..LiveTrafficSample::default()
+            ..TrafficSample::default()
         }]);
-        let higher = VecDeque::from([LiveTrafficSample {
+        let higher = VecDeque::from([TrafficSample {
             download: 800 * 1_024,
-            ..LiveTrafficSample::default()
+            ..TrafficSample::default()
         }]);
 
         assert_eq!(
@@ -1026,46 +1027,10 @@ mod tests {
 
     #[test]
     fn traffic_chart_last_point_is_labeled_as_now() {
-        let samples = VecDeque::from([LiveTrafficSample::default(); 3]);
+        let samples = VecDeque::from([TrafficSample::default(); 3]);
 
         let points = traffic_chart_points(&samples);
 
         assert!(matches!(points[2].label.as_ref(), "现在" | "Now"));
-    }
-
-    #[test]
-    fn live_traffic_series_ignores_duplicate_monitor_reads() {
-        let mut series = LiveTrafficSeries::default();
-        let snapshot = zenclash_core::TrafficSnapshot {
-            download: 1_024,
-            connected: true,
-            updated_at_ms: 1,
-            ..zenclash_core::TrafficSnapshot::default()
-        };
-        series.observe(&snapshot);
-        let samples_after_first_frame = series.samples.clone();
-
-        series.observe(&snapshot);
-
-        assert_eq!(series.samples, samples_after_first_frame);
-    }
-
-    #[test]
-    fn live_traffic_series_does_not_insert_disconnect_zeroes() {
-        let mut series = LiveTrafficSeries::default();
-        series.observe(&zenclash_core::TrafficSnapshot {
-            download: 1_024,
-            connected: true,
-            updated_at_ms: 1,
-            ..zenclash_core::TrafficSnapshot::default()
-        });
-        let samples_before_disconnect = series.samples.clone();
-
-        series.observe(&zenclash_core::TrafficSnapshot {
-            updated_at_ms: 2,
-            ..zenclash_core::TrafficSnapshot::default()
-        });
-
-        assert_eq!(series.samples, samples_before_disconnect);
     }
 }

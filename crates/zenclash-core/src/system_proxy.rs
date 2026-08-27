@@ -4,6 +4,7 @@ use std::{net::IpAddr, sync::Arc};
 
 use parking_lot::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod command;
@@ -26,7 +27,7 @@ use unsupported as platform;
 #[cfg(target_os = "windows")]
 use windows as platform;
 
-use crate::{MihomoError, MihomoResult};
+use crate::{AppPreferences, AppPreferencesError, AppPreferencesStore, MihomoError, MihomoResult};
 
 pub use pac::{default_pac_script, normalize_pac_script, PacServer, PacServerStatus};
 
@@ -162,6 +163,348 @@ pub struct SystemProxyController {
 pub struct SystemProxyOperation<'a> {
     controller: &'a SystemProxyController,
     _guard: MutexGuard<'a, ()>,
+}
+
+/// Persisted manual/PAC settings independent of the enabled intent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SystemProxySettings {
+    /// Native system-proxy mode.
+    pub mode: SystemProxyMode,
+    /// Manual proxy or local PAC-listener host.
+    pub host: String,
+    /// Native bypass entries.
+    pub bypass: Vec<String>,
+    /// PAC JavaScript served in automatic mode.
+    pub pac_script: String,
+}
+
+impl SystemProxySettings {
+    /// Builds settings from a persisted preference snapshot.
+    #[must_use]
+    pub fn from_preferences(preferences: &AppPreferences) -> Self {
+        Self {
+            mode: preferences.system_proxy_mode,
+            host: preferences.system_proxy_host.clone(),
+            bypass: preferences.system_proxy_bypass.clone(),
+            pac_script: preferences.system_proxy_pac_script.clone(),
+        }
+    }
+
+    fn normalized(mut self) -> SystemProxySessionResult<Self> {
+        self.host = normalize_system_proxy_host(&self.host)?;
+        self.bypass = normalize_system_proxy_bypass(&self.bypass)?;
+        self.pac_script = normalize_pac_script(&self.pac_script)?;
+        Ok(self)
+    }
+
+    fn apply_to(&self, preferences: &mut AppPreferences) {
+        preferences.system_proxy_mode = self.mode;
+        preferences.system_proxy_host.clone_from(&self.host);
+        preferences.system_proxy_bypass.clone_from(&self.bypass);
+        preferences
+            .system_proxy_pac_script
+            .clone_from(&self.pac_script);
+    }
+}
+
+/// Why owned native state was released during reconciliation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SystemProxyReleaseReason {
+    /// The selected runtime core is unavailable.
+    CoreUnavailable,
+    /// The runtime core exposes no HTTP or Mixed listener.
+    MissingPort,
+}
+
+/// Result of reconciling persistent intent with native state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SystemProxyReconcileOutcome {
+    /// No owned native state needed a change.
+    Unchanged,
+    /// Enabled intent was applied and its ownership was persisted.
+    Restored,
+    /// Previously owned native state was released while enabled intent remained persistent.
+    Released {
+        /// Reason the native state cannot remain active.
+        reason: SystemProxyReleaseReason,
+        /// Whether the operating-system state still matched ZenClash ownership.
+        native_matched: bool,
+    },
+}
+
+/// Errors produced by native-state and preference transactions.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum SystemProxySessionError {
+    /// Persistent preference access failed.
+    #[error(transparent)]
+    Preferences(#[from] AppPreferencesError),
+    /// Native validation, write, or readback failed.
+    #[error(transparent)]
+    Native(#[from] MihomoError),
+    /// Enabling was requested without a usable proxy port.
+    #[error("启用系统代理需要可用的 HTTP 或 Mixed 端口")]
+    MissingPort,
+    /// Native state was enabled but no verified ownership was returned.
+    #[error("系统代理启用后未返回可验证所有权")]
+    MissingOwnership,
+    /// Persistence failed after a native write and recovery was attempted.
+    #[error("系统代理事务失败：{0}")]
+    Transaction(String),
+}
+
+/// Result type for system-proxy intent transactions.
+pub type SystemProxySessionResult<T> = Result<T, SystemProxySessionError>;
+
+/// Deep interface joining persistent intent, native state, and verified ownership.
+#[derive(Clone)]
+pub struct SystemProxySession {
+    store: AppPreferencesStore,
+    controller: SystemProxyController,
+}
+
+impl SystemProxySession {
+    /// Opens a system-proxy session over shared preference and native owners.
+    #[must_use]
+    pub fn new(store: AppPreferencesStore, controller: SystemProxyController) -> Self {
+        Self { store, controller }
+    }
+
+    /// Applies enabled intent and commits verified ownership atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation, native, persistence, or rollback errors.
+    pub fn set_enabled(
+        &self,
+        enabled: bool,
+        port: u16,
+    ) -> SystemProxySessionResult<AppPreferences> {
+        if enabled && port == 0 {
+            return Err(SystemProxySessionError::MissingPort);
+        }
+        let operation = self.controller.begin_operation();
+        let expected = self.store.load()?;
+        let settings = SystemProxySettings::from_preferences(&expected);
+        let ownership = if enabled {
+            Some(apply_owned_system_proxy(&operation, port, &settings)?)
+        } else {
+            release_system_proxy(&operation, &expected)?;
+            None
+        };
+        match self.store.update(|preferences| {
+            preferences.system_proxy_enabled = enabled;
+            preferences.system_proxy_ownership.clone_from(&ownership);
+        }) {
+            Ok(preferences) => Ok(preferences),
+            Err(error) => Err(SystemProxySessionError::Transaction(
+                restore_after_persist_failure(
+                    &self.store,
+                    &operation,
+                    port,
+                    &expected,
+                    &settings,
+                    &error.to_string(),
+                ),
+            )),
+        }
+    }
+
+    /// Saves normalized manual/PAC settings and reapplies them when intent is enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation, native, persistence, or rollback errors.
+    pub fn save_settings(
+        &self,
+        settings: SystemProxySettings,
+        port: u16,
+    ) -> SystemProxySessionResult<AppPreferences> {
+        let settings = settings.normalized()?;
+        let operation = self.controller.begin_operation();
+        let expected = self.store.load()?;
+        let previous = SystemProxySettings::from_preferences(&expected);
+        let active = expected.system_proxy_enabled;
+        if active && port == 0 {
+            return Err(SystemProxySessionError::MissingPort);
+        }
+        let ownership = active
+            .then(|| apply_owned_system_proxy(&operation, port, &settings))
+            .transpose()?;
+        match self.store.update(|preferences| {
+            settings.apply_to(preferences);
+            if active {
+                preferences.system_proxy_ownership.clone_from(&ownership);
+            }
+        }) {
+            Ok(preferences) => Ok(preferences),
+            Err(error) if active => Err(SystemProxySessionError::Transaction(
+                restore_after_persist_failure(
+                    &self.store,
+                    &operation,
+                    port,
+                    &expected,
+                    &previous,
+                    &error.to_string(),
+                ),
+            )),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Reconciles persistent enabled intent with core availability and native ownership.
+    ///
+    /// Enabled intent remains persistent when the core is temporarily unavailable;
+    /// only owned native state is released.
+    ///
+    /// # Errors
+    ///
+    /// Returns native, persistence, or recovery errors.
+    pub fn reconcile(
+        &self,
+        core_available: bool,
+        port: Option<u16>,
+    ) -> SystemProxySessionResult<SystemProxyReconcileOutcome> {
+        let operation = self.controller.begin_operation();
+        let preferences = self.store.load()?;
+        if !preferences.system_proxy_enabled {
+            return Ok(SystemProxyReconcileOutcome::Unchanged);
+        }
+        let release_reason = if !core_available {
+            Some(SystemProxyReleaseReason::CoreUnavailable)
+        } else if port.is_none() {
+            Some(SystemProxyReleaseReason::MissingPort)
+        } else {
+            None
+        };
+        if let Some(reason) = release_reason {
+            let Some(ownership) = preferences.system_proxy_ownership else {
+                return Ok(SystemProxyReconcileOutcome::Unchanged);
+            };
+            let native_matched = operation.release_if_owned(&ownership)?;
+            self.store
+                .update(|preferences| preferences.system_proxy_ownership = None)?;
+            return Ok(SystemProxyReconcileOutcome::Released {
+                reason,
+                native_matched,
+            });
+        }
+
+        let settings = SystemProxySettings::from_preferences(&preferences);
+        let ownership =
+            apply_owned_system_proxy(&operation, port.expect("available port checked"), &settings)?;
+        if let Err(error) = self.store.update(|preferences| {
+            preferences.system_proxy_ownership = Some(ownership.clone());
+        }) {
+            let release = operation.release_if_owned(&ownership);
+            return Err(SystemProxySessionError::Transaction(match release {
+                Ok(_) => format!("保存所有权失败，已释放新写入的系统代理：{error}"),
+                Err(release) => {
+                    format!("保存所有权失败：{error}；释放新写入状态失败：{release}")
+                }
+            }));
+        }
+        Ok(SystemProxyReconcileOutcome::Restored)
+    }
+
+    /// Releases native state only when it still matches persisted ZenClash ownership.
+    ///
+    /// # Errors
+    ///
+    /// Returns native or persistence errors.
+    pub fn release_owned(&self) -> SystemProxySessionResult<bool> {
+        let operation = self.controller.begin_operation();
+        let preferences = self.store.load()?;
+        if !preferences.system_proxy_enabled {
+            return Ok(false);
+        }
+        let Some(ownership) = preferences.system_proxy_ownership else {
+            return Ok(false);
+        };
+        let released = operation.release_if_owned(&ownership)?;
+        self.store
+            .update(|preferences| preferences.system_proxy_ownership = None)?;
+        Ok(released)
+    }
+}
+
+fn apply_owned_system_proxy(
+    operation: &SystemProxyOperation<'_>,
+    port: u16,
+    settings: &SystemProxySettings,
+) -> SystemProxySessionResult<SystemProxyOwnership> {
+    if port == 0 {
+        return Err(SystemProxySessionError::MissingPort);
+    }
+    operation
+        .apply(
+            true,
+            settings.mode,
+            &settings.host,
+            port,
+            &settings.bypass,
+            &settings.pac_script,
+        )?
+        .ok_or(SystemProxySessionError::MissingOwnership)
+}
+
+fn release_system_proxy(
+    operation: &SystemProxyOperation<'_>,
+    preferences: &AppPreferences,
+) -> SystemProxySessionResult<()> {
+    if let Some(ownership) = &preferences.system_proxy_ownership {
+        operation.release_if_owned(ownership)?;
+    } else {
+        operation.set_enabled(false, preferences.system_proxy_mode, "", 0, &[], "")?;
+    }
+    Ok(())
+}
+
+fn restore_after_persist_failure(
+    store: &AppPreferencesStore,
+    operation: &SystemProxyOperation<'_>,
+    current_port: u16,
+    expected: &AppPreferences,
+    previous: &SystemProxySettings,
+    error: &str,
+) -> String {
+    if !expected.system_proxy_enabled {
+        return match operation.set_enabled(false, previous.mode, "", 0, &[], "") {
+            Ok(()) => format!("保存失败，已释放新写入的系统代理：{error}"),
+            Err(rollback) => format!("保存失败：{error}；释放新写入状态失败：{rollback}"),
+        };
+    }
+    let previous_port = ownership_port(expected.system_proxy_ownership.as_ref())
+        .filter(|port| *port != 0)
+        .unwrap_or(current_port);
+    match apply_owned_system_proxy(operation, previous_port, previous) {
+        Ok(ownership) => {
+            if expected.system_proxy_ownership.as_ref() == Some(&ownership) {
+                return format!("保存失败，已恢复上一系统代理状态：{error}");
+            }
+            match store.update(|preferences| {
+                preferences.system_proxy_ownership = Some(ownership.clone());
+            }) {
+                Ok(_) => format!("保存失败，已恢复上一系统代理状态：{error}"),
+                Err(ownership_error) => match operation.release_if_owned(&ownership) {
+                    Ok(_) => format!(
+                        "保存失败：{error}；恢复后的所有权保存失败并已释放：{ownership_error}"
+                    ),
+                    Err(release_error) => format!(
+                        "保存失败：{error}；恢复后的所有权保存失败：{ownership_error}；释放失败：{release_error}"
+                    ),
+                },
+            }
+        }
+        Err(rollback) => format!("保存失败：{error}；恢复上一系统代理状态失败：{rollback}"),
+    }
+}
+
+fn ownership_port(ownership: Option<&SystemProxyOwnership>) -> Option<u16> {
+    match ownership {
+        Some(SystemProxyOwnership::Manual { port, .. }) => Some(*port),
+        _ => None,
+    }
 }
 
 impl SystemProxyController {
@@ -651,8 +994,10 @@ mod tests {
 
     use super::{
         normalize_system_proxy_bypass, normalize_system_proxy_host, SystemProxyController,
-        SystemProxyManager,
+        SystemProxyManager, SystemProxyMode, SystemProxySession, SystemProxySessionError,
+        SystemProxySettings,
     };
+    use crate::AppPreferencesStore;
 
     #[test]
     fn controller_clones_serialize_complete_native_operations() {
@@ -743,5 +1088,56 @@ mod tests {
             "localhost"
         );
         assert!(normalize_system_proxy_host("0.0.0.0").is_err());
+    }
+
+    #[test]
+    fn inactive_settings_are_normalized_and_persisted_without_native_writes() {
+        let root = std::env::temp_dir().join(format!(
+            "zenclash-system-proxy-settings-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = AppPreferencesStore::new(root.join("preferences.json"));
+        let session = SystemProxySession::new(store.clone(), SystemProxyController::default());
+
+        let saved = session
+            .save_settings(
+                SystemProxySettings {
+                    mode: SystemProxyMode::Manual,
+                    host: " localhost ".into(),
+                    bypass: vec![" localhost ".into(), "LOCALHOST".into()],
+                    pac_script: super::default_pac_script().into(),
+                },
+                0,
+            )
+            .unwrap();
+
+        assert!(!saved.system_proxy_enabled);
+        assert_eq!(saved.system_proxy_host, "localhost");
+        assert_eq!(saved.system_proxy_bypass, ["localhost"]);
+        assert_eq!(store.load().unwrap(), saved);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn enabled_intent_without_a_port_is_rejected_before_native_or_persistent_change() {
+        let root = std::env::temp_dir().join(format!(
+            "zenclash-system-proxy-port-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = AppPreferencesStore::new(root.join("preferences.json"));
+        let session = SystemProxySession::new(store.clone(), SystemProxyController::default());
+
+        let error = session.set_enabled(true, 0).unwrap_err();
+
+        assert!(matches!(error, SystemProxySessionError::MissingPort));
+        assert!(!store.load().unwrap().system_proxy_enabled);
     }
 }

@@ -11,10 +11,8 @@ const PROFILE_UPDATE_SCAN_INTERVAL: Duration = Duration::from_secs(60);
 impl ZenClashApp {
     pub(super) fn start_profile_updates(&mut self, cx: &mut Context<Self>) {
         let runtime = self.runtime.clone();
-        let client = self.client.clone();
         let controlled = self.controlled_config_store.clone();
-        let core_kind = self.core_kind;
-        let process = self.mihomo_process.clone();
+        let core_session = self.core_session.clone();
         cx.spawn(async move |this, cx| loop {
             let scan = runtime.spawn_blocking(|| {
                 let store = ProfileStore::discover().map_err(|error| error.to_string())?;
@@ -28,11 +26,7 @@ impl ZenClashApp {
             match scan.await {
                 Ok(Ok((store, profile_ids))) => {
                     for id in profile_ids {
-                        let core_runtime = workflow::CoreProfileRuntime::new(
-                            core_kind,
-                            client.clone(),
-                            process.clone(),
-                        );
+                        let core_runtime = workflow::CoreProfileRuntime::new(core_session.clone());
                         let task = runtime.spawn(workflow::update_remote_background(
                             store.clone(),
                             controlled.clone(),

@@ -1,28 +1,19 @@
 use super::{SystemProxyEditorState, SystemProxyForm};
 use crate::pages::runtime::{
     default_pac_script, default_system_proxy_bypass, load_page, normalize_pac_script,
-    normalize_system_proxy_bypass, normalize_system_proxy_host, AppContext, AppPreferences,
-    Context, InputState, Page, RuntimePage, SystemProxyController, SystemProxyMode, Window,
+    normalize_system_proxy_bypass, normalize_system_proxy_host, AppContext, Context, InputState,
+    Page, RuntimePage, SystemProxyMode, Window,
 };
-use zenclash_core::{SystemProxyOperation, SystemProxyOwnership};
+use zenclash_core::{SystemProxySession, SystemProxySettings};
 
 impl SystemProxyForm {
-    fn from_preferences(preferences: &AppPreferences) -> Self {
-        Self {
-            mode: preferences.system_proxy_mode,
-            host: preferences.system_proxy_host.clone(),
-            bypass: preferences.system_proxy_bypass.clone(),
-            pac_script: preferences.system_proxy_pac_script.clone(),
+    fn to_settings(&self) -> SystemProxySettings {
+        SystemProxySettings {
+            mode: self.mode,
+            host: self.host.clone(),
+            bypass: self.bypass.clone(),
+            pac_script: self.pac_script.clone(),
         }
-    }
-
-    fn apply_to(&self, preferences: &mut AppPreferences) {
-        preferences.system_proxy_mode = self.mode;
-        preferences.system_proxy_host.clone_from(&self.host);
-        preferences.system_proxy_bypass.clone_from(&self.bypass);
-        preferences
-            .system_proxy_pac_script
-            .clone_from(&self.pac_script);
     }
 }
 
@@ -50,10 +41,11 @@ impl RuntimePage {
         };
         let client = self.client.clone();
         let controller = self.system_proxy_controller.clone();
-        let settings = SystemProxyForm::from_preferences(&self.preferences);
         let task = self.runtime.spawn(async move {
             let preferences = tokio::task::spawn_blocking(move || {
-                persist_system_proxy_enabled(&store, &controller, enabled, port, &settings)
+                SystemProxySession::new(store, controller)
+                    .set_enabled(enabled, port)
+                    .map_err(|error| error.to_string())
             })
             .await
             .map_err(|error| {
@@ -209,9 +201,12 @@ impl RuntimePage {
         };
         let controller = self.system_proxy_controller.clone();
         let client = self.client.clone();
+        let settings = form.to_settings();
         let task = self.runtime.spawn(async move {
             let preferences = tokio::task::spawn_blocking(move || {
-                persist_system_proxy_form(&store, &controller, &form, port)
+                SystemProxySession::new(store, controller)
+                    .save_settings(settings, port)
+                    .map_err(|error| error.to_string())
             })
             .await
             .map_err(|error| {
@@ -326,176 +321,6 @@ fn unavailable_message(listener_error: Option<&str>) -> String {
             &[("error", error.to_owned())],
         ),
         None => zenclash_i18n::text("system_proxy.errors.no_http_port"),
-    }
-}
-
-fn persist_system_proxy_form(
-    store: &crate::pages::runtime::AppPreferencesStore,
-    controller: &SystemProxyController,
-    form: &SystemProxyForm,
-    port: u16,
-) -> Result<AppPreferences, String> {
-    let operation = controller.begin_operation();
-    let expected = store.load().map_err(|error| error.to_string())?;
-    let previous = SystemProxyForm::from_preferences(&expected);
-    let active = expected.system_proxy_enabled;
-    let ownership = if active {
-        Some(apply_owned_system_proxy(&operation, port, form)?)
-    } else {
-        None
-    };
-    match store.update(|preferences| {
-        form.apply_to(preferences);
-        if active {
-            preferences.system_proxy_ownership.clone_from(&ownership);
-        }
-    }) {
-        Ok(preferences) => Ok(preferences),
-        Err(error) if active => Err(restore_after_persist_failure(
-            store,
-            &operation,
-            port,
-            &expected,
-            &previous,
-            &error.to_string(),
-        )),
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-fn persist_system_proxy_enabled(
-    store: &crate::pages::runtime::AppPreferencesStore,
-    controller: &SystemProxyController,
-    enabled: bool,
-    port: u16,
-    form: &SystemProxyForm,
-) -> Result<AppPreferences, String> {
-    let operation = controller.begin_operation();
-    let expected = store.load().map_err(|error| error.to_string())?;
-    let previous = SystemProxyForm::from_preferences(&expected);
-    let ownership = if enabled {
-        Some(apply_owned_system_proxy(&operation, port, form)?)
-    } else {
-        release_system_proxy(&operation, &expected)?;
-        None
-    };
-    match store.update(|preferences| {
-        preferences.system_proxy_enabled = enabled;
-        preferences.system_proxy_ownership.clone_from(&ownership);
-    }) {
-        Ok(preferences) => Ok(preferences),
-        Err(error) => Err(restore_after_persist_failure(
-            store,
-            &operation,
-            port,
-            &expected,
-            &previous,
-            &error.to_string(),
-        )),
-    }
-}
-
-fn apply_owned_system_proxy(
-    operation: &SystemProxyOperation<'_>,
-    port: u16,
-    form: &SystemProxyForm,
-) -> Result<SystemProxyOwnership, String> {
-    operation
-        .apply(
-            true,
-            form.mode,
-            &form.host,
-            port,
-            &form.bypass,
-            &form.pac_script,
-        )
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| zenclash_i18n::text("system_proxy.errors.ownership_missing"))
-}
-
-fn release_system_proxy(
-    operation: &SystemProxyOperation<'_>,
-    preferences: &AppPreferences,
-) -> Result<(), String> {
-    if let Some(ownership) = &preferences.system_proxy_ownership {
-        operation
-            .release_if_owned(ownership)
-            .map(|_| ())
-            .map_err(|error| error.to_string())
-    } else {
-        operation
-            .set_enabled(false, preferences.system_proxy_mode, "", 0, &[], "")
-            .map_err(|error| error.to_string())
-    }
-}
-
-fn restore_after_persist_failure(
-    store: &crate::pages::runtime::AppPreferencesStore,
-    operation: &SystemProxyOperation<'_>,
-    port: u16,
-    expected: &AppPreferences,
-    previous: &SystemProxyForm,
-    error: &str,
-) -> String {
-    if !expected.system_proxy_enabled {
-        return match operation.set_enabled(false, previous.mode, "", 0, &[], "") {
-            Ok(()) => zenclash_i18n::text_with(
-                "system_proxy.errors.save_released",
-                &[("error", error.to_owned())],
-            ),
-            Err(rollback) => zenclash_i18n::text_with(
-                "system_proxy.errors.save_release_failed",
-                &[
-                    ("error", error.to_owned()),
-                    ("rollback", rollback.to_string()),
-                ],
-            ),
-        };
-    }
-    match apply_owned_system_proxy(operation, port, previous) {
-        Ok(ownership) => {
-            if expected.system_proxy_ownership.as_ref() == Some(&ownership) {
-                return zenclash_i18n::text_with(
-                    "system_proxy.errors.save_rolled_back",
-                    &[("error", error.to_owned())],
-                );
-            }
-            match store.update(|preferences| {
-                preferences.system_proxy_ownership = Some(ownership.clone());
-            }) {
-                Ok(_) => zenclash_i18n::text_with(
-                    "system_proxy.errors.save_rolled_back",
-                    &[("error", error.to_owned())],
-                ),
-                Err(ownership_error) => {
-                    let release = operation.release_if_owned(&ownership);
-                    match release {
-                        Ok(_) => zenclash_i18n::text_with(
-                            "system_proxy.errors.save_ownership_released",
-                            &[
-                                ("error", error.to_owned()),
-                                ("ownership_error", ownership_error.to_string()),
-                            ],
-                        ),
-                        Err(release_error) => zenclash_i18n::text_with(
-                            "system_proxy.errors.save_ownership_release_failed",
-                            &[
-                                ("error", error.to_owned()),
-                                ("ownership_error", ownership_error.to_string()),
-                                ("release_error", release_error.to_string()),
-                            ],
-                        ),
-                    }
-                }
-            }
-        }
-        Err(rollback) => zenclash_i18n::text_with(
-            "system_proxy.errors.save_rollback_failed",
-            &[
-                ("error", error.to_owned()),
-                ("rollback", rollback.to_string()),
-            ],
-        ),
     }
 }
 

@@ -8,7 +8,10 @@ use gpui_component::{
     button::Button, h_flex, progress::Progress, scroll::ScrollableElement, v_flex, ActiveTheme,
     Disableable, Icon, IconName, Sizable,
 };
-use zenclash_core::{DelayHistory, MihomoClient, ProxyCatalog, ProxyGroup, ProxyNode};
+use zenclash_core::{
+    DelayHistory, MihomoClient, ProxyCatalog, ProxyDelayTarget, ProxyGroup, ProxyNode,
+    ProxyOperations,
+};
 
 mod actions;
 mod view;

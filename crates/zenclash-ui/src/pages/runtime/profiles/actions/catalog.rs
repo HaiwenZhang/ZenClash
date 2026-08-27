@@ -241,10 +241,8 @@ impl RuntimePage {
         let Some(token) = self.begin_mutation(Page::Profiles) else {
             return;
         };
-        let client = self.client.clone();
         let controlled = self.controlled_config_store.clone();
-        let core_runtime =
-            workflow::CoreProfileRuntime::new(self.core_kind, client, self.process.clone());
+        let core_runtime = workflow::CoreProfileRuntime::new(self.core_session.clone());
         let task = self
             .runtime
             .spawn(workflow::update_remote(store, controlled, core_runtime, id));

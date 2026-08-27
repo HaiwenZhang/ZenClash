@@ -133,11 +133,8 @@ impl RuntimePage {
         let Some(token) = self.begin_mutation(Page::Settings) else {
             return;
         };
-        let client = self.client.clone();
         let core_runtime = super::super::super::profiles::workflow::CoreProfileRuntime::new(
-            self.core_kind,
-            client,
-            self.process.clone(),
+            self.core_session.clone(),
         );
         let previous_profile = self.profile_path.clone();
         let task = self

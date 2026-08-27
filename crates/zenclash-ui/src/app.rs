@@ -15,7 +15,7 @@ use gpui::{
 use gpui_component::{h_flex, v_flex, ActiveTheme, Root, ThemeMode, TitleBar};
 use zenclash_core::{
     AppPreferences, AppPreferencesStore, AppearancePreference, ControlledConfigStore, CoreKind,
-    LogMonitor, MihomoClient, MihomoLogLevel, MihomoProcess, SystemProxyController,
+    CoreSession, LogMonitor, MihomoClient, MihomoLogLevel, MihomoProcess, SystemProxyController,
     TrafficHistoryStore, TrafficMonitor,
 };
 
@@ -105,6 +105,7 @@ pub struct ZenClashApp {
     current_page: Page,
     outbound_mode: OutboundModeCoordinator,
     core_kind: CoreKind,
+    core_session: CoreSession,
     client: MihomoClient,
     traffic_monitor: Arc<TrafficMonitor>,
     runtime: tokio::runtime::Handle,
@@ -144,6 +145,8 @@ pub struct AppServices {
     pub preferences: AppPreferences,
     /// Explicit runtime core selected for this application process.
     pub core_kind: CoreKind,
+    /// Serialized runtime-core transition owner.
+    pub core_session: CoreSession,
     /// Typed external-controller client.
     pub client: MihomoClient,
     /// Shared reconnecting traffic stream.
@@ -181,6 +184,7 @@ impl ZenClashApp {
             preferences_store: _,
             preferences: _,
             core_kind,
+            core_session,
             client,
             traffic_monitor,
             log_monitor,
@@ -213,6 +217,7 @@ impl ZenClashApp {
                 Page::Home,
                 RuntimePageServices {
                     core_kind,
+                    core_session: core_session.clone(),
                     client: client.clone(),
                     runtime: runtime.clone(),
                     traffic_monitor: traffic_monitor.clone(),
@@ -248,6 +253,7 @@ impl ZenClashApp {
             current_page: Page::default(),
             outbound_mode: OutboundModeCoordinator::new_unsynchronized(OutboundMode::default()),
             core_kind,
+            core_session,
             client,
             traffic_monitor,
             runtime,

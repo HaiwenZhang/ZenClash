@@ -83,13 +83,9 @@ impl RuntimePage {
         let Some(token) = self.begin_mutation(super::super::Page::Override) else {
             return;
         };
-        let client = self.client.clone();
         let controlled = self.controlled_config_store.clone();
-        let core_runtime = super::super::profiles::workflow::CoreProfileRuntime::new(
-            self.core_kind,
-            client,
-            self.process.clone(),
-        );
+        let core_runtime =
+            super::super::profiles::workflow::CoreProfileRuntime::new(self.core_session.clone());
         let core_name = self.core_kind.display_name();
         let task = self.runtime.spawn(async move {
             let edit_store = store.clone();

@@ -60,11 +60,13 @@ pub struct TrayProxyGroup {
     pub proxies: Vec<TrayProxyNode>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 /// Proxy node and its most recent delay used by a tray submenu.
 pub struct TrayProxyNode {
     /// Mihomo proxy name.
     pub name: String,
+    /// Provider that supplied this proxy, when applicable.
+    pub provider: Option<String>,
     /// Most recent measured delay in milliseconds.
     pub delay: Option<u32>,
 }
@@ -130,8 +132,8 @@ pub enum TrayCommand {
     TestGroup {
         /// Mihomo proxy-group name.
         group: String,
-        /// Proxy names to test.
-        proxies: Vec<String>,
+        /// Proxy identities to test.
+        proxies: Vec<TrayProxyNode>,
         /// Optional group-specific test URL.
         test_url: Option<String>,
     },

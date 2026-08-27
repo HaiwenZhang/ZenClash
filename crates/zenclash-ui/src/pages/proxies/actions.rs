@@ -1,6 +1,6 @@
 use super::{
     append_delay, take_untested_proxies, test_key, CatalogTaskToken, Context, ProxiesPage,
-    ProxyGroup,
+    ProxyDelayTarget, ProxyGroup, ProxyOperations,
 };
 use futures_util::{stream, StreamExt};
 
@@ -105,11 +105,9 @@ impl ProxiesPage {
         cx.notify();
 
         let client = self.client.clone();
-        let task = self.runtime.spawn(async move {
-            client.change_proxy(&group, &proxy).await?;
-            client.close_all_connections().await?;
-            client.proxy_catalog().await
-        });
+        let task = self
+            .runtime
+            .spawn(async move { ProxyOperations::new(client).select(&group, &proxy).await });
 
         cx.spawn(async move |this, cx| {
             let result = match task.await {
@@ -125,8 +123,13 @@ impl ProxiesPage {
                 }
                 this.switching = None;
                 match result {
-                    Ok(catalog) => {
-                        this.catalog = Some(catalog);
+                    Ok(outcome) => {
+                        for warning in outcome.warnings {
+                            tracing::warn!(%warning, "proxy selection completed with a warning");
+                        }
+                        if let Some(catalog) = outcome.catalog {
+                            this.catalog = Some(catalog);
+                        }
                         this.error = None;
                     }
                     Err(error) => this.error = Some(error),
@@ -152,16 +155,14 @@ impl ProxiesPage {
         let token = CatalogTaskToken(self.catalog_generation);
         cx.notify();
 
-        let client = self.client.clone();
-        let proxy_for_task = proxy.clone();
+        let operations = ProxyOperations::new(self.client.clone());
+        let target = ProxyDelayTarget {
+            name: proxy.clone(),
+            provider,
+        };
         let task = self.runtime.spawn(async move {
-            client
-                .proxy_delay_with_provider(
-                    &proxy_for_task,
-                    test_url.as_deref(),
-                    5_000,
-                    provider.as_deref(),
-                )
+            operations
+                .measure(&target, test_url.as_deref(), 5_000)
                 .await
                 .map_err(|error| error.to_string())
         });
@@ -212,21 +213,20 @@ impl ProxiesPage {
         self.error = None;
         cx.notify();
 
-        let client = self.client.clone();
+        let operations = ProxyOperations::new(self.client.clone());
         let group_name = group.name.clone();
         let test_url = group.test_url.clone();
         let task = self.runtime.spawn(async move {
             stream::iter(proxies.into_iter().map(|proxy| {
-                let client = client.clone();
+                let operations = operations.clone();
                 let test_url = test_url.clone();
                 async move {
-                    let result = client
-                        .proxy_delay_with_provider(
-                            &proxy.name,
-                            test_url.as_deref(),
-                            5_000,
-                            proxy.provider_name.as_deref(),
-                        )
+                    let target = ProxyDelayTarget {
+                        name: proxy.name.clone(),
+                        provider: proxy.provider_name,
+                    };
+                    let result = operations
+                        .measure(&target, test_url.as_deref(), 5_000)
                         .await;
                     (proxy.name, result)
                 }

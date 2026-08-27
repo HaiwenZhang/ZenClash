@@ -20,8 +20,7 @@ impl RuntimePage {
         };
         let client = self.client.clone();
         let controlled = self.controlled_config_store.clone();
-        let core_runtime =
-            workflow::CoreProfileRuntime::new(self.core_kind, client.clone(), self.process.clone());
+        let core_runtime = workflow::CoreProfileRuntime::new(self.core_session.clone());
         let task = self.runtime.spawn(async move {
             workflow::reload_effective(controlled, &core_runtime, &path).await?;
             load_page(client, Page::Profiles).await
@@ -84,10 +83,8 @@ impl RuntimePage {
         let Some(token) = self.begin_mutation(Page::Profiles) else {
             return;
         };
-        let client = self.client.clone();
         let controlled = self.controlled_config_store.clone();
-        let core_runtime =
-            workflow::CoreProfileRuntime::new(self.core_kind, client, self.process.clone());
+        let core_runtime = workflow::CoreProfileRuntime::new(self.core_session.clone());
         let task = self.runtime.spawn(workflow::import_local(
             store,
             controlled,
@@ -179,10 +176,8 @@ impl RuntimePage {
         let Some(token) = self.begin_mutation(Page::Profiles) else {
             return;
         };
-        let client = self.client.clone();
         let controlled = self.controlled_config_store.clone();
-        let core_runtime =
-            workflow::CoreProfileRuntime::new(self.core_kind, client, self.process.clone());
+        let core_runtime = workflow::CoreProfileRuntime::new(self.core_session.clone());
         let task = self.runtime.spawn(workflow::add_remote(
             store,
             controlled,
@@ -255,10 +250,8 @@ impl RuntimePage {
         if page == Page::Home {
             self.home_profile_switching = Some(id.clone());
         }
-        let client = self.client.clone();
         let controlled = self.controlled_config_store.clone();
-        let core_runtime =
-            workflow::CoreProfileRuntime::new(self.core_kind, client, self.process.clone());
+        let core_runtime = workflow::CoreProfileRuntime::new(self.core_session.clone());
         let task = self.runtime.spawn(workflow::activate_existing_for_page(
             store,
             controlled,

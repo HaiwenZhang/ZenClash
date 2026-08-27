@@ -1,10 +1,11 @@
 use super::{
     load_page, load_page_with_binary, AppContext, ConfigInputs, Context, ControlledConfigStore,
-    Duration, HashSet, InputEvent, InputState, LiveTrafficSeries, MihomoLogLevel, Page,
-    PageTaskToken, ProfileActivated, ProfileCatalog, ProfileStore, RuntimeConfig,
-    RuntimeConfigApplied, RuntimeData, RuntimePage, RuntimePageServices, Value, Window,
-    YamlOverrideCatalog, YamlOverrideStore,
+    Duration, HashSet, InputEvent, InputState, MihomoLogLevel, Page, PageTaskToken,
+    ProfileActivated, ProfileCatalog, ProfileStore, RuntimeConfig, RuntimeConfigApplied,
+    RuntimeData, RuntimePage, RuntimePageServices, Value, Window, YamlOverrideCatalog,
+    YamlOverrideStore,
 };
+use zenclash_core::{CoreApplyKind, EffectiveConfigIntent};
 
 struct InitialPersistentState {
     profile_store: Option<ProfileStore>,
@@ -273,6 +274,7 @@ impl RuntimePage {
     ) -> Self {
         let RuntimePageServices {
             core_kind,
+            core_session,
             client,
             runtime,
             traffic_monitor,
@@ -340,6 +342,7 @@ impl RuntimePage {
         let mut this = Self {
             page,
             core_kind,
+            core_session,
             client,
             runtime,
             traffic_monitor,
@@ -373,7 +376,6 @@ impl RuntimePage {
             data: RuntimeData::Empty,
             home_profile_switching: None,
             home_proxy_switching: None,
-            live_traffic: LiveTrafficSeries::default(),
             traffic_history: super::traffic::TrafficHistoryUiState::default(),
             network_probe: super::network::NetworkProbeUiState::default(),
             ruleset: super::resources::RulesetUiState::default(),
@@ -434,8 +436,6 @@ impl RuntimePage {
             tokio::time::sleep(Duration::from_millis(500)).await;
             if this
                 .update(cx, |this, cx| {
-                    let traffic = this.traffic_monitor.snapshot();
-                    let traffic_changed = this.live_traffic.observe(&traffic);
                     if matches!(this.page, Page::Logs) {
                         cx.notify();
                     }
@@ -456,9 +456,7 @@ impl RuntimePage {
                         history_ticks = 0;
                     }
                     if this.page == Page::Home {
-                        if traffic_changed {
-                            cx.notify();
-                        }
+                        cx.notify();
                         dashboard_ticks = dashboard_ticks.saturating_add(1);
                         if dashboard_ticks >= 4 && !this.loading && !this.mutating {
                             dashboard_ticks = 0;
@@ -551,34 +549,22 @@ impl RuntimePage {
         let controlled = self.controlled_config_store.clone();
         let overrides = self.enabled_override_paths();
         let client = self.client.clone();
-        let uses_restart = !self.core_kind.capabilities().full_config_reload;
-        let process = self.process.clone();
-        if uses_restart && process.is_none() {
-            self.mutating = false;
-            self.error = Some(zenclash_i18n::text_with(
-                "runtime.lifecycle.external_reload",
-                &[("core", self.core_kind.display_name().to_owned())],
-            ));
-            cx.notify();
-            return;
-        }
+        let core_session = self.core_session.clone();
         let task = self.runtime.spawn(async move {
-            if uses_restart {
-                let process = process
-                    .ok_or_else(|| zenclash_i18n::text("runtime.lifecycle.core_unavailable"))?;
-                controlled
-                    .apply_json_update_with_restart(process, profile, &patch, overrides)
-                    .await
-                    .map_err(|error| error.to_string())?;
-            } else {
-                controlled
-                    .apply_json_update_with_overrides(&client, profile, &patch, overrides)
-                    .await
-                    .map_err(|error| error.to_string())?;
-            }
+            let outcome = core_session
+                .apply(
+                    &controlled,
+                    EffectiveConfigIntent::Patch {
+                        profile,
+                        patch,
+                        overrides,
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
             let controlled_config = controlled.load_json().map_err(|error| error.to_string())?;
             let data = load_page(client, page).await?;
-            Ok::<_, String>((data, controlled_config))
+            Ok::<_, String>((data, controlled_config, outcome.kind))
         });
         cx.spawn(async move |this, cx| {
             let result = task
@@ -593,7 +579,7 @@ impl RuntimePage {
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
                 match result {
-                    Ok((data, controlled_config)) => {
+                    Ok((data, controlled_config, apply_kind)) => {
                         if let Some(level) = requested_log_level {
                             this.log_monitor.set_level(level);
                         }
@@ -601,7 +587,7 @@ impl RuntimePage {
                         this.config_preview = None;
                         cx.emit(RuntimeConfigApplied);
                         if this.replace_page_data(token, data) {
-                            this.notice = Some(if uses_restart {
+                            this.notice = Some(if apply_kind == CoreApplyKind::Restarted {
                                 let saved = success.replace(
                                     &zenclash_i18n::text("runtime.lifecycle.hot_reload_term"),
                                     &zenclash_i18n::text("runtime.lifecycle.save_term"),

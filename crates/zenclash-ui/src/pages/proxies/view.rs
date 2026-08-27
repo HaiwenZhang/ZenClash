@@ -67,7 +67,7 @@ impl ProxiesPage {
         group: &ProxyGroup,
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> gpui::AnyElement {
         let expanded = self.expanded.contains(&group.name);
         let group_name = group.name.clone();
         let group_for_test = group.clone();
@@ -195,6 +195,7 @@ impl ProxiesPage {
                         })),
                 )
             })
+            .into_any_element()
     }
 
     pub(super) fn render_proxy(

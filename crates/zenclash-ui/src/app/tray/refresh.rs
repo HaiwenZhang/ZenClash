@@ -128,6 +128,7 @@ impl ZenClashApp {
                         let delay = proxy.latest_delay();
                         TrayProxyNode {
                             name: proxy.name,
+                            provider: proxy.provider_name,
                             delay,
                         }
                     })

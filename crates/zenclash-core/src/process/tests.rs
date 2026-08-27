@@ -115,8 +115,8 @@ fn restart_replaces_the_child_and_preserves_process_owner() {
 }
 
 #[cfg(unix)]
-#[test]
-fn rejected_restart_config_does_not_stop_the_running_child() {
+#[tokio::test]
+async fn async_restart_rejection_does_not_stop_the_running_child() {
     use std::os::unix::fs::PermissionsExt;
 
     let directory = std::env::temp_dir().join(format!(
@@ -149,7 +149,10 @@ fn rejected_restart_config_does_not_stop_the_running_child() {
     let first_pid = process.snapshot().pid.unwrap();
     std::fs::write(&profile, "invalid: true\n").unwrap();
 
-    let error = process.restart().unwrap_err();
+    let error = process
+        .restart_and_wait(Duration::from_millis(10))
+        .await
+        .unwrap_err();
 
     assert!(error.to_string().contains("当前内核保持运行"));
     assert_eq!(process.snapshot().pid, Some(first_pid));

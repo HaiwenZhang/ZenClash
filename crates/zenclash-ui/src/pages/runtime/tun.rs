@@ -1,11 +1,10 @@
-use std::time::Duration;
-
 use super::{
     config_input_row, empty_dash, h_flex, info_row, json, message_banner, setting_card,
     setting_switch, v_flex, Button, ButtonVariants, Context, Disableable, IconName, Input,
     IntoElement, Page, ParentElement, RuntimeData, RuntimePage, Styled, TunPermissionGrant,
     TunPermissionManager,
 };
+use zenclash_core::CoreMaintenanceIntent;
 
 impl RuntimePage {
     pub(super) fn render_tun(
@@ -102,7 +101,7 @@ impl RuntimePage {
         let Some(token) = self.begin_mutation(Page::Tun) else {
             return;
         };
-        let process = self.process.clone();
+        let core_session = self.core_session.clone();
         let task = self.runtime.spawn(async move {
             let grant = tokio::task::spawn_blocking(move || {
                 TunPermissionManager::new(binary)
@@ -118,20 +117,8 @@ impl RuntimePage {
             })??;
             #[cfg(unix)]
             if matches!(grant, TunPermissionGrant::Ready(_)) {
-                let process =
-                    process.ok_or_else(|| zenclash_i18n::text("tun.errors.external_restart"))?;
-                let restart = process.clone();
-                tokio::task::spawn_blocking(move || restart.restart())
-                    .await
-                    .map_err(|error| {
-                        zenclash_i18n::text_with(
-                            "tun.errors.restart_task",
-                            &[("error", error.to_string())],
-                        )
-                    })?
-                    .map_err(|error| error.to_string())?;
-                process
-                    .wait_until_ready(Duration::from_secs(20))
+                core_session
+                    .maintain(CoreMaintenanceIntent::Restart)
                     .await
                     .map_err(|error| {
                         zenclash_i18n::text_with(

@@ -1,5 +1,7 @@
 use futures_util::{stream, StreamExt};
-use zenclash_core::YamlOverrideStore;
+use zenclash_core::{
+    EffectiveConfigIntent, ProxyDelayTarget, ProxyOperations, SystemProxySession, YamlOverrideStore,
+};
 
 use super::{
     open_directory, ClipboardItem, Context, EnvironmentShell, OutboundMode, Page, TrayCommand,
@@ -52,12 +54,6 @@ impl ZenClashApp {
                         return;
                     }
                 };
-                if let Some(process) = &self.mihomo_process {
-                    if let Err(error) = process.stop() {
-                        tracing::warn!(%error, "failed to stop the core before restarting ZenClash");
-                        return;
-                    }
-                }
                 self.begin_quit(Some(executable), cx);
             }
             TrayCommand::Quit => self.begin_quit(None, cx),
@@ -82,104 +78,9 @@ impl ZenClashApp {
             tokio::task::spawn_blocking(move || {
                 let store = store
                     .ok_or_else(|| zenclash_i18n::text("system_proxy.errors.ownership_store"))?;
-                let operation = controller.begin_operation();
-                let expected = store.load().map_err(|error| error.to_string())?;
-                let ownership = if enabled {
-                    Some(
-                        operation
-                            .apply(
-                                true,
-                                expected.system_proxy_mode,
-                                &expected.system_proxy_host,
-                                port,
-                                &expected.system_proxy_bypass,
-                                &expected.system_proxy_pac_script,
-                            )
-                            .map_err(|error| error.to_string())?
-                            .ok_or_else(|| {
-                                zenclash_i18n::text("system_proxy.errors.ownership_missing")
-                            })?,
-                    )
-                } else {
-                    if let Some(ownership) = &expected.system_proxy_ownership {
-                        operation
-                            .release_if_owned(ownership)
-                            .map_err(|error| error.to_string())?;
-                    } else {
-                        operation
-                            .set_enabled(false, expected.system_proxy_mode, "", 0, &[], "")
-                            .map_err(|error| error.to_string())?;
-                    }
-                    None
-                };
-                match store.update(|preferences| {
-                    preferences.system_proxy_enabled = enabled;
-                    preferences.system_proxy_ownership.clone_from(&ownership);
-                }) {
-                    Ok(preferences) => Ok(preferences),
-                    Err(error) => {
-                        let rollback = operation.apply(
-                            expected.system_proxy_enabled,
-                            expected.system_proxy_mode,
-                            &expected.system_proxy_host,
-                            port,
-                            &expected.system_proxy_bypass,
-                            &expected.system_proxy_pac_script,
-                        );
-                        match rollback {
-                            Ok(restored_ownership) => {
-                                if restored_ownership != expected.system_proxy_ownership {
-                                    if let Some(restored_ownership) = restored_ownership {
-                                        if let Err(ownership_error) = store.update(|preferences| {
-                                            preferences.system_proxy_ownership =
-                                                Some(restored_ownership.clone());
-                                        }) {
-                                            let release =
-                                                operation.release_if_owned(&restored_ownership);
-                                            return Err(match release {
-                                                Ok(_) => zenclash_i18n::text_with(
-                                                    "tray.errors.toggle_ownership_released",
-                                                    &[
-                                                        ("error", error.to_string()),
-                                                        (
-                                                            "ownership_error",
-                                                            ownership_error.to_string(),
-                                                        ),
-                                                    ],
-                                                ),
-                                                Err(release_error) => zenclash_i18n::text_with(
-                                                    "tray.errors.toggle_ownership_release_failed",
-                                                    &[
-                                                        ("error", error.to_string()),
-                                                        (
-                                                            "ownership_error",
-                                                            ownership_error.to_string(),
-                                                        ),
-                                                        (
-                                                            "release_error",
-                                                            release_error.to_string(),
-                                                        ),
-                                                    ],
-                                                ),
-                                            });
-                                        }
-                                    }
-                                }
-                                Err(zenclash_i18n::text_with(
-                                    "tray.errors.toggle_rolled_back",
-                                    &[("error", error.to_string())],
-                                ))
-                            }
-                            Err(rollback) => Err(zenclash_i18n::text_with(
-                                "tray.errors.toggle_rollback_failed",
-                                &[
-                                    ("error", error.to_string()),
-                                    ("rollback", rollback.to_string()),
-                                ],
-                            )),
-                        }
-                    }
-                }
+                SystemProxySession::new(store, controller)
+                    .set_enabled(enabled, port)
+                    .map_err(|error| error.to_string())
             })
             .await
             .map_err(|error| {
@@ -219,11 +120,9 @@ impl ZenClashApp {
     }
 
     fn start_tun_command(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        let client = self.client.clone();
         let controlled = self.controlled_config_store.clone();
         let profile = self.profile_path.clone();
-        let uses_restart = !self.core_kind.capabilities().full_config_reload;
-        let process = self.mihomo_process.clone();
+        let core_session = self.core_session.clone();
         let task = self.runtime.spawn(async move {
             let Some(profile) = profile else {
                 return Err(zenclash_i18n::text("runtime.lifecycle.profile_missing"));
@@ -243,19 +142,18 @@ impl ZenClashApp {
                         )
                     })?
                     .map_err(|error| error.to_string())?;
-            if uses_restart {
-                let process =
-                    process.ok_or_else(|| zenclash_i18n::text("tray.errors.external_tun"))?;
-                controlled
-                    .apply_json_update_with_restart(process, profile, &body, overrides)
-                    .await
-                    .map_err(|error| error.to_string())
-            } else {
-                controlled
-                    .apply_json_update_with_overrides(&client, profile, &body, overrides)
-                    .await
-                    .map_err(|error| error.to_string())
-            }
+            core_session
+                .apply(
+                    &controlled,
+                    EffectiveConfigIntent::Patch {
+                        profile,
+                        patch: body,
+                        overrides,
+                    },
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -282,25 +180,46 @@ impl ZenClashApp {
     fn test_group_from_tray(
         &mut self,
         group: String,
-        proxies: Vec<String>,
+        proxies: Vec<super::TrayProxyNode>,
         test_url: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let client = self.client.clone();
+        let operations = ProxyOperations::new(self.client.clone());
         let task = self.runtime.spawn(async move {
             stream::iter(proxies)
-                .for_each_concurrent(Some(16), |proxy| {
-                    let client = client.clone();
+                .map(|proxy| {
+                    let operations = operations.clone();
                     let test_url = test_url.clone();
                     async move {
-                        let _ = client.proxy_delay(&proxy, test_url.as_deref(), 5_000).await;
+                        let target = ProxyDelayTarget {
+                            name: proxy.name,
+                            provider: proxy.provider,
+                        };
+                        let result = operations
+                            .measure(&target, test_url.as_deref(), 5_000)
+                            .await;
+                        (target.name, result)
                     }
                 })
-                .await;
+                .buffer_unordered(16)
+                .collect::<Vec<_>>()
+                .await
         });
         cx.spawn(async move |this, cx| {
-            let _ = task.await;
+            let result = task.await;
             let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(results) => {
+                        for (proxy, result) in results {
+                            if let Err(error) = result {
+                                tracing::warn!(%group, %proxy, %error, "tray proxy delay test failed");
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%group, %error, "tray proxy delay task failed");
+                    }
+                }
                 tracing::info!(group, "tray proxy group delay test completed");
                 this.proxies_page
                     .update(cx, crate::pages::proxies::ProxiesPage::reload);
@@ -323,12 +242,9 @@ impl ZenClashApp {
     }
 
     fn start_profile_selection(&mut self, id: String, cx: &mut Context<Self>) {
-        let client = self.client.clone();
         let controlled = self.controlled_config_store.clone();
         let core_runtime = crate::pages::runtime::profiles::workflow::CoreProfileRuntime::new(
-            self.core_kind,
-            client,
-            self.mihomo_process.clone(),
+            self.core_session.clone(),
         );
         let task = self.runtime.spawn(async move {
             let store =
@@ -380,16 +296,19 @@ impl ZenClashApp {
     }
 
     fn start_proxy_selection(&mut self, group: String, proxy: String, cx: &mut Context<Self>) {
-        let client = self.client.clone();
-        let task = self.runtime.spawn(async move {
-            client.change_proxy(&group, &proxy).await?;
-            client.close_all_connections().await
-        });
+        let operations = ProxyOperations::new(self.client.clone());
+        let task = self
+            .runtime
+            .spawn(async move { operations.select(&group, &proxy).await });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(outcome)) => {
+                        for warning in outcome.warnings {
+                            tracing::warn!(%warning, "tray proxy selection completed with a warning");
+                        }
+                    }
                     Ok(Err(error)) => tracing::warn!(%error, "proxy selection from tray failed"),
                     Err(error) => tracing::warn!(%error, "proxy selection tray task failed"),
                 }

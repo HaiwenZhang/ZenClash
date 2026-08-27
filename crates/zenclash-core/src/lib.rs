@@ -9,6 +9,7 @@ mod config_diff;
 mod controlled_config;
 mod core_backend;
 mod core_installation;
+mod core_session;
 mod core_update;
 mod core_validation;
 mod endpoint;
@@ -23,6 +24,7 @@ mod process;
 mod profile;
 mod profiles;
 mod proxy;
+mod proxy_operations;
 mod ruleset;
 mod substore;
 mod system_proxy;
@@ -48,6 +50,10 @@ pub use controlled_config::{
 };
 pub use core_backend::{CoreCapabilities, CoreKind, ParseCoreKindError};
 pub use core_installation::{validate_core_binary, CoreBinaryError, CoreBinaryInfo};
+pub use core_session::{
+    CoreApplyKind, CoreApplyOutcome, CoreMaintenanceIntent, CoreSession, CoreSessionError,
+    CoreSessionSnapshot, EffectiveConfigIntent,
+};
 pub use core_update::{
     CoreUpdateError, CoreUpdateResult, CoreUpdateTransaction, MihomoRelease, MihomoReleaseAsset,
     MihomoReleaseService, PreparedCoreUpdate,
@@ -85,6 +91,7 @@ pub use profiles::{
     MIN_PROFILE_DOWNLOAD_TIMEOUT_SECONDS, MIN_PROFILE_UPDATE_INTERVAL_MINUTES,
 };
 pub use proxy::{DelayHistory, DelayResult, ProxyCatalog, ProxyGroup, ProxyNode};
+pub use proxy_operations::{ProxyDelayTarget, ProxyOperations, ProxySelectionOutcome};
 pub use ruleset::{
     RulesetBehavior, RulesetConversion, RulesetConversionError, RulesetConversionResult,
     RulesetConverter,
@@ -94,9 +101,13 @@ pub use system_proxy::{
     default_pac_script, default_system_proxy_bypass, normalize_pac_script,
     normalize_system_proxy_bypass, normalize_system_proxy_host, PacServer, PacServerStatus,
     SystemProxyController, SystemProxyManager, SystemProxyMode, SystemProxyOperation,
-    SystemProxyOwnership, SystemProxyStatus,
+    SystemProxyOwnership, SystemProxyReconcileOutcome, SystemProxyReleaseReason,
+    SystemProxySession, SystemProxySessionError, SystemProxySessionResult, SystemProxySettings,
+    SystemProxyStatus,
 };
-pub use traffic::{format_speed, TrafficMonitor, TrafficSnapshot};
+pub use traffic::{
+    format_speed, TrafficMonitor, TrafficSample, TrafficSnapshot, LIVE_TRAFFIC_SAMPLE_COUNT,
+};
 pub use traffic_history::{
     TrafficAggregate, TrafficDeltaLogger, TrafficDimension, TrafficHistoryEntry,
     TrafficHistoryError, TrafficHistoryQuery, TrafficHistoryResult, TrafficHistoryStore,

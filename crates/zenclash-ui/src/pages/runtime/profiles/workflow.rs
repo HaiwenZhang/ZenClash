@@ -1,11 +1,9 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::{Path, PathBuf};
 
 use zenclash_core::{
-    ControlledConfigStore, CoreKind, MihomoClient, MihomoProcess, ProfileRecord, ProfileStore,
-    ProfileStoreResult, ProfileUpdate, RemoteProfileOptions, RemoteProfileRoute, YamlOverrideStore,
+    ControlledConfigStore, CoreKind, CoreSession, EffectiveConfigIntent, MihomoClient,
+    ProfileRecord, ProfileStore, ProfileStoreResult, ProfileUpdate, RemoteProfileOptions,
+    RemoteProfileRoute, YamlOverrideStore,
 };
 
 use super::super::{load_page, Page, RuntimeData};
@@ -31,30 +29,20 @@ pub(crate) struct BackgroundUpdateOutcome {
 
 #[derive(Clone)]
 pub(crate) struct CoreProfileRuntime {
-    kind: CoreKind,
-    client: MihomoClient,
-    process: Option<Arc<MihomoProcess>>,
+    session: CoreSession,
 }
 
 impl CoreProfileRuntime {
-    pub(crate) fn new(
-        kind: CoreKind,
-        client: MihomoClient,
-        process: Option<Arc<MihomoProcess>>,
-    ) -> Self {
-        Self {
-            kind,
-            client,
-            process,
-        }
+    pub(crate) fn new(session: CoreSession) -> Self {
+        Self { session }
     }
 
     pub(crate) fn client(&self) -> &MihomoClient {
-        &self.client
+        self.session.client()
     }
 
     pub(crate) fn kind(&self) -> CoreKind {
-        self.kind
+        self.session.kind()
     }
 
     pub(crate) async fn reload_with_overrides(
@@ -63,22 +51,17 @@ impl CoreProfileRuntime {
         path: &Path,
         overrides: Vec<PathBuf>,
     ) -> Result<(), String> {
-        if self.kind.capabilities().full_config_reload {
-            controlled
-                .reload_with_overrides(&self.client, path, overrides)
-                .await
-                .map_err(|error| error.to_string())
-        } else if let Some(process) = self.process.clone() {
-            controlled
-                .restart_with_overrides(process, path, overrides)
-                .await
-                .map_err(|error| error.to_string())
-        } else {
-            Err(zenclash_i18n::text_with(
-                "profiles.errors.external_reload",
-                &[("core", self.kind.display_name().to_owned())],
-            ))
-        }
+        self.session
+            .apply(
+                &controlled,
+                EffectiveConfigIntent::ActivateProfile {
+                    profile: path.to_path_buf(),
+                    overrides,
+                },
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -92,7 +75,7 @@ pub(super) async fn import_local(
     let record = run_store(move || import_store.import_local(source)).await?;
     let rejected = zenclash_i18n::text_with(
         "profiles.errors.rejected",
-        &[("core", runtime.kind.display_name().to_owned())],
+        &[("core", runtime.kind().display_name().to_owned())],
     );
     activate_new_record(store, controlled, runtime, record, &rejected).await
 }
@@ -106,14 +89,14 @@ pub(in super::super) async fn add_remote(
     user_agent: String,
     options: RemoteProfileOptions,
 ) -> Result<ActivationOutcome, String> {
-    let proxy_port = subscription_proxy_port(&runtime.client, options.route()).await?;
+    let proxy_port = subscription_proxy_port(runtime.client(), options.route()).await?;
     let record = store
         .add_remote_with_options(name, url, user_agent, options, proxy_port)
         .await
         .map_err(|error| error.to_string())?;
     let rejected = zenclash_i18n::text_with(
         "profiles.errors.downloaded_rejected",
-        &[("core", runtime.kind.display_name().to_owned())],
+        &[("core", runtime.kind().display_name().to_owned())],
     );
     activate_new_record(store, controlled, runtime.clone(), record, &rejected).await
 }
@@ -156,21 +139,21 @@ pub(in crate::pages::runtime) async fn activate_existing_for_page(
             Ok(()) => Err(zenclash_i18n::text_with(
                 "profiles.errors.rejected_rolled_back",
                 &[
-                    ("core", runtime.kind.display_name().to_owned()),
+                    ("core", runtime.kind().display_name().to_owned()),
                     ("error", error.clone()),
                 ],
             )),
             Err(rollback) => Err(zenclash_i18n::text_with(
                 "profiles.errors.rejected_rollback_failed",
                 &[
-                    ("core", runtime.kind.display_name().to_owned()),
+                    ("core", runtime.kind().display_name().to_owned()),
                     ("error", error),
                     ("rollback", rollback),
                 ],
             )),
         };
     }
-    let refresh = load_page(runtime.client, refresh_page).await;
+    let refresh = load_page(runtime.client().clone(), refresh_page).await;
     Ok(ActivationOutcome {
         refresh,
         path,
@@ -185,7 +168,7 @@ pub(super) async fn update_remote(
     id: String,
 ) -> Result<UpdateOutcome, String> {
     let outcome = update_remote_background(store, controlled, runtime.clone(), id).await?;
-    let refresh = load_page(runtime.client, Page::Profiles).await;
+    let refresh = load_page(runtime.client().clone(), Page::Profiles).await;
     Ok(UpdateOutcome {
         refresh,
         path: outcome.path,
@@ -204,7 +187,7 @@ pub(crate) async fn update_remote_background(
         .remote_route(&id)
         .await
         .map_err(|error| error.to_string())?;
-    let proxy_port = subscription_proxy_port(&runtime.client, route).await?;
+    let proxy_port = subscription_proxy_port(runtime.client(), route).await?;
     let update = store
         .update_remote_with_proxy(&id, proxy_port)
         .await
@@ -306,7 +289,7 @@ async fn activate_new_record(
         };
         return Err(cleanup_new_record(store, record.id, primary).await);
     }
-    let refresh = load_page(runtime.client, Page::Profiles).await;
+    let refresh = load_page(runtime.client().clone(), Page::Profiles).await;
     Ok(ActivationOutcome {
         refresh,
         path,
@@ -327,14 +310,14 @@ async fn reload_updated_profile(
             Ok(_) => Err(zenclash_i18n::text_with(
                 "profiles.errors.update_rejected_rolled_back",
                 &[
-                    ("core", runtime.kind.display_name().to_owned()),
+                    ("core", runtime.kind().display_name().to_owned()),
                     ("error", error.clone()),
                 ],
             )),
             Err(rollback) => Err(zenclash_i18n::text_with(
                 "profiles.errors.update_rejected_rollback_failed",
                 &[
-                    ("core", runtime.kind.display_name().to_owned()),
+                    ("core", runtime.kind().display_name().to_owned()),
                     ("error", error),
                     ("rollback", rollback),
                 ],

@@ -150,11 +150,8 @@ impl RuntimePage {
         let count = overrides.len();
         let client = self.client.clone();
         let controlled = self.controlled_config_store.clone();
-        let core_runtime = super::profiles::workflow::CoreProfileRuntime::new(
-            self.core_kind,
-            client.clone(),
-            self.process.clone(),
-        );
+        let core_runtime =
+            super::profiles::workflow::CoreProfileRuntime::new(self.core_session.clone());
         let task = self.runtime.spawn(async move {
             super::profiles::workflow::reload_effective(controlled, &core_runtime, &profile)
                 .await?;
