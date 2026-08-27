@@ -87,9 +87,11 @@ fn startup_listener_fallback_is_session_only_and_survives_cache_regeneration() {
     )
     .unwrap();
     store.materialize(&profile).unwrap();
-    assert!(fs::read_to_string(store.runtime_path())
-        .unwrap()
-        .contains(&format!("mixed-port: {explicit_port}")));
+    assert!(
+        fs::read_to_string(store.runtime_path())
+            .unwrap()
+            .contains(&format!("mixed-port: {explicit_port}"))
+    );
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -265,10 +267,11 @@ fn effective_json_exposes_merged_values_for_native_forms() {
     let source = store.source_payload(&profile).unwrap();
     let effective_yaml = store.effective_payload(&profile).unwrap();
     let diff = crate::diff_yaml_configs(&source, &effective_yaml, 20).unwrap();
-    assert!(diff
-        .entries
-        .iter()
-        .any(|entry| entry.path == "/dns/nameserver"));
+    assert!(
+        diff.entries
+            .iter()
+            .any(|entry| entry.path == "/dns/nameserver")
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -315,9 +318,11 @@ async fn reload_profile_updates_managed_startup_cache_after_mihomo_accepts_paylo
 
     store.reload_profile(&client, &second).await.unwrap();
 
-    assert!(fs::read_to_string(runtime_path)
-        .unwrap()
-        .contains("mixed-port: 9888"));
+    assert!(
+        fs::read_to_string(runtime_path)
+            .unwrap()
+            .contains("mixed-port: 9888")
+    );
     assert!(server.join().unwrap().contains("mixed-port: 9888"));
     fs::remove_dir_all(root).unwrap();
 }
@@ -462,8 +467,10 @@ async fn mode_update_uses_partial_runtime_patch_and_persists_the_selection() {
             .and_then(serde_json::Value::as_str),
         Some("global")
     );
-    assert!(fs::read_to_string(store.runtime_path())
-        .unwrap()
-        .contains("mode: global"));
+    assert!(
+        fs::read_to_string(store.runtime_path())
+            .unwrap()
+            .contains("mode: global")
+    );
     fs::remove_dir_all(root).unwrap();
 }

@@ -2,7 +2,7 @@ use zenclash_core::{
     NetworkLatencyTarget, NetworkProbeRoutePreference, NetworkProbeService, NetworkProbeSnapshot,
 };
 
-use super::{model, NetworkPreferenceChange};
+use super::{NetworkPreferenceChange, model};
 use crate::pages::runtime::{Context, Page, PreferencesRestored, RuntimeData, RuntimePage};
 
 impl RuntimePage {

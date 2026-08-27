@@ -1,6 +1,6 @@
 use zenclash_core::ProfileSource;
 
-use super::{workflow, Context, Page, ProfileActivated, RemoteProfileOptions, RuntimePage, Window};
+use super::{Context, Page, ProfileActivated, RemoteProfileOptions, RuntimePage, Window, workflow};
 
 impl RuntimePage {
     pub(in super::super) fn begin_edit_remote_profile(

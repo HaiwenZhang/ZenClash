@@ -5,8 +5,8 @@ use std::{
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::Duration,
@@ -14,8 +14,8 @@ use std::{
 
 use super::*;
 use crate::{
-    profiles::atomic_write, AppPreferences, AppPreferencesStore, AppearancePreference,
-    BackupManager, ControlledConfigStore, ProfileStore,
+    AppPreferences, AppPreferencesStore, AppearancePreference, BackupManager,
+    ControlledConfigStore, ProfileStore, profiles::atomic_write,
 };
 
 const PROFILE: &str = "mixed-port: 7890\nproxies: []\nproxy-groups: []\nrules: []\n";
@@ -299,20 +299,20 @@ fn read_request(stream: &mut TcpStream) -> Vec<u8> {
         let read = stream.read(&mut buffer).unwrap();
         assert!(read > 0, "connection closed before request completed");
         request.extend_from_slice(&buffer[..read]);
-        if expected.is_none() {
-            if let Some(header_end) = find_bytes(&request, b"\r\n\r\n") {
-                let headers = std::str::from_utf8(&request[..header_end]).unwrap();
-                let content_length = headers
-                    .lines()
-                    .find_map(|line| {
-                        line.split_once(':').and_then(|(name, value)| {
-                            name.eq_ignore_ascii_case("content-length")
-                                .then(|| value.trim().parse::<usize>().unwrap())
-                        })
+        if expected.is_none()
+            && let Some(header_end) = find_bytes(&request, b"\r\n\r\n")
+        {
+            let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
                     })
-                    .unwrap_or(0);
-                expected = Some(header_end + 4 + content_length);
-            }
+                })
+                .unwrap_or(0);
+            expected = Some(header_end + 4 + content_length);
         }
         if expected.is_some_and(|expected| request.len() >= expected) {
             return request;

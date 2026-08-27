@@ -1,6 +1,6 @@
 use zenclash_core::{TrafficDimension, TrafficHistoryQuery, TrafficOverview};
 
-use super::{finish_history_refresh, unix_millis, TrafficHistoryPayload, TrafficRange};
+use super::{TrafficHistoryPayload, TrafficRange, finish_history_refresh, unix_millis};
 use crate::pages::runtime::{Context, Page, RuntimePage};
 
 impl RuntimePage {

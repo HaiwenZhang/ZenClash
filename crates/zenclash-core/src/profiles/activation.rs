@@ -82,15 +82,15 @@ impl ProfileStore {
         let profile = catalog.profiles.remove(index);
         let path = self.profile_path(&profile);
         self.save_unlocked(&catalog)?;
-        if path.exists() {
-            if let Err(error) = fs::remove_file(&path) {
-                return match self.save_unlocked(&previous_catalog) {
-                    Ok(()) => Err(error.into()),
-                    Err(rollback) => Err(ProfileStoreError::Transaction(format!(
-                        "删除配置文件失败：{error}；恢复配置索引失败：{rollback}"
-                    ))),
-                };
-            }
+        if path.exists()
+            && let Err(error) = fs::remove_file(&path)
+        {
+            return match self.save_unlocked(&previous_catalog) {
+                Ok(()) => Err(error.into()),
+                Err(rollback) => Err(ProfileStoreError::Transaction(format!(
+                    "删除配置文件失败：{error}；恢复配置索引失败：{rollback}"
+                ))),
+            };
         }
         Ok(())
     }

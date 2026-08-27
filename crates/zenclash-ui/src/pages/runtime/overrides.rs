@@ -1,8 +1,8 @@
 use super::{
-    diff_yaml_configs, div, h_flex, info_row, load_page, message_banner, px, setting_card, v_flex,
     Button, ButtonVariants, ClipboardItem, ConfigDiffReport, Context, Disableable, FluentBuilder,
     IconName, IntoElement, Page, ParentElement, PathPromptOptions, RuntimePage, ScrollableElement,
-    Sizable, Styled, Switch,
+    Sizable, Styled, Switch, diff_yaml_configs, div, h_flex, info_row, load_page, message_banner,
+    px, setting_card, v_flex,
 };
 
 mod diff_view;

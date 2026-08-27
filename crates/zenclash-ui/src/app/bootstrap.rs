@@ -1,10 +1,9 @@
 use gpui::{Menu, MenuItem};
 
 use super::{
-    apply_zen_theme, px, App, AppContext, AppPreferences, AppPreferencesStore, AppServices,
-    AppearancePreference, KeyBinding, LogMonitor, NetworkTrayIcon, Quit, Root, SharedString,
-    ShowStatusMenu, ThemeMode, TitleBar, ToggleFloatingWindow, WindowBounds, WindowOptions,
-    ZenClashApp,
+    App, AppContext, AppPreferences, AppPreferencesStore, AppServices, AppearancePreference,
+    KeyBinding, LogMonitor, NetworkTrayIcon, Quit, Root, SharedString, ShowStatusMenu, ThemeMode,
+    TitleBar, ToggleFloatingWindow, WindowBounds, WindowOptions, ZenClashApp, apply_zen_theme, px,
 };
 
 /// Registers `ZenClash` actions, native menus, and platform-appropriate key bindings.

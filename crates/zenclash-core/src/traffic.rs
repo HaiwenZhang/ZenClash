@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::{runtime::Handle, task::JoinHandle};
 
-use crate::{websocket::connect_stream, MihomoEndpoint};
+use crate::{MihomoEndpoint, websocket::connect_stream};
 
 /// Latest values and connection health from Mihomo's `/traffic` stream.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -5,7 +5,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use super::{ProfileStoreError, ProfileStoreResult, MAX_PROFILE_BYTES, MAX_PROFILE_INDEX_BYTES};
+use super::{MAX_PROFILE_BYTES, MAX_PROFILE_INDEX_BYTES, ProfileStoreError, ProfileStoreResult};
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -81,7 +81,7 @@ fn replace_file(temporary: &Path, path: &Path) -> std::io::Result<()> {
     use std::{iter, os::windows::ffi::OsStrExt};
 
     use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
 
     let temporary = temporary

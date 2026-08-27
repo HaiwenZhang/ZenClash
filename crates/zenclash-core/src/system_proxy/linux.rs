@@ -1,6 +1,6 @@
 use std::process::Output;
 
-use super::{command::run_checked, SystemProxyStatus};
+use super::{SystemProxyStatus, command::run_checked};
 use crate::{MihomoError, MihomoResult};
 
 const PROXY_SCHEMA: &str = "org.gnome.system.proxy";

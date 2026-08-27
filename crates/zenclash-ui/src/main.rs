@@ -7,19 +7,19 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
 
 use gpui::Application;
-use tracing_subscriber::{filter::Directive, EnvFilter};
+use tracing_subscriber::{EnvFilter, filter::Directive};
 use zenclash_core::{
-    bundled_recovery_profile, AppInstanceLock, AppPreferences, AppPreferencesStore,
-    ControlledConfigStore, CoreKind, CoreSession, EffectiveConfigIntent, LogMonitor, MihomoClient,
-    MihomoEndpoint, MihomoLaunchConfig, MihomoProcess, ProfileStore, TrafficMonitor,
-    YamlOverrideStore,
+    AppInstanceLock, AppPreferences, AppPreferencesStore, ControlledConfigStore, CoreKind,
+    CoreSession, EffectiveConfigIntent, LogMonitor, MihomoClient, MihomoEndpoint,
+    MihomoLaunchConfig, MihomoProcess, ProfileStore, TrafficMonitor, YamlOverrideStore,
+    bundled_recovery_profile,
 };
 use zenclash_ui::{app, assets::Assets};
 
@@ -262,16 +262,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         && mihomo_process.is_none()
         && core_kind.capabilities().full_config_reload
     {
-        if let Some(profile) = profile_path.as_ref() {
-            if let Err(error) = runtime.block_on(core_session.apply(
+        if let Some(profile) = profile_path.as_ref()
+            && let Err(error) = runtime.block_on(core_session.apply(
                 &controlled_config_store,
                 EffectiveConfigIntent::ActivateProfile {
                     profile: profile.clone(),
                     overrides: override_paths,
                 },
-            )) {
-                tracing::warn!(%error, core = %core_kind, "initial core configuration synchronization failed");
-            }
+            ))
+        {
+            tracing::warn!(%error, core = %core_kind, "initial core configuration synchronization failed");
         }
     } else if !core_kind.capabilities().full_config_reload {
         tracing::info!(core = %core_kind, "skipping unsupported full configuration hot reload");

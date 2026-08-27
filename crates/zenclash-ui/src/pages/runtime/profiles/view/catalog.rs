@@ -3,9 +3,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use zenclash_core::{ProfileRecord, ProfileSource, SubscriptionUsage};
 
 use super::super::super::{
-    compact_text, div, empty_state, format_bytes, format_profile_age, h_flex, px, setting_card,
-    v_flex, Button, ButtonVariants, Context, Disableable, FluentBuilder, IconName, IntoElement,
-    ParentElement, RemoteProfileRoute, RuntimePage, Sizable, Styled, Switch,
+    Button, ButtonVariants, Context, Disableable, FluentBuilder, IconName, IntoElement,
+    ParentElement, RemoteProfileRoute, RuntimePage, Sizable, Styled, Switch, compact_text, div,
+    empty_state, format_bytes, format_profile_age, h_flex, px, setting_card, v_flex,
 };
 
 const UPDATE_INTERVALS: [u32; 4] = [60, 6 * 60, 12 * 60, 24 * 60];
@@ -225,12 +225,12 @@ fn next_update_interval(current: u32) -> u32 {
 }
 
 fn format_update_interval(minutes: u32) -> String {
-    if minutes % 1_440 == 0 {
+    if minutes.is_multiple_of(1_440) {
         zenclash_i18n::text_with(
             "profiles.catalog.every_days",
             &[("count", (minutes / 1_440).to_string())],
         )
-    } else if minutes % 60 == 0 {
+    } else if minutes.is_multiple_of(60) {
         zenclash_i18n::text_with(
             "profiles.catalog.every_hours",
             &[("count", (minutes / 60).to_string())],

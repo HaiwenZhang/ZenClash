@@ -3,8 +3,8 @@
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -109,9 +109,11 @@ impl CoreSession {
     /// Opens a session over one controller and its optional owned child process.
     #[must_use]
     pub fn open(kind: CoreKind, client: MihomoClient, process: Option<Arc<MihomoProcess>>) -> Self {
-        debug_assert!(process
-            .as_ref()
-            .is_none_or(|process| process.kind() == kind));
+        debug_assert!(
+            process
+                .as_ref()
+                .is_none_or(|process| process.kind() == kind)
+        );
         Self {
             kind,
             client,

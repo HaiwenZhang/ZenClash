@@ -10,7 +10,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
 
-use crate::{websocket::connect_stream, MihomoEndpoint};
+use crate::{MihomoEndpoint, websocket::connect_stream};
 
 mod file;
 

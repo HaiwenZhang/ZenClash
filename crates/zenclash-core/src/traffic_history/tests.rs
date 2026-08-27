@@ -87,9 +87,11 @@ fn cleanup_database(path: &Path) {
 fn logger_uses_baselines_and_only_persists_positive_real_deltas() {
     let mut logger = TrafficDeltaLogger::new(2_000);
     let old = connection("old", 1_000, 100, 200);
-    assert!(logger
-        .observe(&snapshot(vec![old.clone()], 100, 200), 2_100)
-        .is_empty());
+    assert!(
+        logger
+            .observe(&snapshot(vec![old.clone()], 100, 200), 2_100)
+            .is_empty()
+    );
 
     let mut old_updated = old;
     old_updated.upload = 140;
@@ -108,14 +110,18 @@ fn logger_uses_baselines_and_only_persists_positive_real_deltas() {
 fn logger_reestablishes_baselines_after_mihomo_counter_reset() {
     let mut logger = TrafficDeltaLogger::new(1_000);
     let first = connection("same-id", 500, 100, 100);
-    assert!(logger
-        .observe(&snapshot(vec![first], 100, 100), 1_100)
-        .is_empty());
+    assert!(
+        logger
+            .observe(&snapshot(vec![first], 100, 100), 1_100)
+            .is_empty()
+    );
 
     let restarted = connection("same-id", 500, 5, 6);
-    assert!(logger
-        .observe(&snapshot(vec![restarted], 5, 6), 1_200)
-        .is_empty());
+    assert!(
+        logger
+            .observe(&snapshot(vec![restarted], 5, 6), 1_200)
+            .is_empty()
+    );
 
     let updated = connection("same-id", 500, 8, 10);
     let deltas = logger.observe(&snapshot(vec![updated], 8, 10), 1_300);

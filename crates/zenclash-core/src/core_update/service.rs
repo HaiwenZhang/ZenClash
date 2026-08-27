@@ -5,8 +5,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use super::{
-    archive::prepare_downloaded, transaction::PreparedCoreUpdate, CoreUpdateError,
-    CoreUpdateResult, MihomoRelease, MihomoReleaseAsset,
+    CoreUpdateError, CoreUpdateResult, MihomoRelease, MihomoReleaseAsset,
+    archive::prepare_downloaded, transaction::PreparedCoreUpdate,
 };
 
 const DEFAULT_API_BASE: &str = "https://api.github.com/repos/MetaCubeX/mihomo/";
@@ -263,7 +263,7 @@ pub(super) fn platform_asset_name(tag: &str) -> CoreUpdateResult<String> {
         (os, arch) => {
             return Err(CoreUpdateError::Metadata(format!(
                 "不支持的平台：{os}-{arch}"
-            )))
+            )));
         }
     };
     let extension = if cfg!(target_os = "windows") {

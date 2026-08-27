@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
 use zenclash_core::{
-    NetworkLatencyTarget, NetworkProbeRoute, NetworkProbeSnapshot, RuntimeConfig,
-    DEFAULT_NETWORK_LATENCY_TARGETS,
+    DEFAULT_NETWORK_LATENCY_TARGETS, NetworkLatencyTarget, NetworkProbeRoute, NetworkProbeSnapshot,
+    RuntimeConfig,
 };
 
 pub(super) fn network_probe_route(

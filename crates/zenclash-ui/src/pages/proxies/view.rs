@@ -1,8 +1,9 @@
-use gpui_component::{button::ButtonVariants, Selectable};
+use gpui_component::{Selectable, button::ButtonVariants};
 
 use super::{
-    div, h_flex, px, test_key, v_flex, Button, Context, Disableable, FluentBuilder, Icon, IconName,
-    IntoElement, ParentElement, Progress, ProxiesPage, ProxyGroup, ProxyNode, Sizable, Styled,
+    Button, Context, Disableable, FluentBuilder, Icon, IconName, IntoElement, ParentElement,
+    Progress, ProxiesPage, ProxyGroup, ProxyNode, Sizable, Styled, div, h_flex, px, test_key,
+    v_flex,
 };
 
 impl ProxiesPage {

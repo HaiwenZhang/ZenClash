@@ -4,10 +4,10 @@ use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, USER_AGENT};
 
 use super::{
-    normalized_remote_url, ProfileStoreError, ProfileStoreResult, RemoteProfileOptions,
-    RemoteProfileRoute, SubscriptionMetadata, SubscriptionUsage, MAX_PROFILE_BYTES,
-    MAX_PROFILE_DOWNLOAD_TIMEOUT_SECONDS, MAX_PROFILE_UPDATE_INTERVAL_MINUTES,
-    MIN_PROFILE_DOWNLOAD_TIMEOUT_SECONDS, MIN_PROFILE_UPDATE_INTERVAL_MINUTES,
+    MAX_PROFILE_BYTES, MAX_PROFILE_DOWNLOAD_TIMEOUT_SECONDS, MAX_PROFILE_UPDATE_INTERVAL_MINUTES,
+    MIN_PROFILE_DOWNLOAD_TIMEOUT_SECONDS, MIN_PROFILE_UPDATE_INTERVAL_MINUTES, ProfileStoreError,
+    ProfileStoreResult, RemoteProfileOptions, RemoteProfileRoute, SubscriptionMetadata,
+    SubscriptionUsage, normalized_remote_url,
 };
 
 #[derive(Debug)]

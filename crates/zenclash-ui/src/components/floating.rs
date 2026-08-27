@@ -38,17 +38,19 @@ impl FloatingTrafficWindow {
 
     fn start_updates(&mut self, cx: &mut Context<Self>) {
         let monitor = self.traffic_monitor.clone();
-        cx.spawn(async move |this, cx| loop {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let traffic = monitor.snapshot();
-            if this
-                .update(cx, |this, cx| {
-                    this.traffic = traffic;
-                    cx.notify();
-                })
-                .is_err()
-            {
-                break;
+        cx.spawn(async move |this, cx| {
+            loop {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let traffic = monitor.snapshot();
+                if this
+                    .update(cx, |this, cx| {
+                        this.traffic = traffic;
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
             }
         })
         .detach();

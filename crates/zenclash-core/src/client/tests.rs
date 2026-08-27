@@ -257,9 +257,11 @@ async fn maintenance_operations_use_real_mihomo_post_endpoints() {
             "POST /upgrade/ui HTTP/1.1"
         ]
     );
-    assert!(requests.iter().all(|request| request
-        .to_ascii_lowercase()
-        .contains("authorization: bearer maintenance-secret")));
+    assert!(requests.iter().all(|request| {
+        request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer maintenance-secret")
+    }));
 }
 
 #[tokio::test]

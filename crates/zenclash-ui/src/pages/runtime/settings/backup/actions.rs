@@ -4,7 +4,7 @@ use gpui::PathPromptOptions;
 use zenclash_core::BackupManager;
 
 use super::super::super::{Context, Page, PreferencesRestored, ProfileActivated, RuntimePage};
-use super::{format_backup_size, workflow::restore_backup, RestoreOutcome};
+use super::{RestoreOutcome, format_backup_size, workflow::restore_backup};
 
 impl RuntimePage {
     pub(super) fn choose_backup_export(&mut self, cx: &mut Context<Self>) {

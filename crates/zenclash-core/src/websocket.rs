@@ -1,10 +1,9 @@
 use std::time::Duration;
 
-use http::{header::AUTHORIZATION, HeaderValue};
+use http::{HeaderValue, header::AUTHORIZATION};
 use tokio_tungstenite::{
-    connect_async,
+    MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{client::IntoClientRequest, handshake::client::Request},
-    MaybeTlsStream, WebSocketStream,
 };
 
 use crate::MihomoEndpoint;

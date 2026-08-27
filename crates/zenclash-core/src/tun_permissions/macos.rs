@@ -1,8 +1,8 @@
 use std::{os::unix::fs::MetadataExt, path::Path, time::Duration};
 
 use crate::{
-    platform_command, tun_permissions::binary_sha256, TunPermissionError, TunPermissionGrant,
-    TunPermissionResult, TunPermissionStatus,
+    TunPermissionError, TunPermissionGrant, TunPermissionResult, TunPermissionStatus,
+    platform_command, tun_permissions::binary_sha256,
 };
 
 const AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(120);

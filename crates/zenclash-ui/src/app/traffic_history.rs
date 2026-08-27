@@ -1,8 +1,8 @@
 use std::{
     mem,
     sync::{
-        atomic::{AtomicBool, AtomicU16, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU16, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };

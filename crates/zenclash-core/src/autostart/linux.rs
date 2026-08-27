@@ -1,6 +1,6 @@
 use std::{fs, path::Path};
 
-use super::{home_dir, required_entry_path, AutostartError, AutostartResult, AutostartStatus};
+use super::{AutostartError, AutostartResult, AutostartStatus, home_dir, required_entry_path};
 use crate::profiles::atomic_write;
 
 pub(super) fn default_entry_path() -> AutostartResult<Option<std::path::PathBuf>> {

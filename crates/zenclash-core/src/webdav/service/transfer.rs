@@ -30,10 +30,10 @@ impl TransferFile {
 
 impl Drop for TransferFile {
     fn drop(&mut self) {
-        if let Err(error) = fs::remove_file(&self.path) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(%error, path = %self.path.display(), "failed to remove WebDAV transfer file");
-            }
+        if let Err(error) = fs::remove_file(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, path = %self.path.display(), "failed to remove WebDAV transfer file");
         }
     }
 }

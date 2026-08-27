@@ -439,8 +439,8 @@ fn listener_supported_on_platform(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_session_fallbacks, resolve_conflicts, validate_listener_change,
-        SessionListenerFallback,
+        SessionListenerFallback, apply_session_fallbacks, resolve_conflicts,
+        validate_listener_change,
     };
     use serde_yaml::Value;
     use std::{

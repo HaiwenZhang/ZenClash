@@ -5,8 +5,8 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
-        mpsc::{self, SyncSender, TrySendError},
         Arc,
+        mpsc::{self, SyncSender, TrySendError},
     },
     thread,
 };
@@ -14,7 +14,7 @@ use std::{
 use parking_lot::RwLock;
 use thiserror::Error;
 
-use super::{format_log_entries, LogEntry};
+use super::{LogEntry, format_log_entries};
 
 const MEBIBYTE: u64 = 1024 * 1024;
 const MIN_MAX_MEBIBYTES: u16 = 1;
@@ -401,9 +401,11 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
-        assert!(fs::read_to_string(&path)
-            .unwrap()
-            .contains("queued.example.com"));
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("queued.example.com")
+        );
         fs::remove_file(path).unwrap();
     }
 

@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use super::{unique_nonempty, SystemNetworkSnapshot};
+use super::{SystemNetworkSnapshot, unique_nonempty};
 
 #[cfg(target_os = "windows")]
 const NETWORK_SCRIPT: &str = "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); $route=Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric,InterfaceMetric | Select-Object -First 1; if($null -eq $route){throw 'No default IPv4 route'}; $adapter=Get-NetAdapter -InterfaceIndex $route.InterfaceIndex; $ip=(Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $route.InterfaceIndex | Where-Object {$_.IPAddress -notlike '169.254*'} | Select-Object -First 1).IPAddress; $dns=@((Get-DnsClientServerAddress -AddressFamily IPv4 -InterfaceIndex $route.InterfaceIndex).ServerAddresses); [pscustomobject]@{interface=$adapter.Name;gateway=$route.NextHop;local_ipv4=$ip;dns_servers=$dns} | ConvertTo-Json -Compress";

@@ -4,21 +4,21 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 use super::super::{
-    BackupError, BackupExportSummary, BackupManager, BackupResult, BACKUP_FORMAT_VERSION,
+    BACKUP_FORMAT_VERSION, BackupError, BackupExportSummary, BackupManager, BackupResult,
     CONTROLLED_PATH, MANIFEST_PATH, MAX_ARCHIVE_BYTES, PREFERENCES_PATH, PROFILE_INDEX_PATH,
     YAML_OVERRIDE_INDEX_PATH,
 };
 use super::{
-    ensure_payload_limits, sha256_hex, validate_catalog_metadata, BackupManifest, ManifestFile,
-    SnapshotFile,
+    BackupManifest, ManifestFile, SnapshotFile, ensure_payload_limits, sha256_hex,
+    validate_catalog_metadata,
 };
 use crate::{
+    AppPreferencesStore, ControlledConfigStore, ProfileStore, ProfileStoreError, YamlOverrideStore,
     profiles::{atomic_write, read_profile_bytes},
-    validate_clash_yaml, AppPreferencesStore, ControlledConfigStore, ProfileStore,
-    ProfileStoreError, YamlOverrideStore,
+    validate_clash_yaml,
 };
 
 pub(in crate::backup) fn export(

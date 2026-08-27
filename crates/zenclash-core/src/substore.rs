@@ -260,9 +260,11 @@ mod tests {
                 .unwrap(),
             "https://substore.example/tenant/download/collection/all?target=ClashMeta&noCache=true"
         );
-        assert!(client
-            .profile_url(SubStoreItemKind::Subscription, "  ")
-            .is_err());
+        assert!(
+            client
+                .profile_url(SubStoreItemKind::Subscription, "  ")
+                .is_err()
+        );
     }
 
     #[test]
@@ -276,9 +278,11 @@ mod tests {
             "http://localhost:0",
         ];
 
-        assert!(invalid
-            .into_iter()
-            .all(|backend| { SubStoreClient::new(backend, "http://localhost:14122").is_err() }));
+        assert!(
+            invalid
+                .into_iter()
+                .all(|backend| { SubStoreClient::new(backend, "http://localhost:14122").is_err() })
+        );
     }
 
     #[tokio::test]

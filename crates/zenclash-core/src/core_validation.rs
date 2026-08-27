@@ -11,7 +11,7 @@ use std::{
 
 use thiserror::Error;
 
-use crate::{platform_command, profiles::validate_clash_yaml, CoreKind};
+use crate::{CoreKind, platform_command, profiles::validate_clash_yaml};
 
 const CONFIG_VALIDATION_TIMEOUT: Duration = Duration::from_secs(30);
 static VALIDATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -186,10 +186,10 @@ struct TemporaryConfig(PathBuf);
 
 impl Drop for TemporaryConfig {
     fn drop(&mut self) {
-        if let Err(error) = std::fs::remove_file(&self.0) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(%error, path = %self.0.display(), "failed to remove temporary core validation config");
-            }
+        if let Err(error) = std::fs::remove_file(&self.0)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, path = %self.0.display(), "failed to remove temporary core validation config");
         }
     }
 }

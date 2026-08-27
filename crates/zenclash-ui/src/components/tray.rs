@@ -1,9 +1,9 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use tray_icon::{
-    menu::MenuEvent, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
+    MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent, menu::MenuEvent,
 };
-use zenclash_core::{format_speed, TrafficMonitor, TrafficSnapshot};
+use zenclash_core::{TrafficMonitor, TrafficSnapshot, format_speed};
 
 mod icon;
 #[cfg(target_os = "macos")]

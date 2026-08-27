@@ -1,11 +1,11 @@
 use super::{
-    apply_zen_theme, AppPreferences, AppearancePreference, Context, HideTrafficIcon,
-    NavigateConnections, NavigateDns, NavigateHome, NavigateLogs, NavigateMihomo, NavigateNetwork,
-    NavigateOverride, NavigateProfiles, NavigateProxies, NavigateResources, NavigateRules,
-    NavigateSettings, NavigateSniffer, NavigateSystemProxy, NavigateTraffic, NavigateTun,
-    OutboundMode, Page, Quit, SetDarkTheme, SetDirectMode, SetGlobalMode, SetLightTheme,
-    SetRuleMode, SetSystemTheme, ShowStatusMenu, ShowTrafficIcon, ThemeMode, ToggleFloatingWindow,
-    Window, ZenClashApp,
+    AppPreferences, AppearancePreference, Context, HideTrafficIcon, NavigateConnections,
+    NavigateDns, NavigateHome, NavigateLogs, NavigateMihomo, NavigateNetwork, NavigateOverride,
+    NavigateProfiles, NavigateProxies, NavigateResources, NavigateRules, NavigateSettings,
+    NavigateSniffer, NavigateSystemProxy, NavigateTraffic, NavigateTun, OutboundMode, Page, Quit,
+    SetDarkTheme, SetDirectMode, SetGlobalMode, SetLightTheme, SetRuleMode, SetSystemTheme,
+    ShowStatusMenu, ShowTrafficIcon, ThemeMode, ToggleFloatingWindow, Window, ZenClashApp,
+    apply_zen_theme,
 };
 
 impl ZenClashApp {
@@ -242,10 +242,10 @@ impl ZenClashApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(tray) = &self.network_tray {
-            if let Err(error) = tray.set_visible(true) {
-                tracing::warn!(%error, "failed to show native traffic tray");
-            }
+        if let Some(tray) = &self.network_tray
+            && let Err(error) = tray.set_visible(true)
+        {
+            tracing::warn!(%error, "failed to show native traffic tray");
         }
         self.update_preferences(|preferences| preferences.traffic_tray_visible = true);
         cx.notify();
@@ -257,10 +257,10 @@ impl ZenClashApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(tray) = &self.network_tray {
-            if let Err(error) = tray.set_visible(false) {
-                tracing::warn!(%error, "failed to hide native traffic tray");
-            }
+        if let Some(tray) = &self.network_tray
+            && let Err(error) = tray.set_visible(false)
+        {
+            tracing::warn!(%error, "failed to hide native traffic tray");
         }
         self.update_preferences(|preferences| preferences.traffic_tray_visible = false);
         cx.notify();

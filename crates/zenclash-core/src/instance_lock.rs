@@ -108,7 +108,7 @@ fn try_lock(file: &File) -> std::io::Result<()> {
     use std::{mem::zeroed, os::windows::io::AsRawHandle};
     use windows_sys::Win32::{
         Foundation::HANDLE,
-        Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY},
+        Storage::FileSystem::{LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx},
         System::IO::OVERLAPPED,
     };
 

@@ -56,10 +56,10 @@ impl MihomoEndpoint {
     #[must_use]
     pub fn from_env() -> Self {
         let mut endpoint = Self::default();
-        if let Ok(controller) = std::env::var("ZENCLASH_CONTROLLER") {
-            if !controller.trim().is_empty() {
-                endpoint.controller = controller;
-            }
+        if let Ok(controller) = std::env::var("ZENCLASH_CONTROLLER")
+            && !controller.trim().is_empty()
+        {
+            endpoint.controller = controller;
         }
         if let Ok(secret) = std::env::var("ZENCLASH_SECRET") {
             endpoint.secret = secret;
@@ -194,9 +194,11 @@ mod tests {
         let endpoint = MihomoEndpoint::with_random_secret("127.0.0.1:19090").unwrap();
 
         assert_eq!(endpoint.secret.len(), 64);
-        assert!(endpoint
-            .secret
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        assert!(
+            endpoint
+                .secret
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
     }
 }

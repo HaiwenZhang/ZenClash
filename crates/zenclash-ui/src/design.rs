@@ -1,4 +1,4 @@
-use gpui::{rgb, App, Hsla, Window};
+use gpui::{App, Hsla, Window, rgb};
 use gpui_component::{Theme, ThemeMode};
 
 /// Primary dark background used by the `ZenClash` visual system.
@@ -189,8 +189,8 @@ fn relative_luminance(rgb: u32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        contrast_ratio, throughput_activity_percent, DARK_FOREGROUND, DARK_MUTED_FOREGROUND,
-        DEEP_INK, LIGHT_CANVAS, LIGHT_INK, LIGHT_MUTED_INK, LIGHT_SIGNAL, SIGNAL_CYAN,
+        DARK_FOREGROUND, DARK_MUTED_FOREGROUND, DEEP_INK, LIGHT_CANVAS, LIGHT_INK, LIGHT_MUTED_INK,
+        LIGHT_SIGNAL, SIGNAL_CYAN, contrast_ratio, throughput_activity_percent,
     };
 
     #[test]

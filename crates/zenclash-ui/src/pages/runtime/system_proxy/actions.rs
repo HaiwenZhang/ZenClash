@@ -1,8 +1,8 @@
 use super::{SystemProxyEditorState, SystemProxyForm};
 use crate::pages::runtime::{
+    AppContext, Context, InputState, Page, RuntimePage, SystemProxyMode, Window,
     default_pac_script, default_system_proxy_bypass, load_page, normalize_pac_script,
-    normalize_system_proxy_bypass, normalize_system_proxy_host, AppContext, Context, InputState,
-    Page, RuntimePage, SystemProxyMode, Window,
+    normalize_system_proxy_bypass, normalize_system_proxy_host,
 };
 use zenclash_core::{SystemProxySession, SystemProxySettings};
 

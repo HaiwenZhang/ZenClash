@@ -8,7 +8,7 @@ use std::{
 use parking_lot::Mutex;
 
 use super::{WebDavError, WebDavResult, WebDavSettings};
-use crate::{profiles::atomic_write, AppPreferencesStore};
+use crate::{AppPreferencesStore, profiles::atomic_write};
 
 const MAX_SETTINGS_BYTES: usize = 1024 * 1024;
 

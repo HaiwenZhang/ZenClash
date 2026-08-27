@@ -2,7 +2,7 @@ use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
 use reqwest::{Method, Response, StatusCode, Url};
 
-use super::super::{model::validate_filename, WebDavBackup, WebDavError, WebDavResult};
+use super::super::{WebDavBackup, WebDavError, WebDavResult, model::validate_filename};
 
 const MAX_ERROR_BYTES: usize = 64 * 1024;
 pub(super) const MAX_PROPFIND_BYTES: usize = 4 * 1024 * 1024;

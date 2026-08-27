@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use crate::{
-    platform_command, TunPermissionError, TunPermissionGrant, TunPermissionResult,
-    TunPermissionStatus,
+    TunPermissionError, TunPermissionGrant, TunPermissionResult, TunPermissionStatus,
+    platform_command,
 };
 
 pub(super) fn status(binary: &Path) -> TunPermissionResult<TunPermissionStatus> {

@@ -8,9 +8,9 @@ use std::{
 use parking_lot::Mutex;
 
 use super::{
-    atomic_write, home_dir, read_index_bytes, read_profile_bytes, unique_id, unix_timestamp,
-    validate_clash_yaml, ProfileCatalog, ProfileRecord, ProfileSource, ProfileStore,
-    ProfileStoreError, ProfileStoreResult, SubscriptionMetadata,
+    ProfileCatalog, ProfileRecord, ProfileSource, ProfileStore, ProfileStoreError,
+    ProfileStoreResult, SubscriptionMetadata, atomic_write, home_dir, read_index_bytes,
+    read_profile_bytes, unique_id, unix_timestamp, validate_clash_yaml,
 };
 
 impl ProfileStore {

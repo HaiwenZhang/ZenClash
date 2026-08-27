@@ -49,9 +49,11 @@ mod tests {
 
     #[test]
     fn component_icons_remain_available() {
-        assert!(Assets
-            .load("icons/globe.svg")
-            .expect("component asset lookup should succeed")
-            .is_some());
+        assert!(
+            Assets
+                .load("icons/globe.svg")
+                .expect("component asset lookup should succeed")
+                .is_some()
+        );
     }
 }

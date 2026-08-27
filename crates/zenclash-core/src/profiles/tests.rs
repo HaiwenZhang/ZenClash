@@ -164,9 +164,11 @@ fn update_policy_is_persisted_only_for_remote_profiles() {
     assert_eq!(persisted.update_interval_minutes, 60);
     assert!(persisted.update_cron.is_none());
     assert!(store.set_update_policy(&local.id, true, 60).is_err());
-    assert!(store
-        .set_update_policy(&remote.id, true, MIN_PROFILE_UPDATE_INTERVAL_MINUTES - 1)
-        .is_err());
+    assert!(
+        store
+            .set_update_policy(&remote.id, true, MIN_PROFILE_UPDATE_INTERVAL_MINUTES - 1)
+            .is_err()
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -193,9 +195,11 @@ fn five_field_cron_drives_due_checks_and_request_settings_persist_atomically() {
         .unwrap()
         .with_download_policy(45, true)
         .unwrap();
-    assert!(RemoteProfileOptions::default()
-        .with_download_policy(0, false)
-        .is_err());
+    assert!(
+        RemoteProfileOptions::default()
+            .with_download_policy(0, false)
+            .is_err()
+    );
 
     store
         .set_remote_request_settings(
@@ -245,16 +249,18 @@ fn five_field_cron_drives_due_checks_and_request_settings_persist_atomically() {
         .into_iter()
         .find(|profile| profile.id == remote.id)
         .unwrap();
-    assert!(store
-        .set_remote_request_settings(
-            &remote.id,
-            "must not persist",
-            "https://user:secret@example.net/profile.yaml",
-            "must-not-persist",
-            RemoteProfileOptions::default(),
-            Some("0 * * * * *".into()),
-        )
-        .is_err());
+    assert!(
+        store
+            .set_remote_request_settings(
+                &remote.id,
+                "must not persist",
+                "https://user:secret@example.net/profile.yaml",
+                "must-not-persist",
+                RemoteProfileOptions::default(),
+                Some("0 * * * * *".into()),
+            )
+            .is_err()
+    );
     let after_rejected_edit = store
         .load()
         .unwrap()
@@ -505,14 +511,18 @@ async fn remote_update_preserves_profile_imported_while_downloading() {
     server.join().unwrap();
 
     let catalog = store.load().unwrap();
-    assert!(catalog
-        .profiles
-        .iter()
-        .any(|profile| profile.id == remote.id));
-    assert!(catalog
-        .profiles
-        .iter()
-        .any(|profile| profile.id == local.id));
+    assert!(
+        catalog
+            .profiles
+            .iter()
+            .any(|profile| profile.id == remote.id)
+    );
+    assert!(
+        catalog
+            .profiles
+            .iter()
+            .any(|profile| profile.id == local.id)
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -639,12 +649,16 @@ fn profile_editor_replaces_and_rolls_back_without_overwriting_a_newer_payload() 
 
     store.rollback_update(update).unwrap();
     assert_eq!(fs::read_to_string(&path).unwrap(), original);
-    assert!(store
-        .replace_payload(&profile.id, candidate, "mixed-port: 9000\n")
-        .is_err());
-    assert!(store
-        .replace_payload(&profile.id, original, "ordinary: yaml\n")
-        .is_err());
+    assert!(
+        store
+            .replace_payload(&profile.id, candidate, "mixed-port: 9000\n")
+            .is_err()
+    );
+    assert!(
+        store
+            .replace_payload(&profile.id, original, "ordinary: yaml\n")
+            .is_err()
+    );
     assert_eq!(fs::read_to_string(path).unwrap(), original);
     fs::remove_dir_all(root).unwrap();
 }

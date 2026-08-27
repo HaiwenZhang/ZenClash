@@ -2,7 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use reqwest::header::HeaderValue;
 
-use super::{ProfileCatalog, ProfileStoreError, ProfileStoreResult, DEFAULT_USER_AGENT};
+use super::{DEFAULT_USER_AGENT, ProfileCatalog, ProfileStoreError, ProfileStoreResult};
 
 const MAX_PROFILE_ID_CHARS: usize = 64;
 

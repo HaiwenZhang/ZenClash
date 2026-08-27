@@ -1,7 +1,7 @@
 #[cfg(target_os = "windows")]
-use super::command::run_checked;
-#[cfg(target_os = "windows")]
 use super::SystemProxyStatus;
+#[cfg(target_os = "windows")]
+use super::command::run_checked;
 #[cfg(target_os = "windows")]
 use crate::{MihomoError, MihomoResult};
 
@@ -101,7 +101,7 @@ fn notify_wininet() -> MihomoResult<()> {
     use std::ptr;
 
     use windows_sys::Win32::Networking::WinInet::{
-        InternetSetOptionW, INTERNET_OPTION_REFRESH, INTERNET_OPTION_SETTINGS_CHANGED,
+        INTERNET_OPTION_REFRESH, INTERNET_OPTION_SETTINGS_CHANGED, InternetSetOptionW,
     };
 
     for option in [INTERNET_OPTION_SETTINGS_CHANGED, INTERNET_OPTION_REFRESH] {

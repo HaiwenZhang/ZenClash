@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use serde_yaml::Value;
 
 use crate::{
-    profiles::{read_profile_bytes, validate_clash_yaml, MAX_PROFILE_BYTES},
     MihomoError, MihomoResult,
+    profiles::{MAX_PROFILE_BYTES, read_profile_bytes, validate_clash_yaml},
 };
 
 /// Builds the effective Mihomo YAML without changing any source file.

@@ -226,10 +226,10 @@ pub(super) fn is_core_binary_candidate(path: &Path) -> bool {
 }
 
 pub(super) fn default_core_home_dir(project_root: &Path, kind: CoreKind) -> PathBuf {
-    if bundled_resources_dir().is_some() {
-        if let Some(data_dir) = platform_data_dir() {
-            return data_dir.join(kind.executable_stem());
-        }
+    if bundled_resources_dir().is_some()
+        && let Some(data_dir) = platform_data_dir()
+    {
+        return data_dir.join(kind.executable_stem());
     }
     project_root.join(format!("target/zenclash-{}", kind.executable_stem()))
 }

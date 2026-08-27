@@ -1,9 +1,9 @@
 use super::{
-    load_page, load_page_with_binary, AppContext, ConfigInputs, Context, ControlledConfigStore,
-    Duration, HashSet, InputEvent, InputState, MihomoLogLevel, Page, PageTaskToken,
-    ProfileActivated, ProfileCatalog, ProfileStore, RuntimeConfig, RuntimeConfigApplied,
-    RuntimeData, RuntimePage, RuntimePageServices, Value, Window, YamlOverrideCatalog,
-    YamlOverrideStore,
+    AppContext, ConfigInputs, Context, ControlledConfigStore, Duration, HashSet, InputEvent,
+    InputState, MihomoLogLevel, Page, PageTaskToken, ProfileActivated, ProfileCatalog,
+    ProfileStore, RuntimeConfig, RuntimeConfigApplied, RuntimeData, RuntimePage,
+    RuntimePageServices, Value, Window, YamlOverrideCatalog, YamlOverrideStore, load_page,
+    load_page_with_binary,
 };
 use zenclash_core::{CoreApplyKind, EffectiveConfigIntent};
 
@@ -415,10 +415,10 @@ impl RuntimePage {
         self.error = None;
         self.notice = None;
         self.reload_controlled_config(cx);
-        if page == Page::Profiles {
-            if let Err(error) = self.reload_profile_catalog() {
-                self.error = Some(error);
-            }
+        if page == Page::Profiles
+            && let Err(error) = self.reload_profile_catalog()
+        {
+            self.error = Some(error);
         }
         self.refresh(cx);
         if page == Page::Settings {
@@ -432,43 +432,45 @@ impl RuntimePage {
     fn start_live_updates(cx: &mut Context<Self>) {
         let mut history_ticks = 0_u8;
         let mut dashboard_ticks = 0_u8;
-        cx.spawn(async move |this, cx| loop {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            if this
-                .update(cx, |this, cx| {
-                    if matches!(this.page, Page::Logs) {
-                        cx.notify();
-                    }
-                    if matches!(this.page, Page::Connections | Page::Traffic)
-                        && !this.loading
-                        && !this.mutating
-                        && this.closing_connections.is_empty()
-                    {
-                        this.refresh(cx);
-                    }
-                    if this.page == Page::Traffic {
-                        history_ticks = history_ticks.saturating_add(1);
-                        if history_ticks >= 10 {
-                            history_ticks = 0;
-                            this.refresh_traffic_history(cx);
+        cx.spawn(async move |this, cx| {
+            loop {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if this
+                    .update(cx, |this, cx| {
+                        if matches!(this.page, Page::Logs) {
+                            cx.notify();
                         }
-                    } else {
-                        history_ticks = 0;
-                    }
-                    if this.page == Page::Home {
-                        cx.notify();
-                        dashboard_ticks = dashboard_ticks.saturating_add(1);
-                        if dashboard_ticks >= 4 && !this.loading && !this.mutating {
-                            dashboard_ticks = 0;
+                        if matches!(this.page, Page::Connections | Page::Traffic)
+                            && !this.loading
+                            && !this.mutating
+                            && this.closing_connections.is_empty()
+                        {
                             this.refresh(cx);
                         }
-                    } else {
-                        dashboard_ticks = 0;
-                    }
-                })
-                .is_err()
-            {
-                break;
+                        if this.page == Page::Traffic {
+                            history_ticks = history_ticks.saturating_add(1);
+                            if history_ticks >= 10 {
+                                history_ticks = 0;
+                                this.refresh_traffic_history(cx);
+                            }
+                        } else {
+                            history_ticks = 0;
+                        }
+                        if this.page == Page::Home {
+                            cx.notify();
+                            dashboard_ticks = dashboard_ticks.saturating_add(1);
+                            if dashboard_ticks >= 4 && !this.loading && !this.mutating {
+                                dashboard_ticks = 0;
+                                this.refresh(cx);
+                            }
+                        } else {
+                            dashboard_ticks = 0;
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
             }
         })
         .detach();

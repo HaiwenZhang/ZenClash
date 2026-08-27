@@ -4,7 +4,7 @@ use std::{ffi::OsStr, path::PathBuf, time::Duration};
 
 use thiserror::Error;
 
-use crate::{platform_command, CoreKind};
+use crate::{CoreKind, platform_command};
 
 const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 

@@ -1,7 +1,7 @@
 use std::{cell::RefCell, sync::Arc};
 
 use objc2::rc::Retained;
-use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
+use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{NSEventTrackingRunLoopMode, NSStatusItem};
 use objc2_foundation::{
     MainThreadMarker, NSDefaultRunLoopMode, NSObject, NSObjectProtocol, NSRunLoop, NSString,

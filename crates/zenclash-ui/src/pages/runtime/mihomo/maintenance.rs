@@ -1,14 +1,15 @@
 use std::sync::Arc;
 
-use gpui::{prelude::FluentBuilder, Context, IntoElement, ParentElement, Styled};
+use gpui::{Context, IntoElement, ParentElement, Styled, prelude::FluentBuilder};
 use gpui_component::{
+    Disableable, IconName, Sizable,
     button::{Button, ButtonVariants},
-    h_flex, v_flex, Disableable, IconName, Sizable,
+    h_flex, v_flex,
 };
 use zenclash_core::{MihomoClient, MihomoProcess, MihomoRelease, MihomoReleaseService};
 
 use super::super::{
-    format_bytes, info_row, load_page, message_banner, setting_card, Page, RuntimePage,
+    Page, RuntimePage, format_bytes, info_row, load_page, message_banner, setting_card,
 };
 
 #[derive(Default)]

@@ -13,13 +13,13 @@ use serde_yaml::Value;
 use thiserror::Error;
 
 use crate::{
+    CoreKind, MihomoClient, MihomoError, MihomoProcess,
     listener_fallback::{
-        apply_session_fallbacks, resolve_conflicts, validate_listener_change,
-        SessionListenerFallback,
+        SessionListenerFallback, apply_session_fallbacks, resolve_conflicts,
+        validate_listener_change,
     },
     profile::{merge_payload_overrides, merge_profile_patch, merge_yaml},
-    profiles::{atomic_write, read_profile_bytes, MAX_PROFILE_BYTES},
-    CoreKind, MihomoClient, MihomoError, MihomoProcess,
+    profiles::{MAX_PROFILE_BYTES, atomic_write, read_profile_bytes},
 };
 
 const MEOW_DEFAULT_NAMESERVERS: [&str; 2] = ["223.5.5.5", "1.1.1.1"];
@@ -29,7 +29,7 @@ mod storage;
 #[cfg(test)]
 mod tests;
 
-use storage::{default_data_dir, require_mapping, RuntimeCacheTransaction};
+use storage::{RuntimeCacheTransaction, default_data_dir, require_mapping};
 
 /// Errors produced while preparing or persisting controlled configuration.
 #[derive(Debug, Error)]

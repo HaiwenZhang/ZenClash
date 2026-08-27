@@ -1,9 +1,9 @@
 use gpui::{
-    div, prelude::FluentBuilder as _, rems, App, InteractiveElement as _, IntoElement,
-    ParentElement, RenderOnce, StatefulInteractiveElement as _, Styled, Window,
+    App, InteractiveElement as _, IntoElement, ParentElement, RenderOnce,
+    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, rems,
 };
 use gpui_component::{
-    h_flex, sidebar::Sidebar as GpuiSidebar, v_flex, ActiveTheme, Collapsible, Icon,
+    ActiveTheme, Collapsible, Icon, h_flex, sidebar::Sidebar as GpuiSidebar, v_flex,
 };
 
 use crate::{

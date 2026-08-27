@@ -1,7 +1,7 @@
 #[cfg(any(target_os = "linux", test))]
 use super::unique_nonempty;
 #[cfg(target_os = "linux")]
-use super::{command, warning_message, SystemNetworkSnapshot};
+use super::{SystemNetworkSnapshot, command, warning_message};
 
 #[cfg(target_os = "linux")]
 pub(super) fn detect() -> Result<SystemNetworkSnapshot, String> {

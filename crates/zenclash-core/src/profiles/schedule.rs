@@ -4,9 +4,9 @@ use chrono::{DateTime, Local, Utc};
 use cron::Schedule;
 
 use super::{
-    normalized_profile_name, normalized_remote_url, normalized_user_agent, ProfileSource,
+    MAX_PROFILE_UPDATE_INTERVAL_MINUTES, MIN_PROFILE_UPDATE_INTERVAL_MINUTES, ProfileSource,
     ProfileStore, ProfileStoreError, ProfileStoreResult, RemoteProfileOptions,
-    MAX_PROFILE_UPDATE_INTERVAL_MINUTES, MIN_PROFILE_UPDATE_INTERVAL_MINUTES,
+    normalized_profile_name, normalized_remote_url, normalized_user_agent,
 };
 
 impl ProfileStore {

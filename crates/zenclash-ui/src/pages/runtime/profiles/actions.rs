@@ -1,7 +1,7 @@
 use super::{
     super::{
-        load_page, Context, Page, PageTaskToken, PathBuf, PathPromptOptions, ProfileActivated,
-        RemoteProfileOptions, RuntimePage, Window,
+        Context, Page, PageTaskToken, PathBuf, PathPromptOptions, ProfileActivated,
+        RemoteProfileOptions, RuntimePage, Window, load_page,
     },
     workflow,
 };

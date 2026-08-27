@@ -1,8 +1,8 @@
 use super::{
-    append_delay, take_untested_proxies, test_key, CatalogTaskToken, Context, ProxiesPage,
-    ProxyDelayTarget, ProxyGroup, ProxyOperations,
+    CatalogTaskToken, Context, ProxiesPage, ProxyDelayTarget, ProxyGroup, ProxyOperations,
+    append_delay, take_untested_proxies, test_key,
 };
-use futures_util::{stream, StreamExt};
+use futures_util::{StreamExt, stream};
 
 const MAX_DELAY_TEST_CONCURRENCY: usize = 16;
 
@@ -43,10 +43,10 @@ impl ProxiesPage {
                 this.loading = false;
                 match result {
                     Ok((catalog, mode)) => {
-                        if this.expanded.is_empty() {
-                            if let Some(group) = catalog.groups_for_mode(&mode).next() {
-                                this.expanded.insert(group.name.clone());
-                            }
+                        if this.expanded.is_empty()
+                            && let Some(group) = catalog.groups_for_mode(&mode).next()
+                        {
+                            this.expanded.insert(group.name.clone());
                         }
                         this.catalog = Some(catalog);
                         this.outbound_mode = mode;
@@ -87,10 +87,10 @@ impl ProxiesPage {
         }
         self.outbound_mode = mode.to_ascii_lowercase();
         self.expanded.clear();
-        if let Some(catalog) = &self.catalog {
-            if let Some(group) = catalog.groups_for_mode(&self.outbound_mode).next() {
-                self.expanded.insert(group.name.clone());
-            }
+        if let Some(catalog) = &self.catalog
+            && let Some(group) = catalog.groups_for_mode(&self.outbound_mode).next()
+        {
+            self.expanded.insert(group.name.clone());
         }
         cx.notify();
     }

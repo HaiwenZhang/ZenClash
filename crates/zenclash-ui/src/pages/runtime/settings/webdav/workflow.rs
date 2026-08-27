@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use zenclash_core::{BackupManager, WebDavBackup, WebDavService, WebDavSettings};
 
 use super::super::super::profiles::workflow::CoreProfileRuntime;
-use super::super::backup::{restore_prepared, RestoreOutcome};
+use super::super::backup::{RestoreOutcome, restore_prepared};
 
 pub(super) async fn restore_remote_backup(
     settings: WebDavSettings,

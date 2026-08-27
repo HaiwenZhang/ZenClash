@@ -2,7 +2,7 @@ use gpui::Entity;
 use gpui_component::input::InputState;
 use serde_json::{Map, Value};
 
-use super::{config_number_or_empty, config_string, text, InputFactory};
+use super::{InputFactory, config_number_or_empty, config_string, text};
 
 pub(in crate::pages::runtime) struct CoreInputs {
     pub port: Entity<InputState>,

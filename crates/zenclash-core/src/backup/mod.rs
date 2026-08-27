@@ -178,10 +178,10 @@ impl PreparedBackupRestore {
 
 impl Drop for PreparedBackupRestore {
     fn drop(&mut self) {
-        if self.staging_root.exists() {
-            if let Err(error) = std::fs::remove_dir_all(&self.staging_root) {
-                tracing::warn!(%error, path = %self.staging_root.display(), "failed to remove backup staging directory");
-            }
+        if self.staging_root.exists()
+            && let Err(error) = std::fs::remove_dir_all(&self.staging_root)
+        {
+            tracing::warn!(%error, path = %self.staging_root.display(), "failed to remove backup staging directory");
         }
     }
 }
@@ -224,10 +224,10 @@ impl BackupRestoreTransaction {
 
 impl Drop for BackupRestoreTransaction {
     fn drop(&mut self) {
-        if self.active {
-            if let Err(error) = transaction::rollback(self) {
-                tracing::error!(%error, "failed to roll back uncommitted backup restore");
-            }
+        if self.active
+            && let Err(error) = transaction::rollback(self)
+        {
+            tracing::error!(%error, "failed to roll back uncommitted backup restore");
         }
     }
 }

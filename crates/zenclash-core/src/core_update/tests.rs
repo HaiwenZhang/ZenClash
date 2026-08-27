@@ -6,16 +6,16 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use flate2::{write::GzEncoder, Compression};
+use flate2::{Compression, write::GzEncoder};
 use sha2::{Digest, Sha256};
 
 use super::{
-    service::{
-        parse_digest, platform_asset_name, validate_asset_url, verify_sha256, RawAsset, RawRelease,
-    },
-    transaction::{sibling_path, PreparedCoreUpdate},
-    workflow::versions_match,
     CoreUpdateError, MihomoReleaseService,
+    service::{
+        RawAsset, RawRelease, parse_digest, platform_asset_name, validate_asset_url, verify_sha256,
+    },
+    transaction::{PreparedCoreUpdate, sibling_path},
+    workflow::versions_match,
 };
 
 fn unique_directory(label: &str) -> PathBuf {
@@ -222,14 +222,16 @@ async fn release_download_activation_and_rollback_are_transactional() {
             .contains("old core")
     );
     let transaction = prepared.activate().unwrap();
-    assert!(String::from_utf8_lossy(
-        &std::process::Command::new(&target)
-            .arg("-v")
-            .output()
-            .unwrap()
-            .stdout
-    )
-    .contains("Mihomo Meta v9.9.9"));
+    assert!(
+        String::from_utf8_lossy(
+            &std::process::Command::new(&target)
+                .arg("-v")
+                .output()
+                .unwrap()
+                .stdout
+        )
+        .contains("Mihomo Meta v9.9.9")
+    );
     transaction.rollback().unwrap();
     assert!(
         String::from_utf8_lossy(&std::process::Command::new(&target).output().unwrap().stdout)

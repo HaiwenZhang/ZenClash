@@ -1,11 +1,11 @@
-use futures_util::{stream, StreamExt};
+use futures_util::{StreamExt, stream};
 use zenclash_core::{
     EffectiveConfigIntent, ProxyDelayTarget, ProxyOperations, SystemProxySession, YamlOverrideStore,
 };
 
 use super::{
-    open_directory, ClipboardItem, Context, EnvironmentShell, OutboundMode, Page, TrayCommand,
-    ZenClashApp,
+    ClipboardItem, Context, EnvironmentShell, OutboundMode, Page, TrayCommand, ZenClashApp,
+    open_directory,
 };
 
 impl ZenClashApp {
@@ -351,22 +351,32 @@ fn proxy_environment(shell: EnvironmentShell, port: u16) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{proxy_environment, EnvironmentShell};
+    use super::{EnvironmentShell, proxy_environment};
 
     #[test]
     fn formats_proxy_environment_for_each_supported_shell() {
         assert_eq!(
             proxy_environment(EnvironmentShell::Bash, 7897).as_deref(),
-            Some("export https_proxy=http://127.0.0.1:7897 http_proxy=http://127.0.0.1:7897 all_proxy=http://127.0.0.1:7897")
+            Some(
+                "export https_proxy=http://127.0.0.1:7897 http_proxy=http://127.0.0.1:7897 all_proxy=http://127.0.0.1:7897"
+            )
         );
-        assert!(proxy_environment(EnvironmentShell::CommandPrompt, 7897)
-            .is_some_and(|value| value.contains("\r\nset")));
-        assert!(proxy_environment(EnvironmentShell::PowerShell, 7897)
-            .is_some_and(|value| value.starts_with("$env:")));
-        assert!(proxy_environment(EnvironmentShell::Fish, 7897)
-            .is_some_and(|value| value.starts_with("set -x")));
-        assert!(proxy_environment(EnvironmentShell::Nushell, 7897)
-            .is_some_and(|value| value.starts_with("$env.")));
+        assert!(
+            proxy_environment(EnvironmentShell::CommandPrompt, 7897)
+                .is_some_and(|value| value.contains("\r\nset"))
+        );
+        assert!(
+            proxy_environment(EnvironmentShell::PowerShell, 7897)
+                .is_some_and(|value| value.starts_with("$env:"))
+        );
+        assert!(
+            proxy_environment(EnvironmentShell::Fish, 7897)
+                .is_some_and(|value| value.starts_with("set -x"))
+        );
+        assert!(
+            proxy_environment(EnvironmentShell::Nushell, 7897)
+                .is_some_and(|value| value.starts_with("$env."))
+        );
     }
 
     #[test]

@@ -8,9 +8,9 @@ use std::{
 use flate2::read::GzDecoder;
 
 use super::{
-    service::verify_sha256,
-    transaction::{sibling_path, PreparedCoreUpdate},
     CoreUpdateError, CoreUpdateResult, MihomoRelease,
+    service::verify_sha256,
+    transaction::{PreparedCoreUpdate, sibling_path},
 };
 use crate::platform_command;
 

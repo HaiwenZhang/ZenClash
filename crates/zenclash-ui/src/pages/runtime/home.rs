@@ -3,19 +3,20 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use gpui::{div, px, rems, IntoElement, ParentElement, SharedString, Styled};
+use gpui::{IntoElement, ParentElement, SharedString, Styled, div, px, rems};
 use gpui_component::{
+    Disableable, Icon, IconName, Selectable, Sizable,
     button::{Button, ButtonVariants},
     chart::AreaChart,
     h_flex,
     menu::{DropdownMenu, PopupMenuItem},
     progress::Progress,
     switch::Switch,
-    v_flex, Disableable, Icon, IconName, Selectable, Sizable,
+    v_flex,
 };
 use zenclash_core::{
-    format_speed, ProxyCatalog, ProxyGroup, ProxyOperations, RuntimeConfig, SubscriptionUsage,
-    SystemProxyStatus, TrafficSample,
+    ProxyCatalog, ProxyGroup, ProxyOperations, RuntimeConfig, SubscriptionUsage, SystemProxyStatus,
+    TrafficSample, format_speed,
 };
 
 use crate::{
@@ -27,8 +28,8 @@ use crate::{
 };
 
 use super::{
-    format_bytes, format_profile_age, load_page, normalized_fraction, Context, FluentBuilder, Page,
-    ProxySelectionChanged, RuntimeData, RuntimePage,
+    Context, FluentBuilder, Page, ProxySelectionChanged, RuntimeData, RuntimePage, format_bytes,
+    format_profile_age, load_page, normalized_fraction,
 };
 
 const LIVE_TRAFFIC_TICK_MARGIN: usize = 6;

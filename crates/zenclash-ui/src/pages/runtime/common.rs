@@ -1,6 +1,6 @@
 use super::{
-    div, h_flex, px, v_flex, App, FluentBuilder, Icon, IconName, Input, IntoElement, ParentElement,
-    Styled, Switch, Window,
+    App, FluentBuilder, Icon, IconName, Input, IntoElement, ParentElement, Styled, Switch, Window,
+    div, h_flex, px, v_flex,
 };
 use gpui::SharedString;
 

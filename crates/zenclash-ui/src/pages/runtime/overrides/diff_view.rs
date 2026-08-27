@@ -2,8 +2,8 @@ use gpui::{AnyElement, FontWeight};
 use zenclash_core::{ConfigDiffEntry, ConfigDiffKind, ConfigDiffReport};
 
 use super::super::{
-    div, empty_state, h_flex, px, setting_card, v_flex, FluentBuilder, IntoElement, ParentElement,
-    Styled,
+    FluentBuilder, IntoElement, ParentElement, Styled, div, empty_state, h_flex, px, setting_card,
+    v_flex,
 };
 
 pub(super) fn render_config_diff(

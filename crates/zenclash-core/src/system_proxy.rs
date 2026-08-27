@@ -29,7 +29,7 @@ use windows as platform;
 
 use crate::{AppPreferences, AppPreferencesError, AppPreferencesStore, MihomoError, MihomoResult};
 
-pub use pac::{default_pac_script, normalize_pac_script, PacServer, PacServerStatus};
+pub use pac::{PacServer, PacServerStatus, default_pac_script, normalize_pac_script};
 
 const MAX_BYPASS_ENTRIES: usize = 64;
 const MAX_BYPASS_ENTRY_BYTES: usize = 253;
@@ -987,15 +987,15 @@ fn is_valid_bypass_entry(entry: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::{
-        sync::{mpsc, Arc},
+        sync::{Arc, mpsc},
         thread,
         time::Duration,
     };
 
     use super::{
-        normalize_system_proxy_bypass, normalize_system_proxy_host, SystemProxyController,
-        SystemProxyManager, SystemProxyMode, SystemProxySession, SystemProxySessionError,
-        SystemProxySettings,
+        SystemProxyController, SystemProxyManager, SystemProxyMode, SystemProxySession,
+        SystemProxySessionError, SystemProxySettings, normalize_system_proxy_bypass,
+        normalize_system_proxy_host,
     };
     use crate::AppPreferencesStore;
 
@@ -1023,9 +1023,11 @@ mod tests {
             })
         };
 
-        assert!(second_acquired_rx
-            .recv_timeout(Duration::from_millis(50))
-            .is_err());
+        assert!(
+            second_acquired_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err()
+        );
         release_first.send(()).unwrap();
         second_acquired_rx
             .recv_timeout(Duration::from_secs(1))

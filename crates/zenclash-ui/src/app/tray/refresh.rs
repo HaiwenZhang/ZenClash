@@ -1,6 +1,6 @@
 use super::{
-    tray_directories, AppContext, Context, OutboundMode, TrayMenuState, TrayProfile,
-    TrayProxyGroup, TrayProxyNode, ZenClashApp,
+    AppContext, Context, OutboundMode, TrayMenuState, TrayProfile, TrayProxyGroup, TrayProxyNode,
+    ZenClashApp, tray_directories,
 };
 
 struct TrayMenuSnapshot {
@@ -188,10 +188,10 @@ impl ZenClashApp {
             groups,
             directories: tray_directories(profile_path.as_deref(), self.core_kind),
         };
-        if let Some(tray) = self.network_tray.as_mut() {
-            if let Err(error) = tray.update_menu(&state) {
-                tracing::warn!(%error, "failed to update tray menu");
-            }
+        if let Some(tray) = self.network_tray.as_mut()
+            && let Err(error) = tray.update_menu(&state)
+        {
+            tracing::warn!(%error, "failed to update tray menu");
         }
         cx.notify();
     }

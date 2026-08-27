@@ -1,8 +1,8 @@
 use super::{
-    atomic_write, download_profile, normalized_profile_name, normalized_remote_url,
-    normalized_user_agent, read_profile_bytes, validate_clash_yaml, ProfileCatalog, ProfileRecord,
-    ProfileSource, ProfileStore, ProfileStoreError, ProfileStoreResult, ProfileUpdate,
-    RemoteProfileOptions, RemoteProfileRoute, SubscriptionMetadata,
+    ProfileCatalog, ProfileRecord, ProfileSource, ProfileStore, ProfileStoreError,
+    ProfileStoreResult, ProfileUpdate, RemoteProfileOptions, RemoteProfileRoute,
+    SubscriptionMetadata, atomic_write, download_profile, normalized_profile_name,
+    normalized_remote_url, normalized_user_agent, read_profile_bytes, validate_clash_yaml,
 };
 
 impl ProfileStore {

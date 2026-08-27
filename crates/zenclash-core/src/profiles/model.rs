@@ -4,7 +4,7 @@ use std::{
 };
 
 use reqwest::header::HeaderValue;
-use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use super::{
     DEFAULT_PROFILE_DOWNLOAD_TIMEOUT_SECONDS, DEFAULT_PROFILE_UPDATE_INTERVAL_MINUTES,

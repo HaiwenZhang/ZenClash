@@ -1,18 +1,18 @@
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
 
 use gpui::{
-    div, px, AnyWindowHandle, App, AppContext, ClipboardItem, Context, Entity, Focusable,
+    AnyWindowHandle, App, AppContext, ClipboardItem, Context, Entity, Focusable,
     InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, SharedString, Styled,
-    Subscription, Window, WindowBounds, WindowKind, WindowOptions,
+    Subscription, Window, WindowBounds, WindowKind, WindowOptions, div, px,
 };
-use gpui_component::{h_flex, v_flex, ActiveTheme, Root, ThemeMode, TitleBar};
+use gpui_component::{ActiveTheme, Root, ThemeMode, TitleBar, h_flex, v_flex};
 use zenclash_core::{
     AppPreferences, AppPreferencesStore, AppearancePreference, ControlledConfigStore, CoreKind,
     CoreSession, LogMonitor, MihomoClient, MihomoLogLevel, MihomoProcess, SystemProxyController,
@@ -45,12 +45,12 @@ use crate::{
     },
     design::apply_zen_theme,
     pages::{
+        Page,
         proxies::ProxiesPage,
         runtime::{
             ElevatedRestartRequested, PreferencesRestored, ProfileActivated, ProxySelectionChanged,
             RuntimeConfigApplied, RuntimePage, RuntimePageServices,
         },
-        Page,
     },
 };
 
@@ -368,10 +368,10 @@ impl ZenClashApp {
                 ) {
                     tracing::warn!(%error, "failed to apply restored log persistence settings");
                 }
-                if let Some(tray) = &this.network_tray {
-                    if let Err(error) = tray.set_visible(this.preferences.traffic_tray_visible) {
-                        tracing::warn!(%error, "failed to apply restored tray visibility");
-                    }
+                if let Some(tray) = &this.network_tray
+                    && let Err(error) = tray.set_visible(this.preferences.traffic_tray_visible)
+                {
+                    tracing::warn!(%error, "failed to apply restored tray visibility");
                 }
                 let appearance = this.preferences.appearance;
                 let _ = cx.update_window(this.main_window, move |_, window, cx| {
@@ -410,43 +410,45 @@ impl ZenClashApp {
         let monitor = self.traffic_monitor.clone();
         let mode = self.outbound_mode.clone();
         let mut observed_mode_revision = mode.revision();
-        cx.spawn(async move |this, cx| loop {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let snapshot = monitor.snapshot();
-            let mode_revision = mode.revision();
-            if this
-                .update(cx, |this, cx| {
-                    if observed_mode_revision != mode_revision {
-                        observed_mode_revision = mode_revision;
-                        let displayed = mode.displayed();
-                        this.proxies_page.update(cx, |page, cx| {
-                            page.set_outbound_mode(displayed.api_value(), cx);
-                        });
-                        this.refresh_tray_menu(cx);
-                    }
-                    let managed_core_running = this
-                        .mihomo_process
-                        .as_ref()
-                        .map(|process| process.is_running());
-                    if managed_core_running != this.managed_core_running {
-                        this.managed_core_running = managed_core_running;
-                        if let Some(running) = managed_core_running {
-                            this.runtime_page.update(cx, |page, cx| {
-                                page.report_managed_core_state(running, cx);
+        cx.spawn(async move |this, cx| {
+            loop {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let snapshot = monitor.snapshot();
+                let mode_revision = mode.revision();
+                if this
+                    .update(cx, |this, cx| {
+                        if observed_mode_revision != mode_revision {
+                            observed_mode_revision = mode_revision;
+                            let displayed = mode.displayed();
+                            this.proxies_page.update(cx, |page, cx| {
+                                page.set_outbound_mode(displayed.api_value(), cx);
                             });
-                            this.restore_system_proxy(cx);
                             this.refresh_tray_menu(cx);
                         }
-                    }
-                    if let Some(tray) = this.network_tray.as_mut() {
-                        if let Err(error) = tray.update(&snapshot) {
+                        let managed_core_running = this
+                            .mihomo_process
+                            .as_ref()
+                            .map(|process| process.is_running());
+                        if managed_core_running != this.managed_core_running {
+                            this.managed_core_running = managed_core_running;
+                            if let Some(running) = managed_core_running {
+                                this.runtime_page.update(cx, |page, cx| {
+                                    page.report_managed_core_state(running, cx);
+                                });
+                                this.restore_system_proxy(cx);
+                                this.refresh_tray_menu(cx);
+                            }
+                        }
+                        if let Some(tray) = this.network_tray.as_mut()
+                            && let Err(error) = tray.update(&snapshot)
+                        {
                             tracing::warn!(%error, "failed to update native traffic tray");
                         }
-                    }
-                })
-                .is_err()
-            {
-                break;
+                    })
+                    .is_err()
+                {
+                    break;
+                }
             }
         })
         .detach();
@@ -457,25 +459,29 @@ impl ZenClashApp {
         let runtime = self.runtime.clone();
         let mode = self.outbound_mode.clone();
         let logs = self.log_monitor.clone();
-        cx.spawn(async move |this, cx| loop {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            let generation = mode.generation();
-            let client = client.clone();
-            let task = runtime.spawn(async move { client.runtime_config().await });
-            match task.await {
-                Ok(Ok(config)) => {
-                    mode.synchronize(OutboundMode::from_api(&config.mode), generation);
-                    if let Some(level) = MihomoLogLevel::from_api(&config.log_level) {
-                        logs.set_level(level);
+        cx.spawn(async move |this, cx| {
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let generation = mode.generation();
+                let client = client.clone();
+                let task = runtime.spawn(async move { client.runtime_config().await });
+                match task.await {
+                    Ok(Ok(config)) => {
+                        mode.synchronize(OutboundMode::from_api(&config.mode), generation);
+                        if let Some(level) = MihomoLogLevel::from_api(&config.log_level) {
+                            logs.set_level(level);
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        tracing::debug!(%error, "failed to synchronize Mihomo outbound mode");
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "outbound mode synchronization task failed")
                     }
                 }
-                Ok(Err(error)) => {
-                    tracing::debug!(%error, "failed to synchronize Mihomo outbound mode");
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
                 }
-                Err(error) => tracing::warn!(%error, "outbound mode synchronization task failed"),
-            }
-            if this.update(cx, |_, cx| cx.notify()).is_err() {
-                break;
             }
         })
         .detach();

@@ -1,10 +1,11 @@
-use gpui::{div, px, InteractiveElement, IntoElement, ParentElement, Render, Styled, Window};
+use gpui::{InteractiveElement, IntoElement, ParentElement, Render, Styled, Window, div, px};
 use gpui_component::{
+    ActiveTheme, Selectable, Sizable,
     badge::Badge,
     button::{Button, ButtonGroup},
     h_flex,
     progress::Progress,
-    v_flex, ActiveTheme, Selectable, Sizable,
+    v_flex,
 };
 use zenclash_core::format_speed;
 

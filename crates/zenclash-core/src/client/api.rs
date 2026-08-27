@@ -3,11 +3,11 @@ use std::{path::Path, time::Duration};
 use reqwest::Method;
 use serde::Serialize;
 
-use super::{request, MihomoClient, MihomoError, MihomoResult, VersionInfo};
+use super::{MihomoClient, MihomoError, MihomoResult, VersionInfo, request};
 use crate::{
-    profiles::{read_profile_bytes, MAX_PROFILE_BYTES},
-    proxy::RawProxyCatalog,
     ConnectionsSnapshot, DelayResult, ProviderCatalog, ProxyCatalog, RuleCatalog, RuntimeConfig,
+    profiles::{MAX_PROFILE_BYTES, read_profile_bytes},
+    proxy::RawProxyCatalog,
 };
 
 impl MihomoClient {

@@ -1,6 +1,6 @@
 use super::{
-    px, AppContext, Context, FloatingTrafficWindow, OutboundMode, Page, Root, TitleBar,
-    WindowBounds, WindowKind, WindowOptions, ZenClashApp,
+    AppContext, Context, FloatingTrafficWindow, OutboundMode, Page, Root, TitleBar, WindowBounds,
+    WindowKind, WindowOptions, ZenClashApp, px,
 };
 
 impl ZenClashApp {
@@ -10,14 +10,13 @@ impl ZenClashApp {
     }
 
     pub(in crate::app) fn toggle_floating_window(&mut self, cx: &mut Context<Self>) {
-        if let Some(handle) = self.floating_window.take() {
-            if cx
+        if let Some(handle) = self.floating_window.take()
+            && cx
                 .update_window(handle, |_, window, _| window.remove_window())
                 .is_ok()
-            {
-                self.refresh_tray_menu(cx);
-                return;
-            }
+        {
+            self.refresh_tray_menu(cx);
+            return;
         }
 
         let client = self.client.clone();

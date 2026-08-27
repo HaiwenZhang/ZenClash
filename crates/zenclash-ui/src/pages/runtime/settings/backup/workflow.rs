@@ -6,7 +6,7 @@ use zenclash_core::{
 };
 
 use super::super::super::profiles::workflow::CoreProfileRuntime;
-use super::super::super::{load_page, Page};
+use super::super::super::{Page, load_page};
 use super::RestoreOutcome;
 
 pub(super) async fn restore_backup(
@@ -232,7 +232,7 @@ async fn rollback_after_runtime_accept<T>(
             return Err(zenclash_i18n::text_with(
                 "backup.errors.override_read",
                 &[("reason", reason), ("error", error)],
-            ))
+            ));
         }
     };
     match runtime_restore {

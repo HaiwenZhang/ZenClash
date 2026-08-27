@@ -4,7 +4,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{Connection, Transaction, params};
 
 use super::{
     TrafficAggregate, TrafficDimension, TrafficHistoryEntry, TrafficHistoryError,

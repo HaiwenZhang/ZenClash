@@ -1,6 +1,6 @@
 use super::{
-    atomic_write, read_profile_bytes, validate_clash_yaml, ProfileStore, ProfileStoreError,
-    ProfileStoreResult, ProfileUpdate, MAX_PROFILE_BYTES,
+    MAX_PROFILE_BYTES, ProfileStore, ProfileStoreError, ProfileStoreResult, ProfileUpdate,
+    atomic_write, read_profile_bytes, validate_clash_yaml,
 };
 
 impl ProfileStore {

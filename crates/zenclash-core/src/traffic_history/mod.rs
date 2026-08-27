@@ -11,8 +11,8 @@ mod tests;
 
 pub use logger::TrafficDeltaLogger;
 pub use model::{
-    TrafficAggregate, TrafficDimension, TrafficHistoryEntry, TrafficHistoryQuery, TrafficOverview,
-    TrafficTotals, TrafficTrendPoint, DEFAULT_TRAFFIC_RETENTION_DAYS,
+    DEFAULT_TRAFFIC_RETENTION_DAYS, TrafficAggregate, TrafficDimension, TrafficHistoryEntry,
+    TrafficHistoryQuery, TrafficOverview, TrafficTotals, TrafficTrendPoint,
 };
 pub use storage::TrafficHistoryStore;
 

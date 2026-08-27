@@ -7,8 +7,8 @@ use super::resources::{
     install_bundled_core, is_core_binary_candidate,
 };
 use crate::{
-    profiles::read_profile_bytes, CoreCapabilities, CoreConfigValidationError, CoreConfigValidator,
-    CoreKind, MihomoEndpoint, MihomoError, MihomoResult,
+    CoreCapabilities, CoreConfigValidationError, CoreConfigValidator, CoreKind, MihomoEndpoint,
+    MihomoError, MihomoResult, profiles::read_profile_bytes,
 };
 
 /// Resolved inputs used to launch one managed Mihomo process.
@@ -324,8 +324,10 @@ mod tests {
         let candidates = workspace_core_candidates(Path::new("/workspace"), CoreKind::Meow);
         let filename = if cfg!(windows) { "meow.exe" } else { "meow" };
 
-        assert!(candidates
-            .contains(&Path::new("/workspace/examples/meow-rs/target/release").join(filename)));
+        assert!(
+            candidates
+                .contains(&Path::new("/workspace/examples/meow-rs/target/release").join(filename))
+        );
     }
 
     #[test]

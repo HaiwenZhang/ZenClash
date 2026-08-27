@@ -3,12 +3,12 @@ use gpui::SharedString;
 use gpui_component::chart::AreaChart;
 use zenclash_core::{TrafficDimension, TrafficTrendPoint};
 
-use super::{dimension_label, TrafficRange};
+use super::{TrafficRange, dimension_label};
 use crate::pages::runtime::{
-    div, empty_state, format_bytes, format_speed, h_flex, metric, px, v_flex, Button,
-    ButtonVariants, ConnectionsSnapshot, Context, Disableable, FluentBuilder, IconName,
+    Button, ButtonVariants, ConnectionsSnapshot, Context, Disableable, FluentBuilder, IconName,
     InteractiveElement, IntoElement, ParentElement, RuntimeData, RuntimePage, Selectable, Sizable,
-    StatefulInteractiveElement, Styled,
+    StatefulInteractiveElement, Styled, div, empty_state, format_bytes, format_speed, h_flex,
+    metric, px, v_flex,
 };
 
 #[derive(Clone, Debug, PartialEq)]

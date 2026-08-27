@@ -44,49 +44,48 @@ impl RuntimePage {
                     )
                 })?
                 .map_err(|error| error.to_string())?;
-            if let Some(profile) = profile {
-                if let Err(error) = super::super::profiles::workflow::reload_effective(
+            if let Some(profile) = profile
+                && let Err(error) = super::super::profiles::workflow::reload_effective(
                     controlled,
                     &core_runtime,
                     &profile,
                 )
                 .await
-                {
-                    let cleanup_store = store.clone();
-                    let ids = imported
-                        .iter()
-                        .map(|record| record.id.clone())
-                        .collect::<Vec<_>>();
-                    let cleanup = tokio::task::spawn_blocking(move || {
-                        for id in ids {
-                            cleanup_store.delete(&id)?;
-                        }
-                        Ok::<_, zenclash_core::YamlOverrideError>(())
-                    })
-                    .await;
-                    return match cleanup {
-                        Ok(Ok(())) => Err(zenclash_i18n::text_with(
-                            "overrides.errors.import_rejected_removed",
-                            &[("core", core_name.to_owned()), ("error", error.clone())],
-                        )),
-                        Ok(Err(cleanup)) => Err(zenclash_i18n::text_with(
-                            "overrides.errors.import_rejected_cleanup_failed",
-                            &[
-                                ("core", core_name.to_owned()),
-                                ("error", error.clone()),
-                                ("cleanup", cleanup.to_string()),
-                            ],
-                        )),
-                        Err(cleanup) => Err(zenclash_i18n::text_with(
-                            "overrides.errors.import_rejected_cleanup_task",
-                            &[
-                                ("core", core_name.to_owned()),
-                                ("error", error),
-                                ("cleanup", cleanup.to_string()),
-                            ],
-                        )),
-                    };
-                }
+            {
+                let cleanup_store = store.clone();
+                let ids = imported
+                    .iter()
+                    .map(|record| record.id.clone())
+                    .collect::<Vec<_>>();
+                let cleanup = tokio::task::spawn_blocking(move || {
+                    for id in ids {
+                        cleanup_store.delete(&id)?;
+                    }
+                    Ok::<_, zenclash_core::YamlOverrideError>(())
+                })
+                .await;
+                return match cleanup {
+                    Ok(Ok(())) => Err(zenclash_i18n::text_with(
+                        "overrides.errors.import_rejected_removed",
+                        &[("core", core_name.to_owned()), ("error", error.clone())],
+                    )),
+                    Ok(Err(cleanup)) => Err(zenclash_i18n::text_with(
+                        "overrides.errors.import_rejected_cleanup_failed",
+                        &[
+                            ("core", core_name.to_owned()),
+                            ("error", error.clone()),
+                            ("cleanup", cleanup.to_string()),
+                        ],
+                    )),
+                    Err(cleanup) => Err(zenclash_i18n::text_with(
+                        "overrides.errors.import_rejected_cleanup_task",
+                        &[
+                            ("core", core_name.to_owned()),
+                            ("error", error),
+                            ("cleanup", cleanup.to_string()),
+                        ],
+                    )),
+                };
             }
             Ok::<_, String>((catalog, imported.len()))
         });
@@ -250,44 +249,43 @@ impl RuntimePage {
                 )
             })?
             .map_err(|error| error.to_string())?;
-            if let Some(profile) = profile {
-                if let Err(error) = super::super::profiles::workflow::reload_effective(
+            if let Some(profile) = profile
+                && let Err(error) = super::super::profiles::workflow::reload_effective(
                     controlled,
                     &core_runtime,
                     &profile,
                 )
                 .await
+            {
+                let rollback_store = store.clone();
+                let expected = next_for_task.clone();
+                let rollback = before.clone();
+                return match tokio::task::spawn_blocking(move || {
+                    rollback_store.replace_catalog(&expected, &rollback)
+                })
+                .await
                 {
-                    let rollback_store = store.clone();
-                    let expected = next_for_task.clone();
-                    let rollback = before.clone();
-                    return match tokio::task::spawn_blocking(move || {
-                        rollback_store.replace_catalog(&expected, &rollback)
-                    })
-                    .await
-                    {
-                        Ok(Ok(())) => Err(zenclash_i18n::text_with(
-                            "overrides.errors.change_rejected_rolled_back",
-                            &[("core", core_name.to_owned()), ("error", error.clone())],
-                        )),
-                        Ok(Err(rollback)) => Err(zenclash_i18n::text_with(
-                            "overrides.errors.change_rejected_rollback_failed",
-                            &[
-                                ("core", core_name.to_owned()),
-                                ("error", error.clone()),
-                                ("rollback", rollback.to_string()),
-                            ],
-                        )),
-                        Err(rollback) => Err(zenclash_i18n::text_with(
-                            "overrides.errors.change_rejected_rollback_task",
-                            &[
-                                ("core", core_name.to_owned()),
-                                ("error", error),
-                                ("rollback", rollback.to_string()),
-                            ],
-                        )),
-                    };
-                }
+                    Ok(Ok(())) => Err(zenclash_i18n::text_with(
+                        "overrides.errors.change_rejected_rolled_back",
+                        &[("core", core_name.to_owned()), ("error", error.clone())],
+                    )),
+                    Ok(Err(rollback)) => Err(zenclash_i18n::text_with(
+                        "overrides.errors.change_rejected_rollback_failed",
+                        &[
+                            ("core", core_name.to_owned()),
+                            ("error", error.clone()),
+                            ("rollback", rollback.to_string()),
+                        ],
+                    )),
+                    Err(rollback) => Err(zenclash_i18n::text_with(
+                        "overrides.errors.change_rejected_rollback_task",
+                        &[
+                            ("core", core_name.to_owned()),
+                            ("error", error),
+                            ("rollback", rollback.to_string()),
+                        ],
+                    )),
+                };
             }
             Ok::<_, String>(())
         });

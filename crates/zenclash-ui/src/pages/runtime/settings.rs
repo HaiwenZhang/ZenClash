@@ -1,8 +1,8 @@
 use super::{
-    div, h_flex, info_row, json, px, setting_card, setting_switch, v_flex, AutostartStatus, Button,
-    Context, Disableable, FluentBuilder, HideTrafficIcon, IconName, IntoElement, Page,
-    ParentElement, PreferencesRestored, RuntimeConfig, RuntimeData, RuntimePage, Selectable,
-    SetDarkTheme, SetLightTheme, SetSystemTheme, ShowTrafficIcon, Sizable, Styled,
+    AutostartStatus, Button, Context, Disableable, FluentBuilder, HideTrafficIcon, IconName,
+    IntoElement, Page, ParentElement, PreferencesRestored, RuntimeConfig, RuntimeData, RuntimePage,
+    Selectable, SetDarkTheme, SetLightTheme, SetSystemTheme, ShowTrafficIcon, Sizable, Styled, div,
+    h_flex, info_row, json, px, setting_card, setting_switch, v_flex,
 };
 use crate::components::sidebar::dispatch_navigate;
 

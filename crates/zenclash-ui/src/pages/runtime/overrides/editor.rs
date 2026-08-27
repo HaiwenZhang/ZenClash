@@ -2,8 +2,8 @@ use gpui::{AppContext, Context, Entity, Window};
 use gpui_component::input::InputState;
 
 use super::super::{
-    h_flex, px, setting_card, v_flex, Button, ButtonVariants, Disableable, IconName, Input,
-    ParentElement, RuntimePage, Styled,
+    Button, ButtonVariants, Disableable, IconName, Input, ParentElement, RuntimePage, Styled,
+    h_flex, px, setting_card, v_flex,
 };
 
 pub(crate) struct ProfileEditorState {

@@ -5,12 +5,12 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
+use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 use super::*;
 use crate::{
-    profiles::atomic_write, AppPreferences, AppearancePreference, ControlledConfigStore,
-    ProfileStore, YamlOverrideStore,
+    AppPreferences, AppearancePreference, ControlledConfigStore, ProfileStore, YamlOverrideStore,
+    profiles::atomic_write,
 };
 
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -34,9 +34,11 @@ fn export_restore_is_complete_reversible_and_excludes_generated_cache() {
 
     assert_eq!(summary.file_count, 6);
     assert!(summary.payload_bytes > 0);
-    assert!(!archive_names(&archive)
-        .iter()
-        .any(|name| name.ends_with("effective.yaml")));
+    assert!(
+        !archive_names(&archive)
+            .iter()
+            .any(|name| name.ends_with("effective.yaml"))
+    );
     let original_target = read_authoritative_snapshot(&target);
     let prepared = BackupManager::new(&target)
         .prepare_restore(&archive)
@@ -51,11 +53,13 @@ fn export_restore_is_complete_reversible_and_excludes_generated_cache() {
             .appearance,
         AppearancePreference::Light
     );
-    assert!(ControlledConfigStore::new(target.join("controlled-config"))
-        .load_json()
-        .unwrap()["mixed-port"]
-        .as_u64()
-        .is_some_and(|port| port == 17_890));
+    assert!(
+        ControlledConfigStore::new(target.join("controlled-config"))
+            .load_json()
+            .unwrap()["mixed-port"]
+            .as_u64()
+            .is_some_and(|port| port == 17_890)
+    );
     let restored_overrides = YamlOverrideStore::new(target.join("yaml-overrides"))
         .unwrap()
         .load()

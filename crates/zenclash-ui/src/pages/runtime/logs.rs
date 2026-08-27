@@ -1,8 +1,8 @@
 use super::{
-    div, empty_state, format_bytes, format_log_entries, h_flex, info_row, metric, px, setting_card,
-    setting_switch, v_flex, Button, Context, Disableable, FluentBuilder, IconName, Input,
-    InteractiveElement, IntoElement, MihomoLogLevel, Page, ParentElement, PreferencesRestored,
-    RuntimePage, Selectable, Sizable, Styled,
+    Button, Context, Disableable, FluentBuilder, IconName, Input, InteractiveElement, IntoElement,
+    MihomoLogLevel, Page, ParentElement, PreferencesRestored, RuntimePage, Selectable, Sizable,
+    Styled, div, empty_state, format_bytes, format_log_entries, h_flex, info_row, metric, px,
+    setting_card, setting_switch, v_flex,
 };
 
 const MAX_VISIBLE_LOGS: usize = 500;

@@ -4,10 +4,10 @@ use super::SystemProxyStatus;
 use crate::{MihomoError, MihomoResult};
 
 pub(super) fn detect() -> MihomoResult<String> {
-    if let Ok(service) = std::env::var("ZENCLASH_NETWORK_SERVICE") {
-        if !service.trim().is_empty() {
-            return Ok(service);
-        }
+    if let Ok(service) = std::env::var("ZENCLASH_NETWORK_SERVICE")
+        && !service.trim().is_empty()
+    {
+        return Ok(service);
     }
     if let Some(service) = active_network_service() {
         return Ok(service);
@@ -174,11 +174,10 @@ fn parse_service_for_interface(output: &[u8], interface: &str) -> Option<String>
         if let Some((order, name)) = line
             .strip_prefix('(')
             .and_then(|line| line.split_once(") "))
+            && order.chars().all(|character| character.is_ascii_digit())
         {
-            if order.chars().all(|character| character.is_ascii_digit()) {
-                service = Some(name.trim_start_matches('*').trim().to_owned());
-                continue;
-            }
+            service = Some(name.trim_start_matches('*').trim().to_owned());
+            continue;
         }
         let device = line
             .split_once("Device:")

@@ -1,22 +1,21 @@
 use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::{
-    div, prelude::FluentBuilder, px, App, AppContext, ClipboardItem, Context, Entity, EventEmitter,
-    Focusable, InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render,
-    StatefulInteractiveElement, Styled, Subscription, Window,
+    App, AppContext, ClipboardItem, Context, Entity, EventEmitter, Focusable, InteractiveElement,
+    IntoElement, ParentElement, PathPromptOptions, Render, StatefulInteractiveElement, Styled,
+    Subscription, Window, div, prelude::FluentBuilder, px,
 };
 use gpui_component::{
+    ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable,
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputEvent, InputState},
     scroll::ScrollableElement,
     switch::Switch,
-    v_flex, ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable,
+    v_flex,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use zenclash_core::{
-    default_pac_script, default_system_proxy_bypass, diff_yaml_configs, format_log_entries,
-    format_speed, normalize_pac_script, normalize_system_proxy_bypass, normalize_system_proxy_host,
     AppPreferences, AppPreferencesStore, AutostartStatus, ConfigDiffReport, ConnectionsSnapshot,
     ControlledConfigStore, CoreBinaryInfo, CoreKind, CoreSession, LogMonitor, MihomoClient,
     MihomoLaunchConfig, MihomoLogLevel, MihomoProcess, NetworkLatencyTarget,
@@ -25,6 +24,8 @@ use zenclash_core::{
     RuntimeConfig, SystemNetworkSnapshot, SystemProxyController, SystemProxyManager,
     SystemProxyMode, SystemProxyStatus, TrafficHistoryStore, TrafficMonitor, TunPermissionGrant,
     TunPermissionManager, TunPermissionStatus, VersionInfo, YamlOverrideCatalog, YamlOverrideStore,
+    default_pac_script, default_system_proxy_bypass, diff_yaml_configs, format_log_entries,
+    format_speed, normalize_pac_script, normalize_system_proxy_bypass, normalize_system_proxy_host,
 };
 
 use crate::app::{HideTrafficIcon, SetDarkTheme, SetLightTheme, SetSystemTheme, ShowTrafficIcon};

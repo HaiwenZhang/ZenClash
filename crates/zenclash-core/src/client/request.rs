@@ -83,10 +83,10 @@ fn error_message(payload: &[u8]) -> String {
         message: String,
     }
 
-    if let Ok(body) = serde_json::from_slice::<ErrorBody>(payload) {
-        if !body.message.trim().is_empty() {
-            return body.message;
-        }
+    if let Ok(body) = serde_json::from_slice::<ErrorBody>(payload)
+        && !body.message.trim().is_empty()
+    {
+        return body.message;
     }
     let body = String::from_utf8_lossy(payload).trim().to_owned();
     if body.is_empty() {

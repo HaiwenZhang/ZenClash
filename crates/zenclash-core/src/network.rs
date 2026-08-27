@@ -13,9 +13,9 @@ mod unsupported;
 mod windows;
 
 pub use probe::{
-    NetworkLatencyResult, NetworkLatencyTarget, NetworkProbeError, NetworkProbeResult,
-    NetworkProbeRoute, NetworkProbeService, NetworkProbeSnapshot, PublicIpInfo, PublicIpProvider,
-    DEFAULT_NETWORK_LATENCY_TARGETS,
+    DEFAULT_NETWORK_LATENCY_TARGETS, NetworkLatencyResult, NetworkLatencyTarget, NetworkProbeError,
+    NetworkProbeResult, NetworkProbeRoute, NetworkProbeService, NetworkProbeSnapshot, PublicIpInfo,
+    PublicIpProvider,
 };
 
 #[cfg(target_os = "linux")]

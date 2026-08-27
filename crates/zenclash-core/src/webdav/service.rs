@@ -1,20 +1,20 @@
 use std::time::Duration;
 
-use reqwest::{header::CONTENT_TYPE, Method, RequestBuilder, StatusCode, Url};
+use reqwest::{Method, RequestBuilder, StatusCode, Url, header::CONTENT_TYPE};
 
 use self::{
     protocol::{
         append_segments, parse_backup_listing, push_url_segment, read_bytes_limited,
         read_utf8_limited, require_status, webdav_method,
     },
-    transfer::{backup_filename, backup_prefix, TransferFile},
+    transfer::{TransferFile, backup_filename, backup_prefix},
 };
 
 use super::{
-    model::{validate_filename, ValidatedWebDavSettings},
     WebDavBackup, WebDavError, WebDavResult, WebDavSettings, WebDavUploadSummary,
+    model::{ValidatedWebDavSettings, validate_filename},
 };
-use crate::{backup::MAX_ARCHIVE_BYTES, BackupManager, PreparedBackupRestore};
+use crate::{BackupManager, PreparedBackupRestore, backup::MAX_ARCHIVE_BYTES};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);

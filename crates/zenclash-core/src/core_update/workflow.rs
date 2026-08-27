@@ -1,8 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
 use super::{
-    service::MihomoReleaseService, transaction::CoreUpdateTransaction, CoreUpdateError,
-    CoreUpdateResult, MihomoRelease,
+    CoreUpdateError, CoreUpdateResult, MihomoRelease, service::MihomoReleaseService,
+    transaction::CoreUpdateTransaction,
 };
 use crate::{CoreConfigValidator, MihomoClient, MihomoProcess, VersionInfo};
 
@@ -43,14 +43,14 @@ impl MihomoReleaseService {
         let transaction = match tokio::task::spawn_blocking(move || prepared.activate()).await {
             Ok(Ok(transaction)) => transaction,
             Ok(Err(error)) => {
-                return Err(restart_after_activation_failure(process, error.to_string()).await)
+                return Err(restart_after_activation_failure(process, error.to_string()).await);
             }
             Err(error) => {
                 return Err(restart_after_activation_failure(
                     process,
                     format!("启用候选内核任务异常结束：{error}"),
                 )
-                .await)
+                .await);
             }
         };
         let verification = async {
@@ -71,7 +71,7 @@ impl MihomoReleaseService {
         let reported = match verification {
             Ok(reported) => reported,
             Err(error) => {
-                return Err(rollback_rejected_core(process, transaction, error.to_string()).await)
+                return Err(rollback_rejected_core(process, transaction, error.to_string()).await);
             }
         };
         tokio::task::spawn_blocking(move || transaction.commit())

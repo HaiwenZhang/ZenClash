@@ -1,6 +1,6 @@
 use std::{fs, path::Path};
 
-use super::{home_dir, required_entry_path, AutostartError, AutostartResult, AutostartStatus};
+use super::{AutostartError, AutostartResult, AutostartStatus, home_dir, required_entry_path};
 use crate::profiles::atomic_write;
 
 pub(super) fn default_entry_path() -> AutostartResult<Option<std::path::PathBuf>> {
@@ -37,10 +37,10 @@ pub(super) fn set_enabled(
     let entry_path = required_entry_path(entry_path)?;
     if enabled {
         atomic_write(entry_path, launch_agent(executable).as_bytes())?;
-    } else if let Err(error) = fs::remove_file(entry_path) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            return Err(AutostartError::Io(error));
-        }
+    } else if let Err(error) = fs::remove_file(entry_path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(AutostartError::Io(error));
     }
     Ok(())
 }

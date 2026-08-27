@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
 use gpui::{
-    div, prelude::FluentBuilder, px, App, Context, Focusable, InteractiveElement, IntoElement,
-    ParentElement, Render, Styled, Window,
+    App, Context, Focusable, InteractiveElement, IntoElement, ParentElement, Render, Styled,
+    Window, div, prelude::FluentBuilder, px,
 };
 use gpui_component::{
-    button::Button, h_flex, progress::Progress, scroll::ScrollableElement, v_flex, ActiveTheme,
-    Disableable, Icon, IconName, Sizable,
+    ActiveTheme, Disableable, Icon, IconName, Sizable, button::Button, h_flex, progress::Progress,
+    scroll::ScrollableElement, v_flex,
 };
 use zenclash_core::{
     DelayHistory, MihomoClient, ProxyCatalog, ProxyDelayTarget, ProxyGroup, ProxyNode,

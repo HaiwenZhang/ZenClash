@@ -3,8 +3,8 @@ use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::Duration,
@@ -244,7 +244,7 @@ fn socket_authority(address: SocketAddr) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_pac_script, normalize_pac_script, PacServer};
+    use super::{PacServer, default_pac_script, normalize_pac_script};
     use std::{
         io::{Read, Write},
         net::TcpStream,

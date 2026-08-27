@@ -6,7 +6,7 @@ use zenclash_core::{
     RemoteProfileRoute, YamlOverrideStore,
 };
 
-use super::super::{load_page, Page, RuntimeData};
+use super::super::{Page, RuntimeData, load_page};
 
 pub(crate) struct ActivationOutcome {
     pub(in crate::pages::runtime) refresh: Result<RuntimeData, String>,
@@ -225,7 +225,7 @@ async fn subscription_proxy_port(
             return Err(zenclash_i18n::text_with(
                 "profiles.errors.proxy_port_read",
                 &[("error", error.to_string())],
-            ))
+            ));
         }
     };
     let port = if config.mixed_port != 0 {
