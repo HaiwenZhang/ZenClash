@@ -67,6 +67,10 @@ impl ZenClashApp {
                 .map(|profile| (self.controlled_config_store.clone(), profile)),
             &self.runtime,
         ) {
+            let pending = self.outbound_mode.is_pending();
+            self.runtime_page.update(cx, |page, cx| {
+                page.begin_home_mode_transition(mode, pending, cx);
+            });
             cx.notify();
         }
     }

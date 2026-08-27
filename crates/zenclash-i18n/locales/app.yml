@@ -651,6 +651,9 @@ home:
     routing_mode:
       zh-CN: 路由模式
       en: Routing Mode
+    mode_switching:
+      zh-CN: 正在切换到“%{mode}”模式…
+      en: Switching to %{mode} mode…
     mode_rule:
       zh-CN: 按规则决定每条连接的去向，适合日常使用
       en: Route each connection by rule; recommended for everyday use

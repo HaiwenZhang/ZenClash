@@ -29,6 +29,10 @@ impl OutboundModeCoordinator {
         self.state.lock().revision
     }
 
+    pub(crate) fn is_pending(&self) -> bool {
+        self.state.lock().in_flight.is_some()
+    }
+
     pub(crate) fn synchronize(&self, mode: OutboundMode, generation: u64) {
         self.state.lock().synchronize(mode, generation);
     }

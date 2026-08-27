@@ -44,6 +44,13 @@ pub(super) struct HomeUiState {
     pub(super) proxy_error: Option<String>,
     pub(super) capture_pending: Option<CapturePlan>,
     pub(super) action_error: Option<String>,
+    mode_transition: Option<ModeTransition>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ModeTransition {
+    displayed: OutboundMode,
+    pending: bool,
 }
 
 impl RuntimePage {
@@ -483,7 +490,12 @@ impl RuntimePage {
             .is_none_or(|tun| tun.observed != CapabilityState::Unsupported);
         let tun_status = tun_status_text(capture);
         let capture_status = capture_status_text(capture);
-        let mode = OutboundMode::from_api(&config.mode);
+        let presentation = mode_presentation(
+            OutboundMode::from_api(&config.mode),
+            self.home.mode_transition,
+        );
+        let mode = presentation.displayed;
+        let mode_pending = presentation.pending;
         let port = config.system_proxy_port().map_or_else(
             || zenclash_i18n::text("home.controls.no_proxy_port"),
             |port| {
@@ -633,12 +645,16 @@ impl RuntimePage {
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
                                         .child(zenclash_i18n::text("home.controls.routing_mode")),
                                 )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(mode_description(mode)),
-                                ),
+                                .child(div().text_xs().text_color(theme.muted_foreground).child(
+                                    if mode_pending {
+                                        zenclash_i18n::text_with(
+                                            "home.controls.mode_switching",
+                                            &[("mode", mode.label())],
+                                        )
+                                    } else {
+                                        mode_description(mode)
+                                    },
+                                )),
                         )
                         .child(
                             h_flex()
@@ -647,18 +663,21 @@ impl RuntimePage {
                                     "home-mode-rule",
                                     OutboundMode::Rule,
                                     mode,
+                                    mode_pending,
                                     SetRuleMode,
                                 ))
                                 .child(mode_button(
                                     "home-mode-global",
                                     OutboundMode::Global,
                                     mode,
+                                    mode_pending,
                                     SetGlobalMode,
                                 ))
                                 .child(mode_button(
                                     "home-mode-direct",
                                     OutboundMode::Direct,
                                     mode,
+                                    mode_pending,
                                     SetDirectMode,
                                 )),
                         ),
@@ -907,6 +926,39 @@ impl RuntimePage {
         })
         .detach();
         cx.notify();
+    }
+
+    pub(crate) fn begin_home_mode_transition(
+        &mut self,
+        displayed: OutboundMode,
+        pending: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.home.mode_transition = Some(ModeTransition { displayed, pending });
+        cx.notify();
+    }
+
+    pub(crate) fn update_home_mode_transition_if_active(
+        &mut self,
+        displayed: OutboundMode,
+        pending: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(current) = self.home.mode_transition else {
+            return;
+        };
+        let confirmed = self
+            .config()
+            .map(|config| OutboundMode::from_api(&config.mode));
+        let next = if !pending && confirmed == Some(displayed) {
+            None
+        } else {
+            Some(ModeTransition { displayed, pending })
+        };
+        if next != Some(current) {
+            self.home.mode_transition = next;
+            cx.notify();
+        }
     }
 }
 
@@ -1288,6 +1340,7 @@ fn mode_button<A>(
     id: &'static str,
     value: OutboundMode,
     selected: OutboundMode,
+    pending: bool,
     action: A,
 ) -> Button
 where
@@ -1300,6 +1353,8 @@ where
         .when(is_selected, |this| this.icon(IconName::Check).primary())
         .when(!is_selected, |this| this.outline())
         .selected(is_selected)
+        .loading(is_selected && pending)
+        .disabled(pending)
         .on_click(move |_, window, cx| {
             window.dispatch_action(Box::new(action.clone()), cx);
         })
@@ -1310,6 +1365,16 @@ fn mode_description(mode: OutboundMode) -> String {
         OutboundMode::Rule => "home.controls.mode_rule",
         OutboundMode::Global => "home.controls.mode_global",
         OutboundMode::Direct => "home.controls.mode_direct",
+    })
+}
+
+fn mode_presentation(
+    confirmed: OutboundMode,
+    transition: Option<ModeTransition>,
+) -> ModeTransition {
+    transition.unwrap_or(ModeTransition {
+        displayed: confirmed,
+        pending: false,
     })
 }
 
@@ -1620,5 +1685,21 @@ mod tests {
         let points = traffic_chart_points(&samples);
 
         assert!(matches!(points[2].label.as_ref(), "现在" | "Now"));
+    }
+
+    #[test]
+    fn pending_mode_transition_is_presented_before_controller_readback() {
+        let presentation = mode_presentation(
+            OutboundMode::Rule,
+            Some(ModeTransition {
+                displayed: OutboundMode::Global,
+                pending: true,
+            }),
+        );
+
+        assert_eq!(
+            (presentation.displayed, presentation.pending),
+            (OutboundMode::Global, true)
+        );
     }
 }

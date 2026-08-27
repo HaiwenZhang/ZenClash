@@ -429,6 +429,11 @@ impl ZenClashApp {
                             });
                             this.refresh_tray_menu(cx);
                         }
+                        let displayed = mode.displayed();
+                        let pending = mode.is_pending();
+                        this.runtime_page.update(cx, |page, cx| {
+                            page.update_home_mode_transition_if_active(displayed, pending, cx);
+                        });
                         let tray_core_running = this
                             .operational_status
                             .snapshot()
