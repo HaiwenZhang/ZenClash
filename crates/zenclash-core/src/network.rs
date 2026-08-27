@@ -61,6 +61,7 @@ impl SystemNetworkSnapshot {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn warning_message(warnings: &[String]) -> Option<String> {
     if warnings.is_empty() {
         None

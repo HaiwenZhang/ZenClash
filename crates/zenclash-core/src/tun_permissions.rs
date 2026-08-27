@@ -1,9 +1,8 @@
-use std::{
-    fs::File,
-    io::Read,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+use std::{fs::File, io::Read};
 
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -141,6 +140,7 @@ fn is_supported_core_name(binary: &Path) -> bool {
     )
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn binary_sha256(binary: &Path) -> TunPermissionResult<String> {
     let mut file = File::open(binary).map_err(|error| {
         TunPermissionError::Platform(format!("无法读取 {}：{error}", binary.display()))

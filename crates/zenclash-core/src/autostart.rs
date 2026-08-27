@@ -1,6 +1,8 @@
 //! Cross-platform login-startup registration with state verification.
 
-use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::path::Path;
+use std::path::PathBuf;
 
 use thiserror::Error;
 
@@ -116,6 +118,7 @@ impl AutostartManager {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn home_dir() -> AutostartResult<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -123,6 +126,7 @@ fn home_dir() -> AutostartResult<PathBuf> {
         .ok_or_else(|| AutostartError::Path("无法确定用户主目录".into()))
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn required_entry_path(entry_path: Option<&Path>) -> AutostartResult<&Path> {
     entry_path.ok_or_else(|| AutostartError::Path("当前平台缺少自动启动文件路径".into()))
 }

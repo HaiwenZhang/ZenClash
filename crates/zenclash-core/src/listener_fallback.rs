@@ -397,7 +397,7 @@ fn is_bind_conflict(error: &io::Error) -> bool {
     #[cfg(target_os = "windows")]
     {
         const WSA_EACCES: i32 = 10_013;
-        return error.raw_os_error() == Some(WSA_EACCES);
+        error.raw_os_error() == Some(WSA_EACCES)
     }
     #[cfg(not(target_os = "windows"))]
     false

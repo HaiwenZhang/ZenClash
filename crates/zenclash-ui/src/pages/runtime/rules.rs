@@ -195,10 +195,7 @@ impl RuntimePage {
                             .child(div().text_xs().text_color(theme.muted_foreground).child(
                                 zenclash_i18n::text_with(
                                     "rules.row.index",
-                                    &[(
-                                        "index",
-                                        runtime_index.map_or(position, |index| index).to_string(),
-                                    )],
+                                    &[("index", runtime_index.unwrap_or(position).to_string())],
                                 ),
                             )),
                     ),
