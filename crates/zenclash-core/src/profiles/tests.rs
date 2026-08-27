@@ -18,6 +18,28 @@ fn test_root(name: &str) -> PathBuf {
 }
 
 #[test]
+fn malformed_profile_index_is_quarantined_without_deleting_managed_yaml() {
+    let root = test_root("quarantine-index");
+    let store = ProfileStore::new(root.join("store")).unwrap();
+    let managed = store.root().join("files/kept.yaml");
+    fs::write(&managed, "rules: [MATCH,DIRECT]\n").unwrap();
+    let invalid = b"{not-json";
+    fs::write(store.root().join("profiles.json"), invalid).unwrap();
+
+    assert!(matches!(store.load(), Err(ProfileStoreError::Index(_))));
+    let quarantine = store.quarantine_invalid_index().unwrap().unwrap();
+
+    assert_eq!(fs::read(quarantine).unwrap(), invalid);
+    assert_eq!(
+        fs::read_to_string(managed).unwrap(),
+        "rules: [MATCH,DIRECT]\n"
+    );
+    assert!(store.load().unwrap().profiles.is_empty());
+    assert!(store.quarantine_invalid_index().unwrap().is_none());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn imports_activates_and_persists_local_profile() {
     let root = test_root("local");
     let source = root.join("source.yaml");

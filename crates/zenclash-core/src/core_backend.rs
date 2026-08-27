@@ -61,6 +61,7 @@ impl CoreKind {
     pub const fn capabilities(self) -> CoreCapabilities {
         match self {
             Self::Mihomo => CoreCapabilities {
+                config_validation: true,
                 full_config_reload: true,
                 rule_toggle: true,
                 core_upgrade: true,
@@ -70,6 +71,7 @@ impl CoreKind {
                 udp_connection_tracking: true,
             },
             Self::Meow => CoreCapabilities {
+                config_validation: false,
                 full_config_reload: false,
                 rule_toggle: false,
                 core_upgrade: false,
@@ -125,6 +127,8 @@ impl std::error::Error for ParseCoreKindError {}
 /// Controller and command-line features that vary between runtime cores.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CoreCapabilities {
+    /// Whether the executable supports native `-t` configuration validation.
+    pub config_validation: bool,
     /// Whether `PUT /configs` can safely apply a complete effective profile.
     pub full_config_reload: bool,
     /// Whether an individual runtime rule can be enabled or disabled.
@@ -162,6 +166,7 @@ mod tests {
     fn meow_does_not_claim_unimplemented_mihomo_extensions() {
         let capabilities = CoreKind::Meow.capabilities();
 
+        assert!(!capabilities.config_validation);
         assert!(!capabilities.full_config_reload);
         assert!(!capabilities.rule_toggle);
         assert!(!capabilities.core_upgrade);

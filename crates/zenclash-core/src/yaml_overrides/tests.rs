@@ -78,3 +78,22 @@ fn rejects_manifest_path_traversal_before_file_operations() {
     assert_eq!(fs::read_to_string(&outside).unwrap(), "mode: direct\n");
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn malformed_manifest_is_quarantined_and_managed_files_are_retained() {
+    let root = test_root("quarantine-manifest");
+    let store = YamlOverrideStore::new(root.join("store")).unwrap();
+    let managed = store.files_dir().join("kept.yaml");
+    fs::write(&managed, "mode: direct\n").unwrap();
+    let invalid = b"{not-json";
+    fs::write(store.manifest_path(), invalid).unwrap();
+
+    assert!(matches!(store.load(), Err(YamlOverrideError::Manifest(_))));
+    let quarantine = store.quarantine_invalid_manifest().unwrap().unwrap();
+
+    assert_eq!(fs::read(quarantine).unwrap(), invalid);
+    assert_eq!(fs::read_to_string(managed).unwrap(), "mode: direct\n");
+    assert!(store.load().unwrap().items.is_empty());
+    assert!(store.quarantine_invalid_manifest().unwrap().is_none());
+    fs::remove_dir_all(root).unwrap();
+}

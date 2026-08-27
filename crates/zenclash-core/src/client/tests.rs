@@ -100,6 +100,41 @@ async fn provider_proxy_delay_uses_the_provider_healthcheck_endpoint() {
 }
 
 #[tokio::test]
+async fn blank_provider_proxy_delay_uses_the_regular_proxy_endpoint() {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 2_048];
+        let bytes = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..bytes]).into_owned();
+        let body = r#"{"delay":21}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        request
+    });
+    let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+
+    let result = client
+        .proxy_delay_with_provider(
+            "DIRECT",
+            Some("https://example.com/generate_204"),
+            5_000,
+            Some("  "),
+        )
+        .await
+        .unwrap();
+    let request = server.join().unwrap();
+
+    assert_eq!(result.delay, 21);
+    assert!(request.starts_with("GET /proxies/DIRECT/delay?"));
+}
+
+#[tokio::test]
 async fn reload_payload_rejects_oversized_config_before_network_request() {
     let client = MihomoClient::new(MihomoEndpoint::default()).unwrap();
     let payload = "a".repeat(crate::profiles::MAX_PROFILE_BYTES + 1);

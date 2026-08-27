@@ -21,7 +21,7 @@ if ($Version -notmatch '^\d+\.\d+\.\d+([.+-][0-9A-Za-z.-]+)?$') {
     throw "Invalid release version: $Version"
 }
 if ([string]::IsNullOrWhiteSpace($ProfilePath)) {
-    $ProfilePath = Join-Path $ProjectRoot "examples\19facdf022b.yaml"
+    $ProfilePath = Join-Path $ProjectRoot "platforms\common\default.yaml"
 }
 if (-not (Test-Path -Path $ProfilePath -PathType Leaf)) {
     throw "Mihomo profile was not found: $ProfilePath"
@@ -90,6 +90,7 @@ try {
     New-Item -ItemType Directory -Force -Path $ResourcesDir | Out-Null
     Copy-Item $MihomoBinary (Join-Path $ResourcesDir "mihomo.exe")
     Copy-Item $ProfilePath (Join-Path $ResourcesDir "profile.yaml")
+    Copy-Item (Join-Path $ProjectRoot "platforms\common\recovery.yaml") (Join-Path $ResourcesDir "recovery.yaml")
     Copy-Item (Join-Path $ProjectRoot "platforms\macos\ZenClash.png") (Join-Path $ResourcesDir "ZenClash.png")
     & (Join-Path $ResourcesDir "mihomo.exe") -v
     if ($LASTEXITCODE -ne 0) {

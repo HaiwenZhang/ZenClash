@@ -33,6 +33,93 @@ fn write_profile(root: &Path) -> PathBuf {
 }
 
 #[test]
+fn malformed_controlled_patch_is_quarantined_without_deleting_its_payload() {
+    let root = test_root("quarantine-invalid");
+    let store = ControlledConfigStore::new(root.join("store"));
+    fs::create_dir_all(store.root()).unwrap();
+    let invalid = "- this\n- is\n- not-a-mapping\n";
+    fs::write(store.root().join("override.yaml"), invalid).unwrap();
+
+    assert!(matches!(
+        store.load(),
+        Err(ControlledConfigError::NotMapping)
+    ));
+    let quarantine = store.quarantine_invalid_patch().unwrap().unwrap();
+
+    assert_eq!(fs::read_to_string(quarantine).unwrap(), invalid);
+    assert!(store.load().unwrap().as_mapping().unwrap().is_empty());
+    assert!(store.quarantine_invalid_patch().unwrap().is_none());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn startup_listener_fallback_is_session_only_and_survives_cache_regeneration() {
+    let occupied = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let original_port = occupied.local_addr().unwrap().port();
+    let root = test_root("listener-fallback");
+    fs::create_dir_all(&root).unwrap();
+    let profile = root.join("base.yaml");
+    let source = format!("mixed-port: {original_port}\nallow-lan: false\nrules: [MATCH,DIRECT]\n");
+    fs::write(&profile, &source).unwrap();
+    let store = ControlledConfigStore::new(root.join("store"));
+
+    store.materialize(&profile).unwrap();
+    let fallbacks = store.resolve_startup_listener_conflicts().unwrap();
+
+    assert_eq!(fallbacks.len(), 1);
+    assert_eq!(fallbacks[0].listener, "mixed-port");
+    assert_eq!(fallbacks[0].original, original_port);
+    assert_ne!(fallbacks[0].current, original_port);
+    assert_eq!(fs::read_to_string(&profile).unwrap(), source);
+
+    store.materialize(&profile).unwrap();
+    let regenerated = fs::read_to_string(store.runtime_path()).unwrap();
+    assert!(regenerated.contains(&format!("mixed-port: {}", fallbacks[0].current)));
+
+    let explicit_port = if original_port == 23_456 {
+        23_457
+    } else {
+        23_456
+    };
+    fs::write(
+        &profile,
+        format!("mixed-port: {explicit_port}\nallow-lan: false\nrules: [MATCH,DIRECT]\n"),
+    )
+    .unwrap();
+    store.materialize(&profile).unwrap();
+    assert!(fs::read_to_string(store.runtime_path())
+        .unwrap()
+        .contains(&format!("mixed-port: {explicit_port}")));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn settings_update_rejects_an_occupied_listener_before_persisting() {
+    let occupied = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let occupied_port = occupied.local_addr().unwrap().port();
+    let root = test_root("occupied-settings-port");
+    let profile = write_profile(&root);
+    let store = ControlledConfigStore::new(root.join("store"));
+    let client = MihomoClient::new(MihomoEndpoint::new("http://127.0.0.1:0", "")).unwrap();
+
+    let result = store
+        .apply_json_update(
+            &client,
+            &profile,
+            &serde_json::json!({"mixed-port": occupied_port}),
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(ControlledConfigError::ListenerFallback(_))
+    ));
+    assert!(store.load_json().unwrap().get("mixed-port").is_none());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn prepares_commits_and_materializes_without_changing_source_profile() {
     let root = test_root("commit");
     let profile = write_profile(&root);

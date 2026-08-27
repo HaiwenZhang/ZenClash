@@ -299,6 +299,41 @@ impl YamlOverrideStore {
         &self.root
     }
 
+    /// Quarantines a malformed manifest while retaining every managed YAML file.
+    ///
+    /// The timestamped manifest can be inspected or restored manually. Only
+    /// manifest/validation failures are eligible; filesystem errors remain
+    /// visible and are not rewritten.
+    ///
+    /// # Errors
+    ///
+    /// Returns the original non-recoverable error or an I/O error while moving
+    /// the invalid manifest.
+    pub fn quarantine_invalid_manifest(&self) -> YamlOverrideResult<Option<PathBuf>> {
+        let _transaction = self.transaction.lock();
+        let error = match self.load_unlocked() {
+            Ok(_) => return Ok(None),
+            Err(error) => error,
+        };
+        if !matches!(
+            error,
+            YamlOverrideError::Manifest(_) | YamlOverrideError::Invalid(_)
+        ) {
+            return Err(error);
+        }
+        let source = self.manifest_path();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let quarantine = self.root.join(format!(
+            "overrides.invalid-{}-{timestamp}.json",
+            std::process::id()
+        ));
+        fs::rename(source, &quarantine)?;
+        Ok(Some(quarantine))
+    }
+
     /// Resolves the managed file for a validated catalog record.
     #[must_use]
     pub fn managed_path(&self, record: &YamlOverrideRecord) -> PathBuf {

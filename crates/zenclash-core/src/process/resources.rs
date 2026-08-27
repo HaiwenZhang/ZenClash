@@ -187,6 +187,12 @@ pub(super) fn bundled_profile() -> Option<PathBuf> {
     bundled_resource("profile.yaml")
 }
 
+/// Locates the immutable direct-only recovery profile packaged beside the application.
+#[must_use]
+pub fn bundled_recovery_profile() -> Option<PathBuf> {
+    bundled_resource("recovery.yaml")
+}
+
 fn bundled_resource(name: &str) -> Option<PathBuf> {
     let executable = std::env::current_exe().ok()?;
     find_bundled_resource(bundled_resource_candidates(&executable), name)

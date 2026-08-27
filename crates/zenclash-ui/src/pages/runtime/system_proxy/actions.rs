@@ -2,9 +2,9 @@ use super::{SystemProxyEditorState, SystemProxyForm};
 use crate::pages::runtime::{
     default_pac_script, default_system_proxy_bypass, load_page, normalize_pac_script,
     normalize_system_proxy_bypass, normalize_system_proxy_host, AppContext, AppPreferences,
-    Context, InputState, Page, RuntimeData, RuntimePage, SystemProxyController, SystemProxyMode,
-    Window,
+    Context, InputState, Page, RuntimePage, SystemProxyController, SystemProxyMode, Window,
 };
+use zenclash_core::{SystemProxyOperation, SystemProxyOwnership};
 
 impl SystemProxyForm {
     fn from_preferences(preferences: &AppPreferences) -> Self {
@@ -42,16 +42,23 @@ impl RuntimePage {
         let Some(token) = self.begin_mutation(page) else {
             return;
         };
+        let Some(store) = self.preferences_store.clone() else {
+            self.mutating = false;
+            self.error = Some("应用设置存储不可用；无法记录系统代理所有权".into());
+            cx.notify();
+            return;
+        };
         let client = self.client.clone();
         let controller = self.system_proxy_controller.clone();
         let settings = SystemProxyForm::from_preferences(&self.preferences);
         let task = self.runtime.spawn(async move {
-            tokio::task::spawn_blocking(move || {
-                apply_system_proxy(&controller, enabled, port, &settings)
+            let preferences = tokio::task::spawn_blocking(move || {
+                persist_system_proxy_enabled(&store, &controller, enabled, port, &settings)
             })
             .await
             .map_err(|error| format!("系统代理后台任务异常结束：{error}"))??;
-            load_page(client, page).await
+            let data = load_page(client, page).await;
+            Ok::<_, String>((preferences, data))
         });
         cx.spawn(async move |this, cx| {
             let result = task
@@ -61,17 +68,27 @@ impl RuntimePage {
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
                 match result {
-                    Ok(data) => {
-                        if this.replace_page_data(token, data) {
-                            this.notice = Some(if enabled {
-                                match this.preferences.system_proxy_mode {
-                                    SystemProxyMode::Manual => "系统 HTTP/HTTPS 代理已启用",
-                                    SystemProxyMode::Pac => "系统 PAC 自动代理已启用",
+                    Ok((preferences, data)) => {
+                        this.preferences = preferences.clone();
+                        cx.emit(super::super::PreferencesRestored { preferences });
+                        match data {
+                            Ok(data) => {
+                                if this.replace_page_data(token, data) {
+                                    this.notice = Some(if enabled {
+                                        match this.preferences.system_proxy_mode {
+                                            SystemProxyMode::Manual => "系统 HTTP/HTTPS 代理已启用",
+                                            SystemProxyMode::Pac => "系统 PAC 自动代理已启用",
+                                        }
+                                        .into()
+                                    } else {
+                                        "系统代理已停用".into()
+                                    });
                                 }
-                                .into()
-                            } else {
-                                "系统代理已停用".into()
-                            });
+                            }
+                            Err(error) => this.set_page_error(
+                                token,
+                                format!("系统代理已切换并保存，但刷新页面状态失败：{error}"),
+                            ),
                         }
                     }
                     Err(error) => this.set_page_error(token, error),
@@ -160,7 +177,7 @@ impl RuntimePage {
             cx.notify();
             return;
         };
-        let active = self.system_proxy_active();
+        let active = self.preferences.system_proxy_enabled;
         let port = self.system_proxy_port();
         if active && port == 0 {
             self.error = Some("当前系统代理已启用，但内核没有可用代理端口".into());
@@ -174,7 +191,7 @@ impl RuntimePage {
         let client = self.client.clone();
         let task = self.runtime.spawn(async move {
             let preferences = tokio::task::spawn_blocking(move || {
-                persist_system_proxy_form(&store, &controller, &form, active, port)
+                persist_system_proxy_form(&store, &controller, &form, port)
             })
             .await
             .map_err(|error| format!("系统代理设置任务异常结束：{error}"))??;
@@ -189,23 +206,25 @@ impl RuntimePage {
             let _ = this.update(cx, |this, cx| {
                 this.mutating = false;
                 match result {
-                    Ok((preferences, data)) if this.is_page_task_current(token) => {
+                    Ok((preferences, data)) => {
                         this.preferences = preferences.clone();
                         this.system_proxy_editor = None;
                         cx.emit(super::super::PreferencesRestored { preferences });
-                        match data {
-                            Ok(data) => {
-                                let _ = this.replace_page_data(token, data);
-                                this.notice = Some("系统代理设置已保存，并通过原生状态回读".into());
-                            }
-                            Err(error) => {
-                                this.error = Some(format!(
-                                    "系统代理设置已经保存，但刷新原生状态失败：{error}"
-                                ));
+                        if this.is_page_task_current(token) {
+                            match data {
+                                Ok(data) => {
+                                    let _ = this.replace_page_data(token, data);
+                                    this.notice =
+                                        Some("系统代理设置已保存，并通过原生状态回读".into());
+                                }
+                                Err(error) => {
+                                    this.error = Some(format!(
+                                        "系统代理设置已经保存，但刷新原生状态失败：{error}"
+                                    ));
+                                }
                             }
                         }
                     }
-                    Ok(_) => {}
                     Err(error) => this.set_page_error(token, error),
                 }
                 cx.notify();
@@ -257,16 +276,6 @@ impl RuntimePage {
         });
         unavailable_message(listener_error.as_deref())
     }
-
-    fn system_proxy_active(&self) -> bool {
-        matches!(
-            &self.data,
-            RuntimeData::SystemProxy { status, .. } if status.active()
-        ) || matches!(
-            &self.data,
-            RuntimeData::Dashboard { system_proxy, .. } if system_proxy.active()
-        )
-    }
 }
 
 fn unavailable_message(listener_error: Option<&str>) -> String {
@@ -285,58 +294,143 @@ fn persist_system_proxy_form(
     store: &crate::pages::runtime::AppPreferencesStore,
     controller: &SystemProxyController,
     form: &SystemProxyForm,
-    active: bool,
     port: u16,
 ) -> Result<AppPreferences, String> {
+    let operation = controller.begin_operation();
     let expected = store.load().map_err(|error| error.to_string())?;
     let previous = SystemProxyForm::from_preferences(&expected);
-    if active {
-        if let Err(error) = apply_system_proxy(controller, true, port, form) {
-            return rollback_error(controller, port, &previous, "应用新设置失败", &error);
-        }
-    }
-    let mut preferences = expected.clone();
-    form.apply_to(&mut preferences);
-    if let Err(error) = store.replace(&expected, &preferences) {
+    let active = expected.system_proxy_enabled;
+    let ownership = if active {
+        Some(apply_owned_system_proxy(&operation, port, form)?)
+    } else {
+        None
+    };
+    match store.update(|preferences| {
+        form.apply_to(preferences);
         if active {
-            let error = error.to_string();
-            return rollback_error(controller, port, &previous, "保存设置失败", &error);
+            preferences.system_proxy_ownership.clone_from(&ownership);
         }
-        return Err(error.to_string());
+    }) {
+        Ok(preferences) => Ok(preferences),
+        Err(error) if active => Err(restore_after_persist_failure(
+            store,
+            &operation,
+            port,
+            &expected,
+            &previous,
+            &error.to_string(),
+        )),
+        Err(error) => Err(error.to_string()),
     }
-    Ok(preferences)
 }
 
-fn apply_system_proxy(
+fn persist_system_proxy_enabled(
+    store: &crate::pages::runtime::AppPreferencesStore,
     controller: &SystemProxyController,
     enabled: bool,
     port: u16,
     form: &SystemProxyForm,
-) -> Result<(), String> {
-    controller
-        .set_enabled(
-            enabled,
+) -> Result<AppPreferences, String> {
+    let operation = controller.begin_operation();
+    let expected = store.load().map_err(|error| error.to_string())?;
+    let previous = SystemProxyForm::from_preferences(&expected);
+    let ownership = if enabled {
+        Some(apply_owned_system_proxy(&operation, port, form)?)
+    } else {
+        release_system_proxy(&operation, &expected)?;
+        None
+    };
+    match store.update(|preferences| {
+        preferences.system_proxy_enabled = enabled;
+        preferences.system_proxy_ownership.clone_from(&ownership);
+    }) {
+        Ok(preferences) => Ok(preferences),
+        Err(error) => Err(restore_after_persist_failure(
+            store,
+            &operation,
+            port,
+            &expected,
+            &previous,
+            &error.to_string(),
+        )),
+    }
+}
+
+fn apply_owned_system_proxy(
+    operation: &SystemProxyOperation<'_>,
+    port: u16,
+    form: &SystemProxyForm,
+) -> Result<SystemProxyOwnership, String> {
+    operation
+        .apply(
+            true,
             form.mode,
             &form.host,
             port,
             &form.bypass,
             &form.pac_script,
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "系统代理启用成功但没有返回所有权证据".to_owned())
 }
 
-fn rollback_error(
-    controller: &SystemProxyController,
+fn release_system_proxy(
+    operation: &SystemProxyOperation<'_>,
+    preferences: &AppPreferences,
+) -> Result<(), String> {
+    if let Some(ownership) = &preferences.system_proxy_ownership {
+        operation
+            .release_if_owned(ownership)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    } else {
+        operation
+            .set_enabled(false, preferences.system_proxy_mode, "", 0, &[], "")
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn restore_after_persist_failure(
+    store: &crate::pages::runtime::AppPreferencesStore,
+    operation: &SystemProxyOperation<'_>,
     port: u16,
+    expected: &AppPreferences,
     previous: &SystemProxyForm,
-    context: &str,
     error: &str,
-) -> Result<AppPreferences, String> {
-    match apply_system_proxy(controller, true, port, previous) {
-        Ok(()) => Err(format!("{context}：{error}；原系统代理已恢复")),
-        Err(rollback) => Err(format!(
-            "{context}：{error}；恢复原系统代理也失败：{rollback}"
-        )),
+) -> String {
+    if !expected.system_proxy_enabled {
+        return match operation.set_enabled(false, previous.mode, "", 0, &[], "") {
+            Ok(()) => format!("保存系统代理设置失败：{error}；系统代理已安全关闭"),
+            Err(rollback) => {
+                format!("保存系统代理设置失败：{error}；安全关闭也失败：{rollback}")
+            }
+        };
+    }
+    match apply_owned_system_proxy(operation, port, previous) {
+        Ok(ownership) => {
+            if expected.system_proxy_ownership.as_ref() == Some(&ownership) {
+                return format!("保存系统代理设置失败：{error}；原状态已恢复");
+            }
+            match store.update(|preferences| {
+                preferences.system_proxy_ownership = Some(ownership.clone());
+            }) {
+                Ok(_) => format!("保存系统代理设置失败：{error}；原状态已恢复"),
+                Err(ownership_error) => {
+                    let release = operation.release_if_owned(&ownership);
+                    match release {
+                        Ok(_) => format!(
+                            "保存系统代理设置失败：{error}；恢复所有权记录也失败：{ownership_error}，系统代理已安全关闭"
+                        ),
+                        Err(release_error) => format!(
+                            "保存系统代理设置失败：{error}；恢复所有权记录失败：{ownership_error}；安全关闭也失败：{release_error}"
+                        ),
+                    }
+                }
+            }
+        }
+        Err(rollback) => {
+            format!("保存系统代理设置失败：{error}；恢复原状态也失败：{rollback}")
+        }
     }
 }
 

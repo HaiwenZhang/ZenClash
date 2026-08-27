@@ -10,7 +10,10 @@ mod controlled_config;
 mod core_backend;
 mod core_installation;
 mod core_update;
+mod core_validation;
 mod endpoint;
+mod instance_lock;
+mod listener_fallback;
 mod logs;
 mod models;
 mod network;
@@ -41,6 +44,7 @@ pub use config_diff::{
 };
 pub use controlled_config::{
     ControlledConfigError, ControlledConfigResult, ControlledConfigStore, ControlledConfigUpdate,
+    ListenerPortFallback,
 };
 pub use core_backend::{CoreCapabilities, CoreKind, ParseCoreKindError};
 pub use core_installation::{validate_core_binary, CoreBinaryError, CoreBinaryInfo};
@@ -48,7 +52,9 @@ pub use core_update::{
     CoreUpdateError, CoreUpdateResult, CoreUpdateTransaction, MihomoRelease, MihomoReleaseAsset,
     MihomoReleaseService, PreparedCoreUpdate,
 };
+pub use core_validation::{CoreConfigValidationError, CoreConfigValidator};
 pub use endpoint::MihomoEndpoint;
+pub use instance_lock::{AppInstanceLock, AppInstanceLockError};
 pub use logs::{
     format_log_entries, LogEntry, LogMonitor, LogPersistenceError, LogPersistenceResult,
     LogPersistenceStatus, MihomoLogLevel,
@@ -66,7 +72,9 @@ pub use preferences::{
     AppPreferences, AppPreferencesError, AppPreferencesResult, AppPreferencesStore,
     AppearancePreference, CoreBinaryPreferences, NetworkProbeRoutePreference,
 };
-pub use process::{MihomoLaunchConfig, MihomoProcess, MihomoProcessSnapshot};
+pub use process::{
+    bundled_recovery_profile, MihomoLaunchConfig, MihomoProcess, MihomoProcessSnapshot,
+};
 pub use profile::merge_profile_overrides;
 pub use profiles::{
     validate_clash_yaml, ProfileActivation, ProfileCatalog, ProfileRecord, ProfileSource,
@@ -85,7 +93,8 @@ pub use substore::{SubStoreClient, SubStoreItem, SubStoreItemKind, SubStoreSnaps
 pub use system_proxy::{
     default_pac_script, default_system_proxy_bypass, normalize_pac_script,
     normalize_system_proxy_bypass, normalize_system_proxy_host, PacServer, PacServerStatus,
-    SystemProxyController, SystemProxyManager, SystemProxyMode, SystemProxyStatus,
+    SystemProxyController, SystemProxyManager, SystemProxyMode, SystemProxyOperation,
+    SystemProxyOwnership, SystemProxyStatus,
 };
 pub use traffic::{format_speed, TrafficMonitor, TrafficSnapshot};
 pub use traffic_history::{

@@ -10,7 +10,7 @@ APP_DIR="${OUTPUT_DIR}/ZenClash.app"
 CONTENTS_DIR="${APP_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
-PROFILE_PATH="${ZENCLASH_CONFIG:-${PROJECT_ROOT}/examples/19facdf022b.yaml}"
+PROFILE_PATH="${ZENCLASH_CONFIG:-${PROJECT_ROOT}/platforms/common/default.yaml}"
 MIHOMO_PATH="${ZENCLASH_MIHOMO_BINARY:-}"
 CARGO_OUTPUT_ROOT="${CARGO_TARGET_DIR:-${PROJECT_ROOT}/target}"
 MIHOMO_WORK_DIR=""
@@ -58,6 +58,7 @@ cp "${CARGO_OUTPUT_ROOT}/${TARGET_TRIPLE}/release/zenclash" "${MACOS_DIR}/zencla
 cp "${PROJECT_ROOT}/platforms/macos/Info.plist" "${CONTENTS_DIR}/Info.plist"
 cp "${MIHOMO_PATH}" "${RESOURCES_DIR}/mihomo"
 cp "${PROFILE_PATH}" "${RESOURCES_DIR}/profile.yaml"
+cp "${PROJECT_ROOT}/platforms/common/recovery.yaml" "${RESOURCES_DIR}/recovery.yaml"
 chmod 755 "${MACOS_DIR}/zenclash" "${RESOURCES_DIR}/mihomo"
 "${RESOURCES_DIR}/mihomo" -v
 

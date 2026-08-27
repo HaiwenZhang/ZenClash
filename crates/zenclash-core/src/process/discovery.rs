@@ -7,8 +7,8 @@ use super::resources::{
     install_bundled_core, is_core_binary_candidate,
 };
 use crate::{
-    profiles::read_profile_bytes, CoreCapabilities, CoreKind, MihomoEndpoint, MihomoError,
-    MihomoResult,
+    profiles::read_profile_bytes, CoreCapabilities, CoreConfigValidationError, CoreConfigValidator,
+    CoreKind, MihomoEndpoint, MihomoError, MihomoResult,
 };
 
 /// Resolved inputs used to launch one managed Mihomo process.
@@ -82,6 +82,14 @@ impl MihomoLaunchConfig {
         self
     }
 
+    /// Overrides both the managed controller address and its authentication secret.
+    #[must_use]
+    pub fn with_controller_endpoint(mut self, endpoint: MihomoEndpoint) -> Self {
+        self.controller_override = Some(endpoint.controller.clone());
+        self.endpoint = endpoint;
+        self
+    }
+
     /// Discovers launch inputs from environment overrides, bundled resources,
     /// workspace fallbacks, and finally the process `PATH`.
     ///
@@ -119,11 +127,31 @@ impl MihomoLaunchConfig {
         kind: CoreKind,
         preferred_binary: Option<&Path>,
     ) -> MihomoResult<Self> {
+        Self::discover_for_kind_with_binary_and_config(project_root, kind, preferred_binary, None)
+    }
+
+    /// Discovers launch inputs while overriding the startup configuration file.
+    ///
+    /// This is used for recovery launches that must locate the same executable
+    /// and writable home as normal startup without first parsing the rejected
+    /// active profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an explicit executable is absent or invalid, or
+    /// when the selected YAML cannot be read.
+    pub fn discover_for_kind_with_binary_and_config(
+        project_root: impl AsRef<Path>,
+        kind: CoreKind,
+        preferred_binary: Option<&Path>,
+        config_override: Option<&Path>,
+    ) -> MihomoResult<Self> {
         let project_root = project_root.as_ref();
-        let config_file = std::env::var_os("ZENCLASH_CONFIG")
-            .map(PathBuf::from)
+        let config_file = config_override
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::var_os("ZENCLASH_CONFIG").map(PathBuf::from))
             .or_else(bundled_profile)
-            .unwrap_or_else(|| project_root.join("examples/19facdf022b.yaml"));
+            .unwrap_or_else(|| workspace_default_profile(project_root));
         let home_dir = std::env::var_os("ZENCLASH_CORE_HOME")
             .or_else(|| std::env::var_os(kind.home_environment_variable()))
             .map_or_else(|| default_core_home_dir(project_root, kind), PathBuf::from);
@@ -179,6 +207,26 @@ impl MihomoLaunchConfig {
     pub const fn capabilities(&self) -> CoreCapabilities {
         self.kind.capabilities()
     }
+
+    /// Validates the selected startup file with the selected native core.
+    /// Cores without a native validation command are left to the controller
+    /// readiness check performed immediately after launch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the core validation command cannot run, times out,
+    /// or rejects the generated startup configuration.
+    pub fn validate_config(&self) -> Result<(), CoreConfigValidationError> {
+        if !self.capabilities().config_validation {
+            return Ok(());
+        }
+        CoreConfigValidator::new(self.kind, self.binary.clone(), self.home_dir.clone())
+            .validate_file(&self.config_file)
+    }
+}
+
+fn workspace_default_profile(project_root: &Path) -> PathBuf {
+    project_root.join("platforms/common/default.yaml")
 }
 
 fn workspace_core_candidates(project_root: &Path, kind: CoreKind) -> Vec<PathBuf> {
@@ -278,5 +326,52 @@ mod tests {
 
         assert!(candidates
             .contains(&Path::new("/workspace/examples/meow-rs/target/release").join(filename)));
+    }
+
+    #[test]
+    fn workspace_fallback_uses_the_packaged_default_source() {
+        assert_eq!(
+            workspace_default_profile(Path::new("/workspace")),
+            Path::new("/workspace/platforms/common/default.yaml")
+        );
+    }
+
+    #[test]
+    fn explicit_recovery_config_bypasses_an_invalid_default_profile() {
+        let root = std::env::temp_dir().join(format!(
+            "zenclash-recovery-discovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let binary = root.join(if cfg!(windows) {
+            "mihomo.exe"
+        } else {
+            "mihomo"
+        });
+        let invalid = root.join("platforms/common/default.yaml");
+        let recovery = root.join("recovery.yaml");
+        std::fs::create_dir_all(invalid.parent().unwrap()).unwrap();
+        std::fs::write(&binary, b"test binary").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::write(&invalid, b"this: [is: invalid").unwrap();
+        std::fs::write(&recovery, b"mode: direct\nrules:\n  - MATCH,DIRECT\n").unwrap();
+
+        let launch = MihomoLaunchConfig::discover_for_kind_with_binary_and_config(
+            &root,
+            CoreKind::Mihomo,
+            Some(&binary),
+            Some(&recovery),
+        )
+        .unwrap();
+
+        assert_eq!(launch.config_file, recovery);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

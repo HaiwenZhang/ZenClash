@@ -1,5 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::{
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 #[cfg(target_os = "linux")]
@@ -136,6 +141,24 @@ fn is_supported_core_name(binary: &Path) -> bool {
     )
 }
 
+fn binary_sha256(binary: &Path) -> TunPermissionResult<String> {
+    let mut file = File::open(binary).map_err(|error| {
+        TunPermissionError::Platform(format!("无法读取 {}：{error}", binary.display()))
+    })?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| {
+            TunPermissionError::Platform(format!("读取 {} 失败：{error}", binary.display()))
+        })?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +172,24 @@ mod tests {
         assert!(is_supported_core_name(Path::new("C:/core/MEOW.EXE")));
         assert!(!is_supported_core_name(Path::new("/tmp/sh")));
         assert!(!is_supported_core_name(Path::new("/tmp/mihomo.backup")));
+    }
+
+    #[test]
+    fn binary_digest_reads_the_exact_candidate_bytes() {
+        let path = std::env::temp_dir().join(format!(
+            "mihomo-digest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"zenclash-tun").unwrap();
+
+        assert_eq!(
+            binary_sha256(&path).unwrap(),
+            "2a047459ab7474be50d2883326e1472b2e7587520b16854ced63d1404b307fe8"
+        );
+        std::fs::remove_file(path).unwrap();
     }
 }

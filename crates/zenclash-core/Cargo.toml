@@ -11,6 +11,7 @@ chrono.workspace = true
 cron.workspace = true
 flate2.workspace = true
 futures-util.workspace = true
+getrandom.workspace = true
 http.workspace = true
 parking_lot.workspace = true
 percent-encoding.workspace = true
@@ -21,6 +22,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true
+socket2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
@@ -29,6 +31,9 @@ zip.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::MihomoEndpoint;
+use crate::{CoreConfigValidator, MihomoEndpoint};
 
 mod api;
 mod request;
@@ -59,6 +59,7 @@ pub struct MihomoClient {
     endpoint: MihomoEndpoint,
     http: reqwest::Client,
     mutation_gate: Arc<tokio::sync::Mutex<()>>,
+    config_validator: Option<CoreConfigValidator>,
 }
 
 impl MihomoClient {
@@ -77,7 +78,18 @@ impl MihomoClient {
             endpoint,
             http,
             mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
+            config_validator: None,
         })
+    }
+
+    /// Enables target-core `-t` validation before complete configuration reloads.
+    ///
+    /// External controllers can omit this because their executable and writable
+    /// home are not owned by ZenClash; managed processes should always provide it.
+    #[must_use]
+    pub fn with_config_validator(mut self, validator: CoreConfigValidator) -> Self {
+        self.config_validator = Some(validator);
+        self
     }
 
     /// Returns the controller address and secret used by this client.

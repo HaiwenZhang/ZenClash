@@ -198,7 +198,9 @@ impl RawProxy {
             mptcp: self.mptcp,
             smux: self.smux,
             history: self.history,
-            provider_name: self.provider_name,
+            provider_name: self
+                .provider_name
+                .and_then(|name| (!name.trim().is_empty()).then(|| name.trim().to_owned())),
         }
     }
 }
@@ -321,6 +323,33 @@ mod tests {
         let catalog = ProxyCatalog::from(raw);
 
         assert_eq!(catalog.groups[0].test_url, None);
+    }
+
+    #[test]
+    fn blank_provider_name_uses_the_regular_proxy_delay_endpoint() {
+        let raw: RawProxyCatalog = serde_json::from_str(
+            r#"{"proxies":{"DIRECT":{"name":"DIRECT","type":"Direct","provider-name":"  "},"Proxy":{"name":"Proxy","type":"Selector","now":"DIRECT","all":["DIRECT"]}}}"#,
+        )
+        .unwrap();
+
+        let catalog = ProxyCatalog::from(raw);
+
+        assert_eq!(catalog.groups[0].all[0].provider_name, None);
+    }
+
+    #[test]
+    fn provider_name_is_trimmed_without_losing_provider_routing() {
+        let raw: RawProxyCatalog = serde_json::from_str(
+            r#"{"proxies":{"HK":{"name":"HK","type":"Shadowsocks","provider-name":" Airport A "},"Proxy":{"name":"Proxy","type":"Selector","now":"HK","all":["HK"]}}}"#,
+        )
+        .unwrap();
+
+        let catalog = ProxyCatalog::from(raw);
+
+        assert_eq!(
+            catalog.groups[0].all[0].provider_name.as_deref(),
+            Some("Airport A")
+        );
     }
 
     #[test]

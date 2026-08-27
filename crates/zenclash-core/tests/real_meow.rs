@@ -90,7 +90,7 @@ impl IntegrationInputs {
             .map(|path| workspace_path(workspace, path))
             .expect("set ZENCLASH_MEOW_BINARY to a real meow-rs executable");
         let profile = std::env::var_os("ZENCLASH_CONFIG").map_or_else(
-            || workspace.join("examples/19facdf022b.yaml"),
+            || workspace.join("platforms/common/default.yaml"),
             |path| workspace_path(workspace, PathBuf::from(path)),
         );
         assert!(binary.is_file(), "missing meow-rs: {}", binary.display());

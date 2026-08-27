@@ -1,8 +1,8 @@
 use std::{os::unix::fs::MetadataExt, path::Path, time::Duration};
 
 use crate::{
-    platform_command, TunPermissionError, TunPermissionGrant, TunPermissionResult,
-    TunPermissionStatus,
+    platform_command, tun_permissions::binary_sha256, TunPermissionError, TunPermissionGrant,
+    TunPermissionResult, TunPermissionStatus,
 };
 
 const AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -30,8 +30,21 @@ pub(super) fn request_grant(binary: &Path) -> TunPermissionResult<TunPermissionG
     let path = binary
         .to_str()
         .ok_or_else(|| TunPermissionError::InvalidBinary("Linux 内核路径不是有效 UTF-8".into()))?;
-    run_pkexec(&["chown", "root:root", path])?;
-    run_pkexec(&["chmod", "u+s", path])?;
+    let expected = binary_sha256(binary)?;
+    let script = concat!(
+        "set -eu\n",
+        "path=$1\n",
+        "expected=$2\n",
+        "chown root:root -- \"$path\"\n",
+        "actual=$(sha256sum -- \"$path\")\n",
+        "actual=${actual%% *}\n",
+        "[ \"$actual\" = \"$expected\" ] || exit 65\n",
+        "chmod 4755 -- \"$path\"\n",
+        "verified=$(sha256sum -- \"$path\")\n",
+        "verified=${verified%% *}\n",
+        "if [ \"$verified\" != \"$expected\" ]; then chmod u-s -- \"$path\"; exit 66; fi\n"
+    );
+    run_pkexec(&["/bin/sh", "-c", script, "zenclash-tun", path, &expected])?;
     let verified = status(binary)?;
     if !verified.granted {
         return Err(TunPermissionError::Verification(verified.detail));

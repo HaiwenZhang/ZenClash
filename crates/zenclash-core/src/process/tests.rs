@@ -5,6 +5,19 @@ use parking_lot::{Mutex, RwLock};
 use super::*;
 
 #[test]
+fn controller_listener_conflict_is_detected_without_confusing_proxy_listener_errors() {
+    let controller = VecDeque::from([String::from(
+        "External controller listen error: listen tcp 127.0.0.1:19191: bind: address already in use",
+    )]);
+    let proxy = VecDeque::from([String::from(
+        "Start Mixed(http+socks) proxy listening at: 127.0.0.1:7890: address already in use",
+    )]);
+
+    assert!(controller_listener_error(&controller).is_some());
+    assert!(controller_listener_error(&proxy).is_none());
+}
+
+#[test]
 fn readiness_attempt_timeout_never_exceeds_remaining_deadline() {
     assert_eq!(
         readiness_attempt_timeout(Duration::from_millis(25)),
@@ -75,8 +88,13 @@ fn restart_replaces_the_child_and_preserves_process_owner() {
     ));
     std::fs::create_dir_all(&directory).unwrap();
     let binary = directory.join("mihomo");
-    std::fs::write(&binary, "#!/bin/sh\nsleep 30\n").unwrap();
+    std::fs::write(
+        &binary,
+        "#!/bin/sh\nif [ \"$1\" = '-t' ]; then exit 0; fi\nsleep 30\n",
+    )
+    .unwrap();
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(directory.join("profile.yaml"), "rules:\n  - MATCH,DIRECT\n").unwrap();
     let process = MihomoProcess::spawn(MihomoLaunchConfig {
         kind: CoreKind::Mihomo,
         binary,
@@ -94,4 +112,86 @@ fn restart_replaces_the_child_and_preserves_process_owner() {
     std::fs::remove_dir_all(directory).unwrap();
 
     assert_ne!(first_pid, second_pid);
+}
+
+#[cfg(unix)]
+#[test]
+fn rejected_restart_config_does_not_stop_the_running_child() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = std::env::temp_dir().join(format!(
+        "zenclash-process-restart-validation-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let binary = directory.join("mihomo");
+    std::fs::write(
+        &binary,
+        "#!/bin/sh\nif [ \"$1\" = '-t' ]; then grep -q invalid \"$5\" && exit 1; exit 0; fi\nsleep 30\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let profile = directory.join("profile.yaml");
+    std::fs::write(&profile, "rules:\n  - MATCH,DIRECT\n").unwrap();
+    let process = MihomoProcess::spawn(MihomoLaunchConfig {
+        kind: CoreKind::Mihomo,
+        binary,
+        config_file: profile.clone(),
+        home_dir: directory.join("data"),
+        endpoint: MihomoEndpoint::default(),
+        controller_override: None,
+    })
+    .unwrap();
+    let first_pid = process.snapshot().pid.unwrap();
+    std::fs::write(&profile, "invalid: true\n").unwrap();
+
+    let error = process.restart().unwrap_err();
+
+    assert!(error.to_string().contains("当前内核保持运行"));
+    assert_eq!(process.snapshot().pid, Some(first_pid));
+    process.stop().unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn stop_gives_the_child_a_graceful_sigterm_window() {
+    let directory = std::env::temp_dir().join(format!(
+        "zenclash-process-graceful-stop-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let marker = directory.join("terminated");
+    let ready = directory.join("ready");
+    let script = format!(
+        "trap 'printf terminated > {} ; exit 0' TERM; printf ready > {}; while true; do sleep 0.05; done",
+        marker.display(),
+        ready.display()
+    );
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(script)
+        .spawn()
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !ready.is_file() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        ready.is_file(),
+        "child did not finish installing its signal handler"
+    );
+    stop_running_child(&mut child).unwrap();
+
+    assert!(marker.is_file(), "child did not handle SIGTERM before exit");
+    std::fs::remove_dir_all(directory).unwrap();
 }

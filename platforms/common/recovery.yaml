@@ -1,0 +1,13 @@
+mixed-port: 0
+allow-lan: false
+mode: direct
+log-level: info
+ipv6: true
+external-controller: 127.0.0.1:9090
+secret: ""
+dns:
+  enable: false
+proxies: []
+proxy-groups: []
+rules:
+  - MATCH,DIRECT

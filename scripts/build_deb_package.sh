@@ -5,7 +5,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_root="$(cd "${script_dir}/.." && pwd)"
 version="${1:-${ZENCLASH_VERSION:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' "${project_root}/Cargo.toml" | head -n 1)}}"
 output_dir="${2:-${ZENCLASH_PACKAGE_DIR:-${project_root}/dist}}"
-profile_path="${ZENCLASH_CONFIG:-${project_root}/examples/19facdf022b.yaml}"
+profile_path="${ZENCLASH_CONFIG:-${project_root}/platforms/common/default.yaml}"
 cargo_output_root="${CARGO_TARGET_DIR:-${project_root}/target}"
 architecture="$(dpkg --print-architecture)"
 work_dir="$(mktemp -d)"
@@ -42,6 +42,8 @@ cargo build --release --locked -p zenclash-ui --bin zenclash
 install -Dm755 "${cargo_output_root}/release/zenclash" "${package_root}/usr/bin/zenclash"
 install -Dm755 "${mihomo_path}" "${package_root}/usr/lib/zenclash/mihomo"
 install -Dm644 "${profile_path}" "${package_root}/usr/lib/zenclash/profile.yaml"
+install -Dm644 "${project_root}/platforms/common/recovery.yaml" \
+  "${package_root}/usr/lib/zenclash/recovery.yaml"
 install -Dm644 "${project_root}/platforms/macos/ZenClash.png" \
   "${package_root}/usr/share/icons/hicolor/1024x1024/apps/zenclash.png"
 install -Dm644 "${project_root}/platforms/linux/zenclash.desktop" \
@@ -67,5 +69,6 @@ dpkg-deb --build --root-owner-group "${package_root}" "${package_path}"
 dpkg-deb --info "${package_path}" >/dev/null
 dpkg-deb --contents "${package_path}" >/dev/null
 dpkg-deb --contents "${package_path}" | grep -Eq '[[:space:]]\./usr/lib/zenclash/mihomo$'
+dpkg-deb --contents "${package_path}" | grep -Eq '[[:space:]]\./usr/lib/zenclash/recovery.yaml$'
 
 echo "Built ${package_path}"

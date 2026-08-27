@@ -28,12 +28,12 @@ SSID 自动策略，以及 FlClash 的 Android/VPN 专属功能。全局快捷�
 
 | 功能 | 状态 | ZenClash 现状 | 尚缺 |
 | --- | --- | --- | --- |
-| 启动/附加内核 | 已实现 | 双内核独立子进程：Mihomo 默认；meow-rs 需在设置页显式选择并重启。支持各自环境变量、随包/工作区/PATH 发现、隔离数据目录、`/version` 就绪验证及外部 controller | 不做自动/静默内核回退 |
-| 真实配置启动 | 已实现 | 启动配置可指向真实 Clash YAML；集成测试使用 `examples/19facdf022b.yaml` | 配置迁移向导 |
+| 启动/附加内核 | 已实现 | 双内核独立子进程：Mihomo 默认；meow-rs 需在设置页显式选择并重启。支持各自环境变量、随包/工作区/PATH 发现、隔离数据目录、256-bit 随机控制器密钥、`/version` 就绪验证及外部 controller；controller 端口被抢占时只对该错误重新分配并重试。首选内核失败可带明确通知恢复到最后可用候选，但不改写首选项；全部候选失败时进入显式离线页，不连接默认 9090，也不展示伪运行数据 | 不静默改写首选内核；外部 controller 生命周期由外部服务负责 |
+| 真实配置启动 | 已实现 | 启动配置可指向真实 Clash YAML并在创建子进程前执行目标内核 `-t` 预检；开发、安装包与无私有配置的集成测试使用 `platforms/common/default.yaml` 安全直连配置。活动配置被拒绝时，所有安装包均从独立 `recovery.yaml` 启动无代理监听的直连恢复实例，原活动选择和源 YAML 不改写 | 配置迁移向导 |
 | 运行模式 | 已实现 | Rule / Global / Direct 持久化并定时回读；两种内核均使用其真实 controller API | Script 模式与自定义模式 |
-| 常用运行参数 | 部分实现 | IPv6、allow-lan、TCP 并发、统一延迟、监听端口、绑定地址、出口接口和日志等级均写入受控 YAML。Mihomo 完整热重载；meow-rs 写入 `effective.yaml` 后重启真实托管进程并等待 controller 回读 | 外部 meow-rs 无法事务重启时明确拒绝完整配置写入；低频高级字段延后 |
+| 常用运行参数 | 部分实现 | IPv6、allow-lan、TCP 并发、统一延迟、监听端口、绑定地址、出口接口和日志等级均写入受控 YAML。表单对源配置中缺失的字段只显示 placeholder，保存不会注入猜测默认值。提交前按 TCP/UDP、IPv4/IPv6 与 allow-lan 作用域探测端口并拒绝配置内重复监听；启动时仅对实际冲突端口生成会话级回退，不篡改持久配置。Mihomo 完整热重载；meow-rs 写入 `effective.yaml` 后重启真实托管进程并等待 controller 回读 | 外部 meow-rs 无法事务重启时明确拒绝完整配置写入；低频高级字段延后 |
 | 内核重载 / 重启 | 已实现 | Mihomo 使用完整 reload API；meow-rs 不冒充完整 `/configs` 兼容，而以“暂存配置 → 重启 → 等待就绪 → 失败恢复旧缓存并重启”的事务实现 Profile、覆写、TUN、备份和设置写入 | 外部 controller 的进程生命周期仍由外部服务负责 |
-| 内核升级 | 已实现 | Mihomo 支持 `/upgrade` 和指定 Release 原子安装/回滚；能力检测会在 meow-rs 下禁用这两条 Mihomo 专属路径 | meow-rs 发行包更新通道待其上游提供稳定制品后单独接入 |
+| 内核升级 | 已实现 | Mihomo 仅暴露指定官方 Release 的安全安装路径：下载 SHA-256 校验、候选 `-v` 身份检查、候选 `-t` 验证当前配置、原子安装与失败回滚；不再从 UI 调用无法由应用事务保护的原生 `/upgrade` | meow-rs 发行包更新通道待其上游提供稳定制品后单独接入 |
 | GeoData / 外部 UI 升级 | 部分实现 | Mihomo 可调用 `/configs/geo` 与 `/upgrade/ui`；meow-rs 明确禁用不支持的接口并显示原因。两种内核都能通过完整配置事务保存资源设置 | URL/间隔编辑器、独立下载哈希校验和资源回滚 |
 | Smart Core / AI 最优节点 | 延后 | 无 Smart group 权重或缓存 API | clash-party 特有扩展，不属于当前必要闭环 |
 
@@ -73,8 +73,8 @@ External UI 更新、MRS 转换或完整 UDP 连接追踪，因此 UI 通过静�
 
 | 功能 | 状态 | ZenClash 现状 | 尚缺 |
 | --- | --- | --- | --- |
-| 系统代理 | 已实现 | macOS `networksetup`、Windows WinINET、Linux GNOME `gsettings` 均执行真实系统写入；支持 Manual/PAC、应用内 PAC HTTP 服务、自定义脚本、host 与 bypass 校验/持久化，主页面与状态栏共享同一 controller，写后回读且失败恢复系统状态 | KDE/其他 Linux 桌面 |
-| TUN 开关 | 已实现 | UI 与状态栏均通过受控 YAML 持久化；Mihomo 热重载，托管 meow-rs 事务重启；TUN 页读取真实内核权限，macOS/Linux 经系统授权写入 root owner + setuid 后回读，Windows 请求管理员重启 | Windows 防火墙与 UWP 回环豁免属于后续平台增强 |
+| 系统代理 | 已实现 | macOS `networksetup`、Windows WinINET、Linux GNOME `gsettings` 均执行真实系统写入；支持 Manual/PAC、应用内 PAC HTTP 服务、自定义脚本、host 与 bypass 校验/持久化，主页面、状态栏、启动恢复与退出共享同一事务锁，写后回读且失败恢复系统状态；持久记录 ZenClash 最后一次写入的精确 service/host/port/bypass 或 PAC URL。Profile/端口变化时按真实 Mixed/HTTP 端口重同步；离线、内核退出和应用退出时仅释放仍与该记录完全一致的代理，用户或其他程序后来接管的系统代理不会被清除 | KDE/其他 Linux 桌面 |
+| TUN 开关 | 已实现 | UI 与状态栏均通过受控 YAML 持久化；Mihomo 热重载，托管 meow-rs 事务重启；TUN 页读取真实内核权限。macOS/Linux 在一次授权事务中核对待授权内核的 SHA-256、设置 root owner + setuid、再次核对摘要并回读权限，成功后重启托管内核并等待同一 controller 就绪；Windows 退出后释放单实例锁，再通过 RunAs 重启 | 专用特权 helper/service 尚未移植；Windows 防火墙与 UWP 回环豁免属于后续平台增强 |
 | TUN 详细参数 | 已实现 | stack、device、MTU、DNS hijack、route include/exclude、auto-route、auto-redirect、auto-detect-interface、strict-route 均可编辑、持久化并热重载 | 无关键缺口 |
 | 网络接口 | 已实现 | 读取默认接口、网关、本机地址和 DNS；可将 Mihomo 固定到当前真实系统接口或恢复自动选择，写入受控 YAML 并由 Mihomo 验收 | 多网卡完整枚举和优先级排序 |
 | DNS | 已实现 | 开关、增强模式、Fake-IP、各类 Nameserver、Fallback/GeoIP、Nameserver Policy 和 Hosts 均通过受控 YAML 持久化并热重载 | 独立的逐行增删交互可继续优化 |
@@ -90,10 +90,11 @@ External UI 更新、MRS 转换或完整 UDP 连接追踪，因此 UI 通过静�
 | 悬浮流量窗 | 已实现 | GPUI 原生窗口、实时上下行 | always-on-top 和位置/大小持久化设置 |
 | 主题 | 部分实现 | GPUI 明暗主题可立即切换并持久化，也可跟随操作系统外观事件实时切换 | 主题包、导入/编辑/应用 |
 | 自动启动 | 已实现 | 设置页直接回读并控制原生系统启动项：macOS LaunchAgent、Windows 计划任务并回退 HKCU Run、Linux XDG autostart；启停后校验状态和当前可执行文件路径 | Windows 以最高权限启动需结合后续 TUN 权限安装流程 |
+| 单实例与重启交接 | 已实现 | 数据目录使用操作系统文件锁保证单实例，锁随进程异常退出自动释放；普通重启和 Windows 提权重启均先完成系统代理/内核清理并退出 GPUI，释放锁后才创建新进程，避免新旧实例竞争 | 尚未实现把第二次启动参数转发给已运行窗口 |
 | 快捷键 | 延后 | 已有应用内动作和状态栏入口；尚未注册系统级全局快捷键 | 不是代理闭环的阻塞项，避免为少量快捷操作引入额外平台权限与依赖 |
 | 多 shell 环境变量 | 已实现 | 状态栏原生子菜单可复制 Bash/Zsh、Command Prompt、PowerShell、Fish、Nushell 命令，并使用当前 Mihomo 代理端口 | 无关键缺口 |
 | 应用更新 | 延后 | 有多系统 release 构建 CI，不把“下载并覆盖自己”误标为已实现 | 等代码签名、公证和可信更新元数据完整后再开发 |
-| 设置持久化 | 部分实现 | 版本化 JSON 原子存储已覆盖主题、流量图标显隐、流量历史启停与保留天数、日志文件、网络探测和系统代理 bypass；旧版本设置可用默认字段迁移，新值有范围校验；普通字段更新在同一锁内读取最新快照后原子写入，避免后台任务互相覆盖，系统代理可逆更新另使用乐观并发检查 | 完整 AppConfig、显式迁移版本、重置和其余偏好 |
+| 设置持久化 | 部分实现 | 版本化 JSON 原子存储已覆盖主题、流量图标显隐、流量历史启停与保留天数、日志文件、网络探测、系统代理接管状态/模式/host/bypass/PAC；启动与 UI 共享同一已验证快照，不再重复读取。旧版本设置可用默认字段迁移，新值有范围校验；普通字段更新在同一锁内读取最新快照后原子写入，避免后台任务互相覆盖，系统代理可逆更新另使用乐观并发检查。损坏/过大/不兼容的偏好、Profile 索引、受控 YAML 和覆写清单会分别改名隔离并在 UI 提示，原 YAML 文件保留；权限和磁盘 I/O 错误仍直接失败 | 完整 AppConfig、显式迁移版本、重置和其余偏好 |
 
 ## 数据、备份和扩展
 

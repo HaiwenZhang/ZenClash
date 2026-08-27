@@ -106,7 +106,7 @@ jobs:
               --header 'User-Agent: clash.meta' \
               "${PROFILE_URL}" --output "${RUNNER_TEMP}/real-profile.yaml"
           else
-            cp examples/19facdf022b.yaml "${RUNNER_TEMP}/real-profile.yaml"
+            cp platforms/common/default.yaml "${RUNNER_TEMP}/real-profile.yaml"
           fi
 
       - name: Download verified Mihomo

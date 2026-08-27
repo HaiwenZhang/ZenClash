@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use super::super::{
     div, h_flex, px, setting_card, v_flex, Button, ButtonVariants, Context, CoreBinaryInfo,
     CoreKind, Disableable, FluentBuilder, Icon, IconName, IntoElement, MihomoLaunchConfig, Page,
-    ParentElement, PathPromptOptions, PreferencesRestored, RuntimePage, Selectable, Sizable,
-    Styled,
+    ParentElement, PathPromptOptions, PreferencesRestored, RuntimeData, RuntimePage, Selectable,
+    Sizable, Styled,
 };
 
 #[derive(Default)]
@@ -50,7 +50,15 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let requested = self.preferences.core_kind;
-        let recovered = requested != self.core_kind;
+        let online = self.runtime_core_available();
+        let recovered = online && requested != self.core_kind;
+        let status_color = if !online {
+            theme.danger
+        } else if recovered {
+            theme.warning
+        } else {
+            theme.success
+        };
         setting_card("运行内核", theme)
             .child(
                 h_flex()
@@ -68,26 +76,18 @@ impl RuntimePage {
                                 div()
                                     .size(px(38.))
                                     .rounded(theme.radius)
-                                    .bg(if recovered {
-                                        theme.warning.opacity(0.14)
-                                    } else {
-                                        theme.success.opacity(0.14)
-                                    })
+                                    .bg(status_color.opacity(0.14))
                                     .flex()
                                     .items_center()
                                     .justify_center()
                                     .child(
-                                        Icon::new(if recovered {
+                                        Icon::new(if !online || recovered {
                                             IconName::TriangleAlert
                                         } else {
                                             IconName::SquareTerminal
                                         })
                                         .size_5()
-                                        .text_color(if recovered {
-                                            theme.warning
-                                        } else {
-                                            theme.success
-                                        }),
+                                        .text_color(status_color),
                                     ),
                             )
                             .child(
@@ -97,19 +97,28 @@ impl RuntimePage {
                                         div()
                                             .text_sm()
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .child(format!(
-                                                "当前运行 {} · 下次启动 {}",
-                                                self.core_kind.display_name(),
-                                                requested.display_name()
-                                            )),
+                                            .child(if online {
+                                                format!(
+                                                    "当前运行 {} · 下次启动 {}",
+                                                    self.core_kind.display_name(),
+                                                    requested.display_name()
+                                                )
+                                            } else {
+                                                format!(
+                                                    "内核未运行 · 下次启动 {}",
+                                                    requested.display_name()
+                                                )
+                                            }),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
                                             .text_color(theme.muted_foreground)
-                                            .child(if recovered {
-                                                "首选内核不可用时已使用最近可运行内核；首选项仍保留"
-                                            } else {
+                                    .child(if !online {
+                                        "应用处于离线恢复模式；选择可用文件后重启即可重新接管"
+                                    } else if recovered {
+                                        "首选内核不可用时已使用最近可运行内核；首选项仍保留"
+                                    } else {
                                                 "切换前执行真实 -v 检测；文件移动或损坏时可恢复到最近可运行内核"
                                             }),
                                     ),
@@ -152,7 +161,7 @@ impl RuntimePage {
     ) -> gpui::AnyElement {
         let state = self.core_management.get(kind);
         let requested = self.preferences.core_kind == kind;
-        let running = self.core_kind == kind;
+        let running = self.core_kind == kind && self.runtime_core_available();
         let index = core_index(kind);
         let (status, status_color, path, version) = if state.checking {
             (
@@ -315,6 +324,13 @@ impl RuntimePage {
                     ),
             )
             .into_any_element()
+    }
+
+    fn runtime_core_available(&self) -> bool {
+        self.process
+            .as_ref()
+            .is_some_and(|process| process.is_running())
+            || matches!(self.data, RuntimeData::Settings { .. })
     }
 
     pub(in crate::pages::runtime) fn refresh_core_management(&mut self, cx: &mut Context<Self>) {

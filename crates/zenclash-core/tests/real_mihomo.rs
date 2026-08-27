@@ -10,10 +10,10 @@ use std::{
 };
 
 use zenclash_core::{
-    ControlledConfigStore, LogMonitor, MihomoClient, MihomoLaunchConfig, MihomoLogLevel,
-    MihomoProcess, NetworkLatencyTarget, NetworkProbeRoute, NetworkProbeService, ProfileStore,
-    RemoteProfileOptions, RulesetBehavior, RulesetConverter, SystemNetworkSnapshot, TrafficMonitor,
-    YamlOverrideStore,
+    ControlledConfigStore, LogMonitor, MihomoClient, MihomoEndpoint, MihomoLaunchConfig,
+    MihomoLogLevel, MihomoProcess, NetworkLatencyTarget, NetworkProbeRoute, NetworkProbeService,
+    ProfileStore, RemoteProfileOptions, RulesetBehavior, RulesetConverter, SystemNetworkSnapshot,
+    TrafficMonitor, YamlOverrideStore,
 };
 
 /// This test intentionally has no mock server. Set `ZENCLASH_MIHOMO_BINARY` to
@@ -24,8 +24,11 @@ async fn drives_the_supplied_profile_through_a_real_mihomo_process() {
     let inputs = IntegrationInputs::from_env();
     inputs.seed_real_geodata();
     verify_real_ruleset_conversion(&inputs);
+    verify_real_listener_conflict_fallback(&inputs).await;
     let process = start_mihomo(&inputs).await;
-    let client = MihomoClient::new(process.endpoint().clone()).expect("real client");
+    let client = MihomoClient::new(process.endpoint().clone())
+        .expect("real client")
+        .with_config_validator(process.config_validator());
     let persistent_logs = LogMonitor::start(
         &tokio::runtime::Handle::current(),
         process.endpoint().clone(),
@@ -52,6 +55,54 @@ async fn drives_the_supplied_profile_through_a_real_mihomo_process() {
     verify_managed_restart(&process, &client, &inputs.profile, &inputs.home).await;
 
     process.stop().expect("stop real Mihomo");
+}
+
+async fn verify_real_listener_conflict_fallback(inputs: &IntegrationInputs) {
+    let occupied = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .expect("reserve a conflicting real proxy port");
+    let original_port = occupied.local_addr().unwrap().port();
+    let controller_reservation = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .expect("reserve listener fallback controller");
+    let controller = controller_reservation.local_addr().unwrap();
+    let root = inputs.home.join("listener-fallback-integration");
+    std::fs::create_dir_all(&root).expect("create listener fallback integration directory");
+    let profile = root.join("source.yaml");
+    let source = format!(
+        "mixed-port: {original_port}\nallow-lan: false\nmode: rule\nexternal-controller: {controller}\nproxies: []\nproxy-groups: []\nrules:\n  - MATCH,DIRECT\n"
+    );
+    std::fs::write(&profile, &source).expect("write listener fallback source profile");
+    let controlled = ControlledConfigStore::new(root.join("controlled"));
+    let runtime_profile = controlled
+        .materialize(&profile)
+        .expect("materialize listener fallback profile");
+    let fallbacks = controlled
+        .resolve_startup_listener_conflicts()
+        .expect("resolve occupied listener with a session fallback");
+    assert_eq!(fallbacks.len(), 1);
+    assert_eq!(fallbacks[0].original, original_port);
+    assert_eq!(std::fs::read_to_string(&profile).unwrap(), source);
+
+    let endpoint = MihomoEndpoint::with_random_secret(controller.to_string())
+        .expect("generate listener fallback controller secret");
+    drop(controller_reservation);
+    let launch = MihomoLaunchConfig::new(&inputs.binary, runtime_profile, root.join("home"))
+        .expect("build listener fallback launch")
+        .with_controller_endpoint(endpoint);
+    launch
+        .validate_config()
+        .expect("real Mihomo validates the fallback runtime profile");
+    let process = MihomoProcess::spawn(launch).expect("start real Mihomo on fallback port");
+    process
+        .wait_until_ready(Duration::from_secs(20))
+        .await
+        .expect("real Mihomo becomes ready on fallback port");
+    let actual = MihomoClient::new(process.endpoint().clone())
+        .expect("listener fallback client")
+        .runtime_config()
+        .await
+        .expect("read listener fallback runtime config");
+    assert_eq!(actual.mixed_port, fallbacks[0].current);
+    process.stop().expect("stop listener fallback Mihomo");
 }
 
 async fn verify_controlled_mode_switch(client: &MihomoClient, profile: &Path, home: &Path) {
@@ -340,7 +391,7 @@ impl IntegrationInputs {
             .map(|path| workspace_path(workspace, path))
             .expect("set ZENCLASH_MIHOMO_BINARY to a real Mihomo executable");
         let profile = std::env::var_os("ZENCLASH_CONFIG").map_or_else(
-            || workspace.join("examples/19facdf022b.yaml"),
+            || workspace.join("platforms/common/default.yaml"),
             |path| workspace_path(workspace, PathBuf::from(path)),
         );
         assert!(profile.is_file(), "missing profile: {}", profile.display());
@@ -386,9 +437,11 @@ async fn start_mihomo(inputs: &IntegrationInputs) -> Arc<MihomoProcess> {
     let runtime_profile = controlled
         .materialize(&inputs.profile)
         .expect("materialize managed startup profile");
+    let endpoint = MihomoEndpoint::with_random_secret(&inputs.controller)
+        .expect("generate authenticated integration controller endpoint");
     let launch = MihomoLaunchConfig::new(&inputs.binary, runtime_profile, inputs.home.clone())
         .expect("real launch config")
-        .with_controller_override(&inputs.controller);
+        .with_controller_endpoint(endpoint);
     let process = MihomoProcess::spawn(launch).expect("start real Mihomo");
     process
         .wait_until_ready(Duration::from_secs(20))
@@ -534,7 +587,7 @@ fn advanced_config_update(system_interface: &str) -> serde_json::Value {
             "direct-nameserver": ["223.5.5.5"],
             "fallback": ["https://1.1.1.1/dns-query"],
             "fallback-filter": {
-                "geoip": true,
+                "geoip": false,
                 "geoip-code": "CN",
                 "ipcidr": ["240.0.0.0/4"],
                 "domain": ["+.google.com"]
@@ -717,19 +770,22 @@ fn serve_subscription(profile: &Path) -> (String, thread::JoinHandle<()>) {
 
 async fn verify_catalog_apis(client: &MihomoClient) {
     let catalog = client.proxy_catalog().await.expect("GET /proxies");
-    assert!(catalog.proxy_count >= 50, "unexpected profile proxy count");
-    assert!(catalog.groups.len() >= 10, "unexpected profile group count");
-    let group = catalog.groups.first().expect("at least one proxy group");
-    assert!(!group.now.is_empty());
-    client
-        .change_proxy(&group.name, &group.now)
-        .await
-        .expect("PUT /proxies/:group");
+    assert!(
+        catalog.proxy_count > 0,
+        "Mihomo did not expose built-in proxies"
+    );
+    if let Some(group) = catalog.groups.first() {
+        assert!(!group.now.is_empty());
+        client
+            .change_proxy(&group.name, &group.now)
+            .await
+            .expect("PUT /proxies/:group");
+    }
 
     let rules = client.rule_catalog().await.expect("GET /rules");
     assert!(
-        rules.rules.len() >= 9_000,
-        "expected the supplied full rule set"
+        !rules.rules.is_empty(),
+        "Mihomo did not expose active rules"
     );
     let (mutable_rule_index, originally_disabled) = rules
         .rules
@@ -748,7 +804,13 @@ async fn verify_catalog_apis(client: &MihomoClient) {
         .proxy_provider_catalog()
         .await
         .expect("GET /providers/proxies");
-    assert!(providers.providers.len() >= 10);
+    assert!(
+        providers
+            .providers
+            .values()
+            .all(|provider| !provider.name.is_empty()),
+        "provider identities must not be empty"
+    );
 
     let connections = client
         .connections_snapshot()

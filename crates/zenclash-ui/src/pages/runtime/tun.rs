@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::{
     config_input_row, empty_dash, h_flex, info_row, json, message_banner, setting_card,
     setting_switch, v_flex, Button, ButtonVariants, Context, Disableable, IconName, Input,
@@ -96,14 +98,32 @@ impl RuntimePage {
         let Some(token) = self.begin_mutation(Page::Tun) else {
             return;
         };
+        let process = self.process.clone();
         let task = self.runtime.spawn(async move {
-            tokio::task::spawn_blocking(move || {
+            let grant = tokio::task::spawn_blocking(move || {
                 TunPermissionManager::new(binary)
                     .and_then(|manager| manager.request_grant())
                     .map_err(|error| error.to_string())
             })
             .await
-            .map_err(|error| format!("TUN 权限任务异常结束：{error}"))?
+            .map_err(|error| format!("TUN 权限任务异常结束：{error}"))??;
+            #[cfg(unix)]
+            if matches!(grant, TunPermissionGrant::Ready(_)) {
+                let process = process.ok_or_else(|| {
+                    "TUN 权限已写入，但当前不是 ZenClash 托管内核；请重启应用后再启用 TUN"
+                        .to_owned()
+                })?;
+                let restart = process.clone();
+                tokio::task::spawn_blocking(move || restart.restart())
+                    .await
+                    .map_err(|error| format!("TUN 授权后重启内核任务异常结束：{error}"))?
+                    .map_err(|error| error.to_string())?;
+                process
+                    .wait_until_ready(Duration::from_secs(20))
+                    .await
+                    .map_err(|error| format!("TUN 授权后内核未能重新就绪：{error}"))?;
+            }
+            Ok::<_, String>(grant)
         });
         cx.spawn(async move |this, cx| {
             let result = task
@@ -115,11 +135,14 @@ impl RuntimePage {
                 match result {
                     Ok(TunPermissionGrant::Ready(_)) => {
                         if this.is_page_task_current(token) {
-                            this.notice = Some("TUN 权限已安装并通过系统状态回读".into());
+                            this.notice =
+                                Some("TUN 权限已安装，受管内核已重启并通过控制器就绪检查".into());
                             this.refresh(cx);
                         }
                     }
-                    Ok(TunPermissionGrant::RelaunchRequested) => cx.quit(),
+                    Ok(TunPermissionGrant::RelaunchRequested) => {
+                        cx.emit(super::ElevatedRestartRequested);
+                    }
                     Err(error) => this.set_page_error(token, error),
                 }
                 cx.notify();

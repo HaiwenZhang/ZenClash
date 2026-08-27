@@ -1,11 +1,24 @@
 use std::{os::unix::fs::MetadataExt, path::Path, time::Duration};
 
 use crate::{
-    platform_command, TunPermissionError, TunPermissionGrant, TunPermissionResult,
-    TunPermissionStatus,
+    platform_command, tun_permissions::binary_sha256, TunPermissionError, TunPermissionGrant,
+    TunPermissionResult, TunPermissionStatus,
 };
 
 const AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(120);
+const AUTHORIZATION_SCRIPT: &str = concat!(
+    "on run argv\n",
+    "set corePath to quoted form of item 1 of argv\n",
+    "set expectedHash to quoted form of item 2 of argv\n",
+    "set commandText to \"set -eu; /usr/sbin/chown root:admin -- \" & corePath & ",
+    "\"; actual=$(/usr/bin/shasum -a 256 -- \" & corePath & \" | /usr/bin/awk '{print $1}'); \" & ",
+    "\"if [ \\\"$actual\\\" != \" & expectedHash & \" ]; then exit 65; fi; \" & ",
+    "\"/bin/chmod 4755 -- \" & corePath & \"; verified=$(/usr/bin/shasum -a 256 -- \" & corePath & ",
+    "\" | /usr/bin/awk '{print $1}'); if [ \\\"$verified\\\" != \" & expectedHash & ",
+    "\" ]; then /bin/chmod u-s -- \" & corePath & \"; exit 66; fi\"\n",
+    "do shell script commandText with administrator privileges\n",
+    "end run"
+);
 
 pub(super) fn status(binary: &Path) -> TunPermissionResult<TunPermissionStatus> {
     let metadata = binary.metadata().map_err(|error| {
@@ -27,19 +40,13 @@ pub(super) fn status(binary: &Path) -> TunPermissionResult<TunPermissionStatus> 
 }
 
 pub(super) fn request_grant(binary: &Path) -> TunPermissionResult<TunPermissionGrant> {
-    let script = concat!(
-        "on run argv\n",
-        "set corePath to quoted form of item 1 of argv\n",
-        "do shell script \"/usr/sbin/chown root:admin -- \" & corePath & ",
-        " \" && /bin/chmod u+s -- \" & corePath with administrator privileges\n",
-        "end run"
-    );
     let path = binary
         .to_str()
         .ok_or_else(|| TunPermissionError::InvalidBinary("macOS 内核路径不是有效 UTF-8".into()))?;
+    let expected = binary_sha256(binary)?;
     let output = platform_command::output_with_timeout(
         "/usr/bin/osascript",
-        &["-e", script, path],
+        &["-e", AUTHORIZATION_SCRIPT, path, &expected],
         AUTHORIZATION_TIMEOUT,
     )
     .map_err(TunPermissionError::Platform)?;
@@ -67,5 +74,29 @@ mod tests {
         assert!(!status.granted);
         assert!(status.can_request);
         assert_eq!(status.binary, binary);
+    }
+
+    #[test]
+    fn authorization_applescript_compiles_before_any_privilege_prompt() {
+        let output = std::env::temp_dir().join(format!(
+            "zenclash-tun-authorization-{}-{}.scpt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let compiled = std::process::Command::new("/usr/bin/osacompile")
+            .args(["-e", AUTHORIZATION_SCRIPT, "-o"])
+            .arg(&output)
+            .output()
+            .unwrap();
+
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        std::fs::remove_file(output).unwrap();
     }
 }

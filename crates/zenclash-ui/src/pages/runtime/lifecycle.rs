@@ -1,9 +1,9 @@
 use super::{
     load_page, load_page_with_binary, AppContext, ConfigInputs, Context, ControlledConfigStore,
     Duration, HashSet, InputEvent, InputState, LiveTrafficSample, MihomoLogLevel, Page,
-    PageTaskToken, ProfileActivated, ProfileCatalog, ProfileStore, RuntimeConfig, RuntimeData,
-    RuntimePage, RuntimePageServices, Value, VecDeque, Window, YamlOverrideCatalog,
-    YamlOverrideStore,
+    PageTaskToken, ProfileActivated, ProfileCatalog, ProfileStore, RuntimeConfig,
+    RuntimeConfigApplied, RuntimeData, RuntimePage, RuntimePageServices, Value, VecDeque, Window,
+    YamlOverrideCatalog, YamlOverrideStore,
 };
 
 struct InitialPersistentState {
@@ -81,6 +81,43 @@ fn empty_json_object() -> Value {
 }
 
 impl RuntimePage {
+    pub(crate) fn report_managed_core_state(&mut self, running: bool, cx: &mut Context<Self>) {
+        const FAILURE_PREFIX: &str = "托管内核意外退出";
+        if running {
+            if self
+                .startup_error
+                .as_deref()
+                .is_some_and(|error| error.starts_with(FAILURE_PREFIX))
+            {
+                self.startup_error = None;
+                self.notice = Some("托管内核已重新启动，运行状态与系统代理正在恢复".into());
+            }
+        } else {
+            self.startup_error = Some(format!(
+                "{FAILURE_PREFIX}，ZenClash 正在释放其接管的系统代理以避免网络中断。请在“内核”页面查看日志并重启。"
+            ));
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn preferences_restored_from_app(
+        &mut self,
+        preferences: super::AppPreferences,
+        cx: &mut Context<Self>,
+    ) {
+        self.preferences = preferences;
+        cx.notify();
+    }
+
+    pub(crate) fn report_system_proxy_reconcile_error(
+        &mut self,
+        error: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.error = Some(format!("系统代理与新内核配置同步失败：{error}"));
+        cx.notify();
+    }
+
     pub(crate) fn profile_updated_in_background(
         &mut self,
         outcome: super::profiles::workflow::BackgroundUpdateOutcome,
@@ -128,6 +165,7 @@ impl RuntimePage {
             system_proxy_controller,
             traffic_history_store,
             startup_notice,
+            startup_error,
         } = services;
         let InitialPersistentState {
             profile_store,
@@ -213,6 +251,7 @@ impl RuntimePage {
             mutating: false,
             closing_connections: HashSet::new(),
             error: error.or(webdav_error),
+            startup_error,
             notice: startup_notice,
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![
@@ -343,7 +382,13 @@ impl RuntimePage {
                             this.refresh_network_probe(cx);
                         }
                     }
-                    Err(error) => this.error = Some(error),
+                    Err(error) => {
+                        if this.startup_error.is_none() {
+                            this.error = Some(error);
+                        } else {
+                            tracing::debug!(%error, "offline recovery controller probe failed");
+                        }
+                    }
                 }
                 cx.notify();
             });
@@ -413,12 +458,13 @@ impl RuntimePage {
                 this.mutating = false;
                 match result {
                     Ok((data, controlled_config)) => {
+                        if let Some(level) = requested_log_level {
+                            this.log_monitor.set_level(level);
+                        }
+                        this.controlled_config = controlled_config;
+                        this.config_preview = None;
+                        cx.emit(RuntimeConfigApplied);
                         if this.replace_page_data(token, data) {
-                            if let Some(level) = requested_log_level {
-                                this.log_monitor.set_level(level);
-                            }
-                            this.controlled_config = controlled_config;
-                            this.config_preview = None;
                             this.notice = Some(if uses_restart {
                                 format!(
                                     "{}（{} 已重启并通过控制器验收）",

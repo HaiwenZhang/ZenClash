@@ -12,6 +12,16 @@ pub(in crate::pages::runtime) mod webdav;
 pub(in crate::pages::runtime) use core_management::CoreManagementUiState;
 
 impl RuntimePage {
+    pub(super) fn render_offline_settings(
+        &self,
+        theme: &gpui_component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        v_flex()
+            .gap_4()
+            .child(self.render_core_management(theme, cx))
+    }
+
     pub(super) fn render_settings(
         &self,
         theme: &gpui_component::Theme,
@@ -297,9 +307,7 @@ impl RuntimePage {
                     Ok(preferences) if this.is_page_task_current(token) => {
                         this.preferences = preferences.clone();
                         this.notice = Some(success.into());
-                        cx.emit(PreferencesRestored {
-                            preferences: preferences.clone(),
-                        });
+                        cx.emit(PreferencesRestored { preferences });
                     }
                     Ok(_) => {}
                     Err(error) => this.set_page_error(token, error),

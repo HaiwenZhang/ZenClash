@@ -37,7 +37,11 @@ impl ZenClashApp {
                 }
             }
             TrayCommand::CopyEnvironment { port, shell } => {
-                cx.write_to_clipboard(ClipboardItem::new_string(proxy_environment(shell, port)));
+                if let Some(environment) = proxy_environment(shell, port) {
+                    cx.write_to_clipboard(ClipboardItem::new_string(environment));
+                } else {
+                    tracing::warn!("cannot copy proxy environment without a live HTTP/Mixed port");
+                }
             }
             TrayCommand::LightMode => cx.hide(),
             TrayCommand::Restart => {
@@ -72,24 +76,106 @@ impl ZenClashApp {
     }
 
     fn start_system_proxy_command(&mut self, enabled: bool, port: u16, cx: &mut Context<Self>) {
-        let bypass = self.preferences.system_proxy_bypass.clone();
-        let mode = self.preferences.system_proxy_mode;
-        let host = self.preferences.system_proxy_host.clone();
-        let pac_script = self.preferences.system_proxy_pac_script.clone();
         let controller = self.system_proxy_controller.clone();
+        let store = self.preferences_store.clone();
         let task = self.runtime.spawn(async move {
             tokio::task::spawn_blocking(move || {
-                controller.set_enabled(enabled, mode, &host, port, &bypass, &pac_script)
+                let store =
+                    store.ok_or_else(|| "应用设置存储不可用；无法记录系统代理所有权".to_owned())?;
+                let operation = controller.begin_operation();
+                let expected = store.load().map_err(|error| error.to_string())?;
+                let ownership = if enabled {
+                    Some(
+                        operation
+                            .apply(
+                                true,
+                                expected.system_proxy_mode,
+                                &expected.system_proxy_host,
+                                port,
+                                &expected.system_proxy_bypass,
+                                &expected.system_proxy_pac_script,
+                            )
+                            .map_err(|error| error.to_string())?
+                            .ok_or_else(|| {
+                                "系统代理启用成功但没有返回所有权证据".to_owned()
+                            })?,
+                    )
+                } else {
+                    if let Some(ownership) = &expected.system_proxy_ownership {
+                        operation
+                            .release_if_owned(ownership)
+                            .map_err(|error| error.to_string())?;
+                    } else {
+                        operation
+                            .set_enabled(
+                                false,
+                                expected.system_proxy_mode,
+                                "",
+                                0,
+                                &[],
+                                "",
+                            )
+                            .map_err(|error| error.to_string())?;
+                    }
+                    None
+                };
+                match store.update(|preferences| {
+                    preferences.system_proxy_enabled = enabled;
+                    preferences.system_proxy_ownership.clone_from(&ownership);
+                }) {
+                    Ok(preferences) => Ok(preferences),
+                    Err(error) => {
+                        let rollback = operation.apply(
+                            expected.system_proxy_enabled,
+                            expected.system_proxy_mode,
+                            &expected.system_proxy_host,
+                            port,
+                            &expected.system_proxy_bypass,
+                            &expected.system_proxy_pac_script,
+                        );
+                        match rollback {
+                            Ok(restored_ownership) => {
+                                if restored_ownership != expected.system_proxy_ownership {
+                                    if let Some(restored_ownership) = restored_ownership {
+                                        if let Err(ownership_error) = store.update(|preferences| {
+                                            preferences.system_proxy_ownership =
+                                                Some(restored_ownership.clone());
+                                        }) {
+                                            let release =
+                                                operation.release_if_owned(&restored_ownership);
+                                            return Err(match release {
+                                                Ok(_) => format!(
+                                                    "保存系统代理开关失败：{error}；恢复所有权记录也失败：{ownership_error}，系统代理已安全关闭"
+                                                ),
+                                                Err(release_error) => format!(
+                                                    "保存系统代理开关失败：{error}；恢复所有权记录失败：{ownership_error}；安全关闭也失败：{release_error}"
+                                                ),
+                                            });
+                                        }
+                                    }
+                                }
+                                Err(format!("保存系统代理开关失败：{error}；原状态已恢复"))
+                            }
+                            Err(rollback) => Err(format!(
+                                "保存系统代理开关失败：{error}；恢复原状态也失败：{rollback}"
+                            )),
+                        }
+                    }
+                }
             })
             .await
             .map_err(|error| format!("系统代理后台任务异常结束：{error}"))?
-            .map_err(|error| error.to_string())
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(preferences)) => {
+                        this.preferences = preferences.clone();
+                        this.runtime_page.update(cx, |page, cx| {
+                            page.preferences_restored_from_app(preferences, cx);
+                        });
+                    }
                     Ok(Err(error)) => tracing::warn!(%error, "system proxy tray command failed"),
                     Err(error) => tracing::warn!(%error, "system proxy tray task failed"),
                 }
@@ -288,10 +374,12 @@ impl ZenClashApp {
     }
 }
 
-fn proxy_environment(shell: EnvironmentShell, port: u16) -> String {
-    let port = if port == 0 { 7890 } else { port };
+fn proxy_environment(shell: EnvironmentShell, port: u16) -> Option<String> {
+    if port == 0 {
+        return None;
+    }
     let url = format!("http://127.0.0.1:{port}");
-    match shell {
+    Some(match shell {
         EnvironmentShell::Bash => {
             format!("export https_proxy={url} http_proxy={url} all_proxy={url}")
         }
@@ -307,7 +395,7 @@ fn proxy_environment(shell: EnvironmentShell, port: u16) -> String {
         EnvironmentShell::Nushell => format!(
             r#"$env.HTTP_PROXY = "{url}"; $env.HTTPS_PROXY = "{url}"; $env.ALL_PROXY = "{url}""#
         ),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -317,17 +405,21 @@ mod tests {
     #[test]
     fn formats_proxy_environment_for_each_supported_shell() {
         assert_eq!(
-            proxy_environment(EnvironmentShell::Bash, 7897),
-            "export https_proxy=http://127.0.0.1:7897 http_proxy=http://127.0.0.1:7897 all_proxy=http://127.0.0.1:7897"
+            proxy_environment(EnvironmentShell::Bash, 7897).as_deref(),
+            Some("export https_proxy=http://127.0.0.1:7897 http_proxy=http://127.0.0.1:7897 all_proxy=http://127.0.0.1:7897")
         );
-        assert!(proxy_environment(EnvironmentShell::CommandPrompt, 7897).contains("\r\nset"));
-        assert!(proxy_environment(EnvironmentShell::PowerShell, 7897).starts_with("$env:"));
-        assert!(proxy_environment(EnvironmentShell::Fish, 7897).starts_with("set -x"));
-        assert!(proxy_environment(EnvironmentShell::Nushell, 7897).starts_with("$env."));
+        assert!(proxy_environment(EnvironmentShell::CommandPrompt, 7897)
+            .is_some_and(|value| value.contains("\r\nset")));
+        assert!(proxy_environment(EnvironmentShell::PowerShell, 7897)
+            .is_some_and(|value| value.starts_with("$env:")));
+        assert!(proxy_environment(EnvironmentShell::Fish, 7897)
+            .is_some_and(|value| value.starts_with("set -x")));
+        assert!(proxy_environment(EnvironmentShell::Nushell, 7897)
+            .is_some_and(|value| value.starts_with("$env.")));
     }
 
     #[test]
-    fn environment_copy_uses_mihomo_default_when_runtime_port_is_unknown() {
-        assert!(proxy_environment(EnvironmentShell::Bash, 0).contains(":7890"));
+    fn environment_copy_refuses_an_unknown_runtime_port() {
+        assert!(proxy_environment(EnvironmentShell::Bash, 0).is_none());
     }
 }

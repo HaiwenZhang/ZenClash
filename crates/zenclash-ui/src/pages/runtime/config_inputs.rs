@@ -28,6 +28,7 @@ pub(super) struct DnsInputs {
     pub fallback_domain: Entity<InputState>,
     pub nameserver_policy: Entity<InputState>,
     pub hosts: Entity<InputState>,
+    source: Value,
 }
 
 pub(super) struct SnifferInputs {
@@ -38,6 +39,7 @@ pub(super) struct SnifferInputs {
     pub force_domain: Entity<InputState>,
     pub skip_dst_address: Entity<InputState>,
     pub skip_src_address: Entity<InputState>,
+    source: Value,
 }
 
 pub(super) struct TunInputs {
@@ -47,6 +49,7 @@ pub(super) struct TunInputs {
     pub dns_hijack: Entity<InputState>,
     pub route_include_address: Entity<InputState>,
     pub route_exclude_address: Entity<InputState>,
+    source: Value,
 }
 
 impl ConfigInputs {
@@ -84,15 +87,15 @@ impl DnsInputs {
     fn new(config: &Value, factory: &mut InputFactory<'_, '_>) -> Self {
         Self {
             enhanced_mode: factory.single(
-                config_string(config, "/dns/enhanced-mode", "fake-ip"),
+                config_string(config, "/dns/enhanced-mode", ""),
                 "fake-ip / redir-host / normal",
             ),
             fake_ip_range: factory.single(
-                config_string(config, "/dns/fake-ip-range", "198.18.0.1/16"),
+                config_string(config, "/dns/fake-ip-range", ""),
                 "198.18.0.1/16",
             ),
             fake_ip_filter_mode: factory.single(
-                config_string(config, "/dns/fake-ip-filter-mode", "blacklist"),
+                config_string(config, "/dns/fake-ip-filter-mode", ""),
                 "blacklist / whitelist / rule",
             ),
             fake_ip_filter: factory.multi(
@@ -114,7 +117,7 @@ impl DnsInputs {
             ),
             fallback: factory.multi(config_lines(config, "/dns/fallback"), "Fallback DNS"),
             fallback_geoip_code: factory.single(
-                config_string(config, "/dns/fallback-filter/geoip-code", "CN"),
+                config_string(config, "/dns/fallback-filter/geoip-code", ""),
                 "CN",
             ),
             fallback_ipcidr: factory.multi(
@@ -133,40 +136,141 @@ impl DnsInputs {
                 config_mapping(config, "/hosts"),
                 "domain: address（YAML 映射）",
             ),
+            source: config.clone(),
         }
     }
 
     pub fn patch(&self, cx: &gpui::App) -> Result<Value, String> {
         let enhanced_mode = text(&self.enhanced_mode, cx);
-        if !matches!(enhanced_mode.as_str(), "fake-ip" | "redir-host" | "normal") {
+        if !enhanced_mode.is_empty()
+            && !matches!(enhanced_mode.as_str(), "fake-ip" | "redir-host" | "normal")
+        {
             return Err("DNS 增强模式必须是 fake-ip、redir-host 或 normal".into());
         }
         let filter_mode = text(&self.fake_ip_filter_mode, cx);
-        if !matches!(filter_mode.as_str(), "blacklist" | "whitelist" | "rule") {
+        if !filter_mode.is_empty()
+            && !matches!(filter_mode.as_str(), "blacklist" | "whitelist" | "rule")
+        {
             return Err("Fake-IP 过滤模式必须是 blacklist、whitelist 或 rule".into());
         }
-        let policy = yaml_mapping(&text(&self.nameserver_policy, cx), "Nameserver Policy")?;
-        let hosts = yaml_mapping(&text(&self.hosts, cx), "Hosts")?;
-        Ok(serde_json::json!({
-            "dns": {
-                "enhanced-mode": enhanced_mode,
-                "fake-ip-range": text(&self.fake_ip_range, cx),
-                "fake-ip-filter-mode": filter_mode,
-                "fake-ip-filter": lines(&self.fake_ip_filter, cx),
-                "default-nameserver": lines(&self.default_nameserver, cx),
-                "nameserver": lines(&self.nameserver, cx),
-                "proxy-server-nameserver": lines(&self.proxy_server_nameserver, cx),
-                "direct-nameserver": lines(&self.direct_nameserver, cx),
-                "fallback": lines(&self.fallback, cx),
-                "fallback-filter": {
-                    "geoip-code": text(&self.fallback_geoip_code, cx),
-                    "ipcidr": lines(&self.fallback_ipcidr, cx),
-                    "domain": lines(&self.fallback_domain, cx)
-                },
-                "nameserver-policy": policy
-            },
-            "hosts": hosts
-        }))
+        let mut dns = Map::new();
+        insert_optional_string(
+            &mut dns,
+            "enhanced-mode",
+            enhanced_mode,
+            &self.source,
+            "/dns/enhanced-mode",
+        );
+        insert_optional_string(
+            &mut dns,
+            "fake-ip-range",
+            text(&self.fake_ip_range, cx),
+            &self.source,
+            "/dns/fake-ip-range",
+        );
+        insert_optional_string(
+            &mut dns,
+            "fake-ip-filter-mode",
+            filter_mode,
+            &self.source,
+            "/dns/fake-ip-filter-mode",
+        );
+        insert_optional_lines(
+            &mut dns,
+            "fake-ip-filter",
+            &self.fake_ip_filter,
+            cx,
+            &self.source,
+            "/dns/fake-ip-filter",
+        );
+        insert_optional_lines(
+            &mut dns,
+            "default-nameserver",
+            &self.default_nameserver,
+            cx,
+            &self.source,
+            "/dns/default-nameserver",
+        );
+        insert_optional_lines(
+            &mut dns,
+            "nameserver",
+            &self.nameserver,
+            cx,
+            &self.source,
+            "/dns/nameserver",
+        );
+        insert_optional_lines(
+            &mut dns,
+            "proxy-server-nameserver",
+            &self.proxy_server_nameserver,
+            cx,
+            &self.source,
+            "/dns/proxy-server-nameserver",
+        );
+        insert_optional_lines(
+            &mut dns,
+            "direct-nameserver",
+            &self.direct_nameserver,
+            cx,
+            &self.source,
+            "/dns/direct-nameserver",
+        );
+        insert_optional_lines(
+            &mut dns,
+            "fallback",
+            &self.fallback,
+            cx,
+            &self.source,
+            "/dns/fallback",
+        );
+        let mut fallback_filter = Map::new();
+        insert_optional_string(
+            &mut fallback_filter,
+            "geoip-code",
+            text(&self.fallback_geoip_code, cx),
+            &self.source,
+            "/dns/fallback-filter/geoip-code",
+        );
+        insert_optional_lines(
+            &mut fallback_filter,
+            "ipcidr",
+            &self.fallback_ipcidr,
+            cx,
+            &self.source,
+            "/dns/fallback-filter/ipcidr",
+        );
+        insert_optional_lines(
+            &mut fallback_filter,
+            "domain",
+            &self.fallback_domain,
+            cx,
+            &self.source,
+            "/dns/fallback-filter/domain",
+        );
+        if !fallback_filter.is_empty() {
+            dns.insert("fallback-filter".into(), Value::Object(fallback_filter));
+        }
+        insert_optional_mapping(
+            &mut dns,
+            "nameserver-policy",
+            &text(&self.nameserver_policy, cx),
+            "Nameserver Policy",
+            &self.source,
+            "/dns/nameserver-policy",
+        )?;
+        let mut patch = Map::new();
+        if !dns.is_empty() {
+            patch.insert("dns".into(), Value::Object(dns));
+        }
+        insert_optional_mapping(
+            &mut patch,
+            "hosts",
+            &text(&self.hosts, cx),
+            "Hosts",
+            &self.source,
+            "/hosts",
+        )?;
+        Ok(Value::Object(patch))
     }
 }
 
@@ -199,21 +303,66 @@ impl SnifferInputs {
                 config_lines(config, "/sniffer/skip-src-address"),
                 "每行一个 IP/CIDR",
             ),
+            source: config.clone(),
         }
     }
 
     pub fn patch(&self, cx: &gpui::App) -> Value {
-        serde_json::json!({"sniffer": {
-            "sniff": {
-                "HTTP": {"ports": ports(&self.http_ports, cx)},
-                "TLS": {"ports": ports(&self.tls_ports, cx)},
-                "QUIC": {"ports": ports(&self.quic_ports, cx)}
-            },
-            "skip-domain": lines(&self.skip_domain, cx),
-            "force-domain": lines(&self.force_domain, cx),
-            "skip-dst-address": lines(&self.skip_dst_address, cx),
-            "skip-src-address": lines(&self.skip_src_address, cx)
-        }})
+        let mut sniff = Map::new();
+        for (key, input, pointer) in [
+            ("HTTP", &self.http_ports, "/sniffer/sniff/HTTP/ports"),
+            ("TLS", &self.tls_ports, "/sniffer/sniff/TLS/ports"),
+            ("QUIC", &self.quic_ports, "/sniffer/sniff/QUIC/ports"),
+        ] {
+            let values = ports(input, cx);
+            if !values.is_empty() || self.source.pointer(pointer).is_some() {
+                sniff.insert(
+                    key.into(),
+                    Value::Object(Map::from_iter([("ports".into(), Value::Array(values))])),
+                );
+            }
+        }
+        let mut sniffer = Map::new();
+        if !sniff.is_empty() {
+            sniffer.insert("sniff".into(), Value::Object(sniff));
+        }
+        insert_optional_lines(
+            &mut sniffer,
+            "skip-domain",
+            &self.skip_domain,
+            cx,
+            &self.source,
+            "/sniffer/skip-domain",
+        );
+        insert_optional_lines(
+            &mut sniffer,
+            "force-domain",
+            &self.force_domain,
+            cx,
+            &self.source,
+            "/sniffer/force-domain",
+        );
+        insert_optional_lines(
+            &mut sniffer,
+            "skip-dst-address",
+            &self.skip_dst_address,
+            cx,
+            &self.source,
+            "/sniffer/skip-dst-address",
+        );
+        insert_optional_lines(
+            &mut sniffer,
+            "skip-src-address",
+            &self.skip_src_address,
+            cx,
+            &self.source,
+            "/sniffer/skip-src-address",
+        );
+        if sniffer.is_empty() {
+            Value::Object(Map::new())
+        } else {
+            Value::Object(Map::from_iter([("sniffer".into(), Value::Object(sniffer))]))
+        }
     }
 }
 
@@ -221,14 +370,11 @@ impl TunInputs {
     fn new(config: &Value, factory: &mut InputFactory<'_, '_>) -> Self {
         Self {
             stack: factory.single(
-                config_string(config, "/tun/stack", "mixed"),
+                config_string(config, "/tun/stack", ""),
                 "gvisor / mixed / system",
             ),
-            device: factory.single(
-                config_string(config, "/tun/device", "utun1500"),
-                "TUN 设备名称",
-            ),
-            mtu: factory.single(config_number(config, "/tun/mtu", 1500), "1 - 65535"),
+            device: factory.single(config_string(config, "/tun/device", ""), "TUN 设备名称"),
+            mtu: factory.single(config_number_or_empty(config, "/tun/mtu"), "默认 1500"),
             dns_hijack: factory.single(
                 config_list_csv(config, "/tun/dns-hijack"),
                 "any:53, tcp://any:53",
@@ -239,29 +385,114 @@ impl TunInputs {
                 config_lines(config, "/tun/route-exclude-address"),
                 "每行一个 CIDR",
             ),
+            source: config.clone(),
         }
     }
 
     pub fn patch(&self, cx: &gpui::App) -> Result<Value, String> {
         let stack = text(&self.stack, cx);
-        if !matches!(stack.as_str(), "gvisor" | "mixed" | "system") {
+        if !stack.is_empty() && !matches!(stack.as_str(), "gvisor" | "mixed" | "system") {
             return Err("TUN 网络栈必须是 gvisor、mixed 或 system".into());
         }
-        let mtu = text(&self.mtu, cx)
-            .parse::<u16>()
-            .map_err(|_| "MTU 必须是 1 到 65535 的整数".to_owned())?;
-        if mtu == 0 {
-            return Err("MTU 必须大于 0".into());
+        let mtu_text = text(&self.mtu, cx);
+        let mtu = if mtu_text.is_empty() && self.source.pointer("/tun/mtu").is_none() {
+            None
+        } else {
+            let mtu = mtu_text
+                .parse::<u16>()
+                .map_err(|_| "MTU 必须是 1 到 65535 的整数".to_owned())?;
+            if mtu == 0 {
+                return Err("MTU 必须大于 0".into());
+            }
+            Some(mtu)
+        };
+        let mut tun = Map::new();
+        insert_optional_string(&mut tun, "stack", stack, &self.source, "/tun/stack");
+        insert_optional_string(
+            &mut tun,
+            "device",
+            text(&self.device, cx),
+            &self.source,
+            "/tun/device",
+        );
+        if let Some(mtu) = mtu {
+            tun.insert("mtu".into(), Value::from(mtu));
         }
-        Ok(serde_json::json!({"tun": {
-            "stack": stack,
-            "device": text(&self.device, cx),
-            "mtu": mtu,
-            "dns-hijack": csv(&self.dns_hijack, cx),
-            "route-address": lines(&self.route_include_address, cx),
-            "route-exclude-address": lines(&self.route_exclude_address, cx)
-        }}))
+        let dns_hijack = csv(&self.dns_hijack, cx);
+        if !dns_hijack.is_empty() || self.source.pointer("/tun/dns-hijack").is_some() {
+            tun.insert(
+                "dns-hijack".into(),
+                Value::Array(dns_hijack.into_iter().map(Value::String).collect()),
+            );
+        }
+        insert_optional_lines(
+            &mut tun,
+            "route-address",
+            &self.route_include_address,
+            cx,
+            &self.source,
+            "/tun/route-address",
+        );
+        insert_optional_lines(
+            &mut tun,
+            "route-exclude-address",
+            &self.route_exclude_address,
+            cx,
+            &self.source,
+            "/tun/route-exclude-address",
+        );
+        if tun.is_empty() {
+            Ok(Value::Object(Map::new()))
+        } else {
+            Ok(Value::Object(Map::from_iter([(
+                "tun".into(),
+                Value::Object(tun),
+            )])))
+        }
     }
+}
+
+fn insert_optional_string(
+    map: &mut Map<String, Value>,
+    key: &str,
+    value: String,
+    source: &Value,
+    pointer: &str,
+) {
+    if !value.is_empty() || source.pointer(pointer).is_some() {
+        map.insert(key.into(), Value::String(value));
+    }
+}
+
+fn insert_optional_lines(
+    map: &mut Map<String, Value>,
+    key: &str,
+    input: &Entity<InputState>,
+    cx: &gpui::App,
+    source: &Value,
+    pointer: &str,
+) {
+    let values = lines(input, cx);
+    if !values.is_empty() || source.pointer(pointer).is_some() {
+        map.insert(
+            key.into(),
+            Value::Array(values.into_iter().map(Value::String).collect()),
+        );
+    }
+}
+
+fn insert_optional_mapping(
+    map: &mut Map<String, Value>,
+    key: &str,
+    text: &str,
+    label: &str,
+    source: &Value,
+    pointer: &str,
+) -> Result<(), String> {
+    if !text.trim().is_empty() || source.pointer(pointer).is_some() {
+        map.insert(key.into(), yaml_mapping(text, label)?);
+    }
+    Ok(())
 }
 
 fn input(
@@ -338,12 +569,11 @@ pub(super) fn config_string(config: &Value, pointer: &str, default: &str) -> Str
         .to_owned()
 }
 
-pub(super) fn config_number(config: &Value, pointer: &str, default: u64) -> String {
+pub(super) fn config_number_or_empty(config: &Value, pointer: &str) -> String {
     config
         .pointer(pointer)
         .and_then(Value::as_u64)
-        .unwrap_or(default)
-        .to_string()
+        .map_or_else(String::new, |value| value.to_string())
 }
 
 fn config_lines(config: &Value, pointer: &str) -> String {

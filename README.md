@@ -6,18 +6,19 @@ experimental alternative with capability-aware UI and restart-based full
 configuration transactions. The workspace currently contains:
 
 - `zenclash-core`: typed Mihomo HTTP/WebSocket APIs, managed core process,
-  macOS system proxy integration, traffic/log monitors, and real integration
-  tests.
+  cross-platform system proxy integration, persistent configuration stores,
+  traffic/log monitors, and real integration tests.
 - `zenclash-ui`: GPUI native window, Clash Party-style card sidebar, proxy
   selection and latency tests, connections, rules, providers, runtime settings,
   TUN controls, logs, real SQLite-backed traffic history and rankings, local
   profile switching, ordered YAML overrides, Sub-Store connectivity, and a
   native status-bar traffic icon.
 
-## Run against the supplied real profile
+## Run with the bundled bootstrap profile
 
-Use a real Mihomo executable. ZenClash will start it with
-`examples/19facdf022b.yaml` when its controller is not already available.
+Use a real Mihomo executable. ZenClash starts it with the safe direct-only
+`platforms/common/default.yaml` profile until you import a local profile or add
+an online subscription.
 
 ```sh
 ZENCLASH_MIHOMO_BINARY=/absolute/path/to/mihomo \
@@ -28,7 +29,7 @@ To connect to an already-running controller instead:
 
 ```sh
 ZENCLASH_CONTROLLER=http://127.0.0.1:9090 \
-  ZENCLASH_CONFIG="$PWD/examples/19facdf022b.yaml" \
+  ZENCLASH_CONFIG="$PWD/platforms/common/default.yaml" \
   cargo run -p zenclash-ui --bin zenclash
 ```
 
@@ -48,8 +49,11 @@ ZENCLASH_MEOW_BINARY="$PWD/examples/meow-rs/target/debug/meow" \
 
 The same selection is available under Settings and takes effect after restart.
 If the selected binary is absent or fails its real `/version` readiness check,
-startup fails clearly. An external controller is used only when
-`ZENCLASH_CONTROLLER` is set explicitly.
+ZenClash reports the failed candidate and can recover through the last usable
+core without rewriting the user's selection. If an active YAML is rejected,
+the installed app starts a packaged direct-only, listener-free recovery profile
+so the Profiles page remains usable; it leaves the rejected source untouched.
+An external controller is used only when `ZENCLASH_CONTROLLER` is set explicitly.
 
 The profile page can switch to another local YAML through the native file
 picker. The override page imports individual YAML files or the immediate YAML
@@ -88,7 +92,7 @@ controller, and sends an HTTP request through its real Mixed listener:
 
 ```sh
 ZENCLASH_MEOW_BINARY="$PWD/examples/meow-rs/target/debug/meow" \
-ZENCLASH_CONFIG="$PWD/examples/19facdf022b.yaml" \
+ZENCLASH_CONFIG="$PWD/platforms/common/default.yaml" \
   cargo test -p zenclash-core --test real_meow -- --ignored --nocapture
 ```
 
@@ -103,7 +107,8 @@ When `ZENCLASH_MIHOMO_BINARY` is not set, the script downloads the pinned
 official Apple Silicon Mihomo release and requires its GitHub SHA-256 digest to
 match before building. The bundle contains the verified binary and profile
 under `Contents/Resources`; runtime data is stored in
-`~/Library/Application Support/ZenClash/mihomo`. Set
+`~/Library/Application Support/ZenClash/mihomo`. A separate `recovery.yaml` is
+also packaged and is used only after the active profile is rejected. Set
 `ZENCLASH_MIHOMO_BINARY=/absolute/path/to/mihomo` only to override the bundled
 core deliberately.
 
@@ -113,8 +118,7 @@ Every installer bundles the pinned real Mihomo release, so normal installation
 does not depend on a first-run download. The experimental meow-rs core is not
 silently substituted and is currently supplied separately through
 `ZENCLASH_MEOW_BINARY`. Local build scripts use
-`examples/19facdf022b.yaml` by default, while public CI packages use the safe
-bootstrap profile described below. The platform build entry points are:
+`platforms/common/default.yaml` by default. The platform build entry points are:
 
 ```sh
 # Apple Silicon macOS (.dmg)

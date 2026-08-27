@@ -4,7 +4,7 @@ use super::{
     service::MihomoReleaseService, transaction::CoreUpdateTransaction, CoreUpdateError,
     CoreUpdateResult, MihomoRelease,
 };
-use crate::{MihomoClient, MihomoProcess, VersionInfo};
+use crate::{CoreConfigValidator, MihomoClient, MihomoProcess, VersionInfo};
 
 impl MihomoReleaseService {
     /// Installs one release into a managed Mihomo process and commits only
@@ -25,8 +25,20 @@ impl MihomoReleaseService {
         process: Arc<MihomoProcess>,
         client: MihomoClient,
     ) -> CoreUpdateResult<VersionInfo> {
-        let target = process.snapshot().binary;
+        let snapshot = process.snapshot();
+        let target = snapshot.binary;
         let prepared = self.prepare(release, target).await?;
+        let candidate = prepared.candidate_path()?.to_path_buf();
+        let validator = CoreConfigValidator::new(process.kind(), candidate, snapshot.home_dir);
+        let config_file = snapshot.config_file;
+        tokio::task::spawn_blocking(move || validator.validate_file(config_file))
+            .await
+            .map_err(|error| {
+                CoreUpdateError::Runtime(format!("候选内核配置预检任务异常结束：{error}"))
+            })?
+            .map_err(|error| {
+                CoreUpdateError::Runtime(format!("候选内核拒绝当前运行配置：{error}"))
+            })?;
         stop_process(process.clone()).await?;
         let transaction = match tokio::task::spawn_blocking(move || prepared.activate()).await {
             Ok(Ok(transaction)) => transaction,

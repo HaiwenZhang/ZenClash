@@ -6,7 +6,7 @@ project_root="$(cd "${script_dir}/.." && pwd)"
 version="${1:-${ZENCLASH_VERSION:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' "${project_root}/Cargo.toml" | head -n 1)}}"
 output_dir="${2:-${ZENCLASH_PACKAGE_DIR:-${project_root}/dist}}"
 package_flavor="${ZENCLASH_PACKAGE_FLAVOR:-linux}"
-profile_path="${ZENCLASH_CONFIG:-${project_root}/examples/19facdf022b.yaml}"
+profile_path="${ZENCLASH_CONFIG:-${project_root}/platforms/common/default.yaml}"
 cargo_output_root="${CARGO_TARGET_DIR:-${project_root}/target}"
 work_dir="$(mktemp -d)"
 payload_dir="${work_dir}/payload"
@@ -43,6 +43,7 @@ cargo build --release --locked -p zenclash-ui --bin zenclash
 install -Dm755 "${cargo_output_root}/release/zenclash" "${payload_dir}/zenclash"
 install -Dm755 "${mihomo_path}" "${payload_dir}/mihomo"
 install -Dm644 "${profile_path}" "${payload_dir}/profile.yaml"
+install -Dm644 "${project_root}/platforms/common/recovery.yaml" "${payload_dir}/recovery.yaml"
 install -Dm644 "${project_root}/platforms/macos/ZenClash.png" "${payload_dir}/zenclash.png"
 install -Dm644 "${project_root}/platforms/linux/zenclash.desktop" "${payload_dir}/zenclash.desktop"
 mkdir -p "${rpmbuild_dir}" "${output_dir}"
@@ -62,5 +63,6 @@ cp "${built_rpm}" "${package_path}"
 rpm -qip "${package_path}" >/dev/null
 rpm -qlp "${package_path}" >/dev/null
 rpm -qlp "${package_path}" | grep -Eq '^/usr/lib/zenclash/mihomo$'
+rpm -qlp "${package_path}" | grep -Eq '^/usr/lib/zenclash/recovery.yaml$'
 
 echo "Built ${package_path}"

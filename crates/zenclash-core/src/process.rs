@@ -9,7 +9,10 @@ use std::{
 
 use parking_lot::{Mutex, RwLock};
 
-use crate::{CoreCapabilities, CoreKind, MihomoClient, MihomoEndpoint, MihomoError, MihomoResult};
+use crate::{
+    CoreCapabilities, CoreConfigValidator, CoreKind, MihomoClient, MihomoEndpoint, MihomoError,
+    MihomoResult,
+};
 
 mod discovery;
 mod resources;
@@ -18,8 +21,11 @@ mod resources;
 mod tests;
 
 pub use discovery::MihomoLaunchConfig;
+pub use resources::bundled_recovery_profile;
 
 const MAX_LOG_LINES: usize = 1_000;
+#[cfg(unix)]
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_MEOW_RUST_LOG: &str = "info";
 const QUIET_MEOW_PROTOCOL_LOGS: &str = "tokio_tungstenite=warn,tungstenite=warn";
 
@@ -78,6 +84,9 @@ impl MihomoProcess {
     /// and its output collectors cannot be started. After a spawn failure the
     /// process remains stopped so callers can report and retry safely.
     pub fn restart(&self) -> MihomoResult<()> {
+        self.config.validate_config().map_err(|error| {
+            MihomoError::Process(format!("重启前配置预检失败，当前内核保持运行：{error}"))
+        })?;
         let mut child_slot = self.child.lock();
         stop_child(&mut child_slot)?;
         let child = spawn_child(&self.config, self.logs.clone())?;
@@ -104,6 +113,9 @@ impl MihomoProcess {
                 .is_ok_and(|result| result.is_ok())
             {
                 return Ok(());
+            }
+            if let Some(error) = controller_listener_error(&self.logs.read()) {
+                return Err(MihomoError::Process(error));
             }
             if !self.is_running() {
                 let message = self.logs.read().back().cloned().unwrap_or_else(|| {
@@ -143,6 +155,16 @@ impl MihomoProcess {
     #[must_use]
     pub const fn capabilities(&self) -> CoreCapabilities {
         self.config.capabilities()
+    }
+
+    /// Returns a target-core validator bound to this managed process.
+    #[must_use]
+    pub fn config_validator(&self) -> CoreConfigValidator {
+        CoreConfigValidator::new(
+            self.config.kind,
+            self.config.binary.clone(),
+            self.config.home_dir.clone(),
+        )
     }
 
     /// Checks whether the child has not exited yet.
@@ -198,6 +220,15 @@ impl MihomoProcess {
     }
 }
 
+fn controller_listener_error(logs: &VecDeque<String>) -> Option<String> {
+    logs.iter().rev().find_map(|line| {
+        let normalized = line.to_ascii_lowercase();
+        (normalized.contains("external controller listen error")
+            && normalized.contains("address already in use"))
+        .then(|| line.clone())
+    })
+}
+
 fn stop_child(child: &mut Option<Child>) -> MihomoResult<()> {
     let Some(process) = child.as_mut() else {
         return Ok(());
@@ -207,14 +238,66 @@ fn stop_child(child: &mut Option<Child>) -> MihomoResult<()> {
         .map_err(|error| MihomoError::Process(format!("查询内核状态失败：{error}")))?
         .is_none()
     {
-        process
-            .kill()
-            .map_err(|error| MihomoError::Process(format!("停止内核失败：{error}")))?;
-        process
-            .wait()
-            .map_err(|error| MihomoError::Process(format!("等待内核退出失败：{error}")))?;
+        stop_running_child(process)?;
     }
     child.take();
+    Ok(())
+}
+
+#[cfg(unix)]
+fn stop_running_child(process: &mut Child) -> MihomoResult<()> {
+    let pid = libc::pid_t::try_from(process.id())
+        .map_err(|_| MihomoError::Process("内核进程 ID 超出平台范围".into()))?;
+    // SAFETY: `pid` comes from the live `Child` handle and SIGTERM does not
+    // access memory in this process.
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if process
+            .try_wait()
+            .map_err(|status| MihomoError::Process(format!("查询内核状态失败：{status}")))?
+            .is_some()
+        {
+            return Ok(());
+        }
+        return Err(MihomoError::Process(format!(
+            "向内核发送 SIGTERM 失败：{error}"
+        )));
+    }
+
+    let deadline = std::time::Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT;
+    loop {
+        if process
+            .try_wait()
+            .map_err(|error| MihomoError::Process(format!("等待内核退出失败：{error}")))?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(25)));
+    }
+
+    tracing::warn!(pid, "managed core ignored SIGTERM; forcing termination");
+    process
+        .kill()
+        .map_err(|error| MihomoError::Process(format!("强制停止内核失败：{error}")))?;
+    process
+        .wait()
+        .map_err(|error| MihomoError::Process(format!("等待强制停止的内核退出失败：{error}")))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn stop_running_child(process: &mut Child) -> MihomoResult<()> {
+    process
+        .kill()
+        .map_err(|error| MihomoError::Process(format!("停止内核失败：{error}")))?;
+    process
+        .wait()
+        .map_err(|error| MihomoError::Process(format!("等待内核退出失败：{error}")))?;
     Ok(())
 }
 
@@ -237,7 +320,11 @@ fn spawn_child(
         .arg("-f")
         .arg(&config.config_file);
     if let Some(controller) = &config.controller_override {
-        command.arg("--ext-ctl").arg(controller);
+        command
+            .arg("--ext-ctl")
+            .arg(controller)
+            .arg("--secret")
+            .arg(&config.endpoint.secret);
     }
     let mut child = command
         .stdout(Stdio::piped())

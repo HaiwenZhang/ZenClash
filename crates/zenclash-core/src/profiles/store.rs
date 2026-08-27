@@ -2,6 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use parking_lot::Mutex;
@@ -54,6 +55,41 @@ impl ProfileStore {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Quarantines a malformed profile index while retaining managed YAML files.
+    ///
+    /// Only JSON decoding and defensive-size failures are recoverable. I/O
+    /// failures are returned unchanged so a permission problem is never
+    /// presented as repaired state.
+    ///
+    /// # Errors
+    ///
+    /// Returns the original non-recoverable error or an I/O error while moving
+    /// the invalid index to its timestamped backup.
+    pub fn quarantine_invalid_index(&self) -> ProfileStoreResult<Option<PathBuf>> {
+        let _transaction = self.transaction.lock();
+        let error = match self.load_unlocked() {
+            Ok(_) => return Ok(None),
+            Err(error) => error,
+        };
+        if !matches!(
+            error,
+            ProfileStoreError::Index(_) | ProfileStoreError::IndexTooLarge { .. }
+        ) {
+            return Err(error);
+        }
+        let source = self.index_path();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let quarantine = self.root.join(format!(
+            "profiles.invalid-{}-{timestamp}.json",
+            std::process::id()
+        ));
+        fs::rename(source, &quarantine)?;
+        Ok(Some(quarantine))
     }
 
     /// Loads and repairs the in-memory catalog view.

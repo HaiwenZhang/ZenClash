@@ -1,8 +1,8 @@
 use super::{
-    config_input_row, format_port, h_flex, info_row, json, load_page, metric, setting_card,
-    setting_switch, v_flex, Button, ButtonVariants, Context, Disableable, Duration, FluentBuilder,
-    IconName, Input, IntoElement, Page, ParentElement, RuntimeConfig, RuntimeData, RuntimePage,
-    Sizable, Styled, VersionInfo,
+    config_input_row, format_port, h_flex, info_row, json, load_page, message_banner, metric,
+    setting_card, setting_switch, v_flex, Button, ButtonVariants, Context, Disableable, Duration,
+    FluentBuilder, IconName, Input, IntoElement, Page, ParentElement, RuntimeConfig, RuntimeData,
+    RuntimePage, Sizable, Styled, VersionInfo,
 };
 
 mod maintenance;
@@ -39,48 +39,6 @@ impl RuntimePage {
                 "{} 内核已重启并通过 /version 验证",
                 self.core_kind.display_name()
             ),
-            cx,
-        );
-    }
-
-    fn upgrade_running_core(&mut self, cx: &mut Context<Self>) {
-        if !self.core_kind.capabilities().core_upgrade {
-            self.error = Some(format!(
-                "{} 不支持 Mihomo /upgrade 接口；请通过发行包更新该实验内核",
-                self.core_kind.display_name()
-            ));
-            cx.notify();
-            return;
-        }
-        let Some(token) = self.begin_mutation(Page::Mihomo) else {
-            return;
-        };
-        let client = self.client.clone();
-        let process = self.process.clone();
-        let task = self.runtime.spawn(async move {
-            client
-                .upgrade_core()
-                .await
-                .map_err(|error| error.to_string())?;
-            if let Some(process) = process {
-                let restarting = process.clone();
-                tokio::task::spawn_blocking(move || restarting.restart())
-                    .await
-                    .map_err(|error| format!("升级后内核重启任务异常结束：{error}"))?
-                    .map_err(|error| error.to_string())?;
-                process
-                    .wait_until_ready(Duration::from_secs(20))
-                    .await
-                    .map_err(|error| error.to_string())?;
-            } else {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-            load_page(client, Page::Mihomo).await
-        });
-        Self::finish_core_maintenance(
-            task,
-            token,
-            "Mihomo 已执行在线升级并重新通过版本检查；Unix TUN 权限需重新核对".into(),
             cx,
         );
     }
@@ -122,14 +80,23 @@ impl RuntimePage {
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let (version, config) = match &self.data {
-            RuntimeData::Core { version, config } => (version.clone(), config.clone()),
-            _ => (VersionInfo::default(), RuntimeConfig::default()),
+        let (version, config, has_runtime_data) = match &self.data {
+            RuntimeData::Core { version, config } => (version.clone(), config.clone(), true),
+            _ => (VersionInfo::default(), RuntimeConfig::default(), false),
         };
         let process = self.process.as_ref().map(|process| process.snapshot());
         let managed_process = process.is_some();
+        let process_running = process
+            .as_ref()
+            .map_or(has_runtime_data, |snapshot| snapshot.running);
         let process_status = process.as_ref().map_or_else(
-            || "连接到外部内核".into(),
+            || {
+                if has_runtime_data {
+                    "连接到外部内核".into()
+                } else {
+                    "外部内核不可达".into()
+                }
+            },
             |snapshot| {
                 if snapshot.running {
                     format!("运行中 · PID {}", snapshot.pid.unwrap_or_default())
@@ -147,96 +114,126 @@ impl RuntimePage {
                     .flex_wrap()
                     .child(metric(
                         "内核版本",
-                        version.version.clone(),
+                        if has_runtime_data && !version.version.is_empty() {
+                            version.version.clone()
+                        } else {
+                            "无法读取".into()
+                        },
                         theme.primary,
                         theme,
                     ))
-                    .child(metric("运行状态", process_status, theme.success, theme))
+                    .child(metric(
+                        "运行状态",
+                        process_status,
+                        if process_running {
+                            theme.success
+                        } else {
+                            theme.danger
+                        },
+                        theme,
+                    ))
                     .child(metric(
                         "运行模式",
-                        config.mode.clone(),
+                        if has_runtime_data && !config.mode.is_empty() {
+                            config.mode.clone()
+                        } else {
+                            "无法读取".into()
+                        },
                         theme.warning,
                         theme,
                     )),
             )
-            .child(
-                setting_card("运行时开关", theme)
-                    .child(setting_switch(
-                        "IPv6",
-                        format!("允许 {} 解析和使用 IPv6", self.core_kind.display_name()),
-                        config.ipv6,
-                        "runtime-ipv6",
-                        theme,
-                        cx.listener(|this, checked, _, cx| {
-                            this.apply_controlled_config(
-                                json!({"ipv6": *checked}),
-                                "IPv6 设置已保存并热重载",
-                                cx,
-                            );
-                        }),
-                    ))
-                    .child(setting_switch(
-                        "允许局域网",
-                        "允许其他设备访问监听端口",
-                        config.allow_lan,
-                        "runtime-allow-lan",
-                        theme,
-                        cx.listener(|this, checked, _, cx| {
-                            this.apply_controlled_config(
-                                json!({"allow-lan": *checked}),
-                                "局域网访问设置已更新",
-                                cx,
-                            );
-                        }),
-                    ))
-                    .child(setting_switch(
-                        "TCP 并发",
-                        "并行建立目标连接以降低握手等待",
-                        config.tcp_concurrent,
-                        "runtime-tcp-concurrent",
-                        theme,
-                        cx.listener(|this, checked, _, cx| {
-                            this.apply_controlled_config(
-                                json!({"tcp-concurrent": *checked}),
-                                "TCP 并发设置已更新",
-                                cx,
-                            );
-                        }),
-                    ))
-                    .child(setting_switch(
-                        "统一延迟",
-                        "使用统一的延迟计算方式",
-                        config.unified_delay,
-                        "runtime-unified-delay",
-                        theme,
-                        cx.listener(|this, checked, _, cx| {
-                            this.apply_controlled_config(
-                                json!({"unified-delay": *checked}),
-                                "统一延迟设置已更新",
-                                cx,
-                            );
-                        }),
-                    )),
-            )
-            .child(
-                setting_card("控制器与监听", theme)
-                    .child(info_row(
-                        "External Controller",
-                        &self.client.endpoint().controller,
-                        theme,
-                    ))
-                    .child(info_row("HTTP", &format_port(config.port), theme))
-                    .child(info_row("SOCKS", &format_port(config.socks_port), theme))
-                    .child(info_row("Mixed", &format_port(config.mixed_port), theme))
-                    .child(info_row("日志等级", &config.log_level, theme)),
-            )
-            .child(self.render_core_inputs(theme, cx))
+            .when(!has_runtime_data, |this| {
+                this.child(message_banner(
+                    "没有使用默认值冒充运行状态。请重启托管内核，或确认外部控制器地址和密钥后刷新。".into(),
+                    theme.danger,
+                    theme,
+                ))
+            })
+            .when(has_runtime_data, |this| {
+                this.child(
+                    setting_card("运行时开关", theme)
+                        .child(setting_switch(
+                            "IPv6",
+                            format!("允许 {} 解析和使用 IPv6", self.core_kind.display_name()),
+                            config.ipv6,
+                            "runtime-ipv6",
+                            theme,
+                            cx.listener(|this, checked, _, cx| {
+                                this.apply_controlled_config(
+                                    json!({"ipv6": *checked}),
+                                    "IPv6 设置已保存并热重载",
+                                    cx,
+                                );
+                            }),
+                        ))
+                        .child(setting_switch(
+                            "允许局域网",
+                            "允许其他设备访问监听端口",
+                            config.allow_lan,
+                            "runtime-allow-lan",
+                            theme,
+                            cx.listener(|this, checked, _, cx| {
+                                this.apply_controlled_config(
+                                    json!({"allow-lan": *checked}),
+                                    "局域网访问设置已更新",
+                                    cx,
+                                );
+                            }),
+                        ))
+                        .child(setting_switch(
+                            "TCP 并发",
+                            "并行建立目标连接以降低握手等待",
+                            config.tcp_concurrent,
+                            "runtime-tcp-concurrent",
+                            theme,
+                            cx.listener(|this, checked, _, cx| {
+                                this.apply_controlled_config(
+                                    json!({"tcp-concurrent": *checked}),
+                                    "TCP 并发设置已更新",
+                                    cx,
+                                );
+                            }),
+                        ))
+                        .child(setting_switch(
+                            "统一延迟",
+                            "使用统一的延迟计算方式",
+                            config.unified_delay,
+                            "runtime-unified-delay",
+                            theme,
+                            cx.listener(|this, checked, _, cx| {
+                                this.apply_controlled_config(
+                                    json!({"unified-delay": *checked}),
+                                    "统一延迟设置已更新",
+                                    cx,
+                                );
+                            }),
+                        )),
+                )
+            })
+            .when(has_runtime_data, |this| {
+                this.child(
+                    setting_card("控制器与监听", theme)
+                        .child(info_row(
+                            "External Controller",
+                            &self.client.endpoint().controller,
+                            theme,
+                        ))
+                        .child(info_row("HTTP", &format_port(config.port), theme))
+                        .child(info_row("SOCKS", &format_port(config.socks_port), theme))
+                        .child(info_row("Mixed", &format_port(config.mixed_port), theme))
+                        .child(info_row("日志等级", &config.log_level, theme)),
+                )
+            })
+            .when(has_runtime_data, |this| {
+                this.child(self.render_core_inputs(theme, cx))
+            })
             .child(
                 setting_card("内核维护", theme)
                     .child(info_row(
                         "升级通道",
                         if self.core_kind.capabilities().core_upgrade {
-                            "Mihomo 原生 /upgrade API"
+                            "官方 Release · SHA-256 校验 · 候选 -t 预检 · 失败回滚"
                         } else {
                             "当前内核不支持应用内升级"
                         },
@@ -252,37 +249,18 @@ impl RuntimePage {
                         theme,
                     ))
                     .child(
-                        h_flex()
-                            .justify_end()
-                            .gap_2()
-                            .p_4()
-                            .child(
-                                Button::new("restart-mihomo-core")
-                                    .icon(IconName::Redo2)
-                                    .label("重启内核")
-                                    .small()
-                                    .outline()
-                                    .loading(self.mutating)
-                                    .disabled(self.mutating || !managed_process)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.restart_managed_core(cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("upgrade-mihomo-core")
-                                    .icon(IconName::ArrowUp)
-                                    .label("在线升级")
-                                    .small()
-                                    .primary()
-                                    .loading(self.mutating)
-                                    .disabled(
-                                        self.mutating
-                                            || !self.core_kind.capabilities().core_upgrade,
-                                    )
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.upgrade_running_core(cx);
-                                    })),
-                            ),
+                        h_flex().justify_end().gap_2().p_4().child(
+                            Button::new("restart-mihomo-core")
+                                .icon(IconName::Redo2)
+                                .label("重启内核")
+                                .small()
+                                .outline()
+                                .loading(self.mutating)
+                                .disabled(self.mutating || !managed_process)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.restart_managed_core(cx);
+                                })),
+                        ),
                     ),
             )
             .child(self.render_versioned_core_updates(&version.version, managed_process, theme, cx))

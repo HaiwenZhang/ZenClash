@@ -73,8 +73,9 @@ impl MihomoClient {
     ///
     /// # Errors
     ///
-    /// Rejects empty proxy/provider names, zero timeouts and non-HTTP(S) test
-    /// URLs, and propagates transport, API-status or response-decoding errors.
+    /// Rejects empty proxy names, zero timeouts and non-HTTP(S) test URLs.
+    /// A blank optional provider is treated as absent. Transport, API-status
+    /// and response-decoding errors are propagated.
     pub async fn proxy_delay_with_provider(
         &self,
         proxy: &str,
@@ -86,8 +87,8 @@ impl MihomoClient {
         if timeout_ms == 0 {
             return Err(MihomoError::InvalidInput("延迟测试超时必须大于 0".into()));
         }
+        let provider = provider.map(str::trim).filter(|name| !name.is_empty());
         let path = if let Some(provider) = provider {
-            require_non_empty(provider, "代理提供者名称")?;
             format!(
                 "/providers/proxies/{}/{}/healthcheck",
                 encode_path_segment(provider),
@@ -246,6 +247,15 @@ impl MihomoClient {
             )));
         }
         let _mutation_guard = self.mutation_gate.lock().await;
+        if let Some(validator) = self.config_validator.clone() {
+            let validation_payload = payload.clone();
+            tokio::task::spawn_blocking(move || validator.validate_payload(&validation_payload))
+                .await
+                .map_err(|error| {
+                    MihomoError::Process(format!("内核配置预检任务异常结束：{error}"))
+                })?
+                .map_err(|error| MihomoError::Process(error.to_string()))?;
+        }
         let response = self
             .request(Method::PUT, "/configs")?
             .query(&[("force", force)])

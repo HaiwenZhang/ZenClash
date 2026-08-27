@@ -139,7 +139,7 @@ impl LogFileWorker {
             settings: settings.clone(),
             status: status.clone(),
         };
-        let thread_settings = settings.clone();
+        let thread_settings = settings;
         let thread_status = status.clone();
         let thread = thread::Builder::new()
             .name("zenclash-log-file".into())

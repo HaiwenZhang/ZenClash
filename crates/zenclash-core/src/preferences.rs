@@ -5,6 +5,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use parking_lot::Mutex;
@@ -12,7 +13,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::profiles::atomic_write;
-use crate::{CoreKind, NetworkLatencyTarget, PublicIpProvider, SystemProxyMode};
+use crate::{
+    CoreKind, NetworkLatencyTarget, PublicIpProvider, SystemProxyMode, SystemProxyOwnership,
+};
 
 const MAX_PREFERENCES_BYTES: usize = 1024 * 1024;
 
@@ -74,6 +77,10 @@ pub struct AppPreferences {
     pub network_latency_targets: Vec<NetworkLatencyTarget>,
     /// Ordered native system-proxy bypass rules shared by the page and tray.
     pub system_proxy_bypass: Vec<String>,
+    /// Whether ZenClash should own and restore the native system proxy.
+    pub system_proxy_enabled: bool,
+    /// Exact native state written by the most recent successful enable.
+    pub system_proxy_ownership: Option<SystemProxyOwnership>,
     /// Whether native system proxying uses explicit endpoints or PAC.
     pub system_proxy_mode: SystemProxyMode,
     /// Host used by manual proxying and the local PAC listener.
@@ -129,6 +136,8 @@ impl Default for AppPreferences {
             network_probe_route: NetworkProbeRoutePreference::Mihomo,
             network_latency_targets: Vec::new(),
             system_proxy_bypass: crate::default_system_proxy_bypass(),
+            system_proxy_enabled: false,
+            system_proxy_ownership: None,
             system_proxy_mode: SystemProxyMode::Manual,
             system_proxy_host: "127.0.0.1".into(),
             system_proxy_pac_script: crate::default_pac_script().into(),
@@ -289,6 +298,42 @@ impl AppPreferencesStore {
             .unwrap_or_else(|| Path::new(""))
             .join("logs/mihomo.log")
     }
+
+    /// Quarantines malformed or incompatible preferences without hiding I/O failures.
+    ///
+    /// JSON decoding, validation, and defensive-size failures are moved to a
+    /// timestamped sibling file. The caller can then continue from defaults
+    /// while retaining the original document for inspection or manual repair.
+    ///
+    /// # Errors
+    ///
+    /// Returns the original non-recoverable error or a filesystem error while
+    /// moving the invalid document.
+    pub fn quarantine_invalid_preferences(&self) -> AppPreferencesResult<Option<PathBuf>> {
+        let _transaction = self.transaction.lock();
+        let error = match self.load_unlocked() {
+            Ok(_) => return Ok(None),
+            Err(error) => error,
+        };
+        if !matches!(
+            error,
+            AppPreferencesError::Json(_)
+                | AppPreferencesError::TooLarge
+                | AppPreferencesError::Invalid(_)
+        ) {
+            return Err(error);
+        }
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let quarantine = self.path.with_file_name(format!(
+            "preferences.invalid-{}-{timestamp}.json",
+            std::process::id()
+        ));
+        fs::rename(&self.path, &quarantine)?;
+        Ok(Some(quarantine))
+    }
 }
 
 fn validate_preferences(preferences: &AppPreferences) -> AppPreferencesResult<()> {
@@ -338,6 +383,10 @@ fn validate_preferences(preferences: &AppPreferences) -> AppPreferencesResult<()
         return Err(AppPreferencesError::Invalid(
             "PAC 脚本必须使用规范化换行结尾".into(),
         ));
+    }
+    if let Some(ownership) = &preferences.system_proxy_ownership {
+        crate::system_proxy::validate_system_proxy_ownership(ownership)
+            .map_err(|error| AppPreferencesError::Invalid(error.to_string()))?;
     }
     Ok(())
 }
@@ -457,6 +506,31 @@ mod tests {
     }
 
     #[test]
+    fn quarantines_invalid_preferences_and_recovers_defaults() {
+        let path = test_path("quarantine-invalid");
+        fs::write(&path, b"{ definitely-not-json").unwrap();
+        let store = AppPreferencesStore::new(&path);
+
+        let quarantine = store.quarantine_invalid_preferences().unwrap().unwrap();
+
+        assert!(!path.exists());
+        assert_eq!(fs::read(&quarantine).unwrap(), b"{ definitely-not-json");
+        assert_eq!(store.load().unwrap(), AppPreferences::default());
+        fs::remove_file(quarantine).unwrap();
+    }
+
+    #[test]
+    fn valid_preferences_are_not_quarantined() {
+        let path = test_path("quarantine-valid");
+        let store = AppPreferencesStore::new(&path);
+        store.save(&AppPreferences::default()).unwrap();
+
+        assert_eq!(store.quarantine_invalid_preferences().unwrap(), None);
+        assert!(path.exists());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn rejects_invalid_traffic_retention() {
         let path = test_path("invalid-retention");
         let store = AppPreferencesStore::new(&path);
@@ -516,6 +590,8 @@ mod tests {
             crate::default_system_proxy_bypass()
         );
         assert_eq!(preferences.system_proxy_mode, SystemProxyMode::Manual);
+        assert!(!preferences.system_proxy_enabled);
+        assert!(preferences.system_proxy_ownership.is_none());
         assert_eq!(preferences.system_proxy_host, "127.0.0.1");
         assert_eq!(
             preferences.system_proxy_pac_script,

@@ -1,7 +1,8 @@
 //! Native desktop system-proxy discovery and control.
 
-use std::net::IpAddr;
+use std::{net::IpAddr, sync::Arc};
 
+use parking_lot::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -68,6 +69,70 @@ pub struct SystemProxyStatus {
     pub auto_url: String,
 }
 
+/// Exact native proxy state last applied and verified by ZenClash.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum SystemProxyOwnership {
+    /// Verified manual HTTP/HTTPS endpoint and bypass rules.
+    Manual {
+        /// Native network service selected during the write.
+        service: String,
+        /// Normalized HTTP/HTTPS proxy host.
+        host: String,
+        /// HTTP/HTTPS proxy port.
+        port: u16,
+        /// Normalized bypass rules observed after the write.
+        bypass: Vec<String>,
+    },
+    /// Verified automatic proxy URL.
+    Pac {
+        /// Native network service selected during the write.
+        service: String,
+        /// PAC URL observed after the write.
+        url: String,
+    },
+}
+
+pub(crate) fn validate_system_proxy_ownership(
+    ownership: &SystemProxyOwnership,
+) -> MihomoResult<()> {
+    let service = match ownership {
+        SystemProxyOwnership::Manual {
+            service,
+            host,
+            port,
+            bypass,
+        } => {
+            if *port == 0 {
+                return Err(MihomoError::Process("系统代理所有权端口不能为 0".into()));
+            }
+            if normalize_system_proxy_host(host)? != *host {
+                return Err(MihomoError::Process(
+                    "系统代理所有权主机不是规范形式".into(),
+                ));
+            }
+            if normalize_system_proxy_bypass(bypass)? != *bypass {
+                return Err(MihomoError::Process(
+                    "系统代理所有权绕过规则不是规范形式".into(),
+                ));
+            }
+            service
+        }
+        SystemProxyOwnership::Pac { service, url } => {
+            if normalize_pac_url(url)? != *url {
+                return Err(MihomoError::Process(
+                    "系统代理所有权 PAC URL 不是规范形式".into(),
+                ));
+            }
+            service
+        }
+    };
+    if service.trim().is_empty() || service.len() > 256 || service.trim() != service {
+        return Err(MihomoError::Process("系统代理所有权服务名称无效".into()));
+    }
+    Ok(())
+}
+
 impl SystemProxyStatus {
     /// Returns whether either manual or automatic system proxying is active.
     #[must_use]
@@ -86,13 +151,36 @@ pub struct SystemProxyManager {
 #[derive(Clone, Debug, Default)]
 pub struct SystemProxyController {
     pac_server: PacServer,
+    operation: Arc<Mutex<()>>,
+}
+
+/// Exclusive native system-proxy operation owned by a controller clone.
+///
+/// Keep this guard alive while coordinating a native write with persistent
+/// application state. This prevents page, tray, startup-reconciliation, and
+/// shutdown workflows from interleaving their writes.
+pub struct SystemProxyOperation<'a> {
+    controller: &'a SystemProxyController,
+    _guard: MutexGuard<'a, ()>,
 }
 
 impl SystemProxyController {
     /// Creates a controller backed by a shared PAC service owner.
     #[must_use]
     pub fn new(pac_server: PacServer) -> Self {
-        Self { pac_server }
+        Self {
+            pac_server,
+            operation: Arc::default(),
+        }
+    }
+
+    /// Acquires the shared native-operation lock used by every controller clone.
+    #[must_use]
+    pub fn begin_operation(&self) -> SystemProxyOperation<'_> {
+        SystemProxyOperation {
+            controller: self,
+            _guard: self.operation.lock(),
+        }
     }
 
     /// Applies the selected proxy mode and verifies native state after writing.
@@ -115,16 +203,36 @@ impl SystemProxyController {
         bypass: &[String],
         pac_script: &str,
     ) -> MihomoResult<()> {
+        self.begin_operation()
+            .set_enabled(enabled, mode, host, port, bypass, pac_script)
+    }
+
+    fn apply_unlocked(
+        &self,
+        enabled: bool,
+        mode: SystemProxyMode,
+        host: &str,
+        port: u16,
+        bypass: &[String],
+        pac_script: &str,
+    ) -> MihomoResult<Option<SystemProxyOwnership>> {
         let manager = SystemProxyManager::detect()?;
         if !enabled {
             manager.set_enabled_with_bypass(false, "", 0, &[])?;
             self.pac_server.stop();
-            return Ok(());
+            return Ok(None);
         }
-        match mode {
+        let ownership = match mode {
             SystemProxyMode::Manual => {
                 manager.set_enabled_with_bypass(true, host, port, bypass)?;
                 self.pac_server.stop();
+                let status = manager.status()?;
+                SystemProxyOwnership::Manual {
+                    service: manager.service().to_owned(),
+                    host: status.server,
+                    port: status.port,
+                    bypass: status.bypass,
+                }
             }
             SystemProxyMode::Pac => {
                 let pac = self.pac_server.start(host, pac_script, port)?;
@@ -132,15 +240,103 @@ impl SystemProxyController {
                     self.pac_server.stop();
                     return Err(error);
                 }
+                SystemProxyOwnership::Pac {
+                    service: manager.service().to_owned(),
+                    url: pac.url,
+                }
             }
-        }
-        Ok(())
+        };
+        Ok(Some(ownership))
     }
 
     /// Returns the process-local PAC listener status, when present.
     #[must_use]
     pub fn pac_status(&self) -> Option<PacServerStatus> {
         self.pac_server.status()
+    }
+}
+
+impl SystemProxyOperation<'_> {
+    /// Applies one native proxy state without reacquiring the controller lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error from validation, PAC startup, platform detection, the
+    /// native write, or state readback.
+    pub fn set_enabled(
+        &self,
+        enabled: bool,
+        mode: SystemProxyMode,
+        host: &str,
+        port: u16,
+        bypass: &[String],
+        pac_script: &str,
+    ) -> MihomoResult<()> {
+        self.apply(enabled, mode, host, port, bypass, pac_script)
+            .map(drop)
+    }
+
+    /// Applies native proxy state and returns verified ownership when enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error from validation, native writes, PAC startup, or state
+    /// readback.
+    pub fn apply(
+        &self,
+        enabled: bool,
+        mode: SystemProxyMode,
+        host: &str,
+        port: u16,
+        bypass: &[String],
+        pac_script: &str,
+    ) -> MihomoResult<Option<SystemProxyOwnership>> {
+        self.controller
+            .apply_unlocked(enabled, mode, host, port, bypass, pac_script)
+    }
+
+    /// Disables the native proxy only if it still matches ZenClash's last
+    /// verified write. A replaced third-party proxy is left untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when native service detection, status readback, or the
+    /// owned-state clear fails.
+    pub fn release_if_owned(&self, ownership: &SystemProxyOwnership) -> MihomoResult<bool> {
+        let manager = SystemProxyManager::detect()?;
+        let status = manager.status()?;
+        let matches = match ownership {
+            SystemProxyOwnership::Manual {
+                service,
+                host,
+                port,
+                bypass,
+            } => {
+                manager.service() == service
+                    && !status.auto_enabled
+                    && status.enabled
+                    && status.secure_enabled
+                    && status.server == *host
+                    && status.secure_server == *host
+                    && status.port == *port
+                    && status.secure_port == *port
+                    && status.bypass == *bypass
+            }
+            SystemProxyOwnership::Pac { service, url } => {
+                manager.service() == service
+                    && status.auto_enabled
+                    && status.auto_url == *url
+                    && !status.enabled
+                    && !status.secure_enabled
+            }
+        };
+        if matches {
+            manager.set_enabled_with_bypass(false, "", 0, &[])?;
+        }
+        if matches!(ownership, SystemProxyOwnership::Pac { .. }) {
+            self.controller.pac_server.stop();
+        }
+        Ok(matches)
     }
 }
 
@@ -447,7 +643,51 @@ fn is_valid_bypass_entry(entry: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_system_proxy_bypass, normalize_system_proxy_host, SystemProxyManager};
+    use std::{
+        sync::{mpsc, Arc},
+        thread,
+        time::Duration,
+    };
+
+    use super::{
+        normalize_system_proxy_bypass, normalize_system_proxy_host, SystemProxyController,
+        SystemProxyManager,
+    };
+
+    #[test]
+    fn controller_clones_serialize_complete_native_operations() {
+        let controller = Arc::new(SystemProxyController::default());
+        let (first_acquired, first_acquired_rx) = mpsc::channel();
+        let (release_first, release_first_rx) = mpsc::channel();
+        let first = {
+            let controller = Arc::clone(&controller);
+            thread::spawn(move || {
+                let _operation = controller.begin_operation();
+                first_acquired.send(()).unwrap();
+                release_first_rx.recv().unwrap();
+            })
+        };
+        first_acquired_rx.recv().unwrap();
+
+        let (second_acquired, second_acquired_rx) = mpsc::channel();
+        let second = {
+            let controller = Arc::clone(&controller);
+            thread::spawn(move || {
+                let _operation = controller.begin_operation();
+                second_acquired.send(()).unwrap();
+            })
+        };
+
+        assert!(second_acquired_rx
+            .recv_timeout(Duration::from_millis(50))
+            .is_err());
+        release_first.send(()).unwrap();
+        second_acquired_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        first.join().unwrap();
+        second.join().unwrap();
+    }
 
     #[test]
     fn rejects_invalid_proxy_endpoint_before_platform_command() {

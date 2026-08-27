@@ -32,6 +32,25 @@ impl MihomoEndpoint {
         }
     }
 
+    /// Creates a controller endpoint protected by a fresh 256-bit secret.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operating system cannot provide secure random
+    /// bytes. No predictable fallback is generated.
+    pub fn with_random_secret(controller: impl Into<String>) -> MihomoResult<Self> {
+        let mut bytes = [0_u8; 32];
+        getrandom::fill(&mut bytes)
+            .map_err(|error| MihomoError::Process(format!("无法生成托管控制器密钥：{error}")))?;
+        let mut secret = String::with_capacity(bytes.len() * 2);
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for byte in bytes {
+            secret.push(char::from(HEX[usize::from(byte >> 4)]));
+            secret.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+        Ok(Self::new(controller, secret))
+    }
+
     /// Resolve the initial controller from environment overrides, while retaining
     /// Mihomo's conventional local controller as the zero-configuration default.
     #[must_use]
@@ -168,5 +187,16 @@ mod tests {
                 .unwrap(),
             "http://127.0.0.1:9090/proxies/HK%2F%E9%A6%99%E6%B8%AF"
         );
+    }
+
+    #[test]
+    fn managed_controller_secret_uses_256_bits_of_lower_hex() {
+        let endpoint = MihomoEndpoint::with_random_secret("127.0.0.1:19090").unwrap();
+
+        assert_eq!(endpoint.secret.len(), 64);
+        assert!(endpoint
+            .secret
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
     }
 }

@@ -1,9 +1,11 @@
 //! Persistent, non-destructive configuration overrides for active profiles.
 
 use std::{
+    collections::BTreeMap,
+    fs,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use parking_lot::Mutex;
@@ -11,6 +13,10 @@ use serde_yaml::Value;
 use thiserror::Error;
 
 use crate::{
+    listener_fallback::{
+        apply_session_fallbacks, resolve_conflicts, validate_listener_change,
+        SessionListenerFallback,
+    },
     profile::{merge_payload_overrides, merge_profile_patch, merge_yaml},
     profiles::{atomic_write, read_profile_bytes, MAX_PROFILE_BYTES},
     CoreKind, MihomoClient, MihomoError, MihomoProcess,
@@ -62,10 +68,24 @@ pub enum ControlledConfigError {
     /// The selected runtime core cannot perform an operation in its current mode.
     #[error("当前内核不支持该配置操作：{0}")]
     UnsupportedCoreOperation(String),
+    /// Listener probing or session-only fallback failed.
+    #[error("代理监听端口处理失败：{0}")]
+    ListenerFallback(String),
 }
 
 /// Result type for controlled-configuration operations.
 pub type ControlledConfigResult<T> = Result<T, ControlledConfigError>;
+
+/// One listener port moved for the current managed-core session only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListenerPortFallback {
+    /// Clash/Mihomo configuration key, such as `mixed-port`.
+    pub listener: String,
+    /// Port requested by the effective persistent configuration.
+    pub original: u16,
+    /// Available port selected for this process session.
+    pub current: u16,
+}
 
 /// Prepared controlled-config mutation that has not been persisted yet.
 ///
@@ -103,6 +123,7 @@ pub struct ControlledConfigStore {
     root: PathBuf,
     transaction: Arc<Mutex<()>>,
     mutation_gate: Arc<tokio::sync::Mutex<()>>,
+    session_listener_fallbacks: Arc<Mutex<BTreeMap<String, SessionListenerFallback>>>,
 }
 
 impl ControlledConfigStore {
@@ -122,6 +143,7 @@ impl ControlledConfigStore {
             root: root.into(),
             transaction: Arc::new(Mutex::new(())),
             mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
+            session_listener_fallbacks: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -276,8 +298,63 @@ impl ControlledConfigStore {
 
     fn write_runtime_payload(&self, payload: &str) -> ControlledConfigResult<PathBuf> {
         let path = self.runtime_path();
+        let payload = self.apply_session_listener_fallbacks(payload)?;
         atomic_write(&path, payload.as_bytes())?;
         Ok(path)
+    }
+
+    /// Detects externally occupied proxy listeners and moves only the generated
+    /// runtime configuration to available ports for this process session.
+    /// Source profiles and persistent controlled overrides are never changed.
+    /// Later runtime-cache generations retain the fallback unless the user
+    /// explicitly chooses another port.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the generated runtime file cannot be read, parsed,
+    /// probed, serialized, or atomically replaced.
+    pub fn resolve_startup_listener_conflicts(
+        &self,
+    ) -> ControlledConfigResult<Vec<ListenerPortFallback>> {
+        let path = self.runtime_path();
+        let bytes = read_profile_bytes(&path).map_err(|error| match error {
+            crate::ProfileStoreError::Io(error) => ControlledConfigError::Io(error),
+            other => ControlledConfigError::ListenerFallback(other.to_string()),
+        })?;
+        let payload = String::from_utf8(bytes).map_err(|error| {
+            ControlledConfigError::ListenerFallback(format!("生成的运行配置不是 UTF-8：{error}"))
+        })?;
+        let mut document = serde_yaml::from_str::<Value>(&payload)?;
+        let mut next_session = self.session_listener_fallbacks.lock().clone();
+        let resolved = resolve_conflicts(&mut document, &mut next_session)
+            .map_err(ControlledConfigError::ListenerFallback)?;
+        if resolved.is_empty() {
+            return Ok(Vec::new());
+        }
+        let payload = serde_yaml::to_string(&document)?;
+        if payload.len() > MAX_PROFILE_BYTES {
+            return Err(ControlledConfigError::TooLarge);
+        }
+        atomic_write(&path, payload.as_bytes())?;
+        *self.session_listener_fallbacks.lock() = next_session;
+        Ok(resolved
+            .into_iter()
+            .map(|(listener, fallback)| ListenerPortFallback {
+                listener,
+                original: fallback.original,
+                current: fallback.current,
+            })
+            .collect())
+    }
+
+    fn apply_session_listener_fallbacks(&self, payload: &str) -> ControlledConfigResult<String> {
+        let session = self.session_listener_fallbacks.lock();
+        let payload = apply_session_fallbacks(payload, &session)
+            .map_err(ControlledConfigError::ListenerFallback)?;
+        if payload.len() > MAX_PROFILE_BYTES {
+            return Err(ControlledConfigError::TooLarge);
+        }
+        Ok(payload)
     }
 
     /// Prepares a recursive JSON patch without persisting it.
@@ -350,6 +427,10 @@ impl ControlledConfigStore {
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let previous_runtime = self.apply_session_listener_fallbacks(&previous_runtime)?;
+        let next_runtime = self.apply_session_listener_fallbacks(&next_runtime)?;
+        validate_listener_change(&previous_runtime, &next_runtime, true)
+            .map_err(ControlledConfigError::ListenerFallback)?;
         let cache = self.accept_runtime_payload(client, next_runtime).await?;
         let commit_store = self.clone();
         let commit_update = update.clone();
@@ -417,6 +498,7 @@ impl ControlledConfigStore {
             tokio::task::spawn_blocking(move || merge_payload_overrides(&next_base, &overrides))
                 .await
                 .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let next_runtime = self.apply_session_listener_fallbacks(&next_runtime)?;
         let cache_store = self.clone();
         let cache =
             tokio::task::spawn_blocking(move || cache_store.stage_runtime_payload(&next_runtime))
@@ -493,10 +575,23 @@ impl ControlledConfigStore {
                 .await
                 .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
         let next_base = update.next_payload().to_owned();
-        let next_runtime =
-            tokio::task::spawn_blocking(move || merge_payload_overrides(&next_base, &overrides))
-                .await
-                .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let previous_base = update.previous_payload().to_owned();
+        let kind = process.kind();
+        let (next_runtime, previous_runtime) = tokio::task::spawn_blocking(move || {
+            Ok::<_, ControlledConfigError>((
+                normalize_runtime_payload(kind, merge_payload_overrides(&next_base, &overrides)?)?,
+                normalize_runtime_payload(
+                    kind,
+                    merge_payload_overrides(&previous_base, &overrides)?,
+                )?,
+            ))
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let next_runtime = self.apply_session_listener_fallbacks(&next_runtime)?;
+        let previous_runtime = self.apply_session_listener_fallbacks(&previous_runtime)?;
+        validate_listener_change(&previous_runtime, &next_runtime, process.is_running())
+            .map_err(ControlledConfigError::ListenerFallback)?;
         let cache = self
             .accept_runtime_payload_with_restart(process.clone(), next_runtime)
             .await?;
@@ -535,6 +630,7 @@ impl ControlledConfigStore {
         let payload = tokio::task::spawn_blocking(move || store.effective_payload(profile))
             .await
             .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let payload = self.validate_candidate_listeners(payload, true)?;
         self.accept_runtime_payload(client, payload).await?.commit();
         Ok(())
     }
@@ -563,6 +659,7 @@ impl ControlledConfigStore {
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let payload = self.validate_candidate_listeners(payload, true)?;
         self.accept_runtime_payload(client, payload).await?.commit();
         Ok(())
     }
@@ -590,6 +687,8 @@ impl ControlledConfigStore {
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let payload = normalize_runtime_payload(process.kind(), payload)?;
+        let payload = self.validate_candidate_listeners(payload, process.is_running())?;
         self.accept_runtime_payload_with_restart(process, payload)
             .await?
             .commit();
@@ -622,11 +721,49 @@ impl ControlledConfigStore {
         &self.root
     }
 
+    /// Quarantines a malformed persisted override and restores an empty layer.
+    ///
+    /// Only parse, shape, and defensive-size failures are recoverable. Native
+    /// I/O errors are returned unchanged so permission and disk failures are
+    /// never mistaken for successful repair.
+    ///
+    /// # Errors
+    ///
+    /// Returns the original non-recoverable error or a filesystem error while
+    /// moving the malformed document to its timestamped backup path.
+    pub fn quarantine_invalid_patch(&self) -> ControlledConfigResult<Option<PathBuf>> {
+        let _transaction = self.transaction.lock();
+        let error = match self.load_unlocked() {
+            Ok(_) => return Ok(None),
+            Err(error) => error,
+        };
+        if !matches!(
+            error,
+            ControlledConfigError::Yaml(_)
+                | ControlledConfigError::NotMapping
+                | ControlledConfigError::TooLarge
+        ) {
+            return Err(error);
+        }
+        let source = self.patch_path();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let quarantine = self.root.join(format!(
+            "override.invalid-{}-{timestamp}.yaml",
+            std::process::id()
+        ));
+        fs::rename(&source, &quarantine)?;
+        Ok(Some(quarantine))
+    }
+
     async fn accept_runtime_payload(
         &self,
         client: &MihomoClient,
         payload: String,
     ) -> ControlledConfigResult<RuntimeCacheTransaction> {
+        let payload = self.apply_session_listener_fallbacks(&payload)?;
         let store = self.clone();
         let cache_payload = payload.clone();
         let cache =
@@ -653,6 +790,7 @@ impl ControlledConfigStore {
         payload: String,
     ) -> ControlledConfigResult<RuntimeCacheTransaction> {
         let payload = normalize_runtime_payload(process.kind(), payload)?;
+        let payload = self.apply_session_listener_fallbacks(&payload)?;
         let store = self.clone();
         let cache = tokio::task::spawn_blocking(move || store.stage_runtime_payload(&payload))
             .await
@@ -687,6 +825,34 @@ impl ControlledConfigStore {
             next_patch,
             previous_payload,
             next_payload,
+        })
+    }
+
+    fn validate_candidate_listeners(
+        &self,
+        candidate: String,
+        current_core_is_running: bool,
+    ) -> ControlledConfigResult<String> {
+        let candidate = self.apply_session_listener_fallbacks(&candidate)?;
+        let current = self
+            .cached_runtime_payload()?
+            .unwrap_or_else(|| candidate.clone());
+        validate_listener_change(&current, &candidate, current_core_is_running)
+            .map_err(ControlledConfigError::ListenerFallback)?;
+        Ok(candidate)
+    }
+
+    fn cached_runtime_payload(&self) -> ControlledConfigResult<Option<String>> {
+        let bytes = match std::fs::read(self.runtime_path()) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(ControlledConfigError::Io(error)),
+        };
+        if bytes.len() > MAX_PROFILE_BYTES {
+            return Err(ControlledConfigError::TooLarge);
+        }
+        String::from_utf8(bytes).map(Some).map_err(|error| {
+            ControlledConfigError::Transaction(format!("运行缓存不是 UTF-8：{error}"))
         })
     }
 }

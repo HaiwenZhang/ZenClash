@@ -199,21 +199,23 @@ pub(super) fn build_menu(
             .map_err(|error| error.to_string())?;
     }
 
-    let copy_environment = Submenu::new("复制代理环境变量", true);
-    for shell in EnvironmentShell::ALL {
-        let item = builder.item(
-            shell.label(),
-            TrayCommand::CopyEnvironment {
-                port: state.mixed_port,
-                shell,
-            },
-        );
-        copy_environment
-            .append(&item)
+    if state.mixed_port > 0 {
+        let copy_environment = Submenu::new("复制代理环境变量", true);
+        for shell in EnvironmentShell::ALL {
+            let item = builder.item(
+                shell.label(),
+                TrayCommand::CopyEnvironment {
+                    port: state.mixed_port,
+                    shell,
+                },
+            );
+            copy_environment
+                .append(&item)
+                .map_err(|error| error.to_string())?;
+        }
+        menu.append(&copy_environment)
             .map_err(|error| error.to_string())?;
     }
-    menu.append(&copy_environment)
-        .map_err(|error| error.to_string())?;
 
     let separator_3 = PredefinedMenuItem::separator();
     let light_mode = builder.item("轻量模式（隐藏窗口）", TrayCommand::LightMode);

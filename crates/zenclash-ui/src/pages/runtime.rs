@@ -114,6 +114,7 @@ pub struct RuntimePage {
     mutating: bool,
     closing_connections: HashSet<String>,
     error: Option<String>,
+    startup_error: Option<String>,
     notice: Option<String>,
     focus_handle: gpui::FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -153,6 +154,8 @@ pub struct RuntimePageServices {
     pub traffic_history_store: Option<TrafficHistoryStore>,
     /// Visible explanation when startup recovered from the requested core.
     pub startup_notice: Option<String>,
+    /// Persistent startup failure while no eligible core/controller is available.
+    pub startup_error: Option<String>,
 }
 
 /// Event emitted after a managed profile becomes the active Mihomo config.
@@ -164,6 +167,12 @@ pub struct ProfileActivated {
 
 impl EventEmitter<ProfileActivated> for RuntimePage {}
 
+/// Event emitted after a controlled runtime configuration is accepted.
+#[derive(Clone, Copy, Debug)]
+pub struct RuntimeConfigApplied;
+
+impl EventEmitter<RuntimeConfigApplied> for RuntimePage {}
+
 /// Event emitted after imported application preferences become authoritative.
 #[derive(Clone, Debug)]
 pub struct PreferencesRestored {
@@ -172,3 +181,9 @@ pub struct PreferencesRestored {
 }
 
 impl EventEmitter<PreferencesRestored> for RuntimePage {}
+
+/// Event requesting a graceful exit followed by a Windows RunAs relaunch.
+#[derive(Clone, Copy, Debug)]
+pub struct ElevatedRestartRequested;
+
+impl EventEmitter<ElevatedRestartRequested> for RuntimePage {}

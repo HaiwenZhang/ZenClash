@@ -1,7 +1,8 @@
 use super::{
-    div, h_flex, message_banner, v_flex, ActiveTheme, App, Button, ButtonVariants, Context,
-    Disableable, FluentBuilder, Focusable, Icon, IconName, InteractiveElement, IntoElement, Page,
-    ParentElement, Render, RuntimePage, ScrollableElement, Sizable, Styled, Window,
+    div, empty_state, h_flex, message_banner, v_flex, ActiveTheme, App, Button, ButtonVariants,
+    Context, Disableable, FluentBuilder, Focusable, Icon, IconName, InteractiveElement,
+    IntoElement, Page, ParentElement, Render, RuntimeData, RuntimePage, ScrollableElement, Sizable,
+    Styled, Window,
 };
 
 impl RuntimePage {
@@ -12,9 +13,9 @@ impl RuntimePage {
     ) -> impl IntoElement {
         let traffic = self.traffic_monitor.snapshot();
         let (status, status_color) = if traffic.connected {
-            ("内核在线", theme.success)
+            ("实时流已连接", theme.success)
         } else {
-            ("正在重连", theme.warning)
+            ("实时流重连中", theme.warning)
         };
         h_flex()
             .h_16()
@@ -75,6 +76,9 @@ impl RuntimePage {
     fn render_status(&self, theme: &gpui_component::Theme) -> gpui::AnyElement {
         v_flex()
             .gap_2()
+            .when_some(self.startup_error.clone(), |this, error| {
+                this.child(message_banner(error, theme.danger, theme))
+            })
             .when_some(self.error.clone(), |this, error| {
                 this.child(message_banner(error, theme.danger, theme))
             })
@@ -89,6 +93,22 @@ impl RuntimePage {
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        if matches!(self.data, RuntimeData::Empty) && self.page == Page::Settings {
+            return self.render_offline_settings(theme, cx).into_any_element();
+        }
+        if matches!(self.data, RuntimeData::Empty)
+            && !matches!(self.page, Page::Logs | Page::Mihomo)
+        {
+            return empty_state(
+                if self.loading {
+                    "正在从内核读取真实状态…"
+                } else {
+                    "当前没有可显示的内核状态，请检查上方错误后重试。"
+                },
+                theme,
+            )
+            .into_any_element();
+        }
         match self.page {
             Page::Home => self.render_home(theme, cx),
             Page::Mihomo => self.render_core(theme, cx),

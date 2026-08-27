@@ -1,4 +1,4 @@
-use std::{path::Path, process::Command};
+use std::path::Path;
 
 use crate::{
     platform_command, TunPermissionError, TunPermissionGrant, TunPermissionResult,
@@ -38,33 +38,5 @@ pub(super) fn status(binary: &Path) -> TunPermissionResult<TunPermissionStatus> 
 }
 
 pub(super) fn request_grant(_binary: &Path) -> TunPermissionResult<TunPermissionGrant> {
-    let executable = std::env::current_exe().map_err(|error| {
-        TunPermissionError::Platform(format!("无法确定 ZenClash 可执行文件：{error}"))
-    })?;
-    let script = concat!(
-        "Start-Sleep -Milliseconds 800; ",
-        "Start-Process -FilePath $args[0] -Verb RunAs"
-    );
-    let mut command = Command::new("powershell.exe");
-    command.args([
-        "-NoProfile",
-        "-NonInteractive",
-        "-WindowStyle",
-        "Hidden",
-        "-Command",
-        script,
-    ]);
-    command.arg(executable);
-    configure_hidden(&mut command);
-    command
-        .spawn()
-        .map_err(|error| TunPermissionError::Platform(format!("无法请求管理员重启：{error}")))?;
     Ok(TunPermissionGrant::RelaunchRequested)
-}
-
-fn configure_hidden(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
 }

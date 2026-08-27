@@ -24,6 +24,12 @@ impl PreparedCoreUpdate {
         &self.tag
     }
 
+    pub(super) fn candidate_path(&self) -> CoreUpdateResult<&Path> {
+        self.staging
+            .as_deref()
+            .ok_or_else(|| CoreUpdateError::Io("候选内核已经被使用".into()))
+    }
+
     /// Atomically moves the active core to a backup and installs the candidate.
     ///
     /// Callers should stop the managed process immediately before activation,
