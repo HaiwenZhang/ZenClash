@@ -1,0 +1,40 @@
+name: Continuous integration
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  verify:
+    name: Test, Clippy and rustfmt
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install the stable Rust toolchain
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add clippy rustfmt
+
+      - name: Install Linux dependencies
+        run: sudo scripts/install_linux_build_deps.sh
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Run workspace tests
+        run: cargo test --workspace --all-features --locked
