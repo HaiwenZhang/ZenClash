@@ -3,8 +3,8 @@ use gpui::{
     rems,
 };
 use gpui_component::{
-    ActiveTheme, Collapsible, Icon, Selectable, button::Button, button::ButtonVariants, h_flex,
-    sidebar::Sidebar as GpuiSidebar, v_flex,
+    ActiveTheme, Collapsible, Icon, IconName, Selectable, Sizable, button::Button,
+    button::ButtonVariants, h_flex, sidebar::Sidebar as GpuiSidebar, v_flex,
 };
 
 use crate::{
@@ -12,7 +12,7 @@ use crate::{
         NavigateConnections, NavigateDns, NavigateHome, NavigateLogs, NavigateMihomo,
         NavigateNetwork, NavigateOverride, NavigateProfiles, NavigateProxies, NavigateResources,
         NavigateRules, NavigateSettings, NavigateSniffer, NavigateSystemProxy, NavigateTraffic,
-        NavigateTun,
+        NavigateTun, ToggleSidebar,
     },
     assets::{GROUP_ICON_PATH, RADIO_ICON_PATH, RULER_ICON_PATH, ZENCLASH_MARK_PATH},
     pages::Page,
@@ -76,13 +76,24 @@ impl OutboundMode {
 /// Primary page navigation rendered beside the active content view.
 pub struct Sidebar {
     current_page: Page,
+    collapsed: bool,
 }
 
 impl Sidebar {
     /// Creates a sidebar with the supplied destination highlighted.
     #[must_use]
     pub const fn new(current_page: Page) -> Self {
-        Self { current_page }
+        Self {
+            current_page,
+            collapsed: false,
+        }
+    }
+
+    /// Sets whether only navigation icons are visible.
+    #[must_use]
+    pub const fn collapsed(mut self, collapsed: bool) -> Self {
+        self.collapsed = collapsed;
+        self
     }
 }
 
@@ -125,6 +136,8 @@ impl RenderOnce for SidebarNavigation {
                     .icon(sidebar_icon(page).size(rems(1.25)))
                     .w_full()
                     .h(rems(3.))
+                    .justify_start()
+                    .when(self.collapsed, |this| this.justify_center())
                     .ghost()
                     .selected(active)
                     .when(!self.collapsed, |this| this.label(page.label()))
@@ -137,50 +150,78 @@ impl RenderOnce for SidebarNavigation {
 impl RenderOnce for Sidebar {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-
         let navigation = std::iter::once(Page::Home).chain(Page::PRIMARY);
+        let toggle_icon = if self.collapsed {
+            IconName::PanelLeftOpen
+        } else {
+            IconName::PanelLeftClose
+        };
+        let toggle_label = zenclash_i18n::text(if self.collapsed {
+            "sidebar.expand"
+        } else {
+            "sidebar.collapse"
+        });
 
         GpuiSidebar::left()
             .w(rems(15.))
-            .collapsible(false)
+            .collapsible(true)
+            .collapsed(self.collapsed)
             .header(
                 h_flex()
-                    .h(rems(5.25))
                     .w_full()
-                    .pt_8()
-                    .gap_3()
+                    .when(!self.collapsed, |this| {
+                        this.h(rems(5.25)).pt_8().gap_3().justify_between().child(
+                            h_flex()
+                                .min_w_0()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .size(rems(3.))
+                                        .flex_shrink_0()
+                                        .rounded(theme.radius_lg)
+                                        .bg(theme.sidebar_foreground.opacity(0.065))
+                                        .border_1()
+                                        .border_color(theme.sidebar_foreground.opacity(0.08))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            Icon::empty()
+                                                .path(ZENCLASH_MARK_PATH)
+                                                .size(rems(1.8))
+                                                .text_color(theme.muted_foreground),
+                                        ),
+                                )
+                                .child(
+                                    v_flex()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .gap_0p5()
+                                        .child(
+                                            div()
+                                                .text_lg()
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .child(zenclash_i18n::text("app.name")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(theme.muted_foreground)
+                                                .child(zenclash_i18n::text("app.description")),
+                                        ),
+                                ),
+                        )
+                    })
+                    .when(self.collapsed, |this| this.justify_center())
                     .child(
-                        div()
-                            .size(rems(3.))
-                            .rounded(theme.radius_lg)
-                            .bg(theme.sidebar_foreground.opacity(0.065))
-                            .border_1()
-                            .border_color(theme.sidebar_foreground.opacity(0.08))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                Icon::empty()
-                                    .path(ZENCLASH_MARK_PATH)
-                                    .size(rems(1.8))
-                                    .text_color(theme.muted_foreground),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .text_lg()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(zenclash_i18n::text("app.name")),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child(zenclash_i18n::text("app.description")),
-                            ),
+                        Button::new("toggle-sidebar")
+                            .icon(toggle_icon)
+                            .small()
+                            .ghost()
+                            .tooltip(toggle_label)
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(ToggleSidebar), cx);
+                            }),
                     ),
             )
             .child(SidebarNavigation::new(self.current_page, navigation))
@@ -237,7 +278,13 @@ mod tests {
         pages::Page,
     };
 
-    use super::{OutboundMode, sidebar_icon_path};
+    use super::{OutboundMode, Sidebar, sidebar_icon_path};
+
+    #[test]
+    fn sidebar_defaults_to_expanded_and_accepts_collapsed_state() {
+        assert!(!Sidebar::new(Page::Home).collapsed);
+        assert!(Sidebar::new(Page::Home).collapsed(true).collapsed);
+    }
 
     #[test]
     fn sidebar_uses_requested_custom_icons() {

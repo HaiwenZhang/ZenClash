@@ -12,6 +12,11 @@ mod core_management;
 pub(in crate::pages::runtime) use app_update::AppUpdateUiState;
 pub(in crate::pages::runtime) use core_management::CoreManagementUiState;
 
+const PROXY_TOOL_PAGES: [Page; 2] = [Page::SystemProxy, Page::Tun];
+const CONFIGURATION_TOOL_PAGES: [Page; 4] =
+    [Page::Dns, Page::Sniffer, Page::Resources, Page::Override];
+const DIAGNOSTIC_TOOL_PAGES: [Page; 1] = [Page::Mihomo];
+
 impl RuntimePage {
     pub(super) fn render_offline_settings(
         &self,
@@ -66,25 +71,19 @@ impl RuntimePage {
                 .child(advanced_tool_group(
                     zenclash_i18n::text("settings.advanced_tools.proxy.title"),
                     zenclash_i18n::text("settings.advanced_tools.proxy.description"),
-                    &[Page::SystemProxy, Page::Tun],
+                    &PROXY_TOOL_PAGES,
                     theme,
                 ))
                 .child(advanced_tool_group(
                     zenclash_i18n::text("settings.advanced_tools.configuration.title"),
                     zenclash_i18n::text("settings.advanced_tools.configuration.description"),
-                    &[
-                        Page::Rules,
-                        Page::Dns,
-                        Page::Sniffer,
-                        Page::Resources,
-                        Page::Override,
-                    ],
+                    &CONFIGURATION_TOOL_PAGES,
                     theme,
                 ))
                 .child(advanced_tool_group(
                     zenclash_i18n::text("settings.advanced_tools.diagnostics.title"),
                     zenclash_i18n::text("settings.advanced_tools.diagnostics.description"),
-                    &[Page::Network, Page::Traffic, Page::Logs, Page::Mihomo],
+                    &DIAGNOSTIC_TOOL_PAGES,
                     theme,
                 )),
         )
@@ -624,4 +623,22 @@ fn tray_setting(theme: &gpui_component::Theme) -> gpui::Div {
                         }),
                 ),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CONFIGURATION_TOOL_PAGES, DIAGNOSTIC_TOOL_PAGES, PROXY_TOOL_PAGES, Page};
+
+    #[test]
+    fn sidebar_runtime_destinations_are_not_repeated_in_application_settings() {
+        let settings_tools = PROXY_TOOL_PAGES
+            .into_iter()
+            .chain(CONFIGURATION_TOOL_PAGES)
+            .chain(DIAGNOSTIC_TOOL_PAGES)
+            .collect::<Vec<_>>();
+
+        for page in [Page::Rules, Page::Network, Page::Traffic, Page::Logs] {
+            assert!(!settings_tools.contains(&page));
+        }
+    }
 }

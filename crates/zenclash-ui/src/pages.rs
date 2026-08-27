@@ -46,9 +46,16 @@ pub enum Page {
 impl Page {
     /// Everyday destinations kept visible in the compact sidebar.
     ///
-    /// Home and Settings are rendered separately, producing the five-entry
-    /// information architecture promised by the product plan.
-    pub const PRIMARY: [Self; 3] = [Self::Proxies, Self::Profiles, Self::Connections];
+    /// Home and Settings are rendered separately.
+    pub const PRIMARY: [Self; 7] = [
+        Self::Proxies,
+        Self::Profiles,
+        Self::Connections,
+        Self::Rules,
+        Self::Network,
+        Self::Traffic,
+        Self::Logs,
+    ];
 
     /// Returns the localized navigation label.
     #[must_use]
@@ -148,7 +155,7 @@ mod tests {
     use super::Page;
 
     #[test]
-    fn primary_navigation_has_exactly_five_task_destinations() {
+    fn primary_navigation_exposes_frequent_runtime_destinations() {
         let destinations = std::iter::once(Page::Home)
             .chain(Page::PRIMARY)
             .chain(std::iter::once(Page::Settings))
@@ -161,11 +168,12 @@ mod tests {
                 Page::Proxies,
                 Page::Profiles,
                 Page::Connections,
+                Page::Rules,
+                Page::Network,
+                Page::Traffic,
+                Page::Logs,
                 Page::Settings,
             ]
         );
-        assert!(!destinations.contains(&Page::Rules));
-        assert!(!destinations.contains(&Page::Traffic));
-        assert!(!destinations.contains(&Page::Logs));
     }
 }
