@@ -40,10 +40,10 @@ pub(super) fn set_enabled(
     let entry_path = required_entry_path(entry_path)?;
     if enabled {
         atomic_write(entry_path, desktop_entry(executable).as_bytes())?;
-    } else if let Err(error) = fs::remove_file(entry_path) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            return Err(AutostartError::Io(error));
-        }
+    } else if let Err(error) = fs::remove_file(entry_path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(AutostartError::Io(error));
     }
     Ok(())
 }
