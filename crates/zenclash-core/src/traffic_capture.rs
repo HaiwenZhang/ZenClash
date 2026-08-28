@@ -10,11 +10,12 @@ use std::{
 use parking_lot::RwLock;
 use thiserror::Error;
 
+#[cfg(unix)]
+use crate::CoreMaintenanceIntent;
 use crate::{
-    CapabilityState, ControlledConfigStore, CoreKind, CoreMaintenanceIntent, CoreSession,
-    EffectiveConfigIntent, Observation, RecoveryAction, SystemProxyOwnershipState,
-    SystemProxySession, SystemProxySessionSnapshot, TunCaptureStatus, TunPermissionManager,
-    YamlOverrideStore,
+    CapabilityState, ControlledConfigStore, CoreKind, CoreSession, EffectiveConfigIntent,
+    Observation, RecoveryAction, SystemProxyOwnershipState, SystemProxySession,
+    SystemProxySessionSnapshot, TunCaptureStatus, TunPermissionManager, YamlOverrideStore,
 };
 
 type CaptureFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
@@ -529,13 +530,17 @@ impl CaptureBackend for ProductionCaptureBackend {
                 .tun_permissions
                 .clone()
                 .ok_or_else(|| "当前 runtime 没有可授权的受管内核".to_owned())?;
-            let already_granted = tokio::task::spawn_blocking(move || {
+            let permission_result = tokio::task::spawn_blocking(move || {
                 let already_granted = permissions.status()?.granted;
                 permissions.request_grant().map(|_| already_granted)
             })
             .await
             .map_err(|error| format!("TUN 授权任务异常结束：{error}"))?
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string());
+            #[cfg(unix)]
+            let already_granted = permission_result?;
+            #[cfg(not(unix))]
+            permission_result?;
             #[cfg(unix)]
             if !already_granted {
                 self.core_session

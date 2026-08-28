@@ -705,8 +705,9 @@ mod tests {
     #[cfg(unix)]
     use std::sync::atomic::AtomicUsize;
 
+    use crate::MihomoEndpoint;
     #[cfg(unix)]
-    use crate::{MihomoEndpoint, MihomoLaunchConfig};
+    use crate::MihomoLaunchConfig;
 
     use super::*;
 
@@ -796,7 +797,11 @@ mod tests {
     async fn uncertain_external_mihomo_apply_never_becomes_an_owned_restart() {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
-        drop(listener);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 8_192];
+            assert!(stream.read(&mut request).unwrap() > 0);
+        });
         let root = std::env::temp_dir().join(format!(
             "zenclash-core-session-external-uncertain-{}-{}",
             std::process::id(),
@@ -826,6 +831,7 @@ mod tests {
         .await
         .expect("external controller failure did not remain bounded")
         .unwrap_err();
+        server.join().unwrap();
 
         assert!(matches!(
             error,
