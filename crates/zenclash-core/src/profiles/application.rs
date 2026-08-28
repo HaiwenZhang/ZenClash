@@ -933,7 +933,7 @@ where
 mod tests {
     use std::{
         fs,
-        io::{Read, Write},
+        io::{BufRead, BufReader, Read, Write},
         net::TcpListener,
         thread,
     };
@@ -986,11 +986,32 @@ mod tests {
         let observed_store = fixture.store.clone();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 8_192];
-            stream.read_exact(&mut request[..1]).unwrap();
+            let mut first_byte = [0_u8; 1];
+            stream.read_exact(&mut first_byte).unwrap();
             let active = observed_store.load().unwrap().active;
+
+            let mut reader = BufReader::new(&mut stream);
+            let mut content_length = None;
+            loop {
+                let mut line = String::new();
+                assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    content_length = Some(value.trim().parse::<usize>().unwrap());
+                }
+            }
+            let mut body = vec![0_u8; content_length.unwrap()];
+            reader.read_exact(&mut body).unwrap();
+            drop(reader);
+
             stream
-                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
                 .unwrap();
             active
         });
