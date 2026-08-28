@@ -195,9 +195,19 @@ impl TrafficCaptureSession {
     /// unavailable permissions, and external System Proxy ownership conflicts.
     pub async fn apply(&self, plan: CapturePlan) -> Result<CaptureOutcome, TrafficCaptureError> {
         let _operation = self.operation.lock().await;
-        let before = self.snapshot_from_backend().await?;
+        let mut before = self.snapshot_from_backend().await?;
         if plan_matches(plan, &before) {
             return Ok(CaptureOutcome::Unchanged { snapshot: before });
+        }
+        if plan == CapturePlan::SystemProxy && before.system_proxy_port.is_none() {
+            self.backend
+                .resync_runtime_profile()
+                .await
+                .map_err(TrafficCaptureError::Backend)?;
+            before = self.snapshot_from_backend().await?;
+            if plan_matches(plan, &before) {
+                return Ok(CaptureOutcome::Unchanged { snapshot: before });
+            }
         }
         if plan != CapturePlan::SystemProxy && has_external_system_proxy(&before) {
             return Err(TrafficCaptureError::ExternalSystemProxy);
@@ -406,6 +416,7 @@ struct CaptureBackendSnapshot {
 
 trait CaptureBackend: Send + Sync {
     fn snapshot(&self) -> CaptureFuture<'_, CaptureBackendSnapshot>;
+    fn resync_runtime_profile(&self) -> CaptureFuture<'_, ()>;
     fn set_system_proxy(&self, enabled: bool, port: u16) -> CaptureFuture<'_, ()>;
     fn set_tun(&self, enabled: bool) -> CaptureFuture<'_, ()>;
     fn ensure_tun_permission(&self) -> CaptureFuture<'_, ()>;
@@ -440,6 +451,29 @@ impl CaptureBackend for ProductionCaptureBackend {
                 system_proxy_port,
                 core_available: core.running,
             })
+        })
+    }
+
+    fn resync_runtime_profile(&self) -> CaptureFuture<'_, ()> {
+        Box::pin(async move {
+            let profile = self
+                .profile
+                .read()
+                .clone()
+                .ok_or_else(|| TrafficCaptureError::MissingProfile.to_string())?;
+            let overrides =
+                tokio::task::spawn_blocking(|| YamlOverrideStore::discover()?.load_enabled_paths())
+                    .await
+                    .map_err(|error| format!("读取 YAML override 任务异常结束：{error}"))?
+                    .map_err(|error| error.to_string())?;
+            self.core_session
+                .apply(
+                    &self.controlled,
+                    EffectiveConfigIntent::ActivateProfile { profile, overrides },
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| format!("重新同步当前活动配置失败：{error}"))
         })
     }
 
@@ -711,6 +745,8 @@ mod tests {
 
     struct FakeState {
         system_proxy: SystemProxySessionSnapshot,
+        system_proxy_port: Option<u16>,
+        resynced_system_proxy_port: Option<u16>,
         tun_configured: bool,
         core_available: bool,
         permission_error: Option<String>,
@@ -734,6 +770,8 @@ mod tests {
                         },
                         ownership,
                     },
+                    system_proxy_port: Some(7890),
+                    resynced_system_proxy_port: Some(7890),
                     tun_configured: tun,
                     core_available: true,
                     permission_error: None,
@@ -804,9 +842,18 @@ mod tests {
                             CapabilityState::Inactive
                         },
                     }),
-                    system_proxy_port: Some(7890),
+                    system_proxy_port: state.system_proxy_port,
                     core_available: state.core_available,
                 })
+            })
+        }
+
+        fn resync_runtime_profile(&self) -> CaptureFuture<'_, ()> {
+            Box::pin(async move {
+                let mut state = self.state.lock().unwrap();
+                state.operations.push("resync-runtime-profile".into());
+                state.system_proxy_port = state.resynced_system_proxy_port;
+                Ok(())
             })
         }
 
@@ -928,6 +975,54 @@ mod tests {
             outcome.snapshot().observed_plan,
             ObservedCapturePlan::TunConfigured
         );
+    }
+
+    #[tokio::test]
+    async fn system_proxy_resynchronizes_the_runtime_when_the_initial_port_is_missing() {
+        let backend = Arc::new(FakeBackend::new(
+            false,
+            SystemProxyOwnershipState::Unowned,
+            false,
+        ));
+        backend.state.lock().unwrap().system_proxy_port = None;
+        let session = TrafficCaptureSession::with_backend(backend.clone());
+
+        let outcome = session.apply(CapturePlan::SystemProxy).await.unwrap();
+
+        assert!(matches!(
+            outcome,
+            CaptureOutcome::Applied {
+                plan: CapturePlan::SystemProxy,
+                ..
+            }
+        ));
+        assert_eq!(
+            backend.operations(),
+            ["resync-runtime-profile", "system-proxy:true"]
+        );
+    }
+
+    #[tokio::test]
+    async fn system_proxy_keeps_the_safe_error_when_resynchronization_has_no_port() {
+        let backend = Arc::new(FakeBackend::new(
+            false,
+            SystemProxyOwnershipState::Unowned,
+            false,
+        ));
+        {
+            let mut state = backend.state.lock().unwrap();
+            state.system_proxy_port = None;
+            state.resynced_system_proxy_port = None;
+        }
+        let session = TrafficCaptureSession::with_backend(backend.clone());
+
+        let error = session
+            .apply(CapturePlan::SystemProxy)
+            .await
+            .expect_err("a profile without HTTP/Mixed listeners remains unsafe");
+
+        assert!(error.to_string().contains("没有可用的 HTTP/Mixed 端口"));
+        assert_eq!(backend.operations(), ["resync-runtime-profile"]);
     }
 
     #[tokio::test]

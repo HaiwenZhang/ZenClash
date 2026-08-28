@@ -64,7 +64,7 @@ On macOS and Linux, the native authorization flow runs only after an explicit TU
 
 ## Quick Start
 
-1. Download the package for your platform from [Releases](https://github.com/HaiwenZhang/zenclash/releases).
+1. Download the package for your platform from [Releases](https://github.com/HaiwenZhang/zenclash/releases). macOS users should read the [macOS installation guide](docs/installation/macos_en.md) first.
 2. Start ZenClash and open **Profiles**.
 3. Add an online subscription or import a local YAML configuration.
 4. Select a profile and node from the home page.

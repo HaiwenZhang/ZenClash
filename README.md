@@ -63,7 +63,7 @@ macOS 与 Linux 的 TUN 授权只会在用户显式启用 TUN 时调用系统授
 
 ## 快速开始
 
-1. 从 [Releases](https://github.com/HaiwenZhang/zenclash/releases) 下载对应平台的安装包。
+1. 从 [Releases](https://github.com/HaiwenZhang/zenclash/releases) 下载对应平台的安装包。macOS 用户请先阅读 [macOS 安装指南](docs/installation/macos.md)。
 2. 启动 ZenClash，进入「订阅管理」。
 3. 添加在线订阅，或者导入本地 YAML 配置。
 4. 在首页选择订阅与节点。
