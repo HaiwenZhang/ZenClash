@@ -34,7 +34,9 @@ async fn drives_the_supplied_profile_and_restart_transaction_through_real_meow()
         .wait_until_ready(Duration::from_secs(20))
         .await
         .expect("real meow-rs controller becomes ready");
-    let client = MihomoClient::new(process.endpoint().clone()).expect("real meow-rs client");
+    let client = MihomoClient::new(process.endpoint().clone())
+        .expect("real meow-rs client")
+        .with_core_kind(CoreKind::Meow);
 
     let version = client.version().await.expect("read real meow-rs version");
     assert!(!version.version.trim().is_empty());

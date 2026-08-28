@@ -1,6 +1,6 @@
 use super::{
-    CatalogTaskToken, ConnectionPolicy, Context, ProxiesPage, ProxyDelayTarget, ProxyGroup,
-    ProxyOperations, ProxyVisibility, append_delay, take_untested_proxies, test_key,
+    CatalogTaskToken, ConnectionPolicy, Context, ProxiesPage, ProxyDelayTarget, ProxyOperations,
+    ProxyVisibility, append_delay, take_untested_proxies, test_key,
 };
 use futures_util::{StreamExt, stream};
 
@@ -77,6 +77,7 @@ impl ProxiesPage {
     pub fn profile_activated(&mut self, cx: &mut Context<Self>) {
         self.catalog = None;
         self.expanded.clear();
+        self.proxy_pages.clear();
         self.test_failures.clear();
         self.show_hidden = false;
         self.notice = None;
@@ -89,13 +90,17 @@ impl ProxiesPage {
         }
         self.show_hidden = show_hidden;
         self.expanded.clear();
+        self.proxy_pages.clear();
         self.start_refresh(true, cx);
     }
 
     pub(super) fn toggle_group(&mut self, name: &str, cx: &mut Context<Self>) {
-        if !self.expanded.remove(name) {
-            self.expanded.insert(name.to_owned());
-        }
+        super::toggle_expanded_group(&mut self.expanded, name);
+        cx.notify();
+    }
+
+    pub(super) fn set_group_page(&mut self, name: String, page: usize, cx: &mut Context<Self>) {
+        self.proxy_pages.insert(name, page);
         cx.notify();
     }
 
@@ -105,6 +110,7 @@ impl ProxiesPage {
         }
         self.outbound_mode = mode.to_ascii_lowercase();
         self.expanded.clear();
+        self.proxy_pages.clear();
         if let Some(catalog) = &self.catalog
             && let Some(group) = catalog.groups_for_mode(&self.outbound_mode).next()
         {
@@ -354,25 +360,32 @@ impl ProxiesPage {
         .detach();
     }
 
-    pub(super) fn test_group(&mut self, group: &ProxyGroup, cx: &mut Context<Self>) {
+    pub(super) fn test_group(&mut self, group_name: &str, cx: &mut Context<Self>) {
         if self.operation_pending() || self.loading {
             return;
         }
+        let Some(group) = self
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.groups.iter().find(|group| group.name == group_name))
+        else {
+            return;
+        };
+        let group_name = group.name.clone();
+        let test_url = group.test_url.clone();
         let proxies = take_untested_proxies(&mut self.testing, group);
         if proxies.is_empty() {
             return;
         }
         let pending = proxies
             .iter()
-            .map(|proxy| test_key(&group.name, &proxy.name))
+            .map(|proxy| test_key(&group_name, &proxy.name))
             .collect::<Vec<_>>();
         let token = CatalogTaskToken(self.catalog_generation);
         self.error = None;
         cx.notify();
 
         let operations = ProxyOperations::new(self.client.clone());
-        let group_name = group.name.clone();
-        let test_url = group.test_url.clone();
         let task = self.runtime.spawn(async move {
             stream::iter(proxies.into_iter().map(|proxy| {
                 let operations = operations.clone();

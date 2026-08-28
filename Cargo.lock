@@ -8635,6 +8635,7 @@ name = "zenclash-ui"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "embed-resource",
  "futures-util",
  "gpui",
  "gpui-component",

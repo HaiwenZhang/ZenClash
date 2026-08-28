@@ -17,6 +17,7 @@ mod actions;
 mod view;
 
 const MAX_LOCAL_DELAY_HISTORY: usize = 20;
+const PROXIES_PER_PAGE: usize = 24;
 
 /// Interactive proxy-group catalog backed by Mihomo's live controller state.
 pub struct ProxiesPage {
@@ -25,6 +26,7 @@ pub struct ProxiesPage {
     catalog: Option<ProxyCatalog>,
     outbound_mode: String,
     expanded: HashSet<String>,
+    proxy_pages: HashMap<String, usize>,
     testing: HashSet<String>,
     test_failures: HashMap<String, DelayTestFailure>,
     switching: Option<(String, String)>,
@@ -51,6 +53,7 @@ impl ProxiesPage {
             catalog: None,
             outbound_mode: "rule".into(),
             expanded: HashSet::new(),
+            proxy_pages: HashMap::new(),
             testing: HashSet::new(),
             test_failures: HashMap::new(),
             switching: None,
@@ -70,6 +73,14 @@ impl ProxiesPage {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CatalogTaskToken(u64);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProxyPage {
+    index: usize,
+    count: usize,
+    start: usize,
+    end: usize,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DelayTestFailure {
@@ -101,6 +112,27 @@ impl CatalogTaskToken {
     }
 }
 
+fn proxy_page(total: usize, requested_index: usize) -> ProxyPage {
+    let count = total.div_ceil(PROXIES_PER_PAGE);
+    let index = requested_index.min(count.saturating_sub(1));
+    let start = index * PROXIES_PER_PAGE;
+    let end = (start + PROXIES_PER_PAGE).min(total);
+    ProxyPage {
+        index,
+        count,
+        start,
+        end,
+    }
+}
+
+fn toggle_expanded_group(expanded: &mut HashSet<String>, name: &str) {
+    if expanded.remove(name) {
+        return;
+    }
+    expanded.clear();
+    expanded.insert(name.to_owned());
+}
+
 impl Focusable for ProxiesPage {
     fn focus_handle(&self, _: &App) -> gpui::FocusHandle {
         self.focus_handle.clone()
@@ -110,7 +142,7 @@ impl Focusable for ProxiesPage {
 impl Render for ProxiesPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let catalog = self.catalog.clone();
+        let catalog = self.catalog.as_ref();
         let error = self.error.clone();
         let notice = self.notice.clone();
 
@@ -214,6 +246,13 @@ fn group_has_unique_current(behavior: &ProxyGroupBehavior) -> bool {
 
 fn test_key(group: &str, proxy: &str) -> String {
     format!("{group}\0{proxy}")
+}
+
+fn group_has_inflight_test(testing: &HashSet<String>, group: &str) -> bool {
+    testing.iter().any(|key| {
+        key.split_once('\0')
+            .is_some_and(|(testing_group, _)| testing_group == group)
+    })
 }
 
 fn take_untested_proxies(testing: &mut HashSet<String>, group: &ProxyGroup) -> Vec<ProxyNode> {
@@ -325,5 +364,39 @@ mod tests {
             DelayTestFailure::from_error("Mihomo API returned HTTP 503: transport error"),
             DelayTestFailure::Failed
         );
+    }
+
+    #[test]
+    fn large_proxy_groups_render_at_most_one_page_of_nodes() {
+        let page = proxy_page(500, 0);
+
+        assert_eq!(page.end - page.start, PROXIES_PER_PAGE);
+        assert_eq!(page.count, 21);
+    }
+
+    #[test]
+    fn stale_proxy_page_is_clamped_after_catalog_shrinks() {
+        let page = proxy_page(30, 20);
+
+        assert_eq!(page.index, 1);
+        assert_eq!(page.start, 24);
+        assert_eq!(page.end, 30);
+    }
+
+    #[test]
+    fn expanding_another_group_collapses_the_previous_group() {
+        let mut expanded = HashSet::from(["Proxy".to_owned()]);
+
+        toggle_expanded_group(&mut expanded, "Streaming");
+
+        assert_eq!(expanded, HashSet::from(["Streaming".to_owned()]));
+    }
+
+    #[test]
+    fn group_testing_state_matches_the_complete_group_name() {
+        let testing = HashSet::from([test_key("Proxy Auto", "HK")]);
+
+        assert!(group_has_inflight_test(&testing, "Proxy Auto"));
+        assert!(!group_has_inflight_test(&testing, "Proxy"));
     }
 }

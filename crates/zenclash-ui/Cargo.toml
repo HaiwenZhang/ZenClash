@@ -25,6 +25,9 @@ tray-icon.workspace = true
 zenclash-core = { path = "../zenclash-core" }
 zenclash-i18n.workspace = true
 
+[build-dependencies]
+embed-resource = "3.0"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
 objc2-app-kit = { workspace = true, features = [

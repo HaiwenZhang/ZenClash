@@ -124,7 +124,7 @@ impl RuntimePage {
             Err(error) => {
                 self.error = Some(zenclash_i18n::text_with(
                     "profiles.errors.request_invalid",
-                    &[("error", error.to_string())],
+                    &[("error", error)],
                 ));
                 cx.notify();
                 return;

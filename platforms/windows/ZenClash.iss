@@ -27,7 +27,7 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 SetupIconFile={#ProjectRoot}\platforms\windows\ZenClash.ico
-UninstallDisplayIcon={app}\zenclash.exe
+UninstallDisplayIcon={app}\zenclash.exe,0
 LicenseFile={#ProjectRoot}\LICENSE
 OutputDir={#OutputDir}
 OutputBaseFilename=ZenClash-{#AppVersion}-windows-x64-setup
@@ -36,8 +36,8 @@ OutputBaseFilename=ZenClash-{#AppVersion}-windows-x64-setup
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\ZenClash"; Filename: "{app}\zenclash.exe"; WorkingDir: "{app}"
-Name: "{autodesktop}\ZenClash"; Filename: "{app}\zenclash.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autoprograms}\ZenClash"; Filename: "{app}\zenclash.exe"; WorkingDir: "{app}"; IconFilename: "{app}\zenclash.exe"; IconIndex: 0
+Name: "{autodesktop}\ZenClash"; Filename: "{app}\zenclash.exe"; WorkingDir: "{app}"; IconFilename: "{app}\zenclash.exe"; IconIndex: 0; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked

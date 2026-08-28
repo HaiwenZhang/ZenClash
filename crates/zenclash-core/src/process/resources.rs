@@ -7,6 +7,8 @@ use std::{
 
 use crate::{CoreKind, MihomoError, MihomoResult};
 
+const BUNDLED_MIHOMO_DATA_FILES: [&str; 1] = ["geoip.metadb"];
+
 pub(super) fn find_core_binary(kind: CoreKind) -> Option<PathBuf> {
     let stem = kind.executable_stem();
     let names = if cfg!(windows) {
@@ -106,6 +108,91 @@ pub(super) fn install_bundled_core(
         let _ = std::fs::remove_file(&staging);
     }
     result.map(|()| target)
+}
+
+pub(super) fn install_bundled_mihomo_data(home_dir: &Path) -> MihomoResult<()> {
+    for name in BUNDLED_MIHOMO_DATA_FILES {
+        if let Some(bundled) = bundled_resource(name) {
+            install_bundled_data_file(&bundled, home_dir, name)?;
+        }
+    }
+    Ok(())
+}
+
+fn install_bundled_data_file(bundled: &Path, home_dir: &Path, name: &str) -> MihomoResult<()> {
+    let target = home_dir.join(name);
+    match target.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
+            return Ok(());
+        }
+        Ok(_) => {
+            return Err(MihomoError::Process(format!(
+                "托管 GeoData 路径不是普通文件：{}",
+                target.display()
+            )));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(MihomoError::Process(format!(
+                "无法检查托管 GeoData {}：{error}",
+                target.display()
+            )));
+        }
+    }
+    std::fs::create_dir_all(home_dir).map_err(|error| {
+        MihomoError::Process(format!(
+            "无法创建 Mihomo 数据目录 {}：{error}",
+            home_dir.display()
+        ))
+    })?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let staging = home_dir.join(format!(".{name}.seed-{}-{nonce}", std::process::id()));
+    let result = seed_bundled_data_file(bundled, &staging).and_then(|()| {
+        std::fs::rename(&staging, &target).map_err(|error| {
+            MihomoError::Process(format!(
+                "无法启用随包 GeoData {}：{error}",
+                target.display()
+            ))
+        })
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
+    result.and_then(|()| sync_directory(home_dir))
+}
+
+fn seed_bundled_data_file(bundled: &Path, staging: &Path) -> MihomoResult<()> {
+    let mut input = File::open(bundled).map_err(|error| {
+        MihomoError::Process(format!(
+            "无法读取随包 GeoData {}：{error}",
+            bundled.display()
+        ))
+    })?;
+    let mut output = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(staging)
+        .map_err(|error| {
+            MihomoError::Process(format!(
+                "无法创建托管 GeoData {}：{error}",
+                staging.display()
+            ))
+        })?;
+    io::copy(&mut input, &mut output).map_err(|error| {
+        MihomoError::Process(format!(
+            "无法复制托管 GeoData {}：{error}",
+            staging.display()
+        ))
+    })?;
+    output.sync_all().map_err(|error| {
+        MihomoError::Process(format!(
+            "无法同步托管 GeoData {}：{error}",
+            staging.display()
+        ))
+    })
 }
 
 fn seed_bundled_core(bundled: &Path, staging: &Path) -> MihomoResult<()> {
@@ -387,6 +474,32 @@ mod tests {
 
         assert_eq!(managed, reused);
         assert_eq!(std::fs::read(reused).unwrap(), b"updated");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bundled_mihomo_data_is_seeded_once_without_overwriting_updates() {
+        let root = std::env::temp_dir().join(format!(
+            "zenclash-bundled-geodata-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let bundled = root.join("packaged-geoip.metadb");
+        let home = root.join("home");
+        std::fs::write(&bundled, b"packaged").unwrap();
+
+        install_bundled_data_file(&bundled, &home, "geoip.metadb").unwrap();
+        let managed = home.join("geoip.metadb");
+        assert_eq!(std::fs::read(&managed).unwrap(), b"packaged");
+
+        std::fs::write(&managed, b"updated").unwrap();
+        install_bundled_data_file(&bundled, &home, "geoip.metadb").unwrap();
+
+        assert_eq!(std::fs::read(managed).unwrap(), b"updated");
         std::fs::remove_dir_all(root).unwrap();
     }
 }

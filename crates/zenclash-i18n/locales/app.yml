@@ -1096,6 +1096,12 @@ proxies:
     expand:
       zh-CN: 展开
       en: Expand
+    previous_page:
+      zh-CN: 上一页
+      en: Previous
+    next_page:
+      zh-CN: 下一页
+      en: Next
     current:
       zh-CN: 当前节点
       en: Current
@@ -1133,6 +1139,10 @@ proxies:
     unknown:
       zh-CN: 未知组类型 %{type} · %{count} 个节点
       en: "Unknown group type %{type} · %{count} nodes"
+  pagination:
+    summary:
+      zh-CN: 第 %{current} / %{total} 页 · 显示 %{first}–%{last}，共 %{count} 个节点
+      en: "Page %{current} of %{total} · Showing %{first}–%{last} of %{count} nodes"
   notices:
     restored_auto:
       zh-CN: 已恢复自动选择，并按 Mihomo 回读更新当前节点

@@ -12,12 +12,17 @@ MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 PROFILE_PATH="${ZENCLASH_CONFIG:-${PROJECT_ROOT}/platforms/common/default.yaml}"
 MIHOMO_PATH="${ZENCLASH_MIHOMO_BINARY:-}"
+GEODATA_PATH="${ZENCLASH_GEODATA_FILE:-}"
 CARGO_OUTPUT_ROOT="${CARGO_TARGET_DIR:-${PROJECT_ROOT}/target}"
 MIHOMO_WORK_DIR=""
+GEODATA_WORK_DIR=""
 
 cleanup() {
   if [[ -n "${MIHOMO_WORK_DIR}" ]]; then
     rm -rf "${MIHOMO_WORK_DIR}"
+  fi
+  if [[ -n "${GEODATA_WORK_DIR}" ]]; then
+    rm -rf "${GEODATA_WORK_DIR}"
   fi
 }
 trap cleanup EXIT
@@ -25,6 +30,17 @@ trap cleanup EXIT
 if [[ "$(uname -m)" != "arm64" ]]; then
   echo "The macOS release bundle must be built on an Apple Silicon runner." >&2
   exit 1
+fi
+
+if [[ -n "${GEODATA_PATH}" ]]; then
+  if [[ ! -f "${GEODATA_PATH}" ]]; then
+    echo "ZENCLASH_GEODATA_FILE is not a regular file: ${GEODATA_PATH}" >&2
+    exit 1
+  fi
+else
+  GEODATA_WORK_DIR="$(mktemp -d)"
+  GEODATA_PATH="${GEODATA_WORK_DIR}/geoip.metadb"
+  bash "${SCRIPT_DIR}/download_mihomo_geodata.sh" "${GEODATA_PATH}"
 fi
 
 if [[ -n "${MIHOMO_PATH}" ]]; then
@@ -57,6 +73,7 @@ mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}"
 cp "${CARGO_OUTPUT_ROOT}/${TARGET_TRIPLE}/release/zenclash" "${MACOS_DIR}/zenclash"
 cp "${PROJECT_ROOT}/platforms/macos/Info.plist" "${CONTENTS_DIR}/Info.plist"
 cp "${MIHOMO_PATH}" "${RESOURCES_DIR}/mihomo"
+cp "${GEODATA_PATH}" "${RESOURCES_DIR}/geoip.metadb"
 cp "${PROFILE_PATH}" "${RESOURCES_DIR}/profile.yaml"
 cp "${PROJECT_ROOT}/platforms/common/recovery.yaml" "${RESOURCES_DIR}/recovery.yaml"
 cp "${PROJECT_ROOT}/LICENSE" "${RESOURCES_DIR}/LICENSE.txt"

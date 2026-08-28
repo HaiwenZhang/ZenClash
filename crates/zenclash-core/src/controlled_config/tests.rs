@@ -7,7 +7,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use super::{ControlledConfigError, ControlledConfigStore};
+use super::{ControlledConfigError, ControlledConfigStore, normalize_runtime_payload};
 use crate::{CoreKind, MihomoClient, MihomoEndpoint};
 
 fn test_root(name: &str) -> PathBuf {
@@ -173,6 +173,44 @@ fn meow_materialization_adds_dns_upstreams_only_for_an_empty_enabled_resolver() 
         2
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn mihomo_materialization_adds_geodata_fallbacks_without_rewriting_the_source() {
+    let root = test_root("mihomo-geodata-defaults");
+    let profile = write_profile(&root);
+    let original = fs::read(&profile).unwrap();
+    let store = ControlledConfigStore::new(root.join("store"));
+
+    let effective = store
+        .materialize_with_overrides_for_core(&profile, &[], CoreKind::Mihomo)
+        .unwrap();
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(&fs::read_to_string(effective).unwrap()).unwrap();
+
+    assert_eq!(
+        yaml["geox-url"]["mmdb"].as_str(),
+        Some("https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.metadb")
+    );
+    assert!(yaml["geox-url"]["geoip"].as_str().is_some());
+    assert!(yaml["geox-url"]["geosite"].as_str().is_some());
+    assert_eq!(fs::read(profile).unwrap(), original);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn mihomo_materialization_preserves_explicit_geodata_urls() {
+    let payload = "geox-url:\n  mmdb: https://example.com/custom.mmdb\nrules: [MATCH,DIRECT]\n";
+
+    let normalized = normalize_runtime_payload(CoreKind::Mihomo, payload.into()).unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&normalized).unwrap();
+
+    assert_eq!(
+        yaml["geox-url"]["mmdb"].as_str(),
+        Some("https://example.com/custom.mmdb")
+    );
+    assert!(yaml["geox-url"]["geoip"].as_str().is_some());
+    assert!(yaml["geox-url"]["geosite"].as_str().is_some());
 }
 
 #[test]

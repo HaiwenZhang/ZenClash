@@ -211,7 +211,7 @@ impl NetworkTrayIcon {
             .with_icon_as_template(true)
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
-            .with_menu_on_right_click(false)
+            .with_menu_on_right_click(native_menu_on_right_click())
             .build()
             .map_err(|error| error.to_string())?;
         #[cfg(target_os = "macos")]
@@ -310,11 +310,7 @@ impl NetworkTrayIcon {
                 if id != self.icon.id() {
                     continue;
                 }
-                return match button {
-                    MouseButton::Left => Some(TrayClick::ShowWindow),
-                    MouseButton::Right => Some(TrayClick::ShowMenu),
-                    MouseButton::Middle => None,
-                };
+                return click_action(button);
             }
         }
         None
@@ -324,6 +320,34 @@ impl NetworkTrayIcon {
     pub fn show_menu(&self) {
         self.icon.show_menu();
     }
+}
+
+#[cfg(target_os = "windows")]
+const fn native_menu_on_right_click() -> bool {
+    true
+}
+
+#[cfg(not(target_os = "windows"))]
+const fn native_menu_on_right_click() -> bool {
+    false
+}
+
+const fn click_action(button: MouseButton) -> Option<TrayClick> {
+    match button {
+        MouseButton::Left => Some(TrayClick::ShowWindow),
+        MouseButton::Right => right_click_action(),
+        MouseButton::Middle => None,
+    }
+}
+
+#[cfg(target_os = "windows")]
+const fn right_click_action() -> Option<TrayClick> {
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+const fn right_click_action() -> Option<TrayClick> {
+    Some(TrayClick::ShowMenu)
 }
 
 fn traffic_title(traffic: &TrafficSnapshot) -> String {
@@ -341,6 +365,13 @@ fn traffic_title(traffic: &TrafficSnapshot) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_uses_native_right_click_menu_without_manual_reentry() {
+        assert!(native_menu_on_right_click());
+        assert_eq!(click_action(MouseButton::Right), None);
+    }
 
     #[test]
     fn connected_traffic_title_formats_both_directions() {

@@ -191,6 +191,7 @@ pub(super) fn message_banner(
         .child(
             div()
                 .size(px(28.))
+                .flex_shrink_0()
                 .rounded(theme.radius)
                 .bg(color.opacity(0.14))
                 .flex()
@@ -198,7 +199,7 @@ pub(super) fn message_banner(
                 .justify_center()
                 .child(Icon::new(IconName::Info).size_4()),
         )
-        .child(message)
+        .child(div().flex_1().min_w_0().whitespace_normal().child(message))
         .into_any_element()
 }
 

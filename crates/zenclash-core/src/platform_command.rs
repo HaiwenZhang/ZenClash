@@ -10,6 +10,13 @@ use std::{
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(target_os = "windows")]
+const fn background_creation_flags() -> u32 {
+    CREATE_NO_WINDOW
+}
 
 /// Executes a short-lived native platform command with captured output.
 ///
@@ -44,6 +51,7 @@ fn output_from_command(
     display_name: &str,
     timeout: Duration,
 ) -> Result<Output, String> {
+    configure_background_command(&mut command);
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -84,6 +92,16 @@ fn output_from_command(
         stderr: stderr.map_err(|error| format!("读取 {display_name} 标准错误失败：{error}"))?,
     })
 }
+
+#[cfg(target_os = "windows")]
+fn configure_background_command(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    command.creation_flags(background_creation_flags());
+}
+
+#[cfg(not(target_os = "windows"))]
+fn configure_background_command(_command: &mut Command) {}
 
 fn spawn_reader(
     pipe: impl Read + Send + 'static,
@@ -153,6 +171,12 @@ fn abort_child(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_background_commands_use_create_no_window() {
+        assert_eq!(background_creation_flags(), CREATE_NO_WINDOW);
+    }
 
     #[cfg(unix)]
     #[test]

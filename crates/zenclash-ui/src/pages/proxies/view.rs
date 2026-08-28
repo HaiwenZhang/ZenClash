@@ -3,7 +3,8 @@ use gpui_component::{Selectable, button::ButtonVariants};
 use super::{
     Button, Context, Disableable, FluentBuilder, Icon, IconName, IntoElement, ParentElement,
     Progress, ProxiesPage, ProxyGroup, ProxyGroupBehavior, ProxyNode, Sizable, Styled, Switch, div,
-    group_allows_manual_selection, group_has_unique_current, h_flex, px, test_key, v_flex,
+    group_allows_manual_selection, group_has_inflight_test, group_has_unique_current, h_flex,
+    proxy_page, px, test_key, v_flex,
 };
 
 impl ProxiesPage {
@@ -95,18 +96,22 @@ impl ProxiesPage {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let expanded = self.expanded.contains(&group.name);
+        let page = proxy_page(
+            group.all.len(),
+            self.proxy_pages
+                .get(&group.name)
+                .copied()
+                .unwrap_or_default(),
+        );
         let group_name = group.name.clone();
         let group_for_restore = group.name.clone();
-        let group_for_test = group.clone();
+        let group_for_test = group.name.clone();
         let restoring_auto = self.restoring_auto.as_deref() == Some(group.name.as_str());
         let measuring_and_restoring =
             self.measuring_and_restoring_auto.as_deref() == Some(group.name.as_str());
         let group_for_measure_restore = group.name.clone();
         let group_test_url = group.test_url.clone();
-        let testing_group = group
-            .all
-            .iter()
-            .any(|proxy| self.testing.contains(&test_key(&group.name, &proxy.name)));
+        let testing_group = group_has_inflight_test(&self.testing, &group.name);
 
         v_flex()
             .rounded(theme.radius_lg)
@@ -305,16 +310,94 @@ impl ProxiesPage {
                     ),
             )
             .when(expanded, |this| {
+                let previous_group = group.name.clone();
+                let next_group = group.name.clone();
                 this.child(
-                    h_flex()
-                        .p_3()
-                        .gap_2()
-                        .flex_wrap()
+                    v_flex()
                         .border_t_1()
                         .border_color(theme.border)
-                        .children(group.all.iter().enumerate().map(|(proxy_index, proxy)| {
-                            self.render_proxy(group_index, proxy_index, group, proxy, theme, cx)
-                        })),
+                        .child(h_flex().p_3().gap_2().flex_wrap().children(
+                            group.all[page.start..page.end].iter().enumerate().map(
+                                |(proxy_offset, proxy)| {
+                                    let proxy_index = page.start + proxy_offset;
+                                    self.render_proxy(
+                                        group_index,
+                                        proxy_index,
+                                        group,
+                                        proxy,
+                                        theme,
+                                        cx,
+                                    )
+                                },
+                            ),
+                        ))
+                        .when(page.count > 1, |this| {
+                            this.child(
+                                h_flex()
+                                    .px_3()
+                                    .pb_3()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div().text_xs().text_color(theme.muted_foreground).child(
+                                            zenclash_i18n::text_with(
+                                                "proxies.pagination.summary",
+                                                &[
+                                                    ("current", (page.index + 1).to_string()),
+                                                    ("total", page.count.to_string()),
+                                                    ("first", (page.start + 1).to_string()),
+                                                    ("last", page.end.to_string()),
+                                                    ("count", group.all.len().to_string()),
+                                                ],
+                                            ),
+                                        ),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .child(
+                                                Button::new((
+                                                    gpui::ElementId::from("previous-proxy-page"),
+                                                    group.name.clone(),
+                                                ))
+                                                .icon(IconName::ChevronLeft)
+                                                .label(zenclash_i18n::text(
+                                                    "proxies.actions.previous_page",
+                                                ))
+                                                .small()
+                                                .outline()
+                                                .disabled(page.index == 0)
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.set_group_page(
+                                                        previous_group.clone(),
+                                                        page.index.saturating_sub(1),
+                                                        cx,
+                                                    );
+                                                })),
+                                            )
+                                            .child(
+                                                Button::new((
+                                                    gpui::ElementId::from("next-proxy-page"),
+                                                    group.name.clone(),
+                                                ))
+                                                .icon(IconName::ChevronRight)
+                                                .label(zenclash_i18n::text(
+                                                    "proxies.actions.next_page",
+                                                ))
+                                                .small()
+                                                .outline()
+                                                .disabled(page.index + 1 >= page.count)
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.set_group_page(
+                                                        next_group.clone(),
+                                                        page.index + 1,
+                                                        cx,
+                                                    );
+                                                })),
+                                            ),
+                                    ),
+                            )
+                        }),
                 )
             })
             .into_any_element()
@@ -332,7 +415,12 @@ impl ProxiesPage {
         let selected = group_has_unique_current(&group.behavior) && group.now == proxy.name;
         let selectable = group_allows_manual_selection(&group.behavior);
         let testing = self.testing.contains(&test_key(&group.name, &proxy.name));
-        let switching = self.switching.as_ref() == Some(&(group.name.clone(), proxy.name.clone()));
+        let switching =
+            self.switching
+                .as_ref()
+                .is_some_and(|(switching_group, switching_proxy)| {
+                    switching_group == &group.name && switching_proxy == &proxy.name
+                });
         let group_name = group.name.clone();
         let proxy_name = proxy.name.clone();
         let delay_group = group.name.clone();

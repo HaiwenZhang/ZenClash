@@ -11,6 +11,7 @@ architecture="$(dpkg --print-architecture)"
 work_dir="$(mktemp -d)"
 package_root="${work_dir}/root"
 mihomo_path="${ZENCLASH_MIHOMO_BINARY:-}"
+geodata_path="${ZENCLASH_GEODATA_FILE:-}"
 
 cleanup() {
   rm -rf "${work_dir}"
@@ -34,6 +35,15 @@ else
   mihomo_path="${work_dir}/mihomo"
   "${script_dir}/download_mihomo.sh" linux amd64 "${mihomo_path}"
 fi
+if [[ -n "${geodata_path}" ]]; then
+  if [[ ! -f "${geodata_path}" ]]; then
+    echo "ZENCLASH_GEODATA_FILE is not a regular file: ${geodata_path}" >&2
+    exit 1
+  fi
+else
+  geodata_path="${work_dir}/geoip.metadb"
+  bash "${script_dir}/download_mihomo_geodata.sh" "${geodata_path}"
+fi
 
 cd "${project_root}"
 cargo build --release --locked -p zenclash-ui --bin zenclash
@@ -41,6 +51,7 @@ cargo build --release --locked -p zenclash-ui --bin zenclash
 
 install -Dm755 "${cargo_output_root}/release/zenclash" "${package_root}/usr/bin/zenclash"
 install -Dm755 "${mihomo_path}" "${package_root}/usr/lib/zenclash/mihomo"
+install -Dm644 "${geodata_path}" "${package_root}/usr/lib/zenclash/geoip.metadb"
 install -Dm644 "${profile_path}" "${package_root}/usr/lib/zenclash/profile.yaml"
 install -Dm644 "${project_root}/platforms/common/recovery.yaml" \
   "${package_root}/usr/lib/zenclash/recovery.yaml"
@@ -71,6 +82,7 @@ dpkg-deb --build --root-owner-group "${package_root}" "${package_path}"
 dpkg-deb --info "${package_path}" >/dev/null
 dpkg-deb --contents "${package_path}" >/dev/null
 dpkg-deb --contents "${package_path}" | grep -Eq '[[:space:]]\./usr/lib/zenclash/mihomo$'
+dpkg-deb --contents "${package_path}" | grep -Eq '[[:space:]]\./usr/lib/zenclash/geoip.metadb$'
 dpkg-deb --contents "${package_path}" | grep -Eq '[[:space:]]\./usr/lib/zenclash/recovery.yaml$'
 dpkg-deb --contents "${package_path}" | grep -Eq '[[:space:]]\./usr/share/doc/zenclash/LICENSE$'
 

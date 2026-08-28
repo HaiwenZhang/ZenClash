@@ -250,7 +250,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         core_kind,
         mihomo_process.as_ref(),
     );
-    let client = MihomoClient::new(endpoint.clone())?;
+    let client = MihomoClient::new(endpoint.clone())?.with_core_kind(core_kind);
     let client = mihomo_process.as_ref().map_or(client.clone(), |process| {
         client.with_config_validator(process.config_validator())
     });

@@ -221,7 +221,7 @@ impl RuntimePage {
                 zenclash_i18n::text_with(
                     "home.profile.source_updated",
                     &[
-                        ("source", profile.source_label().to_owned()),
+                        ("source", profile.source_label()),
                         ("age", format_profile_age(profile.updated_at)),
                     ],
                 )

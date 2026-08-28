@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use super::resources::{
     bundled_core_binary, bundled_profile, default_core_home_dir, find_core_binary,
-    install_bundled_core, is_core_binary_candidate,
+    install_bundled_core, install_bundled_mihomo_data, is_core_binary_candidate,
 };
 use crate::{
     CoreCapabilities, CoreConfigValidationError, CoreConfigValidator, CoreKind, MihomoEndpoint,
@@ -199,6 +199,9 @@ impl MihomoLaunchConfig {
                 }
             }
         };
+        if kind == CoreKind::Mihomo {
+            install_bundled_mihomo_data(&home_dir)?;
+        }
         Self::for_kind(kind, binary, config_file, home_dir)
     }
 

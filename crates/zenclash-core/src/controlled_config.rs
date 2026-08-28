@@ -23,6 +23,20 @@ use crate::{
 };
 
 const MEOW_DEFAULT_NAMESERVERS: [&str; 2] = ["223.5.5.5", "1.1.1.1"];
+const MIHOMO_GEOX_URLS: [(&str, &str); 3] = [
+    (
+        "geoip",
+        "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat",
+    ),
+    (
+        "geosite",
+        "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat",
+    ),
+    (
+        "mmdb",
+        "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.metadb",
+    ),
+];
 
 mod storage;
 
@@ -923,6 +937,7 @@ impl ControlledConfigStore {
         client: &MihomoClient,
         payload: String,
     ) -> ControlledConfigResult<RuntimeCacheTransaction> {
+        let payload = client.normalize_config_payload(payload)?;
         let payload = self.apply_session_listener_fallbacks(&payload)?;
         let store = self.clone();
         let cache_payload = payload.clone();
@@ -1020,15 +1035,21 @@ impl ControlledConfigStore {
     }
 }
 
-fn normalize_runtime_payload(kind: CoreKind, payload: String) -> ControlledConfigResult<String> {
-    if kind != CoreKind::Meow {
-        return Ok(payload);
-    }
-
+pub(crate) fn normalize_runtime_payload(
+    kind: CoreKind,
+    payload: String,
+) -> ControlledConfigResult<String> {
     let mut document = serde_yaml::from_str::<Value>(&payload)?;
     let Some(root) = document.as_mapping_mut() else {
         return Err(ControlledConfigError::NotMapping);
     };
+    if kind == CoreKind::Mihomo {
+        if !insert_missing_mihomo_geox_urls(root) {
+            return Ok(payload);
+        }
+        return Ok(serde_yaml::to_string(&document)?);
+    }
+
     let dns_key = Value::String("dns".into());
     let Some(dns) = root.get_mut(&dns_key).and_then(Value::as_mapping_mut) else {
         return Ok(payload);
@@ -1052,6 +1073,33 @@ fn normalize_runtime_payload(kind: CoreKind, payload: String) -> ControlledConfi
         return Err(ControlledConfigError::TooLarge);
     }
     Ok(normalized)
+}
+
+fn insert_missing_mihomo_geox_urls(root: &mut serde_yaml::Mapping) -> bool {
+    let geox_key = Value::String("geox-url".into());
+    let geox_urls = match root.get_mut(&geox_key) {
+        Some(Value::Mapping(geox_urls)) => geox_urls,
+        Some(value @ Value::Null) => {
+            *value = Value::Mapping(serde_yaml::Mapping::new());
+            value.as_mapping_mut().expect("mapping inserted")
+        }
+        Some(_) => return false,
+        None => {
+            root.insert(geox_key.clone(), Value::Mapping(serde_yaml::Mapping::new()));
+            root.get_mut(&geox_key)
+                .and_then(Value::as_mapping_mut)
+                .expect("mapping inserted")
+        }
+    };
+    let mut changed = false;
+    for (name, url) in MIHOMO_GEOX_URLS {
+        let key = Value::String(name.into());
+        if !geox_urls.contains_key(&key) {
+            geox_urls.insert(key, Value::String(url.into()));
+            changed = true;
+        }
+    }
+    changed
 }
 
 fn yaml_bool(mapping: &serde_yaml::Mapping, key: &str) -> bool {

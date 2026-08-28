@@ -230,6 +230,33 @@ async fn reload_payload_rejects_oversized_config_before_network_request() {
     assert!(matches!(error, MihomoError::InvalidInput(_)));
 }
 
+#[tokio::test]
+async fn reload_payload_adds_mihomo_geodata_fallbacks_before_the_request() {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 8_192];
+        let length = stream.read(&mut request).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        String::from_utf8_lossy(&request[..length]).into_owned()
+    });
+    let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+
+    client
+        .reload_payload("rules: [MATCH,DIRECT]\n", true)
+        .await
+        .unwrap();
+
+    let request = server.join().unwrap();
+    assert!(request.contains("geox-url"));
+    assert!(request.contains("testingcf.jsdelivr.net"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cloned_clients_serialize_mutating_requests() {
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();

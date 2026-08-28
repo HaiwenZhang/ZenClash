@@ -3,8 +3,11 @@ param(
     [string]$Version = "0.1.0",
     [string]$OutputDir = "",
     [string]$MihomoBinary = $env:ZENCLASH_MIHOMO_BINARY,
+    [string]$GeoDataFile = $env:ZENCLASH_GEODATA_FILE,
+    [string]$InnoCompiler = $env:ZENCLASH_ISCC,
     [string]$ProfilePath = $(if ($env:ZENCLASH_CONFIG) { $env:ZENCLASH_CONFIG } else { "" }),
-    [string]$MihomoVersion = $(if ($env:MIHOMO_VERSION) { $env:MIHOMO_VERSION } else { "v1.19.30" })
+    [string]$MihomoVersion = $(if ($env:MIHOMO_VERSION) { $env:MIHOMO_VERSION } else { "v1.19.30" }),
+    [string]$GeoDataVersion = $(if ($env:MIHOMO_GEODATA_VERSION) { $env:MIHOMO_GEODATA_VERSION } else { "latest" })
 )
 
 Set-StrictMode -Version Latest
@@ -68,6 +71,13 @@ try {
     if (-not (Test-Path -Path $MihomoBinary -PathType Leaf)) {
         throw "Set ZENCLASH_MIHOMO_BINARY to a real Mihomo executable"
     }
+    if ([string]::IsNullOrWhiteSpace($GeoDataFile)) {
+        $GeoDataFile = Join-Path $WorkDir "geoip.metadb"
+        & (Join-Path $PSScriptRoot "download_mihomo_geodata.ps1") -OutputPath $GeoDataFile -ReleaseTag $GeoDataVersion
+    }
+    if (-not (Test-Path -Path $GeoDataFile -PathType Leaf)) {
+        throw "Set ZENCLASH_GEODATA_FILE to a real geoip.metadb file"
+    }
     & $MihomoBinary -v
     if ($LASTEXITCODE -ne 0) {
         throw "The supplied Mihomo executable failed its version check"
@@ -85,10 +95,31 @@ try {
     }
 
     $CargoTargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $ProjectRoot "target" }
-    Copy-Item (Join-Path $CargoTargetDir "x86_64-pc-windows-msvc\release\zenclash.exe") (Join-Path $StageDir "zenclash.exe")
+    $ZenClashBinary = Join-Path $CargoTargetDir "x86_64-pc-windows-msvc\release\zenclash.exe"
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class ZenClashIconResource
+{
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    public static extern uint ExtractIconEx(
+        string file,
+        int index,
+        IntPtr[] largeIcons,
+        IntPtr[] smallIcons,
+        uint iconCount);
+}
+"@
+    $IconGroupCount = [ZenClashIconResource]::ExtractIconEx($ZenClashBinary, -1, $null, $null, 0)
+    if ($IconGroupCount -lt 1) {
+        throw "The ZenClash executable does not contain a Windows icon resource"
+    }
+    Copy-Item $ZenClashBinary (Join-Path $StageDir "zenclash.exe")
     $ResourcesDir = Join-Path $StageDir "resources"
     New-Item -ItemType Directory -Force -Path $ResourcesDir | Out-Null
     Copy-Item $MihomoBinary (Join-Path $ResourcesDir "mihomo.exe")
+    Copy-Item $GeoDataFile (Join-Path $ResourcesDir "geoip.metadb")
     Copy-Item $ProfilePath (Join-Path $ResourcesDir "profile.yaml")
     Copy-Item (Join-Path $ProjectRoot "platforms\common\recovery.yaml") (Join-Path $ResourcesDir "recovery.yaml")
     Copy-Item (Join-Path $ProjectRoot "platforms\macos\ZenClash.png") (Join-Path $ResourcesDir "ZenClash.png")
@@ -99,6 +130,9 @@ try {
     }
 
     $IsccCandidates = [System.Collections.Generic.List[string]]::new()
+    if (-not [string]::IsNullOrWhiteSpace($InnoCompiler)) {
+        $IsccCandidates.Add($InnoCompiler)
+    }
     $IsccCommand = Get-Command ISCC.exe -ErrorAction SilentlyContinue
     if ($null -ne $IsccCommand) {
         $IsccCandidates.Add($IsccCommand.Source)

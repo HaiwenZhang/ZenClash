@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{CoreConfigValidator, MihomoEndpoint};
+use crate::{CoreConfigValidator, CoreKind, MihomoEndpoint};
 
 mod api;
 mod request;
@@ -56,6 +56,7 @@ pub struct VersionInfo {
 /// Cloneable HTTP client for Mihomo's external-controller API.
 #[derive(Clone)]
 pub struct MihomoClient {
+    kind: CoreKind,
     endpoint: MihomoEndpoint,
     http: reqwest::Client,
     mutation_gate: Arc<tokio::sync::Mutex<()>>,
@@ -75,11 +76,19 @@ impl MihomoClient {
             .timeout(Duration::from_secs(30))
             .build()?;
         Ok(Self {
+            kind: CoreKind::Mihomo,
             endpoint,
             http,
             mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
             config_validator: None,
         })
+    }
+
+    /// Selects the concrete runtime backend that receives configuration payloads.
+    #[must_use]
+    pub fn with_core_kind(mut self, kind: CoreKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     /// Enables target-core `-t` validation before complete configuration reloads.
@@ -88,8 +97,23 @@ impl MihomoClient {
     /// home are not owned by ZenClash; managed processes should always provide it.
     #[must_use]
     pub fn with_config_validator(mut self, validator: CoreConfigValidator) -> Self {
+        self.kind = validator.kind();
         self.config_validator = Some(validator);
         self
+    }
+
+    pub(crate) fn normalize_config_payload(&self, payload: String) -> MihomoResult<String> {
+        if payload.trim().is_empty() {
+            return Err(MihomoError::InvalidInput("重载配置内容不能为空".into()));
+        }
+        if payload.len() > crate::profiles::MAX_PROFILE_BYTES {
+            return Err(MihomoError::InvalidInput(format!(
+                "重载配置超过 {} MiB 限制",
+                crate::profiles::MAX_PROFILE_BYTES / 1024 / 1024
+            )));
+        }
+        crate::controlled_config::normalize_runtime_payload(self.kind, payload)
+            .map_err(|error| MihomoError::InvalidInput(error.to_string()))
     }
 
     /// Returns the controller address and secret used by this client.

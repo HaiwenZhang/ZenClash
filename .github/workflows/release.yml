@@ -11,6 +11,11 @@ on:
         required: true
         default: v1.19.30
         type: string
+      mihomo_geodata_version:
+        description: MetaCubeX GeoData release tag bundled into every installer
+        required: true
+        default: latest
+        type: string
 
 permissions:
   contents: read
@@ -23,6 +28,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
   MIHOMO_VERSION: ${{ inputs.mihomo_version || 'v1.19.30' }}
+  MIHOMO_GEODATA_VERSION: ${{ inputs.mihomo_geodata_version || 'latest' }}
 
 jobs:
   prepare:

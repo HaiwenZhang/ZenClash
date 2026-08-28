@@ -304,7 +304,7 @@ impl MihomoClient {
         payload: impl Into<String>,
         force: bool,
     ) -> MihomoResult<()> {
-        let payload = payload.into();
+        let payload = self.normalize_config_payload(payload.into())?;
         let _mutation_guard = self.mutation_gate.lock().await;
         self.validate_config_payload_unlocked(&payload).await?;
         let response = self

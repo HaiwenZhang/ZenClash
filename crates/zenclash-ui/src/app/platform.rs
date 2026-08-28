@@ -7,6 +7,74 @@ use std::{
 
 use zenclash_core::{CoreKind, ProfileStore};
 
+#[cfg(target_os = "windows")]
+mod windows {
+    use std::ffi::c_void;
+
+    type Hwnd = *mut c_void;
+
+    const HTCAPTION: usize = 2;
+    const SW_MAXIMIZE: i32 = 3;
+    const SW_MINIMIZE: i32 = 6;
+    const SW_RESTORE: i32 = 9;
+    const WM_NCLBUTTONDOWN: u32 = 0x00A1;
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetActiveWindow() -> Hwnd;
+        fn IsZoomed(window: Hwnd) -> i32;
+        fn ReleaseCapture() -> i32;
+        fn PostMessageW(window: Hwnd, message: u32, wparam: usize, lparam: isize) -> i32;
+        fn ShowWindowAsync(window: Hwnd, command: i32) -> i32;
+    }
+
+    fn active_window() -> Option<Hwnd> {
+        let window = unsafe { GetActiveWindow() };
+        (!window.is_null()).then_some(window)
+    }
+
+    pub(crate) fn start_active_window_drag() {
+        // GPUI 0.2.2 leaves `Window::start_window_move` unimplemented on Windows.
+        // Converting the active client-area press into a caption press delegates the
+        // drag loop, snapping, and multi-monitor behavior back to Windows.
+        unsafe {
+            let Some(window) = active_window() else {
+                return;
+            };
+            ReleaseCapture();
+            // Queue the caption press so GPUI can finish its current mouse callback
+            // before Windows enters the modal move loop.
+            PostMessageW(window, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+        }
+    }
+
+    pub(crate) fn minimize_active_window() {
+        if let Some(window) = active_window() {
+            unsafe {
+                ShowWindowAsync(window, SW_MINIMIZE);
+            }
+        }
+    }
+
+    pub(crate) fn toggle_active_window_maximized() {
+        if let Some(window) = active_window() {
+            let command = if unsafe { IsZoomed(window) } == 0 {
+                SW_MAXIMIZE
+            } else {
+                SW_RESTORE
+            };
+            unsafe {
+                ShowWindowAsync(window, command);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(super) use windows::{
+    minimize_active_window, start_active_window_drag, toggle_active_window_maximized,
+};
+
 pub(super) fn tray_directories(
     profile_path: Option<&Path>,
     core_kind: CoreKind,

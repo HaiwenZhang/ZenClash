@@ -86,6 +86,10 @@ impl CoreConfigValidator {
         }
     }
 
+    pub(crate) const fn kind(&self) -> CoreKind {
+        self.kind
+    }
+
     /// Runs the selected core with `-t -d <home> -f <config>`.
     ///
     /// A successful exit that still emits a fatal Mihomo diagnostic is treated
