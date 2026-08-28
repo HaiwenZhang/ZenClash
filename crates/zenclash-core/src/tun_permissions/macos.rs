@@ -10,12 +10,12 @@ const AUTHORIZATION_SCRIPT: &str = concat!(
     "on run argv\n",
     "set corePath to quoted form of item 1 of argv\n",
     "set expectedHash to quoted form of item 2 of argv\n",
-    "set commandText to \"set -eu; /usr/sbin/chown root:admin -- \" & corePath & ",
+    "set commandText to \"set -eu; /usr/sbin/chown root:admin \" & corePath & ",
     "\"; actual=$(/usr/bin/shasum -a 256 -- \" & corePath & \" | /usr/bin/awk '{print $1}'); \" & ",
     "\"if [ \\\"$actual\\\" != \" & expectedHash & \" ]; then exit 65; fi; \" & ",
-    "\"/bin/chmod 4755 -- \" & corePath & \"; verified=$(/usr/bin/shasum -a 256 -- \" & corePath & ",
+    "\"/bin/chmod 4755 \" & corePath & \"; verified=$(/usr/bin/shasum -a 256 -- \" & corePath & ",
     "\" | /usr/bin/awk '{print $1}'); if [ \\\"$verified\\\" != \" & expectedHash & ",
-    "\" ]; then /bin/chmod u-s -- \" & corePath & \"; exit 66; fi\"\n",
+    "\" ]; then /bin/chmod u-s \" & corePath & \"; exit 66; fi\"\n",
     "do shell script commandText with administrator privileges\n",
     "end run"
 );
@@ -97,5 +97,21 @@ mod tests {
             String::from_utf8_lossy(&compiled.stderr)
         );
         std::fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn authorization_script_uses_macos_compatible_chown_and_chmod_arguments() {
+        let unsupported_arguments = [
+            "/usr/sbin/chown root:admin -- ",
+            "/bin/chmod 4755 -- ",
+            "/bin/chmod u-s -- ",
+        ];
+
+        assert!(
+            unsupported_arguments
+                .iter()
+                .all(|arguments| !AUTHORIZATION_SCRIPT.contains(arguments)),
+            "{AUTHORIZATION_SCRIPT}"
+        );
     }
 }
