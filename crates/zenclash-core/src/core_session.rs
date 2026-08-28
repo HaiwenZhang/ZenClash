@@ -1113,7 +1113,14 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let lifecycle = session.lifecycle_snapshot();
-                if lifecycle.phase == CoreLifecyclePhase::Stable && lifecycle.recovery_attempts == 1
+                let hooks_completed = capture.releases.load(Ordering::Acquire) >= 1
+                    && capture.reconciles.load(Ordering::Acquire) >= 1;
+                let launches_completed =
+                    std::fs::read_to_string(&launches).is_ok_and(|launches| launches.len() >= 2);
+                if lifecycle.phase == CoreLifecyclePhase::Stable
+                    && lifecycle.recovery_attempts == 1
+                    && hooks_completed
+                    && launches_completed
                 {
                     break;
                 }
@@ -1121,7 +1128,7 @@ mod tests {
             }
         })
         .await
-        .expect("managed core did not recover");
+        .expect("managed core recovery did not complete its observable effects");
 
         assert_eq!(capture.releases.load(Ordering::Acquire), 1);
         assert_eq!(capture.reconciles.load(Ordering::Acquire), 1);
