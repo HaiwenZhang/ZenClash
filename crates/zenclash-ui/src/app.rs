@@ -3,10 +3,10 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use gpui::{
     AnyWindowHandle, App, AppContext, ClipboardItem, Context, Entity, Focusable,
     InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, SharedString, Styled,
-    Subscription, Window, WindowBounds, WindowKind, WindowOptions, div,
+    Subscription, Window, WindowBounds, WindowKind, WindowOptions, div, px,
 };
 #[cfg(target_os = "macos")]
-use gpui::{Pixels, Size, px};
+use gpui::{Pixels, Size};
 use gpui_component::{ActiveTheme, Root, ThemeMode, TitleBar, h_flex, v_flex};
 use zenclash_core::{
     AppPreferences, AppPreferencesStore, AppearancePreference, ControlledConfigStore, CoreKind,
