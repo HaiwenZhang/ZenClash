@@ -15,7 +15,7 @@ env:
 jobs:
   formatting:
     name: rustfmt
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Check out source
@@ -38,8 +38,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Ubuntu 22.04
-            os: ubuntu-22.04
+          - name: Ubuntu 24.04
+            os: ubuntu-24.04
           - name: macOS 15
             os: macos-15
           - name: Windows 2022
@@ -57,6 +57,10 @@ jobs:
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: sudo scripts/install_linux_build_deps.sh
+
+      - name: Test Debian packaging behavior
+        if: runner.os == 'Linux'
+        run: bash scripts/tests/build_deb_package_test.sh
 
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings

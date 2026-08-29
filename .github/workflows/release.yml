@@ -33,7 +33,7 @@ env:
 jobs:
   prepare:
     name: Validate release version
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -65,7 +65,7 @@ jobs:
   verify:
     name: Rust checks and real Mihomo integration
     needs: prepare
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - name: Check out source
@@ -73,6 +73,9 @@ jobs:
 
       - name: Install Linux dependencies
         run: sudo scripts/install_linux_build_deps.sh
+
+      - name: Test Debian packaging behavior
+        run: bash scripts/tests/build_deb_package_test.sh
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -180,9 +183,9 @@ jobs:
           compression-level: 0
 
   ubuntu:
-    name: Ubuntu 22.04+ DEB
+    name: Ubuntu 24.04+ DEB
     needs: [prepare, verify]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - name: Check out source
@@ -200,15 +203,15 @@ jobs:
       - name: Upload Ubuntu package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: zenclash-ubuntu-22.04-amd64
-          path: dist/ZenClash-${{ needs.prepare.outputs.version }}-Ubuntu-22.04+-amd64.deb
+          name: zenclash-ubuntu-24.04-amd64
+          path: dist/ZenClash-${{ needs.prepare.outputs.version }}-Ubuntu-24.04+-amd64.deb
           if-no-files-found: error
           compression-level: 0
 
   rpm:
     name: ${{ matrix.label }} RPM
     needs: [prepare, verify]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     container:
       image: ${{ matrix.image }}
@@ -222,9 +225,6 @@ jobs:
           - label: Rocky Linux 8
             image: rockylinux:8
             flavor: rocky8
-          - label: Rocky Linux 9
-            image: rockylinux:9
-            flavor: rocky9
     steps:
       - name: Bootstrap release container
         run: dnf install -y git gzip tar
@@ -264,7 +264,7 @@ jobs:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [prepare, macos, windows, ubuntu, rpm]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: write

@@ -70,20 +70,21 @@ Section: net
 Priority: optional
 Architecture: ${architecture}
 Maintainer: ZenClash contributors
-Depends: libasound2, libfontconfig1, libgtk-3-0, libappindicator3-1 | libayatana-appindicator3-1, libvulkan1, libwayland-client0, libxdo3, libxkbcommon-x11-0
+Depends: libasound2t64, libfontconfig1, libgtk-3-0t64, libayatana-appindicator3-1, libvulkan1, libwayland-client0, libxdo3, libxkbcommon-x11-0
 Description: Native Mihomo client built with Rust and GPUI
  ZenClash provides native proxy management, traffic monitoring, subscription
  management, runtime configuration and a bundled real Mihomo core.
 EOF
 
 mkdir -p "${output_dir}"
-package_path="${output_dir}/ZenClash-${version}-Ubuntu-22.04+-${architecture}.deb"
+package_path="${output_dir}/ZenClash-${version}-Ubuntu-24.04+-${architecture}.deb"
+package_contents_path="${work_dir}/package-contents.txt"
 dpkg-deb --build --root-owner-group "${package_root}" "${package_path}"
 dpkg-deb --info "${package_path}" >/dev/null
-dpkg-deb --contents "${package_path}" >/dev/null
-dpkg-deb --contents "${package_path}" | grep -Eq '[[:space:]]\./usr/lib/zenclash/mihomo$'
-dpkg-deb --contents "${package_path}" | grep -Eq '[[:space:]]\./usr/lib/zenclash/geoip.metadb$'
-dpkg-deb --contents "${package_path}" | grep -Eq '[[:space:]]\./usr/lib/zenclash/recovery.yaml$'
-dpkg-deb --contents "${package_path}" | grep -Eq '[[:space:]]\./usr/share/doc/zenclash/LICENSE$'
+dpkg-deb --contents "${package_path}" >"${package_contents_path}"
+grep -Eq '[[:space:]]\./usr/lib/zenclash/mihomo$' "${package_contents_path}"
+grep -Eq '[[:space:]]\./usr/lib/zenclash/geoip.metadb$' "${package_contents_path}"
+grep -Eq '[[:space:]]\./usr/lib/zenclash/recovery.yaml$' "${package_contents_path}"
+grep -Eq '[[:space:]]\./usr/share/doc/zenclash/LICENSE$' "${package_contents_path}"
 
 echo "Built ${package_path}"

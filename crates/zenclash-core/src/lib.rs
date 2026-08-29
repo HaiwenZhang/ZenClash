@@ -123,7 +123,7 @@ pub use proxy::{
 };
 pub use proxy_operations::{
     ConnectionPolicy, ProxyDelayTarget, ProxyGroupMeasurementOutcome, ProxyOperations,
-    ProxySelectionOutcome, ProxyVisibility,
+    ProxySelectionOutcome, ProxySelectionReceipt, ProxyVisibility,
 };
 pub use ruleset::{
     RulesetBehavior, RulesetConversion, RulesetConversionError, RulesetConversionResult,

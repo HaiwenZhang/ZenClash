@@ -55,7 +55,7 @@ The home page brings together the active profile, four-layer operational status,
 | --- | --- | --- |
 | macOS | DMG | Apple Silicon |
 | Windows | Inno Setup installer | x86_64 |
-| Ubuntu 22.04 and newer | DEB | amd64 |
+| Ubuntu 24.04 and newer | DEB | amd64 |
 | Fedora / Rocky Linux | RPM | x86_64 |
 
 Release packages bundle a Mihomo binary whose SHA-256 digest is verified during the build, so no additional core download is required on first launch. Releases also publish `SHA256SUMS` and GitHub build attestations. Development builds may connect to an existing Mihomo controller.

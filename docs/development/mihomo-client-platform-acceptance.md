@@ -162,7 +162,7 @@ ip -4 route get 1.1.1.1
 ps -eo pid=,ppid=,comm=
 ```
 
-Debian/Ubuntu 使用 `dpkg -i ZenClash-<new>-Ubuntu-22.04+-<arch>.deb` 覆盖旧包；RPM 系使用
+Debian/Ubuntu 使用 `dpkg -i ZenClash-<new>-Ubuntu-24.04+-<arch>.deb` 覆盖旧包；RPM 系使用
 `rpm -Uvh ZenClash-<new>-linux-x86_64.rpm`。升级后用 `dpkg -s zenclash` 或 `rpm -q zenclash`
 确认版本，再执行场景 F。授权依赖桌面 Polkit 的 `pkexec`，缺少代理或用户拒绝时必须安全失败。
 
@@ -176,4 +176,3 @@ Debian/Ubuntu 使用 `dpkg -i ZenClash-<new>-Ubuntu-22.04+-<arch>.deb` 覆盖旧
 | core 崩溃与应用退出 | 通过：直属 core 被终止后以新 PID 恢复，UI 显示尝试次数和退出原因；退出同步回收 | 待目标机 | 待目标机 |
 | 路径探测明确经 Mihomo | 真实 Mihomo harness 通过；系统接管组合待执行 | 待目标机 | 待目标机 |
 | 安装包升级回归 | 待两个发布签名版本 | 待两个发布签名版本与目标机 | 待两个发布包与目标机 |
-

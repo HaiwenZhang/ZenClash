@@ -54,7 +54,7 @@
 | --- | --- | --- |
 | macOS | DMG | Apple Silicon |
 | Windows | Inno Setup 安装程序 | x86_64 |
-| Ubuntu 22.04 及以上 | DEB | amd64 |
+| Ubuntu 24.04 及以上 | DEB | amd64 |
 | Fedora / Rocky Linux | RPM | x86_64 |
 
 发布安装包会内置经过 SHA-256 校验的 Mihomo，不需要在首次启动时另外下载内核。Release 同时发布 `SHA256SUMS` 和 GitHub 构建来源证明。开发构建也可以连接已有的 Mihomo 控制器。

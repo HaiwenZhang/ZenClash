@@ -49,6 +49,13 @@ pub struct ProxySelectionOutcome {
     pub warnings: Vec<String>,
 }
 
+/// Confirmation that Mihomo accepted a proxy selection command.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProxySelectionReceipt {
+    /// Non-fatal connection-cleanup failures after Mihomo accepted the switch.
+    pub warnings: Vec<String>,
+}
+
 /// Result of the explicit group-delay operation that also restores automatic selection.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProxyGroupMeasurementOutcome {
@@ -99,6 +106,27 @@ impl ProxyOperations {
         proxy: &str,
         connection_policy: ConnectionPolicy,
     ) -> MihomoResult<ProxySelectionOutcome> {
+        let receipt = self
+            .apply_selection(group, proxy, connection_policy)
+            .await?;
+        Ok(self.read_selection(group, receipt.warnings).await)
+    }
+
+    /// Applies a group selection without waiting for a full proxy-catalog readback.
+    ///
+    /// This is the acknowledgement seam for interactive callers: success means
+    /// Mihomo accepted the selection and the requested connection policy has
+    /// completed. Callers may reconcile controller state separately.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when Mihomo rejects the selection itself.
+    pub async fn apply_selection(
+        &self,
+        group: &str,
+        proxy: &str,
+        connection_policy: ConnectionPolicy,
+    ) -> MihomoResult<ProxySelectionReceipt> {
         if group.trim().is_empty() {
             return Err(MihomoError::InvalidInput("代理组名称不能为空".into()));
         }
@@ -154,7 +182,7 @@ impl ProxyOperations {
                 }
             }
         }
-        Ok(self.read_selection(group, warnings).await)
+        Ok(ProxySelectionReceipt { warnings })
     }
 
     /// Restores an automatic URL-test or fallback group and reads back controller truth.
@@ -321,6 +349,32 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(requests[0].starts_with("PUT /proxies/Proxy "));
         assert!(requests[1].starts_with("GET /proxies "));
+    }
+
+    #[tokio::test]
+    async fn apply_selection_returns_after_ack_without_waiting_for_catalog_readback() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4_096];
+            let bytes = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            String::from_utf8_lossy(&request[..bytes]).into_owned()
+        });
+        let client =
+            MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+
+        let receipt = ProxyOperations::new(client)
+            .apply_selection("Proxy", "HK 01", ConnectionPolicy::KeepExisting)
+            .await
+            .unwrap();
+        let request = server.join().unwrap();
+
+        assert!(receipt.warnings.is_empty());
+        assert!(request.starts_with("PUT /proxies/Proxy "));
     }
 
     #[tokio::test]

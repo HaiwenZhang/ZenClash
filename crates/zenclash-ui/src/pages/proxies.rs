@@ -29,12 +29,14 @@ pub struct ProxiesPage {
     proxy_pages: HashMap<String, usize>,
     testing: HashSet<String>,
     test_failures: HashMap<String, DelayTestFailure>,
-    switching: Option<(String, String)>,
+    switching: ProxySelectionState,
     restoring_auto: Option<String>,
     measuring_and_restoring_auto: Option<String>,
     show_hidden: bool,
     loading: bool,
+    loading_token: Option<CatalogTaskToken>,
     catalog_generation: u64,
+    delay_generation: u64,
     error: Option<String>,
     notice: Option<String>,
     focus_handle: gpui::FocusHandle,
@@ -56,12 +58,14 @@ impl ProxiesPage {
             proxy_pages: HashMap::new(),
             testing: HashSet::new(),
             test_failures: HashMap::new(),
-            switching: None,
+            switching: ProxySelectionState::default(),
             restoring_auto: None,
             measuring_and_restoring_auto: None,
             show_hidden: false,
             loading: false,
+            loading_token: None,
             catalog_generation: 0,
+            delay_generation: 0,
             error: None,
             notice: None,
             focus_handle: cx.focus_handle(),
@@ -73,6 +77,31 @@ impl ProxiesPage {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CatalogTaskToken(u64);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DelayTaskToken(u64);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProxySelectionTaskToken(u64);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProxySelectionRequest {
+    group: String,
+    proxy: String,
+    token: ProxySelectionTaskToken,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingProxySelection {
+    proxy: String,
+    token: ProxySelectionTaskToken,
+}
+
+#[derive(Debug, Default)]
+struct ProxySelectionState {
+    generation: u64,
+    pending: HashMap<String, PendingProxySelection>,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ProxyPage {
@@ -109,6 +138,70 @@ impl DelayTestFailure {
 impl CatalogTaskToken {
     const fn is_current(self, generation: u64) -> bool {
         self.0 == generation
+    }
+}
+
+impl DelayTaskToken {
+    const fn is_current(self, generation: u64) -> bool {
+        self.0 == generation
+    }
+}
+
+impl ProxySelectionTaskToken {
+    const fn is_latest(self, generation: u64) -> bool {
+        self.0 == generation
+    }
+}
+
+impl ProxySelectionState {
+    fn start(&mut self, group: String, proxy: String) -> Option<ProxySelectionRequest> {
+        if self.pending.contains_key(&group) {
+            return None;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        let token = ProxySelectionTaskToken(self.generation);
+        self.pending.insert(
+            group.clone(),
+            PendingProxySelection {
+                proxy: proxy.clone(),
+                token,
+            },
+        );
+        Some(ProxySelectionRequest {
+            group,
+            proxy,
+            token,
+        })
+    }
+
+    fn complete(&mut self, request: &ProxySelectionRequest) -> bool {
+        let is_current = self
+            .pending
+            .get(&request.group)
+            .is_some_and(|pending| pending.token == request.token);
+        if is_current {
+            self.pending.remove(&request.group);
+        }
+        is_current
+    }
+
+    fn clear(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.pending.clear();
+    }
+
+    fn any_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    fn group_pending(&self, group: &str) -> bool {
+        self.pending.contains_key(group)
+    }
+
+    fn proxy_pending(&self, group: &str, proxy: &str) -> bool {
+        self.pending
+            .get(group)
+            .is_some_and(|pending| pending.proxy == proxy)
     }
 }
 
@@ -278,6 +371,19 @@ fn append_delay(proxy: &mut ProxyNode, delay: u32, mean_delay: u32) {
     proxy.alive = Some(delay > 0);
 }
 
+fn apply_optimistic_selection(catalog: &mut Option<ProxyCatalog>, group: &str, proxy: &str) {
+    let Some(group) = catalog
+        .as_mut()
+        .and_then(|catalog| catalog.groups.iter_mut().find(|item| item.name == group))
+    else {
+        return;
+    };
+    group.now = proxy.to_owned();
+    if matches!(group.behavior, ProxyGroupBehavior::Automatic { .. }) {
+        group.behavior = ProxyGroupBehavior::Automatic { fixed: true };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,6 +458,57 @@ mod tests {
         let token = CatalogTaskToken(7);
 
         assert!(token.is_current(7));
+    }
+
+    #[test]
+    fn proxy_selection_state_tracks_different_groups_independently() {
+        let mut state = ProxySelectionState::default();
+
+        let proxy_request = state.start("Proxy".into(), "HK".into()).unwrap();
+        state.start("Streaming".into(), "US".into()).unwrap();
+        state.complete(&proxy_request);
+
+        assert!(!state.group_pending("Proxy"));
+        assert!(state.group_pending("Streaming"));
+    }
+
+    #[test]
+    fn stale_proxy_selection_cannot_complete_a_newer_request() {
+        let mut state = ProxySelectionState::default();
+
+        let stale = state.start("Proxy".into(), "HK".into()).unwrap();
+        state.clear();
+        state.start("Proxy".into(), "US".into()).unwrap();
+
+        assert!(!state.complete(&stale));
+        assert!(state.proxy_pending("Proxy", "US"));
+    }
+
+    #[test]
+    fn older_selection_readback_is_stale_after_a_newer_request_starts() {
+        let mut state = ProxySelectionState::default();
+
+        let older = state.start("Proxy".into(), "HK".into()).unwrap();
+        state.complete(&older);
+        state.start("Streaming".into(), "US".into()).unwrap();
+
+        assert!(!older.token.is_latest(state.generation));
+    }
+
+    #[test]
+    fn optimistic_selection_updates_current_member_without_replacing_catalog() {
+        let mut catalog = Some(ProxyCatalog {
+            groups: vec![ProxyGroup {
+                name: "Proxy".into(),
+                now: "HK".into(),
+                ..ProxyGroup::default()
+            }],
+            proxy_count: 2,
+        });
+
+        apply_optimistic_selection(&mut catalog, "Proxy", "US");
+
+        assert_eq!(catalog.unwrap().groups[0].now, "US");
     }
 
     #[test]

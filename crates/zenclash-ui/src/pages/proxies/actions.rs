@@ -1,6 +1,7 @@
 use super::{
-    CatalogTaskToken, ConnectionPolicy, Context, ProxiesPage, ProxyDelayTarget, ProxyOperations,
-    ProxyVisibility, append_delay, take_untested_proxies, test_key,
+    CatalogTaskToken, ConnectionPolicy, Context, DelayTaskToken, ProxiesPage, ProxyDelayTarget,
+    ProxyOperations, ProxySelectionTaskToken, ProxyVisibility, append_delay,
+    apply_optimistic_selection, take_untested_proxies, test_key,
 };
 use futures_util::{StreamExt, stream};
 
@@ -17,6 +18,7 @@ impl ProxiesPage {
         }
         let token = self.begin_catalog_operation();
         self.loading = true;
+        self.loading_token = Some(token);
         self.error = None;
         self.notice = None;
         cx.notify();
@@ -45,9 +47,15 @@ impl ProxiesPage {
             };
             let _ = this.update(cx, |this, cx| {
                 if !token.is_current(this.catalog_generation) {
+                    if this.loading_token == Some(token) {
+                        this.loading = false;
+                        this.loading_token = None;
+                        cx.notify();
+                    }
                     return;
                 }
                 this.loading = false;
+                this.loading_token = None;
                 match result {
                     Ok((catalog, mode)) => {
                         if this.expanded.is_empty()
@@ -75,6 +83,7 @@ impl ProxiesPage {
 
     /// Clears profile-specific presentation state before loading a new profile.
     pub fn profile_activated(&mut self, cx: &mut Context<Self>) {
+        self.switching.clear();
         self.catalog = None;
         self.expanded.clear();
         self.proxy_pages.clear();
@@ -120,19 +129,23 @@ impl ProxiesPage {
     }
 
     pub(super) fn change_proxy(&mut self, group: String, proxy: String, cx: &mut Context<Self>) {
-        if self.operation_pending() || self.loading {
+        if self.catalog_operation_pending() || self.switching.group_pending(&group) || self.loading
+        {
             return;
         }
-        let token = self.begin_catalog_operation();
-        self.switching = Some((group.clone(), proxy.clone()));
+        let Some(request) = self.switching.start(group, proxy) else {
+            return;
+        };
         self.error = None;
         self.notice = None;
         cx.notify();
 
         let client = self.client.clone();
+        let task_group = request.group.clone();
+        let task_proxy = request.proxy.clone();
         let task = self.runtime.spawn(async move {
             ProxyOperations::new(client)
-                .select(&group, &proxy, ConnectionPolicy::KeepExisting)
+                .apply_selection(&task_group, &task_proxy, ConnectionPolicy::KeepExisting)
                 .await
         });
 
@@ -145,30 +158,76 @@ impl ProxiesPage {
                 )),
             };
             let _ = this.update(cx, |this, cx| {
-                if !token.is_current(this.catalog_generation) {
+                if !this.switching.complete(&request) {
                     return;
                 }
-                this.switching = None;
                 match result {
-                    Ok(outcome) => {
-                        let warning = (!outcome.warnings.is_empty()).then(|| {
+                    Ok(receipt) => {
+                        let warning = (!receipt.warnings.is_empty()).then(|| {
                             zenclash_i18n::text_with(
                                 "proxies.notices.applied_with_warning",
-                                &[("warning", outcome.warnings.join("; "))],
+                                &[("warning", receipt.warnings.join("; "))],
                             )
                         });
-                        for warning in outcome.warnings {
+                        for warning in receipt.warnings {
                             tracing::warn!(%warning, "proxy selection completed with a warning");
                         }
-                        if let Some(catalog) = outcome.catalog {
-                            this.catalog = Some(catalog);
-                        }
+                        apply_optimistic_selection(
+                            &mut this.catalog,
+                            &request.group,
+                            &request.proxy,
+                        );
                         this.error = None;
                         this.notice = warning;
+                        this.reconcile_proxy_selection(request.token, cx);
                     }
                     Err(error) => this.error = Some(error),
                 }
                 cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn reconcile_proxy_selection(
+        &mut self,
+        selection_token: ProxySelectionTaskToken,
+        cx: &mut Context<Self>,
+    ) {
+        let token = self.next_catalog_task();
+        let visibility = if self.show_hidden {
+            ProxyVisibility::IncludeHidden
+        } else {
+            ProxyVisibility::VisibleOnly
+        };
+        let operations = ProxyOperations::new(self.client.clone());
+        let task = self
+            .runtime
+            .spawn(async move { operations.catalog(visibility).await });
+
+        cx.spawn(async move |this, cx| {
+            let result = match task.await {
+                Ok(result) => result,
+                Err(error) => {
+                    tracing::warn!(%error, "proxy catalog reconciliation task failed");
+                    return;
+                }
+            };
+            let _ = this.update(cx, |this, cx| {
+                if !token.is_current(this.catalog_generation)
+                    || !selection_token.is_latest(this.switching.generation)
+                {
+                    return;
+                }
+                match result {
+                    Ok(catalog) => {
+                        this.catalog = Some(catalog);
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "proxy catalog reconciliation failed");
+                    }
+                }
             });
         })
         .detach();
@@ -305,14 +364,14 @@ impl ProxiesPage {
         provider: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        if self.operation_pending() || self.loading {
+        if self.proxy_selection_blocked(&group) || self.loading {
             return;
         }
         let test_key = test_key(&group, &proxy);
         if !self.testing.insert(test_key.clone()) {
             return;
         }
-        let token = CatalogTaskToken(self.catalog_generation);
+        let token = DelayTaskToken(self.delay_generation);
         cx.notify();
 
         let operations = ProxyOperations::new(self.client.clone());
@@ -336,7 +395,7 @@ impl ProxiesPage {
                 )),
             };
             let _ = this.update(cx, |this, cx| {
-                if !token.is_current(this.catalog_generation) {
+                if !token.is_current(this.delay_generation) {
                     return;
                 }
                 this.testing.remove(&test_key);
@@ -361,7 +420,7 @@ impl ProxiesPage {
     }
 
     pub(super) fn test_group(&mut self, group_name: &str, cx: &mut Context<Self>) {
-        if self.operation_pending() || self.loading {
+        if self.proxy_selection_blocked(group_name) || self.loading {
             return;
         }
         let Some(group) = self
@@ -381,7 +440,7 @@ impl ProxiesPage {
             .iter()
             .map(|proxy| test_key(&group_name, &proxy.name))
             .collect::<Vec<_>>();
-        let token = CatalogTaskToken(self.catalog_generation);
+        let token = DelayTaskToken(self.delay_generation);
         self.error = None;
         cx.notify();
 
@@ -414,7 +473,7 @@ impl ProxiesPage {
                 )
             });
             let _ = this.update(cx, |this, cx| {
-                if !token.is_current(this.catalog_generation) {
+                if !token.is_current(this.delay_generation) {
                     return;
                 }
                 for key in pending {
@@ -477,19 +536,32 @@ impl ProxiesPage {
         append_delay(proxy, delay, mean_delay);
     }
 
-    fn begin_catalog_operation(&mut self) -> CatalogTaskToken {
+    fn next_catalog_task(&mut self) -> CatalogTaskToken {
         self.catalog_generation = self.catalog_generation.wrapping_add(1);
-        self.testing.clear();
-        self.test_failures.clear();
-        self.switching = None;
-        self.restoring_auto = None;
-        self.measuring_and_restoring_auto = None;
         CatalogTaskToken(self.catalog_generation)
     }
 
+    fn begin_catalog_operation(&mut self) -> CatalogTaskToken {
+        let token = self.next_catalog_task();
+        self.delay_generation = self.delay_generation.wrapping_add(1);
+        self.testing.clear();
+        self.test_failures.clear();
+        self.restoring_auto = None;
+        self.measuring_and_restoring_auto = None;
+        token
+    }
+
     pub(super) fn operation_pending(&self) -> bool {
-        self.switching.is_some()
+        self.switching.any_pending()
             || self.restoring_auto.is_some()
             || self.measuring_and_restoring_auto.is_some()
+    }
+
+    fn catalog_operation_pending(&self) -> bool {
+        self.restoring_auto.is_some() || self.measuring_and_restoring_auto.is_some()
+    }
+
+    pub(super) fn proxy_selection_blocked(&self, group: &str) -> bool {
+        self.catalog_operation_pending() || self.switching.group_pending(group)
     }
 }

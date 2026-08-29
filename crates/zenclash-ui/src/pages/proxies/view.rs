@@ -112,6 +112,7 @@ impl ProxiesPage {
         let group_for_measure_restore = group.name.clone();
         let group_test_url = group.test_url.clone();
         let testing_group = group_has_inflight_test(&self.testing, &group.name);
+        let selection_blocked = self.proxy_selection_blocked(&group.name);
 
         v_flex()
             .rounded(theme.radius_lg)
@@ -284,7 +285,7 @@ impl ProxiesPage {
                                     .small()
                                     .ghost()
                                     .loading(testing_group)
-                                    .disabled(testing_group)
+                                    .disabled(testing_group || selection_blocked)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.test_group(&group_for_test, cx);
                                     })),
@@ -415,12 +416,8 @@ impl ProxiesPage {
         let selected = group_has_unique_current(&group.behavior) && group.now == proxy.name;
         let selectable = group_allows_manual_selection(&group.behavior);
         let testing = self.testing.contains(&test_key(&group.name, &proxy.name));
-        let switching =
-            self.switching
-                .as_ref()
-                .is_some_and(|(switching_group, switching_proxy)| {
-                    switching_group == &group.name && switching_proxy == &proxy.name
-                });
+        let switching = self.switching.proxy_pending(&group.name, &proxy.name);
+        let selection_blocked = self.proxy_selection_blocked(&group.name);
         let group_name = group.name.clone();
         let proxy_name = proxy.name.clone();
         let delay_group = group.name.clone();
@@ -546,7 +543,7 @@ impl ProxiesPage {
                         .small()
                         .ghost()
                         .loading(testing)
-                        .disabled(testing)
+                        .disabled(testing || selection_blocked)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.test_proxy(
                                 delay_group.clone(),
@@ -579,7 +576,7 @@ impl ProxiesPage {
                             .outline()
                             .selected(selected)
                             .loading(switching)
-                            .disabled(selected || self.operation_pending())
+                            .disabled(selected || selection_blocked)
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
                                     this.change_proxy(group_name.clone(), proxy_name.clone(), cx);
