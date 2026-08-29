@@ -61,17 +61,35 @@ impl RuntimePage {
         cx.notify();
     }
 
-    pub(in super::super) fn reload_profile_catalog(&mut self) -> Result<(), String> {
-        let Some(store) = &self.profile_store else {
-            return Ok(());
+    pub(in super::super) fn reload_profile_catalog(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = self.profile_store.clone() else {
+            return;
         };
-        match store.load() {
-            Ok(catalog) => {
-                self.profile_catalog = catalog;
-                Ok(())
-            }
-            Err(error) => Err(error.to_string()),
-        }
+        self.profile_catalog_generation = self.profile_catalog_generation.wrapping_add(1);
+        let generation = self.profile_catalog_generation;
+        let task = self
+            .runtime
+            .spawn_blocking(move || store.load().map_err(|error| error.to_string()));
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                if this.profile_catalog_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(catalog) => this.profile_catalog = catalog,
+                    Err(error) if this.page == Page::Profiles => this.error = Some(error),
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to reload profile catalog");
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn import_local_profile_for_page(&mut self, path: PathBuf, page: Page, cx: &mut Context<Self>) {
@@ -372,11 +390,9 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) {
         self.profile_path = Some(outcome.path.clone());
-        self.invalidate_config_inputs();
+        self.invalidate_config_inputs(cx);
         self.config_preview = None;
-        if let Err(error) = self.reload_profile_catalog() {
-            self.set_profile_page_error(token, error);
-        }
+        self.reload_profile_catalog(cx);
         cx.emit(ProfileActivated { path: outcome.path });
         match outcome.refresh {
             Ok(data) => {

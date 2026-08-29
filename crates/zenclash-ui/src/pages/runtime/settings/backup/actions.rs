@@ -171,12 +171,14 @@ impl RuntimePage {
     ) {
         self.profile_path = Some(outcome.profile_path.clone());
         self.profile_store = Some(outcome.profile_store);
+        self.profile_catalog_generation = self.profile_catalog_generation.wrapping_add(1);
         self.profile_catalog = outcome.catalog;
         self.controlled_config_store = outcome.controlled_store;
+        self.controlled_config_generation = self.controlled_config_generation.wrapping_add(1);
         self.controlled_config = outcome.controlled_config;
         self.override_store = Some(outcome.override_store);
         self.override_catalog = outcome.override_catalog;
-        self.invalidate_config_inputs();
+        self.invalidate_config_inputs(cx);
         self.config_preview = None;
         cx.emit(ProfileActivated {
             path: outcome.profile_path,

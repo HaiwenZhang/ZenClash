@@ -1,8 +1,9 @@
 use super::{
-    ConfigInputs, Context, ControlledConfigStore, Duration, MihomoLogLevel, Page, PageTaskToken,
-    ProfileActivated, ProfileCatalog, ProfileStore, RuntimeConfig, RuntimeConfigApplied,
-    RuntimeData, RuntimePage, RuntimePageServices, Value, Window, YamlOverrideCatalog,
-    YamlOverrideStore, load_page, load_page_with_binary,
+    AppContext, ConfigInputs, ConfigInputsTaskToken, Context, ControlledConfigStore, Duration,
+    MihomoLogLevel, Page, PageTaskToken, ProfileActivated, ProfileCatalog, ProfileStore,
+    RuntimeConfig, RuntimeConfigApplied, RuntimeData, RuntimePage, RuntimePageServices, Value,
+    Window, YamlOverrideCatalog, YamlOverrideStore, config_input_snapshot, load_page,
+    load_page_with_binary,
 };
 use zenclash_core::{CoreApplyKind, EffectiveConfigIntent};
 
@@ -222,16 +223,14 @@ impl RuntimePage {
         outcome: super::profiles::workflow::BackgroundUpdateOutcome,
         cx: &mut Context<Self>,
     ) {
-        if let Err(error) = self.reload_profile_catalog() {
-            tracing::warn!(%error, "failed to reload profile catalog after background update");
-        }
+        self.reload_profile_catalog(cx);
         self.notice = Some(zenclash_i18n::text_with(
             "runtime.lifecycle.profile_updated",
             &[("name", outcome.name)],
         ));
         if outcome.active {
             self.profile_path = Some(outcome.path.clone());
-            self.invalidate_config_inputs();
+            self.invalidate_config_inputs(cx);
             self.config_preview = None;
             cx.emit(ProfileActivated { path: outcome.path });
         }
@@ -284,6 +283,7 @@ impl RuntimePage {
             override_catalog,
             error,
         } = load_initial_persistent_state(profile_path.as_deref(), &controlled_config_store);
+        let effective_config = config_input_snapshot(effective_config);
         let config_inputs = ConfigInputs::new(&effective_config, window, cx);
         let config_inputs_profile = profile_path.clone();
         let profile_forms = super::profiles::ProfileFormState::new(window, cx);
@@ -311,7 +311,10 @@ impl RuntimePage {
             controlled_config,
             config_inputs,
             config_inputs_profile,
+            config_inputs_generation: 0,
+            config_inputs_loading: false,
             profile_catalog,
+            profile_catalog_generation: 0,
             preferences_store,
             preferences,
             core_management: super::settings::CoreManagementUiState::default(),
@@ -336,12 +339,14 @@ impl RuntimePage {
             ruleset: super::resources::RulesetUiState::default(),
             navigation_generation: 0,
             load_generation: 0,
+            controlled_config_generation: 0,
             loading: false,
             mutating: false,
             error,
             startup_error,
             notice: startup_notice,
             focus_handle: cx.focus_handle(),
+            window_handle: window.window_handle(),
             _subscriptions: vec![
                 connection_filter_subscription,
                 log_filter_subscription,
@@ -391,11 +396,10 @@ impl RuntimePage {
         self.loading = false;
         self.error = None;
         self.notice = None;
+        self.refresh_config_inputs(cx);
         self.reload_controlled_config(cx);
-        if page == Page::Profiles
-            && let Err(error) = self.reload_profile_catalog()
-        {
-            self.error = Some(error);
+        if page == Page::Profiles {
+            self.reload_profile_catalog(cx);
         }
         self.refresh(cx);
         if page == Page::Settings {
@@ -565,7 +569,10 @@ impl RuntimePage {
                         if let Some(level) = requested_log_level {
                             this.log_monitor.set_level(level);
                         }
+                        this.controlled_config_generation =
+                            this.controlled_config_generation.wrapping_add(1);
                         this.controlled_config = controlled_config;
+                        this.invalidate_config_inputs(cx);
                         this.config_preview = None;
                         cx.emit(RuntimeConfigApplied);
                         if this.replace_page_data(token, data) {
@@ -602,37 +609,92 @@ impl RuntimePage {
             .unwrap_or(fallback)
     }
 
-    pub(super) fn refresh_config_inputs_if_needed(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.config_inputs_profile == self.profile_path {
+    pub(super) fn refresh_config_inputs(&mut self, cx: &mut Context<Self>) {
+        if self.config_inputs_profile == self.profile_path || self.config_inputs_loading {
             return;
         }
-        let Some(profile) = self.profile_path.as_ref() else {
+        let Some(profile) = self.profile_path.clone() else {
             self.config_inputs_profile = None;
             return;
         };
-        match self.controlled_config_store.effective_json(profile) {
-            Ok(config) => {
-                self.config_inputs = ConfigInputs::new(&config, window, cx);
-                self.config_inputs_profile = Some(profile.clone());
-            }
-            Err(error) => self.error = Some(error.to_string()),
-        }
+        self.config_inputs_generation = self.config_inputs_generation.wrapping_add(1);
+        let token = ConfigInputsTaskToken {
+            profile: profile.clone(),
+            generation: self.config_inputs_generation,
+        };
+        self.config_inputs_loading = true;
+        let controlled = self.controlled_config_store.clone();
+        let task = self.runtime.spawn_blocking(move || {
+            controlled
+                .effective_json(profile)
+                .map(config_input_snapshot)
+                .map_err(|error| error.to_string())
+        });
+        let window_handle = self.window_handle;
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            let _ = cx.update_window(window_handle, |_, window, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    if !token
+                        .is_current(this.profile_path.as_deref(), this.config_inputs_generation)
+                    {
+                        return;
+                    }
+                    this.config_inputs_loading = false;
+                    match result {
+                        Ok(config) => {
+                            this.config_inputs = ConfigInputs::new(&config, window, cx);
+                            this.config_inputs_profile = Some(token.profile);
+                        }
+                        Err(error) => this.error = Some(error),
+                    }
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
     }
 
-    pub(super) fn invalidate_config_inputs(&mut self) {
+    pub(super) fn invalidate_config_inputs(&mut self, cx: &mut Context<Self>) {
+        self.config_inputs_generation = self.config_inputs_generation.wrapping_add(1);
+        self.config_inputs_loading = false;
         self.config_inputs_profile = None;
+        self.refresh_config_inputs(cx);
     }
 
     pub(crate) fn reload_controlled_config(&mut self, cx: &mut Context<Self>) {
-        match self.controlled_config_store.load_json() {
-            Ok(controlled) => self.controlled_config = controlled,
-            Err(error) => self.error = Some(error.to_string()),
-        }
-        cx.notify();
+        self.controlled_config_generation = self.controlled_config_generation.wrapping_add(1);
+        let generation = self.controlled_config_generation;
+        let controlled = self.controlled_config_store.clone();
+        let task = self
+            .runtime
+            .spawn_blocking(move || controlled.load_json().map_err(|error| error.to_string()));
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                if this.controlled_config_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(controlled) => {
+                        let changed = this.controlled_config != controlled;
+                        this.controlled_config = controlled;
+                        if changed {
+                            this.invalidate_config_inputs(cx);
+                        }
+                    }
+                    Err(error) => this.error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn profile_activated_from_tray(
@@ -642,11 +704,9 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) {
         self.profile_path = Some(path.clone());
-        self.invalidate_config_inputs();
+        self.invalidate_config_inputs(cx);
         self.config_preview = None;
-        if let Err(error) = self.reload_profile_catalog() {
-            self.error = Some(error);
-        }
+        self.reload_profile_catalog(cx);
         self.notice = Some(zenclash_i18n::text_with(
             "runtime.lifecycle.tray_profile_selected",
             &[("name", name.to_owned())],

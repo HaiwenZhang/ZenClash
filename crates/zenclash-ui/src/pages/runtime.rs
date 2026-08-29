@@ -1,9 +1,9 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::{
-    App, AppContext, ClipboardItem, Context, Entity, EventEmitter, Focusable, InteractiveElement,
-    IntoElement, ParentElement, PathPromptOptions, Render, StatefulInteractiveElement, Styled,
-    Subscription, Window, div, prelude::FluentBuilder, px,
+    AnyWindowHandle, App, AppContext, ClipboardItem, Context, Entity, EventEmitter, Focusable,
+    InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render,
+    StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::FluentBuilder, px,
 };
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable,
@@ -62,11 +62,11 @@ use common::{
     format_profile_age, format_proxy, info_row, message_banner, metric, normalized_fraction,
     setting_card, setting_switch, yes_no,
 };
-use config_inputs::ConfigInputs;
+use config_inputs::{ConfigInputs, config_input_snapshot};
 use loader::{load_page, load_page_with_binary};
 use mihomo::CoreReleaseState;
 use overrides::ConfigPreview;
-use state::{PageTaskToken, RuntimeData};
+use state::{ConfigInputsTaskToken, PageTaskToken, RuntimeData};
 
 /// Stateful GPUI page host for Mihomo runtime, configuration, and diagnostics.
 pub struct RuntimePage {
@@ -86,7 +86,10 @@ pub struct RuntimePage {
     controlled_config: Value,
     config_inputs: ConfigInputs,
     config_inputs_profile: Option<PathBuf>,
+    config_inputs_generation: u64,
+    config_inputs_loading: bool,
     profile_catalog: ProfileCatalog,
+    profile_catalog_generation: u64,
     preferences_store: Option<AppPreferencesStore>,
     preferences: AppPreferences,
     core_management: settings::CoreManagementUiState,
@@ -111,12 +114,14 @@ pub struct RuntimePage {
     ruleset: resources::RulesetUiState,
     navigation_generation: u64,
     load_generation: u64,
+    controlled_config_generation: u64,
     loading: bool,
     mutating: bool,
     error: Option<String>,
     startup_error: Option<String>,
     notice: Option<String>,
     focus_handle: gpui::FocusHandle,
+    window_handle: AnyWindowHandle,
     _subscriptions: Vec<Subscription>,
 }
 

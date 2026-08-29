@@ -151,8 +151,7 @@ impl Focusable for RuntimePage {
 }
 
 impl Render for RuntimePage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.refresh_config_inputs_if_needed(window, cx);
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         v_flex()
             .track_focus(&self.focus_handle)

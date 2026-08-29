@@ -6,6 +6,21 @@ mod core;
 
 pub(in crate::pages::runtime) use core::CoreInputs;
 
+const CONFIG_INPUT_KEYS: &[&str] = &[
+    "port",
+    "socks-port",
+    "mixed-port",
+    "redir-port",
+    "tproxy-port",
+    "bind-address",
+    "interface-name",
+    "log-level",
+    "dns",
+    "hosts",
+    "sniffer",
+    "tun",
+];
+
 pub(super) struct ConfigInputs {
     pub core: CoreInputs,
     pub dns: DnsInputs,
@@ -62,6 +77,26 @@ impl ConfigInputs {
             tun: TunInputs::new(config, &mut factory),
         }
     }
+}
+
+pub(super) fn config_input_snapshot(config: Value) -> Value {
+    config_source(&config, CONFIG_INPUT_KEYS)
+}
+
+pub(super) fn config_source(config: &Value, keys: &[&str]) -> Value {
+    let Some(config) = config.as_object() else {
+        return Value::Object(Map::new());
+    };
+    Value::Object(
+        keys.iter()
+            .filter_map(|key| {
+                config
+                    .get(*key)
+                    .cloned()
+                    .map(|value| ((*key).to_owned(), value))
+            })
+            .collect(),
+    )
 }
 
 pub(super) struct InputFactory<'a, 'b> {
@@ -139,7 +174,7 @@ impl DnsInputs {
                 config_mapping(config, "/hosts"),
                 zenclash_i18n::text("config_inputs.placeholders.address_mapping"),
             ),
-            source: config.clone(),
+            source: config_source(config, &["dns", "hosts"]),
         }
     }
 
@@ -308,7 +343,7 @@ impl SnifferInputs {
                 config_lines(config, "/sniffer/skip-src-address"),
                 zenclash_i18n::text("config_inputs.placeholders.one_address"),
             ),
-            source: config.clone(),
+            source: config_source(config, &["sniffer"]),
         }
     }
 
@@ -398,7 +433,7 @@ impl TunInputs {
                 config_lines(config, "/tun/route-exclude-address"),
                 zenclash_i18n::text("config_inputs.placeholders.one_cidr"),
             ),
-            source: config.clone(),
+            source: config_source(config, &["tun"]),
         }
     }
 
@@ -643,4 +678,46 @@ fn config_mapping(config: &Value, pointer: &str) -> String {
         .unwrap_or_default()
         .trim()
         .to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{config_input_snapshot, config_source};
+
+    #[test]
+    fn input_snapshot_discards_large_runtime_only_sections() {
+        let snapshot = config_input_snapshot(json!({
+            "mixed-port": 7890,
+            "dns": { "nameserver": ["1.1.1.1"] },
+            "rules": ["DOMAIN-SUFFIX,example.com,DIRECT"],
+            "proxies": [{ "name": "large-runtime-section" }]
+        }));
+
+        assert_eq!(snapshot.pointer("/mixed-port"), Some(&json!(7890)));
+        assert_eq!(
+            snapshot.pointer("/dns/nameserver/0"),
+            Some(&json!("1.1.1.1"))
+        );
+        assert!(snapshot.get("rules").is_none());
+        assert!(snapshot.get("proxies").is_none());
+    }
+
+    #[test]
+    fn section_source_keeps_only_fields_used_by_its_patch() {
+        let config = json!({
+            "dns": { "enable": true },
+            "hosts": { "router.local": "192.0.2.1" },
+            "tun": { "enable": true }
+        });
+
+        assert_eq!(
+            config_source(&config, &["dns", "hosts"]),
+            json!({
+                "dns": { "enable": true },
+                "hosts": { "router.local": "192.0.2.1" }
+            })
+        );
+    }
 }

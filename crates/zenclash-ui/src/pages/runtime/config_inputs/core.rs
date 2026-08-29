@@ -2,7 +2,7 @@ use gpui::Entity;
 use gpui_component::input::InputState;
 use serde_json::{Map, Value};
 
-use super::{InputFactory, config_number_or_empty, config_string, text};
+use super::{InputFactory, config_number_or_empty, config_source, config_string, text};
 
 pub(in crate::pages::runtime) struct CoreInputs {
     pub port: Entity<InputState>,
@@ -40,7 +40,19 @@ impl CoreInputs {
                 config_string(config, "/log-level", ""),
                 "silent / error / warning / info / debug",
             ),
-            source: config.clone(),
+            source: config_source(
+                config,
+                &[
+                    "port",
+                    "socks-port",
+                    "mixed-port",
+                    "redir-port",
+                    "tproxy-port",
+                    "bind-address",
+                    "interface-name",
+                    "log-level",
+                ],
+            ),
         }
     }
 

@@ -2,6 +2,7 @@ use super::{
     AutostartStatus, ConnectionsSnapshot, Observation, Page, ProviderCatalog, RuleCatalog,
     RuntimeConfig, SystemNetworkSnapshot, SystemProxyStatus, TunPermissionStatus, VersionInfo,
 };
+use std::path::{Path, PathBuf};
 use zenclash_core::ProxyCatalog;
 
 #[derive(Clone, Debug)]
@@ -90,6 +91,18 @@ impl PageTaskToken {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ConfigInputsTaskToken {
+    pub(super) profile: PathBuf,
+    pub(super) generation: u64,
+}
+
+impl ConfigInputsTaskToken {
+    pub(super) fn is_current(&self, profile: Option<&Path>, generation: u64) -> bool {
+        profile == Some(self.profile.as_path()) && self.generation == generation
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +126,27 @@ mod tests {
         };
 
         assert!(token.is_current(Page::Resources, 8));
+    }
+
+    #[test]
+    fn config_inputs_task_rejects_result_for_replaced_profile() {
+        let token = ConfigInputsTaskToken {
+            profile: PathBuf::from("profiles/old.yaml"),
+            generation: 4,
+        };
+
+        assert!(!token.is_current(Some(Path::new("profiles/new.yaml")), 4));
+    }
+
+    #[test]
+    fn config_inputs_task_rejects_result_after_same_profile_is_invalidated() {
+        let token = ConfigInputsTaskToken {
+            profile: PathBuf::from("profiles/active.yaml"),
+            generation: 4,
+        };
+
+        assert!(!token.is_current(Some(Path::new("profiles/active.yaml")), 5));
+        assert!(token.is_current(Some(Path::new("profiles/active.yaml")), 4));
     }
 
     #[test]

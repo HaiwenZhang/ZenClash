@@ -149,29 +149,23 @@ impl RuntimePage {
                         this.profile_editor.original = None;
                         this.profile_editor.profile_id = None;
                         this.config_preview = None;
-                        this.invalidate_config_inputs();
-                        if let Err(error) = this.reload_profile_catalog() {
-                            this.set_page_error(token, error);
-                        } else {
-                            this.notice = Some(zenclash_i18n::text_with(
-                                "overrides.notices.editor_saved",
-                                &[("core", this.core_kind.display_name().to_owned())],
-                            ));
-                            cx.emit(super::super::ProfileActivated { path });
-                        }
+                        this.invalidate_config_inputs(cx);
+                        this.reload_profile_catalog(cx);
+                        this.notice = Some(zenclash_i18n::text_with(
+                            "overrides.notices.editor_saved",
+                            &[("core", this.core_kind.display_name().to_owned())],
+                        ));
+                        cx.emit(super::super::ProfileActivated { path });
                     }
                     Ok(ProfileEditorSaveOutcome::Stored) if this.is_page_task_current(token) => {
                         this.profile_editor.original = None;
                         this.profile_editor.profile_id = None;
                         this.config_preview = None;
-                        this.invalidate_config_inputs();
-                        if let Err(error) = this.reload_profile_catalog() {
-                            this.set_page_error(token, error);
-                        } else {
-                            this.notice = Some(zenclash_i18n::text(
-                                "overrides.notices.editor_saved_inactive",
-                            ));
-                        }
+                        this.invalidate_config_inputs(cx);
+                        this.reload_profile_catalog(cx);
+                        this.notice = Some(zenclash_i18n::text(
+                            "overrides.notices.editor_saved_inactive",
+                        ));
                     }
                     Ok(_) => {}
                     Err(error) => this.set_page_error(token, error),

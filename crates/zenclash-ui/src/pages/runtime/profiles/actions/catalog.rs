@@ -154,13 +154,9 @@ impl RuntimePage {
                 this.mutating = false;
                 match result {
                     Ok(()) if this.is_page_task_current(token) => {
-                        if let Err(error) = this.reload_profile_catalog() {
-                            this.set_page_error(token, error);
-                        } else {
-                            this.profile_forms.editing_profile_id = None;
-                            this.notice =
-                                Some(zenclash_i18n::text("profiles.notices.request_saved"));
-                        }
+                        this.reload_profile_catalog(cx);
+                        this.profile_forms.editing_profile_id = None;
+                        this.notice = Some(zenclash_i18n::text("profiles.notices.request_saved"));
                     }
                     Ok(()) => {}
                     Err(error) => this.set_page_error(token, error),
@@ -212,9 +208,8 @@ impl RuntimePage {
                 this.mutating = false;
                 match result {
                     Ok(()) => {
-                        if let Err(error) = this.reload_profile_catalog() {
-                            this.set_page_error(token, error);
-                        } else if this.is_page_task_current(token) {
+                        this.reload_profile_catalog(cx);
+                        if this.is_page_task_current(token) {
                             this.notice = Some(if enabled {
                                 zenclash_i18n::text_with(
                                     "profiles.notices.auto_update_enabled",
@@ -273,9 +268,7 @@ impl RuntimePage {
                                 false
                             }
                         };
-                        if let Err(error) = this.reload_profile_catalog() {
-                            this.set_page_error(token, error);
-                        }
+                        this.reload_profile_catalog(cx);
                         if is_profile_page {
                             this.notice = Some(zenclash_i18n::text_with(
                                 "profiles.notices.updated",
@@ -284,7 +277,7 @@ impl RuntimePage {
                         }
                         if outcome.active {
                             this.profile_path = Some(outcome.path.clone());
-                            this.invalidate_config_inputs();
+                            this.invalidate_config_inputs(cx);
                             this.config_preview = None;
                             cx.emit(ProfileActivated { path: outcome.path });
                         }
@@ -320,9 +313,7 @@ impl RuntimePage {
                 this.mutating = false;
                 match result {
                     Ok(()) => {
-                        if let Err(error) = this.reload_profile_catalog() {
-                            this.set_page_error(token, error);
-                        }
+                        this.reload_profile_catalog(cx);
                         if this.is_page_task_current(token) {
                             this.notice = Some(zenclash_i18n::text("profiles.notices.deleted"));
                         }
