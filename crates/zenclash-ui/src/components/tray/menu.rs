@@ -1,17 +1,13 @@
 use std::{
     collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
-use super::{EnvironmentShell, TrayCommand, TrayMenuState};
+use super::{EnvironmentShell, MAX_TRAY_PROXY_NODES, TrayCommand, TrayMenuState};
 
 static NEXT_MENU_GENERATION: AtomicU64 = AtomicU64::new(0);
-const MAX_PROXY_ITEMS_PER_GROUP: usize = 24;
 
 fn select_profile_command(profile: &super::TrayProfile) -> TrayCommand {
     TrayCommand::SelectProfile {
@@ -129,7 +125,7 @@ pub(super) fn build_menu(
                 zenclash_i18n::text("tray.test_group"),
                 TrayCommand::TestGroup {
                     group: group.name.clone(),
-                    proxies: Arc::clone(&group.proxies),
+                    automatic: group.automatic,
                     test_url: group.test_url.clone(),
                 },
             );
@@ -157,7 +153,7 @@ pub(super) fn build_menu(
                 );
                 submenu.append(&item).map_err(|error| error.to_string())?;
             }
-            if group.proxies.len() > MAX_PROXY_ITEMS_PER_GROUP {
+            if group.has_more {
                 let separator = PredefinedMenuItem::separator();
                 let open_proxies = builder.item(
                     zenclash_i18n::text("tray.open_proxies"),
@@ -254,7 +250,7 @@ fn proxy_menu_items(group: &super::TrayProxyGroup) -> Vec<&super::TrayProxyNode>
     let mut proxies = group
         .proxies
         .iter()
-        .take(MAX_PROXY_ITEMS_PER_GROUP)
+        .take(MAX_TRAY_PROXY_NODES)
         .collect::<Vec<_>>();
     if proxies.iter().any(|proxy| proxy.name == group.now) {
         return proxies;
@@ -322,7 +318,7 @@ mod tests {
 
         let items = proxy_menu_items(&group);
 
-        assert_eq!(items.len(), MAX_PROXY_ITEMS_PER_GROUP);
+        assert_eq!(items.len(), MAX_TRAY_PROXY_NODES);
         assert!(items.iter().any(|proxy| proxy.name == group.now));
     }
 }

@@ -7,7 +7,7 @@ use std::{
 use chrono::{SecondsFormat, TimeZone, Utc};
 
 use super::*;
-use crate::{Connection, ConnectionMetadata, ConnectionsSnapshot};
+use crate::{TrafficAccountingConnection, TrafficAccountingMetadata, TrafficAccountingSnapshot};
 
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -19,8 +19,8 @@ fn test_database(name: &str) -> PathBuf {
     ))
 }
 
-fn connection(id: &str, start_ms: i64, upload: u64, download: u64) -> Connection {
-    Connection {
+fn connection(id: &str, start_ms: i64, upload: u64, download: u64) -> TrafficAccountingConnection {
+    TrafficAccountingConnection {
         id: id.into(),
         start: Utc
             .timestamp_millis_opt(start_ms)
@@ -29,28 +29,25 @@ fn connection(id: &str, start_ms: i64, upload: u64, download: u64) -> Connection
             .to_rfc3339_opts(SecondsFormat::Millis, true),
         upload,
         download,
-        chains: vec!["香港 01".into()],
-        metadata: ConnectionMetadata {
+        outbound: "香港 01".into(),
+        metadata: TrafficAccountingMetadata {
             source_ip: "192.168.1.8".into(),
             host: "example.com".into(),
             destination_ip: "93.184.216.34".into(),
             process: "curl".into(),
-            ..ConnectionMetadata::default()
         },
-        ..Connection::default()
     }
 }
 
 fn snapshot(
-    connections: Vec<Connection>,
+    connections: Vec<TrafficAccountingConnection>,
     upload_total: u64,
     download_total: u64,
-) -> ConnectionsSnapshot {
-    ConnectionsSnapshot {
+) -> TrafficAccountingSnapshot {
+    TrafficAccountingSnapshot {
         connections,
         download_total,
         upload_total,
-        ..ConnectionsSnapshot::default()
     }
 }
 

@@ -36,7 +36,7 @@ impl RuntimePage {
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let all_entries = self.log_monitor.entries();
+        let all_entries = self.log_monitor.shared_entries();
         let connected = self.log_monitor.connected();
         let persistence = self.log_monitor.persistence_status();
         let query = normalize_log_query(&self.logs.filter.read(cx).value());
@@ -51,6 +51,7 @@ impl RuntimePage {
             .rev()
             .skip(page.start)
             .take(page.end - page.start)
+            .map(|entry| entry.as_ref())
             .collect::<Vec<_>>();
         let previous_page = page.index.saturating_sub(1);
         let next_page = page.index + 1;

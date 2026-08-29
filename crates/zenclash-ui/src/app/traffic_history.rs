@@ -13,7 +13,8 @@ use super::ZenClashApp;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
-const FLUSH_ENTRY_THRESHOLD: usize = 5_000;
+const FLUSH_ENTRY_THRESHOLD: usize = 1_000;
+const MAX_PENDING_ENTRIES: usize = 5_000;
 const MILLIS_PER_DAY: u64 = 24 * 60 * 60 * 1_000;
 
 /// Lock-free policy snapshot shared with the Tokio traffic accounting task.
@@ -80,7 +81,7 @@ impl ZenClashApp {
                     was_enabled = true;
                 }
 
-                match client.connections_snapshot().await {
+                match client.traffic_accounting_snapshot().await {
                     Ok(snapshot) => pending.extend(logger.observe(&snapshot, now_ms)),
                     Err(error) => {
                         tracing::debug!(%error, "failed to sample core connections for traffic history");
@@ -115,12 +116,27 @@ async fn flush(
         Ok((mut batch, Err(error))) => {
             tracing::warn!(%error, "failed to persist traffic-history batch");
             batch.append(pending);
+            let dropped = trim_pending_entries(&mut batch);
+            if dropped > 0 {
+                tracing::warn!(
+                    dropped,
+                    "discarded oldest unpersisted traffic-history entries"
+                );
+            }
             *pending = batch;
         }
         Err(error) => {
             tracing::warn!(%error, "traffic-history blocking task failed");
         }
     }
+}
+
+fn trim_pending_entries(pending: &mut Vec<TrafficHistoryEntry>) -> usize {
+    let dropped = pending.len().saturating_sub(MAX_PENDING_ENTRIES);
+    if dropped > 0 {
+        pending.drain(..dropped);
+    }
+    dropped
 }
 
 fn unix_millis() -> u64 {
@@ -148,5 +164,27 @@ mod tests {
 
         assert!(!policy.enabled());
         assert_eq!(policy.cutoff_ms(100 * MILLIS_PER_DAY), 10 * MILLIS_PER_DAY);
+    }
+
+    #[test]
+    fn failed_history_flush_retains_only_the_latest_bounded_entries() {
+        let mut pending = (0..MAX_PENDING_ENTRIES + 3)
+            .map(|timestamp_ms| TrafficHistoryEntry {
+                timestamp_ms: timestamp_ms as u64,
+                source_ip: String::new(),
+                host: String::new(),
+                outbound: String::new(),
+                process: String::new(),
+                upload: 0,
+                download: 0,
+            })
+            .collect::<Vec<_>>();
+
+        let dropped = trim_pending_entries(&mut pending);
+
+        assert_eq!(
+            (dropped, pending.len(), pending[0].timestamp_ms),
+            (3, MAX_PENDING_ENTRIES, 3)
+        );
     }
 }

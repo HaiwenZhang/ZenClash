@@ -166,7 +166,7 @@ pub enum LogStreamFormat {
 
 /// Maintains a bounded, reconnecting Mihomo `/logs` stream.
 pub struct LogMonitor {
-    entries: Arc<RwLock<VecDeque<LogEntry>>>,
+    entries: Arc<RwLock<VecDeque<Arc<LogEntry>>>>,
     stream: Arc<RwLock<LogStreamSnapshot>>,
     revision: Arc<AtomicU64>,
     level: watch::Sender<MihomoLogLevel>,
@@ -218,7 +218,24 @@ impl LogMonitor {
     /// Returns the currently buffered log entries in receive order.
     #[must_use]
     pub fn entries(&self) -> Vec<LogEntry> {
+        self.entries
+            .read()
+            .iter()
+            .map(|entry| entry.as_ref().clone())
+            .collect()
+    }
+
+    /// Returns reference-counted entries for read-only UI presentation without
+    /// cloning every payload and structured field.
+    #[must_use]
+    pub fn shared_entries(&self) -> Vec<Arc<LogEntry>> {
         self.entries.read().iter().cloned().collect()
+    }
+
+    /// Returns the number of currently buffered entries without cloning them.
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.entries.read().len()
     }
 
     /// Removes all currently buffered log entries.
@@ -383,7 +400,7 @@ pub fn format_log_entries_support_safe(entries: &[LogEntry]) -> String {
 }
 
 struct LogMonitorState {
-    entries: Arc<RwLock<VecDeque<LogEntry>>>,
+    entries: Arc<RwLock<VecDeque<Arc<LogEntry>>>>,
     stream: Arc<RwLock<LogStreamSnapshot>>,
     revision: Arc<AtomicU64>,
     expected_generation: Arc<AtomicU64>,
@@ -546,7 +563,7 @@ fn update_log_connection(
 }
 
 fn accept_log_entry(
-    entries: &RwLock<VecDeque<LogEntry>>,
+    entries: &RwLock<VecDeque<Arc<LogEntry>>>,
     stream: &RwLock<LogStreamSnapshot>,
     revision: &AtomicU64,
     file_sender: &file::LogFileSender,
@@ -582,7 +599,7 @@ fn accept_log_entry(
 }
 
 fn push_monitor_error_for_generation(
-    entries: &RwLock<VecDeque<LogEntry>>,
+    entries: &RwLock<VecDeque<Arc<LogEntry>>>,
     stream: &RwLock<LogStreamSnapshot>,
     revision: &AtomicU64,
     file_sender: &file::LogFileSender,
@@ -616,7 +633,7 @@ fn push_monitor_error_for_generation(
     true
 }
 
-fn push_bounded(entries: &RwLock<VecDeque<LogEntry>>, entry: LogEntry) {
+fn push_bounded(entries: &RwLock<VecDeque<Arc<LogEntry>>>, entry: LogEntry) {
     let mut entries = entries.write();
     if entry.level == "error"
         && entries
@@ -624,6 +641,7 @@ fn push_bounded(entries: &RwLock<VecDeque<LogEntry>>, entry: LogEntry) {
             .is_some_and(|previous| previous.level == "error" && previous.payload == entry.payload)
     {
         if let Some(previous) = entries.back_mut() {
+            let previous = Arc::make_mut(previous);
             previous.timestamp_ms = entry.timestamp_ms;
             previous.received_at_ms = entry.received_at_ms;
         }
@@ -632,7 +650,7 @@ fn push_bounded(entries: &RwLock<VecDeque<LogEntry>>, entry: LogEntry) {
     if entries.len() >= MAX_LOG_ENTRIES {
         entries.pop_front();
     }
-    entries.push_back(entry);
+    entries.push_back(Arc::new(entry));
 }
 
 fn now_ms() -> u64 {
@@ -853,7 +871,11 @@ mod tests {
         );
 
         assert_eq!(
-            entries.read().iter().cloned().collect::<Vec<_>>(),
+            entries
+                .read()
+                .iter()
+                .map(|entry| entry.as_ref().clone())
+                .collect::<Vec<_>>(),
             vec![LogEntry {
                 level: "error".into(),
                 payload: "offline".into(),
@@ -867,9 +889,11 @@ mod tests {
     fn bounded_log_buffer_discards_the_oldest_entry() {
         let entries = RwLock::new(
             (0..MAX_LOG_ENTRIES)
-                .map(|index| LogEntry {
-                    payload: index.to_string(),
-                    ..LogEntry::default()
+                .map(|index| {
+                    Arc::new(LogEntry {
+                        payload: index.to_string(),
+                        ..LogEntry::default()
+                    })
                 })
                 .collect(),
         );

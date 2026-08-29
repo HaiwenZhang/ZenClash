@@ -189,7 +189,7 @@ pub struct RawProxyCatalog {
 }
 
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct RawProxy {
     #[serde(default)]
     name: String,
@@ -240,23 +240,24 @@ where
 }
 
 impl RawProxy {
-    fn into_node(self, fallback_name: &str) -> ProxyNode {
+    fn to_node(&self, fallback_name: &str) -> ProxyNode {
         ProxyNode {
             name: if self.name.is_empty() {
                 fallback_name.to_owned()
             } else {
-                self.name
+                self.name.clone()
             },
-            kind: self.kind,
+            kind: self.kind.clone(),
             alive: self.alive,
             udp: self.udp,
             xudp: self.xudp,
             tfo: self.tfo,
             mptcp: self.mptcp,
             smux: self.smux,
-            history: self.history,
+            history: self.history.clone(),
             provider_name: self
                 .provider_name
+                .as_deref()
                 .and_then(|name| (!name.trim().is_empty()).then(|| name.trim().to_owned())),
         }
     }
@@ -265,7 +266,7 @@ impl RawProxy {
 impl From<RawProxyCatalog> for ProxyCatalog {
     fn from(raw: RawProxyCatalog) -> Self {
         let proxy_count = raw.proxies.len();
-        let mut groups = Vec::new();
+        let mut groups = Vec::with_capacity(raw.proxies.len());
 
         for (key, proxy) in &raw.proxies {
             if proxy.all.is_empty() {
@@ -276,14 +277,13 @@ impl From<RawProxyCatalog> for ProxyCatalog {
                 .all
                 .iter()
                 .map(|name| {
-                    raw.proxies
-                        .get(name)
-                        .cloned()
-                        .unwrap_or_else(|| RawProxy {
+                    raw.proxies.get(name).map_or_else(
+                        || ProxyNode {
                             name: name.clone(),
-                            ..Default::default()
-                        })
-                        .into_node(name)
+                            ..ProxyNode::default()
+                        },
+                        |proxy| proxy.to_node(name),
+                    )
                 })
                 .collect();
 

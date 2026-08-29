@@ -1,40 +1,51 @@
 use std::{path::PathBuf, sync::Arc};
 
 use parking_lot::Mutex;
+use tokio::sync::watch;
 use zenclash_core::{ControlledConfigStore, MihomoClient, YamlOverrideStore};
 
 use super::sidebar::OutboundMode;
 
 #[derive(Clone, Debug)]
 pub struct OutboundModeCoordinator {
-    state: Arc<Mutex<ModeState>>,
+    shared: Arc<ModeShared>,
+}
+
+#[derive(Debug)]
+struct ModeShared {
+    state: Mutex<ModeState>,
+    updates: watch::Sender<u64>,
 }
 
 impl OutboundModeCoordinator {
     pub(crate) fn new_unsynchronized(initial: OutboundMode) -> Self {
+        let (updates, _) = watch::channel(0);
         Self {
-            state: Arc::new(Mutex::new(ModeState::new(initial, false))),
+            shared: Arc::new(ModeShared {
+                state: Mutex::new(ModeState::new(initial, false)),
+                updates,
+            }),
         }
     }
 
     pub(crate) fn displayed(&self) -> OutboundMode {
-        self.state.lock().displayed
+        self.shared.state.lock().displayed
     }
 
     pub(crate) fn generation(&self) -> u64 {
-        self.state.lock().generation
-    }
-
-    pub(crate) fn revision(&self) -> u64 {
-        self.state.lock().revision
+        self.shared.state.lock().generation
     }
 
     pub(crate) fn is_pending(&self) -> bool {
-        self.state.lock().in_flight.is_some()
+        self.shared.state.lock().in_flight.is_some()
+    }
+
+    pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
+        self.shared.updates.subscribe()
     }
 
     pub(crate) fn synchronize(&self, mode: OutboundMode, generation: u64) {
-        self.state.lock().synchronize(mode, generation);
+        self.update_state(|state| state.synchronize(mode, generation));
     }
 
     pub(crate) fn request(
@@ -44,7 +55,7 @@ impl OutboundModeCoordinator {
         controlled: Option<(ControlledConfigStore, PathBuf)>,
         runtime: &tokio::runtime::Handle,
     ) -> bool {
-        let submission = self.state.lock().submit(mode);
+        let submission = self.update_state(|state| state.submit(mode));
         match submission {
             Submission::Unchanged => false,
             Submission::Queued => true,
@@ -87,11 +98,21 @@ impl OutboundModeCoordinator {
             if let Err(error) = &result {
                 tracing::warn!(%error, mode = mode.api_value(), "failed to update core outbound mode");
             }
-            let Some(next) = self.state.lock().complete(mode, result.is_ok()) else {
+            let Some(next) = self.update_state(|state| state.complete(mode, result.is_ok())) else {
                 break;
             };
             mode = next;
         }
+    }
+
+    fn update_state<T>(&self, update: impl FnOnce(&mut ModeState) -> T) -> T {
+        let mut state = self.shared.state.lock();
+        let previous_revision = state.revision;
+        let result = update(&mut state);
+        if state.revision != previous_revision {
+            self.shared.updates.send_replace(state.revision);
+        }
+        result
     }
 }
 
@@ -261,5 +282,15 @@ mod tests {
         let _ = state.complete(OutboundMode::Global, true);
 
         assert!(state.revision > pending_revision);
+    }
+
+    #[test]
+    fn coordinator_subscription_observes_a_synchronized_mode_change() {
+        let coordinator = OutboundModeCoordinator::new_unsynchronized(OutboundMode::Rule);
+        let updates = coordinator.subscribe();
+
+        coordinator.synchronize(OutboundMode::Global, 0);
+
+        assert!(updates.has_changed().unwrap());
     }
 }

@@ -32,8 +32,8 @@ use crate::{
         mode::OutboundModeCoordinator,
         sidebar::{OutboundMode, Sidebar},
         tray::{
-            EnvironmentShell, NetworkTrayIcon, TrayClick, TrayCommand, TrayMenuState, TrayProfile,
-            TrayProxyGroup, TrayProxyNode,
+            EnvironmentShell, NetworkTrayIcon, TrayClick, TrayCommand, TrayEvent, TrayMenuState,
+            TrayProfile, TrayProxyGroup, TrayProxyNode,
         },
     },
     design::apply_zen_theme,
@@ -168,6 +168,10 @@ pub struct AppServices {
     pub traffic_monitor: Arc<TrafficMonitor>,
     /// Shared reconnecting log stream.
     pub log_monitor: Arc<LogMonitor>,
+    /// Traffic-history store discovered before GPUI starts handling events.
+    pub traffic_history_store: Option<TrafficHistoryStore>,
+    /// TUN permission manager validated before GPUI starts handling events.
+    pub tun_permissions: Option<TunPermissionManager>,
     /// Managed Mihomo child, absent when `ZenClash` attaches to an external core.
     pub mihomo_process: Option<Arc<MihomoProcess>>,
     /// Active Clash/Mihomo YAML path, when known.
@@ -201,6 +205,8 @@ impl ZenClashApp {
             client,
             traffic_monitor,
             log_monitor,
+            traffic_history_store,
+            tun_permissions,
             mihomo_process,
             profile_path,
             controlled_config_store,
@@ -215,30 +221,12 @@ impl ZenClashApp {
         let proxies_page = cx.new(|cx| ProxiesPage::new(client.clone(), runtime.clone(), cx));
         let app_profile_path = profile_path.clone();
         let app_controlled_config_store = controlled_config_store.clone();
-        let traffic_history_store = TrafficHistoryStore::discover()
-            .inspect_err(
-                |error| tracing::warn!(%error, "failed to discover traffic-history database"),
-            )
-            .ok();
         let traffic_history_policy =
             Arc::new(traffic_history::TrafficHistoryPolicy::new(&preferences));
         let system_proxy_controller = SystemProxyController::default();
         let system_proxy_session = preferences_store
             .clone()
             .map(|store| SystemProxySession::new(store, system_proxy_controller.clone()));
-        let tun_permissions = mihomo_process
-            .as_ref()
-            .map(|process| process.snapshot().binary)
-            .or_else(|| {
-                std::env::var_os(core_kind.binary_environment_variable()).map(PathBuf::from)
-            })
-            .and_then(|binary| {
-                TunPermissionManager::new(&binary)
-                    .inspect_err(|error| {
-                        tracing::warn!(%error, path = %binary.display(), "TUN permission manager unavailable");
-                    })
-                    .ok()
-            });
         let traffic_capture = TrafficCaptureSession::new(
             core_session.clone(),
             controlled_config_store.clone(),
@@ -341,7 +329,7 @@ impl ZenClashApp {
         app.start_mode_sync(cx);
         app.start_profile_updates(cx);
         app.start_traffic_history(traffic_history_store);
-        Self::start_tray_updates(cx);
+        app.start_tray_updates(cx);
         app.refresh_tray_menu(cx);
         app
     }
@@ -440,25 +428,49 @@ impl ZenClashApp {
     fn start_traffic_updates(&mut self, cx: &mut Context<Self>) {
         let monitor = self.traffic_monitor.clone();
         let mode = self.outbound_mode.clone();
+        let mut traffic_updates = monitor.subscribe();
+        let mut mode_updates = mode.subscribe();
         let mut operational_updates = self.operational_status.subscribe();
-        let mut observed_traffic_revision = u64::MAX;
-        let mut observed_mode_revision = mode.revision();
         let mut observed_process_running = None;
-        let mut process_initialized = false;
+        let mut initialize = true;
         cx.spawn(async move |this, cx| {
             loop {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                let traffic_revision = monitor.revision();
-                let mode_revision = mode.revision();
-                let traffic_changed = observed_traffic_revision != traffic_revision;
-                let mode_changed = observed_mode_revision != mode_revision;
-                let process_changed =
-                    !process_initialized || operational_updates.has_changed().unwrap_or(false);
-                if !traffic_changed && !mode_changed && !process_changed {
-                    continue;
+                let (mut traffic_changed, mut mode_changed, mut process_changed) =
+                    (initialize, initialize, initialize);
+                if initialize {
+                    initialize = false;
+                } else {
+                    tokio::select! {
+                        result = traffic_updates.changed() => {
+                            if result.is_err() {
+                                break;
+                            }
+                            traffic_changed = true;
+                        }
+                        result = mode_updates.changed() => {
+                            if result.is_err() {
+                                break;
+                            }
+                            mode_changed = true;
+                        }
+                        result = operational_updates.changed() => {
+                            if result.is_err() {
+                                break;
+                            }
+                            process_changed = true;
+                        }
+                    }
                 }
-                observed_traffic_revision = traffic_revision;
-                observed_mode_revision = mode_revision;
+
+                traffic_changed |= traffic_updates.has_changed().unwrap_or(false);
+                mode_changed |= mode_updates.has_changed().unwrap_or(false);
+                process_changed |= operational_updates.has_changed().unwrap_or(false);
+                if traffic_changed {
+                    traffic_updates.borrow_and_update();
+                }
+                if mode_changed {
+                    mode_updates.borrow_and_update();
+                }
                 let traffic = traffic_changed.then(|| monitor.snapshot());
                 let process_running = process_changed.then(|| {
                     operational_updates
@@ -467,7 +479,6 @@ impl ZenClashApp {
                         .value()
                         .map(|process| process.running)
                 });
-                process_initialized = true;
                 if this
                     .update(cx, |this, cx| {
                         let mut refresh_tray = false;
@@ -515,7 +526,7 @@ impl ZenClashApp {
         let logs = self.log_monitor.clone();
         cx.spawn(async move |this, _cx| {
             loop {
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
                 let generation = mode.generation();
                 let client = client.clone();
                 let task = runtime.spawn(async move { client.runtime_config().await });

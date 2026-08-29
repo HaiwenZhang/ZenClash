@@ -1,9 +1,4 @@
-use std::sync::Arc;
-
-use futures_util::{StreamExt, stream};
-use zenclash_core::{
-    CaptureOutcome, CapturePlan, ConnectionPolicy, ProxyDelayTarget, ProxyOperations,
-};
+use zenclash_core::{CaptureOutcome, CapturePlan, ConnectionPolicy, ProxyOperations};
 
 use super::{
     ClipboardItem, Context, EnvironmentShell, OutboundMode, Page, TrayCommand, ZenClashApp,
@@ -24,9 +19,9 @@ impl ZenClashApp {
             TrayCommand::SetTun(enabled) => self.set_tun_from_tray(enabled, cx),
             TrayCommand::TestGroup {
                 group,
-                proxies,
+                automatic,
                 test_url,
-            } => self.test_group_from_tray(group, proxies, test_url, cx),
+            } => self.test_group_from_tray(group, automatic, test_url, cx),
             TrayCommand::SelectProxy { group, proxy } => {
                 self.select_proxy_from_tray(group, proxy, cx);
             }
@@ -182,42 +177,31 @@ impl ZenClashApp {
     fn test_group_from_tray(
         &mut self,
         group: String,
-        proxies: Arc<[super::TrayProxyNode]>,
+        automatic: bool,
         test_url: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let operations = ProxyOperations::new(self.client.clone());
+        let task_group = group.clone();
         let task = self.runtime.spawn(async move {
-            let proxies = proxies.iter().cloned().collect::<Vec<_>>();
-            stream::iter(proxies)
-                .map(|proxy| {
-                    let operations = operations.clone();
-                    let test_url = test_url.clone();
-                    async move {
-                        let target = ProxyDelayTarget {
-                            name: proxy.name,
-                            provider: proxy.provider,
-                        };
-                        let result = operations
-                            .measure(&target, test_url.as_deref(), 5_000)
-                            .await;
-                        (target.name, result)
-                    }
-                })
-                .buffer_unordered(16)
-                .collect::<Vec<_>>()
-                .await
+            if automatic {
+                operations
+                    .measure_group_and_restore_auto(&task_group, test_url.as_deref(), 5_000)
+                    .await
+                    .map(|outcome| outcome.delays)
+            } else {
+                operations
+                    .measure_group(&task_group, test_url.as_deref(), 5_000)
+                    .await
+            }
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    Ok(results) => {
-                        for (proxy, result) in results {
-                            if let Err(error) = result {
-                                tracing::warn!(%group, %proxy, %error, "tray proxy delay test failed");
-                            }
-                        }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(%group, %error, "tray proxy delay test failed");
                     }
                     Err(error) => {
                         tracing::warn!(%group, %error, "tray proxy delay task failed");

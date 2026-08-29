@@ -12,7 +12,25 @@ use crate::{
     SystemProxySession, SystemProxySessionSnapshot, TrafficMonitor, VersionInfo,
 };
 
-const STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const PLATFORM_REFRESH_TICKS: u8 = 6;
+
+#[derive(Debug, Default)]
+struct StatusRefreshSchedule {
+    ticks_until_platform_refresh: u8,
+}
+
+impl StatusRefreshSchedule {
+    fn next_refreshes_platform(&mut self) -> bool {
+        if self.ticks_until_platform_refresh == 0 {
+            self.ticks_until_platform_refresh = PLATFORM_REFRESH_TICKS - 1;
+            true
+        } else {
+            self.ticks_until_platform_refresh -= 1;
+            false
+        }
+    }
+}
 
 /// Recovery action associated with an observation that has no trustworthy value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -597,7 +615,9 @@ async fn run_status_monitor(
     traffic: Arc<TrafficMonitor>,
     logs: Arc<LogMonitor>,
 ) {
+    let mut schedule = StatusRefreshSchedule::default();
     while let Some(status) = status.upgrade() {
+        let refresh_platform = schedule.next_refreshes_platform();
         refresh_status(
             &status,
             &core_session,
@@ -605,6 +625,7 @@ async fn run_status_monitor(
             tun_permissions.clone(),
             &traffic,
             &logs,
+            refresh_platform,
         )
         .await;
         drop(status);
@@ -619,17 +640,26 @@ async fn refresh_status(
     tun_permissions: Option<crate::TunPermissionManager>,
     traffic: &TrafficMonitor,
     logs: &LogMonitor,
+    refresh_platform: bool,
 ) {
     let expected = core_session.snapshot();
     let client = core_session.client().clone();
     let native = async move {
-        let Some(session) = system_proxy else {
-            return Err("应用设置不可用，无法读取系统代理 intent".to_owned());
-        };
-        tokio::task::spawn_blocking(move || session.snapshot())
-            .await
-            .map_err(|error| format!("系统代理读取任务异常结束：{error}"))?
-            .map_err(|error| error.to_string())
+        if !refresh_platform {
+            return None;
+        }
+        Some(
+            async move {
+                let Some(session) = system_proxy else {
+                    return Err("应用设置不可用，无法读取系统代理 intent".to_owned());
+                };
+                tokio::task::spawn_blocking(move || session.snapshot())
+                    .await
+                    .map_err(|error| format!("系统代理读取任务异常结束：{error}"))?
+                    .map_err(|error| error.to_string())
+            }
+            .await,
+        )
     };
     let (version, config, connections, native) = tokio::join!(
         client.version(),
@@ -638,27 +668,31 @@ async fn refresh_status(
         native,
     );
     let current = core_session.snapshot();
-    let tun = match &config {
-        Ok(config) => {
-            let config = config.clone();
-            let kind = current.kind;
-            tokio::task::spawn_blocking(move || {
-                let permission = tun_permissions
-                    .as_ref()
-                    .map(crate::TunPermissionManager::status)
-                    .transpose()
-                    .map_err(|error| error.to_string())?;
-                Ok::<_, String>(TunCaptureStatus::from_platform(
-                    kind,
-                    &config,
-                    permission.as_ref(),
-                ))
-            })
-            .await
-            .map_err(|error| format!("TUN 平台读取任务异常结束：{error}"))
-            .and_then(|result| result)
-        }
-        Err(error) => Err(error.to_string()),
+    let tun = if refresh_platform {
+        Some(match &config {
+            Ok(config) => {
+                let config = config.clone();
+                let kind = current.kind;
+                tokio::task::spawn_blocking(move || {
+                    let permission = tun_permissions
+                        .as_ref()
+                        .map(crate::TunPermissionManager::status)
+                        .transpose()
+                        .map_err(|error| error.to_string())?;
+                    Ok::<_, String>(TunCaptureStatus::from_platform(
+                        kind,
+                        &config,
+                        permission.as_ref(),
+                    ))
+                })
+                .await
+                .map_err(|error| format!("TUN 平台读取任务异常结束：{error}"))
+                .and_then(|result| result)
+            }
+            Err(error) => Err(error.to_string()),
+        })
+    } else {
+        None
     };
     traffic.synchronize_generation(current.generation);
     logs.synchronize_generation(current.generation);
@@ -689,22 +723,26 @@ async fn refresh_status(
         now,
         RecoveryAction::InspectCore,
     );
-    next.capture.system_proxy = Observation::record(
-        &next.capture.system_proxy,
-        native,
-        now,
-        RecoveryAction::ReviewCapture,
-    );
-    next.capture.tun = Observation::record(
-        &next.capture.tun,
-        tun,
-        now,
-        if current.kind == CoreKind::Meow {
-            RecoveryAction::Unsupported
-        } else {
-            RecoveryAction::ReviewCapture
-        },
-    );
+    if let Some(native) = native {
+        next.capture.system_proxy = Observation::record(
+            &next.capture.system_proxy,
+            native,
+            now,
+            RecoveryAction::ReviewCapture,
+        );
+    }
+    if let Some(tun) = tun {
+        next.capture.tun = Observation::record(
+            &next.capture.tun,
+            tun,
+            now,
+            if current.kind == CoreKind::Meow {
+                RecoveryAction::Unsupported
+            } else {
+                RecoveryAction::ReviewCapture
+            },
+        );
+    }
     next.streams.traffic = observe_traffic(
         &generation_observation(&next.streams.traffic, current.generation),
         traffic,
@@ -783,7 +821,6 @@ fn observe_logs(
     generation: u64,
     now: u64,
 ) -> Observation<StreamStatus> {
-    let entries = monitor.entries();
     let snapshot = monitor.stream_snapshot();
     if snapshot.generation != generation {
         return Observation::Loading;
@@ -792,7 +829,7 @@ fn observe_logs(
     let value = StreamStatus {
         generation,
         last_success_at_ms,
-        item_count: entries.len(),
+        item_count: monitor.entry_count(),
         upload: 0,
         download: 0,
         memory: 0,
@@ -898,6 +935,23 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_refresh_schedule_probes_platform_on_the_first_tick() {
+        let mut schedule = StatusRefreshSchedule::default();
+
+        assert!(schedule.next_refreshes_platform());
+    }
+
+    #[test]
+    fn status_refresh_schedule_limits_platform_probes_to_thirty_seconds() {
+        let mut schedule = StatusRefreshSchedule::default();
+        let probes = (0..12)
+            .filter(|_| schedule.next_refreshes_platform())
+            .collect::<Vec<_>>();
+
+        assert_eq!(probes, vec![0, 6]);
+    }
     use crate::{SystemProxyOwnershipState, SystemProxyStatus};
 
     #[test]

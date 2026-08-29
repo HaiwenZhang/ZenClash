@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use chrono::DateTime;
 
 use super::TrafficHistoryEntry;
-use crate::{Connection, ConnectionsSnapshot};
+use crate::{TrafficAccountingConnection, TrafficAccountingSnapshot};
 
 const MAX_LABEL_CHARS: usize = 512;
 
@@ -56,7 +56,7 @@ impl TrafficDeltaLogger {
     #[must_use]
     pub fn observe(
         &mut self,
-        snapshot: &ConnectionsSnapshot,
+        snapshot: &TrafficAccountingSnapshot,
         now_ms: u64,
     ) -> Vec<TrafficHistoryEntry> {
         if snapshot.upload_total < self.last_totals.upload
@@ -122,7 +122,7 @@ impl TrafficDeltaLogger {
         entries
     }
 
-    fn connection_started_in_run(&self, connection: &Connection) -> bool {
+    fn connection_started_in_run(&self, connection: &TrafficAccountingConnection) -> bool {
         DateTime::parse_from_rfc3339(&connection.start)
             .ok()
             .and_then(|timestamp| u64::try_from(timestamp.timestamp_millis()).ok())
@@ -131,7 +131,7 @@ impl TrafficDeltaLogger {
 }
 
 fn history_entry(
-    connection: &Connection,
+    connection: &TrafficAccountingConnection,
     timestamp_ms: u64,
     upload: u64,
     download: u64,
@@ -149,7 +149,11 @@ fn history_entry(
             "Unknown",
         ),
         outbound: bounded_label(
-            connection.chains.first().map_or("DIRECT", String::as_str),
+            if connection.outbound.is_empty() {
+                "DIRECT"
+            } else {
+                &connection.outbound
+            },
             "DIRECT",
         ),
         process: bounded_label(&metadata.process, "Unknown"),

@@ -197,7 +197,7 @@ impl ProxiesPage {
                         );
                         this.error = None;
                         this.notice = warning;
-                        this.reconcile_proxy_selection(request.token, cx);
+                        this.reconcile_proxy_selection(request.token, request.group.clone(), cx);
                     }
                     Err(error) => this.error = Some(error),
                 }
@@ -210,18 +210,15 @@ impl ProxiesPage {
     fn reconcile_proxy_selection(
         &mut self,
         selection_token: ProxySelectionTaskToken,
+        group: String,
         cx: &mut Context<Self>,
     ) {
         let token = self.next_catalog_task();
-        let visibility = if self.show_hidden {
-            ProxyVisibility::IncludeHidden
-        } else {
-            ProxyVisibility::VisibleOnly
-        };
-        let operations = ProxyOperations::new(self.client.clone());
+        let client = self.client.clone();
+        let task_group = group.clone();
         let task = self
             .runtime
-            .spawn(async move { operations.catalog(visibility).await });
+            .spawn(async move { client.proxy_group_selection(&task_group).await });
 
         cx.spawn(async move |this, cx| {
             let result = match task.await {
@@ -238,10 +235,11 @@ impl ProxiesPage {
                     return;
                 }
                 match result {
-                    Ok(catalog) => {
-                        this.catalog = Some(catalog);
+                    Ok(actual) if !actual.is_empty() => {
+                        apply_optimistic_selection(&mut this.catalog, &group, &actual);
                         cx.notify();
                     }
+                    Ok(_) => {}
                     Err(error) => {
                         tracing::warn!(%error, "proxy catalog reconciliation failed");
                     }

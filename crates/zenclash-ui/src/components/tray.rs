@@ -1,5 +1,11 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+};
 
+use parking_lot::Mutex;
+use tokio::sync::mpsc;
 use tray_icon::{
     MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent, menu::MenuEvent,
 };
@@ -9,6 +15,8 @@ mod icon;
 #[cfg(target_os = "macos")]
 mod macos;
 mod menu;
+
+pub(crate) const MAX_TRAY_PROXY_NODES: usize = 24;
 
 use icon::traffic_icon;
 use menu::build_menu;
@@ -52,6 +60,10 @@ pub struct TrayProfile {
 pub struct TrayProxyGroup {
     /// Whether the group accepts an explicit member selection.
     pub selectable: bool,
+    /// Whether a whole-group delay test must restore automatic selection.
+    pub automatic: bool,
+    /// Whether additional nodes are available on the full proxy page.
+    pub has_more: bool,
     /// Mihomo proxy-group name.
     pub name: String,
     /// Currently selected member.
@@ -134,8 +146,8 @@ pub enum TrayCommand {
     TestGroup {
         /// Mihomo proxy-group name.
         group: String,
-        /// Proxy identities to test.
-        proxies: Arc<[TrayProxyNode]>,
+        /// Whether Mihomo automatic selection must be restored after testing.
+        automatic: bool,
         /// Optional group-specific test URL.
         test_url: Option<String>,
     },
@@ -181,6 +193,46 @@ pub enum TrayClick {
     ShowMenu,
 }
 
+pub(crate) enum NativeTrayEvent {
+    Menu(MenuEvent),
+    Click(TrayIconEvent),
+}
+
+static NATIVE_EVENT_SENDER: OnceLock<Mutex<Option<mpsc::UnboundedSender<NativeTrayEvent>>>> =
+    OnceLock::new();
+static NATIVE_EVENT_HANDLERS: OnceLock<()> = OnceLock::new();
+
+fn install_native_event_handlers(sender: mpsc::UnboundedSender<NativeTrayEvent>) {
+    *NATIVE_EVENT_SENDER.get_or_init(|| Mutex::new(None)).lock() = Some(sender);
+    NATIVE_EVENT_HANDLERS.get_or_init(|| {
+        MenuEvent::set_event_handler(Some(|event| {
+            if let Some(sender) = NATIVE_EVENT_SENDER
+                .get()
+                .and_then(|sender| sender.lock().clone())
+            {
+                let _ = sender.send(NativeTrayEvent::Menu(event));
+            }
+        }));
+        TrayIconEvent::set_event_handler(Some(|event| {
+            if !matches!(
+                event,
+                TrayIconEvent::Click {
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
+            ) {
+                return;
+            }
+            if let Some(sender) = NATIVE_EVENT_SENDER
+                .get()
+                .and_then(|sender| sender.lock().clone())
+            {
+                let _ = sender.send(NativeTrayEvent::Click(event));
+            }
+        }));
+    });
+}
+
 /// Native status-bar indicator. The arrows are rendered as a macOS template
 /// image and the live upload/download rates are shown beside it.
 pub struct NetworkTrayIcon {
@@ -189,6 +241,7 @@ pub struct NetworkTrayIcon {
     icon: TrayIcon,
     last_title: String,
     commands: HashMap<String, TrayCommand>,
+    events: Option<mpsc::UnboundedReceiver<NativeTrayEvent>>,
 }
 
 impl NetworkTrayIcon {
@@ -201,6 +254,8 @@ impl NetworkTrayIcon {
         core_kind: zenclash_core::CoreKind,
         traffic_monitor: Arc<TrafficMonitor>,
     ) -> Result<Self, String> {
+        let (event_sender, events) = mpsc::unbounded_channel();
+        install_native_event_handlers(event_sender);
         let icon = traffic_icon(0, 0)?;
         let (menu, commands) = build_menu(&TrayMenuState::default())?;
         let tray = TrayIconBuilder::new()
@@ -230,6 +285,7 @@ impl NetworkTrayIcon {
             icon: tray,
             last_title: String::new(),
             commands,
+            events: Some(events),
         })
     }
 
@@ -287,41 +343,45 @@ impl NetworkTrayIcon {
         Ok(())
     }
 
-    /// Drains menu events until it finds a command owned by this tray.
-    #[must_use]
-    pub fn next_command(&self) -> Option<TrayCommand> {
-        while let Ok(event) = MenuEvent::receiver().try_recv() {
-            if let Some(command) = self.commands.get(event.id().as_ref()) {
-                return Some(command.clone());
-            }
-        }
-        None
+    pub(crate) fn take_event_receiver(
+        &mut self,
+    ) -> Option<mpsc::UnboundedReceiver<NativeTrayEvent>> {
+        self.events.take()
     }
 
-    /// Drains icon events until it finds a released click owned by this tray.
-    #[must_use]
-    pub fn next_click(&self) -> Option<TrayClick> {
-        while let Ok(event) = TrayIconEvent::receiver().try_recv() {
-            if let TrayIconEvent::Click {
-                id,
-                button,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
+    pub(crate) fn resolve_event(&self, event: NativeTrayEvent) -> Option<TrayEvent> {
+        match event {
+            NativeTrayEvent::Menu(event) => self
+                .commands
+                .get(event.id().as_ref())
+                .cloned()
+                .map(TrayEvent::Command),
+            NativeTrayEvent::Click(TrayIconEvent::Click { id, button, .. })
+                if id == self.icon.id() =>
             {
-                if id != self.icon.id() {
-                    continue;
-                }
-                return click_action(button);
+                click_action(button).map(TrayEvent::Click)
             }
+            NativeTrayEvent::Click(_) => None,
         }
-        None
     }
 
     /// Opens the native status menu programmatically.
     pub fn show_menu(&self) {
         self.icon.show_menu();
     }
+}
+
+impl Drop for NetworkTrayIcon {
+    fn drop(&mut self) {
+        if let Some(sender) = NATIVE_EVENT_SENDER.get() {
+            *sender.lock() = None;
+        }
+    }
+}
+
+pub(crate) enum TrayEvent {
+    Command(TrayCommand),
+    Click(TrayClick),
 }
 
 #[cfg(target_os = "windows")]

@@ -43,6 +43,35 @@ pub struct TrafficSample {
 /// Number of logical traffic frames retained for charts.
 pub const LIVE_TRAFFIC_SAMPLE_COUNT: usize = 24;
 
+#[derive(Debug)]
+struct TrafficRevision {
+    updates: watch::Sender<u64>,
+}
+
+impl TrafficRevision {
+    fn new() -> Arc<Self> {
+        Self::with_value(0)
+    }
+
+    fn with_value(value: u64) -> Arc<Self> {
+        let (updates, _) = watch::channel(value);
+        Arc::new(Self { updates })
+    }
+
+    fn current(&self) -> u64 {
+        *self.updates.borrow()
+    }
+
+    fn advance(&self) {
+        self.updates
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+
+    fn subscribe(&self) -> watch::Receiver<u64> {
+        self.updates.subscribe()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize)]
 struct TrafficFrame {
     #[serde(default)]
@@ -56,7 +85,7 @@ struct TrafficFrame {
 pub struct TrafficMonitor {
     snapshot: Arc<RwLock<TrafficSnapshot>>,
     samples: Arc<RwLock<VecDeque<TrafficSample>>>,
-    revision: Arc<AtomicU64>,
+    revision: Arc<TrafficRevision>,
     expected_generation: Arc<AtomicU64>,
     generation: watch::Sender<u64>,
     task: JoinHandle<()>,
@@ -68,7 +97,7 @@ impl TrafficMonitor {
     pub fn start(runtime: &Handle, endpoint: MihomoEndpoint) -> Arc<Self> {
         let snapshot = Arc::new(RwLock::new(TrafficSnapshot::default()));
         let samples = Arc::new(RwLock::new(initial_samples()));
-        let revision = Arc::new(AtomicU64::new(0));
+        let revision = TrafficRevision::new();
         let expected_generation = Arc::new(AtomicU64::new(0));
         let (generation, generation_updates) = watch::channel(0);
         let task = runtime.spawn(run_monitor(
@@ -107,7 +136,13 @@ impl TrafficMonitor {
     /// Returns a monotonic revision for traffic frames and connection-state changes.
     #[must_use]
     pub fn revision(&self) -> u64 {
-        self.revision.load(Ordering::Acquire)
+        self.revision.current()
+    }
+
+    /// Subscribes to traffic frames and connection-state changes.
+    #[must_use]
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.revision.subscribe()
     }
 
     /// Changes the accepted core generation and reconnects the WebSocket.
@@ -119,7 +154,7 @@ impl TrafficMonitor {
             return;
         }
         self.snapshot.write().connected = false;
-        self.revision.fetch_add(1, Ordering::AcqRel);
+        self.revision.advance();
         self.generation.send_replace(generation);
     }
 
@@ -140,7 +175,7 @@ async fn run_monitor(
     endpoint: MihomoEndpoint,
     snapshot: Arc<RwLock<TrafficSnapshot>>,
     samples: Arc<RwLock<VecDeque<TrafficSample>>>,
-    revision: Arc<AtomicU64>,
+    revision: Arc<TrafficRevision>,
     expected_generation: Arc<AtomicU64>,
     mut generation_updates: watch::Receiver<u64>,
 ) {
@@ -253,13 +288,13 @@ fn update_frame_for_generation(
     frame: TrafficFrame,
     generation: u64,
     expected_generation: &AtomicU64,
-    revision: &AtomicU64,
+    revision: &TrafficRevision,
 ) -> bool {
     if expected_generation.load(Ordering::Acquire) != generation {
         return false;
     }
     update_frame(snapshot, samples, frame, generation);
-    revision.fetch_add(1, Ordering::AcqRel);
+    revision.advance();
     true
 }
 
@@ -298,13 +333,13 @@ fn update_connection_for_generation(
     error: Option<String>,
     generation: u64,
     expected_generation: &AtomicU64,
-    revision: &AtomicU64,
+    revision: &TrafficRevision,
 ) -> bool {
     if expected_generation.load(Ordering::Acquire) != generation {
         return false;
     }
     if update_connection(snapshot, connected, error, generation) {
-        revision.fetch_add(1, Ordering::AcqRel);
+        revision.advance();
     }
     true
 }
@@ -471,7 +506,7 @@ mod tests {
         });
         let samples = RwLock::new(initial_samples());
         let expected_generation = AtomicU64::new(2);
-        let revision = AtomicU64::new(0);
+        let revision = TrafficRevision::new();
 
         let accepted = update_frame_for_generation(
             &snapshot,
@@ -486,7 +521,7 @@ mod tests {
         assert_eq!(snapshot.read().upload, 30);
         assert_eq!(snapshot.read().generation, 2);
         assert_eq!(*samples.read(), initial_samples());
-        assert_eq!(revision.load(Ordering::Acquire), 0);
+        assert_eq!(revision.current(), 0);
     }
 
     #[test]
@@ -494,7 +529,7 @@ mod tests {
         let snapshot = RwLock::new(TrafficSnapshot::default());
         let samples = RwLock::new(initial_samples());
         let expected_generation = AtomicU64::new(0);
-        let revision = AtomicU64::new(7);
+        let revision = TrafficRevision::with_value(7);
 
         let accepted = update_frame_for_generation(
             &snapshot,
@@ -506,7 +541,7 @@ mod tests {
         );
 
         assert!(accepted);
-        assert_eq!(revision.load(Ordering::Acquire), 8);
+        assert_eq!(revision.current(), 8);
     }
 
     #[test]
@@ -516,7 +551,7 @@ mod tests {
             ..TrafficSnapshot::default()
         });
         let expected_generation = AtomicU64::new(0);
-        let revision = AtomicU64::new(3);
+        let revision = TrafficRevision::with_value(3);
 
         let accepted = update_connection_for_generation(
             &snapshot,
@@ -528,6 +563,26 @@ mod tests {
         );
 
         assert!(accepted);
-        assert_eq!(revision.load(Ordering::Acquire), 3);
+        assert_eq!(revision.current(), 3);
+    }
+
+    #[test]
+    fn traffic_revision_subscription_observes_an_accepted_frame() {
+        let snapshot = RwLock::new(TrafficSnapshot::default());
+        let samples = RwLock::new(initial_samples());
+        let expected_generation = AtomicU64::new(0);
+        let revision = TrafficRevision::new();
+        let updates = revision.subscribe();
+
+        let _ = update_frame_for_generation(
+            &snapshot,
+            &samples,
+            TrafficFrame { up: 100, down: 200 },
+            0,
+            &expected_generation,
+            &revision,
+        );
+
+        assert!(updates.has_changed().unwrap());
     }
 }

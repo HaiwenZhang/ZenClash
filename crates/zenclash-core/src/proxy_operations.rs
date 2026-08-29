@@ -223,6 +223,23 @@ impl ProxyOperations {
         Ok(ProxyGroupMeasurementOutcome { delays, selection })
     }
 
+    /// Measures every member of a group through Mihomo without changing its selection.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation, transport, API-status, or decoding errors from the
+    /// group-delay request.
+    pub async fn measure_group(
+        &self,
+        group: &str,
+        test_url: Option<&str>,
+        timeout_ms: u64,
+    ) -> MihomoResult<BTreeMap<String, u32>> {
+        self.client
+            .proxy_group_delay(group, test_url, timeout_ms)
+            .await
+    }
+
     /// Measures one proxy through its provider endpoint when source identity is known.
     ///
     /// # Errors
@@ -558,6 +575,35 @@ mod tests {
         assert_eq!(
             outcome.selection.catalog.unwrap().groups[0].behavior,
             crate::ProxyGroupBehavior::Automatic { fixed: false }
+        );
+    }
+
+    #[tokio::test]
+    async fn selector_group_measurement_uses_one_group_request_without_catalog_readback() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4_096];
+            let bytes = stream.read(&mut request).unwrap();
+            stream.write_all(group_delay_response().as_bytes()).unwrap();
+            String::from_utf8_lossy(&request[..bytes]).into_owned()
+        });
+        let client =
+            MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+
+        let delays = ProxyOperations::new(client)
+            .measure_group("Proxy", Some("https://www.gstatic.com/generate_204"), 5_000)
+            .await
+            .unwrap();
+        let request = server.join().unwrap();
+
+        assert_eq!(
+            (
+                delays.get("HK 01"),
+                request.starts_with("GET /group/Proxy/delay?")
+            ),
+            (Some(&42), true)
         );
     }
 

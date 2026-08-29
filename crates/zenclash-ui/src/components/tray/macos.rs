@@ -1,4 +1,7 @@
-use std::{cell::RefCell, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    sync::Arc,
+};
 
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
@@ -14,6 +17,7 @@ use super::traffic_title;
 struct TrafficTimerIvars {
     status_item: RefCell<Retained<NSStatusItem>>,
     monitor: Arc<TrafficMonitor>,
+    last_revision: Cell<u64>,
     last_title: RefCell<String>,
 }
 
@@ -34,6 +38,11 @@ define_class!(
         // `NSTimer` target-selector callbacks.
         #[unsafe(method(refreshTraffic:))]
         fn refresh_traffic(&self, _timer: &NSTimer) {
+            let revision = self.ivars().monitor.revision();
+            if revision == self.ivars().last_revision.get() {
+                return;
+            }
+            self.ivars().last_revision.set(revision);
             let title = traffic_title(&self.ivars().monitor.snapshot());
             if title == *self.ivars().last_title.borrow() {
                 return;
@@ -61,6 +70,7 @@ impl TrafficTimerTarget {
         let this = Self::alloc(mtm).set_ivars(TrafficTimerIvars {
             status_item: RefCell::new(status_item),
             monitor,
+            last_revision: Cell::new(u64::MAX),
             last_title: RefCell::new(String::new()),
         });
         // SAFETY: The signature of `NSObject`'s `init` method is correct.
@@ -111,6 +121,7 @@ impl NativeTrafficUpdater {
 
     pub(super) fn set_status_item(&self, status_item: Retained<NSStatusItem>) {
         *self._target.ivars().status_item.borrow_mut() = status_item;
+        self._target.ivars().last_revision.set(u64::MAX);
         self._target.ivars().last_title.borrow_mut().clear();
         self.timer.fire();
     }

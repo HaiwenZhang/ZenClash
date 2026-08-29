@@ -6,7 +6,7 @@ use zenclash_core::{Observation, ProxyGroupBehavior, ProxyOperations, ProxyVisib
 
 struct TrayMenuSnapshot {
     config: zenclash_core::RuntimeConfig,
-    catalog: zenclash_core::ProxyCatalog,
+    groups: Vec<TrayProxyGroup>,
     system_proxy: Result<bool, String>,
     profiles: Result<zenclash_core::ProfileCatalog, String>,
     mode_generation: u64,
@@ -41,6 +41,7 @@ impl ZenClashApp {
             );
             let config = config.map_err(|error| error.to_string())?;
             let catalog = catalog.map_err(|error| error.to_string())?;
+            let groups = tray_proxy_groups(catalog, &config.mode);
             let system_proxy = match operational_status.snapshot().capture.system_proxy {
                 Observation::Fresh { value, .. } | Observation::Stale { value, .. } => {
                     Ok(value.actual.active())
@@ -56,7 +57,7 @@ impl ZenClashApp {
                     )
                 })
                 .and_then(|result| result);
-            Ok::<_, String>((config, catalog, system_proxy, profiles, mode_generation))
+            Ok::<_, String>((config, groups, system_proxy, profiles, mode_generation))
         });
         let profile_path = self.profile_path.clone();
 
@@ -65,11 +66,11 @@ impl ZenClashApp {
             let _ = this.update(cx, |this, cx| {
                 this.tray_refreshing = false;
                 match result {
-                    Ok(Ok((config, catalog, system_proxy, profiles, mode_generation))) => {
+                    Ok(Ok((config, groups, system_proxy, profiles, mode_generation))) => {
                         this.apply_tray_menu_state(
                             TrayMenuSnapshot {
                                 config,
-                                catalog,
+                                groups,
                                 system_proxy,
                                 profiles,
                                 mode_generation,
@@ -100,7 +101,7 @@ impl ZenClashApp {
     fn apply_tray_menu_state(&mut self, snapshot: TrayMenuSnapshot, cx: &mut Context<Self>) {
         let TrayMenuSnapshot {
             config,
-            catalog,
+            groups,
             system_proxy,
             profiles: profile_catalog,
             mode_generation,
@@ -109,32 +110,6 @@ impl ZenClashApp {
         self.outbound_mode
             .synchronize(OutboundMode::from_api(&config.mode), mode_generation);
         let mixed_port = config.system_proxy_port().unwrap_or_default();
-        let outbound_mode = config.mode.clone();
-        let groups = catalog
-            .into_groups_for_mode(&outbound_mode)
-            .map(|group| TrayProxyGroup {
-                selectable: matches!(
-                    group.behavior,
-                    ProxyGroupBehavior::Selector | ProxyGroupBehavior::Automatic { .. }
-                ),
-                name: group.name,
-                now: group.now,
-                test_url: group.test_url,
-                proxies: group
-                    .all
-                    .into_iter()
-                    .map(|proxy| {
-                        let delay = proxy.latest_delay();
-                        TrayProxyNode {
-                            name: proxy.name,
-                            provider: proxy.provider_name,
-                            delay,
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .into(),
-            })
-            .collect();
         let (profile_name, profiles) = profile_catalog.map_or_else(
             |error| {
                 tracing::warn!(%error, "failed to read managed profiles for tray menu");
@@ -193,5 +168,84 @@ impl ZenClashApp {
         {
             tracing::warn!(%error, "failed to update tray menu");
         }
+    }
+}
+
+fn tray_proxy_groups(
+    catalog: zenclash_core::ProxyCatalog,
+    outbound_mode: &str,
+) -> Vec<TrayProxyGroup> {
+    catalog
+        .into_groups_for_mode(outbound_mode)
+        .map(|group| {
+            let selectable = matches!(
+                &group.behavior,
+                ProxyGroupBehavior::Selector | ProxyGroupBehavior::Automatic { .. }
+            );
+            let automatic = matches!(&group.behavior, ProxyGroupBehavior::Automatic { .. });
+            let (proxies, has_more) = bounded_tray_proxy_nodes(group.all, &group.now);
+            TrayProxyGroup {
+                selectable,
+                automatic,
+                has_more,
+                name: group.name,
+                now: group.now,
+                test_url: group.test_url,
+                proxies: proxies.into(),
+            }
+        })
+        .collect()
+}
+
+fn bounded_tray_proxy_nodes(
+    mut proxies: Vec<zenclash_core::ProxyNode>,
+    current: &str,
+) -> (Vec<TrayProxyNode>, bool) {
+    let limit = crate::components::tray::MAX_TRAY_PROXY_NODES;
+    let has_more = proxies.len() > limit;
+    if has_more
+        && let Some(current_index) = proxies.iter().position(|proxy| proxy.name == current)
+        && current_index >= limit
+    {
+        proxies.swap(limit - 1, current_index);
+    }
+    let proxies = proxies
+        .into_iter()
+        .take(limit)
+        .map(|proxy| {
+            let delay = proxy.latest_delay();
+            TrayProxyNode {
+                name: proxy.name,
+                provider: proxy.provider_name,
+                delay,
+            }
+        })
+        .collect();
+    (proxies, has_more)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_tray_nodes_keep_the_current_member_without_retaining_the_full_group() {
+        let proxies = (0..30)
+            .map(|index| zenclash_core::ProxyNode {
+                name: format!("node-{index}"),
+                ..zenclash_core::ProxyNode::default()
+            })
+            .collect();
+
+        let (nodes, has_more) = bounded_tray_proxy_nodes(proxies, "node-29");
+
+        assert_eq!(
+            (
+                nodes.len(),
+                nodes.iter().any(|node| node.name == "node-29"),
+                has_more,
+            ),
+            (crate::components::tray::MAX_TRAY_PROXY_NODES, true, true)
+        );
     }
 }

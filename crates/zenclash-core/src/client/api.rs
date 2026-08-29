@@ -6,7 +6,7 @@ use serde::Serialize;
 use super::{MihomoClient, MihomoError, MihomoResult, VersionInfo, request};
 use crate::{
     ConnectionsSnapshot, ConnectionsSummary, DelayResult, DnsQueryResponse, DnsRecordType,
-    ProviderCatalog, ProxyCatalog, RuleCatalog, RuntimeConfig,
+    ProviderCatalog, ProxyCatalog, RuleCatalog, RuntimeConfig, TrafficAccountingSnapshot,
     profiles::{MAX_PROFILE_BYTES, read_profile_bytes},
     proxy::RawProxyCatalog,
 };
@@ -51,6 +51,26 @@ impl MihomoClient {
         let path = format!("/proxies/{}", encode_path_segment(group));
         self.put_json(&path, &serde_json::json!({ "name": proxy }))
             .await
+    }
+
+    /// Reads the current member of one proxy group without materializing the
+    /// complete proxy catalog.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty group name and propagates transport, API-status or
+    /// response-decoding errors.
+    pub async fn proxy_group_selection(&self, group: &str) -> MihomoResult<String> {
+        #[derive(serde::Deserialize)]
+        struct GroupSelection {
+            #[serde(default)]
+            now: String,
+        }
+
+        require_non_empty(group, "代理组名称")?;
+        let path = format!("/proxies/{}", encode_path_segment(group));
+        let selection: GroupSelection = self.get_json(&path).await?;
+        Ok(selection.now)
     }
 
     pub(crate) async fn restore_proxy_group(&self, group: &str) -> MihomoResult<()> {
@@ -218,6 +238,15 @@ impl MihomoClient {
     ///
     /// Returns transport, API-status or response-decoding errors.
     pub async fn connections_summary(&self) -> MihomoResult<ConnectionsSummary> {
+        self.get_json("/connections").await
+    }
+
+    /// Fetches only the per-connection fields required by traffic accounting.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, API-status or response-decoding errors.
+    pub async fn traffic_accounting_snapshot(&self) -> MihomoResult<TrafficAccountingSnapshot> {
         self.get_json("/connections").await
     }
 

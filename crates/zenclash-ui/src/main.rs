@@ -15,8 +15,8 @@ use tracing_subscriber::{EnvFilter, filter::Directive};
 use zenclash_core::{
     AppInstanceLock, AppPreferences, AppPreferencesStore, ControlledConfigStore, CoreKind,
     CoreSession, EffectiveConfigIntent, LogMonitor, MihomoClient, MihomoEndpoint,
-    MihomoLaunchConfig, MihomoProcess, ProfileStore, TrafficMonitor, YamlOverrideStore,
-    bundled_recovery_profile,
+    MihomoLaunchConfig, MihomoProcess, ProfileStore, TrafficHistoryStore, TrafficMonitor,
+    TunPermissionManager, YamlOverrideStore, bundled_recovery_profile,
 };
 use zenclash_ui::{app, assets::Assets};
 
@@ -279,6 +279,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         endpoint,
         zenclash_core::MihomoLogLevel::Info,
     );
+    let traffic_history_store = TrafficHistoryStore::discover()
+        .inspect_err(|error| tracing::warn!(%error, "failed to discover traffic-history database"))
+        .ok();
+    let tun_permissions = mihomo_process
+        .as_ref()
+        .map(|process| process.snapshot().binary)
+        .or_else(|| {
+            std::env::var_os(core_kind.binary_environment_variable()).map(PathBuf::from)
+        })
+        .and_then(|binary| {
+            TunPermissionManager::new(&binary)
+                .inspect_err(|error| {
+                    tracing::warn!(%error, path = %binary.display(), "TUN permission manager unavailable");
+                })
+                .ok()
+        });
     let runtime_handle = runtime.handle().clone();
     let restart_after_exit = Arc::new(parking_lot::Mutex::new(None));
     let app_restart_after_exit = Arc::clone(&restart_after_exit);
@@ -294,6 +310,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 client,
                 traffic_monitor: traffic,
                 log_monitor: logs,
+                traffic_history_store,
+                tun_permissions,
                 mihomo_process,
                 profile_path,
                 controlled_config_store,

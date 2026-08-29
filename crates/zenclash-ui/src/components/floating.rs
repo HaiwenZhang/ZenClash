@@ -1,6 +1,6 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
-use gpui::Context;
+use gpui::{Context, Task};
 use zenclash_core::{MihomoClient, TrafficMonitor, TrafficSnapshot};
 
 use super::{mode::OutboundModeCoordinator, sidebar::OutboundMode};
@@ -14,6 +14,7 @@ pub struct FloatingTrafficWindow {
     traffic_monitor: Arc<TrafficMonitor>,
     traffic: TrafficSnapshot,
     outbound_mode: OutboundModeCoordinator,
+    _update_task: Option<Task<()>>,
 }
 
 impl FloatingTrafficWindow {
@@ -32,6 +33,7 @@ impl FloatingTrafficWindow {
             traffic_monitor,
             traffic,
             outbound_mode,
+            _update_task: None,
         };
         this.start_updates(cx);
         this
@@ -39,15 +41,10 @@ impl FloatingTrafficWindow {
 
     fn start_updates(&mut self, cx: &mut Context<Self>) {
         let monitor = self.traffic_monitor.clone();
-        let mut revision = monitor.revision();
-        cx.spawn(async move |this, cx| {
-            loop {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                let current_revision = monitor.revision();
-                if current_revision == revision {
-                    continue;
-                }
-                revision = current_revision;
+        let mut updates = monitor.subscribe();
+        updates.mark_changed();
+        self._update_task = Some(cx.spawn(async move |this, cx| {
+            while updates.changed().await.is_ok() {
                 let traffic = monitor.snapshot();
                 if this
                     .update(cx, |this, cx| {
@@ -59,8 +56,7 @@ impl FloatingTrafficWindow {
                     break;
                 }
             }
-        })
-        .detach();
+        }));
     }
 
     fn set_mode(&mut self, mode: OutboundMode, cx: &mut Context<Self>) {

@@ -136,6 +136,38 @@ async fn blank_provider_proxy_delay_uses_the_regular_proxy_endpoint() {
 }
 
 #[tokio::test]
+async fn proxy_group_selection_reads_only_the_encoded_group_endpoint() {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 2_048];
+        let bytes = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..bytes]).into_owned();
+        let body = r#"{"name":"机场/A","now":"香港 01","all":["香港 01","美国 02"]}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        request
+    });
+    let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+
+    let selected = client.proxy_group_selection("机场/A").await.unwrap();
+    let request = server.join().unwrap();
+
+    assert_eq!(
+        (selected.as_str(), request.lines().next()),
+        (
+            "香港 01",
+            Some("GET /proxies/%E6%9C%BA%E5%9C%BA%2FA HTTP/1.1")
+        )
+    );
+}
+
+#[tokio::test]
 async fn dns_a_and_aaaa_queries_preserve_independent_answers() {
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
     let address = listener.local_addr().unwrap();
