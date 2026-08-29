@@ -595,6 +595,12 @@ home:
     system_proxy_loading:
       zh-CN: 正在读取系统代理状态
       en: Reading System Proxy status
+    system_proxy_enabling:
+      zh-CN: 正在启用系统代理…
+      en: Enabling System Proxy…
+    system_proxy_disabling:
+      zh-CN: 正在关闭系统代理…
+      en: Disabling System Proxy…
     system_proxy_unavailable:
       zh-CN: 系统代理状态不可用
       en: System Proxy status unavailable
@@ -625,6 +631,9 @@ home:
     capture_off:
       zh-CN: 未接管
       en: Capture off
+    capture_switching:
+      zh-CN: 正在切换接管方式…
+      en: Switching capture mode…
     no_proxy_port:
       zh-CN: 未检测到可用代理端口
       en: No usable proxy port detected
@@ -646,6 +655,12 @@ home:
     tun_loading:
       zh-CN: 正在读取 TUN 状态
       en: Reading TUN status
+    tun_enabling:
+      zh-CN: 正在启用 TUN…
+      en: Enabling TUN…
+    tun_disabling:
+      zh-CN: 正在关闭 TUN…
+      en: Disabling TUN…
     tun_unavailable:
       zh-CN: TUN 状态不可用
       en: TUN status unavailable

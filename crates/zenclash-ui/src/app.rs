@@ -2,9 +2,11 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::{
     AnyWindowHandle, App, AppContext, ClipboardItem, Context, Entity, Focusable,
-    InteractiveElement, IntoElement, KeyBinding, ParentElement, Pixels, Render, SharedString, Size,
-    Styled, Subscription, Window, WindowBounds, WindowKind, WindowOptions, div, px,
+    InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, SharedString, Styled,
+    Subscription, Window, WindowBounds, WindowKind, WindowOptions, div,
 };
+#[cfg(target_os = "macos")]
+use gpui::{Pixels, Size, px};
 use gpui_component::{ActiveTheme, Root, ThemeMode, TitleBar, h_flex, v_flex};
 use zenclash_core::{
     AppPreferences, AppPreferencesStore, AppearancePreference, ControlledConfigStore, CoreKind,
@@ -112,6 +114,7 @@ pub struct ZenClashApp {
     controlled_config_store: ControlledConfigStore,
     main_window: AnyWindowHandle,
     main_window_visible: bool,
+    #[cfg(target_os = "macos")]
     main_window_memory: MainWindowMemoryState,
     floating_window: Option<AnyWindowHandle>,
     tray_refreshing: bool,
@@ -133,11 +136,13 @@ pub struct ZenClashApp {
     _subscriptions: Vec<Subscription>,
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Default)]
 struct MainWindowMemoryState {
     restore_size: Option<Size<Pixels>>,
 }
 
+#[cfg(target_os = "macos")]
 impl MainWindowMemoryState {
     fn park(&mut self, current_size: Size<Pixels>) -> Size<Pixels> {
         let parked_size = gpui::size(px(1.), px(1.));
@@ -298,6 +303,7 @@ impl ZenClashApp {
             controlled_config_store: app_controlled_config_store,
             main_window,
             main_window_visible: true,
+            #[cfg(target_os = "macos")]
             main_window_memory: MainWindowMemoryState::default(),
             floating_window: None,
             tray_refreshing: false,
@@ -553,7 +559,7 @@ impl ZenClashApp {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod memory_tests {
     use super::*;
 

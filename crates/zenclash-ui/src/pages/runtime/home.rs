@@ -31,7 +31,7 @@ use crate::{
 
 use super::{
     Context, FluentBuilder, Page, ProxySelectionChanged, RuntimeData, RuntimePage, format_bytes,
-    format_profile_age, load_page, message_banner, normalized_fraction,
+    format_profile_age, message_banner, normalized_fraction,
 };
 
 const LIVE_TRAFFIC_TICK_MARGIN: usize = 6;
@@ -42,9 +42,23 @@ pub(super) struct HomeUiState {
     pub(super) profile_switching: Option<String>,
     pub(super) proxy_switching: Option<(String, String)>,
     pub(super) proxy_error: Option<String>,
-    pub(super) capture_pending: Option<CapturePlan>,
+    capture_transition: Option<CaptureTransition>,
     pub(super) action_error: Option<String>,
     mode_transition: Option<ModeTransition>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CaptureTransition {
+    displayed: CapturePlan,
+    pending: bool,
+    confirmed: Option<CaptureStatus>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CapturePresentation {
+    system_proxy_enabled: bool,
+    tun_enabled: bool,
+    pending: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -473,21 +487,46 @@ impl RuntimePage {
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let proxy = capture.system_proxy.value();
-        let intent_enabled = proxy.map_or(self.preferences.system_proxy_enabled, |snapshot| {
-            snapshot.intent_enabled
-        });
-        let proxy_status = system_proxy_status_text(capture);
-        let tun_enabled = capture
+        let transition = self.home.capture_transition.as_ref();
+        let effective_capture = transition
+            .and_then(|transition| transition.confirmed.as_ref())
+            .unwrap_or(capture);
+        let proxy = effective_capture.system_proxy.value();
+        let confirmed_system_proxy = proxy
+            .map_or(self.preferences.system_proxy_enabled, |snapshot| {
+                snapshot.intent_enabled
+            });
+        let confirmed_tun = effective_capture
             .tun
             .value()
             .map_or(config.tun.enable, |tun| tun.requested || tun.configured);
-        let tun_supported = capture
+        let capture_presentation =
+            capture_presentation(confirmed_system_proxy, confirmed_tun, transition);
+        let proxy_status = capture_transition_status_text(
+            confirmed_system_proxy,
+            capture_presentation.system_proxy_enabled,
+            capture_presentation.pending,
+            "home.controls.system_proxy_enabling",
+            "home.controls.system_proxy_disabling",
+        )
+        .unwrap_or_else(|| system_proxy_status_text(effective_capture));
+        let tun_status = capture_transition_status_text(
+            confirmed_tun,
+            capture_presentation.tun_enabled,
+            capture_presentation.pending,
+            "home.controls.tun_enabling",
+            "home.controls.tun_disabling",
+        )
+        .unwrap_or_else(|| tun_status_text(effective_capture));
+        let tun_supported = effective_capture
             .tun
             .value()
             .is_none_or(|tun| tun.observed != CapabilityState::Unsupported);
-        let tun_status = tun_status_text(capture);
-        let capture_status = capture_status_text(capture);
+        let capture_status = if capture_presentation.pending {
+            zenclash_i18n::text("home.controls.capture_switching")
+        } else {
+            capture_status_text(effective_capture)
+        };
         let presentation = mode_presentation(
             OutboundMode::from_api(&config.mode),
             self.home.mode_transition,
@@ -553,8 +592,8 @@ impl RuntimePage {
                                 )
                                 .child(
                                     Switch::new("home-system-proxy")
-                                        .checked(intent_enabled)
-                                        .disabled(self.home.capture_pending.is_some())
+                                        .checked(capture_presentation.system_proxy_enabled)
+                                        .disabled(capture_presentation.pending)
                                         .on_click(cx.listener(|this, checked, _, cx| {
                                             this.apply_home_capture_plan(
                                                 if *checked {
@@ -589,10 +628,8 @@ impl RuntimePage {
                                 )
                                 .child(
                                     Switch::new("home-tun")
-                                        .checked(tun_enabled)
-                                        .disabled(
-                                            self.home.capture_pending.is_some() || !tun_supported,
-                                        )
+                                        .checked(capture_presentation.tun_enabled)
+                                        .disabled(capture_presentation.pending || !tun_supported)
                                         .on_click(cx.listener(|this, checked, _, cx| {
                                             this.apply_home_capture_plan(
                                                 if *checked {
@@ -873,14 +910,27 @@ impl RuntimePage {
     }
 
     fn apply_home_capture_plan(&mut self, plan: CapturePlan, cx: &mut Context<Self>) {
-        if self.page != Page::Home || self.home.capture_pending.is_some() {
+        if self.page != Page::Home
+            || self
+                .home
+                .capture_transition
+                .as_ref()
+                .is_some_and(|transition| transition.pending)
+        {
             return;
         }
-        self.home.capture_pending = Some(plan);
+        let previous_transition = self.home.capture_transition.take();
+        let confirmed = previous_transition
+            .as_ref()
+            .and_then(|transition| transition.confirmed.clone());
+        self.home.capture_transition = Some(CaptureTransition {
+            displayed: plan,
+            pending: true,
+            confirmed,
+        });
         self.home.action_error = None;
         let token = self.page_task_token_for(Page::Home);
         let capture = self.traffic_capture.clone();
-        let client = self.client.clone();
         let preferences_store = self.preferences_store.clone();
         let task = self.runtime.spawn(async move {
             let outcome = capture
@@ -888,17 +938,15 @@ impl RuntimePage {
                 .await
                 .map_err(|error| error.to_string())?;
             let preferences = if let Some(store) = preferences_store {
-                Some(
-                    tokio::task::spawn_blocking(move || store.load())
-                        .await
-                        .map_err(|error| error.to_string())?
-                        .map_err(|error| error.to_string())?,
-                )
+                tokio::task::spawn_blocking(move || store.load())
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .map(Some)
+                    .map_err(|error| error.to_string())
             } else {
-                None
+                Ok(None)
             };
-            let data = load_page(client, Page::Home).await;
-            Ok::<_, String>((outcome, preferences, data))
+            Ok::<_, String>((outcome, preferences))
         });
         cx.spawn(async move |this, cx| {
             let result = task
@@ -906,31 +954,53 @@ impl RuntimePage {
                 .map_err(|error| error.to_string())
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.home.capture_pending = None;
                 match result {
-                    Ok((CaptureOutcome::RolledBack { failure, .. }, _, _))
-                    | Ok((CaptureOutcome::ReconcileNeeded { failure, .. }, _, _)) => {
+                    Ok((CaptureOutcome::RolledBack { failure, .. }, _))
+                    | Ok((CaptureOutcome::ReconcileNeeded { failure, .. }, _)) => {
+                        this.home.capture_transition = previous_transition;
                         this.home.action_error = Some(failure);
                     }
-                    Ok((_, preferences, data)) => {
-                        if let Some(preferences) = preferences {
-                            this.preferences = preferences.clone();
-                            cx.emit(super::PreferencesRestored { preferences });
-                        }
-                        match data {
-                            Ok(data) => {
-                                this.replace_page_data(token, data);
+                    Ok((outcome, preferences)) => {
+                        match preferences {
+                            Ok(Some(preferences)) => {
+                                this.preferences = preferences.clone();
+                                cx.emit(super::PreferencesRestored { preferences });
                             }
+                            Ok(None) => {}
                             Err(error) => this.home.action_error = Some(error),
                         }
+                        let snapshot = outcome.snapshot();
+                        this.home.capture_transition = Some(CaptureTransition {
+                            displayed: plan,
+                            pending: false,
+                            confirmed: Some(CaptureStatus {
+                                system_proxy: snapshot.system_proxy.clone(),
+                                tun: snapshot.tun.clone(),
+                            }),
+                        });
+                        if this.is_page_task_current(token) {
+                            this.refresh(cx);
+                        }
                     }
-                    Err(error) => this.home.action_error = Some(error),
+                    Err(error) => {
+                        this.home.capture_transition = previous_transition;
+                        this.home.action_error = Some(error);
+                    }
                 }
                 cx.notify();
             });
         })
         .detach();
         cx.notify();
+    }
+
+    pub(crate) fn reconcile_home_capture_transition(&mut self, capture: &CaptureStatus) {
+        let Some(transition) = self.home.capture_transition.as_ref() else {
+            return;
+        };
+        if !transition.pending && observed_capture_plan(capture) == Some(transition.displayed) {
+            self.home.capture_transition = None;
+        }
     }
 
     pub(crate) fn begin_home_mode_transition(
@@ -1405,6 +1475,58 @@ fn mode_presentation(
     })
 }
 
+fn capture_presentation(
+    confirmed_system_proxy: bool,
+    confirmed_tun: bool,
+    transition: Option<&CaptureTransition>,
+) -> CapturePresentation {
+    let Some(transition) = transition else {
+        return CapturePresentation {
+            system_proxy_enabled: confirmed_system_proxy,
+            tun_enabled: confirmed_tun,
+            pending: false,
+        };
+    };
+    let (system_proxy_enabled, tun_enabled) = match transition.displayed {
+        CapturePlan::Off => (false, false),
+        CapturePlan::SystemProxy => (true, false),
+        CapturePlan::Tun => (false, true),
+    };
+    CapturePresentation {
+        system_proxy_enabled,
+        tun_enabled,
+        pending: transition.pending,
+    }
+}
+
+fn capture_transition_status_text(
+    confirmed: bool,
+    displayed: bool,
+    pending: bool,
+    enabling_key: &'static str,
+    disabling_key: &'static str,
+) -> Option<String> {
+    (pending && confirmed != displayed).then(|| {
+        zenclash_i18n::text(if displayed {
+            enabling_key
+        } else {
+            disabling_key
+        })
+    })
+}
+
+fn observed_capture_plan(capture: &CaptureStatus) -> Option<CapturePlan> {
+    let system_proxy_enabled = capture.system_proxy.value()?.intent_enabled;
+    let tun = capture.tun.value()?;
+    let tun_enabled = tun.requested || tun.configured;
+    match (system_proxy_enabled, tun_enabled) {
+        (false, false) => Some(CapturePlan::Off),
+        (true, false) => Some(CapturePlan::SystemProxy),
+        (false, true) => Some(CapturePlan::Tun),
+        (true, true) => None,
+    }
+}
+
 fn status_label(
     label: impl Into<SharedString>,
     color: gpui::Hsla,
@@ -1757,6 +1879,86 @@ mod tests {
         assert_eq!(
             (presentation.displayed, presentation.pending),
             (OutboundMode::Global, true)
+        );
+    }
+
+    #[test]
+    fn pending_system_proxy_transition_is_presented_before_platform_readback() {
+        let transition = CaptureTransition {
+            displayed: CapturePlan::SystemProxy,
+            pending: true,
+            confirmed: None,
+        };
+
+        let presentation = capture_presentation(false, false, Some(&transition));
+
+        assert_eq!(
+            presentation,
+            CapturePresentation {
+                system_proxy_enabled: true,
+                tun_enabled: false,
+                pending: true,
+            }
+        );
+    }
+
+    #[test]
+    fn pending_tun_transition_hides_stale_system_proxy_state() {
+        let transition = CaptureTransition {
+            displayed: CapturePlan::Tun,
+            pending: true,
+            confirmed: None,
+        };
+
+        let presentation = capture_presentation(true, false, Some(&transition));
+
+        assert_eq!(
+            presentation,
+            CapturePresentation {
+                system_proxy_enabled: false,
+                tun_enabled: true,
+                pending: true,
+            }
+        );
+    }
+
+    #[test]
+    fn pending_off_transition_clears_system_proxy_before_platform_readback() {
+        let transition = CaptureTransition {
+            displayed: CapturePlan::Off,
+            pending: true,
+            confirmed: None,
+        };
+
+        let presentation = capture_presentation(true, false, Some(&transition));
+
+        assert_eq!(
+            presentation,
+            CapturePresentation {
+                system_proxy_enabled: false,
+                tun_enabled: false,
+                pending: true,
+            }
+        );
+    }
+
+    #[test]
+    fn completed_transition_stays_visible_until_global_observation_catches_up() {
+        let transition = CaptureTransition {
+            displayed: CapturePlan::SystemProxy,
+            pending: false,
+            confirmed: None,
+        };
+
+        let presentation = capture_presentation(false, false, Some(&transition));
+
+        assert_eq!(
+            presentation,
+            CapturePresentation {
+                system_proxy_enabled: true,
+                tun_enabled: false,
+                pending: false,
+            }
         );
     }
 }

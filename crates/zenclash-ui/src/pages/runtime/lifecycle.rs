@@ -500,8 +500,10 @@ impl RuntimePage {
                 if !*activity.borrow() {
                     continue;
                 }
+                let capture = updates.borrow().capture.clone();
                 if this
                     .update(cx, |this, cx| {
+                        this.reconcile_home_capture_transition(&capture);
                         if this.live_updates_enabled() && this.page == Page::Home {
                             cx.notify();
                         }
