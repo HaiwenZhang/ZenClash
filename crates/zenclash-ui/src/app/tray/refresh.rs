@@ -131,7 +131,8 @@ impl ZenClashApp {
                             delay,
                         }
                     })
-                    .collect(),
+                    .collect::<Vec<_>>()
+                    .into(),
             })
             .collect();
         let (profile_name, profiles) = profile_catalog.map_or_else(
@@ -192,6 +193,5 @@ impl ZenClashApp {
         {
             tracing::warn!(%error, "failed to update tray menu");
         }
-        cx.notify();
     }
 }

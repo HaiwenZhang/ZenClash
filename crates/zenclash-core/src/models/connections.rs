@@ -1,4 +1,25 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::IgnoredAny};
+
+/// Aggregate fields from `/connections` without retaining per-connection metadata.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct ConnectionsSummary {
+    /// Number of active connections in the snapshot.
+    #[serde(
+        default,
+        rename = "connections",
+        deserialize_with = "deserialize_connection_count"
+    )]
+    pub active_connections: usize,
+    /// Total downloaded bytes since core start.
+    #[serde(default, rename = "downloadTotal")]
+    pub download_total: u64,
+    /// Total uploaded bytes since core start.
+    #[serde(default, rename = "uploadTotal")]
+    pub upload_total: u64,
+    /// Memory usage reported alongside the connection snapshot.
+    #[serde(default)]
+    pub memory: u64,
+}
 
 /// Current connections and aggregate counters from `/connections`.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -87,4 +108,51 @@ where
     T: Deserialize<'de> + Default,
 {
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn deserialize_connection_count<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Vec<IgnoredAny>>::deserialize(deserializer)?
+        .map_or(0, |connections| connections.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConnectionsSummary;
+
+    #[test]
+    fn connection_summary_counts_entries_without_materializing_them() {
+        let summary: ConnectionsSummary = serde_json::from_str(
+            r#"{
+                "connections": [
+                    {"id":"first","metadata":{"host":"example.com"}},
+                    {"id":"second","chains":["Proxy"]}
+                ],
+                "downloadTotal": 30,
+                "uploadTotal": 20,
+                "memory": 10
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            summary,
+            ConnectionsSummary {
+                active_connections: 2,
+                download_total: 30,
+                upload_total: 20,
+                memory: 10,
+            }
+        );
+    }
+
+    #[test]
+    fn connection_summary_treats_null_connections_as_empty() {
+        let summary: ConnectionsSummary =
+            serde_json::from_str(r#"{"connections":null,"memory":10}"#).unwrap();
+
+        assert_eq!(summary.active_connections, 0);
+    }
 }

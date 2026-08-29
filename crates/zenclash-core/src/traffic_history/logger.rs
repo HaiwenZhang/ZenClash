@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use chrono::DateTime;
 
@@ -13,12 +13,19 @@ struct Counters {
     download: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ConnectionBaseline {
+    counters: Counters,
+    observed_epoch: u64,
+}
+
 /// Stateful converter from cumulative Mihomo connection counters to positive deltas.
 #[derive(Debug)]
 pub struct TrafficDeltaLogger {
     enabled_at_ms: u64,
     last_totals: Counters,
-    connections: HashMap<String, Counters>,
+    observation_epoch: u64,
+    connections: HashMap<String, ConnectionBaseline>,
 }
 
 impl TrafficDeltaLogger {
@@ -28,6 +35,7 @@ impl TrafficDeltaLogger {
         Self {
             enabled_at_ms,
             last_totals: Counters::default(),
+            observation_epoch: 0,
             connections: HashMap::new(),
         }
     }
@@ -36,6 +44,7 @@ impl TrafficDeltaLogger {
     pub fn reset(&mut self, enabled_at_ms: u64) {
         self.enabled_at_ms = enabled_at_ms;
         self.last_totals = Counters::default();
+        self.observation_epoch = 0;
         self.connections.clear();
     }
 
@@ -64,18 +73,36 @@ impl TrafficDeltaLogger {
             return Vec::new();
         }
 
-        let mut active = HashSet::with_capacity(snapshot.connections.len());
+        self.observation_epoch = self.observation_epoch.wrapping_add(1);
+        if self.observation_epoch == 0 {
+            self.connections.clear();
+            self.observation_epoch = 1;
+        }
+        let observation_epoch = self.observation_epoch;
         let mut entries = Vec::new();
         for connection in &snapshot.connections {
             if connection.id.is_empty() {
                 continue;
             }
-            active.insert(connection.id.clone());
             let current = Counters {
                 upload: connection.upload,
                 download: connection.download,
             };
-            let previous = self.connections.insert(connection.id.clone(), current);
+            let previous = if let Some(baseline) = self.connections.get_mut(&connection.id) {
+                let previous = baseline.counters;
+                baseline.counters = current;
+                baseline.observed_epoch = observation_epoch;
+                Some(previous)
+            } else {
+                self.connections.insert(
+                    connection.id.clone(),
+                    ConnectionBaseline {
+                        counters: current,
+                        observed_epoch: observation_epoch,
+                    },
+                );
+                None
+            };
             let log_initial = previous.is_none() && self.connection_started_in_run(connection);
             let upload = previous.map_or_else(
                 || u64::from(log_initial) * current.upload,
@@ -90,7 +117,8 @@ impl TrafficDeltaLogger {
             }
             entries.push(history_entry(connection, now_ms, upload, download));
         }
-        self.connections.retain(|id, _| active.contains(id));
+        self.connections
+            .retain(|_, baseline| baseline.observed_epoch == observation_epoch);
         entries
     }
 

@@ -1,13 +1,18 @@
+use std::collections::HashSet;
+
 use super::{
-    AppContext, Context, Disableable, Entity, FluentBuilder, Input, InputEvent, InputState,
-    InteractiveElement, IntoElement, Page, ParentElement, RuntimeData, RuntimePage, Sizable,
-    Styled, Subscription, Switch, Window, div, empty_state, h_flex, message_banner, px, v_flex,
+    AppContext, Button, Context, Disableable, Entity, FluentBuilder, IconName, Input, InputEvent,
+    InputState, InteractiveElement, IntoElement, Page, ParentElement, RuntimeData, RuntimePage,
+    Sizable, Styled, Subscription, Switch, Window, contains_ascii_case_insensitive, div,
+    empty_state, h_flex, list_page, message_banner, pagination_summary, px, v_flex,
 };
 
-const MAX_VISIBLE_RULES: usize = 800;
+const RULES_PER_PAGE: usize = 100;
 
 pub(super) struct RulesUiState {
     pub(super) filter: Entity<InputState>,
+    pub(super) page: usize,
+    pub(super) pending: HashSet<usize>,
 }
 
 impl RulesUiState {
@@ -16,12 +21,20 @@ impl RulesUiState {
             InputState::new(window, cx)
                 .placeholder(zenclash_i18n::text("runtime.placeholders.rule_filter"))
         });
-        let subscription = cx.subscribe(&filter, |_, _, event: &InputEvent, cx| {
+        let subscription = cx.subscribe(&filter, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
+                this.rules.page = 0;
                 cx.notify();
             }
         });
-        (Self { filter }, subscription)
+        (
+            Self {
+                filter,
+                page: 0,
+                pending: HashSet::new(),
+            },
+            subscription,
+        )
     }
 }
 
@@ -35,15 +48,17 @@ impl RuntimePage {
             cx.notify();
             return;
         }
-        let Some(token) = self.begin_mutation(Page::Rules) else {
+        if self.page != Page::Rules || !self.rules.pending.insert(index) {
             return;
-        };
+        }
+        self.invalidate_page_load();
+        let token = self.page_task_token_for(Page::Rules);
+        self.error = None;
         let client = self.client.clone();
         let task = self.runtime.spawn(async move {
             client
-                .set_rule_disabled(index, !enabled)
+                .apply_rule_disabled(index, !enabled)
                 .await
-                .map(RuntimeData::Rules)
                 .map_err(|error| error.to_string())
         });
         cx.spawn(async move |this, cx| {
@@ -57,10 +72,11 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.rules.pending.remove(&index);
                 match result {
-                    Ok(data) => {
-                        if this.replace_page_data(token, data) {
+                    Ok(()) => {
+                        if this.is_page_task_current(token) {
+                            apply_rule_disabled(&mut this.data, index, !enabled);
                             this.notice = Some(if enabled {
                                 zenclash_i18n::text_with(
                                     "rules.notices.enabled",
@@ -72,6 +88,9 @@ impl RuntimePage {
                                     &[("index", index.to_string())],
                                 )
                             });
+                            if this.rules.pending.is_empty() {
+                                this.refresh(cx);
+                            }
                         }
                     }
                     Err(error) => this.set_page_error(token, error),
@@ -80,6 +99,11 @@ impl RuntimePage {
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    fn set_rules_page(&mut self, page: usize, cx: &mut Context<Self>) {
+        self.rules.page = page;
         cx.notify();
     }
 
@@ -93,12 +117,19 @@ impl RuntimePage {
             _ => &[],
         };
         let query = normalize_rule_query(&self.rules.filter.read(cx).value());
+        let filtered_count = rules
+            .iter()
+            .filter(|rule| rule_matches(rule, &query))
+            .count();
+        let page = list_page(filtered_count, self.rules.page, RULES_PER_PAGE);
         let filtered = rules
             .iter()
             .filter(|rule| rule_matches(rule, &query))
-            .take(MAX_VISIBLE_RULES)
+            .skip(page.start)
+            .take(page.end - page.start)
             .collect::<Vec<_>>();
-        let filtered_count = filtered.len();
+        let previous_page = page.index.saturating_sub(1);
+        let next_page = page.index + 1;
         v_flex()
             .gap_3()
             .when(!self.core_kind.capabilities().rule_toggle, |this| {
@@ -144,12 +175,12 @@ impl RuntimePage {
                                     }),
                             ),
                     )
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(
-                        zenclash_i18n::text_with(
-                            "rules.summary.limit",
-                            &[("limit", MAX_VISIBLE_RULES.to_string())],
-                        ),
-                    )),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(pagination_summary(page, filtered_count)),
+                    ),
             )
             .child(Input::new(&self.rules.filter).small())
             .child(
@@ -169,12 +200,49 @@ impl RuntimePage {
                             theme,
                         ))
                     })
-                    .children(
-                        filtered.into_iter().enumerate().map(|(position, rule)| {
-                            self.render_rule_row(position, rule, theme, cx)
-                        }),
-                    ),
+                    .children(filtered.into_iter().enumerate().map(|(offset, rule)| {
+                        self.render_rule_row(page.start + offset, rule, theme, cx)
+                    })),
             )
+            .when(page.count > 1, |this| {
+                this.child(
+                    h_flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(pagination_summary(page, filtered_count)),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new("previous-rules-page")
+                                        .icon(IconName::ChevronLeft)
+                                        .label(zenclash_i18n::text("common.actions.previous_page"))
+                                        .small()
+                                        .outline()
+                                        .disabled(page.index == 0)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.set_rules_page(previous_page, cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("next-rules-page")
+                                        .icon(IconName::ChevronRight)
+                                        .label(zenclash_i18n::text("common.actions.next_page"))
+                                        .small()
+                                        .outline()
+                                        .disabled(page.index + 1 >= page.count)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.set_rules_page(next_page, cx);
+                                        })),
+                                ),
+                        ),
+                )
+            })
             .into_any_element()
     }
 
@@ -253,7 +321,10 @@ impl RuntimePage {
                 Switch::new(("rule-enabled", index))
                     .small()
                     .checked(enabled)
-                    .disabled(self.mutating || !self.core_kind.capabilities().rule_toggle)
+                    .disabled(
+                        self.rules.pending.contains(&index)
+                            || !self.core_kind.capabilities().rule_toggle,
+                    )
                     .tooltip(if enabled {
                         zenclash_i18n::text("rules.row.disable")
                     } else {
@@ -282,14 +353,30 @@ fn rule_badge(text: String, color: gpui::Hsla, theme: &gpui_component::Theme) ->
 }
 
 fn normalize_rule_query(query: &str) -> String {
-    query.trim().to_ascii_lowercase()
+    query.trim().to_owned()
 }
 
 fn rule_matches(rule: &zenclash_core::Rule, query: &str) -> bool {
     query.is_empty()
-        || rule.kind.to_ascii_lowercase().contains(query)
-        || rule.payload.to_ascii_lowercase().contains(query)
-        || rule.proxy.to_ascii_lowercase().contains(query)
+        || contains_ascii_case_insensitive(&rule.kind, query)
+        || contains_ascii_case_insensitive(&rule.payload, query)
+        || contains_ascii_case_insensitive(&rule.proxy, query)
+}
+
+fn apply_rule_disabled(data: &mut RuntimeData, index: usize, disabled: bool) -> bool {
+    let RuntimeData::Rules(catalog) = data else {
+        return false;
+    };
+    let Some(stats) = catalog
+        .rules
+        .iter_mut()
+        .find(|rule| rule.index == Some(index))
+        .and_then(|rule| rule.extra.as_mut())
+    else {
+        return false;
+    };
+    stats.disabled = disabled;
+    true
 }
 
 #[cfg(test)]
@@ -309,5 +396,27 @@ mod tests {
         assert!(rule_matches(&rule, &normalize_rule_query("example.com")));
         assert!(rule_matches(&rule, &normalize_rule_query("auto select")));
         assert!(!rule_matches(&rule, &normalize_rule_query("DIRECT")));
+    }
+
+    #[test]
+    fn acknowledged_rule_toggle_updates_only_the_matching_local_rule() {
+        let mut data = RuntimeData::Rules(zenclash_core::RuleCatalog {
+            rules: vec![zenclash_core::Rule {
+                index: Some(12),
+                extra: Some(zenclash_core::RuleRuntimeStats::default()),
+                ..Default::default()
+            }],
+        });
+
+        assert!(apply_rule_disabled(&mut data, 12, true));
+        let RuntimeData::Rules(catalog) = data else {
+            panic!("expected rule catalog");
+        };
+        assert!(
+            catalog.rules[0]
+                .extra
+                .as_ref()
+                .is_some_and(|stats| stats.disabled)
+        );
     }
 }

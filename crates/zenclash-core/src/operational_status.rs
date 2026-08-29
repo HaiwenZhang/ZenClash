@@ -434,6 +434,8 @@ pub struct StreamStatus {
     pub upload: u64,
     /// Current download rate or aggregate bytes, depending on the stream.
     pub download: u64,
+    /// Memory usage reported by `/connections`, or zero for other streams.
+    pub memory: u64,
 }
 
 /// Independent traffic, log, and connection freshness.
@@ -632,7 +634,7 @@ async fn refresh_status(
     let (version, config, connections, native) = tokio::join!(
         client.version(),
         client.runtime_config(),
-        client.connections_snapshot(),
+        client.connections_summary(),
         native,
     );
     let current = core_session.snapshot();
@@ -720,9 +722,10 @@ async fn refresh_status(
         connections.map(|snapshot| StreamStatus {
             generation: current.generation,
             last_success_at_ms: now,
-            item_count: snapshot.connections.len(),
+            item_count: snapshot.active_connections,
             upload: snapshot.upload_total,
             download: snapshot.download_total,
+            memory: snapshot.memory,
         }),
         now,
         RecoveryAction::Retry,
@@ -746,6 +749,7 @@ fn observe_traffic(
         item_count: 0,
         upload: snapshot.upload,
         download: snapshot.download,
+        memory: 0,
     };
     if snapshot.connected && snapshot.updated_at_ms > 0 {
         return Observation::Fresh {
@@ -791,6 +795,7 @@ fn observe_logs(
         item_count: entries.len(),
         upload: 0,
         download: 0,
+        memory: 0,
     };
     if snapshot.connected {
         return Observation::Fresh {

@@ -29,10 +29,20 @@ common:
     restore:
       zh-CN: 恢复
       en: Restore
+    previous_page:
+      zh-CN: 上一页
+      en: Previous
+    next_page:
+      zh-CN: 下一页
+      en: Next
   count:
     visible_total:
       zh-CN: "%{visible} / %{total} 条"
       en: "%{visible} of %{total}"
+  pagination:
+    summary:
+      zh-CN: 第 %{current} / %{total} 页 · 显示 %{first}–%{last}，共 %{count} 条
+      en: "Page %{current} of %{total} · Showing %{first}–%{last} of %{count}"
   status:
     "yes":
       zh-CN: 是
@@ -3411,6 +3421,9 @@ tray:
   open_profiles:
     zh-CN: 打开订阅管理…
     en: Open Profiles…
+  open_proxies:
+    zh-CN: 打开代理组查看更多节点…
+    en: Open Proxies for More Nodes…
   open_directories:
     zh-CN: 打开目录
     en: Open Directory

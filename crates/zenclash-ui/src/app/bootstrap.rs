@@ -35,9 +35,17 @@ pub(super) fn refresh_native_app_menu(cx: &mut App) {
 }
 
 #[cfg(target_os = "macos")]
-fn keep_main_window_alive_when_closed(window: &gpui::Window, cx: &App) {
-    window.on_window_should_close(cx, |_, cx| {
-        cx.hide();
+fn keep_main_window_alive_when_closed(
+    window: &gpui::Window,
+    app: gpui::WeakEntity<ZenClashApp>,
+    cx: &App,
+) {
+    window.on_window_should_close(cx, move |window, cx| {
+        let _ = app.update(cx, |app, cx| {
+            app.park_main_window(window);
+            app.release_hidden_page_data(cx);
+            cx.hide();
+        });
         false
     });
 }
@@ -82,8 +90,6 @@ pub fn create_main_window(services: AppServices, cx: &mut App) {
             apply_zen_theme(theme, Some(window), cx);
             window.set_window_title(&title);
             window.activate_window();
-            #[cfg(target_os = "macos")]
-            keep_main_window_alive_when_closed(window, cx);
             let network_tray =
                 match NetworkTrayIcon::new(services.core_kind, services.traffic_monitor.clone()) {
                     Ok(tray) => {
@@ -107,6 +113,8 @@ pub fn create_main_window(services: AppServices, cx: &mut App) {
                     cx,
                 )
             });
+            #[cfg(target_os = "macos")]
+            keep_main_window_alive_when_closed(window, app.downgrade(), cx);
             let app_for_global_quit = app.downgrade();
             cx.on_action(move |_: &Quit, cx| {
                 let _ = app_for_global_quit.update(cx, |app, cx| app.begin_quit(None, cx));

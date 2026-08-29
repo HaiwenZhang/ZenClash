@@ -77,9 +77,9 @@ pub use logs::{
     format_log_entries_support_safe,
 };
 pub use models::{
-    Connection, ConnectionMetadata, ConnectionsSnapshot, DnsAnswer, DnsQueryResponse, DnsQuestion,
-    DnsRecordType, MemorySnapshot, Provider, ProviderCatalog, Rule, RuleCatalog, RuleRuntimeStats,
-    RuntimeConfig, SnifferConfig, TunConfig,
+    Connection, ConnectionMetadata, ConnectionsSnapshot, ConnectionsSummary, DnsAnswer,
+    DnsQueryResponse, DnsQuestion, DnsRecordType, MemorySnapshot, Provider, ProviderCatalog, Rule,
+    RuleCatalog, RuleRuntimeStats, RuntimeConfig, SnifferConfig, TunConfig,
 };
 pub use network::{
     DEFAULT_NETWORK_LATENCY_TARGETS, NetworkLatencyResult, NetworkLatencyTarget, NetworkProbeError,

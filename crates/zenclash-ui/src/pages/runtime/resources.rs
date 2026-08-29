@@ -163,21 +163,20 @@ impl RuntimePage {
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let fallback_config = RuntimeConfig::default();
+        let fallback_proxy = ProviderCatalog::default();
+        let fallback_rules = ProviderCatalog::default();
         let (config, proxy, rules) = match &self.data {
             RuntimeData::Resources {
                 config,
                 proxy,
                 rules,
-            } => (config.clone(), proxy.clone(), rules.clone()),
-            _ => (
-                RuntimeConfig::default(),
-                ProviderCatalog::default(),
-                ProviderCatalog::default(),
-            ),
+            } => (config, proxy, rules),
+            _ => (&fallback_config, &fallback_proxy, &fallback_rules),
         };
         v_flex()
             .gap_4()
-            .child(self.render_builtin_resources(&config, theme, cx))
+            .child(self.render_builtin_resources(config, theme, cx))
             .child(self.render_ruleset_converter(theme, cx))
             .child(provider_section(
                 zenclash_i18n::text("resources.providers.proxy"),
@@ -337,7 +336,7 @@ fn config_bool(config: &RuntimeConfig, controlled: &serde_json::Value, key: &str
 
 fn provider_section(
     title: String,
-    catalog: ProviderCatalog,
+    catalog: &ProviderCatalog,
     is_rule: bool,
     mutating: bool,
     operations: &super::ProviderOperations,
@@ -375,138 +374,147 @@ fn provider_section(
                         theme,
                     ))
                 })
-                .children(catalog.providers.into_iter().enumerate().map(
-                    |(index, (key, provider))| {
-                        let name = if provider.name.is_empty() {
-                            key
-                        } else {
-                            provider.name
-                        };
-                        let name_for_click = name.clone();
-                        let name_for_healthcheck = name.clone();
-                        let status = operations.status(
-                            if is_rule {
-                                ProviderKind::Rule
+                .children(
+                    catalog
+                        .providers
+                        .iter()
+                        .enumerate()
+                        .map(|(index, (key, provider))| {
+                            let name = if provider.name.is_empty() {
+                                key.as_str()
                             } else {
-                                ProviderKind::Proxy
-                            },
-                            &name,
-                        );
-                        let item_count = if is_rule {
-                            provider.rule_count
-                        } else {
-                            provider.proxies.len()
-                        };
-                        let metadata = if is_rule {
-                            let behavior = empty_dash(&provider.behavior);
-                            let format = empty_dash(&provider.format).to_ascii_uppercase();
-                            zenclash_i18n::text_with(
-                                "resources.providers.rule_metadata",
-                                &[
-                                    ("type", provider.vehicle_type.clone()),
-                                    ("behavior", behavior),
-                                    ("format", format),
-                                    ("updated", provider_updated_at(&provider.updated_at)),
-                                    ("count", item_count.to_string()),
-                                ],
-                            )
-                        } else {
-                            zenclash_i18n::text_with(
-                                "resources.providers.proxy_metadata",
-                                &[
-                                    ("type", provider.vehicle_type.clone()),
-                                    ("updated", provider_updated_at(&provider.updated_at)),
-                                    ("count", item_count.to_string()),
-                                ],
-                            )
-                        };
-                        let operation_metadata = status.as_ref().map(|status| {
-                            zenclash_i18n::text_with(
-                                "resources.providers.operation_metadata",
-                                &[
-                                    ("success", provider_event_age(status.last_success_at_ms)),
-                                    (
-                                        "failure",
-                                        provider_failure_age(status.last_failure.as_ref()),
-                                    ),
-                                    ("update", provider_action_summary(&status.update)),
-                                    (
-                                        "health",
-                                        if is_rule {
-                                            zenclash_i18n::text(
-                                                "resources.providers.not_applicable",
-                                            )
-                                        } else {
-                                            provider_action_summary(&status.healthcheck)
-                                        },
-                                    ),
-                                ],
-                            )
-                        });
-                        h_flex()
-                            .id((
+                                provider.name.as_str()
+                            };
+                            let display_name = name.to_owned();
+                            let name_for_click = display_name.clone();
+                            let name_for_healthcheck = display_name.clone();
+                            let status = operations.status(
                                 if is_rule {
-                                    "rule-provider"
+                                    ProviderKind::Rule
                                 } else {
-                                    "proxy-provider"
+                                    ProviderKind::Proxy
                                 },
-                                index,
-                            ))
-                            .min_h(px(58.))
-                            .px_4()
-                            .gap_3()
-                            .border_b_1()
-                            .border_color(theme.border)
-                            .child(Icon::new(IconName::Inbox).size_4())
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .child(div().text_sm().child(name))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child(metadata),
-                                    )
-                                    .when_some(operation_metadata, |this, metadata| {
-                                        this.child(
+                                name,
+                            );
+                            let item_count = if is_rule {
+                                provider.rule_count
+                            } else {
+                                provider.proxies.len()
+                            };
+                            let metadata = if is_rule {
+                                let behavior = empty_dash(&provider.behavior);
+                                let format = empty_dash(&provider.format).to_ascii_uppercase();
+                                zenclash_i18n::text_with(
+                                    "resources.providers.rule_metadata",
+                                    &[
+                                        ("type", provider.vehicle_type.clone()),
+                                        ("behavior", behavior),
+                                        ("format", format),
+                                        ("updated", provider_updated_at(&provider.updated_at)),
+                                        ("count", item_count.to_string()),
+                                    ],
+                                )
+                            } else {
+                                zenclash_i18n::text_with(
+                                    "resources.providers.proxy_metadata",
+                                    &[
+                                        ("type", provider.vehicle_type.clone()),
+                                        ("updated", provider_updated_at(&provider.updated_at)),
+                                        ("count", item_count.to_string()),
+                                    ],
+                                )
+                            };
+                            let operation_metadata = status.as_ref().map(|status| {
+                                zenclash_i18n::text_with(
+                                    "resources.providers.operation_metadata",
+                                    &[
+                                        ("success", provider_event_age(status.last_success_at_ms)),
+                                        (
+                                            "failure",
+                                            provider_failure_age(status.last_failure.as_ref()),
+                                        ),
+                                        ("update", provider_action_summary(&status.update)),
+                                        (
+                                            "health",
+                                            if is_rule {
+                                                zenclash_i18n::text(
+                                                    "resources.providers.not_applicable",
+                                                )
+                                            } else {
+                                                provider_action_summary(&status.healthcheck)
+                                            },
+                                        ),
+                                    ],
+                                )
+                            });
+                            h_flex()
+                                .id((
+                                    if is_rule {
+                                        "rule-provider"
+                                    } else {
+                                        "proxy-provider"
+                                    },
+                                    index,
+                                ))
+                                .min_h(px(58.))
+                                .px_4()
+                                .gap_3()
+                                .border_b_1()
+                                .border_color(theme.border)
+                                .child(Icon::new(IconName::Inbox).size_4())
+                                .child(
+                                    v_flex()
+                                        .flex_1()
+                                        .child(div().text_sm().child(display_name))
+                                        .child(
                                             div()
                                                 .text_xs()
                                                 .text_color(theme.muted_foreground)
                                                 .child(metadata),
                                         )
-                                    }),
-                            )
-                            .when(!is_rule, |row| {
-                                row.child(
-                                    Button::new(("healthcheck-provider", index))
-                                        .icon(IconName::Heart)
-                                        .label(zenclash_i18n::text(
-                                            "resources.providers.healthcheck",
-                                        ))
+                                        .when_some(operation_metadata, |this, metadata| {
+                                            this.child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child(metadata),
+                                            )
+                                        }),
+                                )
+                                .when(!is_rule, |row| {
+                                    row.child(
+                                        Button::new(("healthcheck-provider", index))
+                                            .icon(IconName::Heart)
+                                            .label(zenclash_i18n::text(
+                                                "resources.providers.healthcheck",
+                                            ))
+                                            .small()
+                                            .outline()
+                                            .disabled(mutating)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.healthcheck_provider(
+                                                    name_for_healthcheck.clone(),
+                                                    cx,
+                                                );
+                                            })),
+                                    )
+                                })
+                                .child(
+                                    Button::new(("update-provider", index))
+                                        .icon(crate::assets::AppIcon::RefreshCw)
+                                        .label(zenclash_i18n::text("resources.providers.update"))
                                         .small()
-                                        .outline()
                                         .disabled(mutating)
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.healthcheck_provider(
-                                                name_for_healthcheck.clone(),
+                                            this.update_provider(
+                                                name_for_click.clone(),
+                                                is_rule,
                                                 cx,
                                             );
                                         })),
                                 )
-                            })
-                            .child(
-                                Button::new(("update-provider", index))
-                                    .icon(crate::assets::AppIcon::RefreshCw)
-                                    .label(zenclash_i18n::text("resources.providers.update"))
-                                    .small()
-                                    .disabled(mutating)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.update_provider(name_for_click.clone(), is_rule, cx);
-                                    })),
-                            )
-                    },
-                )),
+                        }),
+                ),
         )
         .into_any_element()
 }

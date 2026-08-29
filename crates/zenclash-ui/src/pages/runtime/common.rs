@@ -4,6 +4,59 @@ use super::{
 };
 use gpui::SharedString;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ListPage {
+    pub(super) index: usize,
+    pub(super) count: usize,
+    pub(super) start: usize,
+    pub(super) end: usize,
+}
+
+pub(super) fn list_page(total: usize, requested_index: usize, page_size: usize) -> ListPage {
+    let page_size = page_size.max(1);
+    let count = total.div_ceil(page_size).max(1);
+    let index = requested_index.min(count - 1);
+    let start = index.saturating_mul(page_size).min(total);
+    let end = start.saturating_add(page_size).min(total);
+    ListPage {
+        index,
+        count,
+        start,
+        end,
+    }
+}
+
+pub(super) fn contains_ascii_case_insensitive(value: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let query = query.as_bytes();
+    value
+        .as_bytes()
+        .windows(query.len())
+        .any(|candidate| candidate.eq_ignore_ascii_case(query))
+}
+
+pub(super) fn pagination_summary(page: ListPage, total: usize) -> String {
+    zenclash_i18n::text_with(
+        "common.pagination.summary",
+        &[
+            ("current", (page.index + 1).to_string()),
+            ("total", page.count.to_string()),
+            (
+                "first",
+                if total == 0 {
+                    "0".into()
+                } else {
+                    (page.start + 1).to_string()
+                },
+            ),
+            ("last", page.end.to_string()),
+            ("count", total.to_string()),
+        ],
+    )
+}
+
 pub(super) fn setting_card(
     title: impl Into<gpui::SharedString>,
     theme: &gpui_component::Theme,
@@ -322,7 +375,40 @@ pub(super) fn yes_no(value: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::compact_text;
+    use super::{compact_text, contains_ascii_case_insensitive, list_page};
+
+    #[test]
+    fn list_page_clamps_a_stale_page_after_the_collection_shrinks() {
+        assert_eq!(
+            list_page(30, 20, 100),
+            super::ListPage {
+                index: 0,
+                count: 1,
+                start: 0,
+                end: 30,
+            }
+        );
+    }
+
+    #[test]
+    fn list_page_keeps_the_short_final_page_within_bounds() {
+        assert_eq!(
+            list_page(205, 2, 100),
+            super::ListPage {
+                index: 2,
+                count: 3,
+                start: 200,
+                end: 205,
+            }
+        );
+    }
+
+    #[test]
+    fn ascii_case_insensitive_search_does_not_require_lowercase_copies() {
+        assert!(contains_ascii_case_insensitive("Example.COM", "example"));
+        assert!(contains_ascii_case_insensitive("节点-A", "节点"));
+        assert!(!contains_ascii_case_insensitive("DIRECT", "proxy"));
+    }
 
     #[test]
     fn compact_text_preserves_a_value_within_the_limit() {

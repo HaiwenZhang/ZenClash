@@ -168,6 +168,7 @@ pub enum LogStreamFormat {
 pub struct LogMonitor {
     entries: Arc<RwLock<VecDeque<LogEntry>>>,
     stream: Arc<RwLock<LogStreamSnapshot>>,
+    revision: Arc<AtomicU64>,
     level: watch::Sender<MihomoLogLevel>,
     expected_generation: Arc<AtomicU64>,
     generation: watch::Sender<u64>,
@@ -185,6 +186,7 @@ impl LogMonitor {
         let level = level.realtime_stream_level();
         let entries = Arc::new(RwLock::new(VecDeque::new()));
         let stream = Arc::new(RwLock::new(LogStreamSnapshot::default()));
+        let revision = Arc::new(AtomicU64::new(0));
         let file = file::LogFileWorker::start();
         let (level_sender, level_receiver) = watch::channel(level);
         let expected_generation = Arc::new(AtomicU64::new(0));
@@ -193,14 +195,18 @@ impl LogMonitor {
             endpoint,
             level_receiver,
             generation_receiver,
-            entries.clone(),
-            stream.clone(),
-            expected_generation.clone(),
-            file.sender(),
+            LogMonitorState {
+                entries: entries.clone(),
+                stream: stream.clone(),
+                revision: revision.clone(),
+                expected_generation: expected_generation.clone(),
+                file_sender: file.sender(),
+            },
         ));
         Arc::new(Self {
             entries,
             stream,
+            revision,
             level: level_sender,
             expected_generation,
             generation,
@@ -217,7 +223,17 @@ impl LogMonitor {
 
     /// Removes all currently buffered log entries.
     pub fn clear(&self) {
-        self.entries.write().clear();
+        let mut entries = self.entries.write();
+        if !entries.is_empty() {
+            entries.clear();
+            self.revision.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    /// Returns a monotonic revision for visible entries and stream connection state.
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
     }
 
     /// Changes the stream threshold and reconnects only when it actually differs.
@@ -226,6 +242,7 @@ impl LogMonitor {
         let level = level.realtime_stream_level();
         if *self.level.borrow() != level {
             self.level.send_replace(level);
+            self.revision.fetch_add(1, Ordering::AcqRel);
         }
     }
 
@@ -280,6 +297,7 @@ impl LogMonitor {
             return;
         }
         self.stream.write().connected = false;
+        self.revision.fetch_add(1, Ordering::AcqRel);
         self.generation.send_replace(generation);
     }
 
@@ -364,14 +382,19 @@ pub fn format_log_entries_support_safe(entries: &[LogEntry]) -> String {
     output
 }
 
+struct LogMonitorState {
+    entries: Arc<RwLock<VecDeque<LogEntry>>>,
+    stream: Arc<RwLock<LogStreamSnapshot>>,
+    revision: Arc<AtomicU64>,
+    expected_generation: Arc<AtomicU64>,
+    file_sender: file::LogFileSender,
+}
+
 async fn run_monitor(
     endpoint: MihomoEndpoint,
     mut level: watch::Receiver<MihomoLogLevel>,
     mut generation_updates: watch::Receiver<u64>,
-    entries: Arc<RwLock<VecDeque<LogEntry>>>,
-    stream: Arc<RwLock<LogStreamSnapshot>>,
-    expected_generation: Arc<AtomicU64>,
-    file_sender: file::LogFileSender,
+    state: LogMonitorState,
 ) {
     loop {
         let requested_level = *level.borrow();
@@ -380,7 +403,15 @@ async fn run_monitor(
         let mut generation_changed = false;
         match connect_log_stream(&endpoint, requested_level).await {
             Ok(mut socket) => {
-                update_log_connection(&stream, true, None, generation, &expected_generation);
+                if update_log_connection(
+                    &state.stream,
+                    true,
+                    None,
+                    generation,
+                    &state.expected_generation,
+                ) {
+                    state.revision.fetch_add(1, Ordering::AcqRel);
+                }
                 loop {
                     let message = tokio::select! {
                         changed = level.changed() => {
@@ -407,23 +438,25 @@ async fn run_monitor(
                             match parse_log_frame(&message.into_data(), now_ms()) {
                                 Ok(entry) => {
                                     accept_log_entry(
-                                        &entries,
-                                        &stream,
-                                        &file_sender,
+                                        &state.entries,
+                                        &state.stream,
+                                        &state.revision,
+                                        &state.file_sender,
                                         entry,
                                         generation,
-                                        &expected_generation,
+                                        &state.expected_generation,
                                     );
                                 }
                                 Err(error) => {
                                     tracing::debug!(%error, "received malformed Mihomo log frame");
                                     push_monitor_error_for_generation(
-                                        &entries,
-                                        &stream,
-                                        &file_sender,
+                                        &state.entries,
+                                        &state.stream,
+                                        &state.revision,
+                                        &state.file_sender,
                                         format!("收到无法解析的 Mihomo 日志帧：{error}"),
                                         generation,
-                                        &expected_generation,
+                                        &state.expected_generation,
                                     );
                                 }
                             }
@@ -432,12 +465,13 @@ async fn run_monitor(
                         Ok(_) => {}
                         Err(error) => {
                             push_monitor_error_for_generation(
-                                &entries,
-                                &stream,
-                                &file_sender,
+                                &state.entries,
+                                &state.stream,
+                                &state.revision,
+                                &state.file_sender,
                                 format!("日志流读取失败：{error}"),
                                 generation,
-                                &expected_generation,
+                                &state.expected_generation,
                             );
                             break;
                         }
@@ -446,16 +480,25 @@ async fn run_monitor(
             }
             Err(error) => {
                 push_monitor_error_for_generation(
-                    &entries,
-                    &stream,
-                    &file_sender,
+                    &state.entries,
+                    &state.stream,
+                    &state.revision,
+                    &state.file_sender,
                     format!("日志流连接失败：{error}"),
                     generation,
-                    &expected_generation,
+                    &state.expected_generation,
                 );
             }
         }
-        update_log_connection(&stream, false, None, generation, &expected_generation);
+        if update_log_connection(
+            &state.stream,
+            false,
+            None,
+            generation,
+            &state.expected_generation,
+        ) {
+            state.revision.fetch_add(1, Ordering::AcqRel);
+        }
         if level_changed || generation_changed {
             continue;
         }
@@ -505,6 +548,7 @@ fn update_log_connection(
 fn accept_log_entry(
     entries: &RwLock<VecDeque<LogEntry>>,
     stream: &RwLock<LogStreamSnapshot>,
+    revision: &AtomicU64,
     file_sender: &file::LogFileSender,
     entry: LogEntry,
     generation: u64,
@@ -532,6 +576,7 @@ fn accept_log_entry(
         };
     }
     push_bounded(entries, entry.clone());
+    revision.fetch_add(1, Ordering::AcqRel);
     file_sender.append(entry);
     true
 }
@@ -539,6 +584,7 @@ fn accept_log_entry(
 fn push_monitor_error_for_generation(
     entries: &RwLock<VecDeque<LogEntry>>,
     stream: &RwLock<LogStreamSnapshot>,
+    revision: &AtomicU64,
     file_sender: &file::LogFileSender,
     payload: String,
     generation: u64,
@@ -565,6 +611,7 @@ fn push_monitor_error_for_generation(
         ..LogEntry::default()
     };
     push_bounded(entries, entry.clone());
+    revision.fetch_add(1, Ordering::AcqRel);
     file_sender.append(entry);
     true
 }
@@ -878,11 +925,13 @@ mod tests {
             ..LogStreamSnapshot::default()
         });
         let expected_generation = AtomicU64::new(2);
+        let revision = AtomicU64::new(0);
         let file = file::LogFileWorker::start();
 
         let accepted = accept_log_entry(
             &entries,
             &stream,
+            &revision,
             &file.sender(),
             LogEntry {
                 level: "info".into(),
@@ -898,6 +947,7 @@ mod tests {
         assert!(entries.read().is_empty());
         assert_eq!(stream.read().generation, 2);
         assert_eq!(stream.read().updated_at_ms, 0);
+        assert_eq!(revision.load(Ordering::Acquire), 0);
     }
 
     #[test]

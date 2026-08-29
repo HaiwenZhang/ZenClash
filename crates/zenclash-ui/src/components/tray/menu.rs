@@ -1,6 +1,9 @@
 use std::{
     collections::HashMap,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
@@ -8,6 +11,7 @@ use tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu
 use super::{EnvironmentShell, TrayCommand, TrayMenuState};
 
 static NEXT_MENU_GENERATION: AtomicU64 = AtomicU64::new(0);
+const MAX_PROXY_ITEMS_PER_GROUP: usize = 24;
 
 fn select_profile_command(profile: &super::TrayProfile) -> TrayCommand {
     TrayCommand::SelectProfile {
@@ -125,7 +129,7 @@ pub(super) fn build_menu(
                 zenclash_i18n::text("tray.test_group"),
                 TrayCommand::TestGroup {
                     group: group.name.clone(),
-                    proxies: group.proxies.clone(),
+                    proxies: Arc::clone(&group.proxies),
                     test_url: group.test_url.clone(),
                 },
             );
@@ -137,7 +141,7 @@ pub(super) fn build_menu(
                 menu.append(&submenu).map_err(|error| error.to_string())?;
                 continue;
             }
-            for proxy in &group.proxies {
+            for proxy in proxy_menu_items(group) {
                 let delay = match proxy.delay {
                     Some(0) => zenclash_i18n::text("tray.delay_timeout"),
                     Some(delay) => format!("  （{delay} ms）"),
@@ -152,6 +156,16 @@ pub(super) fn build_menu(
                     },
                 );
                 submenu.append(&item).map_err(|error| error.to_string())?;
+            }
+            if group.proxies.len() > MAX_PROXY_ITEMS_PER_GROUP {
+                let separator = PredefinedMenuItem::separator();
+                let open_proxies = builder.item(
+                    zenclash_i18n::text("tray.open_proxies"),
+                    TrayCommand::OpenProxies,
+                );
+                submenu
+                    .append_items(&[&separator, &open_proxies])
+                    .map_err(|error| error.to_string())?;
             }
             menu.append(&submenu).map_err(|error| error.to_string())?;
         }
@@ -236,6 +250,26 @@ pub(super) fn build_menu(
     Ok((menu, builder.commands))
 }
 
+fn proxy_menu_items(group: &super::TrayProxyGroup) -> Vec<&super::TrayProxyNode> {
+    let mut proxies = group
+        .proxies
+        .iter()
+        .take(MAX_PROXY_ITEMS_PER_GROUP)
+        .collect::<Vec<_>>();
+    if proxies.iter().any(|proxy| proxy.name == group.now) {
+        return proxies;
+    }
+    let Some(current) = group.proxies.iter().find(|proxy| proxy.name == group.now) else {
+        return proxies;
+    };
+    if let Some(last) = proxies.last_mut() {
+        *last = current;
+    } else {
+        proxies.push(current);
+    }
+    proxies
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +303,26 @@ mod tests {
         let command = select_profile_command(&profile);
 
         assert!(matches!(command, TrayCommand::SelectProfile { id } if id == "airport"));
+    }
+
+    #[test]
+    fn large_proxy_group_keeps_the_current_node_inside_the_bounded_native_menu() {
+        let group = super::super::TrayProxyGroup {
+            selectable: true,
+            now: "node-29".into(),
+            proxies: (0..30)
+                .map(|index| super::super::TrayProxyNode {
+                    name: format!("node-{index}"),
+                    ..super::super::TrayProxyNode::default()
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            ..super::super::TrayProxyGroup::default()
+        };
+
+        let items = proxy_menu_items(&group);
+
+        assert_eq!(items.len(), MAX_PROXY_ITEMS_PER_GROUP);
+        assert!(items.iter().any(|proxy| proxy.name == group.now));
     }
 }

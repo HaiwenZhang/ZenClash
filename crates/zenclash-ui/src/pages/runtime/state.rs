@@ -11,7 +11,6 @@ pub(super) enum RuntimeData {
     Dashboard {
         config: Observation<RuntimeConfig>,
         proxies: Observation<ProxyCatalog>,
-        connections: Observation<ConnectionsSnapshot>,
     },
     Config(RuntimeConfig),
     Core {
@@ -51,30 +50,19 @@ pub(super) enum RuntimeData {
 
 impl RuntimeData {
     pub(super) fn retain_dashboard_successes(self, previous: &Self) -> Self {
-        let Self::Dashboard {
-            config,
-            proxies,
-            connections,
-        } = self
-        else {
+        let Self::Dashboard { config, proxies } = self else {
             return self;
         };
         let Self::Dashboard {
             config: previous_config,
             proxies: previous_proxies,
-            connections: previous_connections,
         } = previous
         else {
-            return Self::Dashboard {
-                config,
-                proxies,
-                connections,
-            };
+            return Self::Dashboard { config, proxies };
         };
         Self::Dashboard {
             config: Observation::retain_last_success(previous_config, config),
             proxies: Observation::retain_last_success(previous_proxies, proxies),
-            connections: Observation::retain_last_success(previous_connections, connections),
         }
     }
 }
@@ -160,13 +148,9 @@ mod tests {
                 observed_at_ms: 10,
             },
             proxies: Observation::Fresh {
-                value: ProxyCatalog::default(),
-                observed_at_ms: 10,
-            },
-            connections: Observation::Fresh {
-                value: ConnectionsSnapshot {
-                    memory: 42,
-                    ..ConnectionsSnapshot::default()
+                value: ProxyCatalog {
+                    proxy_count: 42,
+                    ..ProxyCatalog::default()
                 },
                 observed_at_ms: 10,
             },
@@ -186,18 +170,12 @@ mod tests {
                 },
                 observed_at_ms: 20,
             },
-            proxies: Observation::Fresh {
-                value: ProxyCatalog::default(),
-                observed_at_ms: 20,
-            },
-            connections: failure,
+            proxies: failure,
         }
         .retain_dashboard_successes(&previous);
 
         let RuntimeData::Dashboard {
-            config,
-            connections,
-            ..
+            config, proxies, ..
         } = next
         else {
             panic!("expected dashboard data");
@@ -207,9 +185,12 @@ mod tests {
             Some("direct")
         );
         assert!(matches!(
-            connections,
+            proxies,
             Observation::Stale {
-                value: ConnectionsSnapshot { memory: 42, .. },
+                value: ProxyCatalog {
+                    proxy_count: 42,
+                    ..
+                },
                 observed_at_ms: 10,
                 ..
             }

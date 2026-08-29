@@ -129,6 +129,20 @@ fn logger_reestablishes_baselines_after_mihomo_counter_reset() {
 }
 
 #[test]
+fn logger_removes_baselines_for_connections_missing_from_the_latest_snapshot() {
+    let mut logger = TrafficDeltaLogger::new(1_000);
+    let old = connection("old", 500, 100, 100);
+    let replacement = connection("replacement", 500, 0, 0);
+    let _ = logger.observe(&snapshot(vec![old], 100, 100), 1_100);
+    let _ = logger.observe(&snapshot(vec![replacement], 100, 100), 1_200);
+
+    let returned = connection("old", 500, 140, 160);
+    let deltas = logger.observe(&snapshot(vec![returned], 140, 160), 1_300);
+
+    assert!(deltas.is_empty());
+}
+
+#[test]
 fn sqlite_store_supports_cleanup_overview_and_drill_down() {
     let path = test_database("overview");
     let store = TrafficHistoryStore::new(&path);

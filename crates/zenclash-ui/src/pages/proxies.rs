@@ -43,13 +43,13 @@ pub struct ProxiesPage {
 }
 
 impl ProxiesPage {
-    /// Creates the page and begins its initial catalog request.
+    /// Creates the inactive page; its catalog is loaded on first presentation.
     pub fn new(
         client: MihomoClient,
         runtime: tokio::runtime::Handle,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut page = Self {
+        Self {
             client,
             runtime,
             catalog: None,
@@ -69,9 +69,7 @@ impl ProxiesPage {
             error: None,
             notice: None,
             focus_handle: cx.focus_handle(),
-        };
-        page.refresh(cx);
-        page
+        }
     }
 }
 

@@ -59,7 +59,7 @@ pub struct TrayProxyGroup {
     /// Optional delay-test URL supplied by Mihomo.
     pub test_url: Option<String>,
     /// Selectable group members.
-    pub proxies: Vec<TrayProxyNode>,
+    pub proxies: Arc<[TrayProxyNode]>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -135,7 +135,7 @@ pub enum TrayCommand {
         /// Mihomo proxy-group name.
         group: String,
         /// Proxy identities to test.
-        proxies: Vec<TrayProxyNode>,
+        proxies: Arc<[TrayProxyNode]>,
         /// Optional group-specific test URL.
         test_url: Option<String>,
     },
@@ -153,6 +153,8 @@ pub enum TrayCommand {
     },
     /// Navigate to profile management.
     OpenProfiles,
+    /// Navigate to the full proxy-group page.
+    OpenProxies,
     /// Open a directory in the platform file manager.
     OpenDirectory(PathBuf),
     /// Copy shell proxy environment variables.

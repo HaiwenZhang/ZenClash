@@ -45,9 +45,25 @@ impl ProfileEditorState {
             );
         });
     }
+
+    pub(in crate::pages::runtime) fn is_open(&self) -> bool {
+        self.original.is_some()
+    }
 }
 
 impl RuntimePage {
+    fn release_profile_yaml_editor_text(&self, cx: &mut Context<Self>) {
+        let input = self.profile_editor.input.clone();
+        let window_handle = self.window_handle;
+        cx.defer(move |cx| {
+            let _ = cx.update_window(window_handle, |_, window, cx| {
+                input.update(cx, |input, cx| {
+                    input.set_value(String::new(), window, cx);
+                });
+            });
+        });
+    }
+
     pub(super) fn open_profile_yaml_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(preview) = &self.config_preview else {
             self.error = Some(zenclash_i18n::text("overrides.errors.preview_required"));
@@ -69,7 +85,14 @@ impl RuntimePage {
         cx.notify();
     }
 
-    pub(super) fn cancel_profile_yaml_editor(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn cancel_profile_yaml_editor(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.profile_editor.input.update(cx, |input, cx| {
+            input.set_value(String::new(), window, cx);
+        });
         self.profile_editor.original = None;
         self.profile_editor.profile_id = None;
         cx.notify();
@@ -149,6 +172,7 @@ impl RuntimePage {
                         this.profile_editor.original = None;
                         this.profile_editor.profile_id = None;
                         this.config_preview = None;
+                        this.release_profile_yaml_editor_text(cx);
                         this.invalidate_config_inputs(cx);
                         this.reload_profile_catalog(cx);
                         this.notice = Some(zenclash_i18n::text_with(
@@ -161,6 +185,7 @@ impl RuntimePage {
                         this.profile_editor.original = None;
                         this.profile_editor.profile_id = None;
                         this.config_preview = None;
+                        this.release_profile_yaml_editor_text(cx);
                         this.invalidate_config_inputs(cx);
                         this.reload_profile_catalog(cx);
                         this.notice = Some(zenclash_i18n::text(
@@ -199,8 +224,8 @@ impl RuntimePage {
                             .label(zenclash_i18n::text("overrides.editor.cancel"))
                             .ghost()
                             .disabled(self.mutating)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.cancel_profile_yaml_editor(cx);
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.cancel_profile_yaml_editor(window, cx);
                             })),
                     )
                     .child(

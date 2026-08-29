@@ -157,6 +157,7 @@ impl ModeState {
     fn complete(&mut self, mode: OutboundMode, succeeded: bool) -> Option<OutboundMode> {
         debug_assert_eq!(self.in_flight, Some(mode));
         self.in_flight = None;
+        self.revision = self.revision.wrapping_add(1);
         if succeeded {
             self.confirmed = mode;
             self.synchronized = true;
@@ -249,5 +250,16 @@ mod tests {
         state.synchronize(OutboundMode::Global, generation);
 
         assert_eq!(state.displayed, OutboundMode::Direct);
+    }
+
+    #[test]
+    fn successful_completion_advances_revision_when_the_displayed_mode_is_unchanged() {
+        let mut state = ModeState::new(OutboundMode::Rule, true);
+        let _ = state.submit(OutboundMode::Global);
+        let pending_revision = state.revision;
+
+        let _ = state.complete(OutboundMode::Global, true);
+
+        assert!(state.revision > pending_revision);
     }
 }

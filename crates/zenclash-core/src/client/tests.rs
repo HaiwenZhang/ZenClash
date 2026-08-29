@@ -415,3 +415,28 @@ async fn rule_disable_uses_indexed_patch_and_requires_matching_readback() {
     assert!(readback_request.starts_with("GET /rules HTTP/1.1"));
     assert!(catalog.rules[0].extra.as_ref().unwrap().disabled);
 }
+
+#[tokio::test]
+async fn acknowledged_rule_disable_returns_without_catalog_readback() {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut patch_stream, _) = listener.accept().unwrap();
+        let mut patch_request = [0_u8; 2_048];
+        let bytes = patch_stream.read(&mut patch_request).unwrap();
+        let patch_request = String::from_utf8_lossy(&patch_request[..bytes]).into_owned();
+        write!(
+            patch_stream,
+            "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        patch_request
+    });
+    let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+
+    client.apply_rule_disabled(7, false).await.unwrap();
+    let patch_request = server.join().unwrap();
+
+    assert!(patch_request.starts_with("PATCH /rules/disable HTTP/1.1"));
+    assert!(patch_request.contains(r#""7":false"#));
+}

@@ -56,6 +56,7 @@ struct TrafficFrame {
 pub struct TrafficMonitor {
     snapshot: Arc<RwLock<TrafficSnapshot>>,
     samples: Arc<RwLock<VecDeque<TrafficSample>>>,
+    revision: Arc<AtomicU64>,
     expected_generation: Arc<AtomicU64>,
     generation: watch::Sender<u64>,
     task: JoinHandle<()>,
@@ -67,18 +68,21 @@ impl TrafficMonitor {
     pub fn start(runtime: &Handle, endpoint: MihomoEndpoint) -> Arc<Self> {
         let snapshot = Arc::new(RwLock::new(TrafficSnapshot::default()));
         let samples = Arc::new(RwLock::new(initial_samples()));
+        let revision = Arc::new(AtomicU64::new(0));
         let expected_generation = Arc::new(AtomicU64::new(0));
         let (generation, generation_updates) = watch::channel(0);
         let task = runtime.spawn(run_monitor(
             endpoint,
             snapshot.clone(),
             samples.clone(),
+            revision.clone(),
             expected_generation.clone(),
             generation_updates,
         ));
         Arc::new(Self {
             snapshot,
             samples,
+            revision,
             expected_generation,
             generation,
             task,
@@ -100,6 +104,12 @@ impl TrafficMonitor {
         self.samples.read().clone()
     }
 
+    /// Returns a monotonic revision for traffic frames and connection-state changes.
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
+    }
+
     /// Changes the accepted core generation and reconnects the WebSocket.
     ///
     /// Frames already queued by the older socket are rejected before they can
@@ -109,6 +119,7 @@ impl TrafficMonitor {
             return;
         }
         self.snapshot.write().connected = false;
+        self.revision.fetch_add(1, Ordering::AcqRel);
         self.generation.send_replace(generation);
     }
 
@@ -129,6 +140,7 @@ async fn run_monitor(
     endpoint: MihomoEndpoint,
     snapshot: Arc<RwLock<TrafficSnapshot>>,
     samples: Arc<RwLock<VecDeque<TrafficSample>>>,
+    revision: Arc<AtomicU64>,
     expected_generation: Arc<AtomicU64>,
     mut generation_updates: watch::Receiver<u64>,
 ) {
@@ -143,6 +155,7 @@ async fn run_monitor(
                     None,
                     generation,
                     &expected_generation,
+                    &revision,
                 );
                 loop {
                     let message = tokio::select! {
@@ -168,6 +181,7 @@ async fn run_monitor(
                                         frame,
                                         generation,
                                         &expected_generation,
+                                        &revision,
                                     );
                                 }
                                 Err(error) => {
@@ -178,6 +192,7 @@ async fn run_monitor(
                                         Some(format!("流量帧解析失败：{error}")),
                                         generation,
                                         &expected_generation,
+                                        &revision,
                                     );
                                 }
                             }
@@ -191,6 +206,7 @@ async fn run_monitor(
                                 Some(error.to_string()),
                                 generation,
                                 &expected_generation,
+                                &revision,
                             );
                             break;
                         }
@@ -204,6 +220,7 @@ async fn run_monitor(
                     Some(error),
                     generation,
                     &expected_generation,
+                    &revision,
                 );
             }
         }
@@ -211,7 +228,14 @@ async fn run_monitor(
         if generation_changed {
             continue;
         }
-        update_connection_for_generation(&snapshot, false, None, generation, &expected_generation);
+        update_connection_for_generation(
+            &snapshot,
+            false,
+            None,
+            generation,
+            &expected_generation,
+            &revision,
+        );
         tokio::select! {
             changed = generation_updates.changed() => {
                 if changed.is_err() {
@@ -229,11 +253,13 @@ fn update_frame_for_generation(
     frame: TrafficFrame,
     generation: u64,
     expected_generation: &AtomicU64,
+    revision: &AtomicU64,
 ) -> bool {
     if expected_generation.load(Ordering::Acquire) != generation {
         return false;
     }
     update_frame(snapshot, samples, frame, generation);
+    revision.fetch_add(1, Ordering::AcqRel);
     true
 }
 
@@ -272,11 +298,14 @@ fn update_connection_for_generation(
     error: Option<String>,
     generation: u64,
     expected_generation: &AtomicU64,
+    revision: &AtomicU64,
 ) -> bool {
     if expected_generation.load(Ordering::Acquire) != generation {
         return false;
     }
-    update_connection(snapshot, connected, error, generation);
+    if update_connection(snapshot, connected, error, generation) {
+        revision.fetch_add(1, Ordering::AcqRel);
+    }
     true
 }
 
@@ -285,8 +314,11 @@ fn update_connection(
     connected: bool,
     error: Option<String>,
     generation: u64,
-) {
+) -> bool {
     let mut snapshot = snapshot.write();
+    let previous_generation = snapshot.generation;
+    let previous_connected = snapshot.connected;
+    let previous_error = snapshot.last_error.clone();
     snapshot.generation = generation;
     snapshot.connected = connected;
     if connected && error.is_none() {
@@ -295,6 +327,9 @@ fn update_connection(
     if let Some(error) = error {
         snapshot.last_error = Some(error);
     }
+    snapshot.generation != previous_generation
+        || snapshot.connected != previous_connected
+        || snapshot.last_error != previous_error
 }
 
 fn now_ms() -> u64 {
@@ -436,6 +471,7 @@ mod tests {
         });
         let samples = RwLock::new(initial_samples());
         let expected_generation = AtomicU64::new(2);
+        let revision = AtomicU64::new(0);
 
         let accepted = update_frame_for_generation(
             &snapshot,
@@ -443,11 +479,55 @@ mod tests {
             TrafficFrame { up: 100, down: 200 },
             1,
             &expected_generation,
+            &revision,
         );
 
         assert!(!accepted);
         assert_eq!(snapshot.read().upload, 30);
         assert_eq!(snapshot.read().generation, 2);
         assert_eq!(*samples.read(), initial_samples());
+        assert_eq!(revision.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn accepted_frame_advances_the_traffic_revision() {
+        let snapshot = RwLock::new(TrafficSnapshot::default());
+        let samples = RwLock::new(initial_samples());
+        let expected_generation = AtomicU64::new(0);
+        let revision = AtomicU64::new(7);
+
+        let accepted = update_frame_for_generation(
+            &snapshot,
+            &samples,
+            TrafficFrame { up: 100, down: 200 },
+            0,
+            &expected_generation,
+            &revision,
+        );
+
+        assert!(accepted);
+        assert_eq!(revision.load(Ordering::Acquire), 8);
+    }
+
+    #[test]
+    fn repeated_connection_state_does_not_advance_the_traffic_revision() {
+        let snapshot = RwLock::new(TrafficSnapshot {
+            connected: true,
+            ..TrafficSnapshot::default()
+        });
+        let expected_generation = AtomicU64::new(0);
+        let revision = AtomicU64::new(3);
+
+        let accepted = update_connection_for_generation(
+            &snapshot,
+            true,
+            None,
+            0,
+            &expected_generation,
+            &revision,
+        );
+
+        assert!(accepted);
+        assert_eq!(revision.load(Ordering::Acquire), 3);
     }
 }

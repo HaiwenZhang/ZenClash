@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use futures_util::{StreamExt, stream};
 use zenclash_core::{
     CaptureOutcome, CapturePlan, ConnectionPolicy, ProxyDelayTarget, ProxyOperations,
@@ -33,6 +35,10 @@ impl ZenClashApp {
                 self.navigate(Page::Profiles, cx);
                 self.show_main_window(cx);
             }
+            TrayCommand::OpenProxies => {
+                self.navigate(Page::Proxies, cx);
+                self.show_main_window(cx);
+            }
             TrayCommand::OpenDirectory(path) => {
                 if let Err(error) = open_directory(path) {
                     tracing::warn!(%error, "failed to start directory opener");
@@ -45,7 +51,7 @@ impl ZenClashApp {
                     tracing::warn!("cannot copy proxy environment without a live HTTP/Mixed port");
                 }
             }
-            TrayCommand::LightMode => cx.hide(),
+            TrayCommand::LightMode => self.hide_main_window(cx),
             TrayCommand::Restart => {
                 let executable = match std::env::current_exe() {
                     Ok(executable) => executable,
@@ -176,12 +182,13 @@ impl ZenClashApp {
     fn test_group_from_tray(
         &mut self,
         group: String,
-        proxies: Vec<super::TrayProxyNode>,
+        proxies: Arc<[super::TrayProxyNode]>,
         test_url: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let operations = ProxyOperations::new(self.client.clone());
         let task = self.runtime.spawn(async move {
+            let proxies = proxies.iter().cloned().collect::<Vec<_>>();
             stream::iter(proxies)
                 .map(|proxy| {
                     let operations = operations.clone();
@@ -217,8 +224,7 @@ impl ZenClashApp {
                     }
                 }
                 tracing::info!(group, "tray proxy group delay test completed");
-                this.proxies_page
-                    .update(cx, crate::pages::proxies::ProxiesPage::reload);
+                this.refresh_visible_proxies(cx);
                 this.refresh_tray_menu(cx);
             });
         })
@@ -310,8 +316,7 @@ impl ZenClashApp {
                     Ok(Err(error)) => tracing::warn!(%error, "proxy selection from tray failed"),
                     Err(error) => tracing::warn!(%error, "proxy selection tray task failed"),
                 }
-                this.proxies_page
-                    .update(cx, crate::pages::proxies::ProxiesPage::reload);
+                this.refresh_visible_proxies(cx);
                 if let Some((group, proxy)) = this.proxy_selection_commands.complete() {
                     this.start_proxy_selection(group, proxy, cx);
                 } else {

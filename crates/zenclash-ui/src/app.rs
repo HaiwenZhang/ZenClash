@@ -2,8 +2,8 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::{
     AnyWindowHandle, App, AppContext, ClipboardItem, Context, Entity, Focusable,
-    InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, SharedString, Styled,
-    Subscription, Window, WindowBounds, WindowKind, WindowOptions, div, px,
+    InteractiveElement, IntoElement, KeyBinding, ParentElement, Pixels, Render, SharedString, Size,
+    Styled, Subscription, Window, WindowBounds, WindowKind, WindowOptions, div, px,
 };
 use gpui_component::{ActiveTheme, Root, ThemeMode, TitleBar, h_flex, v_flex};
 use zenclash_core::{
@@ -111,6 +111,8 @@ pub struct ZenClashApp {
     profile_path: Option<PathBuf>,
     controlled_config_store: ControlledConfigStore,
     main_window: AnyWindowHandle,
+    main_window_visible: bool,
+    main_window_memory: MainWindowMemoryState,
     floating_window: Option<AnyWindowHandle>,
     tray_refreshing: bool,
     tray_refresh_pending: bool,
@@ -129,6 +131,25 @@ pub struct ZenClashApp {
     log_monitor: Arc<LogMonitor>,
     traffic_history_policy: Arc<traffic_history::TrafficHistoryPolicy>,
     _subscriptions: Vec<Subscription>,
+}
+
+#[derive(Default)]
+struct MainWindowMemoryState {
+    restore_size: Option<Size<Pixels>>,
+}
+
+impl MainWindowMemoryState {
+    fn park(&mut self, current_size: Size<Pixels>) -> Size<Pixels> {
+        let parked_size = gpui::size(px(1.), px(1.));
+        if current_size != parked_size && self.restore_size.is_none() {
+            self.restore_size = Some(current_size);
+        }
+        parked_size
+    }
+
+    fn restore(&mut self) -> Option<Size<Pixels>> {
+        self.restore_size.take()
+    }
 }
 
 /// Runtime services prepared by the executable before constructing the UI.
@@ -288,6 +309,8 @@ impl ZenClashApp {
             profile_path: app_profile_path,
             controlled_config_store: app_controlled_config_store,
             main_window,
+            main_window_visible: true,
+            main_window_memory: MainWindowMemoryState::default(),
             floating_window: None,
             tray_refreshing: false,
             tray_refresh_pending: false,
@@ -330,8 +353,13 @@ impl ZenClashApp {
         cx.subscribe(runtime_page, |this, _, event: &ProfileActivated, cx| {
             this.profile_path = Some(event.path.clone());
             this.traffic_capture.set_profile(Some(event.path.clone()));
-            this.proxies_page
-                .update(cx, super::pages::proxies::ProxiesPage::profile_activated);
+            if this.current_page == Page::Proxies && this.main_window_visible {
+                this.proxies_page
+                    .update(cx, super::pages::proxies::ProxiesPage::profile_activated);
+            } else {
+                this.proxies_page
+                    .update(cx, |page, _| page.profile_invalidated());
+            }
             this.restore_system_proxy(cx);
             this.refresh_tray_menu(cx);
         })
@@ -342,8 +370,7 @@ impl ZenClashApp {
         cx: &mut Context<Self>,
     ) -> Subscription {
         cx.subscribe(runtime_page, |this, _, _: &ProxySelectionChanged, cx| {
-            this.proxies_page
-                .update(cx, super::pages::proxies::ProxiesPage::reload);
+            this.refresh_visible_proxies(cx);
             this.refresh_tray_menu(cx);
         })
     }
@@ -413,39 +440,61 @@ impl ZenClashApp {
     fn start_traffic_updates(&mut self, cx: &mut Context<Self>) {
         let monitor = self.traffic_monitor.clone();
         let mode = self.outbound_mode.clone();
+        let mut operational_updates = self.operational_status.subscribe();
+        let mut observed_traffic_revision = u64::MAX;
         let mut observed_mode_revision = mode.revision();
+        let mut observed_process_running = None;
+        let mut process_initialized = false;
         cx.spawn(async move |this, cx| {
             loop {
                 tokio::time::sleep(Duration::from_millis(500)).await;
-                let snapshot = monitor.snapshot();
+                let traffic_revision = monitor.revision();
                 let mode_revision = mode.revision();
+                let traffic_changed = observed_traffic_revision != traffic_revision;
+                let mode_changed = observed_mode_revision != mode_revision;
+                let process_changed =
+                    !process_initialized || operational_updates.has_changed().unwrap_or(false);
+                if !traffic_changed && !mode_changed && !process_changed {
+                    continue;
+                }
+                observed_traffic_revision = traffic_revision;
+                observed_mode_revision = mode_revision;
+                let traffic = traffic_changed.then(|| monitor.snapshot());
+                let process_running = process_changed.then(|| {
+                    operational_updates
+                        .borrow_and_update()
+                        .process
+                        .value()
+                        .map(|process| process.running)
+                });
+                process_initialized = true;
                 if this
                     .update(cx, |this, cx| {
-                        if observed_mode_revision != mode_revision {
-                            observed_mode_revision = mode_revision;
+                        let mut refresh_tray = false;
+                        if mode_changed {
                             let displayed = mode.displayed();
                             this.proxies_page.update(cx, |page, cx| {
                                 page.set_outbound_mode(displayed.api_value(), cx);
                             });
+                            let pending = mode.is_pending();
+                            this.runtime_page.update(cx, |page, cx| {
+                                page.update_home_mode_transition_if_active(displayed, pending, cx);
+                            });
+                            refresh_tray = true;
+                        }
+                        if let Some(process_running) = process_running
+                            && process_running != observed_process_running
+                        {
+                            observed_process_running = process_running;
+                            this.tray_core_running = process_running;
+                            refresh_tray = true;
+                        }
+                        if refresh_tray {
                             this.refresh_tray_menu(cx);
                         }
-                        let displayed = mode.displayed();
-                        let pending = mode.is_pending();
-                        this.runtime_page.update(cx, |page, cx| {
-                            page.update_home_mode_transition_if_active(displayed, pending, cx);
-                        });
-                        let tray_core_running = this
-                            .operational_status
-                            .snapshot()
-                            .process
-                            .value()
-                            .map(|process| process.running);
-                        if tray_core_running != this.tray_core_running {
-                            this.tray_core_running = tray_core_running;
-                            this.refresh_tray_menu(cx);
-                        }
-                        if let Some(tray) = this.network_tray.as_mut()
-                            && let Err(error) = tray.update(&snapshot)
+                        if let Some(traffic) = traffic
+                            && let Some(tray) = this.network_tray.as_mut()
+                            && let Err(error) = tray.update(&traffic)
                         {
                             tracing::warn!(%error, "failed to update native traffic tray");
                         }
@@ -464,7 +513,7 @@ impl ZenClashApp {
         let runtime = self.runtime.clone();
         let mode = self.outbound_mode.clone();
         let logs = self.log_monitor.clone();
-        cx.spawn(async move |this, cx| {
+        cx.spawn(async move |this, _cx| {
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 let generation = mode.generation();
@@ -484,11 +533,37 @@ impl ZenClashApp {
                         tracing::warn!(%error, "outbound mode synchronization task failed")
                     }
                 }
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                if this.upgrade().is_none() {
                     break;
                 }
             }
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+
+    #[test]
+    fn parked_main_window_restores_its_previous_size() {
+        let mut state = MainWindowMemoryState::default();
+        let visible_size = gpui::size(px(1280.), px(820.));
+
+        assert_eq!(state.park(visible_size), gpui::size(px(1.), px(1.)));
+        assert_eq!(state.restore(), Some(visible_size));
+        assert_eq!(state.restore(), None);
+    }
+
+    #[test]
+    fn repeated_parking_does_not_forget_the_visible_size() {
+        let mut state = MainWindowMemoryState::default();
+        let visible_size = gpui::size(px(960.), px(640.));
+
+        state.park(visible_size);
+        state.park(gpui::size(px(1.), px(1.)));
+
+        assert_eq!(state.restore(), Some(visible_size));
     }
 }

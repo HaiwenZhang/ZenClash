@@ -61,18 +61,12 @@ impl RuntimePage {
     ) -> gpui::AnyElement {
         let fallback_config = RuntimeConfig::default();
         let fallback_proxies = ProxyCatalog::default();
-        let fallback_connections = zenclash_core::ConnectionsSnapshot::default();
-        let (config, proxies, connections) = match &self.data {
-            RuntimeData::Dashboard {
-                config,
-                proxies,
-                connections,
-            } => (
+        let (config, proxies) = match &self.data {
+            RuntimeData::Dashboard { config, proxies } => (
                 config.value().unwrap_or(&fallback_config),
                 proxies.value().unwrap_or(&fallback_proxies),
-                connections.value().unwrap_or(&fallback_connections),
             ),
-            _ => (&fallback_config, &fallback_proxies, &fallback_connections),
+            _ => (&fallback_config, &fallback_proxies),
         };
         let operational = self.operational_status.snapshot();
 
@@ -128,7 +122,7 @@ impl RuntimePage {
                     .child(self.render_home_profile(theme, cx))
                     .child(self.render_home_proxy(config, proxies, theme, cx)),
             )
-            .child(self.render_home_traffic(connections, &operational.streams, theme))
+            .child(self.render_home_traffic(&operational.streams, theme))
             .into_any_element()
     }
 
@@ -381,7 +375,11 @@ impl RuntimePage {
             .dropdown_caret(true)
             .tooltip(node_switch_tooltip)
             .loading(self.home.proxy_switching.is_some())
-            .disabled(self.mutating || !can_switch)
+            .disabled(
+                self.home.profile_switching.is_some()
+                    || self.home.proxy_switching.is_some()
+                    || !can_switch,
+            )
             .dropdown_menu(move |mut menu, _, _| {
                 menu = menu
                     .min_w(px(240.))
@@ -688,7 +686,6 @@ impl RuntimePage {
 
     fn render_home_traffic(
         &self,
-        connections: &zenclash_core::ConnectionsSnapshot,
         streams: &StreamStatuses,
         theme: &gpui_component::Theme,
     ) -> gpui::AnyElement {
@@ -696,6 +693,7 @@ impl RuntimePage {
         let (traffic_status, status_color) = stream_status_text(&streams.traffic, theme);
         let (connections_status, connections_color) =
             stream_status_text(&streams.connections, theme);
+        let connections = streams.connections.value();
         let samples = self.traffic_monitor.samples();
         let points = traffic_chart_points(&samples);
         let chart = AreaChart::new(points)
@@ -794,13 +792,15 @@ impl RuntimePage {
                         ))
                         .child(traffic_metric(
                             zenclash_i18n::text("home.traffic.active_connections"),
-                            connections.connections.len().to_string(),
+                            connections
+                                .map_or(0, |status| status.item_count)
+                                .to_string(),
                             theme.foreground,
                             theme,
                         ))
                         .child(traffic_metric(
                             zenclash_i18n::text("home.traffic.core_memory"),
-                            format_bytes(connections.memory),
+                            format_bytes(connections.map_or(0, |status| status.memory)),
                             theme.foreground,
                             theme,
                         )),
@@ -810,23 +810,24 @@ impl RuntimePage {
     }
 
     fn change_home_proxy(&mut self, group: String, proxy: String, cx: &mut Context<Self>) {
-        if self.page != Page::Home {
+        if self.page != Page::Home
+            || self.home.profile_switching.is_some()
+            || self.home.proxy_switching.is_some()
+        {
             return;
         }
-        let Some(token) = self.begin_mutation(Page::Home) else {
-            return;
-        };
+        self.invalidate_page_load();
+        let token = self.page_task_token_for(Page::Home);
         self.home.proxy_switching = Some((group.clone(), proxy.clone()));
         self.home.proxy_error = None;
         let client = self.client.clone();
-        let selected_proxy = proxy.clone();
+        let task_group = group.clone();
+        let task_proxy = proxy.clone();
         let task = self.runtime.spawn(async move {
-            let outcome = ProxyOperations::new(client.clone())
-                .select(&group, &proxy, ConnectionPolicy::KeepExisting)
+            ProxyOperations::new(client)
+                .apply_selection(&task_group, &task_proxy, ConnectionPolicy::KeepExisting)
                 .await
-                .map_err(|error| error.to_string())?;
-            let data = load_page(client, Page::Home).await?;
-            Ok::<_, String>((data, outcome.warnings))
+                .map_err(|error| error.to_string())
         });
         cx.spawn(async move |this, cx| {
             let result = task
@@ -839,19 +840,23 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                if this.home.proxy_switching.as_ref() != Some(&(group.clone(), proxy.clone())) {
+                    return;
+                }
                 this.home.proxy_switching = None;
                 match result {
-                    Ok((data, warnings)) => {
-                        for warning in warnings {
+                    Ok(receipt) => {
+                        for warning in receipt.warnings {
                             tracing::warn!(%warning, "home proxy selection completed with a warning");
                         }
                         cx.emit(ProxySelectionChanged);
-                        if this.replace_page_data(token, data) {
+                        if this.is_page_task_current(token) {
+                            apply_home_proxy_selection(&mut this.data, &group, &proxy);
                             this.notice = Some(zenclash_i18n::text_with(
                                 "home.proxy.switched",
-                                &[("name", selected_proxy)],
+                                &[("name", proxy.clone())],
                             ));
+                            this.refresh(cx);
                         }
                     }
                     Err(error) => {
@@ -960,6 +965,28 @@ impl RuntimePage {
             cx.notify();
         }
     }
+}
+
+fn apply_home_proxy_selection(data: &mut RuntimeData, group_name: &str, proxy_name: &str) -> bool {
+    let RuntimeData::Dashboard { proxies, .. } = data else {
+        return false;
+    };
+    let catalog = match proxies {
+        Observation::Fresh { value, .. } | Observation::Stale { value, .. } => value,
+        Observation::Loading | Observation::Failed { .. } => return false,
+    };
+    let Some(group) = catalog
+        .groups
+        .iter_mut()
+        .find(|group| group.name == group_name)
+    else {
+        return false;
+    };
+    group.now = proxy_name.to_owned();
+    if matches!(group.behavior, ProxyGroupBehavior::Automatic { .. }) {
+        group.behavior = ProxyGroupBehavior::Automatic { fixed: true };
+    }
+    true
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1526,6 +1553,36 @@ mod tests {
         );
 
         assert_eq!(summary.delay, Some(42));
+    }
+
+    #[test]
+    fn acknowledged_home_proxy_selection_updates_the_local_group_immediately() {
+        let mut data = RuntimeData::Dashboard {
+            config: Observation::Loading,
+            proxies: Observation::Fresh {
+                value: ProxyCatalog {
+                    groups: vec![ProxyGroup {
+                        name: "Proxy".into(),
+                        now: "HK 01".into(),
+                        behavior: ProxyGroupBehavior::Automatic { fixed: false },
+                        ..ProxyGroup::default()
+                    }],
+                    proxy_count: 1,
+                },
+                observed_at_ms: 10,
+            },
+        };
+
+        assert!(apply_home_proxy_selection(&mut data, "Proxy", "US 02"));
+        let RuntimeData::Dashboard { proxies, .. } = data else {
+            panic!("expected dashboard data");
+        };
+        let group = &proxies.value().expect("fresh proxy catalog").groups[0];
+        assert_eq!(group.now, "US 02");
+        assert_eq!(
+            group.behavior,
+            ProxyGroupBehavior::Automatic { fixed: true }
+        );
     }
 
     #[test]

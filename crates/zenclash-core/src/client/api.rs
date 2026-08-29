@@ -5,8 +5,8 @@ use serde::Serialize;
 
 use super::{MihomoClient, MihomoError, MihomoResult, VersionInfo, request};
 use crate::{
-    ConnectionsSnapshot, DelayResult, DnsQueryResponse, DnsRecordType, ProviderCatalog,
-    ProxyCatalog, RuleCatalog, RuntimeConfig,
+    ConnectionsSnapshot, ConnectionsSummary, DelayResult, DnsQueryResponse, DnsRecordType,
+    ProviderCatalog, ProxyCatalog, RuleCatalog, RuntimeConfig,
     profiles::{MAX_PROFILE_BYTES, read_profile_bytes},
     proxy::RawProxyCatalog,
 };
@@ -209,6 +209,15 @@ impl MihomoClient {
     ///
     /// Returns transport, API-status or response-decoding errors.
     pub async fn connections_snapshot(&self) -> MihomoResult<ConnectionsSnapshot> {
+        self.get_json("/connections").await
+    }
+
+    /// Fetches aggregate connection counters without retaining connection metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, API-status or response-decoding errors.
+    pub async fn connections_summary(&self) -> MihomoResult<ConnectionsSummary> {
         self.get_json("/connections").await
     }
 
@@ -448,13 +457,7 @@ impl MihomoClient {
         disabled: bool,
     ) -> MihomoResult<RuleCatalog> {
         let _mutation_guard = self.mutation_gate.lock().await;
-        let body = serde_json::json!({index.to_string(): disabled});
-        let response = self
-            .request(Method::PATCH, "/rules/disable")?
-            .json(&body)
-            .send()
-            .await?;
-        request::ensure_success(response).await?;
+        self.patch_rule_disabled(index, disabled).await?;
         let catalog = self.rule_catalog().await?;
         let verified = catalog.rules.iter().any(|rule| {
             rule.index == Some(index)
@@ -469,6 +472,30 @@ impl MihomoClient {
             )));
         }
         Ok(catalog)
+    }
+
+    /// Enables or disables one compiled rule and returns after Mihomo acknowledges the patch.
+    ///
+    /// Interactive callers can update their local row immediately and reconcile the full rule
+    /// catalog separately, avoiding a long UI pending state while `/rules` is read back.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport or API-status errors reported by Mihomo.
+    pub async fn apply_rule_disabled(&self, index: usize, disabled: bool) -> MihomoResult<()> {
+        let _mutation_guard = self.mutation_gate.lock().await;
+        self.patch_rule_disabled(index, disabled).await
+    }
+
+    async fn patch_rule_disabled(&self, index: usize, disabled: bool) -> MihomoResult<()> {
+        let body = serde_json::json!({index.to_string(): disabled});
+        let response = self
+            .request(Method::PATCH, "/rules/disable")?
+            .json(&body)
+            .send()
+            .await?;
+        request::ensure_success(response).await?;
+        Ok(())
     }
 
     async fn send_long_operation(&self, method: Method, path: &str) -> MihomoResult<()> {

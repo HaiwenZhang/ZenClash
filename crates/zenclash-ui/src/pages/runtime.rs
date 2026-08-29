@@ -58,9 +58,10 @@ mod tun;
 mod view;
 
 use common::{
-    compact_text, config_input_row, empty_dash, empty_state, format_bytes, format_port,
-    format_profile_age, format_proxy, info_row, message_banner, metric, normalized_fraction,
-    setting_card, setting_switch, yes_no,
+    compact_text, config_input_row, contains_ascii_case_insensitive, empty_dash, empty_state,
+    format_bytes, format_port, format_profile_age, format_proxy, info_row, list_page,
+    message_banner, metric, normalized_fraction, pagination_summary, setting_card, setting_switch,
+    yes_no,
 };
 use config_inputs::{ConfigInputs, config_input_snapshot};
 use loader::{load_page, load_page_with_binary};
@@ -122,6 +123,8 @@ pub struct RuntimePage {
     notice: Option<String>,
     focus_handle: gpui::FocusHandle,
     window_handle: AnyWindowHandle,
+    ui_visibility: lifecycle::UiVisibility,
+    live_updates_enabled: tokio::sync::watch::Sender<bool>,
     _subscriptions: Vec<Subscription>,
 }
 

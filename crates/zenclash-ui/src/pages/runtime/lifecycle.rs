@@ -7,6 +7,117 @@ use super::{
 };
 use zenclash_core::{CoreApplyKind, EffectiveConfigIntent};
 
+const LIVE_UPDATE_INTERVAL: Duration = Duration::from_millis(500);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct UiVisibility {
+    window_active: bool,
+    window_visible: bool,
+    page_presented: bool,
+}
+
+impl UiVisibility {
+    const fn new(window_active: bool) -> Self {
+        Self {
+            window_active,
+            window_visible: true,
+            page_presented: true,
+        }
+    }
+
+    const fn updates_enabled(self) -> bool {
+        self.window_active && self.window_visible && self.page_presented
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct LiveUpdateActions {
+    notify: bool,
+    refresh_page: bool,
+    refresh_history: bool,
+}
+
+#[derive(Debug)]
+struct LiveUpdateSchedule {
+    history_ticks: u8,
+    dashboard_ticks: u8,
+    connection_ticks: u8,
+    log_revision: u64,
+    traffic_revision: u64,
+}
+
+impl LiveUpdateSchedule {
+    const fn new(log_revision: u64, traffic_revision: u64) -> Self {
+        Self {
+            history_ticks: 0,
+            dashboard_ticks: 0,
+            connection_ticks: 0,
+            log_revision,
+            traffic_revision,
+        }
+    }
+
+    fn synchronize(&mut self, log_revision: u64, traffic_revision: u64) {
+        self.history_ticks = 0;
+        self.dashboard_ticks = 0;
+        self.connection_ticks = 0;
+        self.log_revision = log_revision;
+        self.traffic_revision = traffic_revision;
+    }
+
+    fn tick(
+        &mut self,
+        page: Page,
+        log_revision: u64,
+        traffic_revision: u64,
+        page_refresh_ready: bool,
+        connections_idle: bool,
+    ) -> LiveUpdateActions {
+        let mut actions = LiveUpdateActions::default();
+        if page == Page::Logs && log_revision != self.log_revision {
+            actions.notify = true;
+        }
+        self.log_revision = log_revision;
+
+        if matches!(page, Page::Home | Page::Traffic) && traffic_revision != self.traffic_revision {
+            actions.notify = true;
+        }
+        self.traffic_revision = traffic_revision;
+
+        if matches!(page, Page::Connections | Page::Traffic) {
+            self.connection_ticks = self.connection_ticks.saturating_add(1);
+            if self.connection_ticks >= 2 && page_refresh_ready && connections_idle {
+                self.connection_ticks = 0;
+                actions.refresh_page = true;
+            }
+        } else {
+            self.connection_ticks = 0;
+        }
+
+        if page == Page::Traffic {
+            self.history_ticks = self.history_ticks.saturating_add(1);
+            if self.history_ticks >= 10 {
+                self.history_ticks = 0;
+                actions.refresh_history = true;
+            }
+        } else {
+            self.history_ticks = 0;
+        }
+
+        if page == Page::Home {
+            self.dashboard_ticks = self.dashboard_ticks.saturating_add(1);
+            if self.dashboard_ticks >= 10 && page_refresh_ready {
+                self.dashboard_ticks = 0;
+                actions.refresh_page = true;
+            }
+        } else {
+            self.dashboard_ticks = 0;
+        }
+
+        actions
+    }
+}
+
 struct InitialPersistentState {
     profile_store: Option<ProfileStore>,
     profile_catalog: ProfileCatalog,
@@ -294,6 +405,9 @@ impl RuntimePage {
             super::connections::ConnectionsUiState::new(window, cx);
         let (logs, log_filter_subscription) = super::logs::LogUiState::new(window, cx);
         let (rules, rule_filter_subscription) = super::rules::RulesUiState::new(window, cx);
+        let ui_visibility = UiVisibility::new(window.is_window_active());
+        let (live_updates_enabled, live_update_activity) =
+            tokio::sync::watch::channel(ui_visibility.updates_enabled());
         let mut this = Self {
             page,
             core_kind,
@@ -347,28 +461,48 @@ impl RuntimePage {
             notice: startup_notice,
             focus_handle: cx.focus_handle(),
             window_handle: window.window_handle(),
+            ui_visibility,
+            live_updates_enabled,
             _subscriptions: vec![
                 connection_filter_subscription,
                 log_filter_subscription,
                 rule_filter_subscription,
             ],
         };
+        let window_activation_subscription =
+            cx.observe_window_activation(window, |this, window, cx| {
+                this.set_window_active(window.is_window_active(), cx);
+            });
+        this._subscriptions.push(window_activation_subscription);
         this.refresh(cx);
         this.refresh_app_update(cx);
-        Self::start_operational_updates(this.operational_status.subscribe(), cx);
-        Self::start_live_updates(cx);
+        Self::start_operational_updates(
+            this.operational_status.subscribe(),
+            this.live_updates_enabled.subscribe(),
+            cx,
+        );
+        Self::start_live_updates(
+            live_update_activity,
+            this.log_monitor.revision(),
+            this.traffic_monitor.revision(),
+            cx,
+        );
         this
     }
 
     fn start_operational_updates(
         mut updates: zenclash_core::OperationalStatusStream,
+        activity: tokio::sync::watch::Receiver<bool>,
         cx: &mut Context<Self>,
     ) {
         cx.spawn(async move |this, cx| {
             while updates.changed().await.is_ok() {
+                if !*activity.borrow() {
+                    continue;
+                }
                 if this
                     .update(cx, |this, cx| {
-                        if this.page == Page::Home {
+                        if this.live_updates_enabled() && this.page == Page::Home {
                             cx.notify();
                         }
                     })
@@ -386,8 +520,15 @@ impl RuntimePage {
         if self.page == page {
             return;
         }
+        let previous_page = self.page;
         if self.page == Page::Network {
             self.cancel_network_probe();
+        }
+        if previous_page == Page::Traffic {
+            self.traffic_history.release_results();
+        }
+        if previous_page == Page::Override && !self.profile_editor.is_open() {
+            self.config_preview = None;
         }
         self.page = page;
         self.navigation_generation = self.navigation_generation.wrapping_add(1);
@@ -396,64 +537,158 @@ impl RuntimePage {
         self.loading = false;
         self.error = None;
         self.notice = None;
+        if self.live_updates_enabled() {
+            self.refresh_visible_page(cx);
+        }
+    }
+
+    pub(crate) fn set_presented(&mut self, presented: bool, cx: &mut Context<Self>) {
+        if self.ui_visibility.page_presented == presented {
+            return;
+        }
+        if !presented && !self.mutating {
+            self.release_inactive_page_data();
+        }
+        let was_enabled = self.ui_visibility.updates_enabled();
+        self.ui_visibility.page_presented = presented;
+        self.update_live_update_activity(was_enabled, cx);
+    }
+
+    pub(crate) fn set_window_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.ui_visibility.window_visible == visible {
+            return;
+        }
+        if !visible && !self.mutating {
+            self.release_inactive_page_data();
+        }
+        let was_enabled = self.ui_visibility.updates_enabled();
+        self.ui_visibility.window_visible = visible;
+        self.update_live_update_activity(was_enabled, cx);
+    }
+
+    fn release_inactive_page_data(&mut self) {
+        if self.page == Page::Network {
+            self.cancel_network_probe();
+        }
+        if self.page == Page::Traffic {
+            self.traffic_history.release_results();
+        }
+        if self.page == Page::Override && !self.profile_editor.is_open() {
+            self.config_preview = None;
+        }
+        self.invalidate_page_load();
+        self.data = RuntimeData::Empty;
+    }
+
+    fn set_window_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.ui_visibility.window_active == active {
+            return;
+        }
+        let was_enabled = self.ui_visibility.updates_enabled();
+        self.ui_visibility.window_active = active;
+        self.update_live_update_activity(was_enabled, cx);
+    }
+
+    fn update_live_update_activity(&mut self, was_enabled: bool, cx: &mut Context<Self>) {
+        let enabled = self.ui_visibility.updates_enabled();
+        if was_enabled == enabled {
+            return;
+        }
+        self.live_updates_enabled.send_replace(enabled);
+        if enabled {
+            self.refresh_visible_page(cx);
+            cx.notify();
+        }
+    }
+
+    const fn live_updates_enabled(&self) -> bool {
+        self.ui_visibility.updates_enabled()
+    }
+
+    fn refresh_visible_page(&mut self, cx: &mut Context<Self>) {
         self.refresh_config_inputs(cx);
-        self.reload_controlled_config(cx);
-        if page == Page::Profiles {
+        if self.page == Page::Profiles {
             self.reload_profile_catalog(cx);
         }
         self.refresh(cx);
-        if page == Page::Settings {
+        if self.page == Page::Settings {
             self.refresh_core_management(cx);
             if !self.app_update.checked {
                 self.refresh_app_update(cx);
             }
         }
-        if page == Page::Traffic {
+        if self.page == Page::Traffic {
             self.refresh_traffic_history(cx);
         }
     }
 
-    fn start_live_updates(cx: &mut Context<Self>) {
-        let mut history_ticks = 0_u8;
-        let mut dashboard_ticks = 0_u8;
+    fn start_live_updates(
+        mut activity: tokio::sync::watch::Receiver<bool>,
+        log_revision: u64,
+        traffic_revision: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let mut schedule = LiveUpdateSchedule::new(log_revision, traffic_revision);
         cx.spawn(async move |this, cx| {
             loop {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                if this
-                    .update(cx, |this, cx| {
-                        if matches!(this.page, Page::Logs) {
-                            cx.notify();
+                let active = *activity.borrow_and_update();
+                if !active {
+                    if activity.changed().await.is_err() {
+                        break;
+                    }
+                    if *activity.borrow_and_update()
+                        && this
+                            .update(cx, |this, _| {
+                                schedule.synchronize(
+                                    this.log_monitor.revision(),
+                                    this.traffic_monitor.revision(),
+                                );
+                            })
+                            .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
+                tokio::select! {
+                    changed = activity.changed() => {
+                        if changed.is_err() {
+                            break;
                         }
-                        if matches!(this.page, Page::Connections | Page::Traffic)
-                            && !this.loading
-                            && !this.mutating
-                            && this.connections.closing.is_empty()
+                        if *activity.borrow_and_update()
+                            && this.update(cx, |this, _| {
+                                schedule.synchronize(
+                                    this.log_monitor.revision(),
+                                    this.traffic_monitor.revision(),
+                                );
+                            }).is_err()
                         {
-                            this.refresh(cx);
+                            break;
                         }
-                        if this.page == Page::Traffic {
-                            history_ticks = history_ticks.saturating_add(1);
-                            if history_ticks >= 10 {
-                                history_ticks = 0;
-                                this.refresh_traffic_history(cx);
-                            }
-                        } else {
-                            history_ticks = 0;
-                        }
-                        if this.page == Page::Home {
-                            cx.notify();
-                            dashboard_ticks = dashboard_ticks.saturating_add(1);
-                            if dashboard_ticks >= 4 && !this.loading && !this.mutating {
-                                dashboard_ticks = 0;
+                    }
+                    () = tokio::time::sleep(LIVE_UPDATE_INTERVAL) => {
+                        if this.update(cx, |this, cx| {
+                            let actions = schedule.tick(
+                                this.page,
+                                this.log_monitor.revision(),
+                                this.traffic_monitor.revision(),
+                                !this.loading && !this.mutating,
+                                this.connections.closing.is_empty(),
+                            );
+                            if actions.refresh_page {
                                 this.refresh(cx);
                             }
-                        } else {
-                            dashboard_ticks = 0;
+                            if actions.refresh_history {
+                                this.refresh_traffic_history(cx);
+                            }
+                            if actions.notify && !actions.refresh_page && !actions.refresh_history {
+                                cx.notify();
+                            }
+                        }).is_err() {
+                            break;
                         }
-                    })
-                    .is_err()
-                {
-                    break;
+                    }
                 }
             }
         })
@@ -792,5 +1027,66 @@ impl RuntimePage {
             .as_ref()
             .map(|process| process.snapshot().binary)
             .or_else(|| std::env::var_os("ZENCLASH_MIHOMO_BINARY").map(std::path::PathBuf::from))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ui_updates_require_both_an_active_window_and_presented_page() {
+        let mut visibility = UiVisibility::new(true);
+        visibility.page_presented = false;
+
+        assert!(!visibility.updates_enabled());
+    }
+
+    #[test]
+    fn hidden_window_disables_ui_updates_even_if_it_was_active() {
+        let mut visibility = UiVisibility::new(true);
+        visibility.window_visible = false;
+
+        assert!(!visibility.updates_enabled());
+    }
+
+    #[test]
+    fn idle_home_tick_does_not_request_a_repaint() {
+        let mut schedule = LiveUpdateSchedule::new(2, 3);
+
+        let actions = schedule.tick(Page::Home, 2, 3, true, true);
+
+        assert_eq!(actions, LiveUpdateActions::default());
+    }
+
+    #[test]
+    fn new_traffic_requests_a_home_repaint() {
+        let mut schedule = LiveUpdateSchedule::new(2, 3);
+
+        let actions = schedule.tick(Page::Home, 2, 4, true, true);
+
+        assert!(actions.notify);
+    }
+
+    #[test]
+    fn home_dashboard_refresh_keeps_its_five_second_cadence() {
+        let mut schedule = LiveUpdateSchedule::new(0, 0);
+        for _ in 0..9 {
+            let _ = schedule.tick(Page::Home, 0, 0, true, true);
+        }
+
+        let actions = schedule.tick(Page::Home, 0, 0, true, true);
+
+        assert!(actions.refresh_page);
+    }
+
+    #[test]
+    fn synchronization_discards_revisions_accumulated_while_paused() {
+        let mut schedule = LiveUpdateSchedule::new(1, 1);
+        schedule.synchronize(5, 8);
+
+        let actions = schedule.tick(Page::Logs, 5, 8, true, true);
+
+        assert_eq!(actions, LiveUpdateActions::default());
     }
 }

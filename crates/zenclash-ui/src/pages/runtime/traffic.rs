@@ -80,6 +80,19 @@ impl TrafficHistoryUiState {
             (None, false) => TrafficHistoryFreshness::Loading,
         }
     }
+
+    pub(super) fn release_results(&mut self) {
+        self.overview = TrafficOverview::default();
+        self.details = Vec::new();
+        self.proxy_stats = Vec::new();
+        self.selected_parent = None;
+        self.selected_detail = None;
+        self.loading = false;
+        self.clear_confirmation = false;
+        self.last_success_at_ms = None;
+        self.last_error = None;
+        self.revision = self.revision.wrapping_add(1);
+    }
 }
 
 #[derive(Debug)]
@@ -179,5 +192,31 @@ mod tests {
                 observed_at_ms: 5_000
             }
         );
+    }
+
+    #[test]
+    fn leaving_traffic_releases_derived_results_but_keeps_the_user_selection() {
+        let mut state = TrafficHistoryUiState {
+            range: TrafficRange::Week,
+            dimension: TrafficDimension::Outbound,
+            details: vec![TrafficAggregate::default()],
+            proxy_stats: vec![TrafficAggregate::default()],
+            selected_parent: Some("Proxy".into()),
+            selected_detail: Some("Node".into()),
+            last_success_at_ms: Some(5_000),
+            revision: 7,
+            ..TrafficHistoryUiState::default()
+        };
+
+        state.release_results();
+
+        assert_eq!(state.range, TrafficRange::Week);
+        assert_eq!(state.dimension, TrafficDimension::Outbound);
+        assert!(state.details.is_empty());
+        assert!(state.proxy_stats.is_empty());
+        assert_eq!(state.selected_parent, None);
+        assert_eq!(state.selected_detail, None);
+        assert_eq!(state.last_success_at_ms, None);
+        assert_eq!(state.revision, 8);
     }
 }

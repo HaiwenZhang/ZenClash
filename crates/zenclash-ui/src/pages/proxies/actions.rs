@@ -81,16 +81,34 @@ impl ProxiesPage {
         self.start_refresh(true, cx);
     }
 
-    /// Clears profile-specific presentation state before loading a new profile.
-    pub fn profile_activated(&mut self, cx: &mut Context<Self>) {
+    /// Invalidates in-flight presentation work and releases the inactive catalog.
+    pub(crate) fn suspend(&mut self) {
+        self.catalog_generation = self.catalog_generation.wrapping_add(1);
+        self.delay_generation = self.delay_generation.wrapping_add(1);
         self.switching.clear();
         self.catalog = None;
         self.expanded.clear();
         self.proxy_pages.clear();
+        self.testing.clear();
         self.test_failures.clear();
-        self.show_hidden = false;
+        self.restoring_auto = None;
+        self.measuring_and_restoring_auto = None;
+        self.loading = false;
+        self.loading_token = None;
+        self.error = None;
         self.notice = None;
+    }
+
+    /// Clears profile-specific presentation state before loading a new profile.
+    pub fn profile_activated(&mut self, cx: &mut Context<Self>) {
+        self.profile_invalidated();
         self.start_refresh(true, cx);
+    }
+
+    /// Releases a stale profile catalog without fetching it for an inactive page.
+    pub(crate) fn profile_invalidated(&mut self) {
+        self.suspend();
+        self.show_hidden = false;
     }
 
     pub(super) fn set_show_hidden(&mut self, show_hidden: bool, cx: &mut Context<Self>) {

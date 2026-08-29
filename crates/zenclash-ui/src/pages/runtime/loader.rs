@@ -72,10 +72,9 @@ pub(super) async fn load_page_with_binary(
 
 async fn load_dashboard(client: MihomoClient) -> Result<RuntimeData, String> {
     let proxy_operations = ProxyOperations::new(client.clone());
-    let (config, proxies, connections) = tokio::join!(
+    let (config, proxies) = tokio::join!(
         client.runtime_config(),
         proxy_operations.catalog(ProxyVisibility::VisibleOnly),
-        client.connections_snapshot(),
     );
     let observed_at_ms = now_ms();
     Ok(RuntimeData::Dashboard {
@@ -88,12 +87,6 @@ async fn load_dashboard(client: MihomoClient) -> Result<RuntimeData, String> {
         proxies: Observation::record(
             &Observation::Loading,
             proxies.map_err(|error| error.to_string()),
-            observed_at_ms,
-            RecoveryAction::Retry,
-        ),
-        connections: Observation::record(
-            &Observation::Loading,
-            connections.map_err(|error| error.to_string()),
             observed_at_ms,
             RecoveryAction::Retry,
         ),
@@ -194,11 +187,11 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn dashboard_keeps_successful_slices_when_connections_fail() {
+    async fn dashboard_keeps_successful_config_when_proxy_catalog_fails() {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
-            for _ in 0..3 {
+            for _ in 0..2 {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut request = [0_u8; 2_048];
                 let bytes = stream.read(&mut request).unwrap();
@@ -210,8 +203,7 @@ mod tests {
                     .unwrap();
                 let (status, body) = match path {
                     "/configs" => ("200 OK", r#"{"mode":"rule"}"#),
-                    "/proxies" => ("200 OK", r#"{"proxies":{}}"#),
-                    "/connections" => ("503 Service Unavailable", r#"{"message":"busy"}"#),
+                    "/proxies" => ("503 Service Unavailable", r#"{"message":"busy"}"#),
                     _ => ("404 Not Found", r#"{"message":"missing"}"#),
                 };
                 write!(
@@ -228,19 +220,13 @@ mod tests {
         let data = load_dashboard(client).await.unwrap();
         server.join().unwrap();
 
-        let RuntimeData::Dashboard {
-            config,
-            proxies,
-            connections,
-        } = data
-        else {
+        let RuntimeData::Dashboard { config, proxies } = data else {
             panic!("expected dashboard data");
         };
         assert_eq!(
             config.value().map(|config| config.mode.as_str()),
             Some("rule")
         );
-        assert!(proxies.is_fresh());
-        assert!(matches!(connections, Observation::Failed { .. }));
+        assert!(matches!(proxies, Observation::Failed { .. }));
     }
 }

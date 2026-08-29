@@ -5,8 +5,8 @@ use zenclash_core::{TrafficDimension, TrafficTrendPoint};
 
 use super::{TrafficHistoryFreshness, TrafficRange, dimension_label};
 use crate::pages::runtime::{
-    Button, ButtonVariants, ConnectionsSnapshot, Context, Disableable, FluentBuilder, IconName,
-    InteractiveElement, IntoElement, ParentElement, RuntimeData, RuntimePage, Selectable, Sizable,
+    Button, ButtonVariants, Context, Disableable, FluentBuilder, IconName, InteractiveElement,
+    IntoElement, ParentElement, RuntimeData, RuntimePage, Selectable, Sizable,
     StatefulInteractiveElement, Styled, div, empty_state, format_bytes, format_profile_age,
     format_speed, h_flex, metric, px, v_flex,
 };
@@ -25,9 +25,9 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let realtime = self.traffic_monitor.snapshot();
-        let connections = match &self.data {
-            RuntimeData::Connections(data) => data.clone(),
-            _ => ConnectionsSnapshot::default(),
+        let connection_count = match &self.data {
+            RuntimeData::Connections(data) => data.connections.len(),
+            _ => 0,
         };
         let history = &self.traffic_history;
         v_flex()
@@ -56,7 +56,7 @@ impl RuntimePage {
                     ))
                     .child(metric(
                         zenclash_i18n::text("traffic.metrics.connections"),
-                        connections.connections.len().to_string(),
+                        connection_count.to_string(),
                         theme.foreground,
                         theme,
                     )),

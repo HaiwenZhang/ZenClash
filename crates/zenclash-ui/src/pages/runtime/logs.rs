@@ -2,15 +2,16 @@ use super::{
     AppContext, Button, ClipboardItem, Context, Disableable, Entity, FluentBuilder, IconName,
     Input, InputEvent, InputState, InteractiveElement, IntoElement, LogTimeSource, MihomoLogLevel,
     Page, ParentElement, PreferencesRestored, RuntimePage, Selectable, Sizable, Styled,
-    Subscription, Window, compact_text, div, empty_state, format_bytes, format_log_entries,
-    format_log_entries_support_safe, h_flex, info_row, metric, px, setting_card, setting_switch,
-    v_flex,
+    Subscription, Window, compact_text, contains_ascii_case_insensitive, div, empty_state,
+    format_bytes, format_log_entries, format_log_entries_support_safe, h_flex, info_row, list_page,
+    metric, pagination_summary, px, setting_card, setting_switch, v_flex,
 };
 
-const MAX_VISIBLE_LOGS: usize = 500;
+const LOGS_PER_PAGE: usize = 100;
 
 pub(super) struct LogUiState {
     pub(super) filter: Entity<InputState>,
+    pub(super) page: usize,
 }
 
 impl LogUiState {
@@ -19,12 +20,13 @@ impl LogUiState {
             InputState::new(window, cx)
                 .placeholder(zenclash_i18n::text("runtime.placeholders.log_filter"))
         });
-        let subscription = cx.subscribe(&filter, |_, _, event: &InputEvent, cx| {
+        let subscription = cx.subscribe(&filter, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
+                this.logs.page = 0;
                 cx.notify();
             }
         });
-        (Self { filter }, subscription)
+        (Self { filter, page: 0 }, subscription)
     }
 }
 
@@ -38,19 +40,25 @@ impl RuntimePage {
         let connected = self.log_monitor.connected();
         let persistence = self.log_monitor.persistence_status();
         let query = normalize_log_query(&self.logs.filter.read(cx).value());
+        let filtered_count = all_entries
+            .iter()
+            .filter(|entry| log_matches(entry, &query))
+            .count();
+        let page = list_page(filtered_count, self.logs.page, LOGS_PER_PAGE);
         let entries = all_entries
             .iter()
             .filter(|entry| log_matches(entry, &query))
             .rev()
-            .take(MAX_VISIBLE_LOGS)
-            .cloned()
+            .skip(page.start)
+            .take(page.end - page.start)
             .collect::<Vec<_>>();
-        let entry_count = entries.len();
+        let previous_page = page.index.saturating_sub(1);
+        let next_page = page.index + 1;
         v_flex()
             .gap_3()
             .child(render_log_header(
                 all_entries.len(),
-                entry_count,
+                filtered_count,
                 query.is_empty(),
                 connected,
                 &persistence,
@@ -94,17 +102,63 @@ impl RuntimePage {
                             .disabled(all_entries.is_empty())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.log_monitor.clear();
+                                this.logs.page = 0;
                                 this.notice = Some(zenclash_i18n::text("logs.notices.cleared"));
                                 cx.notify();
                             })),
                     ),
             )
             .child(Self::render_log_entries(
-                entries,
+                &entries,
                 all_entries.is_empty(),
+                page.start,
                 theme,
             ))
+            .when(page.count > 1, |this| {
+                this.child(
+                    h_flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(pagination_summary(page, filtered_count)),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new("previous-logs-page")
+                                        .icon(IconName::ChevronLeft)
+                                        .label(zenclash_i18n::text("common.actions.previous_page"))
+                                        .small()
+                                        .outline()
+                                        .disabled(page.index == 0)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.set_logs_page(previous_page, cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("next-logs-page")
+                                        .icon(IconName::ChevronRight)
+                                        .label(zenclash_i18n::text("common.actions.next_page"))
+                                        .small()
+                                        .outline()
+                                        .disabled(page.index + 1 >= page.count)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.set_logs_page(next_page, cx);
+                                        })),
+                                ),
+                        ),
+                )
+            })
             .into_any_element()
+    }
+
+    fn set_logs_page(&mut self, page: usize, cx: &mut Context<Self>) {
+        self.logs.page = page;
+        cx.notify();
     }
 
     fn render_log_persistence(
@@ -298,8 +352,9 @@ impl RuntimePage {
     }
 
     fn render_log_entries(
-        entries: Vec<zenclash_core::LogEntry>,
+        entries: &[&zenclash_core::LogEntry],
         all_empty: bool,
+        page_start: usize,
         theme: &gpui_component::Theme,
     ) -> gpui::Div {
         v_flex()
@@ -317,7 +372,8 @@ impl RuntimePage {
                     theme,
                 ))
             })
-            .children(entries.into_iter().enumerate().map(|(index, entry)| {
+            .children(entries.iter().enumerate().map(|(offset, entry)| {
+                let index = page_start + offset;
                 let color = match entry.level.as_str() {
                     "error" => theme.danger,
                     "warning" | "warn" => theme.warning,
@@ -357,7 +413,7 @@ impl RuntimePage {
                         v_flex()
                             .flex_1()
                             .gap_1()
-                            .child(div().text_xs().child(entry.payload))
+                            .child(div().text_xs().child(entry.payload.clone()))
                             .child(
                                 div()
                                     .text_xs()
@@ -550,24 +606,37 @@ fn log_level_description(level: MihomoLogLevel) -> String {
 
 fn log_matches(entry: &zenclash_core::LogEntry, query: &str) -> bool {
     query.is_empty()
-        || entry.level.to_ascii_lowercase().contains(query)
-        || entry.payload.to_ascii_lowercase().contains(query)
+        || contains_ascii_case_insensitive(&entry.level, query)
+        || contains_ascii_case_insensitive(&entry.payload, query)
         || entry.fields.as_object().is_some_and(|fields| {
             fields.iter().any(|(key, value)| {
-                key.to_ascii_lowercase().contains(query)
-                    || value.to_string().to_ascii_lowercase().contains(query)
+                contains_ascii_case_insensitive(key, query) || json_value_matches(value, query)
             })
         })
-        || (!entry.fields.is_object()
-            && entry
-                .fields
-                .to_string()
-                .to_ascii_lowercase()
-                .contains(query))
+        || (!entry.fields.is_object() && json_value_matches(&entry.fields, query))
 }
 
 fn normalize_log_query(query: &str) -> String {
-    query.trim().to_ascii_lowercase()
+    query.trim().to_owned()
+}
+
+fn json_value_matches(value: &serde_json::Value, query: &str) -> bool {
+    match value {
+        serde_json::Value::Null => contains_ascii_case_insensitive("null", query),
+        serde_json::Value::Bool(value) => {
+            contains_ascii_case_insensitive(if *value { "true" } else { "false" }, query)
+        }
+        serde_json::Value::Number(value) => {
+            contains_ascii_case_insensitive(&value.to_string(), query)
+        }
+        serde_json::Value::String(value) => contains_ascii_case_insensitive(value, query),
+        serde_json::Value::Array(values) => {
+            values.iter().any(|value| json_value_matches(value, query))
+        }
+        serde_json::Value::Object(fields) => fields.iter().any(|(key, value)| {
+            contains_ascii_case_insensitive(key, query) || json_value_matches(value, query)
+        }),
+    }
 }
 
 #[cfg(test)]
