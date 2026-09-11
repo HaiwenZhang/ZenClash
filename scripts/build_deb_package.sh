@@ -46,8 +46,10 @@ else
 fi
 
 cd "${project_root}"
+bundled_mihomo_version="$("${mihomo_path}" -v)"
+ZENCLASH_VERSION="${version}" \
+ZENCLASH_BUNDLED_MIHOMO_VERSION="${bundled_mihomo_version}" \
 cargo build --release --locked -p zenclash-ui --bin zenclash
-"${mihomo_path}" -v
 
 install -Dm755 "${cargo_output_root}/release/zenclash" "${package_root}/usr/bin/zenclash"
 install -Dm755 "${mihomo_path}" "${package_root}/usr/lib/zenclash/mihomo"

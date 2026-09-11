@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -50,7 +50,18 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         std::process::id(),
         sequence
     ));
-    let result = fs::write(&temporary, bytes)
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    // Create secret-bearing temporary files privately before the first byte is written.
+    let mut file = options.open(&temporary)?;
+    let written = file.write_all(bytes);
+    drop(file);
+    let result = written
         .and_then(|()| restrict_private_file(&temporary))
         .and_then(|()| replace_file(&temporary, path));
     if result.is_err() {

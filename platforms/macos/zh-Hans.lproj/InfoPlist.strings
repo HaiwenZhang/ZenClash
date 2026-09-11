@@ -1,0 +1,2 @@
+/* Kept in sync with ssid.permission_description in app.yml by the i18n test. */
+"NSLocationWhenInUseUsageDescription" = "ZenClash 需要读取 Wi-Fi 网络名称，以根据 SSID 规则自动切换本地配置。";

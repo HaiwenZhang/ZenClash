@@ -71,6 +71,7 @@ use state::{ConfigInputsTaskToken, PageTaskToken, RuntimeData};
 
 /// Stateful GPUI page host for Mihomo runtime, configuration, and diagnostics.
 pub struct RuntimePage {
+    remote: bool,
     page: Page,
     core_kind: CoreKind,
     core_session: CoreSession,

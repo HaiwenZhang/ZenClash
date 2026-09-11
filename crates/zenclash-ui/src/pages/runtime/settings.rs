@@ -25,6 +25,7 @@ impl RuntimePage {
     ) -> impl IntoElement {
         v_flex()
             .gap_4()
+            .child(self.render_version_info(theme))
             .child(self.render_core_management(theme, cx))
     }
 
@@ -42,6 +43,7 @@ impl RuntimePage {
         };
         v_flex()
             .gap_4()
+            .child(self.render_version_info(theme))
             .child(self.render_advanced_tools(theme))
             .child(self.render_core_management(theme, cx))
             .child(self.render_app_update(theme, cx))
@@ -55,6 +57,43 @@ impl RuntimePage {
             })
             .child(self.render_backup_card(theme, cx))
             .into_any_element()
+    }
+
+    fn render_version_info(&self, theme: &gpui_component::Theme) -> impl IntoElement {
+        let snapshot = self.operational_status.snapshot();
+        let bundled = env!("ZENCLASH_BUILD_MIHOMO_VERSION");
+        let running = match &snapshot.controller {
+            zenclash_core::Observation::Fresh { value, .. }
+                if !value.version.version.is_empty() =>
+            {
+                format!(
+                    "{} {}",
+                    self.core_kind.display_name(),
+                    value.version.version
+                )
+            }
+            _ => zenclash_i18n::text("settings.versions.unavailable"),
+        };
+        setting_card(zenclash_i18n::text("settings.versions.title"), theme)
+            .child(info_row(
+                zenclash_i18n::text("settings.versions.app"),
+                env!("ZENCLASH_BUILD_VERSION"),
+                theme,
+            ))
+            .child(info_row(
+                zenclash_i18n::text("settings.versions.bundled"),
+                if bundled.is_empty() {
+                    zenclash_i18n::text("settings.versions.not_bundled")
+                } else {
+                    bundled.to_owned()
+                },
+                theme,
+            ))
+            .child(info_row(
+                zenclash_i18n::text("settings.versions.running"),
+                running,
+                theme,
+            ))
     }
 
     fn render_advanced_tools(&self, theme: &gpui_component::Theme) -> impl IntoElement {

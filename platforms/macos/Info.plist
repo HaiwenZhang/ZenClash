@@ -32,5 +32,7 @@
     <string>Copyright © 2026 Haiwen Zhang. Licensed under GNU GPL v3.0 only.</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>ZenClash needs access to the Wi-Fi network name to switch your local profile using SSID rules.</string>
 </dict>
 </plist>

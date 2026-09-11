@@ -386,6 +386,24 @@ impl RuntimePage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_scoped(page, services, false, window, cx)
+    }
+
+    pub(crate) fn new_remote(
+        services: RuntimePageServices,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_scoped(Page::Connections, services, true, window, cx)
+    }
+
+    fn new_scoped(
+        page: Page,
+        services: RuntimePageServices,
+        remote: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let RuntimePageServices {
             core_kind,
             core_session,
@@ -413,7 +431,19 @@ impl RuntimePage {
             override_store,
             override_catalog,
             error,
-        } = load_initial_persistent_state(profile_path.as_deref(), &controlled_config_store);
+        } = if remote {
+            InitialPersistentState {
+                profile_store: None,
+                profile_catalog: ProfileCatalog::default(),
+                controlled_config: empty_json_object(),
+                effective_config: empty_json_object(),
+                override_store: None,
+                override_catalog: YamlOverrideCatalog::default(),
+                error: None,
+            }
+        } else {
+            load_initial_persistent_state(profile_path.as_deref(), &controlled_config_store)
+        };
         let effective_config = config_input_snapshot(effective_config);
         let config_inputs = ConfigInputs::new(&effective_config, window, cx);
         let config_inputs_profile = profile_path.clone();
@@ -429,6 +459,7 @@ impl RuntimePage {
         let (live_updates_enabled, live_update_activity) =
             tokio::sync::watch::channel(ui_visibility.updates_enabled());
         let mut this = Self {
+            remote,
             page,
             core_kind,
             core_session,
@@ -495,7 +526,9 @@ impl RuntimePage {
             });
         this._subscriptions.push(window_activation_subscription);
         this.refresh(cx);
-        this.refresh_app_update(cx);
+        if !remote {
+            this.refresh_app_update(cx);
+        }
         Self::start_operational_updates(
             this.operational_status.subscribe(),
             this.live_updates_enabled.subscribe(),
@@ -539,6 +572,9 @@ impl RuntimePage {
 
     /// Switches the active tab and invalidates results from older page tasks.
     pub fn switch_to(&mut self, page: Page, cx: &mut Context<Self>) {
+        if self.remote && !matches!(page, Page::Connections | Page::Logs | Page::Rules) {
+            return;
+        }
         if self.page == page {
             return;
         }

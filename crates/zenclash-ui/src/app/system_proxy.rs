@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use super::{Context, ZenClashApp};
+use super::{AppContext, Context, ZenClashApp};
 use zenclash_core::CaptureOutcome;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -51,6 +51,10 @@ impl ZenClashApp {
             return;
         }
         self.quit_state = QuitState::InProgress;
+        self.controllers_page.update(cx, |page, _| page.shutdown());
+        if let Some(panel) = self.status_panel.take() {
+            let _ = cx.update_window(panel, |_, window, _| window.remove_window());
+        }
         self.core_session.request_shutdown();
         let capture = self.traffic_capture.clone();
         let core_session = self.core_session.clone();

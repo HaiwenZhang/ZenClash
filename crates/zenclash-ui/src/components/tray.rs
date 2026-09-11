@@ -123,6 +123,8 @@ impl EnvironmentShell {
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Application command encoded into a native menu item identifier.
 pub enum TrayCommand {
+    /// Open or close the local status panel, including on platforms without click events.
+    ShowPanel,
     /// Activate the main `ZenClash` window.
     ShowWindow,
     /// Open or close the compact traffic window.
@@ -187,8 +189,8 @@ pub enum TrayCommand {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Mouse gestures emitted by the native tray icon.
 pub enum TrayClick {
-    /// Primary click requests the main window.
-    ShowWindow,
+    /// Primary click toggles the compact status panel.
+    ShowPanel,
     /// Secondary click requests the native menu.
     ShowMenu,
 }
@@ -369,6 +371,33 @@ impl NetworkTrayIcon {
     pub fn show_menu(&self) {
         self.icon.show_menu();
     }
+
+    pub(crate) fn panel_anchor(&self, fallback_scale: f32) -> Option<gpui::Bounds<gpui::Pixels>> {
+        let rect = self.icon.rect()?;
+        #[cfg(target_os = "macos")]
+        let scale = self
+            .icon
+            .ns_status_item()
+            .and_then(|item| {
+                let mtm = objc2_foundation::MainThreadMarker::new()?;
+                let button = item.button(mtm)?;
+                // SAFETY: AppKit's window and backingScaleFactor selectors run on the main thread.
+                unsafe {
+                    let window: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> =
+                        objc2::msg_send![&button, window];
+                    window.map(|window| objc2::msg_send![&window, backingScaleFactor])
+                }
+            })
+            .unwrap_or(f64::from(fallback_scale));
+        #[cfg(not(target_os = "macos"))]
+        let scale = f64::from(fallback_scale);
+        let position = rect.position.to_logical::<f32>(scale);
+        let size = rect.size.to_logical::<f32>(scale);
+        Some(gpui::Bounds::new(
+            gpui::point(gpui::px(position.x), gpui::px(position.y)),
+            gpui::size(gpui::px(size.width), gpui::px(size.height)),
+        ))
+    }
 }
 
 impl Drop for NetworkTrayIcon {
@@ -396,7 +425,7 @@ const fn native_menu_on_right_click() -> bool {
 
 const fn click_action(button: MouseButton) -> Option<TrayClick> {
     match button {
-        MouseButton::Left => Some(TrayClick::ShowWindow),
+        MouseButton::Left => Some(TrayClick::ShowPanel),
         MouseButton::Right => right_click_action(),
         MouseButton::Middle => None,
     }

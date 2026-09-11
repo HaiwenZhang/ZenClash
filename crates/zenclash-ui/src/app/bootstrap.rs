@@ -9,6 +9,11 @@ use super::{
 /// Registers `ZenClash` actions, native menus, and platform-appropriate key bindings.
 pub fn init(cx: &mut App) {
     gpui_component::init(cx);
+    cx.bind_keys([KeyBinding::new(
+        "escape",
+        super::CloseStatusPanel,
+        Some("ZenClashStatusPanel"),
+    )]);
     if cfg!(target_os = "macos") {
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),

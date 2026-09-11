@@ -26,7 +26,7 @@ impl RuntimePage {
         let task = self.runtime.spawn(async {
             AppUpdateService::new()
                 .map_err(|error| error.to_string())?
-                .check(env!("CARGO_PKG_VERSION"))
+                .check(env!("ZENCLASH_BUILD_VERSION"))
                 .await
                 .map_err(|error| error.to_string())
         });
@@ -71,7 +71,7 @@ impl RuntimePage {
         let mut card = setting_card(zenclash_i18n::text("settings.app_update.title"), theme)
             .child(info_row(
                 zenclash_i18n::text("settings.app_update.current"),
-                env!("CARGO_PKG_VERSION"),
+                env!("ZENCLASH_BUILD_VERSION"),
                 theme,
             ))
             .child(info_row(

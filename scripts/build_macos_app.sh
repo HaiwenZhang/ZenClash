@@ -66,12 +66,16 @@ fi
 
 cd "${PROJECT_ROOT}"
 rustup target add "${TARGET_TRIPLE}"
+bundled_mihomo_version="$("${MIHOMO_PATH}" -v)"
+ZENCLASH_VERSION="${VERSION}" \
+ZENCLASH_BUNDLED_MIHOMO_VERSION="${bundled_mihomo_version}" \
 cargo build --release --locked -p zenclash-ui --bin zenclash --target "${TARGET_TRIPLE}"
 
 rm -rf "${APP_DIR}"
 mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}"
 cp "${CARGO_OUTPUT_ROOT}/${TARGET_TRIPLE}/release/zenclash" "${MACOS_DIR}/zenclash"
 cp "${PROJECT_ROOT}/platforms/macos/Info.plist" "${CONTENTS_DIR}/Info.plist"
+cp -R "${PROJECT_ROOT}/platforms/macos/en.lproj" "${PROJECT_ROOT}/platforms/macos/zh-Hans.lproj" "${RESOURCES_DIR}/"
 cp "${MIHOMO_PATH}" "${RESOURCES_DIR}/mihomo"
 cp "${GEODATA_PATH}" "${RESOURCES_DIR}/geoip.metadb"
 cp "${PROFILE_PATH}" "${RESOURCES_DIR}/profile.yaml"

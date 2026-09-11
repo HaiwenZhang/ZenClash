@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{MihomoError, MihomoResult};
 
 /// Address and authentication information for Mihomo's external controller.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MihomoEndpoint {
     /// HTTP(S) controller base URL or `host:port` shorthand.
@@ -11,6 +11,16 @@ pub struct MihomoEndpoint {
     /// Bearer token configured as Mihomo's controller secret.
     #[serde(default)]
     pub secret: String,
+}
+
+impl std::fmt::Debug for MihomoEndpoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MihomoEndpoint")
+            .field("controller", &self.controller)
+            .field("secret", &"[redacted]")
+            .finish()
+    }
 }
 
 impl Default for MihomoEndpoint {

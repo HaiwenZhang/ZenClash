@@ -190,6 +190,11 @@ impl Render for ZenClashApp {
             Page::Proxies => self.proxies_page.clone().into_any_element(),
             _ => self.runtime_page.clone().into_any_element(),
         };
+        let content = if self.controllers_presented {
+            self.controllers_page.clone().into_any_element()
+        } else {
+            content
+        };
 
         v_flex()
             .id("zenclash-app")
@@ -233,10 +238,46 @@ impl Render for ZenClashApp {
             })
             .child(
                 h_flex()
+                    .px_3()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        gpui_component::button::Button::new("open-controllers")
+                            .small()
+                            .label(zenclash_i18n::text("controllers.title"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.controllers_presented = true;
+                                this.controllers_page
+                                    .update(cx, |page, cx| page.show_manager(cx));
+                                this.runtime_page
+                                    .update(cx, |page, cx| page.set_presented(false, cx));
+                                this.refresh_visible_proxies(cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .px_3()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(if self.controllers_presented {
+                                self.controllers_page.read(cx).target_label()
+                            } else {
+                                zenclash_i18n::text("controllers.local")
+                            }),
+                    ),
+            )
+            .child(
+                h_flex()
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .child(Sidebar::new(self.current_page).collapsed(self.sidebar_collapsed))
+                    .when(!self.controllers_presented, |view| {
+                        view.child(
+                            Sidebar::new(self.current_page).collapsed(self.sidebar_collapsed),
+                        )
+                    })
                     .child(div().flex_1().h_full().min_w_0().child(content)),
             )
     }

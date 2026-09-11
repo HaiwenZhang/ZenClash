@@ -82,6 +82,16 @@ If the current configuration fails core validation, ZenClash keeps the original 
 
 See [automatic runtime validation](docs/development/automatic-runtime-validation.md) for implementation details and repeatable manual checks.
 
+## Controllers, Wi-Fi Rules and the Menu Bar Panel
+
+- Use **Controllers and Wi-Fi rules** at the top of the window to add, edit, test and switch remote Mihomo controllers. Switching probes the version and runtime configuration first and preserves the previous connection on failure. Deleting the selected controller returns to local. Startup attempts to restore the last successfully selected target.
+- Each remote session owns its client, connection cache, traffic and logs; switching releases the previous session. Remote pages provide proxies, connections, logs and rules. The local core, system proxy, TUN and profiles remain independently managed. Remote traffic and logs are not written to local history.
+- On macOS, map an exact SSID to a local profile. Rules default to off and require system location permission to read Wi-Fi names; location data is not collected. Use the packaged `ZenClash.app`; command-line binaries display a missing application permission declaration message. Native SSID/link events trigger refreshes with a 30-second fallback check. Two stable observations trigger one attempt per association. Unknown SSIDs, missing profiles, a manually stopped core or a remote target do not cause repeated switching.
+- Left-click the menu bar icon to open the local panel; right-click retains the native menu. Linux trays do not provide click events; use **Open status panel** in the native menu instead. The panel shows traffic and provides mode, profile, proxy-node, system proxy and TUN controls. Escape or loss of focus closes it. Large proxy groups link to the main window for more nodes.
+- `controllers.json` and `ssid-rules.json` live separately in the app data directory; existing preferences require no migration. Current configuration backups do not include these two new files. Controller secrets are stored as plaintext with `0600` file permissions on Unix and redacted from diagnostics. Do not share these files. Corrupt or unsupported files report errors and remain intact.
+
+See [controller and panel validation](docs/development/controller-panel-validation.md) for platform acceptance steps and verification limits.
+
 ## Run from Source
 
 ### Requirements
@@ -129,6 +139,8 @@ Common environment variables:
 ZenClash never switches silently to an experimental core. meow-rs is used only when it is selected explicitly and a valid binary is available.
 
 ## Build Installers
+
+The top of Settings shows the ZenClash version, bundled Mihomo version, and running core version. All packaging scripts inject the package version and the actual Mihomo executable’s `-v` output. The running version comes from the API and is unavailable while stopped or offline. Direct Cargo builds use the workspace version and indicate that bundle metadata was not provided.
 
 ### macOS
 
@@ -186,7 +198,7 @@ By default, the build scripts download a pinned official Mihomo release and veri
 - Imported subscriptions and YAML source files are never rewritten in place.
 - Active profiles, override layers, and runtime settings are materialized into a separate managed configuration.
 - If the core rejects the active configuration, the original source is preserved and ZenClash enters the direct-connect recovery flow.
-- ZenClash connects to an external controller only when `ZENCLASH_CONTROLLER` is set explicitly.
+- ZenClash connects to an external controller after `ZENCLASH_CONTROLLER` is explicitly set or a target is added and selected in the controller interface. Saved targets are retried on the next startup.
 - A Mihomo process started by ZenClash is stopped when the application exits normally.
 - Traffic history is stored in a local SQLite database and can be disabled or given a custom retention period in Settings.
 

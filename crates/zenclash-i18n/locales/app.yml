@@ -3447,6 +3447,9 @@ outbound_mode:
     en: Direct Mode
 
 tray:
+  show_panel:
+    zh-CN: 打开状态面板
+    en: Open status panel
   tooltip:
     zh-CN: ZenClash · %{core} 网络流量
     en: ZenClash · %{core} Network Traffic
@@ -3528,6 +3531,25 @@ tray:
       en: An external experimental core cannot reliably apply the full TUN configuration; use a ZenClash-managed core
 
 settings:
+  versions:
+    title:
+      zh-CN: 版本信息
+      en: Version Information
+    app:
+      zh-CN: ZenClash 版本
+      en: ZenClash Version
+    bundled:
+      zh-CN: 随包 Mihomo 版本
+      en: Bundled Mihomo Version
+    running:
+      zh-CN: 当前运行内核
+      en: Running Core
+    unavailable:
+      zh-CN: 暂未获取
+      en: Unavailable
+    not_bundled:
+      zh-CN: 未提供打包信息
+      en: No Bundle Metadata
   app_update:
     title:
       zh-CN: ZenClash 更新
@@ -3742,3 +3764,147 @@ automatic:
   failed:
     zh-CN: "自动运行维护失败：%{error}"
     en: "Automatic runtime maintenance failed: %{error}"
+
+panel:
+  refresh:
+    zh-CN: "刷新状态"
+    en: "Refresh status"
+  local:
+    zh-CN: "本机控制器"
+    en: "Local controller"
+
+controllers:
+  title:
+    zh-CN: "控制器与 Wi-Fi 规则"
+    en: "Controllers and Wi-Fi rules"
+  local:
+    zh-CN: "本机"
+    en: "Local"
+  add:
+    zh-CN: "添加控制器"
+    en: "Add controller"
+  name:
+    zh-CN: "名称"
+    en: "Name"
+  address:
+    zh-CN: "控制器地址"
+    en: "Controller address"
+  secret:
+    zh-CN: "控制器密钥"
+    en: "Controller secret"
+  test:
+    zh-CN: "检测"
+    en: "Test"
+  edit:
+    zh-CN: "编辑"
+    en: "Edit"
+  save:
+    zh-CN: "保存"
+    en: "Save"
+  back:
+    zh-CN: "返回远程控制器"
+    en: "Back to remote controller"
+  scope:
+    zh-CN: "远程控制器支持节点、连接、日志和规则。本机内核独立运行；菜单栏面板始终控制本机。密钥保存在应用数据目录中，诊断日志会将其隐藏。"
+    en: "Remote controllers support proxies, connections, logs and rules. The local core runs independently; the menu bar panel controls the local core. Secrets are stored in the app data directory and redacted from diagnostics."
+  saved:
+    zh-CN: "已保存"
+    en: "Saved"
+  reachable:
+    zh-CN: "控制器可连接"
+    en: "Controller is reachable"
+  timeout:
+    zh-CN: "连接超时，原控制器保持不变。"
+    en: "Connection timed out. The previous controller remains active."
+  probe_failed:
+    zh-CN: "无法连接控制器。请检查地址、密钥及网络。原控制器保持不变。"
+    en: "Could not reach the controller. Check its address, secret and network. The previous controller remains active."
+  command_failed:
+    zh-CN: "远程操作失败，请刷新后重试。"
+    en: "The remote command failed. Refresh and try again."
+  invalid_name:
+    zh-CN: "请输入名称。"
+    en: "Enter a name."
+  invalid_endpoint:
+    zh-CN: "请输入有效的 HTTP(S) 控制器地址，密钥请填入独立字段。"
+    en: "Enter a valid HTTP(S) controller address and put the secret in its separate field."
+  invalid_secret:
+    zh-CN: "密钥包含无效字符。"
+    en: "The secret contains invalid characters."
+  invalid_catalog:
+    zh-CN: "控制器文件版本不受支持或记录过多，原文件已保留。"
+    en: "The controller file has an unsupported version or too many entries. The original file is preserved."
+  duplicate_id:
+    zh-CN: "控制器标识重复，原文件已保留。"
+    en: "Duplicate controller IDs. The original file is preserved."
+  missing_target:
+    zh-CN: "已保存的活动控制器不存在，原文件已保留。"
+    en: "The saved active controller is missing. The original file is preserved."
+  missing_store:
+    zh-CN: "无法定位应用数据目录。"
+    en: "The app data directory is unavailable."
+  store_too_large:
+    zh-CN: "控制器文件超过大小限制，原文件已保留。"
+    en: "The controller file exceeds the size limit. The original file is preserved."
+  store_failed:
+    zh-CN: "无法读写控制器或 Wi-Fi 规则：%{error}"
+    en: "Could not read or save controllers or Wi-Fi rules: %{error}"
+
+ssid:
+  title:
+    zh-CN: "Wi-Fi 自动切换配置"
+    en: "Switch profiles by Wi-Fi"
+  scope:
+    zh-CN: "仅在本机托管内核运行时生效。SSID 精确匹配；未知网络保持当前配置。进入远程控制器时暂停，返回本机后重新判断。"
+    en: "Applies while the managed local core is running. SSIDs match exactly; unknown networks keep the current profile. Rules pause while a remote controller is selected and resume on return to local."
+  name:
+    zh-CN: "Wi-Fi 名称（SSID）"
+    en: "Wi-Fi name (SSID)"
+  choose_profile:
+    zh-CN: "选择本地配置"
+    en: "Choose a local profile"
+  save:
+    zh-CN: "保存规则"
+    en: "Save rule"
+  missing_profile:
+    zh-CN: "配置已失效，请重新选择"
+    en: "Profile missing — choose another"
+  enable:
+    zh-CN: "启用自动切换"
+    en: "Enable automatic switching"
+  disable:
+    zh-CN: "关闭自动切换"
+    en: "Disable automatic switching"
+  permission_action:
+    zh-CN: "管理 Wi-Fi 访问权限"
+    en: "Manage Wi-Fi access"
+  unsupported:
+    zh-CN: "目前仅支持 macOS。"
+    en: "Currently available on macOS only."
+  disabled:
+    zh-CN: "自动切换已关闭"
+    en: "Automatic switching is off"
+  bundle_required:
+    zh-CN: "请从打包的 ZenClash.app 启动，以便申请 Wi-Fi 名称访问权限。"
+    en: "Launch the packaged ZenClash.app to request access to Wi-Fi names."
+  permission_needed:
+    zh-CN: "需要定位权限才能读取 Wi-Fi 名称，不会采集位置。"
+    en: "Location permission is required to read Wi-Fi names. Location data is not collected."
+  denied:
+    zh-CN: "Wi-Fi 名称访问未获授权，请在系统设置中允许定位权限。"
+    en: "Access to Wi-Fi names is denied. Allow location access in System Settings."
+  services_disabled:
+    zh-CN: "系统定位服务已关闭。"
+    en: "System location services are disabled."
+  ready:
+    zh-CN: "正在监听 Wi-Fi 网络变化"
+    en: "Listening for Wi-Fi network changes"
+  unavailable:
+    zh-CN: "Wi-Fi 监听暂不可用，请关闭后重新启用。"
+    en: "Wi-Fi monitoring is unavailable. Disable and enable it to retry."
+  invalid_rules:
+    zh-CN: "SSID 必须为 1–32 字节且需要选择配置；规则文件版本必须受支持。"
+    en: "SSID must be 1–32 bytes and have a selected profile; the rule file version must be supported."
+  permission_description:
+    zh-CN: "ZenClash 需要读取 Wi-Fi 网络名称，以根据 SSID 规则自动切换本地配置。"
+    en: "ZenClash needs access to the Wi-Fi network name to switch your local profile using SSID rules."

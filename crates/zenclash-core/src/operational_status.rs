@@ -491,6 +491,7 @@ pub type OperationalStatusStream = watch::Receiver<OperationalSnapshot>;
 /// In-process owner of read-only operational facts.
 pub struct OperationalStatus {
     snapshot: watch::Sender<OperationalSnapshot>,
+    task: std::sync::OnceLock<tokio::task::AbortHandle>,
 }
 
 impl OperationalStatus {
@@ -513,17 +514,56 @@ impl OperationalStatus {
             ..OperationalSnapshot::default()
         };
         let (snapshot, _) = watch::channel(initial);
-        let status = Arc::new(Self { snapshot });
+        let status = Arc::new(Self {
+            snapshot,
+            task: std::sync::OnceLock::new(),
+        });
         let weak = Arc::downgrade(&status);
-        runtime.spawn(run_status_monitor(
+        let task = runtime.spawn(run_status_monitor(
             weak,
             core_session,
             system_proxy,
             tun_permissions,
             traffic,
             logs,
+            true,
         ));
+        let _ = status.task.set(task.abort_handle());
         status
+    }
+
+    /// Starts controller and stream sampling without inspecting this computer's
+    /// system proxy, TUN interfaces or permissions for a remote target.
+    #[must_use]
+    pub fn start_remote(
+        runtime: &Handle,
+        core_session: CoreSession,
+        traffic: Arc<TrafficMonitor>,
+        logs: Arc<LogMonitor>,
+    ) -> Arc<Self> {
+        let (snapshot, _) = watch::channel(OperationalSnapshot::default());
+        let status = Arc::new(Self {
+            snapshot,
+            task: std::sync::OnceLock::new(),
+        });
+        let task = runtime.spawn(run_status_monitor(
+            Arc::downgrade(&status),
+            core_session,
+            None,
+            None,
+            traffic,
+            logs,
+            false,
+        ));
+        let _ = status.task.set(task.abort_handle());
+        status
+    }
+
+    /// Cancels outstanding sampling immediately when its owning target is closed.
+    pub fn stop(&self) {
+        if let Some(task) = self.task.get() {
+            task.abort();
+        }
     }
 
     /// Returns a cheap point-in-time copy of every operational slice.
@@ -617,10 +657,11 @@ async fn run_status_monitor(
     tun_permissions: Option<crate::TunPermissionManager>,
     traffic: Arc<TrafficMonitor>,
     logs: Arc<LogMonitor>,
+    inspect_platform: bool,
 ) {
     let mut schedule = StatusRefreshSchedule::default();
     while let Some(status) = status.upgrade() {
-        let refresh_platform = schedule.next_refreshes_platform();
+        let refresh_platform = inspect_platform && schedule.next_refreshes_platform();
         refresh_status(
             &status,
             &core_session,
@@ -937,6 +978,32 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn remote_sampling_can_be_cancelled_without_waiting_for_a_controller_timeout() {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let endpoint =
+            crate::MihomoEndpoint::new(format!("http://{}", listener.local_addr().unwrap()), "");
+        let runtime = tokio::runtime::Handle::current();
+        let client = crate::MihomoClient::new(endpoint.clone()).unwrap();
+        let core = crate::CoreSession::open(crate::CoreKind::Mihomo, client, None);
+        let traffic = crate::TrafficMonitor::start(&runtime, endpoint.clone());
+        let logs = crate::LogMonitor::start(&runtime, endpoint, crate::MihomoLogLevel::Info);
+        let traffic_weak = std::sync::Arc::downgrade(&traffic);
+        let logs_weak = std::sync::Arc::downgrade(&logs);
+        let status = super::OperationalStatus::start_remote(&runtime, core, traffic, logs);
+        tokio::task::yield_now().await;
+        status.stop();
+        drop(status);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while traffic_weak.upgrade().is_some() || logs_weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect(
+            "closing a target must promptly release its streams even when the HTTP peer stalls",
+        );
+    }
     use super::*;
 
     #[test]
@@ -1229,7 +1296,10 @@ mod tests {
     #[test]
     fn old_generation_path_probe_cannot_advance_first_run_state() {
         let (sender, _) = watch::channel(controllable_snapshot());
-        let status = OperationalStatus { snapshot: sender };
+        let status = OperationalStatus {
+            snapshot: sender,
+            task: std::sync::OnceLock::new(),
+        };
 
         assert!(!status.record_path(
             6,

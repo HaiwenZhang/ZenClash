@@ -6,6 +6,7 @@ use super::{
 };
 
 mod commands;
+mod panel;
 mod queue;
 mod refresh;
 mod window;
@@ -34,7 +35,7 @@ impl ZenClashApp {
                                 this.handle_tray_command(command, cx);
                             }
                             Some(TrayEvent::Click(click)) => match click {
-                                TrayClick::ShowWindow => this.show_main_window(cx),
+                                TrayClick::ShowPanel => this.toggle_status_panel(cx),
                                 TrayClick::ShowMenu => {
                                     this.tray_menu_requested = true;
                                     this.refresh_tray_menu(cx);

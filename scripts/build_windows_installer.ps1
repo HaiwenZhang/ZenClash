@@ -78,19 +78,25 @@ try {
     if (-not (Test-Path -Path $GeoDataFile -PathType Leaf)) {
         throw "Set ZENCLASH_GEODATA_FILE to a real geoip.metadb file"
     }
-    & $MihomoBinary -v
+    $BundledMihomoVersion = (& $MihomoBinary -v) -join "`n"
     if ($LASTEXITCODE -ne 0) {
         throw "The supplied Mihomo executable failed its version check"
     }
 
+    $PreviousBuildVersion = $env:ZENCLASH_VERSION
+    $PreviousMihomoVersion = $env:ZENCLASH_BUNDLED_MIHOMO_VERSION
     Push-Location $ProjectRoot
     try {
         rustup target add x86_64-pc-windows-msvc
         if ($LASTEXITCODE -ne 0) { throw "rustup target add failed" }
+        $env:ZENCLASH_VERSION = $Version
+        $env:ZENCLASH_BUNDLED_MIHOMO_VERSION = $BundledMihomoVersion
         cargo build --release --locked -p zenclash-ui --bin zenclash --target x86_64-pc-windows-msvc
         if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
     }
     finally {
+        $env:ZENCLASH_VERSION = $PreviousBuildVersion
+        $env:ZENCLASH_BUNDLED_MIHOMO_VERSION = $PreviousMihomoVersion
         Pop-Location
     }
 

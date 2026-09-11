@@ -80,6 +80,9 @@ impl ZenClashApp {
     }
 
     pub(in crate::app) fn navigate(&mut self, page: Page, cx: &mut Context<Self>) {
+        if self.controllers_presented {
+            self.controllers_page.update(cx, |page, cx| page.local(cx));
+        }
         let previous_page = self.current_page;
         self.current_page = page;
         if page == Page::Proxies {
@@ -99,7 +102,10 @@ impl ZenClashApp {
     }
 
     pub(in crate::app) fn refresh_visible_proxies(&mut self, cx: &mut Context<Self>) {
-        if self.current_page == Page::Proxies && self.main_window_visible {
+        if self.current_page == Page::Proxies
+            && self.main_window_visible
+            && !self.controllers_presented
+        {
             self.proxies_page
                 .update(cx, crate::pages::proxies::ProxiesPage::reload);
         } else {

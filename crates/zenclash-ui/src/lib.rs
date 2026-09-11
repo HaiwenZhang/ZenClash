@@ -16,3 +16,7 @@ pub mod components;
 pub mod design;
 /// Navigable application pages and their live Mihomo views.
 pub mod pages;
+
+#[cfg(test)]
+#[path = "../build_version.rs"]
+mod build_version;

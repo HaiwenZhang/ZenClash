@@ -79,9 +79,10 @@ impl ZenClashApp {
                             cx,
                         );
                     }
-                    Ok(Err(error)) => tracing::warn!(%error, "failed to load tray menu state"),
-                    Err(error) => tracing::warn!(%error, "tray menu state task failed"),
+                    Ok(Err(error)) => this.tray_error = Some(error),
+                    Err(error) => this.tray_error = Some(error.to_string()),
                 }
+                cx.notify();
 
                 if this.tray_refresh_pending {
                     this.refresh_tray_menu(cx);
@@ -168,6 +169,8 @@ impl ZenClashApp {
         {
             tracing::warn!(%error, "failed to update tray menu");
         }
+        self.tray_state = state;
+        self.tray_error = None;
     }
 }
 

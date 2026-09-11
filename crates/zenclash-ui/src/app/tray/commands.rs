@@ -6,8 +6,17 @@ use super::{
 };
 
 impl ZenClashApp {
-    pub(super) fn handle_tray_command(&mut self, command: TrayCommand, cx: &mut Context<Self>) {
+    pub(in crate::app) fn handle_tray_command(
+        &mut self,
+        command: TrayCommand,
+        cx: &mut Context<Self>,
+    ) {
+        if self.quit_state != crate::app::system_proxy::QuitState::Idle {
+            return;
+        }
+        self.tray_command_error = None;
         match command {
+            TrayCommand::ShowPanel => self.toggle_status_panel(cx),
             TrayCommand::ShowWindow => self.show_main_window(cx),
             TrayCommand::ToggleFloatingWindow => self.toggle_floating_window(cx),
             TrayCommand::SetRuleMode => self.set_mode(OutboundMode::Rule, cx),
@@ -98,6 +107,9 @@ impl ZenClashApp {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
+                if this.quit_state != crate::app::system_proxy::QuitState::Idle {
+                    return;
+                }
                 match result {
                     Ok(Ok((outcome, preferences))) => {
                         if let Some(preferences) = preferences {
@@ -114,8 +126,8 @@ impl ZenClashApp {
                             tracing::warn!(?outcome, "system proxy tray command did not converge");
                         }
                     }
-                    Ok(Err(error)) => tracing::warn!(%error, "system proxy tray command failed"),
-                    Err(error) => tracing::warn!(%error, "system proxy tray task failed"),
+                    Ok(Err(error)) => this.report_tray_error(error, cx),
+                    Err(error) => this.report_tray_error(error.to_string(), cx),
                 }
                 if let Some((enabled, port)) = this.system_proxy_commands.complete() {
                     this.start_system_proxy_command(enabled, port, cx);
@@ -148,6 +160,9 @@ impl ZenClashApp {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
+                if this.quit_state != crate::app::system_proxy::QuitState::Idle {
+                    return;
+                }
                 match result {
                     Ok(Ok(outcome)) => {
                         if matches!(
@@ -161,8 +176,8 @@ impl ZenClashApp {
                             runtime_page.reload_controlled_config(cx);
                         });
                     }
-                    Ok(Err(error)) => tracing::warn!(%error, "TUN tray command failed"),
-                    Err(error) => tracing::warn!(%error, "TUN tray task failed"),
+                    Ok(Err(error)) => this.report_tray_error(error, cx),
+                    Err(error) => this.report_tray_error(error.to_string(), cx),
                 }
                 if let Some(enabled) = this.tun_commands.complete() {
                     this.start_tun_command(enabled, cx);
@@ -198,6 +213,9 @@ impl ZenClashApp {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
+                if this.quit_state != crate::app::system_proxy::QuitState::Idle {
+                    return;
+                }
                 match result {
                     Ok(Ok(_)) => {}
                     Ok(Err(error)) => {
@@ -254,6 +272,9 @@ impl ZenClashApp {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
+                if this.quit_state != crate::app::system_proxy::QuitState::Idle {
+                    return;
+                }
                 match result {
                     Ok(outcome) => {
                         this.runtime_page.update(cx, |runtime_page, cx| {
@@ -266,6 +287,9 @@ impl ZenClashApp {
                     }
                     Err(error) => {
                         tracing::warn!(%error, "profile selection from tray failed");
+                        this.report_tray_error(error.clone(), cx);
+                        this.controllers_page
+                            .update(cx, |page, cx| page.report_error(error.clone(), cx));
                         this.runtime_page.update(cx, |runtime_page, cx| {
                             runtime_page.report_tray_profile_error(&error, cx);
                         });
@@ -291,14 +315,15 @@ impl ZenClashApp {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
+                if this.quit_state != crate::app::system_proxy::QuitState::Idle { return; }
                 match result {
                     Ok(Ok(outcome)) => {
                         for warning in outcome.warnings {
                             tracing::warn!(%warning, "tray proxy selection completed with a warning");
                         }
                     }
-                    Ok(Err(error)) => tracing::warn!(%error, "proxy selection from tray failed"),
-                    Err(error) => tracing::warn!(%error, "proxy selection tray task failed"),
+                    Ok(Err(error)) => this.report_tray_error(error.to_string(), cx),
+                    Err(error) => this.report_tray_error(error.to_string(), cx),
                 }
                 this.refresh_visible_proxies(cx);
                 if let Some((group, proxy)) = this.proxy_selection_commands.complete() {
@@ -309,6 +334,11 @@ impl ZenClashApp {
             });
         })
         .detach();
+    }
+
+    fn report_tray_error(&mut self, error: String, cx: &mut Context<Self>) {
+        self.tray_command_error = Some(error);
+        cx.notify();
     }
 }
 

@@ -65,6 +65,10 @@ pub(super) fn build_menu(
         zenclash_i18n::text("tray.show_window"),
         TrayCommand::ShowWindow,
     );
+    let show_panel = builder.item(
+        zenclash_i18n::text("tray.show_panel"),
+        TrayCommand::ShowPanel,
+    );
     let floating = builder.item(
         if state.floating_visible {
             zenclash_i18n::text("tray.hide_floating")
@@ -100,6 +104,7 @@ pub(super) fn build_menu(
     let tun = builder.check("TUN", state.tun, TrayCommand::SetTun(!state.tun));
 
     menu.append_items(&[
+        &show_panel,
         &show_window,
         &floating,
         &rule,
