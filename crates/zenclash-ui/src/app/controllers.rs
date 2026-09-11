@@ -79,7 +79,10 @@ impl ControllersPage {
             profiles: ProfileCatalog::default(),
             ssid: input(cx, "ssid.name", false),
             ssid_profile: None,
+            #[cfg(target_os = "macos")]
             wifi: wifi::WifiMonitor::default(),
+            #[cfg(not(target_os = "macos"))]
+            wifi: wifi::WifiMonitor,
             _subscriptions: Vec::new(),
         };
         this.load(cx);
