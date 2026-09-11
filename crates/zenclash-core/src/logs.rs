@@ -5,7 +5,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use chrono::{Days, Local, NaiveTime, TimeZone};
@@ -413,6 +413,7 @@ async fn run_monitor(
     mut generation_updates: watch::Receiver<u64>,
     state: LogMonitorState,
 ) {
+    let mut backoff = crate::websocket::ReconnectBackoff::default();
     loop {
         let requested_level = *level.borrow();
         let generation = *generation_updates.borrow_and_update();
@@ -454,6 +455,7 @@ async fn run_monitor(
                         Ok(message) if message.is_text() || message.is_binary() => {
                             match parse_log_frame(&message.into_data(), now_ms()) {
                                 Ok(entry) => {
+                                    backoff.reset();
                                     accept_log_entry(
                                         &state.entries,
                                         &state.stream,
@@ -517,6 +519,7 @@ async fn run_monitor(
             state.revision.fetch_add(1, Ordering::AcqRel);
         }
         if level_changed || generation_changed {
+            backoff.reset();
             continue;
         }
         tokio::select! {
@@ -524,13 +527,15 @@ async fn run_monitor(
                 if changed.is_err() {
                     return;
                 }
+                backoff.reset();
             }
             changed = generation_updates.changed() => {
                 if changed.is_err() {
                     return;
                 }
+                backoff.reset();
             }
-            () = tokio::time::sleep(Duration::from_secs(2)) => {}
+            () = tokio::time::sleep(backoff.next_delay()) => {}
         }
     }
 }

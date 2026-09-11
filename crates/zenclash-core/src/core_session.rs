@@ -25,6 +25,8 @@ const CORE_SUPERVISOR_INTERVAL: Duration = Duration::from_millis(250);
 const CORE_RECOVERY_RETRY_DELAY: Duration = Duration::from_secs(1);
 const MAX_CORE_RECOVERY_ATTEMPTS: u32 = 3;
 
+mod automatic;
+
 #[derive(Clone, Copy)]
 struct CoreRecoveryPolicy {
     interval: Duration,
@@ -99,6 +101,8 @@ pub enum EffectiveConfigIntent {
 pub enum CoreMaintenanceIntent {
     /// Restart the owned child and wait for its controller.
     Restart,
+    /// Stop the owned child until an explicit restart is requested.
+    Stop,
 }
 
 /// Mechanism that successfully applied an effective configuration.
@@ -145,6 +149,8 @@ pub enum CoreLifecyclePhase {
     ShuttingDown,
     /// The managed child was explicitly stopped and reaped.
     Stopped,
+    /// Link loss stopped the child; only network recovery or an explicit restart may resume it.
+    NetworkSuspended,
     /// The controller belongs to an external process ZenClash cannot supervise.
     External,
 }
@@ -208,6 +214,7 @@ pub struct CoreSession {
     generation: Arc<AtomicU64>,
     shutdown_requested: Arc<AtomicBool>,
     supervisor_started: Arc<AtomicBool>,
+    network_suspended: Arc<AtomicBool>,
     lifecycle: Arc<RwLock<CoreLifecycleSnapshot>>,
 }
 
@@ -215,6 +222,7 @@ pub struct CoreSession {
 pub(crate) struct CoreProfileApplication {
     state: CoreProfileApplicationState,
     generation: Arc<AtomicU64>,
+    client: MihomoClient,
     _transition_guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
@@ -231,6 +239,7 @@ impl CoreProfileApplication {
         match self.state {
             CoreProfileApplicationState::Runtime { transaction, kind } => {
                 transaction.commit();
+                self.client.invalidate_connections();
                 let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
                 Some(CoreApplyOutcome { kind, generation })
             }
@@ -239,6 +248,7 @@ impl CoreProfileApplication {
     }
 
     pub(crate) async fn rollback(self) -> Result<(), CoreSessionError> {
+        self.client.invalidate_connections();
         match self.state {
             CoreProfileApplicationState::Runtime { transaction, .. } => transaction
                 .rollback()
@@ -267,6 +277,7 @@ impl CoreSession {
             generation: Arc::new(AtomicU64::new(0)),
             shutdown_requested: Arc::new(AtomicBool::new(false)),
             supervisor_started: Arc::new(AtomicBool::new(false)),
+            network_suspended: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -412,6 +423,7 @@ impl CoreSession {
         Ok(CoreProfileApplication {
             state,
             generation: self.generation.clone(),
+            client: self.client.clone(),
             _transition_guard: transition_guard,
         })
     }
@@ -431,7 +443,8 @@ impl CoreSession {
         timeout: Duration,
     ) -> Result<u64, CoreSessionError> {
         let _transition = self.transition.lock().await;
-        self.ensure_running_operations_allowed()?;
+        self.ensure_not_shutting_down()?;
+        self.network_suspended.store(false, Ordering::Release);
         let process = self
             .process
             .as_ref()
@@ -441,6 +454,11 @@ impl CoreSession {
                 process
                     .restart_and_wait_until(timeout, Some(self.shutdown_requested.clone()))
                     .await?;
+            }
+            CoreMaintenanceIntent::Stop => {
+                process.stop_async().await?;
+                self.lifecycle.write().phase = CoreLifecyclePhase::Stopped;
+                return Ok(self.next_generation());
             }
         }
         *self.lifecycle.write() = CoreLifecycleSnapshot::new(true);
@@ -453,7 +471,7 @@ impl CoreSession {
     ///
     /// Returns an error when an owned child cannot be stopped and reaped.
     pub async fn shutdown(&self) -> Result<(), CoreSessionError> {
-        self.shutdown_requested.store(true, Ordering::Release);
+        self.request_shutdown();
         if self.process.is_some() {
             self.lifecycle.write().phase = CoreLifecyclePhase::ShuttingDown;
         }
@@ -564,10 +582,23 @@ impl CoreSession {
     }
 
     fn next_generation(&self) -> u64 {
+        self.client.invalidate_connections();
         self.generation.fetch_add(1, Ordering::AcqRel) + 1
     }
 
     fn ensure_running_operations_allowed(&self) -> Result<(), CoreSessionError> {
+        self.ensure_not_shutting_down()?;
+        if self.network_suspended.load(Ordering::Acquire)
+            || self.lifecycle.read().phase == CoreLifecyclePhase::Stopped
+        {
+            return Err(CoreSessionError::Process(MihomoError::Process(
+                zenclash_i18n::text("automatic.core_paused"),
+            )));
+        }
+        Ok(())
+    }
+
+    fn ensure_not_shutting_down(&self) -> Result<(), CoreSessionError> {
         if self.shutdown_requested.load(Ordering::Acquire) {
             Err(CoreSessionError::ShuttingDown)
         } else {
@@ -593,9 +624,21 @@ async fn supervise_managed_core(
             continue;
         }
 
+        if session.network_suspended.load(Ordering::Acquire)
+            || session.lifecycle.read().phase == CoreLifecyclePhase::Stopped
+        {
+            tokio::time::sleep(policy.interval).await;
+            continue;
+        }
+
         let process_snapshot = process.snapshot();
         let (new_exit, retry_exhausted) = {
             let mut lifecycle = session.lifecycle.write();
+            if session.network_suspended.load(Ordering::Acquire)
+                || lifecycle.phase == CoreLifecyclePhase::Stopped
+            {
+                continue;
+            }
             let new_exit = lifecycle.phase == CoreLifecyclePhase::Stable;
             if new_exit {
                 lifecycle.recovery_attempts = 0;
@@ -645,7 +688,10 @@ async fn supervise_managed_core(
 
 async fn recover_managed_core(session: &CoreSession, policy: CoreRecoveryPolicy) -> bool {
     let _transition = session.transition.lock().await;
-    if session.shutdown_requested.load(Ordering::Acquire) {
+    if session.shutdown_requested.load(Ordering::Acquire)
+        || session.network_suspended.load(Ordering::Acquire)
+        || session.lifecycle.read().phase == CoreLifecyclePhase::Stopped
+    {
         return false;
     }
     let Some(process) = session.process.as_ref() else {

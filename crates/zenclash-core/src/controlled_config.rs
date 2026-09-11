@@ -889,6 +889,35 @@ impl ControlledConfigStore {
         self.root.join("effective.yaml")
     }
 
+    /// Fingerprints an effective source change not already represented by the runtime cache.
+    ///
+    /// Ignores formatting and comments, so application writes and atomic cache
+    /// replacement cannot cause a restart loop. Run off the UI thread.
+    ///
+    /// # Errors
+    /// Returns source, merge, size-limit or YAML errors without changing any files.
+    pub fn pending_source_revision(
+        &self,
+        kind: CoreKind,
+        profile: &Path,
+        overrides: &[PathBuf],
+    ) -> ControlledConfigResult<Option<[u8; 32]>> {
+        use sha2::{Digest, Sha256};
+        let candidate =
+            normalize_runtime_payload(kind, self.effective_with_overrides(profile, overrides)?)?;
+        let candidate = self.apply_session_listener_fallbacks(&candidate)?;
+        let candidate: Value = serde_yaml::from_str(&candidate)?;
+        if let Some(current) = self.cached_runtime_payload()? {
+            let current: Value = serde_yaml::from_str(&current)?;
+            if current == candidate {
+                return Ok(None);
+            }
+        }
+        Ok(Some(
+            Sha256::digest(serde_yaml::to_string(&candidate)?.as_bytes()).into(),
+        ))
+    }
+
     /// Returns the controlled-config storage root.
     #[must_use]
     pub fn root(&self) -> &Path {
@@ -967,9 +996,15 @@ impl ControlledConfigStore {
         let payload = normalize_runtime_payload(process.kind(), payload)?;
         let payload = self.apply_session_listener_fallbacks(&payload)?;
         let store = self.clone();
-        let cache = tokio::task::spawn_blocking(move || store.stage_runtime_payload(&payload))
-            .await
-            .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let validator = process.config_validator();
+        let cache = tokio::task::spawn_blocking(move || {
+            validator.validate_payload(&payload).map_err(|error| {
+                ControlledConfigError::Profile(MihomoError::Process(error.to_string()))
+            })?;
+            store.stage_runtime_payload(&payload)
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
         if let Err(error) = process
             .restart_and_wait(std::time::Duration::from_secs(20))
             .await

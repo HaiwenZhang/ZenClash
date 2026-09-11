@@ -51,6 +51,7 @@ impl ZenClashApp {
             return;
         }
         self.quit_state = QuitState::InProgress;
+        self.core_session.request_shutdown();
         let capture = self.traffic_capture.clone();
         let core_session = self.core_session.clone();
         let task = self.runtime.spawn(async move {

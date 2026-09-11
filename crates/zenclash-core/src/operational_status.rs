@@ -207,6 +207,8 @@ pub enum ProcessRecoveryStatus {
     Failed,
     /// An explicit application shutdown is in progress or complete.
     Stopped,
+    /// Link loss paused the process and network recovery may resume it.
+    NetworkSuspended,
     /// ZenClash observes an external core and cannot recover its process.
     External,
 }
@@ -234,6 +236,7 @@ impl ProcessStatus {
                 CoreLifecyclePhase::ShuttingDown | CoreLifecyclePhase::Stopped => {
                     ProcessRecoveryStatus::Stopped
                 }
+                CoreLifecyclePhase::NetworkSuspended => ProcessRecoveryStatus::NetworkSuspended,
                 CoreLifecyclePhase::External => ProcessRecoveryStatus::External,
             },
         }

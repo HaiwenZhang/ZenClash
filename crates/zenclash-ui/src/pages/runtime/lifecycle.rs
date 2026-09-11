@@ -193,6 +193,26 @@ fn empty_json_object() -> Value {
 }
 
 impl RuntimePage {
+    pub(crate) fn report_automatic_runtime(
+        &mut self,
+        notice: Option<&str>,
+        error: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(error) = error {
+            self.error = Some(zenclash_i18n::text_with(
+                "automatic.failed",
+                &[("error", error)],
+            ));
+        }
+        if let Some(notice) = notice {
+            self.notice = Some(zenclash_i18n::text(notice));
+            self.invalidate_config_inputs(cx);
+            self.refresh(cx);
+        }
+        cx.notify();
+    }
+
     pub(crate) fn preferences_restored_from_app(
         &mut self,
         preferences: super::AppPreferences,

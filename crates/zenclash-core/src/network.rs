@@ -7,6 +7,8 @@ mod linux;
 #[cfg(any(target_os = "macos", test))]
 mod macos;
 mod probe;
+mod reachability;
+pub use reachability::NetworkReachability;
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 mod unsupported;
 #[cfg(any(target_os = "windows", test))]

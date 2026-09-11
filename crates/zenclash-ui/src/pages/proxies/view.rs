@@ -72,6 +72,30 @@ impl ProxiesPage {
                             ),
                     )
                     .child(
+                        Button::new("sort-proxies-by-latency")
+                            .label(zenclash_i18n::text("proxies.actions.sort_latency"))
+                            .small()
+                            .outline()
+                            .selected(self.sort_by_latency)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.sort_by_latency = !this.sort_by_latency;
+                                this.proxy_pages.clear();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("hide-unavailable-proxies")
+                            .label(zenclash_i18n::text("proxies.actions.hide_unavailable"))
+                            .small()
+                            .outline()
+                            .selected(self.hide_unavailable)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.hide_unavailable = !this.hide_unavailable;
+                                this.proxy_pages.clear();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
                         Button::new("refresh-proxies")
                             .icon(crate::assets::AppIcon::RefreshCw)
                             .label(if loading {
@@ -90,14 +114,20 @@ impl ProxiesPage {
 
     pub(super) fn render_group(
         &self,
-        group_index: usize,
+        _group_index: usize,
         group: &ProxyGroup,
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let expanded = self.expanded.contains(&group.name);
+        let nodes = visible_nodes(
+            group,
+            self.sort_by_latency,
+            self.hide_unavailable,
+            &self.test_failures,
+        );
         let page = proxy_page(
-            group.all.len(),
+            nodes.len(),
             self.proxy_pages
                 .get(&group.name)
                 .copied()
@@ -225,26 +255,31 @@ impl ProxiesPage {
                                 matches!(group.behavior, ProxyGroupBehavior::Automatic { .. }),
                                 |this| {
                                     this.child(
-                                        Button::new(("measure-restore-auto", group_index))
-                                            .icon(crate::assets::AppIcon::Gauge)
-                                            .label(if measuring_and_restoring {
-                                                zenclash_i18n::text("proxies.actions.testing")
-                                            } else {
-                                                zenclash_i18n::text(
-                                                    "proxies.actions.measure_restore_auto",
-                                                )
-                                            })
-                                            .small()
-                                            .ghost()
-                                            .loading(measuring_and_restoring)
-                                            .disabled(self.operation_pending())
-                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                        Button::new((
+                                            gpui::ElementId::from("measure-restore-auto"),
+                                            group.name.clone(),
+                                        ))
+                                        .icon(crate::assets::AppIcon::Gauge)
+                                        .label(if measuring_and_restoring {
+                                            zenclash_i18n::text("proxies.actions.testing")
+                                        } else {
+                                            zenclash_i18n::text(
+                                                "proxies.actions.measure_restore_auto",
+                                            )
+                                        })
+                                        .small()
+                                        .ghost()
+                                        .loading(measuring_and_restoring)
+                                        .disabled(self.operation_pending())
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
                                                 this.measure_group_and_restore_auto(
                                                     group_for_measure_restore.clone(),
                                                     group_test_url.clone(),
                                                     cx,
                                                 );
-                                            })),
+                                            }),
+                                        ),
                                     )
                                 },
                             )
@@ -255,58 +290,71 @@ impl ProxiesPage {
                                 ),
                                 |this| {
                                     this.child(
-                                        Button::new(("restore-auto", group_index))
-                                            .icon(crate::assets::AppIcon::RefreshCw)
-                                            .label(if restoring_auto {
-                                                zenclash_i18n::text(
-                                                    "proxies.actions.restoring_auto",
-                                                )
-                                            } else {
-                                                zenclash_i18n::text("proxies.actions.restore_auto")
-                                            })
-                                            .small()
-                                            .outline()
-                                            .loading(restoring_auto)
-                                            .disabled(self.operation_pending())
-                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                        Button::new((
+                                            gpui::ElementId::from("restore-auto"),
+                                            group.name.clone(),
+                                        ))
+                                        .icon(crate::assets::AppIcon::RefreshCw)
+                                        .label(if restoring_auto {
+                                            zenclash_i18n::text("proxies.actions.restoring_auto")
+                                        } else {
+                                            zenclash_i18n::text("proxies.actions.restore_auto")
+                                        })
+                                        .small()
+                                        .outline()
+                                        .loading(restoring_auto)
+                                        .disabled(self.operation_pending())
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
                                                 this.restore_auto(group_for_restore.clone(), cx);
-                                            })),
+                                            }),
+                                        ),
                                     )
                                 },
                             )
                             .child(
-                                Button::new(("test-group", group_index))
-                                    .icon(crate::assets::AppIcon::Gauge)
-                                    .label(if testing_group {
-                                        zenclash_i18n::text("proxies.actions.testing")
-                                    } else {
-                                        zenclash_i18n::text("proxies.actions.test_all")
-                                    })
-                                    .small()
-                                    .ghost()
-                                    .loading(testing_group)
-                                    .disabled(testing_group || selection_blocked)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                Button::new((
+                                    gpui::ElementId::from("test-group"),
+                                    group.name.clone(),
+                                ))
+                                .icon(crate::assets::AppIcon::Gauge)
+                                .label(if testing_group {
+                                    zenclash_i18n::text("proxies.actions.testing")
+                                } else {
+                                    zenclash_i18n::text("proxies.actions.test_all")
+                                })
+                                .small()
+                                .ghost()
+                                .loading(testing_group)
+                                .disabled(testing_group || selection_blocked)
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
                                         this.test_group(&group_for_test, cx);
-                                    })),
+                                    },
+                                )),
                             )
                             .child(
-                                Button::new(("toggle-group", group_index))
-                                    .icon(if expanded {
-                                        IconName::ChevronDown
-                                    } else {
-                                        IconName::ChevronRight
-                                    })
-                                    .label(if expanded {
-                                        zenclash_i18n::text("proxies.actions.collapse")
-                                    } else {
-                                        zenclash_i18n::text("proxies.actions.expand")
-                                    })
-                                    .small()
-                                    .outline()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                Button::new((
+                                    gpui::ElementId::from("toggle-group"),
+                                    group.name.clone(),
+                                ))
+                                .icon(if expanded {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .label(if expanded {
+                                    zenclash_i18n::text("proxies.actions.collapse")
+                                } else {
+                                    zenclash_i18n::text("proxies.actions.expand")
+                                })
+                                .small()
+                                .outline()
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
                                         this.toggle_group(&group_name, cx);
-                                    })),
+                                    },
+                                )),
                             ),
                     ),
             )
@@ -317,21 +365,13 @@ impl ProxiesPage {
                     v_flex()
                         .border_t_1()
                         .border_color(theme.border)
-                        .child(h_flex().p_3().gap_2().flex_wrap().children(
-                            group.all[page.start..page.end].iter().enumerate().map(
-                                |(proxy_offset, proxy)| {
-                                    let proxy_index = page.start + proxy_offset;
-                                    self.render_proxy(
-                                        group_index,
-                                        proxy_index,
-                                        group,
-                                        proxy,
-                                        theme,
-                                        cx,
-                                    )
-                                },
+                        .child(
+                            h_flex().p_3().gap_2().flex_wrap().children(
+                                nodes[page.start..page.end]
+                                    .iter()
+                                    .map(|proxy| self.render_proxy(group, proxy, theme, cx)),
                             ),
-                        ))
+                        )
                         .when(page.count > 1, |this| {
                             this.child(
                                 h_flex()
@@ -348,7 +388,7 @@ impl ProxiesPage {
                                                     ("total", page.count.to_string()),
                                                     ("first", (page.start + 1).to_string()),
                                                     ("last", page.end.to_string()),
-                                                    ("count", group.all.len().to_string()),
+                                                    ("count", nodes.len().to_string()),
                                                 ],
                                             ),
                                         ),
@@ -406,8 +446,7 @@ impl ProxiesPage {
 
     pub(super) fn render_proxy(
         &self,
-        group_index: usize,
-        proxy_index: usize,
+
         group: &ProxyGroup,
         proxy: &ProxyNode,
         theme: &gpui_component::Theme,
@@ -531,8 +570,11 @@ impl ProxiesPage {
                     .gap_1()
                     .child(
                         Button::new((
-                            gpui::ElementId::from(("test-proxy", group_index)),
-                            proxy_index.to_string(),
+                            gpui::ElementId::from((
+                                gpui::ElementId::from("test-proxy"),
+                                group.name.clone(),
+                            )),
+                            proxy.name.clone(),
                         ))
                         .icon(crate::assets::AppIcon::Gauge)
                         .label(if testing {
@@ -557,8 +599,11 @@ impl ProxiesPage {
                     .when(selectable, |this| {
                         this.child(
                             Button::new((
-                                gpui::ElementId::from(("select-proxy", group_index)),
-                                proxy_index.to_string(),
+                                gpui::ElementId::from((
+                                    gpui::ElementId::from("select-proxy"),
+                                    group.name.clone(),
+                                )),
+                                proxy.name.clone(),
                             ))
                             .icon(if selected {
                                 Icon::new(IconName::Check)
@@ -586,5 +631,89 @@ impl ProxiesPage {
                     }),
             )
             .into_any_element()
+    }
+}
+
+fn visible_nodes<'a>(
+    group: &'a ProxyGroup,
+    sort: bool,
+    hide: bool,
+    failures: &std::collections::HashMap<String, super::DelayTestFailure>,
+) -> Vec<&'a ProxyNode> {
+    let mut nodes = group
+        .all
+        .iter()
+        .filter(|proxy| {
+            !hide
+                || (!failures.contains_key(&test_key(&group.name, &proxy.name))
+                    && match proxy.latest_delay() {
+                        Some(delay) => delay > 0,
+                        None => proxy.alive != Some(false),
+                    })
+        })
+        .collect::<Vec<_>>();
+    if sort {
+        nodes.sort_by_key(|proxy| {
+            let delay = proxy.latest_delay();
+            let failed = failures.contains_key(&test_key(&group.name, &proxy.name))
+                || delay == Some(0)
+                || (delay.is_none() && proxy.alive == Some(false));
+            (
+                failed,
+                delay.is_none(),
+                delay.filter(|value| *value > 0).unwrap_or(u32::MAX),
+            )
+        });
+    }
+    nodes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn latency_filter_keeps_untested_nodes_and_sorts_before_paging() {
+        let group = ProxyGroup {
+            all: vec![
+                ProxyNode {
+                    name: "unknown".into(),
+                    ..Default::default()
+                },
+                ProxyNode {
+                    name: "timeout".into(),
+                    history: vec![zenclash_core::DelayHistory {
+                        delay: 0,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                ProxyNode {
+                    name: "slow".into(),
+                    history: vec![zenclash_core::DelayHistory {
+                        delay: 100,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                ProxyNode {
+                    name: "fast".into(),
+                    history: vec![zenclash_core::DelayHistory {
+                        delay: 10,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let nodes = visible_nodes(&group, true, true, &std::collections::HashMap::new());
+        assert_eq!(
+            nodes
+                .iter()
+                .map(|node| node.name.as_str())
+                .collect::<Vec<_>>(),
+            ["fast", "slow", "unknown"]
+        );
     }
 }

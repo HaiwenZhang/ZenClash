@@ -36,13 +36,13 @@ The home page brings together the active profile, four-layer operational status,
 
 - **Native desktop interface**: Built with GPUI and gpui-component, with light, dark, and system appearance modes.
 - **Profile management**: Supports online subscriptions and local Clash/Mihomo YAML files, including traffic quota, update time, and expiration information.
-- **Proxy groups and nodes**: Browse proxy groups, switch nodes, run delay tests, and retain local test history.
+- **Proxy groups and nodes**: Browse proxy groups, switch nodes, run delay tests, sort by latency, hide unavailable nodes, and retain local test history.
 - **Quick controls**: Toggle the system proxy and switch between Rule, Global, and Direct routing modes from the home page.
 - **TUN and system proxy**: Native System Proxy state and ownership readback, plus separate TUN permission, device, and route evidence so a configured switch is never presented as proven capture.
 - **Network diagnostics**: Independently checks the controller, capture, DNS A/AAAA, DIRECT/Mihomo paths, and providers, with a strictly redacted support summary.
 - **Live monitoring**: Inspect upload, download, active connections, runtime logs, and real-time traffic trends.
 - **Traffic history**: Stores history in a local SQLite database and aggregates usage by domain, device, outbound, and process.
-- **Connections and rules**: Inspect and close active connections, search rules, and review proxy and rule providers.
+- **Connections and rules**: Inspect and close active connections, filter by TCP/UDP, sort by time or traffic, search rules, and review proxy and rule providers.
 - **YAML overrides**: Compose configurations through ordered override layers, preview the effective result, and leave imported source files untouched.
 - **Status bar menu**: Shows live upload and download rates with quick access to routing mode, system proxy, TUN, nodes, and profiles.
 - **Backup and restore**: Supports exporting and restoring complete local ZIP snapshots.
@@ -71,6 +71,16 @@ On macOS and Linux, the native authorization flow runs only after an explicit TU
 5. Enable the system proxy or TUN when needed.
 
 If the current configuration fails core validation, ZenClash keeps the original source and attempts to start with the bundled direct-only recovery profile, allowing you to return to profile management and fix the problem.
+
+## Automatic Runtime Maintenance
+
+- When two consecutive observations find no available non-tunnel uplink, ZenClash pauses its managed core and releases its owned system proxy. When the network returns, it starts the core with the retained TUN configuration and reconciles system proxy intent. Failed observations are unknown; website, DNS, and controller request failures do not count as link loss.
+- A core stopped manually in Core Management stays stopped when connectivity returns. Use Restart to start it again. Quitting cancels automatic recovery.
+- Background checks inspect the active configuration and enabled YAML overrides every second. Effective changes stable across two observations are validated and applied by restarting the core. Comments, formatting, and content already applied by the app do not trigger repeated restarts. Validation failure preserves the current core; startup failure uses the existing rollback workflow.
+- External controllers are never automatically stopped or restarted. Imported local configurations follow the managed-copy convention: monitoring targets the active managed source, not the original import path.
+- Pages, the tray, and historical accounting share connection snapshots for up to one second. Closing connections and core transitions invalidate the snapshot. Traffic and log streams reconnect with exponential backoff and jitter, capped at 20 seconds.
+
+See [automatic runtime validation](docs/development/automatic-runtime-validation.md) for implementation details and repeatable manual checks.
 
 ## Run from Source
 

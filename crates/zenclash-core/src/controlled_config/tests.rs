@@ -33,6 +33,66 @@ fn write_profile(root: &Path) -> PathBuf {
 }
 
 #[test]
+fn source_monitor_ignores_applied_writes_and_detects_external_effective_changes() {
+    let root = test_root("source-monitor");
+    let profile = write_profile(&root);
+    let store = ControlledConfigStore::new(root.join("controlled"));
+    store
+        .materialize_with_overrides_for_core(&profile, &[], CoreKind::Mihomo)
+        .unwrap();
+    assert_eq!(
+        store
+            .pending_source_revision(CoreKind::Mihomo, &profile, &[])
+            .unwrap(),
+        None
+    );
+    let payload = fs::read_to_string(&profile).unwrap();
+    fs::write(&profile, format!("# external editor save\n{payload}")).unwrap();
+    assert_eq!(
+        store
+            .pending_source_revision(CoreKind::Mihomo, &profile, &[])
+            .unwrap(),
+        None
+    );
+    fs::write(&profile, payload.replace("7890", "7891")).unwrap();
+    assert!(
+        store
+            .pending_source_revision(CoreKind::Mihomo, &profile, &[])
+            .unwrap()
+            .is_some()
+    );
+    store
+        .materialize_with_overrides_for_core(&profile, &[], CoreKind::Mihomo)
+        .unwrap();
+    assert_eq!(
+        store
+            .pending_source_revision(CoreKind::Mihomo, &profile, &[])
+            .unwrap(),
+        None
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn source_monitor_rejects_invalid_yaml_without_touching_runtime_cache() {
+    let root = test_root("invalid-source-monitor");
+    let profile = write_profile(&root);
+    let store = ControlledConfigStore::new(root.join("controlled"));
+    let runtime = store
+        .materialize_with_overrides_for_core(&profile, &[], CoreKind::Mihomo)
+        .unwrap();
+    let original = fs::read(&runtime).unwrap();
+    fs::write(&profile, "rules: [").unwrap();
+    assert!(
+        store
+            .pending_source_revision(CoreKind::Mihomo, &profile, &[])
+            .is_err()
+    );
+    assert_eq!(fs::read(runtime).unwrap(), original);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn malformed_controlled_patch_is_quarantined_without_deleting_its_payload() {
     let root = test_root("quarantine-invalid");
     let store = ControlledConfigStore::new(root.join("store"));

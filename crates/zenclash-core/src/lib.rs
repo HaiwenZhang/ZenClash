@@ -84,8 +84,8 @@ pub use models::{
 };
 pub use network::{
     DEFAULT_NETWORK_LATENCY_TARGETS, NetworkLatencyResult, NetworkLatencyTarget, NetworkProbeError,
-    NetworkProbeResult, NetworkProbeRoute, NetworkProbeService, NetworkProbeSnapshot, PublicIpInfo,
-    PublicIpProvider, SystemNetworkSnapshot,
+    NetworkProbeResult, NetworkProbeRoute, NetworkProbeService, NetworkProbeSnapshot,
+    NetworkReachability, PublicIpInfo, PublicIpProvider, SystemNetworkSnapshot,
 };
 pub use network_diagnostics::{
     DiagnosticData, DiagnosticFailure, DiagnosticPlan, DiagnosticReport, DiagnosticRoute,

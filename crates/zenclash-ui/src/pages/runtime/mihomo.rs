@@ -11,6 +11,38 @@ mod maintenance;
 pub(super) use maintenance::CoreReleaseState;
 
 impl RuntimePage {
+    fn stop_managed_core(&mut self, cx: &mut Context<Self>) {
+        if !self.core_session.snapshot().managed {
+            return;
+        }
+        let Some(token) = self.begin_mutation(Page::Mihomo) else {
+            return;
+        };
+        let core = self.core_session.clone();
+        let capture = self.traffic_capture.clone();
+        let data = self.data.clone();
+        let task = self.runtime.spawn(async move {
+            // Stop intent must suppress both crash recovery and network resume.
+            core.maintain(CoreMaintenanceIntent::Stop)
+                .await
+                .map_err(|error| error.to_string())?;
+            match capture
+                .release_owned()
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                zenclash_core::CaptureOutcome::ReconcileNeeded { failure, .. } => Err(failure),
+                _ => Ok(data),
+            }
+        });
+        Self::finish_core_maintenance(
+            task,
+            token,
+            zenclash_i18n::text("automatic.user_stopped"),
+            cx,
+        );
+    }
+
     fn restart_managed_core(&mut self, cx: &mut Context<Self>) {
         if !self.core_session.snapshot().managed {
             self.error = Some(zenclash_i18n::text("core_page.errors.external_restart"));
@@ -22,11 +54,19 @@ impl RuntimePage {
         };
         let client = self.client.clone();
         let core_session = self.core_session.clone();
+        let capture = self.traffic_capture.clone();
         let task = self.runtime.spawn(async move {
             core_session
                 .maintain(CoreMaintenanceIntent::Restart)
                 .await
                 .map_err(|error| error.to_string())?;
+            if let zenclash_core::CaptureOutcome::ReconcileNeeded { failure, .. } = capture
+                .reconcile()
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                return Err(failure);
+            }
             load_page(client, Page::Mihomo).await
         });
         Self::finish_core_maintenance(
@@ -261,18 +301,32 @@ impl RuntimePage {
                         theme,
                     ))
                     .child(
-                        h_flex().justify_end().gap_2().p_4().child(
-                            Button::new("restart-mihomo-core")
-                                .icon(crate::assets::AppIcon::RefreshCw)
-                                .label(zenclash_i18n::text("core_page.maintenance.restart"))
-                                .small()
-                                .outline()
-                                .loading(self.mutating)
-                                .disabled(self.mutating || !managed_process)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.restart_managed_core(cx);
-                                })),
-                        ),
+                        h_flex()
+                            .justify_end()
+                            .gap_2()
+                            .p_4()
+                            .child(
+                                Button::new("stop-mihomo-core")
+                                    .label(zenclash_i18n::text("automatic.stop"))
+                                    .small()
+                                    .outline()
+                                    .disabled(self.mutating || !managed_process)
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.stop_managed_core(cx)),
+                                    ),
+                            )
+                            .child(
+                                Button::new("restart-mihomo-core")
+                                    .icon(crate::assets::AppIcon::RefreshCw)
+                                    .label(zenclash_i18n::text("core_page.maintenance.restart"))
+                                    .small()
+                                    .outline()
+                                    .loading(self.mutating)
+                                    .disabled(self.mutating || !managed_process)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.restart_managed_core(cx);
+                                    })),
+                            ),
                     ),
             )
             .child(self.render_versioned_core_updates(&version.version, managed_process, theme, cx))

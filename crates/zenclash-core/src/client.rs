@@ -8,6 +8,7 @@ use thiserror::Error;
 use crate::{CoreConfigValidator, CoreKind, MihomoEndpoint};
 
 mod api;
+mod connections;
 mod request;
 
 #[cfg(test)]
@@ -61,6 +62,7 @@ pub struct MihomoClient {
     http: reqwest::Client,
     mutation_gate: Arc<tokio::sync::Mutex<()>>,
     config_validator: Option<CoreConfigValidator>,
+    connections: Arc<connections::ConnectionCache>,
 }
 
 impl MihomoClient {
@@ -81,6 +83,7 @@ impl MihomoClient {
             http,
             mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
             config_validator: None,
+            connections: Arc::default(),
         })
     }
 

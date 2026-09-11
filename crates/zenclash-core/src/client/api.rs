@@ -223,31 +223,58 @@ impl MihomoClient {
         self.send_empty(Method::POST, "/cache/fakeip/flush").await
     }
 
-    /// Fetches the current connection snapshot.
+    /// Fetches a connection snapshot shared across callers for up to one second.
     ///
     /// # Errors
     ///
     /// Returns transport, API-status or response-decoding errors.
     pub async fn connections_snapshot(&self) -> MihomoResult<ConnectionsSnapshot> {
-        self.get_json("/connections").await
+        Ok(self.shared_connections().await?.as_ref().clone())
     }
 
-    /// Fetches aggregate connection counters without retaining connection metadata.
+    /// Derives aggregate counters from the shared connection snapshot.
     ///
     /// # Errors
     ///
     /// Returns transport, API-status or response-decoding errors.
     pub async fn connections_summary(&self) -> MihomoResult<ConnectionsSummary> {
-        self.get_json("/connections").await
+        let snapshot = self.shared_connections().await?;
+        Ok(ConnectionsSummary {
+            active_connections: snapshot.connections.len(),
+            download_total: snapshot.download_total,
+            upload_total: snapshot.upload_total,
+            memory: snapshot.memory,
+        })
     }
 
-    /// Fetches only the per-connection fields required by traffic accounting.
+    /// Derives accounting fields from the same snapshot used by live views.
     ///
     /// # Errors
     ///
     /// Returns transport, API-status or response-decoding errors.
     pub async fn traffic_accounting_snapshot(&self) -> MihomoResult<TrafficAccountingSnapshot> {
-        self.get_json("/connections").await
+        let snapshot = self.shared_connections().await?;
+        Ok(TrafficAccountingSnapshot {
+            download_total: snapshot.download_total,
+            upload_total: snapshot.upload_total,
+            connections: snapshot
+                .connections
+                .iter()
+                .map(|connection| crate::TrafficAccountingConnection {
+                    id: connection.id.clone(),
+                    metadata: crate::TrafficAccountingMetadata {
+                        source_ip: connection.metadata.source_ip.clone(),
+                        destination_ip: connection.metadata.destination_ip.clone(),
+                        host: connection.metadata.host.clone(),
+                        process: connection.metadata.process.clone(),
+                    },
+                    upload: connection.upload,
+                    download: connection.download,
+                    start: connection.start.clone(),
+                    outbound: connection.chains.first().cloned().unwrap_or_default(),
+                })
+                .collect(),
+        })
     }
 
     /// Changes Mihomo's outbound mode to `rule`, `global` or `direct`.
@@ -390,7 +417,9 @@ impl MihomoClient {
     pub async fn close_connection(&self, id: &str) -> MihomoResult<()> {
         require_non_empty(id, "连接 ID")?;
         let path = format!("/connections/{}", encode_path_segment(id));
-        self.send_empty(Method::DELETE, &path).await
+        let result = self.send_empty(Method::DELETE, &path).await;
+        self.invalidate_connections();
+        result
     }
 
     /// Requests a proxy-provider refresh.
@@ -439,7 +468,9 @@ impl MihomoClient {
     ///
     /// Returns transport or API-status errors.
     pub async fn close_all_connections(&self) -> MihomoResult<()> {
-        self.send_empty(Method::DELETE, "/connections").await
+        let result = self.send_empty(Method::DELETE, "/connections").await;
+        self.invalidate_connections();
+        result
     }
 
     /// Asks the running Mihomo core to download and install its latest release.

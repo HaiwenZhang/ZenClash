@@ -16,6 +16,7 @@ use zenclash_core::{
 };
 
 mod actions;
+mod automatic;
 mod bootstrap;
 pub(crate) mod platform;
 mod profile_updates;
@@ -334,6 +335,7 @@ impl ZenClashApp {
         app.restore_system_proxy(cx);
         app.start_mode_sync(cx);
         app.start_profile_updates(cx);
+        app.start_automatic_runtime(cx);
         app.start_traffic_history(traffic_history_store);
         app.start_tray_updates(cx);
         app.refresh_tray_menu(cx);

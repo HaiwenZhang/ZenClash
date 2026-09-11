@@ -4,7 +4,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use futures_util::StreamExt;
@@ -179,6 +179,7 @@ async fn run_monitor(
     expected_generation: Arc<AtomicU64>,
     mut generation_updates: watch::Receiver<u64>,
 ) {
+    let mut backoff = crate::websocket::ReconnectBackoff::default();
     loop {
         let generation = *generation_updates.borrow_and_update();
         let mut generation_changed = false;
@@ -210,6 +211,7 @@ async fn run_monitor(
                         Ok(message) if message.is_text() || message.is_binary() => {
                             match serde_json::from_slice::<TrafficFrame>(&message.into_data()) {
                                 Ok(frame) => {
+                                    backoff.reset();
                                     update_frame_for_generation(
                                         &snapshot,
                                         &samples,
@@ -261,6 +263,7 @@ async fn run_monitor(
         }
 
         if generation_changed {
+            backoff.reset();
             continue;
         }
         update_connection_for_generation(
@@ -276,8 +279,9 @@ async fn run_monitor(
                 if changed.is_err() {
                     return;
                 }
+                backoff.reset();
             }
-            () = tokio::time::sleep(Duration::from_secs(2)) => {}
+            () = tokio::time::sleep(backoff.next_delay()) => {}
         }
     }
 }

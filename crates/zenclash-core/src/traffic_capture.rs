@@ -558,7 +558,8 @@ impl CaptureBackend for ProductionCaptureBackend {
                 return Ok(());
             };
             let core = self.core_session.snapshot();
-            let port = if core.running {
+            let running = core.running && !self.core_session.is_shutting_down();
+            let port = if running {
                 self.core_session
                     .client()
                     .runtime_config()
@@ -568,7 +569,7 @@ impl CaptureBackend for ProductionCaptureBackend {
             } else {
                 None
             };
-            tokio::task::spawn_blocking(move || session.reconcile(core.running, port))
+            tokio::task::spawn_blocking(move || session.reconcile(running, port))
                 .await
                 .map_err(|error| format!("系统代理恢复任务异常结束：{error}"))?
                 .map(|_| ())

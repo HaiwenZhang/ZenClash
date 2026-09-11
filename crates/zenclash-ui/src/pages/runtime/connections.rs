@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use gpui_component::menu::{DropdownMenu, PopupMenuItem};
+
 use super::{
     AppContext, Button, ButtonVariants, Context, Disableable, Entity, FluentBuilder, Icon,
     IconName, Input, InputEvent, InputState, InteractiveElement, IntoElement, Page, ParentElement,
@@ -15,6 +17,8 @@ pub(super) struct ConnectionsUiState {
     pub(super) closing: HashSet<String>,
     pub(super) expanded: Option<String>,
     pub(super) page: usize,
+    transport: ConnectionTransport,
+    sort: ConnectionSort,
 }
 
 impl ConnectionsUiState {
@@ -36,6 +40,8 @@ impl ConnectionsUiState {
                 closing: HashSet::new(),
                 expanded: None,
                 page: 0,
+                transport: ConnectionTransport::All,
+                sort: ConnectionSort::Default,
             },
             subscription,
         )
@@ -43,6 +49,64 @@ impl ConnectionsUiState {
 }
 
 impl RuntimePage {
+    fn render_connection_options(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let transport = self.connections.transport;
+        let sort = self.connections.sort;
+        let transport_owner = cx.entity().downgrade();
+        let sort_owner = cx.entity().downgrade();
+        h_flex()
+            .gap_2()
+            .flex_wrap()
+            .child(
+                Button::new("connection-transport")
+                    .label(zenclash_i18n::text(transport.label()))
+                    .small()
+                    .outline()
+                    .dropdown_caret(true)
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for value in ConnectionTransport::ALL {
+                            let owner = transport_owner.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(zenclash_i18n::text(value.label()))
+                                    .checked(value == transport)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = owner.update(cx, |page, cx| {
+                                            page.connections.transport = value;
+                                            page.connections.page = 0;
+                                            cx.notify();
+                                        });
+                                    }),
+                            );
+                        }
+                        menu
+                    }),
+            )
+            .child(
+                Button::new("connection-sort")
+                    .label(zenclash_i18n::text(sort.label()))
+                    .small()
+                    .outline()
+                    .dropdown_caret(true)
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for value in ConnectionSort::ALL {
+                            let owner = sort_owner.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(zenclash_i18n::text(value.label()))
+                                    .checked(value == sort)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = owner.update(cx, |page, cx| {
+                                            page.connections.sort = value;
+                                            page.connections.page = 0;
+                                            cx.notify();
+                                        });
+                                    }),
+                            );
+                        }
+                        menu
+                    }),
+            )
+    }
+
     fn toggle_connection_details(&mut self, id: String, cx: &mut Context<Self>) {
         self.connections.expanded = if self.connections.expanded.as_deref() == Some(id.as_str()) {
             None
@@ -156,19 +220,15 @@ impl RuntimePage {
         };
         let total = data.connections.len();
         let query = normalize_connection_query(&self.connections.filter.read(cx).value());
-        let visible = data
-            .connections
-            .iter()
-            .filter(|connection| connection_matches(connection, &query))
-            .count();
+        let filtered = present_connections(
+            &data.connections,
+            &query,
+            self.connections.transport,
+            self.connections.sort,
+        );
+        let visible = filtered.len();
         let page = list_page(visible, self.connections.page, CONNECTIONS_PER_PAGE);
-        let filtered = data
-            .connections
-            .iter()
-            .filter(|connection| connection_matches(connection, &query))
-            .skip(page.start)
-            .take(page.end - page.start)
-            .collect::<Vec<_>>();
+        let filtered = &filtered[page.start..page.end];
         let previous_page = page.index.saturating_sub(1);
         let next_page = page.index + 1;
         v_flex()
@@ -236,6 +296,7 @@ impl RuntimePage {
                             .on_click(cx.listener(|this, _, _, cx| this.close_all_connections(cx))),
                     ),
             )
+            .child(self.render_connection_options(cx))
             .child(
                 h_flex()
                     .gap_3()
@@ -278,144 +339,127 @@ impl RuntimePage {
                             theme,
                         ))
                     })
-                    .children(
-                        filtered
-                            .into_iter()
-                            .enumerate()
-                            .map(|(offset, connection)| {
-                                let index = page.start + offset;
-                                let id = connection.id.clone();
-                                let closing = self.connections.closing.contains(&id);
-                                let expanded =
-                                    self.connections.expanded.as_deref() == Some(id.as_str());
-                                let host = if connection.metadata.host.is_empty() {
-                                    connection.metadata.destination_ip.clone()
-                                } else {
-                                    connection.metadata.host.clone()
-                                };
-                                let summary = connection_summary(connection);
-                                let detail_id = id.clone();
-                                v_flex()
-                                    .id(("connection-row", index))
-                                    .border_b_1()
-                                    .border_color(theme.border)
+                    .children(filtered.iter().map(|connection| {
+                        let id = connection.id.clone();
+                        let closing = self.connections.closing.contains(&id);
+                        let expanded = self.connections.expanded.as_deref() == Some(id.as_str());
+                        let host = if connection.metadata.host.is_empty() {
+                            connection.metadata.destination_ip.clone()
+                        } else {
+                            connection.metadata.host.clone()
+                        };
+                        let summary = connection_summary(connection);
+                        let detail_id = id.clone();
+                        v_flex()
+                            .id(connection_element_id("connection-row", &id))
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .child(
+                                h_flex()
+                                    .min_h(px(58.))
+                                    .px_4()
+                                    .gap_3()
+                                    .items_center()
+                                    .child(Icon::new(IconName::ExternalLink).size_4())
                                     .child(
-                                        h_flex()
-                                            .min_h(px(58.))
-                                            .px_4()
-                                            .gap_3()
-                                            .items_center()
-                                            .child(Icon::new(IconName::ExternalLink).size_4())
+                                        v_flex()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(div().text_sm().child(format!(
+                                                "{}:{}",
+                                                host, connection.metadata.destination_port
+                                            )))
                                             .child(
-                                                v_flex()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .child(div().text_sm().child(format!(
-                                                        "{}:{}",
-                                                        host, connection.metadata.destination_port
-                                                    )))
-                                                    .child(
-                                                        div()
-                                                            .text_xs()
-                                                            .text_color(theme.muted_foreground)
-                                                            .child(summary),
-                                                    ),
-                                            )
-                                            .child(
-                                                v_flex()
-                                                    .items_end()
+                                                div()
                                                     .text_xs()
-                                                    .child(format!(
-                                                        "↑ {}",
-                                                        format_bytes(connection.upload)
-                                                    ))
-                                                    .child(format!(
-                                                        "↓ {}",
-                                                        format_bytes(connection.download)
-                                                    )),
-                                            )
-                                            .child(
-                                                Button::new(("connection-details", index))
-                                                    .icon(IconName::Eye)
-                                                    .label(zenclash_i18n::text(if expanded {
-                                                        "connections.actions.hide_details"
-                                                    } else {
-                                                        "connections.actions.show_details"
-                                                    }))
-                                                    .ghost()
-                                                    .small()
-                                                    .on_click(cx.listener(
-                                                        move |this, _, _, cx| {
-                                                            this.toggle_connection_details(
-                                                                detail_id.clone(),
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
-                                            )
-                                            .child(
-                                                Button::new(("close-connection", index))
-                                                    .icon(IconName::CircleX)
-                                                    .label(zenclash_i18n::text(
-                                                        "connections.actions.close",
-                                                    ))
-                                                    .ghost()
-                                                    .small()
-                                                    .disabled(self.mutating || closing)
-                                                    .on_click(cx.listener(
-                                                        move |this, _, _, cx| {
-                                                            this.close_connection(id.clone(), cx);
-                                                        },
-                                                    )),
+                                                    .text_color(theme.muted_foreground)
+                                                    .child(summary),
                                             ),
                                     )
-                                    .when(expanded, |this| {
-                                        this.child(
-                                            v_flex()
-                                                .px_12()
-                                                .pb_4()
-                                                .gap_2()
-                                                .child(connection_detail(
-                                                    zenclash_i18n::text(
-                                                        "connections.details.source",
-                                                    ),
-                                                    format!(
-                                                        "{}:{}",
-                                                        connection.metadata.source_ip,
-                                                        connection.metadata.source_port
-                                                    ),
-                                                    theme,
-                                                ))
-                                                .child(connection_detail(
-                                                    zenclash_i18n::text(
-                                                        "connections.details.destination",
-                                                    ),
-                                                    format!(
-                                                        "{}:{}",
-                                                        connection.metadata.destination_ip,
-                                                        connection.metadata.destination_port
-                                                    ),
-                                                    theme,
-                                                ))
-                                                .child(connection_detail(
-                                                    zenclash_i18n::text("connections.details.rule"),
-                                                    format!(
-                                                        "{} · {}",
-                                                        connection.rule, connection.rule_payload
-                                                    ),
-                                                    theme,
-                                                ))
-                                                .child(connection_detail(
-                                                    zenclash_i18n::text(
-                                                        "connections.details.route",
-                                                    ),
-                                                    connection.chains.join(" → "),
-                                                    theme,
-                                                )),
-                                        )
-                                    })
-                            }),
-                    ),
+                                    .child(
+                                        v_flex()
+                                            .items_end()
+                                            .text_xs()
+                                            .child(format!("↑ {}", format_bytes(connection.upload)))
+                                            .child(format!(
+                                                "↓ {}",
+                                                format_bytes(connection.download)
+                                            )),
+                                    )
+                                    .child(
+                                        Button::new(connection_element_id(
+                                            "connection-details",
+                                            &id,
+                                        ))
+                                        .icon(IconName::Eye)
+                                        .label(zenclash_i18n::text(if expanded {
+                                            "connections.actions.hide_details"
+                                        } else {
+                                            "connections.actions.show_details"
+                                        }))
+                                        .ghost()
+                                        .small()
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.toggle_connection_details(
+                                                    detail_id.clone(),
+                                                    cx,
+                                                );
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        Button::new(connection_element_id("close-connection", &id))
+                                            .icon(IconName::CircleX)
+                                            .label(zenclash_i18n::text("connections.actions.close"))
+                                            .ghost()
+                                            .small()
+                                            .disabled(self.mutating || closing)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.close_connection(id.clone(), cx);
+                                            })),
+                                    ),
+                            )
+                            .when(expanded, |this| {
+                                this.child(
+                                    v_flex()
+                                        .px_12()
+                                        .pb_4()
+                                        .gap_2()
+                                        .child(connection_detail(
+                                            zenclash_i18n::text("connections.details.source"),
+                                            format!(
+                                                "{}:{}",
+                                                connection.metadata.source_ip,
+                                                connection.metadata.source_port
+                                            ),
+                                            theme,
+                                        ))
+                                        .child(connection_detail(
+                                            zenclash_i18n::text("connections.details.destination"),
+                                            format!(
+                                                "{}:{}",
+                                                connection.metadata.destination_ip,
+                                                connection.metadata.destination_port
+                                            ),
+                                            theme,
+                                        ))
+                                        .child(connection_detail(
+                                            zenclash_i18n::text("connections.details.rule"),
+                                            format!(
+                                                "{} · {}",
+                                                connection.rule, connection.rule_payload
+                                            ),
+                                            theme,
+                                        ))
+                                        .child(connection_detail(
+                                            zenclash_i18n::text("connections.details.route"),
+                                            connection.chains.join(" → "),
+                                            theme,
+                                        )),
+                                )
+                            })
+                    })),
             )
             .when(page.count > 1, |this| {
                 this.child(
@@ -458,6 +502,110 @@ impl RuntimePage {
             })
             .into_any_element()
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnectionTransport {
+    All,
+    Tcp,
+    Udp,
+}
+
+impl ConnectionTransport {
+    const ALL: [Self; 3] = [Self::All, Self::Tcp, Self::Udp];
+    const fn label(self) -> &'static str {
+        match self {
+            Self::All => "connections.transport.all",
+            Self::Tcp => "connections.transport.tcp",
+            Self::Udp => "connections.transport.udp",
+        }
+    }
+    fn matches(self, network: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Tcp => network.eq_ignore_ascii_case("tcp"),
+            Self::Udp => network.eq_ignore_ascii_case("udp"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnectionSort {
+    Default,
+    Newest,
+    Oldest,
+    Upload,
+    Download,
+    Total,
+}
+
+impl ConnectionSort {
+    const ALL: [Self; 6] = [
+        Self::Default,
+        Self::Newest,
+        Self::Oldest,
+        Self::Upload,
+        Self::Download,
+        Self::Total,
+    ];
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Default => "connections.sort.default",
+            Self::Newest => "connections.sort.newest",
+            Self::Oldest => "connections.sort.oldest",
+            Self::Upload => "connections.sort.upload",
+            Self::Download => "connections.sort.download",
+            Self::Total => "connections.sort.total",
+        }
+    }
+}
+
+fn present_connections<'a>(
+    connections: &'a [zenclash_core::Connection],
+    query: &str,
+    transport: ConnectionTransport,
+    sort: ConnectionSort,
+) -> Vec<&'a zenclash_core::Connection> {
+    let mut result = connections
+        .iter()
+        .filter(|connection| {
+            transport.matches(&connection.metadata.network) && connection_matches(connection, query)
+        })
+        .collect::<Vec<_>>();
+    match sort {
+        ConnectionSort::Default => {}
+        ConnectionSort::Newest | ConnectionSort::Oldest => {
+            result.sort_by_cached_key(|connection| {
+                let timestamp = chrono::DateTime::parse_from_rfc3339(&connection.start)
+                    .ok()
+                    .map(|value| value.timestamp_micros());
+                (
+                    timestamp.is_none(),
+                    timestamp.map(|value| {
+                        if sort == ConnectionSort::Newest {
+                            -i128::from(value)
+                        } else {
+                            i128::from(value)
+                        }
+                    }),
+                    connection.id.clone(),
+                )
+            })
+        }
+        _ => result.sort_by_cached_key(|connection| {
+            let bytes = match sort {
+                ConnectionSort::Upload => u128::from(connection.upload),
+                ConnectionSort::Download => u128::from(connection.download),
+                _ => u128::from(connection.upload) + u128::from(connection.download),
+            };
+            (std::cmp::Reverse(bytes), connection.id.clone())
+        }),
+    }
+    result
+}
+
+fn connection_element_id(action: &'static str, id: &str) -> gpui::ElementId {
+    (gpui::ElementId::from(action), id.to_owned()).into()
 }
 
 fn connection_detail(label: String, value: String, theme: &gpui_component::Theme) -> gpui::Div {
@@ -514,6 +662,102 @@ fn connection_summary(connection: &zenclash_core::Connection) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protocol_filter_and_traffic_sort_apply_before_pagination() {
+        let connections = vec![
+            zenclash_core::Connection {
+                id: "udp".into(),
+                download: 100,
+                metadata: zenclash_core::ConnectionMetadata {
+                    network: "UDP".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            zenclash_core::Connection {
+                id: "small".into(),
+                download: 1,
+                metadata: zenclash_core::ConnectionMetadata {
+                    network: "tcp".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            zenclash_core::Connection {
+                id: "large".into(),
+                download: 50,
+                metadata: zenclash_core::ConnectionMetadata {
+                    network: "TCP".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ];
+        let result = present_connections(
+            &connections,
+            "",
+            ConnectionTransport::Tcp,
+            ConnectionSort::Download,
+        );
+        assert_eq!(
+            result
+                .iter()
+                .map(|value| value.id.as_str())
+                .collect::<Vec<_>>(),
+            ["large", "small"]
+        );
+    }
+
+    #[test]
+    fn newest_sort_compares_instants_and_puts_invalid_dates_last() {
+        let connections = vec![
+            zenclash_core::Connection {
+                id: "invalid".into(),
+                ..Default::default()
+            },
+            zenclash_core::Connection {
+                id: "older".into(),
+                start: "2026-01-01T10:00:00+08:00".into(),
+                ..Default::default()
+            },
+            zenclash_core::Connection {
+                id: "newer".into(),
+                start: "2026-01-01T03:00:00Z".into(),
+                ..Default::default()
+            },
+        ];
+        let result = present_connections(
+            &connections,
+            "",
+            ConnectionTransport::All,
+            ConnectionSort::Newest,
+        );
+        assert_eq!(
+            result
+                .iter()
+                .map(|value| value.id.as_str())
+                .collect::<Vec<_>>(),
+            ["newer", "older", "invalid"]
+        );
+    }
+
+    #[test]
+    fn connection_controls_keep_identity_after_reordering() {
+        let id = connection_element_id("close-connection", "connection-a");
+        assert_eq!(
+            id,
+            connection_element_id("close-connection", "connection-a")
+        );
+        assert_ne!(
+            id,
+            connection_element_id("close-connection", "connection-b")
+        );
+        assert_ne!(
+            id,
+            connection_element_id("connection-details", "connection-a")
+        );
+    }
 
     #[test]
     fn filter_matches_connection_identity_and_route_fields() {

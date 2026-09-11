@@ -8,6 +8,65 @@ use std::{
 use super::{api::encode_path_segment, *};
 use crate::DnsRecordType;
 
+#[tokio::test]
+async fn connection_consumers_share_a_request_and_close_invalidates_the_snapshot() {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut requests = Vec::new();
+        for body in [
+            r#"{"connections":[{"id":"one","download":42}],"downloadTotal":42}"#,
+            "",
+            r#"{"connections":[],"downloadTotal":42}"#,
+        ] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let size = stream.read(&mut request).unwrap();
+            requests.push(
+                String::from_utf8_lossy(&request[..size])
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .to_owned(),
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        }
+        requests
+    });
+    let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+    let other = client.clone();
+    let (live, summary, history) = tokio::join!(
+        client.connections_snapshot(),
+        other.connections_summary(),
+        client.traffic_accounting_snapshot()
+    );
+    assert_eq!(live.unwrap().connections[0].download, 42);
+    assert_eq!(summary.unwrap().active_connections, 1);
+    assert_eq!(history.unwrap().connections[0].download, 42);
+    client.close_connection("one").await.unwrap();
+    assert!(
+        client
+            .connections_snapshot()
+            .await
+            .unwrap()
+            .connections
+            .is_empty()
+    );
+    assert_eq!(
+        server.join().unwrap(),
+        [
+            "GET /connections HTTP/1.1",
+            "DELETE /connections/one HTTP/1.1",
+            "GET /connections HTTP/1.1"
+        ]
+    );
+}
+
 #[test]
 fn encodes_proxy_names_as_single_path_segments() {
     assert_eq!(
