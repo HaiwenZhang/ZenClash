@@ -251,6 +251,12 @@ impl ProxyOperations {
         test_url: Option<&str>,
         timeout_ms: u64,
     ) -> MihomoResult<DelayResult> {
+        let _permit = self
+            .client
+            .delay_gate
+            .acquire()
+            .await
+            .map_err(|error| MihomoError::Process(error.to_string()))?;
         self.client
             .proxy_delay_with_provider(
                 &target.name,
@@ -647,6 +653,68 @@ mod tests {
         assert_eq!(delay.delay, 42);
         assert!(request.starts_with("GET /proxies/HK%2001/delay?"));
         assert!(!request.contains("/group/"));
+    }
+
+    #[tokio::test]
+    async fn cloned_clients_share_measurement_budget_and_cancellation_releases_it() {
+        use tokio::{
+            io::AsyncWriteExt,
+            time::{Duration, timeout},
+        };
+
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let client = MihomoClient::new(MihomoEndpoint::new(
+            format!("http://{}", listener.local_addr().unwrap()),
+            "",
+        ))
+        .unwrap();
+        let reserved = client.delay_gate.acquire_many(15).await.unwrap();
+        let start = || {
+            let operations = ProxyOperations::new(client.clone());
+            tokio::spawn(async move {
+                operations
+                    .measure(
+                        &ProxyDelayTarget {
+                            name: "node".into(),
+                            provider: None,
+                        },
+                        None,
+                        5_000,
+                    )
+                    .await
+            })
+        };
+        let first = start();
+        let (_first_socket, _) = timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let second = start();
+        assert!(
+            timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let (mut socket, _) = timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 12\r\nConnection: close\r\n\r\n{\"delay\":42}").await.unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(2), second)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .delay,
+            42
+        );
+        drop(reserved);
+        assert_eq!(client.delay_gate.available_permits(), 16);
     }
 
     fn proxy_catalog_response() -> String {

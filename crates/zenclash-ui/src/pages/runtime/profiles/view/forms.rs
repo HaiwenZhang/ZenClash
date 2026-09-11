@@ -75,7 +75,7 @@ impl RuntimePage {
                                 .icon(IconName::Inbox)
                                 .label(zenclash_i18n::text("profiles.actions.download_enable"))
                                 .primary()
-                                .loading(self.mutating)
+                                .loading(self.core_busy())
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.add_remote_profile(cx);
                                 })),
@@ -100,7 +100,7 @@ impl RuntimePage {
                             .checked(
                                 self.profile_forms.subscription_route == RemoteProfileRoute::Mihomo,
                             )
-                            .disabled(self.mutating)
+                            .disabled(self.core_busy())
                             .on_click(cx.listener(|this, checked, _, cx| {
                                 this.profile_forms.subscription_route = if *checked {
                                     RemoteProfileRoute::Mihomo
@@ -126,7 +126,7 @@ impl RuntimePage {
                                     == RemoteProfileRoute::DirectWithMihomoFallback,
                             )
                             .disabled(
-                                self.mutating
+                                self.core_busy()
                                     || self.profile_forms.subscription_route
                                         == RemoteProfileRoute::Mihomo,
                             )
@@ -215,7 +215,7 @@ impl RuntimePage {
                             .icon(crate::assets::AppIcon::RefreshCw)
                             .label(zenclash_i18n::text("profiles.actions.reload"))
                             .primary()
-                            .loading(self.mutating)
+                            .loading(self.core_busy())
                             .on_click(cx.listener(|this, _, _, cx| this.reload_profile(cx))),
                     ),
             )

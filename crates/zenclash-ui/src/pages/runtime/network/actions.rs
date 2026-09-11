@@ -4,9 +4,7 @@ use zenclash_core::{
 };
 
 use super::{DnsCacheAction, NetworkPreferenceChange, model};
-use crate::pages::runtime::{
-    ClipboardItem, Context, Page, PreferencesRestored, RuntimeData, RuntimePage,
-};
+use crate::pages::runtime::{ClipboardItem, Context, Page, RuntimeData, RuntimePage};
 
 impl RuntimePage {
     pub(in crate::pages::runtime) fn cancel_network_probe(&mut self) {
@@ -24,7 +22,7 @@ impl RuntimePage {
         }) else {
             return;
         };
-        let generation = self.core_session.snapshot().generation;
+        let generation = self.core_session.generation();
         let mihomo_route = model::network_probe_route(&config, true);
         let dns_name = self.network_probe.dns_name.read(cx).value().to_string();
         let provider = self.preferences.network_ip_provider;
@@ -142,7 +140,7 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok(()) if this.is_page_task_current(token) => {
                         this.notice = Some(match action {
@@ -205,7 +203,10 @@ impl RuntimePage {
             cx.notify();
             return;
         };
-        let Some(token) = self.begin_mutation(Page::Network) else {
+        let Some(token) = self.begin_scoped_mutation(
+            Page::Network,
+            crate::pages::runtime::busy::MutationDomain::Network,
+        ) else {
             return;
         };
         let task = self.runtime.spawn_blocking(move || {
@@ -246,16 +247,22 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
-                    Ok(preferences) if this.is_page_task_current(token) => {
-                        this.preferences = preferences.clone();
-                        this.notice = Some(success);
-                        cx.emit(PreferencesRestored { preferences });
+                    Ok(preferences) => {
+                        if this.is_page_task_current(token) {
+                            this.notice = Some(success);
+                        }
+                        this.accept_preferences(
+                            preferences,
+                            crate::pages::runtime::PreferenceScope::Network,
+                            cx,
+                        );
                         this.cancel_network_probe();
-                        this.refresh_network_probe(cx);
+                        if this.is_page_task_current(token) {
+                            this.refresh_network_probe(cx);
+                        }
                     }
-                    Ok(_) => {}
                     Err(error) => this.set_page_error(token, error),
                 }
                 cx.notify();

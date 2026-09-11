@@ -1,7 +1,12 @@
-use gpui::{AppContext, Context, Entity, SharedString, Window};
+use gpui::{AppContext, Context, Entity, Focusable, SharedString, Window};
 use gpui_component::input::InputState;
 use serde_json::{Map, Number, Value};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
+#[path = "config_inputs/core.rs"]
 mod core;
 
 pub(in crate::pages::runtime) use core::CoreInputs;
@@ -15,6 +20,8 @@ const CONFIG_INPUT_KEYS: &[&str] = &[
     "bind-address",
     "interface-name",
     "log-level",
+    "geodata-mode",
+    "geo-auto-update",
     "dns",
     "hosts",
     "sniffer",
@@ -22,6 +29,9 @@ const CONFIG_INPUT_KEYS: &[&str] = &[
 ];
 
 pub(super) struct ConfigInputs {
+    fields: HashMap<&'static str, InputField>,
+    profile: Option<PathBuf>,
+    reset: bool,
     pub core: CoreInputs,
     pub dns: DnsInputs,
     pub sniffer: SnifferInputs,
@@ -67,16 +77,131 @@ pub(super) struct TunInputs {
     source: Value,
 }
 
+pub(super) struct SubmittedInputs {
+    profile: Option<PathBuf>,
+    values: Vec<(&'static str, String)>,
+}
+
 impl ConfigInputs {
-    pub fn new(config: &Value, window: &mut Window, cx: &mut Context<super::RuntimePage>) -> Self {
-        let mut factory = InputFactory { window, cx };
+    pub fn new(
+        config: &Value,
+        profile: Option<&Path>,
+        window: &mut Window,
+        cx: &mut Context<super::RuntimePage>,
+    ) -> Self {
+        let mut fields = HashMap::new();
+        let mut factory = InputFactory {
+            window,
+            cx,
+            fields: &mut fields,
+        };
+        let core = CoreInputs::new(config, &mut factory);
+        let dns = DnsInputs::new(config, &mut factory);
+        let sniffer = SnifferInputs::new(config, &mut factory);
+        let tun = TunInputs::new(config, &mut factory);
         Self {
-            core: CoreInputs::new(config, &mut factory),
-            dns: DnsInputs::new(config, &mut factory),
-            sniffer: SnifferInputs::new(config, &mut factory),
-            tun: TunInputs::new(config, &mut factory),
+            core,
+            dns,
+            sniffer,
+            tun,
+            fields,
+            profile: profile.map(Path::to_path_buf),
+            reset: false,
         }
     }
+
+    pub(super) fn is_for_profile(&self, profile: Option<&Path>) -> bool {
+        self.profile.as_deref() == profile
+    }
+
+    pub(super) fn submitted(&self, patch: &Value, cx: &gpui::App) -> SubmittedInputs {
+        SubmittedInputs {
+            profile: self.profile.clone(),
+            values: self
+                .fields
+                .iter()
+                .filter(|(key, _)| patch.pointer(key).is_some())
+                .map(|(&key, field)| (key, field.input.read(cx).value().to_string()))
+                .collect(),
+        }
+    }
+
+    pub(super) fn accept_submitted(&mut self, submitted: SubmittedInputs, cx: &gpui::App) {
+        if self.profile != submitted.profile {
+            return;
+        }
+        for (key, value) in submitted.values {
+            if let Some(field) = self.fields.get_mut(key) {
+                field.baseline.accept(&field.input.read(cx).value(), &value);
+            }
+        }
+    }
+
+    pub(super) fn reset_on_next_refresh(&mut self) {
+        self.reset = true;
+    }
+
+    pub(super) fn refresh(
+        &mut self,
+        config: &Value,
+        profile: Option<&Path>,
+        window: &mut Window,
+        cx: &mut Context<super::RuntimePage>,
+    ) {
+        let reset = self.reset || self.profile.as_deref() != profile;
+        let focused = reset
+            .then(|| {
+                self.fields.iter().find_map(|(&key, field)| {
+                    field
+                        .input
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window)
+                        .then_some(key)
+                })
+            })
+            .flatten();
+        if reset {
+            self.fields.clear();
+        }
+        let mut factory = InputFactory {
+            window,
+            cx,
+            fields: &mut self.fields,
+        };
+        self.core = CoreInputs::new(config, &mut factory);
+        self.dns = DnsInputs::new(config, &mut factory);
+        self.sniffer = SnifferInputs::new(config, &mut factory);
+        self.tun = TunInputs::new(config, &mut factory);
+        if let Some(field) = focused.and_then(|key| self.fields.get(key)) {
+            field.input.update(cx, |input, cx| input.focus(window, cx));
+        }
+        self.profile = profile.map(Path::to_path_buf);
+        self.reset = false;
+    }
+}
+
+#[derive(Default)]
+struct FieldBaseline(String);
+
+impl FieldBaseline {
+    fn accept(&mut self, current: &str, submitted: &str) {
+        if current == submitted {
+            self.0 = submitted.to_owned();
+        }
+    }
+
+    fn refresh(&mut self, current: &str, incoming: String) -> Option<String> {
+        let replace = current != incoming && current == self.0;
+        self.0 = incoming;
+        replace.then(|| self.0.clone())
+    }
+}
+
+struct InputField {
+    input: Entity<InputState>,
+    baseline: FieldBaseline,
+    placeholder: SharedString,
 }
 
 pub(super) fn config_input_snapshot(config: Value) -> Value {
@@ -102,19 +227,71 @@ pub(super) fn config_source(config: &Value, keys: &[&str]) -> Value {
 pub(super) struct InputFactory<'a, 'b> {
     window: &'a mut Window,
     cx: &'a mut Context<'b, super::RuntimePage>,
+    fields: &'a mut HashMap<&'static str, InputField>,
 }
 
 impl InputFactory<'_, '_> {
     pub(super) fn single(
         &mut self,
+        key: &'static str,
         value: String,
         placeholder: impl Into<SharedString>,
     ) -> Entity<InputState> {
-        input(value, placeholder.into(), false, self.window, self.cx)
+        self.field(key, value, placeholder.into(), false)
     }
 
-    fn multi(&mut self, value: String, placeholder: impl Into<SharedString>) -> Entity<InputState> {
-        input(value, placeholder.into(), true, self.window, self.cx)
+    fn multi(
+        &mut self,
+        key: &'static str,
+        value: String,
+        placeholder: impl Into<SharedString>,
+    ) -> Entity<InputState> {
+        self.field(key, value, placeholder.into(), true)
+    }
+
+    fn field(
+        &mut self,
+        key: &'static str,
+        value: String,
+        placeholder: SharedString,
+        multiline: bool,
+    ) -> Entity<InputState> {
+        if let Some(field) = self.fields.get_mut(key) {
+            let current = field.input.read(self.cx).value();
+            if let Some(value) = field.baseline.refresh(&current, value) {
+                field.input.update(self.cx, |input, cx| {
+                    let focused = input.focus_handle(cx).is_focused(self.window);
+                    let cursor = input.cursor_position();
+                    input.set_value(value, self.window, cx);
+                    if focused {
+                        input.set_cursor_position(cursor, self.window, cx);
+                    }
+                });
+            }
+            if field.placeholder != placeholder {
+                field.input.update(self.cx, |input, cx| {
+                    input.set_placeholder(placeholder.clone(), self.window, cx)
+                });
+                field.placeholder = placeholder;
+            }
+            return field.input.clone();
+        }
+        let input = input(
+            value.clone(),
+            placeholder.clone(),
+            multiline,
+            self.window,
+            self.cx,
+        );
+        self.fields.insert(
+            key,
+            InputField {
+                input: input.clone(),
+                baseline: FieldBaseline(value),
+                placeholder,
+            },
+        );
+        input
     }
 }
 
@@ -122,55 +299,72 @@ impl DnsInputs {
     fn new(config: &Value, factory: &mut InputFactory<'_, '_>) -> Self {
         Self {
             enhanced_mode: factory.single(
+                "/dns/enhanced-mode",
                 config_string(config, "/dns/enhanced-mode", ""),
                 "fake-ip / redir-host / normal",
             ),
             fake_ip_range: factory.single(
+                "/dns/fake-ip-range",
                 config_string(config, "/dns/fake-ip-range", ""),
                 "198.18.0.1/16",
             ),
             fake_ip_filter_mode: factory.single(
+                "/dns/fake-ip-filter-mode",
                 config_string(config, "/dns/fake-ip-filter-mode", ""),
                 "blacklist / whitelist / rule",
             ),
             fake_ip_filter: factory.multi(
+                "/dns/fake-ip-filter",
                 config_lines(config, "/dns/fake-ip-filter"),
                 zenclash_i18n::text("config_inputs.placeholders.one_domain_or_rule"),
             ),
             default_nameserver: factory.multi(
+                "/dns/default-nameserver",
                 config_lines(config, "/dns/default-nameserver"),
                 zenclash_i18n::text("config_inputs.placeholders.one_ip_dns"),
             ),
             nameserver: factory.multi(
+                "/dns/nameserver",
                 config_lines(config, "/dns/nameserver"),
                 zenclash_i18n::text("config_inputs.placeholders.one_dns"),
             ),
             proxy_server_nameserver: factory.multi(
+                "/dns/proxy-server-nameserver",
                 config_lines(config, "/dns/proxy-server-nameserver"),
                 zenclash_i18n::text("config_inputs.placeholders.proxy_resolver"),
             ),
             direct_nameserver: factory.multi(
+                "/dns/direct-nameserver",
                 config_lines(config, "/dns/direct-nameserver"),
                 zenclash_i18n::text("config_inputs.placeholders.direct_resolver"),
             ),
-            fallback: factory.multi(config_lines(config, "/dns/fallback"), "Fallback DNS"),
+            fallback: factory.multi(
+                "/dns/fallback",
+                config_lines(config, "/dns/fallback"),
+                "Fallback DNS",
+            ),
             fallback_geoip_code: factory.single(
+                "/dns/fallback-filter/geoip-code",
                 config_string(config, "/dns/fallback-filter/geoip-code", ""),
                 "CN",
             ),
             fallback_ipcidr: factory.multi(
+                "/dns/fallback-filter/ipcidr",
                 config_lines(config, "/dns/fallback-filter/ipcidr"),
                 zenclash_i18n::text("config_inputs.placeholders.one_cidr"),
             ),
             fallback_domain: factory.multi(
+                "/dns/fallback-filter/domain",
                 config_lines(config, "/dns/fallback-filter/domain"),
                 zenclash_i18n::text("config_inputs.placeholders.one_domain_rule"),
             ),
             nameserver_policy: factory.multi(
+                "/dns/nameserver-policy",
                 config_mapping(config, "/dns/nameserver-policy"),
                 zenclash_i18n::text("config_inputs.placeholders.dns_mapping"),
             ),
             hosts: factory.multi(
+                "/hosts",
                 config_mapping(config, "/hosts"),
                 zenclash_i18n::text("config_inputs.placeholders.address_mapping"),
             ),
@@ -316,30 +510,37 @@ impl SnifferInputs {
     fn new(config: &Value, factory: &mut InputFactory<'_, '_>) -> Self {
         Self {
             http_ports: factory.single(
+                "/sniffer/sniff/HTTP/ports",
                 config_list_csv(config, "/sniffer/sniff/HTTP/ports"),
                 "80, 8080-8880",
             ),
             tls_ports: factory.single(
+                "/sniffer/sniff/TLS/ports",
                 config_list_csv(config, "/sniffer/sniff/TLS/ports"),
                 "443, 8443",
             ),
             quic_ports: factory.single(
+                "/sniffer/sniff/QUIC/ports",
                 config_list_csv(config, "/sniffer/sniff/QUIC/ports"),
                 "443, 8443",
             ),
             skip_domain: factory.multi(
+                "/sniffer/skip-domain",
                 config_lines(config, "/sniffer/skip-domain"),
                 zenclash_i18n::text("config_inputs.placeholders.one_domain"),
             ),
             force_domain: factory.multi(
+                "/sniffer/force-domain",
                 config_lines(config, "/sniffer/force-domain"),
                 zenclash_i18n::text("config_inputs.placeholders.one_domain"),
             ),
             skip_dst_address: factory.multi(
+                "/sniffer/skip-dst-address",
                 config_lines(config, "/sniffer/skip-dst-address"),
                 zenclash_i18n::text("config_inputs.placeholders.one_address"),
             ),
             skip_src_address: factory.multi(
+                "/sniffer/skip-src-address",
                 config_lines(config, "/sniffer/skip-src-address"),
                 zenclash_i18n::text("config_inputs.placeholders.one_address"),
             ),
@@ -410,26 +611,32 @@ impl TunInputs {
     fn new(config: &Value, factory: &mut InputFactory<'_, '_>) -> Self {
         Self {
             stack: factory.single(
+                "/tun/stack",
                 config_string(config, "/tun/stack", ""),
                 "gvisor / mixed / system",
             ),
             device: factory.single(
+                "/tun/device",
                 config_string(config, "/tun/device", ""),
                 zenclash_i18n::text("config_inputs.placeholders.tun_device"),
             ),
             mtu: factory.single(
+                "/tun/mtu",
                 config_number_or_empty(config, "/tun/mtu"),
                 zenclash_i18n::text("config_inputs.placeholders.default_mtu"),
             ),
             dns_hijack: factory.single(
+                "/tun/dns-hijack",
                 config_list_csv(config, "/tun/dns-hijack"),
                 "any:53, tcp://any:53",
             ),
             route_include_address: factory.multi(
+                "/tun/route-address",
                 config_lines(config, "/tun/route-address"),
                 zenclash_i18n::text("config_inputs.placeholders.one_cidr"),
             ),
             route_exclude_address: factory.multi(
+                "/tun/route-exclude-address",
                 config_lines(config, "/tun/route-exclude-address"),
                 zenclash_i18n::text("config_inputs.placeholders.one_cidr"),
             ),
@@ -682,15 +889,54 @@ fn config_mapping(config: &Value, pointer: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::FieldBaseline;
     use serde_json::json;
 
     use super::{config_input_snapshot, config_source};
 
     #[test]
+    fn unchanged_refresh_leaves_text_and_selection_untouched() {
+        let mut baseline = FieldBaseline("saved".into());
+        assert_eq!(baseline.refresh("saved", "saved".into()), None);
+    }
+
+    #[test]
+    fn background_refresh_preserves_edits_and_accepts_save_acknowledgements() {
+        let mut baseline = FieldBaseline("original".into());
+        assert_eq!(baseline.refresh("editing", "remote".into()), None);
+        assert_eq!(baseline.refresh("editing", "editing".into()), None);
+        assert_eq!(
+            baseline.refresh("editing", "next remote".into()),
+            Some("next remote".into())
+        );
+    }
+
+    #[test]
+    fn typing_after_submit_survives_the_older_save_readback() {
+        let mut baseline = FieldBaseline("original".into());
+        assert_eq!(baseline.refresh("newer typing", "submitted".into()), None);
+        assert_eq!(baseline.refresh("newer typing", "submitted".into()), None);
+    }
+
+    #[test]
+    fn acknowledged_input_is_normalized_without_discarding_later_typing() {
+        let mut baseline = FieldBaseline("old".into());
+        baseline.accept("  saved  ", "  saved  ");
+        assert_eq!(
+            baseline.refresh("  saved  ", "saved".into()),
+            Some("saved".into())
+        );
+        baseline.accept("new typing", "submitted");
+        assert_eq!(baseline.refresh("new typing", "submitted".into()), None);
+    }
+
+    #[test]
     fn input_snapshot_discards_large_runtime_only_sections() {
         let snapshot = config_input_snapshot(json!({
             "mixed-port": 7890,
-            "dns": { "nameserver": ["1.1.1.1"] },
+            "geodata-mode": false,
+            "geo-auto-update": true,
+            "dns": { "enable": false, "nameserver": ["1.1.1.1"] },
             "rules": ["DOMAIN-SUFFIX,example.com,DIRECT"],
             "proxies": [{ "name": "large-runtime-section" }]
         }));
@@ -700,6 +946,9 @@ mod tests {
             snapshot.pointer("/dns/nameserver/0"),
             Some(&json!("1.1.1.1"))
         );
+        assert_eq!(snapshot.pointer("/dns/enable"), Some(&json!(false)));
+        assert_eq!(snapshot.get("geodata-mode"), Some(&json!(false)));
+        assert_eq!(snapshot.get("geo-auto-update"), Some(&json!(true)));
         assert!(snapshot.get("rules").is_none());
         assert!(snapshot.get("proxies").is_none());
     }

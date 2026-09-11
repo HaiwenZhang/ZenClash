@@ -19,24 +19,43 @@ pub(in crate::pages::runtime) struct CoreInputs {
 impl CoreInputs {
     pub(super) fn new(config: &Value, factory: &mut InputFactory<'_, '_>) -> Self {
         Self {
-            port: factory.single(config_number_or_empty(config, "/port"), "0 - 65535"),
-            socks_port: factory.single(config_number_or_empty(config, "/socks-port"), "0 - 65535"),
+            port: factory.single(
+                "/port",
+                config_number_or_empty(config, "/port"),
+                "0 - 65535",
+            ),
+            socks_port: factory.single(
+                "/socks-port",
+                config_number_or_empty(config, "/socks-port"),
+                "0 - 65535",
+            ),
             mixed_port: factory.single(
+                "/mixed-port",
                 config_number_or_empty(config, "/mixed-port"),
                 zenclash_i18n::text("config_inputs.placeholders.mixed_port"),
             ),
-            redir_port: factory.single(config_number_or_empty(config, "/redir-port"), "0 - 65535"),
-            tproxy_port: factory
-                .single(config_number_or_empty(config, "/tproxy-port"), "0 - 65535"),
+            redir_port: factory.single(
+                "/redir-port",
+                config_number_or_empty(config, "/redir-port"),
+                "0 - 65535",
+            ),
+            tproxy_port: factory.single(
+                "/tproxy-port",
+                config_number_or_empty(config, "/tproxy-port"),
+                "0 - 65535",
+            ),
             bind_address: factory.single(
+                "/bind-address",
                 config_string(config, "/bind-address", ""),
                 "* / 127.0.0.1 / 0.0.0.0",
             ),
             interface_name: factory.single(
+                "/interface-name",
                 config_string(config, "/interface-name", ""),
                 zenclash_i18n::text("config_inputs.placeholders.automatic_interface"),
             ),
             log_level: factory.single(
+                "/log-level",
                 config_string(config, "/log-level", ""),
                 "silent / error / warning / info / debug",
             ),

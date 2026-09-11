@@ -242,8 +242,8 @@ impl RuntimePage {
                         .icon(IconName::Check)
                         .label(zenclash_i18n::text("dns.policy.save"))
                         .primary()
-                        .loading(self.mutating)
-                        .disabled(self.mutating)
+                        .loading(self.core_busy())
+                        .disabled(self.core_busy())
                         .on_click(cx.listener(|this, _, _, cx| {
                             match this.config_inputs.dns.patch(cx) {
                                 Ok(patch) => this.apply_controlled_config(

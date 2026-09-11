@@ -88,7 +88,7 @@ impl RuntimePage {
                         "DOMAIN",
                         RulesetBehavior::Domain,
                         self.ruleset.behavior,
-                        self.mutating,
+                        self.core_busy(),
                         cx,
                     ))
                     .child(behavior_button(
@@ -96,7 +96,7 @@ impl RuntimePage {
                         "IPCIDR",
                         RulesetBehavior::IpCidr,
                         self.ruleset.behavior,
-                        self.mutating,
+                        self.core_busy(),
                         cx,
                     ))
                     .child(behavior_button(
@@ -104,7 +104,7 @@ impl RuntimePage {
                         "CLASSICAL",
                         RulesetBehavior::Classical,
                         self.ruleset.behavior,
-                        self.mutating,
+                        self.core_busy(),
                         cx,
                     )),
             )
@@ -132,7 +132,8 @@ impl RuntimePage {
                             .small()
                             .outline()
                             .disabled(
-                                self.mutating || !self.core_kind.capabilities().ruleset_conversion,
+                                self.core_busy()
+                                    || !self.core_kind.capabilities().ruleset_conversion,
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.choose_ruleset(cx);
@@ -144,9 +145,9 @@ impl RuntimePage {
                             .label(zenclash_i18n::text("resources.ruleset.convert"))
                             .small()
                             .primary()
-                            .loading(self.mutating)
+                            .loading(self.core_busy())
                             .disabled(
-                                self.mutating
+                                self.core_busy()
                                     || self.ruleset.source.is_none()
                                     || !self.core_kind.capabilities().ruleset_conversion,
                             )
@@ -199,7 +200,7 @@ impl RuntimePage {
                                     .label(zenclash_i18n::text("resources.ruleset.export"))
                                     .small()
                                     .outline()
-                                    .disabled(self.mutating)
+                                    .disabled(self.core_busy())
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.choose_ruleset_export(cx);
                                     })),
@@ -308,7 +309,7 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok(conversion) if this.is_page_task_current(token) => {
                         this.notice = Some(zenclash_i18n::text_with(
@@ -388,7 +389,7 @@ impl RuntimePage {
         token: super::super::PageTaskToken,
         cx: &mut Context<Self>,
     ) {
-        let Some(_) = self.begin_mutation(Page::Resources) else {
+        let Some(mutation_token) = self.begin_mutation(Page::Resources) else {
             return;
         };
         let display_path = path.display().to_string();
@@ -411,7 +412,7 @@ impl RuntimePage {
                     })
                 });
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(mutation_token);
                 match result {
                     Ok(()) if this.is_page_task_current(token) => {
                         this.notice = Some(zenclash_i18n::text_with(

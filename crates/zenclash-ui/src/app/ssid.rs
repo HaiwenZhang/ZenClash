@@ -6,6 +6,7 @@ use zenclash_core::SsidSwitchState;
 impl ZenClashApp {
     pub(super) fn start_ssid_switching(&self, cx: &mut Context<Self>) {
         let runtime = self.runtime.clone();
+        let core = self.core_session.clone();
         cx.spawn(async move |this, cx| {
             let mut policy = SsidSwitchState::default();
             let mut observation = None;
@@ -47,6 +48,12 @@ impl ZenClashApp {
                     observation = revision;
                     ticks = 0;
                 }
+                let core_snapshot = if rules.enabled {
+                    let core = core.clone();
+                    runtime.spawn_blocking(move || core.snapshot()).await.ok()
+                } else {
+                    None
+                };
                 let _ = this.update(cx, |this, cx| {
                     let controllers = this.controllers_page.read(cx);
                     if this.quit_state != QuitState::Idle
@@ -59,8 +66,12 @@ impl ZenClashApp {
                         // probe is busy; its completion must not override a manual profile.
                         return;
                     }
-                    let core = this.core_session.snapshot();
-                    let local = !controllers.is_remote() && core.managed && core.running;
+                    let local = !controllers.is_remote()
+                        && core_snapshot.is_some_and(|snapshot| {
+                            snapshot.managed
+                                && snapshot.running
+                                && snapshot.generation == core.generation()
+                        });
                     // Profile IDs are stable file stems in the managed profile store.
                     let current = this
                         .profile_path

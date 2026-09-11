@@ -289,7 +289,9 @@ impl RuntimePage {
                         .label(zenclash_i18n::text("traffic.actions.clear"))
                         .small()
                         .ghost()
-                        .disabled(self.mutating)
+                        .disabled(self.mutation_busy(
+                            crate::pages::runtime::busy::MutationDomain::TrafficHistory,
+                        ))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.request_clear_traffic_history(cx);
                         })),

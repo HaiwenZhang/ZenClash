@@ -140,6 +140,7 @@ pub struct ZenClashApp {
     network_tray: Option<NetworkTrayIcon>,
     preferences_store: Option<AppPreferencesStore>,
     preferences: AppPreferences,
+    preferences_save_task: Option<tokio::task::JoinHandle<()>>,
     restart_after_exit: Arc<parking_lot::Mutex<Option<PathBuf>>>,
     log_monitor: Arc<LogMonitor>,
     traffic_history_policy: Arc<traffic_history::TrafficHistoryPolicy>,
@@ -357,6 +358,7 @@ impl ZenClashApp {
             network_tray,
             preferences_store,
             preferences,
+            preferences_save_task: None,
             restart_after_exit,
             log_monitor,
             traffic_history_policy,
@@ -428,9 +430,9 @@ impl ZenClashApp {
         cx.subscribe(
             runtime_page,
             move |this, _, event: &PreferencesRestored, cx| {
-                let locale_changed = this.preferences.language != event.preferences.language;
-                this.preferences = event.preferences.clone();
-                if locale_changed {
+                let previous_language = this.preferences.language;
+                event.scope.apply(&mut this.preferences, &event.preferences);
+                if previous_language != this.preferences.language {
                     zenclash_i18n::set_locale(this.preferences.language.locale());
                     bootstrap::refresh_native_app_menu(cx);
                     this.proxies_page.update(cx, |_, cx| cx.notify());
@@ -448,28 +450,36 @@ impl ZenClashApp {
                         });
                     });
                 }
-                this.traffic_history_policy.update(&this.preferences);
-                if let Err(error) = bootstrap::configure_log_monitor(
-                    &this.log_monitor,
-                    this.preferences_store.as_ref(),
-                    &this.preferences,
+                use crate::pages::runtime::PreferenceScope;
+                if matches!(
+                    event.scope,
+                    PreferenceScope::Restore | PreferenceScope::TrafficHistory
                 ) {
-                    tracing::warn!(%error, "failed to apply restored log persistence settings");
+                    this.traffic_history_policy.update(&this.preferences);
                 }
-                if let Some(tray) = &this.network_tray
-                    && let Err(error) = tray.set_visible(this.preferences.traffic_tray_visible)
-                {
-                    tracing::warn!(%error, "failed to apply restored tray visibility");
+                if event.scope == PreferenceScope::Restore {
+                    if let Err(error) = bootstrap::configure_log_monitor(
+                        &this.log_monitor,
+                        this.preferences_store.as_ref(),
+                        &this.preferences,
+                    ) {
+                        tracing::warn!(%error, "failed to apply restored log persistence settings");
+                    }
+                    if let Some(tray) = &this.network_tray
+                        && let Err(error) = tray.set_visible(this.preferences.traffic_tray_visible)
+                    {
+                        tracing::warn!(%error, "failed to apply restored tray visibility");
+                    }
+                    let appearance = this.preferences.appearance;
+                    let _ = cx.update_window(this.main_window, move |_, window, cx| {
+                        let mode = match appearance {
+                            AppearancePreference::System => ThemeMode::from(window.appearance()),
+                            AppearancePreference::Light => ThemeMode::Light,
+                            AppearancePreference::Dark => ThemeMode::Dark,
+                        };
+                        apply_zen_theme(mode, Some(window), cx);
+                    });
                 }
-                let appearance = this.preferences.appearance;
-                let _ = cx.update_window(this.main_window, move |_, window, cx| {
-                    let mode = match appearance {
-                        AppearancePreference::System => ThemeMode::from(window.appearance()),
-                        AppearancePreference::Light => ThemeMode::Light,
-                        AppearancePreference::Dark => ThemeMode::Dark,
-                    };
-                    apply_zen_theme(mode, Some(window), cx);
-                });
                 this.refresh_tray_menu(cx);
                 cx.notify();
             },

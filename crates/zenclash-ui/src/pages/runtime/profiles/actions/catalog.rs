@@ -151,7 +151,7 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok(()) if this.is_page_task_current(token) => {
                         this.reload_profile_catalog(cx);
@@ -205,7 +205,7 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok(()) => {
                         this.reload_profile_catalog(cx);
@@ -252,11 +252,11 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok(outcome) => {
                         let is_profile_page = match outcome.refresh {
-                            Ok(data) => this.replace_page_data(token, data),
+                            Ok(data) => this.replace_page_data(token, data, cx),
                             Err(error) => {
                                 this.set_page_error(
                                     token,
@@ -310,7 +310,7 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok(()) => {
                         this.reload_profile_catalog(cx);

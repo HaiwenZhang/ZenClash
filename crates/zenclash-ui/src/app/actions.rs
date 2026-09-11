@@ -13,17 +13,24 @@ impl ZenClashApp {
         self.begin_quit(None, cx);
     }
 
-    fn update_preferences(&mut self, mutate: impl Fn(&mut AppPreferences)) {
+    fn update_preferences(&mut self, mutate: impl Fn(&mut AppPreferences) + Send + 'static) {
         mutate(&mut self.preferences);
-        let Some(store) = &self.preferences_store else {
+        let Some(store) = self.preferences_store.clone() else {
             return;
         };
-        match store.update(mutate) {
-            Ok(preferences) => self.preferences = preferences,
-            Err(error) => {
-                tracing::warn!(%error, path = %store.path().display(), "failed to update application preferences");
+        let previous = self.preferences_save_task.take();
+        self.preferences_save_task = Some(self.runtime.spawn(async move {
+            if let Some(previous) = previous {
+                let _ = previous.await;
             }
-        }
+            match tokio::task::spawn_blocking(move || store.update(mutate)).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "failed to update application preferences")
+                }
+                Err(error) => tracing::warn!(%error, "preference worker failed"),
+            }
+        }));
     }
 
     pub(super) fn on_navigate_home(

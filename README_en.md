@@ -92,6 +92,8 @@ See [automatic runtime validation](docs/development/automatic-runtime-validation
 
 See [controller and panel validation](docs/development/controller-panel-validation.md) for platform acceptance steps and verification limits.
 
+Per-node latency checks publish progress in batches; leaving the proxy page cancels its reads and per-node checks. Switching runtime pages cancels their old reads, and log filtering reuses results until the data or query changes. Connection filtering and sorting runs in the background after coalescing input, keeping the previous list visible while updating. Expanded proxy groups reuse their sorted indices, invalidating only affected groups when delay results change. Configuration forms read the merged effective configuration. Ordinary refreshes preserve unsaved edits; changing profiles or restoring a backup resets editing state. Ordinary preference saves update only their owned fields. Log, language, traffic history, and network diagnostics preferences have separate busy states. Core and configuration changes remain serialized, and backups exclude these mutations. Log copy and export formatting runs in the background. Log export has its own busy state and does not block core or configuration operations; the displayed log file size follows background observations and may briefly lag. See [UI responsiveness validation](docs/development/ui-responsiveness-validation.md) for behavior, automated checks and manual acceptance steps.
+
 ## Run from Source
 
 ### Requirements

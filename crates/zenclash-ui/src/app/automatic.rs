@@ -76,7 +76,7 @@ impl SourceScanner {
 
 impl ZenClashApp {
     pub(super) fn start_automatic_runtime(&self, cx: &mut Context<Self>) {
-        if !self.core_session.snapshot().managed {
+        if !self.core_session.is_managed() {
             return;
         }
         let runtime = self.runtime.clone();
@@ -92,13 +92,14 @@ impl ZenClashApp {
             loop {
                 let Ok((quitting, profile)) = this.update(cx, |this, _| (this.quit_state != QuitState::Idle, this.profile_path.clone())) else { return; };
                 if quitting { return; }
-                let session = core.snapshot();
+                let kind = core.kind();
+                let generation = core.generation();
                 let store = controlled.clone();
                 let inspected_profile = profile.clone();
                 let scanner = scanner.clone();
                 let scan = runtime.spawn_blocking(move || {
                     let network = NetworkReachability::detect();
-                    let configuration = scanner.lock().scan(&store, session.kind, inspected_profile);
+                    let configuration = scanner.lock().scan(&store, kind, inspected_profile);
                     (network, configuration)
                 }).await;
                 let mut notice = None;
@@ -135,7 +136,7 @@ impl ZenClashApp {
                                     let task_capture = capture.clone();
                                     let task_store = controlled.clone();
                                     let applied = runtime.spawn(async move {
-                                        let result = task_core.restart_changed_source(&task_store, profile, overrides, session.generation, revision).await.map_err(|error| error.to_string());
+                                        let result = task_core.restart_changed_source(&task_store, profile, overrides, generation, revision).await.map_err(|error| error.to_string());
                                         if result.as_ref().is_ok_and(|changed| *changed) || result.is_err() {
                                             let capture = task_capture.reconcile().await.map_err(|error| error.to_string())?;
                                             if let zenclash_core::CaptureOutcome::ReconcileNeeded { failure, .. } = capture { return Err(failure); }

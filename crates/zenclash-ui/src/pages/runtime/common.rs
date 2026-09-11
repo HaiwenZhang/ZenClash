@@ -1,6 +1,6 @@
 use super::{
-    App, FluentBuilder, Icon, IconName, Input, IntoElement, ParentElement, Styled, Switch, Window,
-    div, h_flex, px, v_flex,
+    App, Disableable, FluentBuilder, Icon, IconName, Input, IntoElement, ParentElement, Styled,
+    Switch, Window, div, h_flex, px, v_flex,
 };
 use gpui::SharedString;
 
@@ -159,6 +159,21 @@ pub(super) fn setting_switch<F>(
 where
     F: Fn(&bool, &mut Window, &mut App) + 'static,
 {
+    setting_switch_disabled(label, description, checked, id, theme, false, listener)
+}
+
+pub(super) fn setting_switch_disabled<F>(
+    label: impl Into<gpui::SharedString>,
+    description: impl Into<gpui::SharedString>,
+    checked: bool,
+    id: &'static str,
+    theme: &gpui_component::Theme,
+    disabled: bool,
+    listener: F,
+) -> gpui::AnyElement
+where
+    F: Fn(&bool, &mut Window, &mut App) + 'static,
+{
     let label = label.into();
     let description = description.into();
     h_flex()
@@ -176,7 +191,12 @@ where
                     .child(description),
             ),
         )
-        .child(Switch::new(id).checked(checked).on_click(listener))
+        .child(
+            Switch::new(id)
+                .checked(checked)
+                .disabled(disabled)
+                .on_click(listener),
+        )
         .into_any_element()
 }
 

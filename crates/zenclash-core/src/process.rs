@@ -232,7 +232,20 @@ impl MihomoProcess {
         )
     }
 
+    /// Returns immutable launch metadata without waiting for process transitions.
+    #[must_use]
+    pub const fn launch_config(&self) -> &MihomoLaunchConfig {
+        &self.config
+    }
+
+    /// Copies bounded output history without acquiring the process lifecycle lock.
+    #[must_use]
+    pub fn recent_logs(&self) -> Vec<String> {
+        self.logs.read().iter().cloned().collect()
+    }
+
     /// Checks whether the child has not exited yet.
+    /// Run off the UI thread: a concurrent stop or restart can hold the child lock.
     #[must_use]
     pub fn is_running(&self) -> bool {
         let mut child = self.child.lock();

@@ -14,6 +14,7 @@ use zenclash_core::{
 };
 
 mod actions;
+mod presentation;
 mod view;
 
 const MAX_LOCAL_DELAY_HISTORY: usize = 20;
@@ -27,7 +28,10 @@ pub struct ProxiesPage {
     outbound_mode: String,
     expanded: HashSet<String>,
     proxy_pages: HashMap<String, usize>,
+    group_orders: presentation::GroupOrders,
     testing: HashSet<String>,
+    group_progress: HashMap<String, (usize, usize)>,
+    presentation_tasks: actions::PresentationTasks,
     test_failures: HashMap<String, DelayTestFailure>,
     switching: ProxySelectionState,
     restoring_auto: Option<String>,
@@ -58,7 +62,10 @@ impl ProxiesPage {
             outbound_mode: "rule".into(),
             expanded: HashSet::new(),
             proxy_pages: HashMap::new(),
+            group_orders: presentation::GroupOrders::default(),
             testing: HashSet::new(),
+            group_progress: HashMap::new(),
+            presentation_tasks: actions::PresentationTasks::default(),
             test_failures: HashMap::new(),
             switching: ProxySelectionState::default(),
             restoring_auto: None,
@@ -350,12 +357,24 @@ fn group_has_inflight_test(testing: &HashSet<String>, group: &str) -> bool {
     })
 }
 
-fn take_untested_proxies(testing: &mut HashSet<String>, group: &ProxyGroup) -> Vec<ProxyNode> {
+fn take_untested_proxies(
+    testing: &mut HashSet<String>,
+    group: &ProxyGroup,
+) -> Vec<(usize, ProxyDelayTarget)> {
     group
         .all
         .iter()
-        .filter(|proxy| testing.insert(test_key(&group.name, &proxy.name)))
-        .cloned()
+        .enumerate()
+        .filter(|(_, proxy)| testing.insert(test_key(&group.name, &proxy.name)))
+        .map(|(index, proxy)| {
+            (
+                index,
+                ProxyDelayTarget {
+                    name: proxy.name.clone(),
+                    provider: proxy.provider_name.clone(),
+                },
+            )
+        })
         .collect()
 }
 
@@ -413,10 +432,11 @@ mod tests {
         assert_eq!(
             selected
                 .iter()
-                .map(|proxy| proxy.name.as_str())
+                .map(|(_, proxy)| proxy.name.as_str())
                 .collect::<Vec<_>>(),
             vec!["US"]
         );
+        assert_eq!(selected[0].0, 1);
     }
 
     #[test]

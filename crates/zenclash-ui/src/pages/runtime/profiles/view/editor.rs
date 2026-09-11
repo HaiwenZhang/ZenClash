@@ -140,7 +140,7 @@ impl RuntimePage {
                     .label(zenclash_i18n::text("profiles.actions.cancel"))
                     .small()
                     .ghost()
-                    .disabled(self.mutating)
+                    .disabled(self.core_busy())
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.cancel_edit_remote_profile(cx);
                     })),
@@ -151,7 +151,7 @@ impl RuntimePage {
                     .label(zenclash_i18n::text("profiles.actions.save_request"))
                     .small()
                     .primary()
-                    .loading(self.mutating)
+                    .loading(self.core_busy())
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.save_remote_profile_settings(cx);
                     })),

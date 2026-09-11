@@ -53,10 +53,10 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok(data) => {
-                        if this.replace_page_data(token, data) {
+                        if this.replace_page_data(token, data, cx) {
                             this.notice = Some(match resource {
                                 BuiltinResource::GeoData => {
                                     zenclash_i18n::text("resources.notices.geodata")
@@ -105,10 +105,10 @@ impl RuntimePage {
                 )),
             };
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok(data) => {
-                        if this.replace_page_data(token, data) {
+                        if this.replace_page_data(token, data, cx) {
                             this.notice = Some(zenclash_i18n::text("resources.notices.provider"));
                         }
                     }
@@ -142,10 +142,10 @@ impl RuntimePage {
                 )),
             };
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok(data) => {
-                        if this.replace_page_data(token, data) {
+                        if this.replace_page_data(token, data, cx) {
                             this.notice =
                                 Some(zenclash_i18n::text("resources.notices.healthcheck"));
                         }
@@ -182,7 +182,7 @@ impl RuntimePage {
                 zenclash_i18n::text("resources.providers.proxy"),
                 proxy,
                 false,
-                self.mutating,
+                self.core_busy(),
                 &self.provider_operations,
                 theme,
                 cx,
@@ -191,7 +191,7 @@ impl RuntimePage {
                 zenclash_i18n::text("resources.providers.rule"),
                 rules,
                 true,
-                self.mutating,
+                self.core_busy(),
                 &self.provider_operations,
                 theme,
                 cx,
@@ -295,9 +295,9 @@ impl RuntimePage {
                             .label(zenclash_i18n::text("resources.builtin.update_geodata"))
                             .small()
                             .primary()
-                            .loading(self.mutating)
+                            .loading(self.core_busy())
                             .disabled(
-                                self.mutating || !self.core_kind.capabilities().geodata_update,
+                                self.core_busy() || !self.core_kind.capabilities().geodata_update,
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.update_builtin_resource(BuiltinResource::GeoData, cx);
@@ -310,7 +310,8 @@ impl RuntimePage {
                             .small()
                             .outline()
                             .disabled(
-                                self.mutating || !self.core_kind.capabilities().external_ui_update,
+                                self.core_busy()
+                                    || !self.core_kind.capabilities().external_ui_update,
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.update_builtin_resource(BuiltinResource::ExternalUi, cx);

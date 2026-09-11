@@ -146,7 +146,10 @@ impl RuntimePage {
             cx.notify();
             return;
         };
-        let Some(token) = self.begin_mutation(Page::Traffic) else {
+        let Some(token) = self.begin_scoped_mutation(
+            Page::Traffic,
+            crate::pages::runtime::busy::MutationDomain::TrafficHistory,
+        ) else {
             return;
         };
         self.traffic_history.revision = self.traffic_history.revision.wrapping_add(1);
@@ -171,7 +174,7 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 this.traffic_history.clear_confirmation = false;
                 match result {
                     Ok(()) if this.is_page_task_current(token) => {

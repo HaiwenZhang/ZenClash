@@ -4,6 +4,29 @@ use super::{
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Owns cancellation of the page's read-only request, including when the view is dropped.
+#[derive(Default)]
+pub(super) struct PageReadTask(Option<tokio::task::AbortHandle>);
+
+impl PageReadTask {
+    pub(super) fn replace<T>(&mut self, task: &tokio::task::JoinHandle<T>) {
+        self.cancel();
+        self.0 = Some(task.abort_handle());
+    }
+
+    pub(super) fn cancel(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for PageReadTask {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
 pub(super) async fn load_page(client: MihomoClient, page: Page) -> Result<RuntimeData, String> {
     load_page_with_binary(client, page, None).await
 }
@@ -37,7 +60,7 @@ pub(super) async fn load_page_with_binary(
         Page::Connections | Page::Traffic => client
             .connections_snapshot()
             .await
-            .map(RuntimeData::Connections)
+            .map(|data| RuntimeData::Connections(std::sync::Arc::new(data)))
             .map_err(|error| error.to_string()),
         Page::Rules => client
             .rule_catalog()
@@ -176,6 +199,76 @@ async fn load_settings(client: MihomoClient) -> Result<RuntimeData, String> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn cancelling_a_page_read_closes_a_slow_controller_request() {
+        use tokio::{
+            io::AsyncReadExt,
+            time::{Duration, timeout},
+        };
+
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let client = MihomoClient::new(MihomoEndpoint::new(
+            format!("http://{}", listener.local_addr().unwrap()),
+            "",
+        ))
+        .unwrap();
+        let mut owner = PageReadTask::default();
+        let read = tokio::spawn(load_page(client, Page::Rules));
+        owner.replace(&read);
+        let (mut connection, _) = timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            request.push(
+                timeout(Duration::from_secs(2), connection.read_u8())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        assert!(request.starts_with(b"GET /rules "));
+        owner.cancel();
+        assert!(read.await.unwrap_err().is_cancelled());
+        let mut buffer = [0_u8; 1];
+        assert_eq!(
+            timeout(Duration::from_secs(2), connection.read(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn replacing_a_page_read_cancels_only_the_previous_request() {
+        let mut owner = super::PageReadTask::default();
+        let previous = tokio::spawn(std::future::pending::<()>());
+        let current = tokio::spawn(std::future::pending::<()>());
+        owner.replace(&previous);
+        owner.replace(&current);
+        assert!(previous.await.unwrap_err().is_cancelled());
+        assert!(!current.is_finished());
+        drop(owner);
+        assert!(current.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn invalidating_a_read_leaves_mutation_tasks_running() {
+        let mut owner = super::PageReadTask::default();
+        let read = tokio::spawn(std::future::pending::<()>());
+        let (finish, pending) = tokio::sync::oneshot::channel();
+        let mutation = tokio::spawn(async move { pending.await.unwrap() });
+        owner.replace(&read);
+        owner.cancel();
+        assert!(read.await.unwrap_err().is_cancelled());
+        finish.send(42).unwrap();
+        assert_eq!(mutation.await.unwrap(), 42);
+    }
+
     use std::{
         io::{Read, Write},
         net::TcpListener,

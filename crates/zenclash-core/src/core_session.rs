@@ -490,7 +490,20 @@ impl CoreSession {
         self.lifecycle.read().clone()
     }
 
+    /// Returns process ownership without waiting for a lifecycle transition.
+    #[must_use]
+    pub fn is_managed(&self) -> bool {
+        self.process.is_some()
+    }
+
+    /// Returns the last successful transition generation without inspecting the child.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
     /// Captures ownership, running state, and successful transition generation.
+    /// Run off the UI thread because process inspection can wait for a transition.
     #[must_use]
     pub fn snapshot(&self) -> CoreSessionSnapshot {
         CoreSessionSnapshot {

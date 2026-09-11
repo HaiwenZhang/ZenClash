@@ -23,7 +23,7 @@ pub(super) enum RuntimeData {
         group_count: usize,
         rule_count: usize,
     },
-    Connections(ConnectionsSnapshot),
+    Connections(std::sync::Arc<ConnectionsSnapshot>),
     Rules(RuleCatalog),
     Resources {
         config: RuntimeConfig,
@@ -71,6 +71,7 @@ impl RuntimeData {
 pub(super) struct PageTaskToken {
     pub(super) page: Page,
     pub(super) navigation_generation: u64,
+    pub(super) mutation: Option<super::busy::MutationToken>,
 }
 
 impl PageTaskToken {
@@ -101,6 +102,7 @@ mod tests {
         let token = PageTaskToken {
             page: Page::Profiles,
             navigation_generation: 3,
+            mutation: None,
         };
 
         assert!(!token.is_current(Page::Profiles, 5));
@@ -111,6 +113,7 @@ mod tests {
         let token = PageTaskToken {
             page: Page::Resources,
             navigation_generation: 8,
+            mutation: None,
         };
 
         assert!(token.is_current(Page::Resources, 8));

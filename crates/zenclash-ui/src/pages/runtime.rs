@@ -35,6 +35,7 @@ use crate::app::{HideTrafficIcon, SetDarkTheme, SetLightTheme, SetSystemTheme, S
 
 use super::Page;
 
+mod busy;
 mod common;
 mod config_inputs;
 mod connections;
@@ -86,10 +87,12 @@ pub struct RuntimePage {
     profile_store: Option<ProfileStore>,
     controlled_config_store: ControlledConfigStore,
     controlled_config: Value,
+    effective_config: Value,
     config_inputs: ConfigInputs,
     config_inputs_profile: Option<PathBuf>,
     config_inputs_generation: u64,
     config_inputs_loading: bool,
+    persistent_loading: bool,
     profile_catalog: ProfileCatalog,
     profile_catalog_generation: u64,
     preferences_store: Option<AppPreferencesStore>,
@@ -116,9 +119,10 @@ pub struct RuntimePage {
     ruleset: resources::RulesetUiState,
     navigation_generation: u64,
     load_generation: u64,
+    page_read_task: loader::PageReadTask,
     controlled_config_generation: u64,
     loading: bool,
-    mutating: bool,
+    mutations: busy::MutationState,
     error: Option<String>,
     startup_error: Option<String>,
     notice: Option<String>,
@@ -188,11 +192,16 @@ pub struct RuntimeConfigApplied;
 
 impl EventEmitter<RuntimeConfigApplied> for RuntimePage {}
 
-/// Event emitted after imported application preferences become authoritative.
+/// Event emitted after persisted application preference fields become authoritative.
 #[derive(Clone, Debug)]
 pub struct PreferencesRestored {
-    /// Preferences loaded from the validated backup.
+    /// Fields made authoritative by this operation; only backup restore replaces all fields.
+    pub scope: PreferenceScope,
+    /// Persisted snapshot whose fields are selected by `scope`.
     pub preferences: AppPreferences,
 }
 
 impl EventEmitter<PreferencesRestored> for RuntimePage {}
+
+mod preferences;
+pub use preferences::PreferenceScope;

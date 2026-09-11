@@ -184,6 +184,8 @@ pub struct ProcessStatus {
     pub kind: CoreKind,
     /// Whether ZenClash owns the child process.
     pub managed: bool,
+    /// Last observed live process identifier for a managed core.
+    pub pid: Option<u32>,
     /// Whether the process or external attachment is currently running.
     pub running: bool,
     /// Last successful runtime transition generation.
@@ -221,6 +223,7 @@ impl ProcessStatus {
         Self {
             kind: snapshot.kind,
             managed: snapshot.managed,
+            pid: process.as_ref().and_then(|process| process.pid),
             running: snapshot.running,
             generation: snapshot.generation,
             exit_reason: lifecycle.exit_reason.or_else(|| {
@@ -1199,6 +1202,7 @@ mod tests {
                 value: ProcessStatus {
                     kind: CoreKind::Mihomo,
                     managed: true,
+                    pid: None,
                     running: true,
                     generation: 7,
                     exit_reason: None,

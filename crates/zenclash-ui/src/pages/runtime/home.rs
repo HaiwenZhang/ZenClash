@@ -261,7 +261,7 @@ impl RuntimePage {
             .dropdown_caret(true)
             .tooltip(profile_switch_tooltip)
             .loading(self.home.profile_switching.is_some())
-            .disabled(self.mutating || !can_switch)
+            .disabled(self.core_busy() || !can_switch)
             .dropdown_menu(move |mut menu, _, _| {
                 menu = menu
                     .min_w(px(240.))
@@ -963,8 +963,11 @@ impl RuntimePage {
                     Ok((outcome, preferences)) => {
                         match preferences {
                             Ok(Some(preferences)) => {
-                                this.preferences = preferences.clone();
-                                cx.emit(super::PreferencesRestored { preferences });
+                                this.accept_preferences(
+                                    preferences,
+                                    crate::pages::runtime::PreferenceScope::SystemProxy,
+                                    cx,
+                                );
                             }
                             Ok(None) => {}
                             Err(error) => this.home.action_error = Some(error),
@@ -1608,6 +1611,7 @@ mod tests {
         let process = ProcessStatus {
             kind: zenclash_core::CoreKind::Mihomo,
             managed: true,
+            pid: None,
             running: false,
             generation: 3,
             exit_reason: Some("exit status: 23".into()),

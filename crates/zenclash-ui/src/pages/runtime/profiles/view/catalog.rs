@@ -110,7 +110,7 @@ impl RuntimePage {
                         .label(zenclash_i18n::text("profiles.actions.request_settings"))
                         .small()
                         .ghost()
-                        .disabled(self.mutating)
+                        .disabled(self.core_busy())
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.begin_edit_remote_profile(edit_id.clone(), window, cx);
                         })),
@@ -121,7 +121,7 @@ impl RuntimePage {
                         .label(zenclash_i18n::text("profiles.actions.update"))
                         .small()
                         .outline()
-                        .disabled(self.mutating)
+                        .disabled(self.core_busy())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.update_managed_profile(update_id.clone(), cx);
                         })),
@@ -137,7 +137,7 @@ impl RuntimePage {
                     })
                     .small()
                     .primary()
-                    .disabled(active || self.mutating)
+                    .disabled(active || self.core_busy())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.activate_managed_profile(activate_id.clone(), cx);
                     })),
@@ -148,7 +148,7 @@ impl RuntimePage {
                     .small()
                     .ghost()
                     .danger()
-                    .disabled(active || self.mutating)
+                    .disabled(active || self.core_busy())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.delete_managed_profile(delete_id.clone(), cx);
                     })),
@@ -173,7 +173,7 @@ impl RuntimePage {
             .child(
                 Switch::new(("auto-update-profile", index))
                     .checked(auto_update)
-                    .disabled(self.mutating)
+                    .disabled(self.core_busy())
                     .on_click(cx.listener(move |this, enabled, _, cx| {
                         this.set_profile_update_policy(
                             policy_id.clone(),
@@ -197,7 +197,7 @@ impl RuntimePage {
                     ))
                     .xsmall()
                     .outline()
-                    .disabled(!auto_update || self.mutating)
+                    .disabled(!auto_update || self.core_busy())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.set_profile_update_policy(
                             interval_id.clone(),

@@ -130,8 +130,8 @@ impl RuntimePage {
                         zenclash_i18n::text("tun.permissions.action_install")
                     })
                     .primary()
-                    .loading(self.mutating)
-                    .disabled(self.mutating || granted || !can_request)
+                    .loading(self.core_busy())
+                    .disabled(self.core_busy() || granted || !can_request)
                     .on_click(cx.listener(|this, _, _, cx| this.grant_tun_permissions(cx))),
             ),
         )
@@ -286,12 +286,12 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok(CaptureOutcome::Applied { .. } | CaptureOutcome::Unchanged { .. }) => {
+                        this.reload_controlled_config(cx);
                         if this.is_page_task_current(token) {
                             this.notice = Some(success);
-                            this.reload_controlled_config(cx);
                             this.refresh(cx);
                         }
                     }
@@ -357,8 +357,8 @@ impl RuntimePage {
                         .icon(IconName::Check)
                         .label(zenclash_i18n::text("tun.routes.save"))
                         .primary()
-                        .loading(self.mutating)
-                        .disabled(self.mutating)
+                        .loading(self.core_busy())
+                        .disabled(self.core_busy())
                         .on_click(cx.listener(|this, _, _, cx| {
                             match this.config_inputs.tun.patch(cx) {
                                 Ok(patch) => this.apply_controlled_config(

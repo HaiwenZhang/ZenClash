@@ -1103,6 +1103,9 @@ proxies:
       zh-CN: 新连接使用所选节点；现有连接保持原链路。可查看协议能力并执行真实延迟测试。
       en: New connections use the selected node; existing connections keep their current chains. Review capabilities and run live delay tests.
   actions:
+    testing_progress:
+      zh-CN: "测速中 %{done}/%{total}"
+      en: "Testing %{done}/%{total}"
     sort_latency:
       zh-CN: 按延迟排序
       en: Sort by latency
@@ -1329,6 +1332,9 @@ logs:
     export_dialog_task:
       zh-CN: 日志保存对话框异常结束：%{error}
       en: "The log save dialog ended unexpectedly: %{error}"
+    copy_task:
+      zh-CN: 日志复制任务异常结束：%{error}
+      en: "The log copy task ended unexpectedly: %{error}"
     export_task:
       zh-CN: 日志导出任务异常结束：%{error}
       en: "The log export task ended unexpectedly: %{error}"
@@ -3272,6 +3278,9 @@ backup:
       en: "%{reason}; original disk data was restored, but restoring the core runtime configuration failed: %{error}"
 
 connections:
+  filtering:
+    zh-CN: 正在更新连接列表…
+    en: Updating connections…
   transport:
     all:
       zh-CN: 全部协议
@@ -3366,6 +3375,9 @@ connections:
       zh-CN: 全部连接已关闭
       en: All connections closed
   errors:
+    filter_task:
+      zh-CN: 连接列表处理失败：%{error}
+      en: "Could not prepare the connection list: %{error}"
     close_task:
       zh-CN: 关闭连接任务异常结束：%{error}
       en: "The close-connections task ended unexpectedly: %{error}"

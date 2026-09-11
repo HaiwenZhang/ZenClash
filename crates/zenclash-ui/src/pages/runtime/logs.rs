@@ -1,10 +1,12 @@
+use std::sync::Arc;
+
 use super::{
     AppContext, Button, ClipboardItem, Context, Disableable, Entity, FluentBuilder, IconName,
     Input, InputEvent, InputState, InteractiveElement, IntoElement, LogTimeSource, MihomoLogLevel,
-    Page, ParentElement, PreferencesRestored, RuntimePage, Selectable, Sizable, Styled,
-    Subscription, Window, compact_text, contains_ascii_case_insensitive, div, empty_state,
-    format_bytes, format_log_entries, format_log_entries_support_safe, h_flex, info_row, list_page,
-    metric, pagination_summary, px, setting_card, setting_switch, v_flex,
+    Page, ParentElement, RuntimePage, Selectable, Sizable, Styled, Subscription, Window,
+    compact_text, contains_ascii_case_insensitive, div, empty_state, format_bytes,
+    format_log_entries, format_log_entries_support_safe, h_flex, info_row, list_page, metric,
+    pagination_summary, px, setting_card, v_flex,
 };
 
 const LOGS_PER_PAGE: usize = 100;
@@ -12,9 +14,50 @@ const LOGS_PER_PAGE: usize = 100;
 pub(super) struct LogUiState {
     pub(super) filter: Entity<InputState>,
     pub(super) page: usize,
+    presentation: LogPresentation,
+    copying: bool,
+    exporting: bool,
+}
+
+#[derive(Default)]
+struct LogPresentation {
+    revision: Option<u64>,
+    query: String,
+    entries: Vec<Arc<zenclash_core::LogEntry>>,
+    matches: Vec<usize>,
+}
+
+impl LogPresentation {
+    fn refresh(
+        &mut self,
+        revision: u64,
+        query: String,
+        snapshot: impl FnOnce() -> Vec<Arc<zenclash_core::LogEntry>>,
+    ) {
+        let changed = self.revision != Some(revision);
+        if changed {
+            self.entries = snapshot();
+            self.revision = Some(revision);
+        }
+        if changed || self.query != query {
+            self.query = query;
+            self.matches = self
+                .entries
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|(_, entry)| log_matches(entry, &self.query))
+                .map(|(index, _)| index)
+                .collect();
+        }
+    }
 }
 
 impl LogUiState {
+    pub(super) fn release_results(&mut self) {
+        self.presentation = LogPresentation::default();
+    }
+
     pub(super) fn new(window: &mut Window, cx: &mut Context<RuntimePage>) -> (Self, Subscription) {
         let filter = cx.new(|cx| {
             InputState::new(window, cx)
@@ -26,32 +69,39 @@ impl LogUiState {
                 cx.notify();
             }
         });
-        (Self { filter, page: 0 }, subscription)
+        (
+            Self {
+                filter,
+                page: 0,
+                presentation: LogPresentation::default(),
+                copying: false,
+                exporting: false,
+            },
+            subscription,
+        )
     }
 }
 
 impl RuntimePage {
     pub(super) fn render_logs(
-        &self,
+        &mut self,
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let all_entries = self.log_monitor.shared_entries();
+        let query = normalize_log_query(&self.logs.filter.read(cx).value());
+        self.logs
+            .presentation
+            .refresh(self.log_monitor.revision(), query.clone(), || {
+                self.log_monitor.shared_entries()
+            });
+        let all_entries = &self.logs.presentation.entries;
         let connected = self.log_monitor.connected();
         let persistence = self.log_monitor.persistence_status();
-        let query = normalize_log_query(&self.logs.filter.read(cx).value());
-        let filtered_count = all_entries
-            .iter()
-            .filter(|entry| log_matches(entry, &query))
-            .count();
+        let filtered_count = self.logs.presentation.matches.len();
         let page = list_page(filtered_count, self.logs.page, LOGS_PER_PAGE);
-        let entries = all_entries
+        let entries = self.logs.presentation.matches[page.start..page.end]
             .iter()
-            .filter(|entry| log_matches(entry, &query))
-            .rev()
-            .skip(page.start)
-            .take(page.end - page.start)
-            .map(|entry| entry.as_ref())
+            .map(|&index| all_entries[index].as_ref())
             .collect::<Vec<_>>();
         let previous_page = page.index.saturating_sub(1);
         let next_page = page.index + 1;
@@ -78,7 +128,8 @@ impl RuntimePage {
                             .label(zenclash_i18n::text("logs.actions.export"))
                             .small()
                             .outline()
-                            .disabled(all_entries.is_empty() || self.mutating)
+                            .loading(self.logs.exporting)
+                            .disabled(all_entries.is_empty() || self.logs.exporting)
                             .on_click(cx.listener(|this, _, _, cx| this.choose_log_export(cx))),
                     )
                     .child(
@@ -87,14 +138,11 @@ impl RuntimePage {
                             .label(zenclash_i18n::text("logs.actions.copy_safe"))
                             .small()
                             .outline()
-                            .disabled(all_entries.is_empty())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let payload =
-                                    format_log_entries_support_safe(&this.log_monitor.entries());
-                                cx.write_to_clipboard(ClipboardItem::new_string(payload));
-                                this.notice = Some(zenclash_i18n::text("logs.notices.safe_copied"));
-                                cx.notify();
-                            })),
+                            .loading(self.logs.copying)
+                            .disabled(all_entries.is_empty() || self.logs.copying)
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.copy_support_safe_logs(cx)),
+                            ),
                     )
                     .child(
                         Button::new("clear-logs")
@@ -183,12 +231,13 @@ impl RuntimePage {
         });
 
         setting_card(zenclash_i18n::text("logs.persistence.title"), theme)
-            .child(setting_switch(
+            .child(crate::pages::runtime::common::setting_switch_disabled(
                 zenclash_i18n::text("logs.persistence.enabled.title"),
                 zenclash_i18n::text("logs.persistence.enabled.description"),
                 self.preferences.log_file_enabled,
                 "logs-file-enabled",
                 theme,
+                self.mutation_busy(crate::pages::runtime::busy::MutationDomain::Logs),
                 cx.listener(|this, checked, _, cx| {
                     this.set_log_file_enabled(*checked, cx);
                 }),
@@ -249,18 +298,19 @@ impl RuntimePage {
                             .children([5_u16, 10, 25, 50].into_iter().enumerate().map(
                                 |(index, mebibytes)| {
                                     Button::new(("log-file-limit", index))
-                                        .label(format!("{mebibytes} MiB"))
-                                        .small()
-                                        .outline()
-                                        .selected(
-                                            self.preferences.log_file_max_mebibytes == mebibytes,
-                                        )
-                                        .disabled(
-                                            !self.preferences.log_file_enabled || self.mutating,
-                                        )
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.set_log_file_limit(mebibytes, cx);
-                                        }))
+                                    .label(format!("{mebibytes} MiB"))
+                                    .small()
+                                    .outline()
+                                    .selected(self.preferences.log_file_max_mebibytes == mebibytes)
+                                    .disabled(
+                                        !self.preferences.log_file_enabled
+                                            || self.mutation_busy(
+                                                crate::pages::runtime::busy::MutationDomain::Logs,
+                                            ),
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.set_log_file_limit(mebibytes, cx);
+                                    }))
                                 },
                             )),
                     ),
@@ -302,7 +352,10 @@ impl RuntimePage {
             return;
         };
         let log_path = store.log_file_path();
-        let Some(token) = self.begin_mutation(Page::Logs) else {
+        let Some(token) = self.begin_scoped_mutation(
+            Page::Logs,
+            crate::pages::runtime::busy::MutationDomain::Logs,
+        ) else {
             return;
         };
         let task = self.runtime.spawn_blocking(move || {
@@ -328,23 +381,27 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
-                    Ok(preferences) if this.is_page_task_current(token) => {
+                    Ok(preferences) => {
                         match this.log_monitor.configure_persistence(
                             log_path,
                             preferences.log_file_enabled,
                             preferences.log_file_max_mebibytes,
                         ) {
                             Ok(()) => {
-                                this.preferences = preferences.clone();
-                                this.notice = Some(success);
-                                cx.emit(PreferencesRestored { preferences });
+                                if this.is_page_task_current(token) {
+                                    this.notice = Some(success);
+                                }
+                                this.accept_preferences(
+                                    preferences,
+                                    crate::pages::runtime::PreferenceScope::Logs,
+                                    cx,
+                                );
                             }
                             Err(error) => this.set_page_error(token, error.to_string()),
                         }
                     }
-                    Ok(_) => {}
                     Err(error) => this.set_page_error(token, error),
                 }
                 cx.notify();
@@ -436,56 +493,103 @@ impl RuntimePage {
             }))
     }
 
-    fn choose_log_export(&mut self, cx: &mut Context<Self>) {
+    fn copy_support_safe_logs(&mut self, cx: &mut Context<Self>) {
+        if self.logs.copying {
+            return;
+        }
+        self.logs.copying = true;
         let token = self.page_task_token_for(Page::Logs);
-        let directory = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
-        let receiver = cx.prompt_for_new_path(&directory, Some("zenclash-mihomo.log"));
-        let payload = format_log_entries(&self.log_monitor.entries());
+        let entries = self.log_monitor.shared_entries();
+        let task = self
+            .runtime
+            .spawn_blocking(move || prepare_log_payload(entries, true));
         cx.spawn(async move |this, cx| {
-            let selection = receiver.await;
-            let _ = this.update(cx, |this, cx| match selection {
-                Ok(Ok(Some(path))) if this.is_page_task_current(token) => {
-                    this.write_log_export(path, payload, token, cx);
-                }
-                Ok(Ok(Some(_))) => tracing::info!("discarded log export after leaving logs page"),
-                Ok(Ok(None)) => {}
-                Ok(Err(error)) => {
-                    this.set_page_error(
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.logs.copying = false;
+                match result {
+                    Ok(payload) => {
+                        cx.write_to_clipboard(ClipboardItem::new_string(payload));
+                        if this.is_page_task_current(token) {
+                            this.notice = Some(zenclash_i18n::text("logs.notices.safe_copied"));
+                        }
+                    }
+                    Err(error) => this.set_page_error(
                         token,
                         zenclash_i18n::text_with(
-                            "logs.errors.export_dialog",
+                            "logs.errors.copy_task",
                             &[("error", error.to_string())],
                         ),
-                    );
-                    cx.notify();
+                    ),
                 }
-                Err(error) => {
-                    this.set_page_error(
-                        token,
-                        zenclash_i18n::text_with(
-                            "logs.errors.export_dialog_task",
-                            &[("error", error.to_string())],
-                        ),
-                    );
-                    cx.notify();
-                }
+                cx.notify();
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    fn choose_log_export(&mut self, cx: &mut Context<Self>) {
+        if self.logs.exporting {
+            return;
+        }
+        self.logs.exporting = true;
+        self.error = None;
+        self.notice = None;
+        let token = self.page_task_token_for(Page::Logs);
+        let directory = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
+        let receiver = cx.prompt_for_new_path(&directory, Some("zenclash-mihomo.log"));
+        let entries = self.log_monitor.shared_entries();
+        cx.spawn(async move |this, cx| {
+            let selection = receiver.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Ok(Ok(Some(path))) = &selection
+                    && this.is_page_task_current(token)
+                {
+                    this.write_log_export(path.clone(), entries, token, cx);
+                    return;
+                }
+                this.logs.exporting = false;
+                match selection {
+                    Ok(Ok(Some(_))) => {
+                        tracing::info!("discarded log export after leaving logs page")
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(error)) => {
+                        this.set_page_error(
+                            token,
+                            zenclash_i18n::text_with(
+                                "logs.errors.export_dialog",
+                                &[("error", error.to_string())],
+                            ),
+                        );
+                    }
+                    Err(error) => {
+                        this.set_page_error(
+                            token,
+                            zenclash_i18n::text_with(
+                                "logs.errors.export_dialog_task",
+                                &[("error", error.to_string())],
+                            ),
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn write_log_export(
         &mut self,
         path: std::path::PathBuf,
-        payload: String,
+        entries: Vec<Arc<zenclash_core::LogEntry>>,
         token: super::PageTaskToken,
         cx: &mut Context<Self>,
     ) {
-        let Some(_) = self.begin_mutation(Page::Logs) else {
-            return;
-        };
         let display_path = path.display().to_string();
-        let task = self.runtime.spawn(tokio::fs::write(path, payload));
+        let task = self.runtime.spawn(export_log_entries(path, entries));
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
@@ -504,7 +608,7 @@ impl RuntimePage {
                     })
                 });
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.logs.exporting = false;
                 match result {
                     Ok(()) if this.is_page_task_current(token) => {
                         this.notice = Some(zenclash_i18n::text_with(
@@ -520,6 +624,28 @@ impl RuntimePage {
         })
         .detach();
         cx.notify();
+    }
+}
+
+async fn export_log_entries(
+    path: std::path::PathBuf,
+    entries: Vec<Arc<zenclash_core::LogEntry>>,
+) -> std::io::Result<()> {
+    let payload = tokio::task::spawn_blocking(move || prepare_log_payload(entries, false))
+        .await
+        .map_err(std::io::Error::other)?;
+    tokio::fs::write(path, payload).await
+}
+
+fn prepare_log_payload(entries: Vec<Arc<zenclash_core::LogEntry>>, support_safe: bool) -> String {
+    let entries = entries
+        .into_iter()
+        .map(|entry| entry.as_ref().clone())
+        .collect::<Vec<_>>();
+    if support_safe {
+        format_log_entries_support_safe(&entries)
+    } else {
+        format_log_entries(&entries)
     }
 }
 
@@ -645,6 +771,83 @@ fn json_value_matches(value: &serde_json::Value, query: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn log_fixture(payload: &str) -> Arc<zenclash_core::LogEntry> {
+        Arc::new(zenclash_core::LogEntry {
+            payload: payload.into(),
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn export_reports_write_failure_and_next_export_preserves_snapshot() {
+        let directory = std::env::temp_dir().join(format!(
+            "zenclash-log-export-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let entries = vec![log_fixture("first entry"), log_fixture("second entry")];
+        let expected = prepare_log_payload(entries.clone(), false);
+        let failed = export_log_entries(directory.clone(), entries.clone()).await;
+        let path = directory.join("export.log");
+        let saved = export_log_entries(path.clone(), entries).await;
+        let content = tokio::fs::read_to_string(&path).await;
+        std::fs::remove_dir_all(directory).unwrap();
+
+        assert!(failed.is_err(), "writing a directory must report an error");
+        saved.unwrap();
+        assert_eq!(content.unwrap(), expected);
+    }
+
+    #[test]
+    fn background_payload_preserves_export_and_redacts_support_copy() {
+        let entries = vec![
+            log_fixture("private-target.example"),
+            log_fixture("second entry"),
+        ];
+        let raw = prepare_log_payload(entries.clone(), false);
+        let safe = prepare_log_payload(entries, true);
+        assert!(raw.find("private-target.example").unwrap() < raw.find("second entry").unwrap());
+        assert!(!safe.contains("private-target.example"));
+        assert!(!safe.contains("second entry"));
+        assert_eq!(safe.lines().count(), 2);
+    }
+
+    #[test]
+    fn redraw_and_search_reuse_the_same_log_snapshot() {
+        let mut presentation = LogPresentation::default();
+        presentation.refresh(1, String::new(), || {
+            vec![log_fixture("old"), log_fixture("new")]
+        });
+        assert_eq!(presentation.matches, [1, 0]);
+        presentation.refresh(1, String::new(), || {
+            panic!("redraw fetched another snapshot")
+        });
+        presentation.refresh(1, "old".into(), || {
+            panic!("search fetched another snapshot")
+        });
+        assert_eq!(presentation.matches, [0]);
+    }
+
+    #[test]
+    fn log_rotation_and_clear_replace_filtered_indices() {
+        let mut presentation = LogPresentation::default();
+        presentation.refresh(1, "match".into(), || {
+            vec![log_fixture("match"), log_fixture("other")]
+        });
+        assert_eq!(presentation.matches, [0]);
+        presentation.refresh(2, "match".into(), || {
+            vec![log_fixture("other"), log_fixture("match new")]
+        });
+        assert_eq!(presentation.matches, [1]);
+        presentation.refresh(3, "match".into(), Vec::new);
+        assert!(presentation.entries.is_empty());
+        assert!(presentation.matches.is_empty());
+    }
 
     #[test]
     fn log_filter_matches_level_and_payload_case_insensitively() {

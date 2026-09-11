@@ -34,7 +34,7 @@ impl RuntimePage {
             return;
         };
         let Some(store) = self.preferences_store.clone() else {
-            self.mutating = false;
+            self.finish_mutation(token);
             self.error = Some(zenclash_i18n::text("system_proxy.errors.ownership_store"));
             cx.notify();
             return;
@@ -73,11 +73,14 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok((outcome, preferences, data)) => {
-                        this.preferences = preferences.clone();
-                        cx.emit(super::super::PreferencesRestored { preferences });
+                        this.accept_preferences(
+                            preferences,
+                            crate::pages::runtime::PreferenceScope::SystemProxy,
+                            cx,
+                        );
                         if let CaptureOutcome::RolledBack { failure, .. }
                         | CaptureOutcome::ReconcileNeeded { failure, .. } = outcome
                         {
@@ -87,7 +90,7 @@ impl RuntimePage {
                         }
                         match data {
                             Ok(data) => {
-                                if this.replace_page_data(token, data) {
+                                if this.replace_page_data(token, data, cx) {
                                     this.notice = Some(if enabled {
                                         match this.preferences.system_proxy_mode {
                                             SystemProxyMode::Manual => zenclash_i18n::text(
@@ -240,16 +243,19 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok((preferences, data)) => {
-                        this.preferences = preferences.clone();
                         this.system_proxy_editor = None;
-                        cx.emit(super::super::PreferencesRestored { preferences });
+                        this.accept_preferences(
+                            preferences,
+                            crate::pages::runtime::PreferenceScope::SystemProxy,
+                            cx,
+                        );
                         if this.is_page_task_current(token) {
                             match data {
                                 Ok(data) => {
-                                    let _ = this.replace_page_data(token, data);
+                                    let _ = this.replace_page_data(token, data, cx);
                                     this.notice =
                                         Some(zenclash_i18n::text("system_proxy.notices.saved"));
                                 }
@@ -304,7 +310,7 @@ impl RuntimePage {
 
     fn unavailable_system_proxy_message(&self) -> String {
         let listener_error = self.process.as_ref().and_then(|process| {
-            process.snapshot().logs.into_iter().rev().find(|line| {
+            process.recent_logs().into_iter().rev().find(|line| {
                 let normalized = line.to_ascii_lowercase();
                 normalized.contains("start http server error")
                     || normalized.contains("start mixed server error")

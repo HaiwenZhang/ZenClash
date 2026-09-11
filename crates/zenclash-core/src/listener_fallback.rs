@@ -519,15 +519,21 @@ mod tests {
     }
 
     #[test]
-    fn changed_mixed_port_checks_udp_occupancy() {
+    fn adding_udp_to_an_existing_tcp_listener_checks_udp_occupancy() {
         let occupied = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = occupied.local_addr().unwrap().port();
-        let current = "mixed-port: 32002\nallow-lan: false\nipv6: false\n";
+        // The running core already owns TCP; this change introduces only UDP.
+        // An unrelated TCP listener on the randomly allocated UDP port must not
+        // determine which transport this test reports.
+        let current = format!("port: {port}\nallow-lan: false\nipv6: false\n");
         let candidate = format!("mixed-port: {port}\nallow-lan: false\nipv6: false\n");
 
-        let error = validate_listener_change(current, &candidate, true).unwrap_err();
+        let error = validate_listener_change(&current, &candidate, true).unwrap_err();
 
-        assert!(error.contains(&port.to_string()) && error.contains("UDP"));
+        assert!(
+            error.contains(&port.to_string()) && error.contains("UDP"),
+            "expected UDP conflict on {port}, got: {error}"
+        );
     }
 
     #[test]

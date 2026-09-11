@@ -6,9 +6,10 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        mpsc::{self, SyncSender, TrySendError},
+        mpsc::{self, RecvTimeoutError, SyncSender, TrySendError},
     },
     thread,
+    time::{Duration, Instant},
 };
 
 use parking_lot::RwLock;
@@ -91,6 +92,7 @@ impl LogFileConfig {
 
 enum LogFileCommand {
     Append(LogEntry),
+    Refresh,
 }
 
 #[derive(Clone)]
@@ -145,18 +147,38 @@ impl LogFileWorker {
             .name("zenclash-log-file".into())
             .spawn(move || {
                 let mut writer = BoundedLogFile::default();
-                while let Ok(LogFileCommand::Append(entry)) = receiver.recv() {
+                let mut observed = Instant::now();
+                loop {
+                    let command = match receiver.recv_timeout(Duration::from_secs(1)) {
+                        Ok(command) => Some(command),
+                        Err(RecvTimeoutError::Timeout) => None,
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    };
                     let config = thread_settings.read().clone();
-                    let Some(config) = config.filter(|config| config.enabled) else {
+                    let Some(config) = config else {
                         continue;
                     };
-                    match writer.append(&config, &entry) {
-                        Ok(size) => {
-                            let mut snapshot = thread_status.write();
-                            snapshot.size_bytes = size;
-                            snapshot.last_error = None;
+                    if observed.elapsed() >= Duration::from_secs(1)
+                        || matches!(command, Some(LogFileCommand::Refresh))
+                    {
+                        refresh_file_status(&thread_status, &config);
+                        observed = Instant::now();
+                    }
+                    if let Some(LogFileCommand::Append(entry)) = command
+                        && config.enabled
+                    {
+                        let result = writer.append(&config, &entry);
+                        let mut snapshot = thread_status.write();
+                        if snapshot.path.as_ref() != Some(&config.path) {
+                            continue;
                         }
-                        Err(error) => thread_status.write().last_error = Some(error.to_string()),
+                        match result {
+                            Ok(size) => {
+                                snapshot.size_bytes = size;
+                                snapshot.last_error = None;
+                            }
+                            Err(error) => snapshot.last_error = Some(error.to_string()),
+                        }
                     }
                 }
             });
@@ -187,36 +209,39 @@ impl LogFileWorker {
         *self.sender.settings.write() = Some(config.clone());
         let mut status = self.sender.status.write();
         status.enabled = enabled;
+        if status.path.as_ref() != Some(&path) {
+            status.size_bytes = 0;
+            status.last_error = None;
+        }
         status.path = Some(path);
         status.max_bytes = config.max_bytes;
-        let observed_size = fs::metadata(&config.path);
-        status.size_bytes = observed_size.as_ref().map_or(0, fs::Metadata::len);
-        status.last_error = if self.thread.is_none() {
-            Some("日志文件写入线程未能启动".into())
-        } else {
-            observed_size.err().and_then(|error| {
-                (error.kind() != std::io::ErrorKind::NotFound)
-                    .then(|| format!("无法读取日志文件状态：{error}"))
-            })
-        };
+        if self.thread.is_none() {
+            status.last_error = Some("日志文件写入线程未能启动".into());
+        }
+        drop(status);
+        // A full queue already wakes the worker; periodic refresh is the fallback.
+        let _ = self.sender.sender.try_send(LogFileCommand::Refresh);
         Ok(())
     }
 
     pub(super) fn status(&self) -> LogPersistenceStatus {
-        let mut status = self.sender.status.read().clone();
-        if let Some(path) = &status.path {
-            match fs::metadata(path) {
-                Ok(metadata) => status.size_bytes = metadata.len(),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    status.size_bytes = 0;
-                }
-                Err(error) if status.last_error.is_none() => {
-                    status.last_error = Some(format!("无法读取日志文件状态：{error}"));
-                }
-                Err(_) => {}
-            }
+        self.sender.status.read().clone()
+    }
+}
+
+fn refresh_file_status(status: &RwLock<LogPersistenceStatus>, config: &LogFileConfig) {
+    let metadata = fs::metadata(&config.path);
+    let mut status = status.write();
+    if status.path.as_ref() != Some(&config.path) {
+        return;
+    }
+    match metadata {
+        Ok(metadata) => status.size_bytes = metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => status.size_bytes = 0,
+        Err(error) if status.last_error.is_none() => {
+            status.last_error = Some(format!("无法读取日志文件状态：{error}"));
         }
-        status
+        Err(_) => {}
     }
 }
 
@@ -426,12 +451,16 @@ mod tests {
     }
 
     #[test]
-    fn status_reads_current_file_metadata_instead_of_a_stale_counter() {
+    fn worker_observes_external_file_changes_without_io_in_status_reads() {
         let path = test_path("status-metadata");
         let worker = LogFileWorker::start();
         worker.configure(path.clone(), true, 1).unwrap();
         fs::write(&path, b"external").unwrap();
 
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while worker.status().size_bytes != 8 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
         assert_eq!(worker.status().size_bytes, 8);
         fs::remove_file(path).unwrap();
     }

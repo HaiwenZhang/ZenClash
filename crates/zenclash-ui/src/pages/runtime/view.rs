@@ -78,7 +78,7 @@ impl RuntimePage {
                             .small()
                             .ghost()
                             .loading(self.loading)
-                            .disabled(self.mutating)
+                            .disabled(self.core_busy())
                             .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
                     ),
             )
@@ -100,10 +100,28 @@ impl RuntimePage {
     }
 
     fn render_body(
-        &self,
+        &mut self,
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        if self.persistent_loading
+            || (matches!(
+                self.page,
+                Page::Dns | Page::Sniffer | Page::Tun | Page::Mihomo
+            ) && !self
+                .config_inputs
+                .is_for_profile(self.profile_path.as_deref()))
+        {
+            return empty_state(
+                zenclash_i18n::text(if self.persistent_loading || self.config_inputs_loading {
+                    "runtime.empty.loading"
+                } else {
+                    "runtime.empty.unavailable"
+                }),
+                theme,
+            )
+            .into_any_element();
+        }
         if self.page == Page::Home {
             return self.render_home(theme, cx);
         }

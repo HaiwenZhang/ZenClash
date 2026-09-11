@@ -45,7 +45,10 @@ impl RuntimePage {
     }
 
     fn export_backup(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let Some(token) = self.begin_mutation(Page::Settings) else {
+        let Some(token) = self.begin_scoped_mutation(
+            Page::Settings,
+            crate::pages::runtime::busy::MutationDomain::Backup,
+        ) else {
             return;
         };
         let task = self.runtime.spawn_blocking(move || {
@@ -64,7 +67,7 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok(summary) if this.is_page_task_current(token) => {
                         this.notice = Some(zenclash_i18n::text_with(
@@ -130,7 +133,10 @@ impl RuntimePage {
     }
 
     fn import_backup(&mut self, archive: PathBuf, cx: &mut Context<Self>) {
-        let Some(token) = self.begin_mutation(Page::Settings) else {
+        let Some(token) = self.begin_scoped_mutation(
+            Page::Settings,
+            crate::pages::runtime::busy::MutationDomain::Backup,
+        ) else {
             return;
         };
         let core_runtime = super::super::super::profiles::workflow::CoreProfileRuntime::new(
@@ -151,7 +157,7 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok(outcome) => this.apply_restore_outcome(outcome, token, cx),
                     Err(error) => this.set_page_error(token, error),
@@ -178,6 +184,7 @@ impl RuntimePage {
         self.controlled_config = outcome.controlled_config;
         self.override_store = Some(outcome.override_store);
         self.override_catalog = outcome.override_catalog;
+        self.config_inputs.reset_on_next_refresh();
         self.invalidate_config_inputs(cx);
         self.config_preview = None;
         cx.emit(ProfileActivated {
@@ -186,9 +193,10 @@ impl RuntimePage {
         self.preferences = outcome.preferences.clone();
         self.system_proxy_editor = None;
         cx.emit(PreferencesRestored {
+            scope: crate::pages::runtime::PreferenceScope::Restore,
             preferences: outcome.preferences,
         });
-        if self.replace_page_data(token, outcome.page_data) {
+        if self.replace_page_data(token, outcome.page_data, cx) {
             let warning = outcome.cleanup_warning.map_or_else(String::new, |warning| {
                 zenclash_i18n::text_with("backup.notices.cleanup_warning", &[("warning", warning)])
             });

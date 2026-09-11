@@ -63,6 +63,7 @@ pub struct MihomoClient {
     mutation_gate: Arc<tokio::sync::Mutex<()>>,
     config_validator: Option<CoreConfigValidator>,
     connections: Arc<connections::ConnectionCache>,
+    pub(crate) delay_gate: Arc<tokio::sync::Semaphore>,
 }
 
 impl MihomoClient {
@@ -84,6 +85,7 @@ impl MihomoClient {
             mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
             config_validator: None,
             connections: Arc::default(),
+            delay_gate: Arc::new(tokio::sync::Semaphore::new(16)),
         })
     }
 

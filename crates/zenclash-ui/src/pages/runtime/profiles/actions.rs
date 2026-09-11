@@ -34,10 +34,10 @@ impl RuntimePage {
                 )),
             };
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok(data) => {
-                        if this.replace_page_data(token, data) {
+                        if this.replace_page_data(token, data, cx) {
                             this.notice =
                                 Some(if this.core_kind.capabilities().full_config_reload {
                                     zenclash_i18n::text_with(
@@ -130,7 +130,7 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 this.home.profile_switching = None;
                 match result {
                     Ok(outcome) => this.apply_profile_activation(
@@ -160,7 +160,7 @@ impl RuntimePage {
             cx.notify();
             return;
         };
-        if self.mutating {
+        if self.core_busy() {
             return;
         }
         self.profile_forms.subscription_error = None;
@@ -230,7 +230,7 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok(outcome) => {
                         this.profile_forms.subscription_error = None;
@@ -304,7 +304,7 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 this.home.profile_switching = None;
                 match result {
                     Ok(outcome) => this.apply_profile_activation(
@@ -396,7 +396,7 @@ impl RuntimePage {
         cx.emit(ProfileActivated { path: outcome.path });
         match outcome.refresh {
             Ok(data) => {
-                if self.replace_page_data(token, data) {
+                if self.replace_page_data(token, data, cx) {
                     if token.page == Page::Home {
                         self.home.action_error = None;
                     }

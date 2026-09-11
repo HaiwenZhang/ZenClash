@@ -12,7 +12,7 @@ pub(super) use maintenance::CoreReleaseState;
 
 impl RuntimePage {
     fn stop_managed_core(&mut self, cx: &mut Context<Self>) {
-        if !self.core_session.snapshot().managed {
+        if !self.core_session.is_managed() {
             return;
         }
         let Some(token) = self.begin_mutation(Page::Mihomo) else {
@@ -44,7 +44,7 @@ impl RuntimePage {
     }
 
     fn restart_managed_core(&mut self, cx: &mut Context<Self>) {
-        if !self.core_session.snapshot().managed {
+        if !self.core_session.is_managed() {
             self.error = Some(zenclash_i18n::text("core_page.errors.external_restart"));
             cx.notify();
             return;
@@ -97,10 +97,10 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok(data) => {
-                        if this.replace_page_data(token, data) {
+                        if this.replace_page_data(token, data, cx) {
                             this.notice = Some(success);
                         }
                     }
@@ -126,21 +126,29 @@ impl RuntimePage {
             RuntimeData::Core { version, config } => (version.clone(), config.clone(), true),
             _ => (VersionInfo::default(), RuntimeConfig::default(), false),
         };
-        let process = self.process.as_ref().map(|process| process.snapshot());
+        let process = self.process.as_ref().map(|process| process.launch_config());
         let managed_process = process.is_some();
-        let process_running = process
-            .as_ref()
-            .map_or(has_runtime_data, |snapshot| snapshot.running);
-        let process_status = process.as_ref().map_or_else(
+        let operational = self.operational_status.snapshot();
+        let observed = operational.process.value();
+        let process_running = observed.map_or(has_runtime_data, |snapshot| snapshot.running);
+        let process_status = observed.map_or_else(
             || {
-                if has_runtime_data {
+                if managed_process {
+                    zenclash_i18n::text("core_page.status.unreadable")
+                } else if has_runtime_data {
                     zenclash_i18n::text("core_page.status.external_connected")
                 } else {
                     zenclash_i18n::text("core_page.status.external_unreachable")
                 }
             },
             |snapshot| {
-                if snapshot.running {
+                if !snapshot.managed {
+                    zenclash_i18n::text(if has_runtime_data {
+                        "core_page.status.external_connected"
+                    } else {
+                        "core_page.status.external_unreachable"
+                    })
+                } else if snapshot.running {
                     zenclash_i18n::text_with(
                         "core_page.status.running",
                         &[("pid", snapshot.pid.unwrap_or_default().to_string())],
@@ -310,7 +318,7 @@ impl RuntimePage {
                                     .label(zenclash_i18n::text("automatic.stop"))
                                     .small()
                                     .outline()
-                                    .disabled(self.mutating || !managed_process)
+                                    .disabled(self.core_busy() || !managed_process)
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.stop_managed_core(cx)),
                                     ),
@@ -321,8 +329,8 @@ impl RuntimePage {
                                     .label(zenclash_i18n::text("core_page.maintenance.restart"))
                                     .small()
                                     .outline()
-                                    .loading(self.mutating)
-                                    .disabled(self.mutating || !managed_process)
+                                    .loading(self.core_busy())
+                                    .disabled(self.core_busy() || !managed_process)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.restart_managed_core(cx);
                                     })),
@@ -417,8 +425,8 @@ impl RuntimePage {
                             &[("core", self.core_kind.display_name().to_owned())],
                         ))
                         .primary()
-                        .loading(self.mutating)
-                        .disabled(self.mutating)
+                        .loading(self.core_busy())
+                        .disabled(self.core_busy())
                         .on_click(cx.listener(|this, _, _, cx| {
                             match this.config_inputs.core.patch(cx) {
                                 Ok(patch) => this.apply_controlled_config(

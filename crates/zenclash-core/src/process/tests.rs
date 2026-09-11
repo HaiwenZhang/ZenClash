@@ -252,3 +252,47 @@ fn stop_gives_the_child_a_graceful_sigterm_window() {
     assert!(marker.is_file(), "child did not handle SIGTERM before exit");
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn ui_metadata_and_logs_remain_available_while_lifecycle_lock_is_held() {
+    let process = MihomoProcess {
+        child: parking_lot::Mutex::new(None),
+        logs: std::sync::Arc::new(parking_lot::RwLock::new(VecDeque::from(["ready".into()]))),
+        last_exit_reason: parking_lot::RwLock::new(None),
+        config: MihomoLaunchConfig {
+            kind: CoreKind::Mihomo,
+            binary: "mihomo".into(),
+            config_file: "profile.yaml".into(),
+            home_dir: "home".into(),
+            endpoint: MihomoEndpoint::default(),
+            controller_override: None,
+        },
+    };
+    let process = std::sync::Arc::new(process);
+    let session = crate::CoreSession::open(
+        CoreKind::Mihomo,
+        MihomoClient::new(MihomoEndpoint::default()).unwrap(),
+        Some(process.clone()),
+    );
+    let transition = process.child.lock();
+    let reader = process.clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        sender
+            .send((
+                reader.launch_config().binary.clone(),
+                reader.recent_logs(),
+                session.is_managed(),
+                session.generation(),
+            ))
+            .unwrap();
+    });
+    let result = receiver.recv_timeout(std::time::Duration::from_secs(1));
+    drop(transition);
+    worker.join().unwrap();
+    let (binary, logs, managed, generation) = result.expect("UI read waited on lifecycle lock");
+    assert_eq!(binary, std::path::Path::new("mihomo"));
+    assert_eq!(logs, ["ready"]);
+    assert!(managed);
+    assert_eq!(generation, 0);
+}

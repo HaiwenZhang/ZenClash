@@ -132,7 +132,7 @@ impl RuntimePage {
                     .label(zenclash_i18n::text("system_proxy.editor.edit"))
                     .small()
                     .outline()
-                    .disabled(self.mutating)
+                    .disabled(self.core_busy())
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_system_proxy_editor(window, cx);
                     })),
@@ -164,7 +164,7 @@ impl RuntimePage {
                                 zenclash_i18n::text("system_proxy.fields.host")
                             }),
                     )
-                    .child(Input::new(&editor.host).disabled(self.mutating)),
+                    .child(Input::new(&editor.host).disabled(self.core_busy())),
             )
             .when(editor.mode == SystemProxyMode::Manual, |this| {
                 this.child(
@@ -175,7 +175,7 @@ impl RuntimePage {
                                 .text_sm()
                                 .child(zenclash_i18n::text("system_proxy.fields.bypass_rules")),
                         )
-                        .child(Input::new(&editor.bypass).disabled(self.mutating)),
+                        .child(Input::new(&editor.bypass).disabled(self.core_busy())),
                 )
             })
             .when(editor.mode == SystemProxyMode::Pac, |this| {
@@ -193,7 +193,7 @@ impl RuntimePage {
                                 .text_color(theme.muted_foreground)
                                 .child(zenclash_i18n::text("system_proxy.editor.pac_help")),
                         )
-                        .child(Input::new(&editor.pac_script).disabled(self.mutating)),
+                        .child(Input::new(&editor.pac_script).disabled(self.core_busy())),
                 )
             })
             .child(
@@ -205,7 +205,7 @@ impl RuntimePage {
                             .label(zenclash_i18n::text("system_proxy.editor.reset"))
                             .small()
                             .outline()
-                            .disabled(self.mutating)
+                            .disabled(self.core_busy())
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.reset_system_proxy_editor(window, cx);
                             })),
@@ -215,7 +215,7 @@ impl RuntimePage {
                             .label(zenclash_i18n::text("system_proxy.editor.cancel"))
                             .small()
                             .ghost()
-                            .disabled(self.mutating)
+                            .disabled(self.core_busy())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.cancel_system_proxy_editor(cx);
                             })),
@@ -225,7 +225,7 @@ impl RuntimePage {
                             .label(zenclash_i18n::text("system_proxy.editor.save"))
                             .small()
                             .primary()
-                            .disabled(self.mutating)
+                            .disabled(self.core_busy())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.save_system_proxy_editor(cx);
                             })),
@@ -255,7 +255,7 @@ impl RuntimePage {
                             .small()
                             .outline()
                             .selected(mode == SystemProxyMode::Manual)
-                            .disabled(self.mutating)
+                            .disabled(self.core_busy())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.set_system_proxy_editor_mode(SystemProxyMode::Manual, cx);
                             })),
@@ -266,7 +266,7 @@ impl RuntimePage {
                             .small()
                             .outline()
                             .selected(mode == SystemProxyMode::Pac)
-                            .disabled(self.mutating)
+                            .disabled(self.core_busy())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.set_system_proxy_editor_mode(SystemProxyMode::Pac, cx);
                             })),

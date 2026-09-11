@@ -14,7 +14,7 @@ use super::{
     InputState, IntoElement, NetworkLatencyTarget, NetworkProbeRoutePreference,
     NetworkProbeSnapshot, ParentElement, PublicIpProvider, RuntimeConfig, RuntimeData, RuntimePage,
     Selectable, Sizable, Styled, SystemNetworkSnapshot, Window, config_input_row, div, empty_dash,
-    h_flex, info_row, json, message_banner, metric, px, setting_card, setting_switch, v_flex,
+    h_flex, info_row, json, message_banner, metric, px, setting_card, v_flex,
 };
 
 #[derive(Clone, Debug)]
@@ -182,7 +182,7 @@ impl RuntimePage {
                                 })
                                 .small()
                                 .danger()
-                                .disabled(self.mutating)
+                                .disabled(self.core_busy())
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.flush_network_cache(action, cx);
                                 })),
@@ -194,7 +194,7 @@ impl RuntimePage {
                                 .label(zenclash_i18n::text("network.diagnostics.flush_dns"))
                                 .small()
                                 .outline()
-                                .disabled(self.mutating)
+                                .disabled(self.core_busy())
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.request_network_cache_flush(DnsCacheAction::Dns, cx);
                                 })),
@@ -204,7 +204,7 @@ impl RuntimePage {
                                 .label(zenclash_i18n::text("network.diagnostics.flush_fake_ip"))
                                 .small()
                                 .outline()
-                                .disabled(self.mutating)
+                                .disabled(self.core_busy())
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.request_network_cache_flush(DnsCacheAction::FakeIp, cx);
                                 })),
@@ -244,18 +244,22 @@ impl RuntimePage {
                             PublicIpProvider::ALL.into_iter().enumerate().map(
                                 |(index, candidate)| {
                                     Button::new(("network-provider", index))
-                                        .label(candidate.label())
-                                        .small()
-                                        .outline()
-                                        .selected(candidate == provider)
-                                        .disabled(self.mutating || self.network_probe.loading)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.persist_network_preference(
-                                                NetworkPreferenceChange::Provider(candidate),
-                                                zenclash_i18n::text("network.notices.provider"),
-                                                cx,
-                                            );
-                                        }))
+                                    .label(candidate.label())
+                                    .small()
+                                    .outline()
+                                    .selected(candidate == provider)
+                                    .disabled(
+                                        self.mutation_busy(
+                                            crate::pages::runtime::busy::MutationDomain::Network,
+                                        ) || self.network_probe.loading,
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.persist_network_preference(
+                                            NetworkPreferenceChange::Provider(candidate),
+                                            zenclash_i18n::text("network.notices.provider"),
+                                            cx,
+                                        );
+                                    }))
                                 },
                             ),
                         ),
@@ -270,7 +274,7 @@ impl RuntimePage {
                             })
                             .small()
                             .primary()
-                            .disabled(self.network_probe.loading || self.mutating)
+                            .disabled(self.network_probe.loading || self.core_busy())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.refresh_network_probe(cx);
                             })),
@@ -332,12 +336,13 @@ impl RuntimePage {
             .map(|target| target.url.as_str())
             .collect::<HashSet<_>>();
         setting_card(zenclash_i18n::text("network.latency.title"), theme)
-            .child(setting_switch(
+            .child(crate::pages::runtime::common::setting_switch_disabled(
                 zenclash_i18n::text("network.latency.through_core"),
                 zenclash_i18n::text("network.latency.through_core_description"),
                 self.preferences.network_probe_route == NetworkProbeRoutePreference::Mihomo,
                 "network-probe-through-mihomo",
                 theme,
+                self.mutation_busy(crate::pages::runtime::busy::MutationDomain::Network),
                 cx.listener(|this, checked, _, cx| {
                     this.persist_network_preference(
                         NetworkPreferenceChange::ThroughMihomo(*checked),
@@ -381,7 +386,9 @@ impl RuntimePage {
                         .small()
                         .outline()
                         .disabled(
-                            self.mutating || self.preferences.network_latency_targets.len() >= 13,
+                            self.mutation_busy(
+                                crate::pages::runtime::busy::MutationDomain::Network,
+                            ) || self.preferences.network_latency_targets.len() >= 13,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.add_network_latency_target(cx);
@@ -439,7 +446,9 @@ impl RuntimePage {
                                 .icon(IconName::Delete)
                                 .small()
                                 .ghost()
-                                .disabled(self.mutating)
+                                .disabled(self.mutation_busy(
+                                    crate::pages::runtime::busy::MutationDomain::Network,
+                                ))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.persist_network_preference(
                                         NetworkPreferenceChange::RemoveTarget(url.clone()),
@@ -501,7 +510,7 @@ impl RuntimePage {
                                     .label(zenclash_i18n::text("network.system.pin"))
                                     .small()
                                     .primary()
-                                    .disabled(system.interface.is_empty() || self.mutating)
+                                    .disabled(system.interface.is_empty() || self.core_busy())
                                     .on_click({
                                         let interface = system.interface.clone();
                                         cx.listener(move |this, _, _, cx| {
@@ -521,7 +530,7 @@ impl RuntimePage {
                                     .label(zenclash_i18n::text("network.system.automatic"))
                                     .small()
                                     .outline()
-                                    .disabled(config.interface_name.is_empty() || self.mutating)
+                                    .disabled(config.interface_name.is_empty() || self.core_busy())
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.apply_controlled_config(
                                             json!({"interface-name": ""}),

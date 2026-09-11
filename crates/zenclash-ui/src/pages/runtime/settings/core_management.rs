@@ -2,9 +2,8 @@ use std::path::{Path, PathBuf};
 
 use super::super::{
     Button, ButtonVariants, Context, CoreBinaryInfo, CoreKind, Disableable, FluentBuilder, Icon,
-    IconName, IntoElement, MihomoLaunchConfig, Page, ParentElement, PathPromptOptions,
-    PreferencesRestored, RuntimeData, RuntimePage, Selectable, Sizable, Styled, div, h_flex, px,
-    setting_card, v_flex,
+    IconName, IntoElement, MihomoLaunchConfig, Page, ParentElement, PathPromptOptions, RuntimeData,
+    RuntimePage, Selectable, Sizable, Styled, div, h_flex, px, setting_card, v_flex,
 };
 
 #[derive(Default)]
@@ -149,7 +148,7 @@ impl RuntimePage {
                             .small()
                             .outline()
                             .disabled(
-                                self.mutating
+                                self.core_busy()
                                     || self.core_management.mihomo.checking
                                     || self.core_management.meow.checking,
                             )
@@ -316,7 +315,7 @@ impl RuntimePage {
                             .icon(IconName::FolderOpen)
                             .small()
                             .outline()
-                            .disabled(self.mutating || state.checking || environment_locked)
+                            .disabled(self.core_busy() || state.checking || environment_locked)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.choose_core_binary(kind, cx);
                             })),
@@ -330,7 +329,7 @@ impl RuntimePage {
                                     .small()
                                     .ghost()
                                     .disabled(
-                                        self.mutating
+                                        self.core_busy()
                                             || state.checking
                                             || environment_locked
                                             || self.preferences.core_binaries.path(kind).is_none(),
@@ -350,7 +349,7 @@ impl RuntimePage {
                                     .outline()
                                     .selected(requested)
                                     .disabled(
-                                        self.mutating
+                                        self.core_busy()
                                             || state.checking
                                             || state.info.is_none()
                                             || requested,
@@ -365,9 +364,11 @@ impl RuntimePage {
     }
 
     fn runtime_core_available(&self) -> bool {
-        self.process
-            .as_ref()
-            .is_some_and(|process| process.is_running())
+        self.operational_status
+            .snapshot()
+            .process
+            .value()
+            .is_some_and(|process| process.running)
             || matches!(self.data, RuntimeData::Settings { .. })
     }
 
@@ -522,24 +523,25 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
-                let page_is_current = this.is_page_task_current(token);
+                this.finish_mutation(token);
                 match result {
-                    Ok((info, preferences)) if page_is_current => {
+                    Ok((info, preferences)) => {
                         let state = this.core_management.get_mut(kind);
                         state.checking = false;
                         state.source = zenclash_i18n::text("core_management.source.custom");
                         state.info = Some(info);
                         state.error = None;
-                        this.preferences = preferences.clone();
-                        this.notice = Some(zenclash_i18n::text_with(
-                            "core_management.notices.validated",
-                            &[("core", kind.display_name().to_owned())],
-                        ));
-                        cx.emit(PreferencesRestored { preferences });
-                    }
-                    Ok(_) => {
-                        this.core_management.get_mut(kind).checking = false;
+                        if this.is_page_task_current(token) {
+                            this.notice = Some(zenclash_i18n::text_with(
+                                "core_management.notices.validated",
+                                &[("core", kind.display_name().to_owned())],
+                            ));
+                        }
+                        this.accept_preferences(
+                            preferences,
+                            crate::pages::runtime::PreferenceScope::CoreBinary(kind),
+                            cx,
+                        );
                     }
                     Err(error) => {
                         let state = this.core_management.get_mut(kind);
@@ -591,18 +593,22 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
-                    Ok(preferences) if this.is_page_task_current(token) => {
-                        this.preferences = preferences.clone();
-                        this.notice = Some(zenclash_i18n::text_with(
-                            "core_management.notices.automatic",
-                            &[("core", kind.display_name().to_owned())],
-                        ));
-                        cx.emit(PreferencesRestored { preferences });
+                    Ok(preferences) => {
+                        if this.is_page_task_current(token) {
+                            this.notice = Some(zenclash_i18n::text_with(
+                                "core_management.notices.automatic",
+                                &[("core", kind.display_name().to_owned())],
+                            ));
+                        }
+                        this.accept_preferences(
+                            preferences,
+                            crate::pages::runtime::PreferenceScope::CoreBinary(kind),
+                            cx,
+                        );
                         this.refresh_core_management(cx);
                     }
-                    Ok(_) => {}
                     Err(error) => this.set_page_error(token, error),
                 }
                 cx.notify();
@@ -658,24 +664,28 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
-                    Ok(preferences) if this.is_page_task_current(token) => {
-                        this.preferences = preferences.clone();
-                        this.notice = Some(if kind == this.core_kind {
-                            zenclash_i18n::text_with(
-                                "core_management.notices.already_current",
-                                &[("core", kind.display_name().to_owned())],
-                            )
-                        } else {
-                            zenclash_i18n::text_with(
-                                "core_management.notices.preferred",
-                                &[("core", kind.display_name().to_owned())],
-                            )
-                        });
-                        cx.emit(PreferencesRestored { preferences });
+                    Ok(preferences) => {
+                        if this.is_page_task_current(token) {
+                            this.notice = Some(if kind == this.core_kind {
+                                zenclash_i18n::text_with(
+                                    "core_management.notices.already_current",
+                                    &[("core", kind.display_name().to_owned())],
+                                )
+                            } else {
+                                zenclash_i18n::text_with(
+                                    "core_management.notices.preferred",
+                                    &[("core", kind.display_name().to_owned())],
+                                )
+                            });
+                        }
+                        this.accept_preferences(
+                            preferences,
+                            crate::pages::runtime::PreferenceScope::CoreKind,
+                            cx,
+                        );
                     }
-                    Ok(_) => {}
                     Err(error) => {
                         let state = this.core_management.get_mut(kind);
                         state.info = None;

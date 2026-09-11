@@ -70,7 +70,7 @@ impl RuntimePage {
                                     })
                                     .small()
                                     .outline()
-                                    .disabled(self.mutating)
+                                    .disabled(self.core_busy())
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.profile_forms.adding_subscription =
                                             !this.profile_forms.adding_subscription;
@@ -83,7 +83,7 @@ impl RuntimePage {
                                     .label(zenclash_i18n::text("profiles.actions.import_local"))
                                     .small()
                                     .primary()
-                                    .disabled(self.mutating)
+                                    .disabled(self.core_busy())
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.choose_profile(window, cx);
                                     })),

@@ -10,6 +10,8 @@ use super::{
     message_banner, metric, pagination_summary, px, v_flex,
 };
 
+mod projection;
+
 const CONNECTIONS_PER_PAGE: usize = 100;
 
 pub(super) struct ConnectionsUiState {
@@ -19,18 +21,30 @@ pub(super) struct ConnectionsUiState {
     pub(super) page: usize,
     transport: ConnectionTransport,
     sort: ConnectionSort,
+    query: String,
+    projection: Option<projection::ConnectionProjection>,
+    worker: projection::ProjectionWorker,
+    pub(super) projecting: bool,
 }
 
 impl ConnectionsUiState {
+    pub(super) fn release_presentation(&mut self) {
+        self.worker.cancel();
+        self.projection = None;
+        self.projecting = false;
+    }
+
     pub(super) fn new(window: &mut Window, cx: &mut Context<RuntimePage>) -> (Self, Subscription) {
         let filter = cx.new(|cx| {
             InputState::new(window, cx).placeholder(zenclash_i18n::text(
                 "runtime.placeholders.connection_filter",
             ))
         });
-        let subscription = cx.subscribe(&filter, |this, _, event: &InputEvent, cx| {
+        let subscription = cx.subscribe(&filter, |this, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.connections.page = 0;
+                this.connections.query = normalize_connection_query(&input.read(cx).value());
+                this.update_connection_presentation(cx);
                 cx.notify();
             }
         });
@@ -42,6 +56,10 @@ impl ConnectionsUiState {
                 page: 0,
                 transport: ConnectionTransport::All,
                 sort: ConnectionSort::Default,
+                query: String::new(),
+                projection: None,
+                worker: projection::ProjectionWorker::default(),
+                projecting: false,
             },
             subscription,
         )
@@ -49,6 +67,48 @@ impl ConnectionsUiState {
 }
 
 impl RuntimePage {
+    pub(super) fn update_connection_presentation(&mut self, cx: &mut Context<Self>) {
+        let RuntimeData::Connections(data) = &self.data else {
+            self.connections.release_presentation();
+            return;
+        };
+        if self.page != Page::Connections {
+            return;
+        }
+        let (generation, task) = self.connections.worker.start(
+            &self.runtime,
+            data.clone(),
+            self.connections.query.clone(),
+            self.connections.transport,
+            self.connections.sort,
+        );
+        self.connections.projecting = true;
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                if !this.connections.worker.is_current(generation) {
+                    return;
+                }
+                this.connections.projecting = false;
+                match result {
+                    Ok(Some(projection)) => this.connections.projection = Some(projection),
+                    Ok(None) => {}
+                    Err(error) => {
+                        this.error = Some(zenclash_i18n::text_with(
+                            "connections.errors.filter_task",
+                            &[("error", error.to_string())],
+                        ))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn render_connection_options(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let transport = self.connections.transport;
         let sort = self.connections.sort;
@@ -73,6 +133,7 @@ impl RuntimePage {
                                         let _ = owner.update(cx, |page, cx| {
                                             page.connections.transport = value;
                                             page.connections.page = 0;
+                                            page.update_connection_presentation(cx);
                                             cx.notify();
                                         });
                                     }),
@@ -97,6 +158,7 @@ impl RuntimePage {
                                         let _ = owner.update(cx, |page, cx| {
                                             page.connections.sort = value;
                                             page.connections.page = 0;
+                                            page.update_connection_presentation(cx);
                                             cx.notify();
                                         });
                                     }),
@@ -137,7 +199,7 @@ impl RuntimePage {
             client
                 .connections_snapshot()
                 .await
-                .map(RuntimeData::Connections)
+                .map(|data| RuntimeData::Connections(std::sync::Arc::new(data)))
                 .map_err(|error| error.to_string())
         });
         cx.spawn(async move |this, cx| {
@@ -149,10 +211,10 @@ impl RuntimePage {
                 )),
             };
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok(data) => {
-                        if this.replace_page_data(token, data) {
+                        if this.replace_page_data(token, data, cx) {
                             this.notice =
                                 Some(zenclash_i18n::text("connections.notices.closed_all"));
                         }
@@ -167,7 +229,7 @@ impl RuntimePage {
     }
 
     fn close_connection(&mut self, id: String, cx: &mut Context<Self>) {
-        if self.mutating || !self.connections.closing.insert(id.clone()) {
+        if self.core_busy() || !self.connections.closing.insert(id.clone()) {
             return;
         }
         self.invalidate_page_load();
@@ -212,20 +274,23 @@ impl RuntimePage {
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let data = match &self.data {
-            RuntimeData::Connections(data) => data,
-            _ => {
-                return empty_state(zenclash_i18n::text("connections.empty.active"), theme);
-            }
+        let Some(projection) = &self.connections.projection else {
+            return v_flex()
+                .child(Input::new(&self.connections.filter).small())
+                .child(empty_state(
+                    zenclash_i18n::text(if self.connections.projecting {
+                        "connections.filtering"
+                    } else {
+                        "connections.empty.active"
+                    }),
+                    theme,
+                ))
+                .into_any_element();
         };
+        let data = &projection.snapshot;
         let total = data.connections.len();
-        let query = normalize_connection_query(&self.connections.filter.read(cx).value());
-        let filtered = present_connections(
-            &data.connections,
-            &query,
-            self.connections.transport,
-            self.connections.sort,
-        );
+        let query = &projection.query;
+        let filtered = &projection.order;
         let visible = filtered.len();
         let page = list_page(visible, self.connections.page, CONNECTIONS_PER_PAGE);
         let filtered = &filtered[page.start..page.end];
@@ -278,12 +343,13 @@ impl RuntimePage {
             .child(
                 h_flex()
                     .justify_between()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child(zenclash_i18n::text("connections.refresh_hint")),
-                    )
+                    .child(div().text_sm().text_color(theme.muted_foreground).child(
+                        zenclash_i18n::text(if self.connections.projecting {
+                            "connections.filtering"
+                        } else {
+                            "connections.refresh_hint"
+                        }),
+                    ))
                     .child(
                         Button::new("close-all-connections")
                             .icon(IconName::CircleX)
@@ -291,7 +357,9 @@ impl RuntimePage {
                             .danger()
                             .small()
                             .disabled(
-                                total == 0 || self.mutating || !self.connections.closing.is_empty(),
+                                total == 0
+                                    || self.core_busy()
+                                    || !self.connections.closing.is_empty(),
                             )
                             .on_click(cx.listener(|this, _, _, cx| this.close_all_connections(cx))),
                     ),
@@ -339,7 +407,8 @@ impl RuntimePage {
                             theme,
                         ))
                     })
-                    .children(filtered.iter().map(|connection| {
+                    .children(filtered.iter().map(|&index| {
+                        let connection = &data.connections[index];
                         let id = connection.id.clone();
                         let closing = self.connections.closing.contains(&id);
                         let expanded = self.connections.expanded.as_deref() == Some(id.as_str());
@@ -414,7 +483,7 @@ impl RuntimePage {
                                             .label(zenclash_i18n::text("connections.actions.close"))
                                             .ghost()
                                             .small()
-                                            .disabled(self.mutating || closing)
+                                            .disabled(self.core_busy() || closing)
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.close_connection(id.clone(), cx);
                                             })),
@@ -560,39 +629,39 @@ impl ConnectionSort {
     }
 }
 
-fn present_connections<'a>(
-    connections: &'a [zenclash_core::Connection],
+fn present_connections(
+    connections: &[zenclash_core::Connection],
     query: &str,
     transport: ConnectionTransport,
     sort: ConnectionSort,
-) -> Vec<&'a zenclash_core::Connection> {
-    let mut result = connections
-        .iter()
-        .filter(|connection| {
+) -> Vec<usize> {
+    let mut result = (0..connections.len())
+        .filter(|&index| {
+            let connection = &connections[index];
             transport.matches(&connection.metadata.network) && connection_matches(connection, query)
         })
         .collect::<Vec<_>>();
     match sort {
         ConnectionSort::Default => {}
-        ConnectionSort::Newest | ConnectionSort::Oldest => {
-            result.sort_by_cached_key(|connection| {
-                let timestamp = chrono::DateTime::parse_from_rfc3339(&connection.start)
-                    .ok()
-                    .map(|value| value.timestamp_micros());
-                (
-                    timestamp.is_none(),
-                    timestamp.map(|value| {
-                        if sort == ConnectionSort::Newest {
-                            -i128::from(value)
-                        } else {
-                            i128::from(value)
-                        }
-                    }),
-                    connection.id.clone(),
-                )
-            })
-        }
-        _ => result.sort_by_cached_key(|connection| {
+        ConnectionSort::Newest | ConnectionSort::Oldest => result.sort_by_cached_key(|&index| {
+            let connection = &connections[index];
+            let timestamp = chrono::DateTime::parse_from_rfc3339(&connection.start)
+                .ok()
+                .map(|value| value.timestamp_micros());
+            (
+                timestamp.is_none(),
+                timestamp.map(|value| {
+                    if sort == ConnectionSort::Newest {
+                        -i128::from(value)
+                    } else {
+                        i128::from(value)
+                    }
+                }),
+                connection.id.clone(),
+            )
+        }),
+        _ => result.sort_by_cached_key(|&index| {
+            let connection = &connections[index];
             let bytes = match sort {
                 ConnectionSort::Upload => u128::from(connection.upload),
                 ConnectionSort::Download => u128::from(connection.download),
@@ -703,7 +772,7 @@ mod tests {
         assert_eq!(
             result
                 .iter()
-                .map(|value| value.id.as_str())
+                .map(|&index| connections[index].id.as_str())
                 .collect::<Vec<_>>(),
             ["large", "small"]
         );
@@ -736,7 +805,7 @@ mod tests {
         assert_eq!(
             result
                 .iter()
-                .map(|value| value.id.as_str())
+                .map(|&index| connections[index].id.as_str())
                 .collect::<Vec<_>>(),
             ["newer", "older", "invalid"]
         );

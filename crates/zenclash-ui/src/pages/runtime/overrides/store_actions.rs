@@ -100,17 +100,19 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
-                    Ok((catalog, count)) if this.is_page_task_current(token) => {
+                    Ok((catalog, count)) => {
                         this.override_catalog = catalog;
                         this.config_preview = None;
-                        this.notice = Some(zenclash_i18n::text_with(
-                            "overrides.notices.imported",
-                            &[("count", count.to_string())],
-                        ));
+                        this.invalidate_config_inputs(cx);
+                        if this.is_page_task_current(token) {
+                            this.notice = Some(zenclash_i18n::text_with(
+                                "overrides.notices.imported",
+                                &[("count", count.to_string())],
+                            ));
+                        }
                     }
-                    Ok(_) => {}
                     Err(error) => this.set_page_error(token, error),
                 }
                 cx.notify();
@@ -198,14 +200,16 @@ impl RuntimePage {
                 })
                 .and_then(|result| result.map_err(|error| error.to_string()));
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
-                    Ok(catalog) if this.is_page_task_current(token) => {
+                    Ok(catalog) => {
                         this.override_catalog = catalog;
                         this.config_preview = None;
-                        this.notice = Some(zenclash_i18n::text("overrides.notices.deleted"));
+                        this.invalidate_config_inputs(cx);
+                        if this.is_page_task_current(token) {
+                            this.notice = Some(zenclash_i18n::text("overrides.notices.deleted"));
+                        }
                     }
-                    Ok(_) => {}
                     Err(error) => this.set_page_error(token, error),
                 }
                 cx.notify();
@@ -300,14 +304,16 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
-                    Ok(()) if this.is_page_task_current(token) => {
+                    Ok(()) => {
                         this.override_catalog = next;
                         this.config_preview = None;
-                        this.notice = Some(success);
+                        this.invalidate_config_inputs(cx);
+                        if this.is_page_task_current(token) {
+                            this.notice = Some(success);
+                        }
                     }
-                    Ok(()) => {}
                     Err(error) => this.set_page_error(token, error),
                 }
                 cx.notify();

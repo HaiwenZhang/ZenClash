@@ -120,19 +120,6 @@ impl ProxiesPage {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let expanded = self.expanded.contains(&group.name);
-        let nodes = visible_nodes(
-            group,
-            self.sort_by_latency,
-            self.hide_unavailable,
-            &self.test_failures,
-        );
-        let page = proxy_page(
-            nodes.len(),
-            self.proxy_pages
-                .get(&group.name)
-                .copied()
-                .unwrap_or_default(),
-        );
         let group_name = group.name.clone();
         let group_for_restore = group.name.clone();
         let group_for_test = group.name.clone();
@@ -318,11 +305,23 @@ impl ProxiesPage {
                                     group.name.clone(),
                                 ))
                                 .icon(crate::assets::AppIcon::Gauge)
-                                .label(if testing_group {
-                                    zenclash_i18n::text("proxies.actions.testing")
-                                } else {
-                                    zenclash_i18n::text("proxies.actions.test_all")
-                                })
+                                .label(
+                                    if let Some((done, total)) =
+                                        self.group_progress.get(&group.name)
+                                    {
+                                        zenclash_i18n::text_with(
+                                            "proxies.actions.testing_progress",
+                                            &[
+                                                ("done", done.to_string()),
+                                                ("total", total.to_string()),
+                                            ],
+                                        )
+                                    } else if testing_group {
+                                        zenclash_i18n::text("proxies.actions.testing")
+                                    } else {
+                                        zenclash_i18n::text("proxies.actions.test_all")
+                                    },
+                                )
                                 .small()
                                 .ghost()
                                 .loading(testing_group)
@@ -359,19 +358,31 @@ impl ProxiesPage {
                     ),
             )
             .when(expanded, |this| {
+                let nodes = self.group_orders.order(
+                    group,
+                    self.sort_by_latency,
+                    self.hide_unavailable,
+                    &self.test_failures,
+                );
+                let page = proxy_page(
+                    nodes.len(),
+                    self.proxy_pages
+                        .get(&group.name)
+                        .copied()
+                        .unwrap_or_default(),
+                );
+
                 let previous_group = group.name.clone();
                 let next_group = group.name.clone();
                 this.child(
                     v_flex()
                         .border_t_1()
                         .border_color(theme.border)
-                        .child(
-                            h_flex().p_3().gap_2().flex_wrap().children(
-                                nodes[page.start..page.end]
-                                    .iter()
-                                    .map(|proxy| self.render_proxy(group, proxy, theme, cx)),
-                            ),
-                        )
+                        .child(h_flex().p_3().gap_2().flex_wrap().children(
+                            nodes[page.start..page.end].iter().map(|&index| {
+                                self.render_proxy(group, &group.all[index], theme, cx)
+                            }),
+                        ))
                         .when(page.count > 1, |this| {
                             this.child(
                                 h_flex()
@@ -634,40 +645,6 @@ impl ProxiesPage {
     }
 }
 
-fn visible_nodes<'a>(
-    group: &'a ProxyGroup,
-    sort: bool,
-    hide: bool,
-    failures: &std::collections::HashMap<String, super::DelayTestFailure>,
-) -> Vec<&'a ProxyNode> {
-    let mut nodes = group
-        .all
-        .iter()
-        .filter(|proxy| {
-            !hide
-                || (!failures.contains_key(&test_key(&group.name, &proxy.name))
-                    && match proxy.latest_delay() {
-                        Some(delay) => delay > 0,
-                        None => proxy.alive != Some(false),
-                    })
-        })
-        .collect::<Vec<_>>();
-    if sort {
-        nodes.sort_by_key(|proxy| {
-            let delay = proxy.latest_delay();
-            let failed = failures.contains_key(&test_key(&group.name, &proxy.name))
-                || delay == Some(0)
-                || (delay.is_none() && proxy.alive == Some(false));
-            (
-                failed,
-                delay.is_none(),
-                delay.filter(|value| *value > 0).unwrap_or(u32::MAX),
-            )
-        });
-    }
-    nodes
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -707,11 +684,16 @@ mod tests {
             ],
             ..Default::default()
         };
-        let nodes = visible_nodes(&group, true, true, &std::collections::HashMap::new());
+        let nodes = super::super::presentation::visible_node_indices(
+            &group,
+            true,
+            true,
+            &std::collections::HashMap::new(),
+        );
         assert_eq!(
             nodes
                 .iter()
-                .map(|node| node.name.as_str())
+                .map(|&index| group.all[index].name.as_str())
                 .collect::<Vec<_>>(),
             ["fast", "slow", "unknown"]
         );

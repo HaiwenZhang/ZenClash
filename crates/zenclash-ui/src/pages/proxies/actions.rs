@@ -36,6 +36,7 @@ impl ProxiesPage {
                     .map_err(|error| error.to_string())?;
             Ok::<_, String>((catalog, config.mode))
         });
+        self.presentation_tasks.track(&task);
 
         cx.spawn(async move |this, cx| {
             let result = match task.await {
@@ -63,6 +64,7 @@ impl ProxiesPage {
                         {
                             this.expanded.insert(group.name.clone());
                         }
+                        this.group_orders.clear();
                         this.catalog = Some(catalog);
                         this.outbound_mode = mode;
                         this.test_failures.clear();
@@ -83,9 +85,12 @@ impl ProxiesPage {
 
     /// Invalidates in-flight presentation work and releases the inactive catalog.
     pub(crate) fn suspend(&mut self) {
+        self.presentation_tasks.cancel();
+        self.group_progress.clear();
         self.catalog_generation = self.catalog_generation.wrapping_add(1);
         self.delay_generation = self.delay_generation.wrapping_add(1);
         self.switching.clear();
+        self.group_orders.clear();
         self.catalog = None;
         self.expanded.clear();
         self.proxy_pages.clear();
@@ -116,6 +121,7 @@ impl ProxiesPage {
             return;
         }
         self.show_hidden = show_hidden;
+        self.group_orders.clear();
         self.expanded.clear();
         self.proxy_pages.clear();
         self.start_refresh(true, cx);
@@ -123,6 +129,9 @@ impl ProxiesPage {
 
     pub(super) fn toggle_group(&mut self, name: &str, cx: &mut Context<Self>) {
         super::toggle_expanded_group(&mut self.expanded, name);
+        if !self.expanded.contains(name) {
+            self.group_orders.invalidate(name);
+        }
         cx.notify();
     }
 
@@ -136,6 +145,7 @@ impl ProxiesPage {
             return;
         }
         self.outbound_mode = mode.to_ascii_lowercase();
+        self.group_orders.clear();
         self.expanded.clear();
         self.proxy_pages.clear();
         if let Some(catalog) = &self.catalog
@@ -289,6 +299,7 @@ impl ProxiesPage {
                             tracing::warn!(%warning, "automatic proxy group restored with a warning");
                         }
                         if let Some(catalog) = outcome.catalog {
+                            this.group_orders.clear();
                             this.catalog = Some(catalog);
                         }
                         this.error = None;
@@ -352,10 +363,16 @@ impl ProxiesPage {
                             tracing::warn!(%warning, "group delay completed with a readback warning");
                         }
                         if let Some(catalog) = outcome.selection.catalog {
+                            this.group_orders.clear();
                             this.catalog = Some(catalog);
                         }
-                        for (proxy, delay) in outcome.delays {
-                            this.record_delay(&group, &proxy, delay, delay);
+                        this.group_orders.invalidate(&group);
+                        if let Some(group) = this.catalog.as_mut().and_then(|catalog| catalog.groups.iter_mut().find(|item| item.name == group)) {
+                            for proxy in &mut group.all {
+                                if let Some(&delay) = outcome.delays.get(&proxy.name) {
+                                    append_delay(proxy, delay, delay);
+                                }
+                            }
                         }
                         this.error = None;
                         this.notice = warning.or_else(|| {
@@ -401,6 +418,7 @@ impl ProxiesPage {
                 .await
                 .map_err(|error| error.to_string())
         });
+        self.presentation_tasks.track(&task);
 
         cx.spawn(async move |this, cx| {
             let result = match task.await {
@@ -436,7 +454,10 @@ impl ProxiesPage {
     }
 
     pub(super) fn test_group(&mut self, group_name: &str, cx: &mut Context<Self>) {
-        if self.proxy_selection_blocked(group_name) || self.loading {
+        if self.proxy_selection_blocked(group_name)
+            || self.loading
+            || self.group_progress.contains_key(group_name)
+        {
             return;
         }
         let Some(group) = self
@@ -452,86 +473,97 @@ impl ProxiesPage {
         if proxies.is_empty() {
             return;
         }
-        let pending = proxies
-            .iter()
-            .map(|proxy| test_key(&group_name, &proxy.name))
-            .collect::<Vec<_>>();
+        self.group_progress
+            .insert(group_name.clone(), (0, proxies.len()));
         let token = DelayTaskToken(self.delay_generation);
         self.error = None;
         cx.notify();
 
         let operations = ProxyOperations::new(self.client.clone());
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(64);
         let task = self.runtime.spawn(async move {
-            stream::iter(proxies.into_iter().map(|proxy| {
+            let mut measurements = stream::iter(proxies.into_iter().map(|(index, target)| {
                 let operations = operations.clone();
                 let test_url = test_url.clone();
                 async move {
-                    let target = ProxyDelayTarget {
-                        name: proxy.name.clone(),
-                        provider: proxy.provider_name,
-                    };
                     let result = operations
                         .measure(&target, test_url.as_deref(), 5_000)
-                        .await;
-                    (proxy.name, result)
+                        .await
+                        .map_err(|error| error.to_string());
+                    (index, target.name, result)
                 }
             }))
-            .buffer_unordered(MAX_DELAY_TEST_CONCURRENCY)
-            .collect::<Vec<_>>()
-            .await
+            .buffer_unordered(MAX_DELAY_TEST_CONCURRENCY);
+            while let Some(result) = measurements.next().await {
+                if sender.send(result).await.is_err() {
+                    break;
+                }
+            }
         });
-
+        self.presentation_tasks.track(&task);
         cx.spawn(async move |this, cx| {
-            let result = task.await.map_err(|error| {
-                zenclash_i18n::text_with(
-                    "proxies.errors.group_delay_task",
-                    &[("error", error.to_string())],
-                )
-            });
+            let mut failures = 0usize;
+            let mut first_error = None;
+            while let Some(batch) = receive_batch(&mut receiver).await {
+                let applied = this.update(cx, |this, cx| {
+                    if !token.is_current(this.delay_generation) {
+                        return false;
+                    }
+                    let mut group = this.catalog.as_mut().and_then(|catalog| {
+                        catalog
+                            .groups
+                            .iter_mut()
+                            .find(|group| group.name == group_name)
+                    });
+                    this.group_orders.invalidate(&group_name);
+                    for (index, name, result) in batch {
+                        let key = test_key(&group_name, &name);
+                        this.testing.remove(&key);
+                        if let Some(progress) = this.group_progress.get_mut(&group_name) {
+                            progress.0 += 1;
+                        }
+                        let (delay, mean_delay) = match result {
+                            Ok(result) => {
+                                this.test_failures.remove(&key);
+                                (result.delay, result.mean_delay)
+                            }
+                            Err(error) => {
+                                failures += 1;
+                                this.test_failures
+                                    .insert(key, super::DelayTestFailure::from_error(&error));
+                                first_error.get_or_insert(error);
+                                (0, 0)
+                            }
+                        };
+                        if let Some(proxy) = group
+                            .as_deref_mut()
+                            .and_then(|group| group.all.get_mut(index))
+                            .filter(|proxy| proxy.name == name)
+                        {
+                            append_delay(proxy, delay, mean_delay);
+                        }
+                    }
+                    if let Some(error) = &first_error {
+                        this.error = Some(zenclash_i18n::text_with(
+                            "proxies.errors.group_failed_detail",
+                            &[("count", failures.to_string()), ("error", error.clone())],
+                        ));
+                    }
+                    cx.notify();
+                    true
+                });
+                if !matches!(applied, Ok(true)) {
+                    return;
+                }
+            }
+            let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 if !token.is_current(this.delay_generation) {
                     return;
                 }
-                for key in pending {
-                    this.testing.remove(&key);
-                }
-                match result {
-                    Ok(results) => {
-                        let mut failed = 0usize;
-                        let mut first_error = None;
-                        for (proxy, result) in results {
-                            if let Ok(result) = result {
-                                this.test_failures.remove(&test_key(&group_name, &proxy));
-                                this.record_delay(
-                                    &group_name,
-                                    &proxy,
-                                    result.delay,
-                                    result.mean_delay,
-                                );
-                            } else if let Err(error) = result {
-                                failed += 1;
-                                first_error.get_or_insert_with(|| error.to_string());
-                                this.test_failures.insert(
-                                    test_key(&group_name, &proxy),
-                                    super::DelayTestFailure::from_error(&error.to_string()),
-                                );
-                                this.record_delay(&group_name, &proxy, 0, 0);
-                            }
-                        }
-                        if failed > 0 {
-                            this.error = Some(match first_error {
-                                Some(error) => zenclash_i18n::text_with(
-                                    "proxies.errors.group_failed_detail",
-                                    &[("count", failed.to_string()), ("error", error)],
-                                ),
-                                None => zenclash_i18n::text_with(
-                                    "proxies.errors.group_failed",
-                                    &[("count", failed.to_string())],
-                                ),
-                            });
-                        }
-                    }
-                    Err(error) => this.error = Some(error),
+                this.group_progress.remove(&group_name);
+                if let Err(error) = result {
+                    this.error = Some(error.to_string());
                 }
                 cx.notify();
             });
@@ -550,6 +582,7 @@ impl ProxiesPage {
             return;
         };
         append_delay(proxy, delay, mean_delay);
+        self.group_orders.invalidate(&group.name);
     }
 
     fn next_catalog_task(&mut self) -> CatalogTaskToken {
@@ -558,9 +591,12 @@ impl ProxiesPage {
     }
 
     fn begin_catalog_operation(&mut self) -> CatalogTaskToken {
+        self.presentation_tasks.cancel();
+        self.group_progress.clear();
         let token = self.next_catalog_task();
         self.delay_generation = self.delay_generation.wrapping_add(1);
         self.testing.clear();
+        self.group_orders.clear();
         self.test_failures.clear();
         self.restoring_auto = None;
         self.measuring_and_restoring_auto = None;
@@ -579,5 +615,98 @@ impl ProxiesPage {
 
     pub(super) fn proxy_selection_blocked(&self, group: &str) -> bool {
         self.catalog_operation_pending() || self.switching.group_pending(group)
+    }
+}
+
+#[derive(Default)]
+pub(super) struct PresentationTasks(Vec<tokio::task::AbortHandle>);
+
+impl PresentationTasks {
+    fn track<T>(&mut self, task: &tokio::task::JoinHandle<T>) {
+        self.0.retain(|handle| !handle.is_finished());
+        self.0.push(task.abort_handle());
+    }
+
+    fn cancel(&mut self) {
+        for handle in self.0.drain(..) {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for PresentationTasks {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+async fn receive_batch<T>(receiver: &mut tokio::sync::mpsc::Receiver<T>) -> Option<Vec<T>> {
+    let first = receiver.recv().await?;
+    gpui::Timer::after(std::time::Duration::from_millis(50)).await;
+    let mut batch = vec![first];
+    while batch.len() < 64 {
+        let Ok(item) = receiver.try_recv() else {
+            break;
+        };
+        batch.push(item);
+    }
+    Some(batch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_wait_can_start_on_the_gpui_executor_without_a_tokio_runtime() {
+        use futures_util::FutureExt;
+
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(64);
+        sender.try_send(42).unwrap();
+        let _ = receive_batch(&mut receiver).now_or_never();
+    }
+
+    #[tokio::test]
+    async fn batches_bound_ui_work_without_losing_results() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(128);
+        for index in 0..100 {
+            sender.send(index).await.unwrap();
+        }
+        drop(sender);
+        assert_eq!(
+            receive_batch(&mut receiver).await.unwrap(),
+            (0..64).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            receive_batch(&mut receiver).await.unwrap(),
+            (64..100).collect::<Vec<_>>()
+        );
+        assert!(receive_batch(&mut receiver).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn measurement_results_are_published_before_the_producer_finishes() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(64);
+        sender.send(42).await.unwrap();
+        let batch = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            receive_batch(&mut receiver),
+        )
+        .await
+        .unwrap();
+        assert_eq!(batch, Some(vec![42]));
+        assert!(!sender.is_closed());
+    }
+
+    #[tokio::test]
+    async fn suspending_presentation_cancels_all_registered_work() {
+        let mut tasks = PresentationTasks::default();
+        let first = tokio::spawn(std::future::pending::<()>());
+        let second = tokio::spawn(std::future::pending::<()>());
+        tasks.track(&first);
+        tasks.track(&second);
+        tasks.cancel();
+        assert!(first.await.unwrap_err().is_cancelled());
+        assert!(second.await.unwrap_err().is_cancelled());
     }
 }

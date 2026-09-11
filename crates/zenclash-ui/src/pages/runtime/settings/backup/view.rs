@@ -56,7 +56,9 @@ impl RuntimePage {
                                     .icon(crate::assets::AppIcon::SquareArrowRightExit)
                                     .label(zenclash_i18n::text("backup.local.export"))
                                     .small()
-                                    .disabled(self.mutating)
+                                    .disabled(self.mutation_busy(
+                                        crate::pages::runtime::busy::MutationDomain::Backup,
+                                    ))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.choose_backup_export(cx);
                                     })),
@@ -66,7 +68,9 @@ impl RuntimePage {
                                     .icon(IconName::FolderOpen)
                                     .label(zenclash_i18n::text("backup.local.import"))
                                     .small()
-                                    .disabled(self.mutating)
+                                    .disabled(self.mutation_busy(
+                                        crate::pages::runtime::busy::MutationDomain::Backup,
+                                    ))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.choose_backup_import(cx);
                                     })),

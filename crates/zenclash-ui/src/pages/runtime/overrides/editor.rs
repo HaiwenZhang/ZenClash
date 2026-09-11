@@ -163,7 +163,7 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok(ProfileEditorSaveOutcome::Applied(path))
                         if this.is_page_task_current(token) =>
@@ -223,7 +223,7 @@ impl RuntimePage {
                         Button::new("cancel-profile-yaml-edit")
                             .label(zenclash_i18n::text("overrides.editor.cancel"))
                             .ghost()
-                            .disabled(self.mutating)
+                            .disabled(self.core_busy())
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.cancel_profile_yaml_editor(window, cx);
                             })),
@@ -233,7 +233,7 @@ impl RuntimePage {
                             .icon(IconName::Check)
                             .label(zenclash_i18n::text("overrides.editor.save"))
                             .primary()
-                            .loading(self.mutating)
+                            .loading(self.core_busy())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.save_profile_yaml_editor(cx);
                             })),

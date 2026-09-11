@@ -160,8 +160,8 @@ impl RuntimePage {
                         .icon(IconName::Check)
                         .label(zenclash_i18n::text("sniffer.filters.save"))
                         .primary()
-                        .loading(self.mutating)
-                        .disabled(self.mutating)
+                        .loading(self.core_busy())
+                        .disabled(self.core_busy())
                         .on_click(cx.listener(|this, _, _, cx| {
                             let patch = this.config_inputs.sniffer.patch(cx);
                             this.apply_controlled_config(

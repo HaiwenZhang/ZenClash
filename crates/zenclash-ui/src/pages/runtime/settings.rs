@@ -1,8 +1,8 @@
 use super::{
     AutostartStatus, Button, Context, Disableable, FluentBuilder, HideTrafficIcon, IconName,
-    IntoElement, Page, ParentElement, PreferencesRestored, RuntimeConfig, RuntimeData, RuntimePage,
-    Selectable, SetDarkTheme, SetLightTheme, SetSystemTheme, ShowTrafficIcon, Sizable, Styled, div,
-    h_flex, info_row, json, px, setting_card, setting_switch, v_flex,
+    IntoElement, Page, ParentElement, RuntimeConfig, RuntimeData, RuntimePage, Selectable,
+    SetDarkTheme, SetLightTheme, SetSystemTheme, ShowTrafficIcon, Sizable, Styled, div, h_flex,
+    info_row, json, px, setting_card, setting_switch, v_flex,
 };
 use crate::components::sidebar::dispatch_navigate;
 
@@ -222,7 +222,9 @@ impl RuntimePage {
                                 self.preferences.language
                                     == zenclash_core::LanguagePreference::ZhCn,
                             )
-                            .disabled(self.mutating)
+                            .disabled(self.mutation_busy(
+                                crate::pages::runtime::busy::MutationDomain::Language,
+                            ))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.set_language(zenclash_core::LanguagePreference::ZhCn, cx);
                             })),
@@ -235,7 +237,9 @@ impl RuntimePage {
                             .selected(
                                 self.preferences.language == zenclash_core::LanguagePreference::En,
                             )
-                            .disabled(self.mutating)
+                            .disabled(self.mutation_busy(
+                                crate::pages::runtime::busy::MutationDomain::Language,
+                            ))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.set_language(zenclash_core::LanguagePreference::En, cx);
                             })),
@@ -262,7 +266,10 @@ impl RuntimePage {
             cx.notify();
             return;
         };
-        let Some(token) = self.begin_mutation(Page::Settings) else {
+        let Some(token) = self.begin_scoped_mutation(
+            Page::Settings,
+            crate::pages::runtime::busy::MutationDomain::Language,
+        ) else {
             return;
         };
         let task = self.runtime.spawn(async move {
@@ -280,15 +287,19 @@ impl RuntimePage {
                 .map_err(|error| error.to_string())
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
-                    Ok(preferences) if this.is_page_task_current(token) => {
+                    Ok(preferences) => {
                         zenclash_i18n::set_locale(preferences.language.locale());
-                        this.preferences = preferences.clone();
-                        this.notice = Some(zenclash_i18n::text("language.saved"));
-                        cx.emit(PreferencesRestored { preferences });
+                        if this.is_page_task_current(token) {
+                            this.notice = Some(zenclash_i18n::text("language.saved"));
+                        }
+                        this.accept_preferences(
+                            preferences,
+                            crate::pages::runtime::PreferenceScope::Language,
+                            cx,
+                        );
                     }
-                    Ok(_) => {}
                     Err(error) => {
                         this.set_page_error(
                             token,
@@ -346,10 +357,10 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok(data) => {
-                        if this.replace_page_data(token, data) {
+                        if this.replace_page_data(token, data, cx) {
                             this.notice = Some(if enabled {
                                 zenclash_i18n::text("settings.application.autostart.enabled")
                             } else {
@@ -372,7 +383,7 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         v_flex()
-            .child(setting_switch(
+            .child(crate::pages::runtime::common::setting_switch_disabled(
                 zenclash_i18n::text("settings.traffic_history.title"),
                 zenclash_i18n::text_with(
                     "settings.traffic_history.description",
@@ -381,6 +392,7 @@ impl RuntimePage {
                 self.preferences.traffic_history_enabled,
                 "settings-traffic-history",
                 theme,
+                self.mutation_busy(crate::pages::runtime::busy::MutationDomain::TrafficHistory),
                 cx.listener(|this, checked, _, cx| {
                     this.set_traffic_history_enabled(*checked, cx);
                 }),
@@ -422,7 +434,7 @@ impl RuntimePage {
                                         .selected(self.preferences.traffic_retention_days == days)
                                         .disabled(
                                             !self.preferences.traffic_history_enabled
-                                                || self.mutating,
+                                                || self.mutation_busy(crate::pages::runtime::busy::MutationDomain::TrafficHistory),
                                         )
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.set_traffic_retention(days, cx);
@@ -469,7 +481,10 @@ impl RuntimePage {
             cx.notify();
             return;
         };
-        let Some(token) = self.begin_mutation(Page::Settings) else {
+        let Some(token) = self.begin_scoped_mutation(
+            Page::Settings,
+            crate::pages::runtime::busy::MutationDomain::TrafficHistory,
+        ) else {
             return;
         };
         let task = self.runtime.spawn(async move {
@@ -504,14 +519,18 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
-                    Ok(preferences) if this.is_page_task_current(token) => {
-                        this.preferences = preferences.clone();
-                        this.notice = Some(success);
-                        cx.emit(PreferencesRestored { preferences });
+                    Ok(preferences) => {
+                        if this.is_page_task_current(token) {
+                            this.notice = Some(success);
+                        }
+                        this.accept_preferences(
+                            preferences,
+                            crate::pages::runtime::PreferenceScope::TrafficHistory,
+                            cx,
+                        );
                     }
-                    Ok(_) => {}
                     Err(error) => this.set_page_error(token, error),
                 }
                 cx.notify();

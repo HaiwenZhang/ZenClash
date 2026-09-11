@@ -109,7 +109,7 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok(preview) if this.is_page_task_current(token) => {
                         this.config_preview = Some(preview);
@@ -166,10 +166,10 @@ impl RuntimePage {
                 )),
             };
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok(data) => {
-                        if this.replace_page_data(token, data) {
+                        if this.replace_page_data(token, data, cx) {
                             this.notice = Some(zenclash_i18n::text_with(
                                 "overrides.notices.applied",
                                 &[("count", count.to_string())],
@@ -272,8 +272,8 @@ impl RuntimePage {
                         Button::new("preview-overrides")
                             .icon(IconName::Eye)
                             .label(zenclash_i18n::text("overrides.actions.preview"))
-                            .loading(self.mutating)
-                            .disabled(self.mutating)
+                            .loading(self.core_busy())
+                            .disabled(self.core_busy())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.load_config_preview(cx);
                             })),
@@ -284,7 +284,7 @@ impl RuntimePage {
                             .label(zenclash_i18n::text("overrides.actions.edit"))
                             .outline()
                             .disabled(
-                                self.mutating
+                                self.core_busy()
                                     || self.config_preview.is_none()
                                     || self.profile_catalog.active.is_none(),
                             )
@@ -303,7 +303,7 @@ impl RuntimePage {
                             .icon(crate::assets::AppIcon::RefreshCw)
                             .label(zenclash_i18n::text("overrides.actions.apply"))
                             .primary()
-                            .loading(self.mutating)
+                            .loading(self.core_busy())
                             .disabled(self.profile_path.is_none())
                             .on_click(cx.listener(|this, _, _, cx| this.apply_overrides(cx))),
                     ),
@@ -330,7 +330,7 @@ impl RuntimePage {
             .child(
                 Switch::new(("override-enabled", index))
                     .checked(record.enabled)
-                    .disabled(self.mutating)
+                    .disabled(self.core_busy())
                     .on_click(cx.listener(move |this, checked, _, cx| {
                         this.set_override_enabled(&enabled_id, *checked, cx);
                     })),
@@ -354,7 +354,7 @@ impl RuntimePage {
                     .icon(IconName::ArrowUp)
                     .xsmall()
                     .ghost()
-                    .disabled(index == 0 || self.mutating)
+                    .disabled(index == 0 || self.core_busy())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.move_override(&up_id, -1, cx);
                     })),
@@ -364,7 +364,7 @@ impl RuntimePage {
                     .icon(IconName::ArrowDown)
                     .xsmall()
                     .ghost()
-                    .disabled(index + 1 == self.override_catalog.items.len() || self.mutating)
+                    .disabled(index + 1 == self.override_catalog.items.len() || self.core_busy())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.move_override(&down_id, 1, cx);
                     })),
@@ -375,7 +375,7 @@ impl RuntimePage {
                     .xsmall()
                     .ghost()
                     .danger()
-                    .disabled(record.enabled || self.mutating)
+                    .disabled(record.enabled || self.core_busy())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.delete_disabled_override(delete_id.clone(), cx);
                     })),

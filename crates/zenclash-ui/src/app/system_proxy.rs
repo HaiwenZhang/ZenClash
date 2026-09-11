@@ -58,7 +58,11 @@ impl ZenClashApp {
         self.core_session.request_shutdown();
         let capture = self.traffic_capture.clone();
         let core_session = self.core_session.clone();
+        let preferences = self.preferences_save_task.take();
         let task = self.runtime.spawn(async move {
+            if let Some(preferences) = preferences {
+                let _ = preferences.await;
+            }
             let mut failures = Vec::new();
             match capture.release_owned().await {
                 Ok(CaptureOutcome::ReconcileNeeded { failure, .. }) => {

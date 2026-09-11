@@ -101,10 +101,10 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.mutating = false;
+                this.finish_mutation(token);
                 match result {
                     Ok(data) => {
-                        if this.replace_page_data(token, data) {
+                        if this.replace_page_data(token, data, cx) {
                             this.notice = Some(zenclash_i18n::text_with(
                                 "core_page.notices.release_installed",
                                 &[("version", tag)],
@@ -194,9 +194,9 @@ impl RuntimePage {
                         }))
                         .small()
                         .outline()
-                        .loading(self.mutating && !is_current)
+                        .loading(self.core_busy() && !is_current)
                         .disabled(
-                            self.mutating
+                            self.core_busy()
                                 || !managed_process
                                 || is_current
                                 || !self.core_kind.capabilities().core_upgrade,
@@ -222,7 +222,7 @@ impl RuntimePage {
                     .loading(self.core_releases.loading)
                     .disabled(
                         self.core_releases.loading
-                            || self.mutating
+                            || self.core_busy()
                             || !self.core_kind.capabilities().core_upgrade,
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
