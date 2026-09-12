@@ -42,8 +42,10 @@ impl ConnectionsUiState {
         });
         let subscription = cx.subscribe(&filter, |this, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
+                if !replace_connection_query(&mut this.connections.query, &input.read(cx).value()) {
+                    return;
+                }
                 this.connections.page = 0;
-                this.connections.query = normalize_connection_query(&input.read(cx).value());
                 this.update_connection_presentation(cx);
                 cx.notify();
             }
@@ -693,6 +695,14 @@ fn normalize_connection_query(query: &str) -> String {
     query.trim().to_owned()
 }
 
+fn replace_connection_query(current: &mut String, incoming: &str) -> bool {
+    if current.eq_ignore_ascii_case(incoming.trim()) {
+        return false;
+    }
+    *current = normalize_connection_query(incoming);
+    true
+}
+
 fn connection_matches(connection: &zenclash_core::Connection, query: &str) -> bool {
     query.is_empty()
         || contains_ascii_case_insensitive(&connection.metadata.host, query)
@@ -826,6 +836,22 @@ mod tests {
             id,
             connection_element_id("connection-details", "connection-a")
         );
+    }
+
+    #[test]
+    fn equivalent_edits_keep_the_running_query_and_real_edits_replace_it() {
+        let mut current = "example.com".to_owned();
+        for incoming in ["example.com", "  example.com  ", "EXAMPLE.COM"] {
+            assert!(!replace_connection_query(&mut current, incoming));
+            assert_eq!(current, "example.com");
+        }
+        assert!(replace_connection_query(&mut current, " example.org "));
+        assert_eq!(current, "example.org");
+        assert!(replace_connection_query(&mut current, " "));
+        assert!(current.is_empty());
+        assert!(!replace_connection_query(&mut current, "\t"));
+        assert!(replace_connection_query(&mut current, "节点甲"));
+        assert!(replace_connection_query(&mut current, "节点乙"));
     }
 
     #[test]

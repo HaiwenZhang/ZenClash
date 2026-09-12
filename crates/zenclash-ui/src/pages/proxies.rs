@@ -245,6 +245,7 @@ impl Render for ProxiesPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let catalog = self.catalog.as_ref();
+        let testing_groups = groups_with_inflight_tests(&self.testing);
         let error = self.error.clone();
         let notice = self.notice.clone();
 
@@ -324,11 +325,14 @@ impl Render for ProxiesPage {
                                     .child(message),
                             )
                         } else {
-                            this.children(
-                                groups.into_iter().enumerate().map(|(index, group)| {
-                                    self.render_group(index, group, &theme, cx)
-                                }),
-                            )
+                            this.children(groups.into_iter().map(|group| {
+                                self.render_group(
+                                    group,
+                                    testing_groups.contains(group.name.as_str()),
+                                    &theme,
+                                    cx,
+                                )
+                            }))
                         }
                     }),
             )
@@ -350,11 +354,11 @@ fn test_key(group: &str, proxy: &str) -> String {
     format!("{group}\0{proxy}")
 }
 
-fn group_has_inflight_test(testing: &HashSet<String>, group: &str) -> bool {
-    testing.iter().any(|key| {
-        key.split_once('\0')
-            .is_some_and(|(testing_group, _)| testing_group == group)
-    })
+fn groups_with_inflight_tests(testing: &HashSet<String>) -> HashSet<&str> {
+    testing
+        .iter()
+        .filter_map(|key| key.split_once('\0').map(|(group, _)| group))
+        .collect()
 }
 
 fn take_untested_proxies(
@@ -575,7 +579,29 @@ mod tests {
     fn group_testing_state_matches_the_complete_group_name() {
         let testing = HashSet::from([test_key("Proxy Auto", "HK")]);
 
-        assert!(group_has_inflight_test(&testing, "Proxy Auto"));
-        assert!(!group_has_inflight_test(&testing, "Proxy"));
+        let groups = groups_with_inflight_tests(&testing);
+        assert!(groups.contains("Proxy Auto"));
+        assert!(!groups.contains("Proxy"));
+    }
+
+    #[test]
+    fn group_stays_testing_until_its_last_measurement_finishes() {
+        let mut testing = HashSet::from([
+            test_key("Proxy", "HK"),
+            test_key("Proxy", "JP"),
+            test_key("Auto", "HK"),
+        ]);
+        testing.remove(&test_key("Proxy", "HK"));
+        assert_eq!(
+            groups_with_inflight_tests(&testing),
+            HashSet::from(["Proxy", "Auto"])
+        );
+        testing.remove(&test_key("Proxy", "JP"));
+        assert_eq!(
+            groups_with_inflight_tests(&testing),
+            HashSet::from(["Auto"])
+        );
+        testing.clear();
+        assert!(groups_with_inflight_tests(&testing).is_empty());
     }
 }

@@ -19,6 +19,16 @@ impl GroupOrders {
         self.0.borrow_mut().remove(group);
     }
 
+    pub(super) fn invalidate_delays(&self, group: &str) {
+        let mut orders = self.0.borrow_mut();
+        if orders
+            .get(group)
+            .is_some_and(|order| order.sort || order.hide)
+        {
+            orders.remove(group);
+        }
+    }
+
     pub(super) fn order(
         &self,
         group: &ProxyGroup,
@@ -104,6 +114,22 @@ mod tests {
                 })
                 .collect(),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn delay_updates_preserve_catalog_order_but_refresh_latency_and_visibility() {
+        for (sort, hide) in [(false, false), (true, false), (false, true), (true, true)] {
+            let orders = GroupOrders::default();
+            let mut group = group("group");
+            let mut failures = HashMap::new();
+            let before = orders.order(&group, sort, hide, &failures);
+            group.all[0].history[0].delay = 1;
+            failures.insert(test_key("group", "node-1"), DelayTestFailure::Timeout);
+            orders.invalidate_delays(&group.name);
+            let after = orders.order(&group, sort, hide, &failures);
+            assert_eq!(&*after, visible_node_indices(&group, sort, hide, &failures));
+            assert_eq!(Rc::ptr_eq(&before, &after), !sort && !hide);
         }
     }
 

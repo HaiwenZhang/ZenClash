@@ -3,8 +3,8 @@ use gpui_component::{Selectable, button::ButtonVariants};
 use super::{
     Button, Context, Disableable, FluentBuilder, Icon, IconName, IntoElement, ParentElement,
     Progress, ProxiesPage, ProxyGroup, ProxyGroupBehavior, ProxyNode, Sizable, Styled, Switch, div,
-    group_allows_manual_selection, group_has_inflight_test, group_has_unique_current, h_flex,
-    proxy_page, px, test_key, v_flex,
+    group_allows_manual_selection, group_has_unique_current, h_flex, proxy_page, px, test_key,
+    v_flex,
 };
 
 impl ProxiesPage {
@@ -114,8 +114,8 @@ impl ProxiesPage {
 
     pub(super) fn render_group(
         &self,
-        _group_index: usize,
         group: &ProxyGroup,
+        testing_group: bool,
         theme: &gpui_component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -128,7 +128,6 @@ impl ProxiesPage {
             self.measuring_and_restoring_auto.as_deref() == Some(group.name.as_str());
         let group_for_measure_restore = group.name.clone();
         let group_test_url = group.test_url.clone();
-        let testing_group = group_has_inflight_test(&self.testing, &group.name);
         let selection_blocked = self.proxy_selection_blocked(&group.name);
 
         v_flex()

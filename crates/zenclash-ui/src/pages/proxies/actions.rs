@@ -366,7 +366,7 @@ impl ProxiesPage {
                             this.group_orders.clear();
                             this.catalog = Some(catalog);
                         }
-                        this.group_orders.invalidate(&group);
+                        this.group_orders.invalidate_delays(&group);
                         if let Some(group) = this.catalog.as_mut().and_then(|catalog| catalog.groups.iter_mut().find(|item| item.name == group)) {
                             for proxy in &mut group.all {
                                 if let Some(&delay) = outcome.delays.get(&proxy.name) {
@@ -515,7 +515,7 @@ impl ProxiesPage {
                             .iter_mut()
                             .find(|group| group.name == group_name)
                     });
-                    this.group_orders.invalidate(&group_name);
+                    this.group_orders.invalidate_delays(&group_name);
                     for (index, name, result) in batch {
                         let key = test_key(&group_name, &name);
                         this.testing.remove(&key);
@@ -582,7 +582,7 @@ impl ProxiesPage {
             return;
         };
         append_delay(proxy, delay, mean_delay);
-        self.group_orders.invalidate(&group.name);
+        self.group_orders.invalidate_delays(&group.name);
     }
 
     fn next_catalog_task(&mut self) -> CatalogTaskToken {

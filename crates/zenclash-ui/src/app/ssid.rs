@@ -5,6 +5,9 @@ use zenclash_core::SsidSwitchState;
 
 impl ZenClashApp {
     pub(super) fn start_ssid_switching(&self, cx: &mut Context<Self>) {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
         let runtime = self.runtime.clone();
         let core = self.core_session.clone();
         cx.spawn(async move |this, cx| {
@@ -48,7 +51,11 @@ impl ZenClashApp {
                     observation = revision;
                     ticks = 0;
                 }
-                let core_snapshot = if rules.enabled {
+                let core_snapshot = if rules.enabled
+                    && cached_ssid
+                        .as_ref()
+                        .is_some_and(|ssid| rules.profiles.contains_key(ssid))
+                {
                     let core = core.clone();
                     runtime.spawn_blocking(move || core.snapshot()).await.ok()
                 } else {

@@ -54,6 +54,22 @@ fn main() {
         assert_eq!(&*orders.order(&group, true, true, &failures), expected);
         orders.clear();
         println!("nodes={count} uncached_mean_us={uncached:.2} cached_mean_us={cached:.4}");
+        for rebuild in [true, false] {
+            let orders = measured::GroupOrders::default();
+            let expected = measured::visible_node_indices(&group, false, false, &failures);
+            assert_eq!(&*orders.order(&group, false, false, &failures), expected);
+            let started = Instant::now();
+            for _ in 0..10000 {
+                if rebuild {
+                    orders.invalidate(black_box("test"));
+                } else {
+                    orders.invalidate_delays(black_box("test"));
+                }
+                black_box(orders.order(black_box(&group), false, false, &failures));
+            }
+            let elapsed = started.elapsed().as_secs_f64()*1e6/10000.0;
+            println!("nodes={count} delay_batch_rebuild={rebuild} order_mean_us={elapsed:.4}");
+        }
     }
 }
 '''
