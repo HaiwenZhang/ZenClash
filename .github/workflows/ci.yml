@@ -25,7 +25,7 @@ jobs:
         run: |
           rustup update stable
           rustup default stable
-          rustup component add rustfmt
+          rustup component add rustfmt clippy
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -52,7 +52,7 @@ jobs:
         run: |
           rustup update stable
           rustup default stable
-          rustup component add clippy
+          rustup component add rustfmt clippy
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -63,7 +63,19 @@ jobs:
         run: bash scripts/tests/build_deb_package_test.sh
 
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        run: >-
+          cargo clippy --workspace --all-targets --all-features --locked --
+          -D warnings
+          -D clippy::future_not_send
+          -D clippy::await_holding_lock
+          -D clippy::large_futures
+          -D clippy::perf
+          -D clippy::redundant_clone
+          -D clippy::needless_collect
+          -D clippy::large_enum_variant
+          -D clippy::manual_ok_or
+          -D clippy::missing_errors_doc
+          -D clippy::missing_panics_doc
 
       - name: Run workspace tests
         run: cargo test --workspace --all-features --locked

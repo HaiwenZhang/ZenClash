@@ -71,6 +71,12 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Install the stable Rust toolchain
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add rustfmt clippy
+
       - name: Install Linux dependencies
         run: sudo scripts/install_linux_build_deps.sh
 
@@ -139,6 +145,11 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Install the stable Rust toolchain
+        run: |
+          rustup update stable
+          rustup default stable
+
       - name: Run native core tests
         run: cargo test --locked -p zenclash-core --lib
 
@@ -165,6 +176,11 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Install the stable Rust toolchain
+        run: |
+          rustup update stable
+          rustup default stable
+
       - name: Run native core tests
         run: cargo test --locked -p zenclash-core --lib
 
@@ -190,6 +206,11 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install the stable Rust toolchain
+        run: |
+          rustup update stable
+          rustup default stable
 
       - name: Install Linux dependencies
         run: sudo scripts/install_linux_build_deps.sh

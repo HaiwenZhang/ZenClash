@@ -101,7 +101,7 @@ impl RuntimePage {
                     Err(error) => {
                         this.error = Some(zenclash_i18n::text_with(
                             "connections.errors.filter_task",
-                            &[("error", error.to_string())],
+                            &[("error", error)],
                         ))
                     }
                 }
