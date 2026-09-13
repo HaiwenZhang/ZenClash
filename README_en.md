@@ -47,7 +47,7 @@ The macOS package is not yet notarized by Apple. See the [macOS installation gui
 ## Quick Start
 
 1. Open ZenClash and add a subscription URL or import a local YAML file in **Profiles**.
-2. Return to Home, select a profile and proxy node, and test the node's latency.
+2. Select a profile on Home, then open **Proxies** to choose a node and test its latency.
 3. Enable the system proxy or TUN as needed, then choose Rule, Global, or Direct mode.
 
 TUN requires system permissions. On Windows, ZenClash cannot yet request the administrator permissions needed for TUN from within the app; use the system proxy to get started.

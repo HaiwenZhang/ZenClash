@@ -52,11 +52,27 @@ fn output_from_command(
     timeout: Duration,
 ) -> Result<Output, String> {
     configure_background_command(&mut command);
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("执行 {display_name} 失败：{error}"))?;
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let started = Instant::now();
+    let mut child = loop {
+        match command.spawn() {
+            Ok(child) => break child,
+            Err(error) => {
+                // A concurrent fork can retain a closed writer until exec.
+                // See https://github.com/rust-lang/rust/issues/114554.
+                if cfg!(target_os = "linux") && error.kind() == io::ErrorKind::ExecutableFileBusy {
+                    let remaining = timeout.saturating_sub(started.elapsed());
+                    if !remaining.is_zero() {
+                        thread::sleep(POLL_INTERVAL.min(remaining));
+                        if started.elapsed() < timeout {
+                            continue;
+                        }
+                    }
+                }
+                return Err(format!("执行 {display_name} 失败：{error}"));
+            }
+        }
+    };
     let stdout = child
         .stdout
         .take()
@@ -82,7 +98,7 @@ fn output_from_command(
         }
     };
 
-    let status = wait_for_exit(&mut child, display_name, timeout);
+    let status = wait_for_exit(&mut child, display_name, started, timeout);
     let stdout = join_reader(stdout_reader, "stdout");
     let stderr = join_reader(stderr_reader, "stderr");
 
@@ -136,9 +152,9 @@ fn join_reader(
 fn wait_for_exit(
     child: &mut Child,
     command: &str,
+    started: Instant,
     timeout: Duration,
 ) -> Result<ExitStatus, String> {
-    let started = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
@@ -197,6 +213,124 @@ mod tests {
 
         assert!(error.contains("超时"));
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn busy_executable() -> (std::path::PathBuf, std::fs::File) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "zenclash-busy-command-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("sh");
+        std::fs::copy("/bin/sh", &path).unwrap();
+        let writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+
+        (path, writer)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn output_retries_a_busy_executable_until_the_writer_closes() {
+        use std::sync::mpsc::{self, RecvTimeoutError};
+
+        let (path, writer) = busy_executable();
+        let error = Command::new(&path).spawn().unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ETXTBSY));
+        let (sender, receiver) = mpsc::channel();
+
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                let result = output_path_with_timeout(
+                    &path,
+                    &[OsStr::new("-c"), OsStr::new("printf zenclash")],
+                    Duration::from_secs(2),
+                );
+                sender.send(result).unwrap();
+            });
+            let before_close = receiver.recv_timeout(Duration::from_millis(50));
+            drop(writer);
+            assert!(matches!(before_close, Err(RecvTimeoutError::Timeout)));
+            let output = receiver
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap()
+                .unwrap();
+
+            assert!(output.status.success());
+            assert_eq!(output.stdout, b"zenclash");
+        });
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn output_stops_retrying_a_busy_executable_at_the_timeout() {
+        let (path, writer) = busy_executable();
+        let timeout = Duration::from_millis(50);
+        let started = Instant::now();
+
+        let error = output_path_with_timeout(&path, &[], timeout).unwrap_err();
+
+        assert!(error.contains(&io::Error::from_raw_os_error(libc::ETXTBSY).to_string()));
+        assert!(started.elapsed() >= timeout);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(writer);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn output_counts_busy_retry_time_toward_the_execution_timeout() {
+        let (path, writer) = busy_executable();
+        let timeout = Duration::from_millis(600);
+        let started = Instant::now();
+
+        let error = thread::scope(|scope| {
+            scope.spawn(move || {
+                thread::sleep(Duration::from_millis(400));
+                drop(writer);
+            });
+            output_path_with_timeout(
+                &path,
+                &[OsStr::new("-c"), OsStr::new("exec sleep 2")],
+                timeout,
+            )
+            .unwrap_err()
+        });
+
+        assert!(error.contains("超时"));
+        assert!(started.elapsed() >= timeout);
+        assert!(started.elapsed() < Duration::from_millis(850));
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn output_returns_other_spawn_errors_without_retrying() {
+        let started = Instant::now();
+
+        let error = output_with_timeout("\0", &[], Duration::from_secs(2)).unwrap_err();
+
+        assert!(error.contains("失败"));
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_preserves_nonzero_exit_status_and_both_output_streams() {
+        let output = output_with_timeout(
+            "/bin/sh",
+            &["-c", "printf stdout; printf stderr >&2; exit 7"],
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert_eq!(output.status.code(), Some(7));
+        assert_eq!(output.stdout, b"stdout");
+        assert_eq!(output.stderr, b"stderr");
     }
 
     #[test]
