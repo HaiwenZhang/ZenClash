@@ -26,7 +26,6 @@
 - **Proxies and routing**: Switch proxy groups and nodes, test latency, and choose Rule, Global, or Direct mode.
 - **Desktop integration**: System proxy, TUN, launch at login, and quick controls from the tray.
 - **Monitoring and diagnostics**: Live traffic, active connections, rules, logs, network diagnostics, and local usage history.
-- **Remote management**: Connect to multiple Mihomo controllers; switch local profiles by Wi-Fi network on macOS.
 - **Native interface**: Simplified Chinese and English, with light, dark, and system appearance modes.
 
 ## Download and Install

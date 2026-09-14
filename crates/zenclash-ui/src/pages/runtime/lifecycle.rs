@@ -385,24 +385,6 @@ impl RuntimePage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_scoped(page, services, false, window, cx)
-    }
-
-    pub(crate) fn new_remote(
-        services: RuntimePageServices,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        Self::new_scoped(Page::Connections, services, true, window, cx)
-    }
-
-    fn new_scoped(
-        page: Page,
-        services: RuntimePageServices,
-        remote: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
         let RuntimePageServices {
             core_kind,
             core_session,
@@ -423,12 +405,12 @@ impl RuntimePage {
             startup_error,
         } = services;
         let initial_profile = profile_path.clone();
-        let persistent_task = (!remote).then(|| {
+        let persistent_task = {
             let profile = profile_path.clone();
             let store = controlled_config_store.clone();
             runtime
                 .spawn_blocking(move || load_initial_persistent_state(profile.as_deref(), &store))
-        });
+        };
         let profile_store = None;
         let profile_catalog = ProfileCatalog::default();
         let controlled_config = empty_json_object();
@@ -452,7 +434,6 @@ impl RuntimePage {
         let (live_updates_enabled, live_update_activity) =
             tokio::sync::watch::channel(ui_visibility.updates_enabled());
         let mut this = Self {
-            remote,
             page,
             core_kind,
             core_session,
@@ -471,8 +452,8 @@ impl RuntimePage {
             config_inputs,
             config_inputs_profile,
             config_inputs_generation: 0,
-            config_inputs_loading: !remote,
-            persistent_loading: !remote,
+            config_inputs_loading: true,
+            persistent_loading: true,
             profile_catalog,
             profile_catalog_generation: 0,
             preferences_store,
@@ -521,13 +502,9 @@ impl RuntimePage {
                 this.set_window_active(window.is_window_active(), cx);
             });
         this._subscriptions.push(window_activation_subscription);
-        if let Some(task) = persistent_task {
-            this.finish_initial_persistent_state(task, initial_profile, cx);
-        }
+        this.finish_initial_persistent_state(persistent_task, initial_profile, cx);
         this.refresh(cx);
-        if !remote {
-            this.refresh_app_update(cx);
-        }
+        this.refresh_app_update(cx);
         Self::start_operational_updates(
             this.operational_status.subscribe(),
             this.live_updates_enabled.subscribe(),
@@ -617,9 +594,6 @@ impl RuntimePage {
 
     /// Switches the active tab and invalidates results from older page tasks.
     pub fn switch_to(&mut self, page: Page, cx: &mut Context<Self>) {
-        if self.remote && !matches!(page, Page::Connections | Page::Logs | Page::Rules) {
-            return;
-        }
         if self.page == page {
             return;
         }

@@ -14,9 +14,6 @@ impl<T> Default for LatestCommandQueue<T> {
 }
 
 impl<T> LatestCommandQueue<T> {
-    pub(in crate::app) fn is_running(&self) -> bool {
-        self.running
-    }
     pub(super) fn submit(&mut self, command: T) -> Option<T> {
         if self.running {
             self.pending = Some(command);

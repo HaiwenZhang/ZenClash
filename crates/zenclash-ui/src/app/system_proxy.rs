@@ -51,7 +51,6 @@ impl ZenClashApp {
             return;
         }
         self.quit_state = QuitState::InProgress;
-        self.controllers_page.update(cx, |page, _| page.shutdown());
         if let Some(panel) = self.status_panel.take() {
             let _ = cx.update_window(panel, |_, window, _| window.remove_window());
         }

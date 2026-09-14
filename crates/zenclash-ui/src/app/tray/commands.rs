@@ -288,8 +288,6 @@ impl ZenClashApp {
                     Err(error) => {
                         tracing::warn!(%error, "profile selection from tray failed");
                         this.report_tray_error(error.clone(), cx);
-                        this.controllers_page
-                            .update(cx, |page, cx| page.report_error(error.clone(), cx));
                         this.runtime_page.update(cx, |runtime_page, cx| {
                             runtime_page.report_tray_profile_error(&error, cx);
                         });

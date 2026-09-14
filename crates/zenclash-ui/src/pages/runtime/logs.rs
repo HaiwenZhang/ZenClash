@@ -115,9 +115,7 @@ impl RuntimePage {
                 &persistence,
                 theme,
             ))
-            .when(!self.remote, |view| {
-                view.child(self.render_log_persistence(theme, cx))
-            })
+            .child(self.render_log_persistence(theme, cx))
             .child(
                 h_flex()
                     .gap_2()

@@ -529,34 +529,6 @@ impl OperationalStatus {
             tun_permissions,
             traffic,
             logs,
-            true,
-        ));
-        let _ = status.task.set(task.abort_handle());
-        status
-    }
-
-    /// Starts controller and stream sampling without inspecting this computer's
-    /// system proxy, TUN interfaces or permissions for a remote target.
-    #[must_use]
-    pub fn start_remote(
-        runtime: &Handle,
-        core_session: CoreSession,
-        traffic: Arc<TrafficMonitor>,
-        logs: Arc<LogMonitor>,
-    ) -> Arc<Self> {
-        let (snapshot, _) = watch::channel(OperationalSnapshot::default());
-        let status = Arc::new(Self {
-            snapshot,
-            task: std::sync::OnceLock::new(),
-        });
-        let task = runtime.spawn(run_status_monitor(
-            Arc::downgrade(&status),
-            core_session,
-            None,
-            None,
-            traffic,
-            logs,
-            false,
         ));
         let _ = status.task.set(task.abort_handle());
         status
@@ -660,11 +632,10 @@ async fn run_status_monitor(
     tun_permissions: Option<crate::TunPermissionManager>,
     traffic: Arc<TrafficMonitor>,
     logs: Arc<LogMonitor>,
-    inspect_platform: bool,
 ) {
     let mut schedule = StatusRefreshSchedule::default();
     while let Some(status) = status.upgrade() {
-        let refresh_platform = inspect_platform && schedule.next_refreshes_platform();
+        let refresh_platform = schedule.next_refreshes_platform();
         refresh_status(
             &status,
             &core_session,
@@ -982,7 +953,7 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
-    async fn remote_sampling_can_be_cancelled_without_waiting_for_a_controller_timeout() {
+    async fn sampling_can_be_cancelled_without_waiting_for_a_controller_timeout() {
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let endpoint =
             crate::MihomoEndpoint::new(format!("http://{}", listener.local_addr().unwrap()), "");
@@ -993,7 +964,7 @@ mod tests {
         let logs = crate::LogMonitor::start(&runtime, endpoint, crate::MihomoLogLevel::Info);
         let traffic_weak = std::sync::Arc::downgrade(&traffic);
         let logs_weak = std::sync::Arc::downgrade(&logs);
-        let status = super::OperationalStatus::start_remote(&runtime, core, traffic, logs);
+        let status = super::OperationalStatus::start(&runtime, core, None, None, traffic, logs);
         tokio::task::yield_now().await;
         status.stop();
         drop(status);

@@ -18,10 +18,8 @@ use zenclash_core::{
 mod actions;
 mod automatic;
 mod bootstrap;
-mod controllers;
 pub(crate) mod platform;
 mod profile_updates;
-mod ssid;
 mod system_proxy;
 mod traffic_history;
 mod tray;
@@ -113,8 +111,6 @@ pub struct ZenClashApp {
     focus_handle: gpui::FocusHandle,
     proxies_page: Entity<ProxiesPage>,
     runtime_page: Entity<RuntimePage>,
-    controllers_page: Entity<controllers::ControllersPage>,
-    controllers_presented: bool,
     tray_core_running: Option<bool>,
     profile_path: Option<PathBuf>,
     controlled_config_store: ControlledConfigStore,
@@ -287,28 +283,6 @@ impl ZenClashApp {
             )
         });
         let profile_subscription = Self::subscribe_profile_events(&runtime_page, cx);
-        let controllers_page = cx.new(|cx| {
-            controllers::ControllersPage::new(
-                runtime.clone(),
-                app_controlled_config_store.clone(),
-                window,
-                cx,
-            )
-        });
-        let controllers_subscription = cx.subscribe(
-            &controllers_page,
-            |this, _, event: &controllers::TargetEvent, cx| {
-                this.controllers_presented = matches!(event, controllers::TargetEvent::Remote);
-                this.runtime_page.update(cx, |page, cx| {
-                    page.set_presented(
-                        !this.controllers_presented && this.current_page != Page::Proxies,
-                        cx,
-                    )
-                });
-                this.refresh_visible_proxies(cx);
-                cx.notify();
-            },
-        );
         let proxy_selection_subscription =
             Self::subscribe_proxy_selection_events(&runtime_page, cx);
         let runtime_config_subscription = Self::subscribe_runtime_config_events(&runtime_page, cx);
@@ -331,8 +305,6 @@ impl ZenClashApp {
             focus_handle,
             proxies_page,
             runtime_page,
-            controllers_page,
-            controllers_presented: false,
             tray_core_running: None,
             profile_path: app_profile_path,
             controlled_config_store: app_controlled_config_store,
@@ -363,7 +335,6 @@ impl ZenClashApp {
             log_monitor,
             traffic_history_policy,
             _subscriptions: vec![
-                controllers_subscription,
                 profile_subscription,
                 proxy_selection_subscription,
                 runtime_config_subscription,
@@ -376,7 +347,6 @@ impl ZenClashApp {
         app.start_mode_sync(cx);
         app.start_profile_updates(cx);
         app.start_automatic_runtime(cx);
-        app.start_ssid_switching(cx);
         app.start_traffic_history(traffic_history_store);
         app.start_tray_updates(cx);
         app.refresh_tray_menu(cx);
@@ -437,15 +407,11 @@ impl ZenClashApp {
                     bootstrap::refresh_native_app_menu(cx);
                     this.proxies_page.update(cx, |_, cx| cx.notify());
                     let runtime_page = runtime_page_for_localization.clone();
-                    let controllers_page = this.controllers_page.clone();
                     let main_window = this.main_window;
                     cx.defer(move |cx| {
                         let _ = cx.update_window(main_window, |_, window, cx| {
                             runtime_page.update(cx, |page, cx| {
                                 page.refresh_localized_placeholders(window, cx);
-                            });
-                            controllers_page.update(cx, |page, cx| {
-                                page.refresh_localized_placeholders(window, cx)
                             });
                         });
                     });

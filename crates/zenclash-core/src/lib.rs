@@ -8,7 +8,6 @@ mod backup;
 mod client;
 mod config_diff;
 mod controlled_config;
-mod controllers;
 mod core_backend;
 mod core_installation;
 mod core_session;
@@ -57,10 +56,6 @@ pub use config_diff::{
 pub use controlled_config::{
     ControlledConfigError, ControlledConfigResult, ControlledConfigStore, ControlledConfigUpdate,
     ListenerPortFallback,
-};
-pub use controllers::{
-    ContextStoreError, ControllerCatalog, ControllerEntry, ControllerStore, SsidRules,
-    SsidSwitchState,
 };
 pub use core_backend::{CoreCapabilities, CoreKind, ParseCoreKindError};
 pub use core_installation::{CoreBinaryError, CoreBinaryInfo, validate_core_binary};

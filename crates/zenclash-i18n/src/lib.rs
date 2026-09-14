@@ -54,25 +54,10 @@ mod tests {
     use serde_yaml::Value;
 
     #[test]
-    fn macos_permission_resources_match_the_shared_translation_catalog() {
-        for (locale, resource) in [
-            (
-                EN,
-                include_str!("../../../platforms/macos/en.lproj/InfoPlist.strings"),
-            ),
-            (
-                ZH_CN,
-                include_str!("../../../platforms/macos/zh-Hans.lproj/InfoPlist.strings"),
-            ),
-        ] {
-            assert!(resource.contains(&format!(
-                "\"NSLocationWhenInUseUsageDescription\" = \"{}\";",
-                text_for(locale, "ssid.permission_description")
-            )));
-        }
+    fn macos_app_does_not_request_location_access() {
         assert!(
-            include_str!("../../../platforms/macos/Info.plist")
-                .contains(&text_for(EN, "ssid.permission_description"))
+            !include_str!("../../../platforms/macos/Info.plist")
+                .contains("NSLocationWhenInUseUsageDescription")
         );
     }
 

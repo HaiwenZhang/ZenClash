@@ -1,2 +1,0 @@
-/* Kept in sync with ssid.permission_description in app.yml by the i18n test. */
-"NSLocationWhenInUseUsageDescription" = "ZenClash needs access to the Wi-Fi network name to switch your local profile using SSID rules.";
