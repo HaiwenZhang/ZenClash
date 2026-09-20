@@ -1,3 +1,5 @@
+
+
 <p align="center">
   <img src="platforms/macos/ZenClash.png" width="120" alt="ZenClash Logo">
 </p>
@@ -71,7 +73,7 @@ cargo fmt --all -- --check
 cargo test --workspace --all-features --locked
 ```
 
-完整 Clippy 规则见 [CI 工作流](.github/workflows/ci.yml)。真实内核集成测试默认忽略，需要提供内核路径后显式运行。
+完整 Clippy 规则见 [CI 工作流](.github/workflows/ci.yml)。真实内核集成测试默认忽略，需要设置 `ZENCLASH_MIHOMO_BINARY` 后显式运行。
 
 更多开发资料：[打包脚本](scripts) · [开发与验收文档](docs/development) · [项目规约](AGENTS.md)。
 
