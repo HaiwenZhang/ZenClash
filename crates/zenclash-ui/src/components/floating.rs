@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use gpui_kit::{Context, Task};
-use zenclash_core::{MihomoClient, TrafficMonitor, TrafficSnapshot};
+use zenclash_core::{ControlledConfigStore, CoreSession, TrafficMonitor, TrafficSnapshot};
 
 use super::{mode::OutboundModeCoordinator, sidebar::OutboundMode};
 
@@ -9,7 +9,8 @@ mod view;
 
 /// Compact floating window showing traffic and outbound-mode controls.
 pub struct FloatingTrafficWindow {
-    client: MihomoClient,
+    core_session: CoreSession,
+    controlled_config_store: ControlledConfigStore,
     runtime: tokio::runtime::Handle,
     traffic_monitor: Arc<TrafficMonitor>,
     traffic: TrafficSnapshot,
@@ -20,7 +21,8 @@ pub struct FloatingTrafficWindow {
 impl FloatingTrafficWindow {
     /// Creates the floating monitor and starts its periodic state synchronization.
     pub(crate) fn new(
-        client: MihomoClient,
+        core_session: CoreSession,
+        controlled_config_store: ControlledConfigStore,
         runtime: tokio::runtime::Handle,
         traffic_monitor: Arc<TrafficMonitor>,
         outbound_mode: OutboundModeCoordinator,
@@ -28,7 +30,8 @@ impl FloatingTrafficWindow {
     ) -> Self {
         let traffic = traffic_monitor.snapshot();
         let mut this = Self {
-            client,
+            core_session,
+            controlled_config_store,
             runtime,
             traffic_monitor,
             traffic,
@@ -60,10 +63,12 @@ impl FloatingTrafficWindow {
     }
 
     fn set_mode(&mut self, mode: OutboundMode, cx: &mut Context<Self>) {
-        if self
-            .outbound_mode
-            .request(mode, &self.client, None, &self.runtime)
-        {
+        if self.outbound_mode.request(
+            mode,
+            &self.core_session,
+            &self.controlled_config_store,
+            &self.runtime,
+        ) {
             cx.notify();
         }
     }

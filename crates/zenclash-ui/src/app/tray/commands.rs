@@ -11,7 +11,9 @@ impl ZenClashApp {
         command: TrayCommand,
         cx: &mut Context<Self>,
     ) {
-        if self.quit_state != crate::app::system_proxy::QuitState::Idle {
+        if self.quit_state != crate::app::system_proxy::QuitState::Idle
+            && !matches!(command, TrayCommand::Quit | TrayCommand::ShowWindow)
+        {
             return;
         }
         self.tray_command_error = None;

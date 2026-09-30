@@ -5,7 +5,7 @@ use super::{
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Owns cancellation of the page's read-only request, including when the view is dropped.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct PageReadTask(Option<tokio::task::AbortHandle>);
 
 impl PageReadTask {
@@ -44,17 +44,16 @@ pub(super) async fn load_page_with_binary(
             Ok(RuntimeData::Core { version, config })
         }
         Page::Profiles => {
-            let (config, proxies, rules) = tokio::try_join!(
+            let (config, proxies, rules) = tokio::join!(
                 client.runtime_config(),
                 client.proxy_catalog(),
                 client.rule_catalog()
-            )
-            .map_err(|error| error.to_string())?;
+            );
             Ok(RuntimeData::Profile {
-                config,
-                proxy_count: proxies.proxy_count,
-                group_count: proxies.groups.len(),
-                rule_count: rules.rules.len(),
+                config: config.ok(),
+                proxy_count: proxies.as_ref().ok().map(|catalog| catalog.proxy_count),
+                group_count: proxies.ok().map(|catalog| catalog.groups.len()),
+                rule_count: rules.ok().map(|catalog| catalog.rules.len()),
             })
         }
         Page::Connections | Page::Traffic => client
@@ -65,7 +64,7 @@ pub(super) async fn load_page_with_binary(
         Page::Rules => client
             .rule_catalog()
             .await
-            .map(RuntimeData::Rules)
+            .map(|catalog| RuntimeData::Rules(std::sync::Arc::new(catalog)))
             .map_err(|error| error.to_string()),
         Page::Resources => {
             let (config, proxy, rules) = tokio::try_join!(
@@ -84,7 +83,7 @@ pub(super) async fn load_page_with_binary(
         Page::Network => load_network(client).await,
         Page::Tun => load_tun(client, mihomo_binary).await,
         Page::Settings => load_settings(client).await,
-        Page::Logs => Ok(RuntimeData::Empty),
+        Page::Logs | Page::Override => Ok(RuntimeData::Empty),
         _ => client
             .runtime_config()
             .await

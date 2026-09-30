@@ -217,7 +217,10 @@ pub enum ProcessRecoveryStatus {
 
 impl ProcessStatus {
     fn from_session(session: &CoreSession) -> Self {
-        let snapshot = session.snapshot();
+        Self::from_snapshot(session, session.snapshot())
+    }
+
+    fn from_snapshot(session: &CoreSession, snapshot: CoreSessionSnapshot) -> Self {
         let process = session.managed_process_snapshot();
         let lifecycle = session.lifecycle_snapshot();
         Self {
@@ -660,6 +663,46 @@ async fn refresh_status(
     logs: &LogMonitor,
     refresh_platform: bool,
 ) {
+    refresh_status_with_tun_reader(
+        status,
+        core_session,
+        system_proxy,
+        traffic,
+        logs,
+        refresh_platform,
+        move |kind, config| async move {
+            tokio::task::spawn_blocking(move || {
+                let permission = tun_permissions
+                    .as_ref()
+                    .map(crate::TunPermissionManager::status)
+                    .transpose()
+                    .map_err(|error| error.to_string())?;
+                Ok::<_, String>(TunCaptureStatus::from_platform(
+                    kind,
+                    &config,
+                    permission.as_ref(),
+                ))
+            })
+            .await
+            .map_err(|error| format!("TUN 平台读取任务异常结束：{error}"))
+            .and_then(|result| result)
+        },
+    )
+    .await;
+}
+
+async fn refresh_status_with_tun_reader<F, R>(
+    status: &OperationalStatus,
+    core_session: &CoreSession,
+    system_proxy: Option<SystemProxySession>,
+    traffic: &TrafficMonitor,
+    logs: &LogMonitor,
+    refresh_platform: bool,
+    read_tun: F,
+) where
+    F: FnOnce(CoreKind, RuntimeConfig) -> R,
+    R: Future<Output = Result<TunCaptureStatus, String>>,
+{
     let expected = core_session.snapshot();
     let client = core_session.client().clone();
     let native = async move {
@@ -685,108 +728,96 @@ async fn refresh_status(
         client.connections_summary(),
         native,
     );
-    let current = core_session.snapshot();
     let tun = if refresh_platform {
         Some(match &config {
-            Ok(config) => {
-                let config = config.clone();
-                let kind = current.kind;
-                tokio::task::spawn_blocking(move || {
-                    let permission = tun_permissions
-                        .as_ref()
-                        .map(crate::TunPermissionManager::status)
-                        .transpose()
-                        .map_err(|error| error.to_string())?;
-                    Ok::<_, String>(TunCaptureStatus::from_platform(
-                        kind,
-                        &config,
-                        permission.as_ref(),
-                    ))
-                })
-                .await
-                .map_err(|error| format!("TUN 平台读取任务异常结束：{error}"))
-                .and_then(|result| result)
-            }
+            Ok(config) => read_tun(expected.kind, config.clone()).await,
             Err(error) => Err(error.to_string()),
         })
     } else {
         None
     };
-    traffic.synchronize_generation(current.generation);
-    logs.synchronize_generation(current.generation);
-    let now = now_ms();
-    let mut next = status.snapshot();
-    next.process = Observation::Fresh {
-        value: ProcessStatus::from_session(core_session),
-        observed_at_ms: now,
-    };
-    if !same_generation(expected, current) {
-        reset_old_generation_streams(&mut next.streams, current.generation);
-        status.replace(next);
-        return;
-    }
+    core_session
+        .observe_current(|current| {
+            traffic.synchronize_generation(current.generation);
+            logs.synchronize_generation(current.generation);
+            let now = now_ms();
+            let mut next = status.snapshot();
+            next.process = Observation::Fresh {
+                value: ProcessStatus::from_snapshot(core_session, current),
+                observed_at_ms: now,
+            };
+            if !same_generation(expected, current) {
+                reset_old_generation_streams(&mut next.streams, current.generation);
+                next.controller = Observation::Loading;
+                next.capture.tun = Observation::Loading;
+                next.path = Observation::Loading;
+                status.replace(next);
+                return;
+            }
 
-    next.controller = Observation::record(
-        &next.controller,
-        version.map(|version| ControllerStatus {
-            version,
-            authenticated: true,
-            compatibility: if current.kind == CoreKind::Mihomo {
-                ControllerCompatibility::Compatible
-            } else {
-                ControllerCompatibility::Limited
-            },
-            generation: current.generation,
-        }),
-        now,
-        RecoveryAction::InspectCore,
-    );
-    if let Some(native) = native {
-        next.capture.system_proxy = Observation::record(
-            &next.capture.system_proxy,
-            native,
-            now,
-            RecoveryAction::ReviewCapture,
-        );
-    }
-    if let Some(tun) = tun {
-        next.capture.tun = Observation::record(
-            &next.capture.tun,
-            tun,
-            now,
-            if current.kind == CoreKind::Meow {
-                RecoveryAction::Unsupported
-            } else {
-                RecoveryAction::ReviewCapture
-            },
-        );
-    }
-    next.streams.traffic = observe_traffic(
-        &generation_observation(&next.streams.traffic, current.generation),
-        traffic,
-        current.generation,
-        now,
-    );
-    next.streams.logs = observe_logs(
-        &generation_observation(&next.streams.logs, current.generation),
-        logs,
-        current.generation,
-        now,
-    );
-    next.streams.connections = Observation::record(
-        &generation_observation(&next.streams.connections, current.generation),
-        connections.map(|snapshot| StreamStatus {
-            generation: current.generation,
-            last_success_at_ms: now,
-            item_count: snapshot.active_connections,
-            upload: snapshot.upload_total,
-            download: snapshot.download_total,
-            memory: snapshot.memory,
-        }),
-        now,
-        RecoveryAction::Retry,
-    );
-    status.replace(next);
+            next.controller = Observation::record(
+                &next.controller,
+                version.map(|version| ControllerStatus {
+                    version,
+                    authenticated: true,
+                    compatibility: if current.kind == CoreKind::Mihomo {
+                        ControllerCompatibility::Compatible
+                    } else {
+                        ControllerCompatibility::Limited
+                    },
+                    generation: current.generation,
+                }),
+                now,
+                RecoveryAction::InspectCore,
+            );
+            if let Some(native) = native {
+                next.capture.system_proxy = Observation::record(
+                    &next.capture.system_proxy,
+                    native,
+                    now,
+                    RecoveryAction::ReviewCapture,
+                );
+            }
+            if let Some(tun) = tun {
+                next.capture.tun = Observation::record(
+                    &next.capture.tun,
+                    tun,
+                    now,
+                    if current.kind == CoreKind::Meow {
+                        RecoveryAction::Unsupported
+                    } else {
+                        RecoveryAction::ReviewCapture
+                    },
+                );
+            }
+            next.streams.traffic = observe_traffic(
+                &generation_observation(&next.streams.traffic, current.generation),
+                traffic,
+                current.generation,
+                now,
+            );
+            next.streams.logs = observe_logs(
+                &generation_observation(&next.streams.logs, current.generation),
+                logs,
+                current.generation,
+                now,
+            );
+            next.streams.connections = Observation::record(
+                &generation_observation(&next.streams.connections, current.generation),
+                connections.map(|snapshot| StreamStatus {
+                    generation: current.generation,
+                    last_success_at_ms: now,
+                    item_count: snapshot.active_connections,
+                    upload: snapshot.upload_total,
+                    download: snapshot.download_total,
+                    memory: snapshot.memory,
+                }),
+                now,
+                RecoveryAction::Retry,
+            );
+            status.replace(next);
+        })
+        .await;
 }
 
 fn observe_traffic(
@@ -952,6 +983,97 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn a_transition_during_the_final_platform_read_rejects_the_old_sample() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let endpoint =
+            crate::MihomoEndpoint::new(format!("http://{}", listener.local_addr().unwrap()), "");
+        let server = std::thread::spawn(move || {
+            for index in 0..5 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 8_192];
+                let length = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..length]);
+                let body = if request.starts_with("GET /version ") {
+                    r#"{"version":"test"}"#
+                } else if request.starts_with("GET /connections ") {
+                    r#"{"connections":[],"uploadTotal":0,"downloadTotal":0}"#
+                } else if index < 3 {
+                    r#"{"mode":"rule"}"#
+                } else {
+                    r#"{"mode":"global"}"#
+                };
+                if request.starts_with("PATCH ") {
+                    stream
+                        .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                        .unwrap();
+                } else {
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                }
+            }
+        });
+        let client = crate::MihomoClient::new(endpoint).unwrap();
+        let core = CoreSession::open(CoreKind::Mihomo, client, None);
+        let runtime = Handle::current();
+        let offline = crate::MihomoEndpoint::new("http://127.0.0.1:1", "");
+        let traffic = TrafficMonitor::start(&runtime, offline.clone());
+        let logs = LogMonitor::start(&runtime, offline, crate::MihomoLogLevel::Info);
+        let (snapshot, _) = watch::channel(OperationalSnapshot::default());
+        let status = Arc::new(OperationalStatus {
+            snapshot,
+            task: std::sync::OnceLock::new(),
+        });
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let sampling = {
+            let status = status.clone();
+            let core = core.clone();
+            let traffic = traffic.clone();
+            let logs = logs.clone();
+            tokio::spawn(async move {
+                refresh_status_with_tun_reader(
+                    &status,
+                    &core,
+                    None,
+                    &traffic,
+                    &logs,
+                    true,
+                    |kind, config| async move {
+                        entered.send(()).unwrap();
+                        released.await.unwrap();
+                        Ok(TunCaptureStatus::from_config(kind, &config))
+                    },
+                )
+                .await;
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        core.set_mode(
+            &crate::ControlledConfigStore::new(std::env::temp_dir()),
+            "global",
+        )
+        .await
+        .unwrap();
+        release.send(()).unwrap();
+        sampling.await.unwrap();
+        let snapshot = status.snapshot();
+        assert_eq!(snapshot.process.value().unwrap().generation, 1);
+        assert!(snapshot.controller.value().is_none());
+        assert!(snapshot.capture.tun.value().is_none());
+        assert!(snapshot.streams.connections.value().is_none());
+        server.join().unwrap();
+    }
+
     #[tokio::test]
     async fn sampling_can_be_cancelled_without_waiting_for_a_controller_timeout() {
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();

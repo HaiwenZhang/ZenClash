@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 use super::{
     ProfileCatalog, ProfileRecord, ProfileSource, ProfileStore, ProfileStoreError,
     ProfileStoreResult, SubscriptionMetadata, atomic_write, home_dir, read_index_bytes,
-    read_profile_bytes, unique_id, unix_timestamp, validate_clash_yaml,
+    read_profile_bytes, unique_id, unix_timestamp, validate_catalog_records, validate_clash_yaml,
 };
 
 impl ProfileStore {
@@ -59,7 +59,7 @@ impl ProfileStore {
 
     /// Quarantines a malformed profile index while retaining managed YAML files.
     ///
-    /// Only JSON decoding and defensive-size failures are recoverable. I/O
+    /// JSON decoding, record validation and defensive-size failures are recoverable. I/O
     /// failures are returned unchanged so a permission problem is never
     /// presented as repaired state.
     ///
@@ -75,7 +75,9 @@ impl ProfileStore {
         };
         if !matches!(
             error,
-            ProfileStoreError::Index(_) | ProfileStoreError::IndexTooLarge { .. }
+            ProfileStoreError::Index(_)
+                | ProfileStoreError::InvalidIndex(_)
+                | ProfileStoreError::IndexTooLarge { .. }
         ) {
             return Err(error);
         }
@@ -222,6 +224,19 @@ impl ProfileStore {
         }
         let contents = read_index_bytes(&path)?;
         let mut catalog: ProfileCatalog = serde_json::from_slice(&contents)?;
+        validate_catalog_records(&catalog)?;
+        for profile in &catalog.profiles {
+            match fs::symlink_metadata(self.profile_path(profile)) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(ProfileStoreError::InvalidIndex(zenclash_i18n::text(
+                        "profiles.errors.symlink",
+                    )));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         catalog
             .profiles
             .retain(|profile| self.profile_path(profile).is_file());
@@ -236,8 +251,8 @@ impl ProfileStore {
     }
 
     pub(super) fn save_unlocked(&self, catalog: &ProfileCatalog) -> ProfileStoreResult<()> {
+        let bytes = super::encode_catalog(catalog)?;
         fs::create_dir_all(&self.root)?;
-        let bytes = serde_json::to_vec_pretty(catalog)?;
         let path = self.index_path();
         atomic_write(&path, &bytes)?;
         Ok(())

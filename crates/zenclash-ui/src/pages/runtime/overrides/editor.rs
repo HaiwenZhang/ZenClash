@@ -44,15 +44,11 @@ impl ProfileEditorState {
             );
         });
     }
-
-    pub(in crate::pages::runtime) fn is_open(&self) -> bool {
-        self.original.is_some()
-    }
 }
 
 impl RuntimePage {
     fn release_profile_yaml_editor_text(&self, cx: &mut Context<Self>) {
-        let input = self.profile_editor.input.clone();
+        let input = self.overrides.editor.input.clone();
         let window_handle = self.window_handle;
         cx.defer(move |cx| {
             let _ = cx.update_window(window_handle, |_, window, cx| {
@@ -64,22 +60,22 @@ impl RuntimePage {
     }
 
     pub(super) fn open_profile_yaml_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(preview) = &self.config_preview else {
+        let Some(preview) = &self.overrides.preview else {
             self.error = Some(zenclash_i18n::text("overrides.errors.preview_required"));
             cx.notify();
             return;
         };
-        let Some(profile_id) = self.profile_catalog.active.clone() else {
+        let Some(profile_id) = self.profiles.catalog.active.clone() else {
             self.error = Some(zenclash_i18n::text("overrides.errors.unmanaged_profile"));
             cx.notify();
             return;
         };
         let original = preview.source.clone();
-        self.profile_editor.input.update(cx, |input, cx| {
+        self.overrides.editor.input.update(cx, |input, cx| {
             input.set_value(original.clone(), window, cx);
         });
-        self.profile_editor.original = Some(original);
-        self.profile_editor.profile_id = Some(profile_id);
+        self.overrides.editor.original = Some(original);
+        self.overrides.editor.profile_id = Some(profile_id);
         self.error = None;
         cx.notify();
     }
@@ -89,25 +85,25 @@ impl RuntimePage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.profile_editor.input.update(cx, |input, cx| {
+        self.overrides.editor.input.update(cx, |input, cx| {
             input.set_value(String::new(), window, cx);
         });
-        self.profile_editor.original = None;
-        self.profile_editor.profile_id = None;
+        self.overrides.editor.original = None;
+        self.overrides.editor.profile_id = None;
         cx.notify();
     }
 
     pub(super) fn save_profile_yaml_editor(&mut self, cx: &mut Context<Self>) {
         let (Some(store), Some(id), Some(original)) = (
-            self.profile_store.clone(),
-            self.profile_editor.profile_id.clone(),
-            self.profile_editor.original.clone(),
+            self.profiles.store.clone(),
+            self.overrides.editor.profile_id.clone(),
+            self.overrides.editor.original.clone(),
         ) else {
             self.error = Some(zenclash_i18n::text("overrides.errors.editor_expired"));
             cx.notify();
             return;
         };
-        let candidate = self.profile_editor.input.read(cx).value().to_string();
+        let candidate = self.overrides.editor.input.read(cx).value().to_string();
         let Some(token) = self.begin_mutation(super::super::Page::Override) else {
             return;
         };
@@ -168,9 +164,9 @@ impl RuntimePage {
                         if this.is_page_task_current(token) =>
                     {
                         this.profile_path = Some(path.clone());
-                        this.profile_editor.original = None;
-                        this.profile_editor.profile_id = None;
-                        this.config_preview = None;
+                        this.overrides.editor.original = None;
+                        this.overrides.editor.profile_id = None;
+                        this.overrides.invalidate_preview();
                         this.release_profile_yaml_editor_text(cx);
                         this.invalidate_config_inputs(cx);
                         this.reload_profile_catalog(cx);
@@ -181,9 +177,9 @@ impl RuntimePage {
                         cx.emit(super::super::ProfileActivated { path });
                     }
                     Ok(ProfileEditorSaveOutcome::Stored) if this.is_page_task_current(token) => {
-                        this.profile_editor.original = None;
-                        this.profile_editor.profile_id = None;
-                        this.config_preview = None;
+                        this.overrides.editor.original = None;
+                        this.overrides.editor.profile_id = None;
+                        this.overrides.invalidate_preview();
                         this.release_profile_yaml_editor_text(cx);
                         this.invalidate_config_inputs(cx);
                         this.reload_profile_catalog(cx);
@@ -211,7 +207,7 @@ impl RuntimePage {
                 v_flex()
                     .h(px(520.))
                     .p_3()
-                    .child(Editor::new(&self.profile_editor.input).h_full()),
+                    .child(Editor::new(&self.overrides.editor.input).h_full()),
             )
             .child(
                 h_flex()

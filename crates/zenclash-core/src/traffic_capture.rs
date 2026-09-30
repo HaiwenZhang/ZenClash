@@ -582,11 +582,17 @@ impl CaptureBackend for ProductionCaptureBackend {
             let Some(session) = self.system_proxy.clone() else {
                 return Ok(());
             };
-            tokio::task::spawn_blocking(move || session.release_owned())
+            let result = tokio::task::spawn_blocking(move || session.release_owned())
                 .await
-                .map_err(|error| format!("系统代理释放任务异常结束：{error}"))?
-                .map(|_| ())
-                .map_err(|error| error.to_string())
+                .map_err(|error| format!("系统代理释放任务异常结束：{error}"))?;
+            match result {
+                Ok(_) => Ok(()),
+                Err(crate::SystemProxySessionError::ReleasePersistence(error)) => {
+                    tracing::warn!(%error, "owned system proxy released but ownership metadata could not be cleared");
+                    Ok(())
+                }
+                Err(error) => Err(error.to_string()),
+            }
         })
     }
 }

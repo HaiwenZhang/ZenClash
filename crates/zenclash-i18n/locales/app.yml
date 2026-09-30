@@ -148,6 +148,9 @@ app:
       quit_release:
         zh-CN: 关闭系统代理失败：%{error}
         en: "Could not disable the system proxy: %{error}"
+      quit_blocked:
+        zh-CN: "退出清理失败，应用暂时保持运行：%{error}。请修复权限或系统代理状态后，再次退出。"
+        en: "Quit cleanup failed; the app remains running: %{error}. Fix the permissions or system proxy state, then quit again."
       quit_release_task:
         zh-CN: 退出前关闭系统代理任务异常结束：%{error}
         en: "The pre-quit system proxy release task ended unexpectedly: %{error}"
@@ -1000,6 +1003,15 @@ profiles:
     profile_path_missing:
       zh-CN: 未配置当前配置文件路径
       en: No active profile path is configured
+    invalid_identity:
+      zh-CN: 配置索引包含空白或重复 ID
+      en: The profile index contains blank or duplicate IDs
+    invalid_file_name:
+      zh-CN: 配置索引包含不安全或重复文件名
+      en: The profile index contains unsafe or duplicate file names
+    symlink:
+      zh-CN: 配置索引指向符号链接，请恢复受管理的 YAML 文件
+      en: The profile index points to a symbolic link; restore the managed YAML file
     store_unavailable:
       zh-CN: 配置仓库不可用
       en: Profile library unavailable
@@ -1493,6 +1505,18 @@ system_proxy:
       zh-CN: 系统代理设置已保存，并通过原生状态回读
       en: System proxy settings saved and verified against native state
   errors:
+    pending_recovery:
+      zh-CN: 上次系统代理操作尚未安全恢复，请先重试释放
+      en: The previous system proxy operation still needs recovery; retry releasing it first
+    verification:
+      zh-CN: 系统代理写后回读不一致
+      en: System proxy state does not match after the write
+    recovered_failure:
+      zh-CN: 系统代理操作失败，已恢复先前状态：%{error}
+      en: "System proxy operation failed; previous state restored: %{error}"
+    recovery_failure:
+      zh-CN: 系统代理操作失败：%{error}；恢复失败：%{recovery}；关闭结果：%{release}
+      en: "System proxy operation failed: %{error}; recovery failed: %{recovery}; release result: %{release}"
     ownership_store:
       zh-CN: 应用设置存储不可用；无法记录系统代理所有权
       en: Application preferences are unavailable; system proxy ownership cannot be recorded
@@ -3391,6 +3415,9 @@ rules:
       zh-CN: "%{core} 支持规则查看与匹配，但暂不提供单条规则启停和命中统计。"
       en: "%{core} supports browsing and matching rules, but not individual toggles or hit statistics."
   errors:
+    filter_task:
+      zh-CN: 规则筛选任务异常结束：%{error}
+      en: "The rule filter task ended unexpectedly: %{error}"
     status_task:
       zh-CN: 规则状态任务异常结束：%{error}
       en: "The rule status task ended unexpectedly: %{error}"

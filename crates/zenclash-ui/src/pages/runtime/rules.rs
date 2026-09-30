@@ -1,4 +1,7 @@
-use std::collections::HashSet;
+use gpui_kit::base::TestSupportExt;
+use std::collections::{HashMap, HashSet};
+
+mod projection;
 
 use super::{
     AppContext, Button, Context, Disableable, Entity, FluentBuilder, IconName, Input, InputEvent,
@@ -13,6 +16,11 @@ pub(super) struct RulesUiState {
     pub(super) filter: Entity<InputState>,
     pub(super) page: usize,
     pub(super) pending: HashSet<usize>,
+    query: String,
+    projection: Option<projection::RuleProjection>,
+    worker: projection::ProjectionWorker,
+    pub(super) confirmed_disabled: HashMap<usize, bool>,
+    pub(super) projecting: bool,
 }
 
 impl RulesUiState {
@@ -24,6 +32,8 @@ impl RulesUiState {
         let subscription = cx.subscribe(&filter, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.rules.page = 0;
+                this.rules.query = normalize_rule_query(&this.rules.filter.read(cx).value());
+                this.update_rule_presentation(cx);
                 cx.notify();
             }
         });
@@ -32,13 +42,68 @@ impl RulesUiState {
                 filter,
                 page: 0,
                 pending: HashSet::new(),
+                query: String::new(),
+                projection: None,
+                worker: projection::ProjectionWorker::default(),
+                confirmed_disabled: HashMap::new(),
+                projecting: false,
             },
             subscription,
         )
     }
 }
 
+impl RulesUiState {
+    pub(super) fn cancel_projection(&mut self) {
+        self.worker.cancel();
+        self.projecting = false;
+    }
+
+    pub(super) fn release_presentation(&mut self) {
+        self.cancel_projection();
+        self.projection = None;
+        self.confirmed_disabled.clear();
+    }
+}
+
 impl RuntimePage {
+    pub(super) fn update_rule_presentation(&mut self, cx: &mut Context<Self>) {
+        let RuntimeData::Rules(snapshot) = &self.data else {
+            self.rules.release_presentation();
+            return;
+        };
+        if self.page != Page::Rules || !self.live_updates_enabled() {
+            return;
+        }
+        if self.rules.projection.as_ref().is_some_and(|projection| {
+            std::sync::Arc::ptr_eq(&projection.snapshot, snapshot)
+                && projection.query == self.rules.query
+        }) {
+            return;
+        }
+        let source = snapshot.clone();
+        let (generation, task) =
+            self.rules
+                .worker
+                .start(&self.runtime, source.clone(), self.rules.query.clone());
+        self.rules.projecting = true;
+        self.rules.projection = None;
+        cx.spawn(async move |this, cx| {
+            let result = task.await.map_err(|error| error.to_string()).and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                if !this.rules.worker.is_current(generation)
+                    || !matches!(&this.data, RuntimeData::Rules(current) if std::sync::Arc::ptr_eq(current, &source)) { return; }
+                this.rules.projecting = false;
+                match result {
+                    Ok(Some(projection)) => this.rules.projection = Some(projection),
+                    Ok(None) => {},
+                    Err(error) => this.error = Some(zenclash_i18n::text_with("rules.errors.filter_task", &[("error", error)])),
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
     fn set_rule_enabled(&mut self, index: usize, enabled: bool, cx: &mut Context<Self>) {
         if !self.core_kind.capabilities().rule_toggle {
             self.error = Some(zenclash_i18n::text_with(
@@ -76,7 +141,7 @@ impl RuntimePage {
                 match result {
                     Ok(()) => {
                         if this.is_page_task_current(token) {
-                            apply_rule_disabled(&mut this.data, index, !enabled);
+                            this.rules.confirmed_disabled.insert(index, !enabled);
                             this.notice = Some(if enabled {
                                 zenclash_i18n::text_with(
                                     "rules.notices.enabled",
@@ -112,22 +177,25 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let rules = match &self.data {
-            RuntimeData::Rules(data) => data.rules.as_slice(),
-            _ => &[],
+        let Some(projection) = &self.rules.projection else {
+            return v_flex()
+                .gap_3()
+                .child(Input::new(&self.rules.filter).small())
+                .child(empty_state(
+                    zenclash_i18n::text(if self.rules.projecting {
+                        "runtime.empty.loading"
+                    } else {
+                        "runtime.empty.unavailable"
+                    }),
+                    theme,
+                ))
+                .into_any_element();
         };
-        let query = normalize_rule_query(&self.rules.filter.read(cx).value());
-        let filtered_count = rules
-            .iter()
-            .filter(|rule| rule_matches(rule, &query))
-            .count();
+        let rules = &projection.snapshot.rules;
+        let query = &projection.query;
+        let filtered_count = projection.indices.len();
         let page = list_page(filtered_count, self.rules.page, RULES_PER_PAGE);
-        let filtered = rules
-            .iter()
-            .filter(|rule| rule_matches(rule, &query))
-            .skip(page.start)
-            .take(page.end - page.start)
-            .collect::<Vec<_>>();
+        let filtered = &projection.indices[page.start..page.end];
         let previous_page = page.index.saturating_sub(1);
         let next_page = page.index + 1;
         v_flex()
@@ -200,9 +268,11 @@ impl RuntimePage {
                             theme,
                         ))
                     })
-                    .children(filtered.into_iter().enumerate().map(|(offset, rule)| {
-                        self.render_rule_row(page.start + offset, rule, theme, cx)
-                    })),
+                    .children(
+                        filtered
+                            .iter()
+                            .map(|&index| self.render_rule_row(index, &rules[index], theme, cx)),
+                    ),
             )
             .when(page.count > 1, |this| {
                 this.child(
@@ -255,10 +325,13 @@ impl RuntimePage {
     ) -> gpui_kit::AnyElement {
         let runtime_index = rule.index;
         let stats = rule.extra.as_ref();
-        let disabled = stats.is_some_and(|stats| stats.disabled);
+        let disabled = runtime_index
+            .and_then(|index| self.rules.confirmed_disabled.get(&index).copied())
+            .unwrap_or_else(|| stats.is_some_and(|stats| stats.disabled));
         let enabled = !disabled;
         let mut row = h_flex()
             .id(("rule-row", position))
+            .test_support()
             .items_center()
             .min_h(px(72.))
             .px_4()
@@ -367,22 +440,6 @@ fn rule_matches(rule: &zenclash_core::Rule, query: &str) -> bool {
         || contains_ascii_case_insensitive(&rule.proxy, query)
 }
 
-fn apply_rule_disabled(data: &mut RuntimeData, index: usize, disabled: bool) -> bool {
-    let RuntimeData::Rules(catalog) = data else {
-        return false;
-    };
-    let Some(stats) = catalog
-        .rules
-        .iter_mut()
-        .find(|rule| rule.index == Some(index))
-        .and_then(|rule| rule.extra.as_mut())
-    else {
-        return false;
-    };
-    stats.disabled = disabled;
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,27 +457,5 @@ mod tests {
         assert!(rule_matches(&rule, &normalize_rule_query("example.com")));
         assert!(rule_matches(&rule, &normalize_rule_query("auto select")));
         assert!(!rule_matches(&rule, &normalize_rule_query("DIRECT")));
-    }
-
-    #[test]
-    fn acknowledged_rule_toggle_updates_only_the_matching_local_rule() {
-        let mut data = RuntimeData::Rules(zenclash_core::RuleCatalog {
-            rules: vec![zenclash_core::Rule {
-                index: Some(12),
-                extra: Some(zenclash_core::RuleRuntimeStats::default()),
-                ..Default::default()
-            }],
-        });
-
-        assert!(apply_rule_disabled(&mut data, 12, true));
-        let RuntimeData::Rules(catalog) = data else {
-            panic!("expected rule catalog");
-        };
-        assert!(
-            catalog.rules[0]
-                .extra
-                .as_ref()
-                .is_some_and(|stats| stats.disabled)
-        );
     }
 }

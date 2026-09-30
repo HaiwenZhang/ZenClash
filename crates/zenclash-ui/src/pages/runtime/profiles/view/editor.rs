@@ -11,11 +11,13 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
         let name = self
-            .profile_forms
+            .profiles
+            .forms
             .editing_profile_id
             .as_deref()
             .and_then(|id| {
-                self.profile_catalog
+                self.profiles
+                    .catalog
                     .profiles
                     .iter()
                     .find(|profile| profile.id == id)
@@ -41,48 +43,48 @@ impl RuntimePage {
             .child(config_input_row(
                 zenclash_i18n::text("profiles.form.name"),
                 zenclash_i18n::text("profiles.editor.name_description"),
-                Input::new(&self.profile_forms.request_name),
+                Input::new(&self.profiles.forms.request_name),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("profiles.editor.url"),
                 zenclash_i18n::text("profiles.editor.url_description"),
-                Input::new(&self.profile_forms.request_url),
+                Input::new(&self.profiles.forms.request_url),
                 theme,
             ))
             .child(config_input_row(
                 "User-Agent",
                 zenclash_i18n::text("profiles.editor.user_agent_description"),
-                Input::new(&self.profile_forms.request_user_agent),
+                Input::new(&self.profiles.forms.request_user_agent),
                 theme,
             ))
             .child(config_input_row(
                 "Authorization",
                 zenclash_i18n::text("profiles.editor.authorization_description"),
-                Input::new(&self.profile_forms.request_authorization).mask_toggle(),
+                Input::new(&self.profiles.forms.request_authorization).mask_toggle(),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("profiles.editor.timeout"),
                 zenclash_i18n::text("profiles.editor.timeout_description"),
-                Input::new(&self.profile_forms.request_timeout_seconds),
+                Input::new(&self.profiles.forms.request_timeout_seconds),
                 theme,
             ))
             .child(self.render_remote_profile_route_settings(theme, cx))
             .child(config_input_row(
                 zenclash_i18n::text("profiles.editor.cron"),
                 zenclash_i18n::text("profiles.editor.cron_description"),
-                Input::new(&self.profile_forms.update_cron),
+                Input::new(&self.profiles.forms.update_cron),
                 theme,
             ))
             .child(setting_switch(
                 zenclash_i18n::text("profiles.editor.fixed_interval"),
                 zenclash_i18n::text("profiles.editor.fixed_interval_description"),
-                self.profile_forms.editing_fixed_update_interval,
+                self.profiles.forms.editing_fixed_update_interval,
                 "edit-profile-fixed-update-interval",
                 theme,
                 cx.listener(|this, checked, _, cx| {
-                    this.profile_forms.editing_fixed_update_interval = *checked;
+                    this.profiles.forms.editing_fixed_update_interval = *checked;
                     cx.notify();
                 }),
             ))
@@ -98,11 +100,11 @@ impl RuntimePage {
             .child(setting_switch(
                 zenclash_i18n::text("profiles.editor.proxy"),
                 zenclash_i18n::text("profiles.editor.proxy_description"),
-                self.profile_forms.editing_route == RemoteProfileRoute::Mihomo,
+                self.profiles.forms.editing_route == RemoteProfileRoute::Mihomo,
                 "edit-profile-use-mihomo-proxy",
                 theme,
                 cx.listener(|this, checked, _, cx| {
-                    this.profile_forms.editing_route = if *checked {
+                    this.profiles.forms.editing_route = if *checked {
                         RemoteProfileRoute::Mihomo
                     } else {
                         RemoteProfileRoute::DirectWithMihomoFallback
@@ -113,12 +115,12 @@ impl RuntimePage {
             .child(setting_switch(
                 zenclash_i18n::text("profiles.editor.fallback"),
                 zenclash_i18n::text("profiles.editor.fallback_description"),
-                self.profile_forms.editing_route == RemoteProfileRoute::DirectWithMihomoFallback,
+                self.profiles.forms.editing_route == RemoteProfileRoute::DirectWithMihomoFallback,
                 "edit-profile-mihomo-fallback",
                 theme,
                 cx.listener(|this, checked, _, cx| {
-                    if this.profile_forms.editing_route != RemoteProfileRoute::Mihomo {
-                        this.profile_forms.editing_route = if *checked {
+                    if this.profiles.forms.editing_route != RemoteProfileRoute::Mihomo {
+                        this.profiles.forms.editing_route = if *checked {
                             RemoteProfileRoute::DirectWithMihomoFallback
                         } else {
                             RemoteProfileRoute::Direct

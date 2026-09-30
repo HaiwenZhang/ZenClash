@@ -4,7 +4,7 @@ mod forms;
 
 use super::super::{
     Button, ButtonVariants, Disableable, FluentBuilder, IconName, IntoElement, ParentElement,
-    RuntimeConfig, RuntimeData, RuntimePage, Sizable, Styled, h_flex, metric, v_flex,
+    RuntimeData, RuntimePage, Sizable, Styled, empty_dash, empty_state, h_flex, metric, v_flex,
 };
 
 impl RuntimePage {
@@ -19,8 +19,8 @@ impl RuntimePage {
                 proxy_count,
                 group_count,
                 rule_count,
-            } => (config.clone(), *proxy_count, *group_count, *rule_count),
-            _ => (RuntimeConfig::default(), 0, 0, 0),
+            } => (config.as_ref(), *proxy_count, *group_count, *rule_count),
+            _ => (None, None, None, None),
         };
 
         v_flex()
@@ -36,19 +36,22 @@ impl RuntimePage {
                             .flex_wrap()
                             .child(metric(
                                 zenclash_i18n::text("profiles.metrics.proxies"),
-                                proxy_count.to_string(),
+                                proxy_count
+                                    .map_or_else(|| empty_dash(""), |count| count.to_string()),
                                 theme.primary,
                                 theme,
                             ))
                             .child(metric(
                                 zenclash_i18n::text("profiles.metrics.groups"),
-                                group_count.to_string(),
+                                group_count
+                                    .map_or_else(|| empty_dash(""), |count| count.to_string()),
                                 theme.success,
                                 theme,
                             ))
                             .child(metric(
                                 zenclash_i18n::text("profiles.metrics.rules"),
-                                rule_count.to_string(),
+                                rule_count
+                                    .map_or_else(|| empty_dash(""), |count| count.to_string()),
                                 theme.warning,
                                 theme,
                             )),
@@ -58,12 +61,12 @@ impl RuntimePage {
                             .gap_2()
                             .child(
                                 Button::new("toggle-add-subscription")
-                                    .icon(if self.profile_forms.adding_subscription {
+                                    .icon(if self.profiles.forms.adding_subscription {
                                         IconName::Close
                                     } else {
                                         IconName::Plus
                                     })
-                                    .label(if self.profile_forms.adding_subscription {
+                                    .label(if self.profiles.forms.adding_subscription {
                                         zenclash_i18n::text("profiles.actions.collapse_form")
                                     } else {
                                         zenclash_i18n::text("profiles.actions.add_remote")
@@ -72,8 +75,8 @@ impl RuntimePage {
                                     .outline()
                                     .disabled(self.core_busy())
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.profile_forms.adding_subscription =
-                                            !this.profile_forms.adding_subscription;
+                                        this.profiles.forms.adding_subscription =
+                                            !this.profiles.forms.adding_subscription;
                                         cx.notify();
                                     })),
                             )
@@ -90,14 +93,22 @@ impl RuntimePage {
                             ),
                     ),
             )
-            .when(self.profile_forms.adding_subscription, |this| {
+            .when(self.profiles.forms.adding_subscription, |this| {
                 this.child(self.render_subscription_form(theme, cx))
             })
             .child(self.render_managed_profiles(theme, cx))
-            .when(self.profile_forms.editing_profile_id.is_some(), |this| {
+            .when(self.profiles.forms.editing_profile_id.is_some(), |this| {
                 this.child(self.render_remote_profile_editor(theme, cx))
             })
-            .child(self.render_current_profile(&config, theme, cx))
+            .when_some(config, |this, config| {
+                this.child(self.render_current_profile(config, theme, cx))
+            })
+            .when(config.is_none(), |this| {
+                this.child(empty_state(
+                    zenclash_i18n::text("runtime.empty.unavailable"),
+                    theme,
+                ))
+            })
             .into_any_element()
     }
 }

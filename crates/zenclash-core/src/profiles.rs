@@ -30,13 +30,15 @@ pub use model::{
     SubscriptionUsage,
 };
 pub use storage::atomic_write;
+use storage::home_dir;
 pub use storage::read_profile_bytes;
-use storage::{home_dir, read_index_bytes};
+pub(crate) use storage::{encode_catalog, read_index_bytes};
 pub use validation::validate_clash_yaml;
 use validation::{
     normalized_profile_name, normalized_remote_url, normalized_user_agent, unique_id,
     unix_timestamp,
 };
+pub(crate) use validation::{safe_profile_file_name, validate_catalog_records};
 
 const DEFAULT_USER_AGENT: &str = "clash.meta";
 /// Default automatic refresh cadence for remote profiles.
@@ -64,6 +66,9 @@ pub enum ProfileStoreError {
     /// The persistent profile index could not be decoded or encoded.
     #[error("配置仓库索引无效：{0}")]
     Index(#[from] serde_json::Error),
+    /// The decoded index contains unsafe paths or ambiguous record identities.
+    #[error("{0}")]
+    InvalidIndex(String),
     /// The profile index exceeded the defensive in-memory read limit.
     #[error("配置仓库索引超过 {limit_mib} MiB 限制")]
     IndexTooLarge {

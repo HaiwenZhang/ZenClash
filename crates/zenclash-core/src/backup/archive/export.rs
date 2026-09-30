@@ -95,7 +95,7 @@ fn collect_snapshot(manager: &BackupManager) -> BackupResult<Vec<SnapshotFile>> 
         },
         SnapshotFile {
             path: PROFILE_INDEX_PATH.into(),
-            bytes: serde_json::to_vec_pretty(&catalog)?,
+            bytes: crate::profiles::encode_catalog(&catalog)?,
         },
         SnapshotFile {
             path: YAML_OVERRIDE_INDEX_PATH.into(),

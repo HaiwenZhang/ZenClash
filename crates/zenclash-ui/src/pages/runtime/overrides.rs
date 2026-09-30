@@ -20,6 +20,53 @@ pub(super) struct ConfigPreview {
     diff: ConfigDiffReport,
 }
 
+pub(super) struct OverridesState {
+    pub(super) store: Option<zenclash_core::YamlOverrideStore>,
+    pub(super) catalog: zenclash_core::YamlOverrideCatalog,
+    pub(super) preview: Option<ConfigPreview>,
+    pub(super) editor: ProfileEditorState,
+    preview_generation: u64,
+    preview_loading: bool,
+    preview_task: super::loader::PageReadTask,
+    preview_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+}
+
+impl OverridesState {
+    pub(super) fn new(
+        store: Option<zenclash_core::YamlOverrideStore>,
+        catalog: zenclash_core::YamlOverrideCatalog,
+        editor: ProfileEditorState,
+    ) -> Self {
+        Self {
+            store,
+            catalog,
+            editor,
+            preview: None,
+            preview_generation: 0,
+            preview_loading: false,
+            preview_task: super::loader::PageReadTask::default(),
+            preview_gate: std::sync::Arc::default(),
+        }
+    }
+
+    pub(super) fn cancel_preview(&mut self) {
+        self.preview_task.cancel();
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+        self.preview_loading = false;
+    }
+
+    pub(super) fn invalidate_preview(&mut self) {
+        self.cancel_preview();
+        self.preview = None;
+    }
+
+    pub(super) fn enabled_paths(&self) -> Vec<std::path::PathBuf> {
+        self.store
+            .as_ref()
+            .map_or_else(Vec::new, |store| store.enabled_paths(&self.catalog))
+    }
+}
+
 impl RuntimePage {
     fn choose_overrides(&mut self, cx: &mut Context<Self>) {
         let token = self.page_task_token_for(Page::Override);
@@ -69,13 +116,20 @@ impl RuntimePage {
             cx.notify();
             return;
         };
-        let Some(token) = self.begin_mutation(Page::Override) else {
+        if self.overrides.preview_loading {
             return;
-        };
+        }
+        self.overrides.invalidate_preview();
+        self.overrides.preview_loading = true;
+        let generation = self.overrides.preview_generation;
+        let gate = self.overrides.preview_gate.clone();
+        let token = self.page_task_token_for(Page::Override);
         let controlled = self.controlled_config_store.clone();
         let overrides = self.enabled_override_paths();
         let task = self.runtime.spawn(async move {
+            let permit = gate.lock_owned().await;
             tokio::task::spawn_blocking(move || {
+                let _permit = permit;
                 let source = controlled
                     .source_payload(&profile)
                     .map_err(|error| error.to_string())?;
@@ -98,6 +152,7 @@ impl RuntimePage {
                 )
             })?
         });
+        self.overrides.preview_task.replace(&task);
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
@@ -109,10 +164,15 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.finish_mutation(token);
+                if this.overrides.preview_generation != generation
+                    || !this.is_page_task_current(token)
+                {
+                    return;
+                }
+                this.overrides.preview_loading = false;
                 match result {
                     Ok(preview) if this.is_page_task_current(token) => {
-                        this.config_preview = Some(preview);
+                        this.overrides.preview = Some(preview);
                         this.notice = Some(zenclash_i18n::text("overrides.notices.preview"));
                     }
                     Ok(_) => {}
@@ -126,7 +186,7 @@ impl RuntimePage {
     }
 
     fn copy_config_preview(&self, effective: bool, cx: &mut Context<Self>) {
-        let Some(preview) = &self.config_preview else {
+        let Some(preview) = &self.overrides.preview else {
             return;
         };
         let payload = if effective {
@@ -198,7 +258,7 @@ impl RuntimePage {
                 theme.primary,
                 theme,
             ))
-            .children(self.config_preview.as_ref().map(|preview| {
+            .children(self.overrides.preview.as_ref().map(|preview| {
                 v_flex()
                     .gap_4()
                     .child(render_config_diff(&preview.diff, theme))
@@ -217,7 +277,7 @@ impl RuntimePage {
                         cx.listener(|this, _, _, cx| this.copy_config_preview(true, cx)),
                     ))
             }))
-            .when(self.profile_editor.original.is_some(), |this| {
+            .when(self.overrides.editor.original.is_some(), |this| {
                 this.child(self.render_profile_yaml_editor(theme, cx))
             })
             .into_any_element()
@@ -232,9 +292,10 @@ impl RuntimePage {
             || zenclash_i18n::text("overrides.chain.unspecified"),
             |path| path.display().to_string(),
         );
-        let count = self.override_catalog.items.len();
+        let count = self.overrides.catalog.items.len();
         let enabled = self
-            .override_catalog
+            .overrides
+            .catalog
             .items
             .iter()
             .filter(|record| record.enabled)
@@ -257,7 +318,8 @@ impl RuntimePage {
                 theme,
             ))
             .children(
-                self.override_catalog
+                self.overrides
+                    .catalog
                     .items
                     .iter()
                     .enumerate()
@@ -272,8 +334,8 @@ impl RuntimePage {
                         Button::new("preview-overrides")
                             .icon(IconName::Eye)
                             .label(zenclash_i18n::text("overrides.actions.preview"))
-                            .loading(self.core_busy())
-                            .disabled(self.core_busy())
+                            .loading(self.overrides.preview_loading)
+                            .disabled(self.core_busy() || self.overrides.preview_loading)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.load_config_preview(cx);
                             })),
@@ -285,8 +347,8 @@ impl RuntimePage {
                             .outline()
                             .disabled(
                                 self.core_busy()
-                                    || self.config_preview.is_none()
-                                    || self.profile_catalog.active.is_none(),
+                                    || self.overrides.preview.is_none()
+                                    || self.profiles.catalog.active.is_none(),
                             )
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_profile_yaml_editor(window, cx);
@@ -328,7 +390,7 @@ impl RuntimePage {
             .border_t_1()
             .border_color(theme.border)
             .child(
-                Switch::new(("override-enabled", index))
+                Switch::new(format!("override-enabled:{}", record.id))
                     .checked(record.enabled)
                     .disabled(self.core_busy())
                     .on_click(cx.listener(move |this, checked, _, cx| {
@@ -350,7 +412,7 @@ impl RuntimePage {
                     .child(record.name.clone()),
             )
             .child(
-                Button::new(("override-up", index))
+                Button::new(format!("override-up:{}", record.id))
                     .icon(IconName::ArrowUp)
                     .xsmall()
                     .ghost()
@@ -360,17 +422,17 @@ impl RuntimePage {
                     })),
             )
             .child(
-                Button::new(("override-down", index))
+                Button::new(format!("override-down:{}", record.id))
                     .icon(IconName::ArrowDown)
                     .xsmall()
                     .ghost()
-                    .disabled(index + 1 == self.override_catalog.items.len() || self.core_busy())
+                    .disabled(index + 1 == self.overrides.catalog.items.len() || self.core_busy())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.move_override(&down_id, 1, cx);
                     })),
             )
             .child(
-                Button::new(("override-delete", index))
+                Button::new(format!("override-delete:{}", record.id))
                     .icon(IconName::Delete)
                     .xsmall()
                     .ghost()

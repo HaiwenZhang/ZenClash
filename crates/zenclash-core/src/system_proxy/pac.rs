@@ -48,6 +48,7 @@ impl fmt::Debug for PacServer {
 #[derive(Default)]
 struct PacServerInner {
     running: Mutex<Option<RunningPacServer>>,
+    retained: Mutex<Option<RunningPacServer>>,
 }
 
 impl Drop for PacServerInner {
@@ -58,7 +59,7 @@ impl Drop for PacServerInner {
     }
 }
 
-struct RunningPacServer {
+pub(super) struct RunningPacServer {
     status: PacServerStatus,
     shutdown: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
@@ -91,6 +92,23 @@ impl PacServer {
         script: &str,
         proxy_port: u16,
     ) -> MihomoResult<PacServerStatus> {
+        let replacement = self.prepare(bind_host, script, proxy_port)?;
+        let status = replacement.status.clone();
+        self.commit(replacement);
+        Ok(status)
+    }
+
+    pub(super) fn prepare(
+        &self,
+        bind_host: &str,
+        script: &str,
+        proxy_port: u16,
+    ) -> MihomoResult<RunningPacServer> {
+        if self.inner.retained.lock().is_some() {
+            return Err(MihomoError::Process(zenclash_i18n::text(
+                "system_proxy.errors.pending_recovery",
+            )));
+        }
         let bind_host = super::normalize_system_proxy_host(bind_host)?;
         if proxy_port == 0 {
             return Err(MihomoError::Process("PAC 代理端口不能为 0".into()));
@@ -118,20 +136,44 @@ impl PacServer {
             .name("zenclash-pac".into())
             .spawn(move || run_server(&listener, &script, &worker_shutdown))
             .map_err(|error| MihomoError::Process(format!("无法启动 PAC 服务线程：{error}")))?;
-        let replacement = RunningPacServer {
+        Ok(RunningPacServer {
             status: status.clone(),
             shutdown,
             thread: Some(thread),
-        };
+        })
+    }
+
+    pub(super) fn commit(&self, replacement: RunningPacServer) {
         let previous = self.inner.running.lock().replace(replacement);
         drop(previous);
-        Ok(status)
+    }
+
+    pub(super) fn retain_for_recovery(&self, replacement: RunningPacServer) {
+        let mut retained = self.inner.retained.lock();
+        debug_assert!(retained.is_none());
+        *retained = Some(replacement);
+    }
+
+    pub(super) fn owns_url(&self, url: &str) -> bool {
+        self.inner
+            .running
+            .lock()
+            .as_ref()
+            .is_some_and(|server| server.status.url == url)
+            || self
+                .inner
+                .retained
+                .lock()
+                .as_ref()
+                .is_some_and(|server| server.status.url == url)
     }
 
     /// Stops the current PAC service. Calling this repeatedly is harmless.
     pub fn stop(&self) {
         let running = self.inner.running.lock().take();
+        let retained = self.inner.retained.lock().take();
         drop(running);
+        drop(retained);
     }
 
     /// Returns the currently served PAC URL and socket, when running.
@@ -142,6 +184,12 @@ impl PacServer {
             .lock()
             .as_ref()
             .map(|running| running.status.clone())
+    }
+}
+
+impl RunningPacServer {
+    pub(super) fn status(&self) -> &PacServerStatus {
+        &self.status
     }
 }
 

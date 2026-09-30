@@ -10,7 +10,8 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) {
         let Some(profile) = self
-            .profile_catalog
+            .profiles
+            .catalog
             .profiles
             .iter()
             .find(|profile| profile.id == id)
@@ -40,61 +41,75 @@ impl RuntimePage {
         let name = profile.name.clone();
         let url = url.clone();
         let user_agent = user_agent.clone();
-        self.profile_forms
+        self.profiles
+            .forms
             .request_name
             .update(cx, |input, cx| input.set_value(name, window, cx));
-        self.profile_forms
+        self.profiles
+            .forms
             .request_url
             .update(cx, |input, cx| input.set_value(url, window, cx));
-        self.profile_forms
+        self.profiles
+            .forms
             .request_user_agent
             .update(cx, |input, cx| input.set_value(user_agent, window, cx));
-        self.profile_forms
+        self.profiles
+            .forms
             .request_authorization
             .update(cx, |input, cx| input.set_value(authorization, window, cx));
-        self.profile_forms
+        self.profiles
+            .forms
             .request_timeout_seconds
             .update(cx, |input, cx| input.set_value(timeout_seconds, window, cx));
-        self.profile_forms.update_cron.update(cx, |input, cx| {
+        self.profiles.forms.update_cron.update(cx, |input, cx| {
             input.set_value(update_cron, window, cx);
         });
-        self.profile_forms.editing_route = options.route();
-        self.profile_forms.editing_fixed_update_interval = options.fixed_update_interval;
-        self.profile_forms.editing_profile_id = Some(id);
+        self.profiles.forms.editing_route = options.route();
+        self.profiles.forms.editing_fixed_update_interval = options.fixed_update_interval;
+        self.profiles.forms.editing_profile_id = Some(id);
         self.error = None;
         cx.notify();
     }
 
     pub(in super::super) fn cancel_edit_remote_profile(&mut self, cx: &mut Context<Self>) {
-        self.profile_forms.editing_profile_id = None;
+        self.profiles.forms.editing_profile_id = None;
         cx.notify();
     }
 
     pub(in super::super) fn save_remote_profile_settings(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.profile_forms.editing_profile_id.clone() else {
+        let Some(id) = self.profiles.forms.editing_profile_id.clone() else {
             return;
         };
-        let Some(store) = self.profile_store.clone() else {
+        let Some(store) = self.profiles.store.clone() else {
             self.error = Some(zenclash_i18n::text("profiles.errors.store_unavailable"));
             cx.notify();
             return;
         };
         let authorization = self
-            .profile_forms
+            .profiles
+            .forms
             .request_authorization
             .read(cx)
             .value()
             .to_string();
-        let name = self.profile_forms.request_name.read(cx).value().to_string();
-        let url = self.profile_forms.request_url.read(cx).value().to_string();
+        let name = self
+            .profiles
+            .forms
+            .request_name
+            .read(cx)
+            .value()
+            .to_string();
+        let url = self.profiles.forms.request_url.read(cx).value().to_string();
         let user_agent = self
-            .profile_forms
+            .profiles
+            .forms
             .request_user_agent
             .read(cx)
             .value()
             .to_string();
         let timeout_seconds = match self
-            .profile_forms
+            .profiles
+            .forms
             .request_timeout_seconds
             .read(cx)
             .value()
@@ -112,11 +127,11 @@ impl RuntimePage {
             }
         };
         let options = RemoteProfileOptions::new(authorization, false)
-            .map(|options| options.with_route(self.profile_forms.editing_route))
+            .map(|options| options.with_route(self.profiles.forms.editing_route))
             .and_then(|options| {
                 options.with_download_policy(
                     timeout_seconds,
-                    self.profile_forms.editing_fixed_update_interval,
+                    self.profiles.forms.editing_fixed_update_interval,
                 )
             });
         let options = match options {
@@ -130,7 +145,7 @@ impl RuntimePage {
                 return;
             }
         };
-        let cron = self.profile_forms.update_cron.read(cx).value().to_string();
+        let cron = self.profiles.forms.update_cron.read(cx).value().to_string();
         let cron = (!cron.trim().is_empty()).then_some(cron);
         let Some(token) = self.begin_mutation(Page::Profiles) else {
             return;
@@ -153,12 +168,14 @@ impl RuntimePage {
             let _ = this.update(cx, |this, cx| {
                 this.finish_mutation(token);
                 match result {
-                    Ok(()) if this.is_page_task_current(token) => {
+                    Ok(()) => {
                         this.reload_profile_catalog(cx);
-                        this.profile_forms.editing_profile_id = None;
-                        this.notice = Some(zenclash_i18n::text("profiles.notices.request_saved"));
+                        this.profiles.forms.editing_profile_id = None;
+                        if this.is_page_task_current(token) {
+                            this.notice =
+                                Some(zenclash_i18n::text("profiles.notices.request_saved"));
+                        }
                     }
-                    Ok(()) => {}
                     Err(error) => this.set_page_error(token, error),
                 }
                 cx.notify();
@@ -175,7 +192,7 @@ impl RuntimePage {
         interval_minutes: u32,
         cx: &mut Context<Self>,
     ) {
-        let Some(store) = self.profile_store.clone() else {
+        let Some(store) = self.profiles.store.clone() else {
             return;
         };
         let Some(token) = self.begin_mutation(Page::Profiles) else {
@@ -230,7 +247,7 @@ impl RuntimePage {
     }
 
     pub(in super::super) fn update_managed_profile(&mut self, id: String, cx: &mut Context<Self>) {
-        let Some(store) = self.profile_store.clone() else {
+        let Some(store) = self.profiles.store.clone() else {
             return;
         };
         let Some(token) = self.begin_mutation(Page::Profiles) else {
@@ -278,7 +295,7 @@ impl RuntimePage {
                         if outcome.active {
                             this.profile_path = Some(outcome.path.clone());
                             this.invalidate_config_inputs(cx);
-                            this.config_preview = None;
+                            this.overrides.invalidate_preview();
                             cx.emit(ProfileActivated { path: outcome.path });
                         }
                     }
@@ -292,7 +309,7 @@ impl RuntimePage {
     }
 
     pub(in super::super) fn delete_managed_profile(&mut self, id: String, cx: &mut Context<Self>) {
-        let Some(store) = self.profile_store.clone() else {
+        let Some(store) = self.profiles.store.clone() else {
             return;
         };
         let Some(token) = self.begin_mutation(Page::Profiles) else {

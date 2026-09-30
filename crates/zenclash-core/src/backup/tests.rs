@@ -17,6 +17,81 @@ static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const PROFILE: &str = "mixed-port: 7890\nproxies: []\nproxy-groups: []\nrules: []\n";
 
 #[test]
+fn export_rejects_an_index_whose_pretty_encoding_exceeds_the_store_capacity() {
+    let root = test_root("catalog-export-capacity");
+    let source = root.join("source");
+    create_snapshot(&source, AppearancePreference::Light, false, 7890);
+    let store = ProfileStore::new(source.join("profiles")).unwrap();
+    let mut catalog = store.load().unwrap();
+    let limit = 4 * 1024 * 1024;
+    catalog.profiles[0].name = "x".repeat(limit);
+    let overhead = serde_json::to_vec(&catalog).unwrap().len() - limit;
+    catalog.profiles[0].name.truncate(limit - overhead - 1);
+    fs::write(
+        source.join(PROFILE_INDEX_PATH),
+        serde_json::to_vec(&catalog).unwrap(),
+    )
+    .unwrap();
+    assert!(store.load().is_ok());
+    let destination = root.join("backup.zip");
+    assert!(matches!(
+        BackupManager::new(&source).export_to(&destination),
+        Err(BackupError::Profiles(
+            ProfileStoreError::IndexTooLarge { .. }
+        ))
+    ));
+    assert!(!destination.exists());
+    assert!(store.load().is_ok());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn restore_rejects_an_oversized_valid_index_without_changing_live_data() {
+    use sha2::{Digest, Sha256};
+
+    let root = test_root("catalog-restore-capacity");
+    let source = root.join("source");
+    let target = root.join("target");
+    create_snapshot(&source, AppearancePreference::Light, false, 7890);
+    create_snapshot(&target, AppearancePreference::Dark, true, 7891);
+    let before = read_authoritative_snapshot(&target);
+    let archive = root.join("backup.zip");
+    BackupManager::new(&source).export_to(&archive).unwrap();
+    let mut catalog = ProfileStore::new(source.join("profiles"))
+        .unwrap()
+        .load()
+        .unwrap();
+    catalog.profiles[0].name = "x".repeat(4 * 1024 * 1024);
+    let index = serde_json::to_vec(&catalog).unwrap();
+    let oversized = root.join("oversized.zip");
+    rewrite_archive(&archive, &oversized, |name, bytes| {
+        if name == PROFILE_INDEX_PATH {
+            *bytes = index.clone();
+        }
+        if name == MANIFEST_PATH {
+            let mut manifest: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            let entry = manifest["files"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|entry| entry["path"] == PROFILE_INDEX_PATH)
+                .unwrap();
+            entry["size"] = serde_json::json!(index.len());
+            entry["sha256"] = serde_json::json!(format!("{:x}", Sha256::digest(&index)));
+            *bytes = serde_json::to_vec(&manifest).unwrap();
+        }
+    });
+    assert!(matches!(
+        BackupManager::new(&target).prepare_restore(&oversized),
+        Err(BackupError::Profiles(
+            ProfileStoreError::IndexTooLarge { .. }
+        ))
+    ));
+    assert_eq!(read_authoritative_snapshot(&target), before);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn export_restore_is_complete_reversible_and_excludes_generated_cache() {
     let root = test_root("roundtrip");
     let source = root.join("source");

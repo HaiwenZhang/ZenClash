@@ -40,6 +40,121 @@ fn malformed_profile_index_is_quarantined_without_deleting_managed_yaml() {
 }
 
 #[test]
+fn invalid_catalog_paths_cannot_delete_files_outside_the_store() {
+    let root = test_root("catalog-boundary");
+    let store = ProfileStore::new(root.join("store")).unwrap();
+    let outside = root.join("outside.yaml");
+    fs::write(&outside, "rules: [MATCH,DIRECT]\n").unwrap();
+    let profile = store.import_local(&outside).unwrap();
+    let mut catalog = store.load().unwrap();
+    for file_name in ["../../outside.yaml", "..\\..\\outside.yaml"] {
+        catalog.profiles[0].file_name = file_name.into();
+        fs::write(
+            store.root().join("profiles.json"),
+            serde_json::to_vec(&catalog).unwrap(),
+        )
+        .unwrap();
+        assert!(store.load().is_err());
+        assert!(store.delete(&profile.id).is_err());
+        assert!(outside.is_file());
+    }
+    assert!(store.quarantine_invalid_index().unwrap().is_some());
+    assert!(outside.is_file());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn catalog_rejects_duplicate_record_identity_before_mutation() {
+    let root = test_root("catalog-identity");
+    let store = ProfileStore::new(root.join("store")).unwrap();
+    let source = root.join("source.yaml");
+    fs::write(&source, "rules: [MATCH,DIRECT]\n").unwrap();
+    let profile = store.import_local(&source).unwrap();
+    let mut catalog = store.load().unwrap();
+    catalog.profiles.push(profile.clone());
+    fs::write(
+        store.root().join("profiles.json"),
+        serde_json::to_vec(&catalog).unwrap(),
+    )
+    .unwrap();
+    assert!(store.delete(&profile.id).is_err());
+    assert!(store.profile_path(&profile).is_file());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn catalog_rejects_file_names_that_alias_on_case_insensitive_filesystems() {
+    let root = test_root("catalog-file-alias");
+    let store = ProfileStore::new(root.join("store")).unwrap();
+    let source = root.join("source.yaml");
+    fs::write(&source, "rules: [MATCH,DIRECT]\n").unwrap();
+    let original = store.import_local(&source).unwrap();
+    let mut catalog = store.load().unwrap();
+    let mut alias = original.clone();
+    alias.id = "other".into();
+    alias.file_name = "SOURCE.yaml".into();
+    catalog.profiles.push(alias);
+    fs::write(
+        store.root().join("profiles.json"),
+        serde_json::to_vec(&catalog).unwrap(),
+    )
+    .unwrap();
+    assert!(store.delete(&original.id).is_err());
+    assert!(store.profile_path(&original).is_file());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn catalog_rejects_managed_files_replaced_with_symlinks() {
+    let root = test_root("catalog-symlink");
+    let store = ProfileStore::new(root.join("store")).unwrap();
+    let outside = root.join("outside.yaml");
+    fs::write(&outside, "rules: [MATCH,DIRECT]\n").unwrap();
+    let profile = store.import_local(&outside).unwrap();
+    let managed = store.profile_path(&profile);
+    fs::remove_file(&managed).unwrap();
+    std::os::unix::fs::symlink(&outside, &managed).unwrap();
+    assert!(matches!(
+        store.load(),
+        Err(ProfileStoreError::InvalidIndex(_))
+    ));
+    assert!(store.delete(&profile.id).is_err());
+    assert!(outside.is_file());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn index_capacity_failure_preserves_the_readable_catalog_and_managed_files() {
+    let root = test_root("catalog-capacity");
+    let store = ProfileStore::new(root.join("store")).unwrap();
+    let source = root.join("source.yaml");
+    fs::write(&source, "rules: [MATCH,DIRECT]\n").unwrap();
+    store.import_local(&source).unwrap();
+    let mut catalog = store.load().unwrap();
+    catalog.profiles[0].name = "x".repeat(MAX_PROFILE_INDEX_BYTES);
+    let overhead = serde_json::to_vec_pretty(&catalog).unwrap().len() - MAX_PROFILE_INDEX_BYTES;
+    catalog.profiles[0]
+        .name
+        .truncate(MAX_PROFILE_INDEX_BYTES - overhead - 1);
+    let previous = serde_json::to_vec_pretty(&catalog).unwrap();
+    fs::write(store.root().join("profiles.json"), &previous).unwrap();
+    assert!(store.load().is_ok());
+
+    assert!(matches!(
+        store.import_local(&source),
+        Err(ProfileStoreError::IndexTooLarge { .. })
+    ));
+    assert_eq!(
+        fs::read(store.root().join("profiles.json")).unwrap(),
+        previous
+    );
+    assert_eq!(store.load().unwrap().profiles.len(), 1);
+    assert_eq!(fs::read_dir(store.root().join("files")).unwrap().count(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn imports_activates_and_persists_local_profile() {
     let root = test_root("local");
     let source = root.join("source.yaml");

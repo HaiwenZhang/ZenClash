@@ -253,7 +253,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let client = mihomo_process.as_ref().map_or(client.clone(), |process| {
         client.with_config_validator(process.config_validator())
     });
-    let core_session = CoreSession::open(core_kind, client.clone(), mihomo_process.clone());
+    let core_session = CoreSession::open_with_config(
+        core_kind,
+        client.clone(),
+        mihomo_process.clone(),
+        profile_path.clone(),
+        override_paths.clone(),
+    );
     if startup_error.is_none()
         && mihomo_process.is_none()
         && core_kind.capabilities().full_config_reload
@@ -302,6 +308,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         app::init(cx);
         app::create_main_window(
             app::AppServices {
+                profile_store: Some(profile_store),
+                override_store: Some(override_store),
                 preferences_store,
                 preferences,
                 core_kind,

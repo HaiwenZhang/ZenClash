@@ -1,8 +1,8 @@
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tokio::sync::watch;
-use zenclash_core::{ControlledConfigStore, MihomoClient, YamlOverrideStore};
+use zenclash_core::{ControlledConfigStore, CoreSession};
 
 use super::sidebar::OutboundMode;
 
@@ -51,8 +51,8 @@ impl OutboundModeCoordinator {
     pub(crate) fn request(
         &self,
         mode: OutboundMode,
-        client: &MihomoClient,
-        controlled: Option<(ControlledConfigStore, PathBuf)>,
+        session: &CoreSession,
+        controlled: &ControlledConfigStore,
         runtime: &tokio::runtime::Handle,
     ) -> bool {
         let submission = self.update_state(|state| state.submit(mode));
@@ -61,9 +61,10 @@ impl OutboundModeCoordinator {
             Submission::Queued => true,
             Submission::Start(mode) => {
                 let state = self.clone();
-                let client = client.clone();
+                let session = session.clone();
+                let controlled = controlled.clone();
                 runtime.spawn(async move {
-                    state.drive(client, controlled, mode).await;
+                    state.drive(session, controlled, mode).await;
                 });
                 true
             }
@@ -72,29 +73,15 @@ impl OutboundModeCoordinator {
 
     async fn drive(
         self,
-        client: MihomoClient,
-        controlled: Option<(ControlledConfigStore, PathBuf)>,
+        session: CoreSession,
+        controlled: ControlledConfigStore,
         mut mode: OutboundMode,
     ) {
         loop {
-            let result = match &controlled {
-                Some((controlled, profile)) => match load_managed_overrides().await {
-                    Ok(overrides) => controlled
-                        .apply_mode_update_with_overrides(
-                            &client,
-                            profile,
-                            mode.api_value(),
-                            overrides,
-                        )
-                        .await
-                        .map_err(|error| error.to_string()),
-                    Err(error) => Err(error),
-                },
-                None => client
-                    .set_mode(mode.api_value())
-                    .await
-                    .map_err(|error| error.to_string()),
-            };
+            let result = session
+                .set_mode(&controlled, mode.api_value())
+                .await
+                .map_err(|error| error.to_string());
             if let Err(error) = &result {
                 tracing::warn!(%error, mode = mode.api_value(), "failed to update core outbound mode");
             }
@@ -114,18 +101,6 @@ impl OutboundModeCoordinator {
         }
         result
     }
-}
-
-async fn load_managed_overrides() -> Result<Vec<PathBuf>, String> {
-    tokio::task::spawn_blocking(|| YamlOverrideStore::discover()?.load_enabled_paths())
-        .await
-        .map_err(|error| {
-            zenclash_i18n::text_with(
-                "profiles.errors.override_read_task",
-                &[("error", error.to_string())],
-            )
-        })?
-        .map_err(|error| error.to_string())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

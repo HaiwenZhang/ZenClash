@@ -1,10 +1,47 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashSet,
+    path::{Component, Path},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use reqwest::header::HeaderValue;
 
 use super::{DEFAULT_USER_AGENT, ProfileCatalog, ProfileStoreError, ProfileStoreResult};
 
 const MAX_PROFILE_ID_CHARS: usize = 64;
+
+pub(crate) fn safe_profile_file_name(name: &str) -> bool {
+    let mut components = Path::new(name).components();
+    !name.contains(['/', '\\', ':', '<', '>', '"', '|', '?', '*'])
+        && !name.chars().any(char::is_control)
+        && !Path::new(name)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(is_windows_reserved_name)
+        && matches!(components.next(), Some(Component::Normal(_)))
+        && components.next().is_none()
+        && Path::new(name).extension().and_then(|value| value.to_str()) == Some("yaml")
+}
+
+pub(crate) fn validate_catalog_records(catalog: &ProfileCatalog) -> ProfileStoreResult<()> {
+    let mut ids = HashSet::new();
+    let mut file_names = HashSet::new();
+    for profile in &catalog.profiles {
+        if profile.id.trim().is_empty() || !ids.insert(profile.id.as_str()) {
+            return Err(ProfileStoreError::InvalidIndex(zenclash_i18n::text(
+                "profiles.errors.invalid_identity",
+            )));
+        }
+        if !safe_profile_file_name(&profile.file_name)
+            || !file_names.insert(profile.file_name.to_lowercase())
+        {
+            return Err(ProfileStoreError::InvalidIndex(zenclash_i18n::text(
+                "profiles.errors.invalid_file_name",
+            )));
+        }
+    }
+    Ok(())
+}
 
 /// Validates that a payload is a non-empty Clash/Mihomo YAML mapping.
 ///

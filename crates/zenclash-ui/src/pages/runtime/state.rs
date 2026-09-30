@@ -18,13 +18,13 @@ pub(super) enum RuntimeData {
         config: RuntimeConfig,
     },
     Profile {
-        config: RuntimeConfig,
-        proxy_count: usize,
-        group_count: usize,
-        rule_count: usize,
+        config: Option<RuntimeConfig>,
+        proxy_count: Option<usize>,
+        group_count: Option<usize>,
+        rule_count: Option<usize>,
     },
     Connections(std::sync::Arc<ConnectionsSnapshot>),
-    Rules(RuleCatalog),
+    Rules(std::sync::Arc<RuleCatalog>),
     Resources {
         config: RuntimeConfig,
         proxy: ProviderCatalog,

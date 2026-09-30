@@ -80,11 +80,11 @@ impl Default for CoreRecoveryPolicy {
 pub enum EffectiveConfigIntent {
     /// Merge and persist a JSON patch over the active source profile.
     Patch {
-        /// Active source profile.
+        /// Initial source when this session has no committed configuration yet.
         profile: PathBuf,
         /// Recursive JSON object patch.
         patch: serde_json::Value,
-        /// Ordered explicit YAML override files.
+        /// Initial override chain when this session has no committed configuration yet.
         overrides: Vec<PathBuf>,
     },
     /// Apply a different profile without changing its source file.
@@ -210,7 +210,7 @@ pub struct CoreSession {
     kind: CoreKind,
     client: MihomoClient,
     process: Option<Arc<MihomoProcess>>,
-    transition: Arc<tokio::sync::Mutex<()>>,
+    transition: Arc<tokio::sync::Mutex<CommittedConfig>>,
     generation: Arc<AtomicU64>,
     shutdown_requested: Arc<AtomicBool>,
     supervisor_started: Arc<AtomicBool>,
@@ -218,12 +218,19 @@ pub struct CoreSession {
     lifecycle: Arc<RwLock<CoreLifecycleSnapshot>>,
 }
 
+#[derive(Default)]
+struct CommittedConfig {
+    profile: Option<PathBuf>,
+    overrides: Vec<PathBuf>,
+}
+
 #[must_use]
 pub(crate) struct CoreProfileApplication {
     state: CoreProfileApplicationState,
     generation: Arc<AtomicU64>,
     client: MihomoClient,
-    _transition_guard: tokio::sync::OwnedMutexGuard<()>,
+    transition_guard: tokio::sync::OwnedMutexGuard<CommittedConfig>,
+    overrides: Vec<PathBuf>,
 }
 
 enum CoreProfileApplicationState {
@@ -235,10 +242,14 @@ enum CoreProfileApplicationState {
 }
 
 impl CoreProfileApplication {
-    pub(crate) fn commit(self) -> Option<CoreApplyOutcome> {
+    pub(crate) fn commit(mut self, profile: PathBuf) -> Option<CoreApplyOutcome> {
         match self.state {
             CoreProfileApplicationState::Runtime { transaction, kind } => {
                 transaction.commit();
+                *self.transition_guard = CommittedConfig {
+                    profile: Some(profile),
+                    overrides: self.overrides,
+                };
                 self.client.invalidate_connections();
                 let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
                 Some(CoreApplyOutcome { kind, generation })
@@ -263,6 +274,21 @@ impl CoreSession {
     /// Opens a session over one controller and its optional owned child process.
     #[must_use]
     pub fn open(kind: CoreKind, client: MihomoClient, process: Option<Arc<MihomoProcess>>) -> Self {
+        Self::open_with_config(kind, client, process, None, Vec::new())
+    }
+
+    /// Opens a session with the source profile successfully applied at startup.
+    ///
+    /// The committed source identity is shared by queued mode and configuration
+    /// changes and advances only after a successful profile transaction.
+    #[must_use]
+    pub fn open_with_config(
+        kind: CoreKind,
+        client: MihomoClient,
+        process: Option<Arc<MihomoProcess>>,
+        profile: Option<PathBuf>,
+        overrides: Vec<PathBuf>,
+    ) -> Self {
         debug_assert!(
             process
                 .as_ref()
@@ -273,7 +299,10 @@ impl CoreSession {
             client,
             lifecycle: Arc::new(RwLock::new(CoreLifecycleSnapshot::new(process.is_some()))),
             process,
-            transition: Arc::new(tokio::sync::Mutex::new(())),
+            transition: Arc::new(tokio::sync::Mutex::new(CommittedConfig {
+                profile,
+                overrides,
+            })),
             generation: Arc::new(AtomicU64::new(0)),
             shutdown_requested: Arc::new(AtomicBool::new(false)),
             supervisor_started: Arc::new(AtomicBool::new(false)),
@@ -347,22 +376,72 @@ impl CoreSession {
         store: &ControlledConfigStore,
         intent: EffectiveConfigIntent,
     ) -> Result<CoreApplyOutcome, CoreSessionError> {
-        let _transition = self.transition.lock().await;
+        let mut active_profile = self.transition.lock().await;
         self.ensure_running_operations_allowed()?;
-        let kind = match intent {
+        let (kind, profile, active_overrides) = match intent {
             EffectiveConfigIntent::Patch {
                 profile,
                 patch,
                 overrides,
-            } => self.apply_patch(store, profile, patch, overrides).await?,
-            EffectiveConfigIntent::ActivateProfile { profile, overrides } => {
-                self.activate_profile(store, profile, overrides).await?
+            } => {
+                let (profile, overrides) = active_profile
+                    .profile
+                    .as_ref()
+                    .map_or((profile, overrides), |profile| {
+                        (profile.clone(), active_profile.overrides.clone())
+                    });
+                let kind = self
+                    .apply_patch(store, profile.clone(), patch, overrides.clone())
+                    .await?;
+                (kind, profile, overrides)
             }
+            EffectiveConfigIntent::ActivateProfile { profile, overrides } => {
+                let kind = self
+                    .activate_profile(store, profile.clone(), overrides.clone())
+                    .await?;
+                (kind, profile, overrides)
+            }
+        };
+        *active_profile = CommittedConfig {
+            profile: Some(profile),
+            overrides: active_overrides,
         };
         Ok(CoreApplyOutcome {
             kind,
             generation: self.next_generation(),
         })
+    }
+
+    /// Changes the outbound mode on the currently committed profile.
+    ///
+    /// Resolves profile identity after entering the same transition gate used
+    /// for profile application, maintenance and shutdown. An attached session
+    /// without a source profile updates only the live controller.
+    ///
+    /// # Errors
+    ///
+    /// Returns controller, persistence or lifecycle errors without advancing
+    /// the session generation.
+    pub async fn set_mode(
+        &self,
+        store: &ControlledConfigStore,
+        mode: &str,
+    ) -> Result<u64, CoreSessionError> {
+        let active_profile = self.transition.lock().await;
+        self.ensure_running_operations_allowed()?;
+        if let Some(profile) = active_profile.profile.as_ref() {
+            store
+                .apply_mode_update_with_overrides(
+                    &self.client,
+                    profile,
+                    mode,
+                    active_profile.overrides.clone(),
+                )
+                .await?;
+        } else {
+            self.client.set_mode(mode).await?;
+        }
+        Ok(self.next_generation())
     }
 
     pub(crate) async fn stage_profile_application(
@@ -375,6 +454,7 @@ impl CoreSession {
     ) -> Result<CoreProfileApplication, CoreSessionError> {
         let transition_guard = self.transition.clone().lock_owned().await;
         self.ensure_running_operations_allowed()?;
+        let active_overrides = overrides.clone();
         let state = if !apply_runtime {
             CoreProfileApplicationState::Validated(
                 store
@@ -424,7 +504,8 @@ impl CoreSession {
             state,
             generation: self.generation.clone(),
             client: self.client.clone(),
-            _transition_guard: transition_guard,
+            transition_guard,
+            overrides: active_overrides,
         })
     }
 
@@ -515,6 +596,14 @@ impl CoreSession {
                 .is_none_or(|process| process.is_running()),
             generation: self.generation.load(Ordering::Acquire),
         }
+    }
+
+    pub(crate) async fn observe_current<T>(
+        &self,
+        observation: impl FnOnce(CoreSessionSnapshot) -> T,
+    ) -> T {
+        let _transition = self.transition.lock().await;
+        observation(self.snapshot())
     }
 
     pub(crate) fn managed_process_snapshot(&self) -> Option<crate::MihomoProcessSnapshot> {
@@ -769,6 +858,157 @@ mod tests {
     use crate::MihomoLaunchConfig;
 
     use super::*;
+
+    #[tokio::test]
+    async fn queued_mode_uses_the_profile_committed_by_the_preceding_transition() {
+        queued_update_uses_committed_config(false).await;
+    }
+
+    #[tokio::test]
+    async fn queued_patch_uses_the_profile_and_override_chain_committed_by_the_preceding_transition()
+     {
+        queued_update_uses_committed_config(true).await;
+    }
+
+    async fn queued_update_uses_committed_config(patch: bool) {
+        let root = std::env::temp_dir().join(format!(
+            "zenclash-queued-mode-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let a = root.join("a.yaml");
+        let b = root.join("b.yaml");
+        let previous_override = root.join("previous-override.yaml");
+        let next_override = root.join("next-override.yaml");
+        std::fs::write(&a, "mixed-port: 8011\nrules: [MATCH,DIRECT]\n").unwrap();
+        std::fs::write(&b, "mixed-port: 8012\nrules: [MATCH,DIRECT]\n").unwrap();
+        std::fs::write(&previous_override, "allow-lan: false\n").unwrap();
+        std::fs::write(&next_override, "allow-lan: true\n").unwrap();
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let mut entered = Some(entered);
+            let mut requests = Vec::new();
+            for index in 0..if patch { 2 } else { 4 } {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut bytes = [0_u8; 8_192];
+                let length = stream.read(&mut bytes).unwrap();
+                requests.push(String::from_utf8_lossy(&bytes[..length]).into_owned());
+                if index == 0 {
+                    entered.take().unwrap().send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                if patch || matches!(index, 0 | 2) {
+                    stream
+                        .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                        .unwrap();
+                } else {
+                    let mode = if index == 1 { "rule" } else { "global" };
+                    let body = format!(r#"{{"mode":"{mode}"}}"#);
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                }
+            }
+            requests
+        });
+        let client =
+            MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+        let session = CoreSession::open_with_config(
+            CoreKind::Mihomo,
+            client,
+            None,
+            Some(a.clone()),
+            vec![previous_override.clone()],
+        );
+        let store = ControlledConfigStore::new(root.join("controlled"));
+        let activation = {
+            let session = session.clone();
+            let store = store.clone();
+            tokio::spawn(async move {
+                session
+                    .apply(
+                        &store,
+                        EffectiveConfigIntent::ActivateProfile {
+                            profile: b,
+                            overrides: vec![next_override],
+                        },
+                    )
+                    .await
+            })
+        };
+        waiting.await.unwrap();
+        let mode = {
+            let session = session.clone();
+            let store = store.clone();
+            tokio::spawn(async move {
+                if patch {
+                    session
+                        .apply(
+                            &store,
+                            EffectiveConfigIntent::Patch {
+                                profile: a,
+                                patch: serde_json::json!({"mode": "global"}),
+                                overrides: vec![previous_override],
+                            },
+                        )
+                        .await
+                        .map(|outcome| outcome.generation)
+                } else {
+                    session.set_mode(&store, "global").await
+                }
+            })
+        };
+        release.send(()).unwrap();
+        assert_eq!(activation.await.unwrap().unwrap().generation, 1);
+        assert_eq!(mode.await.unwrap().unwrap(), 2);
+        let runtime: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(store.runtime_path()).unwrap()).unwrap();
+        assert_eq!(runtime["mixed-port"].as_u64(), Some(8012));
+        assert_eq!(runtime["mode"].as_str(), Some("global"));
+        assert_eq!(runtime["allow-lan"].as_bool(), Some(true));
+        let requests = server.join().unwrap();
+        assert!(requests[if patch { 1 } else { 2 }].starts_with(if patch {
+            "PUT /configs?force=true "
+        } else {
+            "PATCH /configs "
+        }));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn queued_mode_does_not_run_after_shutdown_is_requested() {
+        let session = CoreSession::open(
+            CoreKind::Mihomo,
+            MihomoClient::new(MihomoEndpoint::default()).unwrap(),
+            None,
+        );
+        let guard = session.transition.lock().await;
+        let task = {
+            let session = session.clone();
+            tokio::spawn(async move {
+                session
+                    .set_mode(&ControlledConfigStore::new(std::env::temp_dir()), "global")
+                    .await
+            })
+        };
+        session.request_shutdown();
+        drop(guard);
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(CoreSessionError::ShuttingDown)
+        ));
+        assert_eq!(session.generation(), 0);
+    }
 
     #[tokio::test]
     async fn accepted_profile_apply_reports_hot_reload_and_advances_generation() {

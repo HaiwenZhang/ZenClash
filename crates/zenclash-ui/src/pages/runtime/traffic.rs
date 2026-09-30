@@ -2,7 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use zenclash_core::{TrafficAggregate, TrafficDimension, TrafficOverview};
 
-use super::{PageTaskToken, RuntimePage};
+use super::loader::PageReadTask;
 
 mod actions;
 mod view;
@@ -47,7 +47,7 @@ impl TrafficRange {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub(super) struct TrafficHistoryUiState {
     pub(super) range: TrafficRange,
     pub(super) dimension: TrafficDimension,
@@ -61,6 +61,15 @@ pub(super) struct TrafficHistoryUiState {
     pub(super) last_success_at_ms: Option<u64>,
     pub(super) last_error: Option<String>,
     revision: u64,
+    request_generation: u64,
+    task: PageReadTask,
+    query_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HistoryRequest {
+    generation: u64,
+    revision: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,6 +81,47 @@ enum TrafficHistoryFreshness {
 }
 
 impl TrafficHistoryUiState {
+    fn begin_query(&mut self) -> HistoryRequest {
+        self.request_generation = self.request_generation.wrapping_add(1);
+        self.loading = true;
+        HistoryRequest {
+            generation: self.request_generation,
+            revision: self.revision,
+        }
+    }
+
+    pub(super) fn cancel_query(&mut self) {
+        self.task.cancel();
+        self.request_generation = self.request_generation.wrapping_add(1);
+        self.loading = false;
+    }
+
+    fn complete_query(
+        &mut self,
+        token: HistoryRequest,
+        result: Result<TrafficHistoryPayload, String>,
+        observed_at_ms: u64,
+    ) -> bool {
+        if token.generation != self.request_generation || !self.loading {
+            return false;
+        }
+        self.loading = false;
+        if token.revision != self.revision {
+            return true;
+        }
+        match result {
+            Ok(payload) => {
+                self.overview = payload.overview;
+                self.details = payload.details;
+                self.proxy_stats = payload.proxy_stats;
+                self.last_success_at_ms = Some(observed_at_ms);
+                self.last_error = None;
+            }
+            Err(error) => self.last_error = Some(error),
+        }
+        false
+    }
+
     fn freshness(&self) -> TrafficHistoryFreshness {
         match (self.last_success_at_ms, self.last_error.is_some()) {
             (Some(observed_at_ms), false) => TrafficHistoryFreshness::Fresh { observed_at_ms },
@@ -82,6 +132,7 @@ impl TrafficHistoryUiState {
     }
 
     pub(super) fn release_results(&mut self) {
+        self.cancel_query();
         self.overview = TrafficOverview::default();
         self.details = Vec::new();
         self.proxy_stats = Vec::new();
@@ -100,33 +151,6 @@ struct TrafficHistoryPayload {
     overview: TrafficOverview,
     details: Vec<TrafficAggregate>,
     proxy_stats: Vec<TrafficAggregate>,
-}
-
-fn finish_history_refresh(
-    page: &mut RuntimePage,
-    token: PageTaskToken,
-    revision: u64,
-    result: Result<TrafficHistoryPayload, String>,
-) -> bool {
-    page.traffic_history.loading = false;
-    if page.is_page_task_current(token) && page.traffic_history.revision != revision {
-        return true;
-    }
-    match result {
-        Ok(payload) if page.is_page_task_current(token) => {
-            page.traffic_history.overview = payload.overview;
-            page.traffic_history.details = payload.details;
-            page.traffic_history.proxy_stats = payload.proxy_stats;
-            page.traffic_history.last_success_at_ms = Some(unix_millis());
-            page.traffic_history.last_error = None;
-        }
-        Ok(_) => {}
-        Err(error) => {
-            page.traffic_history.last_error = Some(error.clone());
-            page.set_page_error(token, error);
-        }
-    }
-    false
 }
 
 fn dimension_label(dimension: TrafficDimension) -> String {
@@ -149,6 +173,60 @@ fn unix_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_old_completion_cannot_change_the_loading_or_error_of_a_reopened_page() {
+        for result in [
+            Ok(TrafficHistoryPayload {
+                overview: TrafficOverview::default(),
+                details: vec![TrafficAggregate::default()],
+                proxy_stats: Vec::new(),
+            }),
+            Err("old query failed".into()),
+        ] {
+            let mut state = TrafficHistoryUiState::default();
+            let old = state.begin_query();
+            state.release_results();
+            let current = state.begin_query();
+            assert!(!state.complete_query(old, result, 1));
+            assert!(state.loading);
+            assert!(state.last_error.is_none());
+            assert!(state.details.is_empty());
+            state.complete_query(
+                current,
+                Ok(TrafficHistoryPayload {
+                    overview: TrafficOverview::default(),
+                    details: Vec::new(),
+                    proxy_stats: Vec::new(),
+                }),
+                2,
+            );
+            assert!(!state.loading);
+            assert_eq!(state.last_success_at_ms, Some(2));
+        }
+    }
+
+    #[test]
+    fn cancelling_a_hidden_query_prevents_publishing_or_requesting_another_query() {
+        let mut state = TrafficHistoryUiState::default();
+        let token = state.begin_query();
+        state.revision += 1;
+        state.cancel_query();
+        assert!(!state.complete_query(token, Err("hidden query failed".into()), 1));
+        assert!(!state.loading);
+        assert!(state.last_error.is_none());
+    }
+
+    #[test]
+    fn changing_query_selection_requests_one_refresh_without_publishing_old_data() {
+        let mut state = TrafficHistoryUiState::default();
+        let token = state.begin_query();
+        state.revision += 1;
+        assert!(state.complete_query(token, Err("obsolete selection failed".into()), 1));
+        assert!(state.last_error.is_none());
+        assert_eq!(state.last_success_at_ms, None);
+        assert!(!state.complete_query(token, Err("duplicate completion".into()), 2));
+    }
 
     #[test]
     fn history_ranges_produce_the_expected_bounded_bucket_counts() {

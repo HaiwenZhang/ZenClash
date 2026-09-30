@@ -28,7 +28,7 @@ impl ZenClashApp {
         });
     }
 
-    pub(super) fn show_main_window(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::app) fn show_main_window(&mut self, cx: &mut Context<Self>) {
         self.main_window_visible = true;
         self.runtime_page.update(cx, |runtime_page, cx| {
             runtime_page.set_window_visible(true, cx);
@@ -54,7 +54,8 @@ impl ZenClashApp {
             return;
         }
 
-        let client = self.client.clone();
+        let core_session = self.core_session.clone();
+        let controlled_config_store = self.controlled_config_store.clone();
         let runtime = self.runtime.clone();
         let traffic_monitor = self.traffic_monitor.clone();
         let outbound_mode = self.outbound_mode.clone();
@@ -72,7 +73,14 @@ impl ZenClashApp {
         match gpui_kit::open_window(options, cx, |window, cx| {
             window.set_window_title("ZenClash Signal");
             cx.new(|cx| {
-                FloatingTrafficWindow::new(client, runtime, traffic_monitor, outbound_mode, cx)
+                FloatingTrafficWindow::new(
+                    core_session,
+                    controlled_config_store,
+                    runtime,
+                    traffic_monitor,
+                    outbound_mode,
+                    cx,
+                )
             })
         }) {
             Ok((handle, _)) => self.floating_window = Some(handle),
@@ -114,10 +122,8 @@ impl ZenClashApp {
             .update(cx, |page, cx| page.set_outbound_mode(mode.api_value(), cx));
         if self.outbound_mode.request(
             mode,
-            &self.client,
-            self.profile_path
-                .clone()
-                .map(|profile| (self.controlled_config_store.clone(), profile)),
+            &self.core_session,
+            &self.controlled_config_store,
             &self.runtime,
         ) {
             let pending = self.outbound_mode.is_pending();

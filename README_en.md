@@ -23,6 +23,7 @@
 ## Features
 
 - **Profiles and configuration**: Add subscriptions, import Clash/Mihomo YAML files, apply overrides, and back up or restore configurations.
+  Local profiles, disabled overrides, and traffic history remain available while the core is offline; operations requiring the core report connection failures.
 - **Proxies and routing**: Switch proxy groups and nodes, test latency, and choose Rule, Global, or Direct mode.
 - **Desktop integration**: System proxy, TUN, launch at login, and quick controls from the tray.
 - **Monitoring and diagnostics**: Live traffic, active connections, rules, logs, network diagnostics, and local usage history.
@@ -78,6 +79,10 @@ Further reading: [packaging scripts](scripts) · [development and validation not
 ## Data and Privacy
 
 - Imported subscriptions and YAML source files are never rewritten in place.
+- Profile indexes reject unsafe paths, duplicate records, and managed-file symlinks. Reads and writes enforce the same size limit, including backups.
+- Mode changes and profile applications run serially, using the profile and override chain committed when execution starts.
+- System proxies are released on the recorded network service. PAC replacement closes the old listener after native readback and preference persistence; failures restore state or retain listeners for recovery.
+- If proxy release or core shutdown fails during quit, the app remains running and shows the error. Fix the system permissions or proxy state, then retry quitting.
 - Traffic history stays local; you can disable it or change its retention period in Settings.
 - Cores started by ZenClash stop when the app exits normally.
 - Configurations, logs, and backups may contain subscription URLs or controller secrets. Redact them before sharing.

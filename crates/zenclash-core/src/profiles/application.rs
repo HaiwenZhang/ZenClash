@@ -841,7 +841,7 @@ impl ProfileApplication {
 
         let commit = run_store(move || staged.commit()).await;
         match commit {
-            Ok(committed) => match runtime.commit() {
+            Ok(committed) => match runtime.commit(committed.path.clone()) {
                 Some(applied) => ProfileApplyOutcome::Applied {
                     profile: committed.record,
                     path: committed.path,

@@ -218,7 +218,7 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let active = self.profile_catalog.active_profile();
+        let active = self.profiles.catalog.active_profile();
         let name = active.map_or_else(
             || zenclash_i18n::text("home.profile.none"),
             |profile| profile.name.clone(),
@@ -241,14 +241,15 @@ impl RuntimePage {
                 || (zenclash_i18n::text("home.profile.usage_unavailable"), 0.),
                 subscription_usage,
             );
-        let active_id = self.profile_catalog.active.clone();
+        let active_id = self.profiles.catalog.active.clone();
         let profiles = self
-            .profile_catalog
+            .profiles
+            .catalog
             .profiles
             .iter()
             .map(|profile| (profile.id.clone(), profile.name.clone()))
             .collect::<Vec<_>>();
-        let can_switch = self.profile_store.is_some() && !profiles.is_empty();
+        let can_switch = self.profiles.store.is_some() && !profiles.is_empty();
         let runtime_page = cx.entity().downgrade();
         let profile_switch_tooltip =
             zenclash_i18n::text_with("home.profile.switch_current", &[("name", name.clone())]);

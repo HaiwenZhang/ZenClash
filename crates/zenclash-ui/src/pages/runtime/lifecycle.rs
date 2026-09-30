@@ -16,7 +16,7 @@ pub(super) struct UiVisibility {
 }
 
 impl UiVisibility {
-    const fn new(window_active: bool) -> Self {
+    pub(super) const fn new(window_active: bool) -> Self {
         Self {
             window_active,
             window_visible: true,
@@ -130,9 +130,11 @@ struct InitialPersistentState {
 fn load_initial_persistent_state(
     profile_path: Option<&std::path::Path>,
     controlled_store: &ControlledConfigStore,
+    profile_store: Option<ProfileStore>,
+    override_store: Option<YamlOverrideStore>,
 ) -> InitialPersistentState {
-    let (profile_store, profile_catalog, store_error) = match ProfileStore::discover() {
-        Ok(store) => match store.load() {
+    let (profile_store, profile_catalog, store_error) = match profile_store {
+        Some(store) => match store.load() {
             Ok(catalog) => (Some(store), catalog, None),
             Err(error) => (
                 Some(store),
@@ -140,14 +142,18 @@ fn load_initial_persistent_state(
                 Some(error.to_string()),
             ),
         },
-        Err(error) => (None, ProfileCatalog::default(), Some(error.to_string())),
+        None => (
+            None,
+            ProfileCatalog::default(),
+            Some(zenclash_i18n::text("profiles.errors.store_unavailable")),
+        ),
     };
     let (controlled_config, controlled_error) = controlled_store.load_json().map_or_else(
         |error| (empty_json_object(), Some(error.to_string())),
         |value| (value, None),
     );
-    let (override_store, override_catalog, override_error) = match YamlOverrideStore::discover() {
-        Ok(store) => match store.load() {
+    let (override_store, override_catalog, override_error) = match override_store {
+        Some(store) => match store.load() {
             Ok(catalog) => (Some(store), catalog, None),
             Err(error) => (
                 Some(store),
@@ -155,10 +161,10 @@ fn load_initial_persistent_state(
                 Some(error.to_string()),
             ),
         },
-        Err(error) => (
+        None => (
             None,
             YamlOverrideCatalog::default(),
-            Some(error.to_string()),
+            Some(zenclash_i18n::text("overrides.errors.store_unavailable")),
         ),
     };
     let override_paths = override_store
@@ -336,9 +342,11 @@ impl RuntimePage {
                 input.set_placeholder(zenclash_i18n::text(key), window, cx);
             });
         }
-        self.profile_forms
+        self.profiles
+            .forms
             .refresh_localized_placeholders(window, cx);
-        self.profile_editor
+        self.overrides
+            .editor
             .refresh_localized_placeholder(window, cx);
         cx.notify();
     }
@@ -368,7 +376,7 @@ impl RuntimePage {
         if outcome.active {
             self.profile_path = Some(outcome.path.clone());
             self.invalidate_config_inputs(cx);
-            self.config_preview = None;
+            self.overrides.invalidate_preview();
             cx.emit(ProfileActivated { path: outcome.path });
         }
         cx.notify();
@@ -393,6 +401,8 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> Self {
         let RuntimePageServices {
+            profile_store,
+            override_store,
             core_kind,
             core_session,
             client,
@@ -415,14 +425,15 @@ impl RuntimePage {
         let persistent_task = {
             let profile = profile_path.clone();
             let store = controlled_config_store.clone();
-            runtime
-                .spawn_blocking(move || load_initial_persistent_state(profile.as_deref(), &store))
+            let profiles = profile_store.clone();
+            let overrides = override_store.clone();
+            runtime.spawn_blocking(move || {
+                load_initial_persistent_state(profile.as_deref(), &store, profiles, overrides)
+            })
         };
-        let profile_store = None;
         let profile_catalog = ProfileCatalog::default();
         let controlled_config = empty_json_object();
         let effective_config = empty_json_object();
-        let override_store = None;
         let override_catalog = YamlOverrideCatalog::default();
         let error = None;
         let effective_config = config_input_snapshot(effective_config);
@@ -452,7 +463,6 @@ impl RuntimePage {
             traffic_capture,
             process,
             profile_path,
-            profile_store,
             controlled_config_store,
             controlled_config,
             effective_config,
@@ -461,24 +471,27 @@ impl RuntimePage {
             config_inputs_generation: 0,
             config_inputs_loading: true,
             persistent_loading: true,
-            profile_catalog,
-            profile_catalog_generation: 0,
             preferences_store,
             preferences,
             core_management: super::settings::CoreManagementUiState::default(),
             app_update: super::settings::AppUpdateUiState::default(),
             system_proxy_session,
             traffic_history_store,
-            profile_forms,
+            profiles: super::profiles::ProfileLibrary::new(
+                profile_store,
+                profile_catalog,
+                profile_forms,
+            ),
+            overrides: super::overrides::OverridesState::new(
+                override_store,
+                override_catalog,
+                profile_editor,
+            ),
             connections,
             logs,
             rules,
             system_proxy_editor: None,
             core_releases: super::CoreReleaseState::default(),
-            override_store,
-            override_catalog,
-            config_preview: None,
-            profile_editor,
             data: RuntimeData::Empty,
             home: super::home::HomeUiState::default(),
             traffic_history: super::traffic::TrafficHistoryUiState::default(),
@@ -541,12 +554,12 @@ impl RuntimePage {
                     this.config_inputs_loading = false;
                     match result {
                         Ok(state) => {
-                            this.profile_store = state.profile_store;
-                            if this.profile_catalog_generation == 0 {
-                                this.profile_catalog = state.profile_catalog;
+                            this.profiles.store = state.profile_store;
+                            if this.profiles.generation == 0 {
+                                this.profiles.catalog = state.profile_catalog;
                             }
-                            this.override_store = state.override_store;
-                            this.override_catalog = state.override_catalog;
+                            this.overrides.store = state.override_store;
+                            this.overrides.catalog = state.override_catalog;
                             this.controlled_config = state.controlled_config;
                             this.error = state.error;
                             if this.profile_path == profile && this.config_inputs_generation == 0 {
@@ -614,13 +627,14 @@ impl RuntimePage {
         if previous_page == Page::Traffic {
             self.traffic_history.release_results();
         }
-        if previous_page == Page::Override && !self.profile_editor.is_open() {
-            self.config_preview = None;
+        if previous_page == Page::Override {
+            self.overrides.invalidate_preview();
         }
         self.page = page;
         self.navigation_generation = self.navigation_generation.wrapping_add(1);
         self.data = RuntimeData::Empty;
         self.connections.release_presentation();
+        self.rules.release_presentation();
         self.invalidate_page_load();
         self.error = None;
         self.notice = None;
@@ -661,12 +675,13 @@ impl RuntimePage {
         if self.page == Page::Traffic {
             self.traffic_history.release_results();
         }
-        if self.page == Page::Override && !self.profile_editor.is_open() {
-            self.config_preview = None;
+        if self.page == Page::Override {
+            self.overrides.invalidate_preview();
         }
         self.invalidate_page_load();
         self.data = RuntimeData::Empty;
         self.connections.release_presentation();
+        self.rules.release_presentation();
     }
 
     fn set_window_active(&mut self, active: bool, cx: &mut Context<Self>) {
@@ -680,17 +695,28 @@ impl RuntimePage {
 
     fn update_live_update_activity(&mut self, was_enabled: bool, cx: &mut Context<Self>) {
         let enabled = self.ui_visibility.updates_enabled();
+        if !enabled {
+            self.traffic_history.cancel_query();
+            if self.ui_visibility.window_visible && self.ui_visibility.page_presented {
+                self.overrides.cancel_preview();
+                self.rules.cancel_projection();
+            } else {
+                self.overrides.invalidate_preview();
+                self.rules.release_presentation();
+            }
+        }
         if was_enabled == enabled {
             return;
         }
         self.live_updates_enabled.send_replace(enabled);
         if enabled {
             self.refresh_visible_page(cx);
+            self.update_rule_presentation(cx);
             cx.notify();
         }
     }
 
-    const fn live_updates_enabled(&self) -> bool {
+    pub(super) const fn live_updates_enabled(&self) -> bool {
         self.ui_visibility.updates_enabled()
     }
 
@@ -903,7 +929,7 @@ impl RuntimePage {
                             this.log_monitor.set_level(level);
                         }
                         this.reload_controlled_config(cx);
-                        this.config_preview = None;
+                        this.overrides.invalidate_preview();
                         cx.emit(RuntimeConfigApplied);
                         this.invalidate_page_load();
                         this.refresh(cx);
@@ -1041,7 +1067,7 @@ impl RuntimePage {
     ) {
         self.profile_path = Some(path.clone());
         self.invalidate_config_inputs(cx);
-        self.config_preview = None;
+        self.overrides.invalidate_preview();
         self.reload_profile_catalog(cx);
         self.notice = Some(zenclash_i18n::text_with(
             "runtime.lifecycle.tray_profile_selected",
@@ -1135,6 +1161,8 @@ impl RuntimePage {
         }
         self.data = data.retain_dashboard_successes(&self.data);
         self.update_connection_presentation(cx);
+        self.rules.confirmed_disabled.clear();
+        self.update_rule_presentation(cx);
         true
     }
 
@@ -1149,9 +1177,9 @@ impl RuntimePage {
     pub(super) const fn config(&self) -> Option<&RuntimeConfig> {
         match &self.data {
             RuntimeData::Dashboard { config, .. } => config.value(),
+            RuntimeData::Profile { config, .. } => config.as_ref(),
             RuntimeData::Config(config)
             | RuntimeData::Core { config, .. }
-            | RuntimeData::Profile { config, .. }
             | RuntimeData::Resources { config, .. }
             | RuntimeData::SystemProxy { config, .. }
             | RuntimeData::Network { config, .. }

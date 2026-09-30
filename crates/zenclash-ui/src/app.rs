@@ -166,6 +166,10 @@ impl MainWindowMemoryState {
 
 /// Runtime services prepared by the executable before constructing the UI.
 pub struct AppServices {
+    /// Profile repository opened during bootstrap.
+    pub profile_store: Option<zenclash_core::ProfileStore>,
+    /// YAML override repository opened during bootstrap.
+    pub override_store: Option<zenclash_core::YamlOverrideStore>,
     /// Persistent application-preference store discovered during process bootstrap.
     pub preferences_store: Option<AppPreferencesStore>,
     /// Single validated preference snapshot used consistently for startup and UI state.
@@ -210,6 +214,8 @@ impl ZenClashApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let AppServices {
+            profile_store,
+            override_store,
             preferences_store: _,
             preferences: _,
             core_kind,
@@ -260,6 +266,8 @@ impl ZenClashApp {
             RuntimePage::new(
                 Page::Home,
                 RuntimePageServices {
+                    profile_store,
+                    override_store,
                     core_kind,
                     core_session: core_session.clone(),
                     client: client.clone(),

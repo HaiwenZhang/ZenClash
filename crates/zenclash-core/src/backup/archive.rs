@@ -1,8 +1,3 @@
-use std::{
-    collections::HashSet,
-    path::{Component, Path},
-};
-
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -10,7 +5,10 @@ use super::{
     BackupError, BackupResult, CONTROLLED_PATH, MAX_BACKUP_BYTES, MAX_BACKUP_FILES,
     PREFERENCES_PATH, PROFILE_INDEX_PATH, YAML_OVERRIDE_INDEX_PATH,
 };
-use crate::ProfileCatalog;
+use crate::{
+    ProfileCatalog,
+    profiles::{safe_profile_file_name, validate_catalog_records},
+};
 
 mod export;
 mod import;
@@ -41,23 +39,8 @@ struct SnapshotFile {
 }
 
 fn validate_catalog_metadata(catalog: &ProfileCatalog) -> BackupResult<()> {
-    let mut ids = HashSet::new();
-    let mut file_names = HashSet::new();
-    for profile in &catalog.profiles {
-        if profile.id.trim().is_empty() || !ids.insert(profile.id.as_str()) {
-            return Err(BackupError::InvalidArchive(
-                "配置索引包含空白或重复 ID".into(),
-            ));
-        }
-        if !safe_profile_file_name(&profile.file_name)
-            || !file_names.insert(profile.file_name.as_str())
-        {
-            return Err(BackupError::InvalidArchive(format!(
-                "配置索引包含不安全或重复文件名 {}",
-                profile.file_name
-            )));
-        }
-    }
+    validate_catalog_records(catalog)
+        .map_err(|error| BackupError::InvalidArchive(error.to_string()))?;
     if catalog
         .active
         .as_ref()
@@ -68,13 +51,6 @@ fn validate_catalog_metadata(catalog: &ProfileCatalog) -> BackupResult<()> {
         ));
     }
     Ok(())
-}
-
-fn safe_profile_file_name(name: &str) -> bool {
-    let mut components = Path::new(name).components();
-    matches!(components.next(), Some(Component::Normal(_)))
-        && components.next().is_none()
-        && Path::new(name).extension().and_then(|value| value.to_str()) == Some("yaml")
 }
 
 fn is_authoritative_path(path: &str) -> bool {

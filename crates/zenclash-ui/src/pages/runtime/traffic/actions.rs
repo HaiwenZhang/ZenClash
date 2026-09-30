@@ -1,11 +1,14 @@
 use zenclash_core::{TrafficDimension, TrafficHistoryQuery, TrafficOverview};
 
-use super::{TrafficHistoryPayload, TrafficRange, finish_history_refresh, unix_millis};
+use super::{TrafficHistoryPayload, TrafficRange, unix_millis};
 use crate::pages::runtime::{Context, Page, RuntimePage};
 
 impl RuntimePage {
     pub(in crate::pages::runtime) fn refresh_traffic_history(&mut self, cx: &mut Context<Self>) {
-        if self.page != Page::Traffic || self.traffic_history.loading {
+        if self.page != Page::Traffic
+            || !self.live_updates_enabled()
+            || self.traffic_history.loading
+        {
             return;
         }
         let Some(store) = self.traffic_history_store.clone() else {
@@ -17,10 +20,12 @@ impl RuntimePage {
         let selected_parent = self.traffic_history.selected_parent.clone();
         let selected_detail = self.traffic_history.selected_detail.clone();
         let token = self.page_task_token_for(Page::Traffic);
-        let revision = self.traffic_history.revision;
-        self.traffic_history.loading = true;
+        let request = self.traffic_history.begin_query();
+        let query_gate = self.traffic_history.query_gate.clone();
         let task = self.runtime.spawn(async move {
+            let permit = query_gate.lock_owned().await;
             tokio::task::spawn_blocking(move || {
+                let _permit = permit;
                 let overview = store.overview(&query).map_err(|error| error.to_string())?;
                 let details = selected_parent.as_deref().map_or_else(
                     || Ok(Vec::new()),
@@ -55,6 +60,7 @@ impl RuntimePage {
                 )
             })?
         });
+        self.traffic_history.task.replace(&task);
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
@@ -63,7 +69,12 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                let refresh_again = finish_history_refresh(this, token, revision, result);
+                if !this.is_page_task_current(token) || !this.live_updates_enabled() {
+                    return;
+                }
+                let refresh_again =
+                    this.traffic_history
+                        .complete_query(request, result, unix_millis());
                 if refresh_again {
                     this.refresh_traffic_history(cx);
                 }
@@ -152,6 +163,7 @@ impl RuntimePage {
         ) else {
             return;
         };
+        self.traffic_history.cancel_query();
         self.traffic_history.revision = self.traffic_history.revision.wrapping_add(1);
         let task = self.runtime.spawn(async move {
             tokio::task::spawn_blocking(move || store.clear().map_err(|error| error.to_string()))
@@ -177,13 +189,15 @@ impl RuntimePage {
                 this.finish_mutation(token);
                 this.traffic_history.clear_confirmation = false;
                 match result {
-                    Ok(()) if this.is_page_task_current(token) => {
+                    Ok(()) => {
+                        this.traffic_history.cancel_query();
                         this.traffic_history.overview = TrafficOverview::default();
                         this.reset_traffic_drill_down();
-                        this.notice = Some(zenclash_i18n::text("traffic.notices.cleared"));
+                        if this.is_page_task_current(token) {
+                            this.notice = Some(zenclash_i18n::text("traffic.notices.cleared"));
+                        }
                         this.refresh_traffic_history(cx);
                     }
-                    Ok(()) => {}
                     Err(error) => this.set_page_error(token, error),
                 }
                 cx.notify();

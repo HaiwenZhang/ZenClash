@@ -197,7 +197,7 @@ fn verify_manifest(
 fn validate_staged_snapshot(staging_root: &Path) -> BackupResult<()> {
     AppPreferencesStore::new(staging_root.join(PREFERENCES_PATH)).load()?;
     ControlledConfigStore::new(staging_root.join("controlled-config")).load()?;
-    let index = fs::read(staging_root.join(PROFILE_INDEX_PATH))?;
+    let index = crate::profiles::read_index_bytes(&staging_root.join(PROFILE_INDEX_PATH))?;
     let catalog: ProfileCatalog = serde_json::from_slice(&index)?;
     validate_catalog_metadata(&catalog)?;
     let overrides = YamlOverrideStore::new(staging_root.join("yaml-overrides"))?;

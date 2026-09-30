@@ -21,7 +21,7 @@ impl RuntimePage {
                         .gap_3()
                         .child(subscription_input(
                             zenclash_i18n::text("profiles.form.name"),
-                            Input::new(&self.profile_forms.subscription_name)
+                            Input::new(&self.profiles.forms.subscription_name)
                                 .prefix(Icon::new(IconName::File))
                                 .cleanable(true),
                             theme,
@@ -29,7 +29,7 @@ impl RuntimePage {
                         .child(
                             subscription_input(
                                 zenclash_i18n::text("profiles.form.user_agent"),
-                                Input::new(&self.profile_forms.subscription_user_agent)
+                                Input::new(&self.profiles.forms.subscription_user_agent)
                                     .prefix(Icon::new(IconName::Bot))
                                     .cleanable(true),
                                 theme,
@@ -39,7 +39,7 @@ impl RuntimePage {
                 )
                 .child(subscription_input(
                     zenclash_i18n::text("profiles.form.url"),
-                    Input::new(&self.profile_forms.subscription_url)
+                    Input::new(&self.profiles.forms.subscription_url)
                         .prefix(Icon::new(IconName::Globe))
                         .cleanable(true),
                     theme,
@@ -49,7 +49,7 @@ impl RuntimePage {
                         .gap_3()
                         .child(subscription_input(
                             zenclash_i18n::text("profiles.form.authorization"),
-                            Input::new(&self.profile_forms.subscription_authorization)
+                            Input::new(&self.profiles.forms.subscription_authorization)
                                 .prefix(Icon::new(IconName::Asterisk))
                                 .mask_toggle()
                                 .cleanable(true),
@@ -58,7 +58,7 @@ impl RuntimePage {
                         .child(self.render_subscription_route_controls(theme, cx)),
                 )
                 .when_some(
-                    self.profile_forms.subscription_error.clone(),
+                    self.profiles.forms.subscription_error.clone(),
                     |this, error| this.child(message_banner(error, theme.danger, theme)),
                 )
                 .child(
@@ -98,11 +98,12 @@ impl RuntimePage {
                     .child(
                         Switch::new("subscription-use-mihomo-proxy")
                             .checked(
-                                self.profile_forms.subscription_route == RemoteProfileRoute::Mihomo,
+                                self.profiles.forms.subscription_route
+                                    == RemoteProfileRoute::Mihomo,
                             )
                             .disabled(self.core_busy())
                             .on_click(cx.listener(|this, checked, _, cx| {
-                                this.profile_forms.subscription_route = if *checked {
+                                this.profiles.forms.subscription_route = if *checked {
                                     RemoteProfileRoute::Mihomo
                                 } else {
                                     RemoteProfileRoute::DirectWithMihomoFallback
@@ -122,19 +123,19 @@ impl RuntimePage {
                     .child(
                         Switch::new("subscription-mihomo-fallback")
                             .checked(
-                                self.profile_forms.subscription_route
+                                self.profiles.forms.subscription_route
                                     == RemoteProfileRoute::DirectWithMihomoFallback,
                             )
                             .disabled(
                                 self.core_busy()
-                                    || self.profile_forms.subscription_route
+                                    || self.profiles.forms.subscription_route
                                         == RemoteProfileRoute::Mihomo,
                             )
                             .on_click(cx.listener(|this, checked, _, cx| {
-                                if this.profile_forms.subscription_route
+                                if this.profiles.forms.subscription_route
                                     != RemoteProfileRoute::Mihomo
                                 {
-                                    this.profile_forms.subscription_route = if *checked {
+                                    this.profiles.forms.subscription_route = if *checked {
                                         RemoteProfileRoute::DirectWithMihomoFallback
                                     } else {
                                         RemoteProfileRoute::Direct
@@ -174,7 +175,8 @@ impl RuntimePage {
             |path| path.display().to_string(),
         );
         let remote_count = self
-            .profile_catalog
+            .profiles
+            .catalog
             .profiles
             .iter()
             .filter(|profile| profile.is_remote())
@@ -205,7 +207,7 @@ impl RuntimePage {
                         zenclash_i18n::text_with(
                             "profiles.current.counts",
                             &[
-                                ("managed", self.profile_catalog.profiles.len().to_string()),
+                                ("managed", self.profiles.catalog.profiles.len().to_string()),
                                 ("remote", remote_count.to_string()),
                             ],
                         ),

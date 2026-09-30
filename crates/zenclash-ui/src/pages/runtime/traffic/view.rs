@@ -7,8 +7,8 @@ use super::{TrafficHistoryFreshness, TrafficRange, dimension_label};
 use crate::pages::runtime::{
     Button, ButtonVariants, Context, Disableable, FluentBuilder, IconName, InteractiveElement,
     IntoElement, ParentElement, RuntimeData, RuntimePage, Selectable, Sizable,
-    StatefulInteractiveElement, Styled, div, empty_state, format_bytes, format_profile_age,
-    format_speed, h_flex, metric, px, v_flex,
+    StatefulInteractiveElement, Styled, div, empty_dash, empty_state, format_bytes,
+    format_profile_age, format_speed, h_flex, metric, px, v_flex,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -26,8 +26,8 @@ impl RuntimePage {
     ) -> gpui_kit::AnyElement {
         let realtime = self.traffic_monitor.snapshot();
         let connection_count = match &self.data {
-            RuntimeData::Connections(data) => data.connections.len(),
-            _ => 0,
+            RuntimeData::Connections(data) => Some(data.connections.len()),
+            _ => None,
         };
         let history = &self.traffic_history;
         v_flex()
@@ -38,25 +38,36 @@ impl RuntimePage {
                     .flex_wrap()
                     .child(metric(
                         zenclash_i18n::text("traffic.metrics.upload"),
-                        format_speed(realtime.upload),
+                        if realtime.connected {
+                            format_speed(realtime.upload)
+                        } else {
+                            empty_dash("")
+                        },
                         theme.success,
                         theme,
                     ))
                     .child(metric(
                         zenclash_i18n::text("traffic.metrics.download"),
-                        format_speed(realtime.download),
+                        if realtime.connected {
+                            format_speed(realtime.download)
+                        } else {
+                            empty_dash("")
+                        },
                         theme.primary,
                         theme,
                     ))
                     .child(metric(
                         zenclash_i18n::text("traffic.metrics.range_usage"),
-                        format_bytes(history.overview.totals.total),
+                        history.last_success_at_ms.map_or_else(
+                            || empty_dash(""),
+                            |_| format_bytes(history.overview.totals.total),
+                        ),
                         theme.warning,
                         theme,
                     ))
                     .child(metric(
                         zenclash_i18n::text("traffic.metrics.connections"),
-                        connection_count.to_string(),
+                        connection_count.map_or_else(|| empty_dash(""), |count| count.to_string()),
                         theme.foreground,
                         theme,
                     )),

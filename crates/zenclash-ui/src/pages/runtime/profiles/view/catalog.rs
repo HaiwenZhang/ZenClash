@@ -17,27 +17,26 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
         let mut card = setting_card(zenclash_i18n::text("profiles.catalog.title"), theme);
-        if self.profile_catalog.profiles.is_empty() {
+        if self.profiles.catalog.profiles.is_empty() {
             return card.child(empty_state(
                 zenclash_i18n::text("profiles.catalog.empty"),
                 theme,
             ));
         }
 
-        for (index, profile) in self.profile_catalog.profiles.iter().enumerate() {
-            card = card.child(self.render_managed_profile(index, profile, theme, cx));
+        for profile in &self.profiles.catalog.profiles {
+            card = card.child(self.render_managed_profile(profile, theme, cx));
         }
         card
     }
 
     fn render_managed_profile(
         &self,
-        index: usize,
         profile: &ProfileRecord,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
-        let active = self.profile_catalog.active.as_deref() == Some(profile.id.as_str());
+        let active = self.profiles.catalog.active.as_deref() == Some(profile.id.as_str());
         let source = profile_source(&profile.source);
 
         v_flex()
@@ -54,7 +53,7 @@ impl RuntimePage {
                     .child(source),
             )
             .when(profile.is_remote(), |this| {
-                this.child(self.render_profile_update_policy(index, profile, theme, cx))
+                this.child(self.render_profile_update_policy(profile, theme, cx))
             })
             .when_some(profile.subscription.usage.as_ref(), |this, usage| {
                 this.child(render_subscription_usage(usage, theme))
@@ -86,13 +85,12 @@ impl RuntimePage {
                                 &[("age", format_profile_age(profile.updated_at))],
                             )),
                     )
-                    .child(self.render_profile_actions(index, profile, active, cx)),
+                    .child(self.render_profile_actions(profile, active, cx)),
             )
     }
 
     fn render_profile_actions(
         &self,
-        index: usize,
         profile: &ProfileRecord,
         active: bool,
         cx: &mut Context<Self>,
@@ -105,7 +103,7 @@ impl RuntimePage {
             .gap_2()
             .when(profile.is_remote(), |this| {
                 this.child(
-                    Button::new(("edit-profile-request", index))
+                    Button::new(format!("edit-profile-request:{}", profile.id))
                         .icon(IconName::Settings2)
                         .label(zenclash_i18n::text("profiles.actions.request_settings"))
                         .small()
@@ -116,7 +114,7 @@ impl RuntimePage {
                         })),
                 )
                 .child(
-                    Button::new(("update-profile", index))
+                    Button::new(format!("update-profile:{}", profile.id))
                         .icon(crate::assets::AppIcon::RefreshCw)
                         .label(zenclash_i18n::text("profiles.actions.update"))
                         .small()
@@ -128,7 +126,7 @@ impl RuntimePage {
                 )
             })
             .child(
-                Button::new(("activate-profile", index))
+                Button::new(format!("activate-profile:{}", profile.id))
                     .icon(IconName::ArrowRight)
                     .label(if active {
                         zenclash_i18n::text("profiles.actions.active")
@@ -143,7 +141,7 @@ impl RuntimePage {
                     })),
             )
             .child(
-                Button::new(("delete-profile", index))
+                Button::new(format!("delete-profile:{}", profile.id))
                     .icon(IconName::Delete)
                     .small()
                     .ghost()
@@ -157,7 +155,6 @@ impl RuntimePage {
 
     fn render_profile_update_policy(
         &self,
-        index: usize,
         profile: &ProfileRecord,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
@@ -171,7 +168,7 @@ impl RuntimePage {
             .min_h(px(30.))
             .gap_3()
             .child(
-                Switch::new(("auto-update-profile", index))
+                Switch::new(format!("auto-update-profile:{}", profile.id))
                     .checked(auto_update)
                     .disabled(self.core_busy())
                     .on_click(cx.listener(move |this, enabled, _, cx| {
@@ -190,7 +187,7 @@ impl RuntimePage {
                     .child(zenclash_i18n::text("profiles.catalog.auto_update")),
             )
             .child(
-                Button::new(("profile-update-interval", index))
+                Button::new(format!("profile-update-interval:{}", profile.id))
                     .label(update_cron.as_deref().map_or_else(
                         || format_update_interval(interval_minutes),
                         |expression| format!("Cron {expression}"),

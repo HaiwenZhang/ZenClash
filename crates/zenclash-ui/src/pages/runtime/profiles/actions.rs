@@ -62,25 +62,27 @@ impl RuntimePage {
     }
 
     pub(in super::super) fn reload_profile_catalog(&mut self, cx: &mut Context<Self>) {
-        let Some(store) = self.profile_store.clone() else {
+        let Some(store) = self.profiles.store.clone() else {
             return;
         };
-        self.profile_catalog_generation = self.profile_catalog_generation.wrapping_add(1);
-        let generation = self.profile_catalog_generation;
+        let generation = self.profiles.begin_read();
         let task = self
             .runtime
             .spawn_blocking(move || store.load().map_err(|error| error.to_string()));
+        self.profiles.read_task.replace(&task);
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
                 .map_err(|error| error.to_string())
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                if this.profile_catalog_generation != generation {
+                if this.profiles.generation != generation {
                     return;
                 }
                 match result {
-                    Ok(catalog) => this.profile_catalog = catalog,
+                    Ok(catalog) => {
+                        this.profiles.accept_catalog(generation, catalog);
+                    }
                     Err(error) if this.page == Page::Profiles => this.error = Some(error),
                     Err(error) => {
                         tracing::warn!(%error, "failed to reload profile catalog");
@@ -93,7 +95,7 @@ impl RuntimePage {
     }
 
     fn import_local_profile_for_page(&mut self, path: PathBuf, page: Page, cx: &mut Context<Self>) {
-        let Some(store) = self.profile_store.clone() else {
+        let Some(store) = self.profiles.store.clone() else {
             let error = zenclash_i18n::text("profiles.errors.store_unavailable");
             if page == Page::Home {
                 self.home.action_error = Some(error);
@@ -154,8 +156,8 @@ impl RuntimePage {
     }
 
     pub(super) fn add_remote_profile(&mut self, cx: &mut Context<Self>) {
-        let Some(store) = self.profile_store.clone() else {
-            self.profile_forms.subscription_error =
+        let Some(store) = self.profiles.store.clone() else {
+            self.profiles.forms.subscription_error =
                 Some(zenclash_i18n::text("profiles.errors.store_unavailable"));
             cx.notify();
             return;
@@ -163,41 +165,45 @@ impl RuntimePage {
         if self.core_busy() {
             return;
         }
-        self.profile_forms.subscription_error = None;
+        self.profiles.forms.subscription_error = None;
         let name = self
-            .profile_forms
+            .profiles
+            .forms
             .subscription_name
             .read(cx)
             .value()
             .to_string();
         let url = self
-            .profile_forms
+            .profiles
+            .forms
             .subscription_url
             .read(cx)
             .value()
             .to_string();
         let user_agent = self
-            .profile_forms
+            .profiles
+            .forms
             .subscription_user_agent
             .read(cx)
             .value()
             .to_string();
         let authorization = self
-            .profile_forms
+            .profiles
+            .forms
             .subscription_authorization
             .read(cx)
             .value()
             .to_string();
         if name.trim().is_empty() || url.trim().is_empty() {
-            self.profile_forms.subscription_error =
+            self.profiles.forms.subscription_error =
                 Some(zenclash_i18n::text("profiles.errors.required_fields"));
             cx.notify();
             return;
         }
         let options = match RemoteProfileOptions::new(authorization, false) {
-            Ok(options) => options.with_route(self.profile_forms.subscription_route),
+            Ok(options) => options.with_route(self.profiles.forms.subscription_route),
             Err(error) => {
-                self.profile_forms.subscription_error = Some(zenclash_i18n::text_with(
+                self.profiles.forms.subscription_error = Some(zenclash_i18n::text_with(
                     "profiles.errors.request_invalid",
                     &[("error", error)],
                 ));
@@ -233,8 +239,8 @@ impl RuntimePage {
                 this.finish_mutation(token);
                 match result {
                     Ok(outcome) => {
-                        this.profile_forms.subscription_error = None;
-                        this.profile_forms.adding_subscription = false;
+                        this.profiles.forms.subscription_error = None;
+                        this.profiles.forms.adding_subscription = false;
                         this.apply_profile_activation(
                             outcome,
                             |name| {
@@ -247,7 +253,7 @@ impl RuntimePage {
                             cx,
                         );
                     }
-                    Err(error) => this.profile_forms.subscription_error = Some(error),
+                    Err(error) => this.profiles.forms.subscription_error = Some(error),
                 }
                 cx.notify();
             });
@@ -274,7 +280,7 @@ impl RuntimePage {
         page: Page,
         cx: &mut Context<Self>,
     ) {
-        let Some(store) = self.profile_store.clone() else {
+        let Some(store) = self.profiles.store.clone() else {
             return;
         };
         let Some(token) = self.begin_mutation(page) else {
@@ -391,7 +397,7 @@ impl RuntimePage {
     ) {
         self.profile_path = Some(outcome.path.clone());
         self.invalidate_config_inputs(cx);
-        self.config_preview = None;
+        self.overrides.invalidate_preview();
         self.reload_profile_catalog(cx);
         cx.emit(ProfileActivated { path: outcome.path });
         match outcome.refresh {

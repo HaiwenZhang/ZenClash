@@ -58,6 +58,9 @@ mod traffic;
 mod tun;
 mod view;
 
+#[cfg(test)]
+mod ui_tests;
+
 use common::{
     compact_text, config_input_row, contains_ascii_case_insensitive, empty_dash, empty_state,
     format_bytes, format_port, format_profile_age, format_proxy, info_row, list_page,
@@ -67,7 +70,6 @@ use common::{
 use config_inputs::{ConfigInputs, config_input_snapshot};
 use loader::{load_page, load_page_with_binary};
 use mihomo::CoreReleaseState;
-use overrides::ConfigPreview;
 use state::{ConfigInputsTaskToken, PageTaskToken, RuntimeData};
 
 /// Stateful GPUI page host for Mihomo runtime, configuration, and diagnostics.
@@ -83,7 +85,6 @@ pub struct RuntimePage {
     traffic_capture: TrafficCaptureSession,
     process: Option<Arc<MihomoProcess>>,
     profile_path: Option<PathBuf>,
-    profile_store: Option<ProfileStore>,
     controlled_config_store: ControlledConfigStore,
     controlled_config: Value,
     effective_config: Value,
@@ -92,24 +93,19 @@ pub struct RuntimePage {
     config_inputs_generation: u64,
     config_inputs_loading: bool,
     persistent_loading: bool,
-    profile_catalog: ProfileCatalog,
-    profile_catalog_generation: u64,
     preferences_store: Option<AppPreferencesStore>,
     preferences: AppPreferences,
     core_management: settings::CoreManagementUiState,
     app_update: settings::AppUpdateUiState,
     system_proxy_session: Option<SystemProxySession>,
     traffic_history_store: Option<TrafficHistoryStore>,
-    profile_forms: profiles::ProfileFormState,
+    profiles: profiles::ProfileLibrary,
+    overrides: overrides::OverridesState,
     connections: connections::ConnectionsUiState,
     logs: logs::LogUiState,
     rules: rules::RulesUiState,
     system_proxy_editor: Option<system_proxy::SystemProxyEditorState>,
     core_releases: CoreReleaseState,
-    override_store: Option<YamlOverrideStore>,
-    override_catalog: YamlOverrideCatalog,
-    config_preview: Option<ConfigPreview>,
-    profile_editor: overrides::ProfileEditorState,
     data: RuntimeData,
     home: home::HomeUiState,
     traffic_history: traffic::TrafficHistoryUiState,
@@ -134,6 +130,10 @@ pub struct RuntimePage {
 
 /// Runtime services shared by the native Mihomo management pages.
 pub struct RuntimePageServices {
+    /// Profile repository opened during bootstrap and shared with local pages.
+    pub profile_store: Option<ProfileStore>,
+    /// YAML override repository opened during bootstrap and shared with local pages.
+    pub override_store: Option<YamlOverrideStore>,
     /// Explicit runtime core selected for this application process.
     pub core_kind: CoreKind,
     /// Serialized runtime-core transition owner.

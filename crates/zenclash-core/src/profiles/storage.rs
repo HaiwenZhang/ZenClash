@@ -23,7 +23,7 @@ pub fn read_profile_bytes(path: &Path) -> ProfileStoreResult<Vec<u8>> {
     Ok(payload)
 }
 
-pub(super) fn read_index_bytes(path: &Path) -> ProfileStoreResult<Vec<u8>> {
+pub(crate) fn read_index_bytes(path: &Path) -> ProfileStoreResult<Vec<u8>> {
     let file = fs::File::open(path)?;
     let mut payload = Vec::new();
     file.take(MAX_PROFILE_INDEX_BYTES as u64 + 1)
@@ -34,6 +34,17 @@ pub(super) fn read_index_bytes(path: &Path) -> ProfileStoreResult<Vec<u8>> {
         });
     }
     Ok(payload)
+}
+
+pub(crate) fn encode_catalog(catalog: &super::ProfileCatalog) -> ProfileStoreResult<Vec<u8>> {
+    super::validate_catalog_records(catalog)?;
+    let bytes = serde_json::to_vec_pretty(catalog)?;
+    if bytes.len() > MAX_PROFILE_INDEX_BYTES {
+        return Err(ProfileStoreError::IndexTooLarge {
+            limit_mib: MAX_PROFILE_INDEX_BYTES / 1024 / 1024,
+        });
+    }
+    Ok(bytes)
 }
 
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {

@@ -1,13 +1,29 @@
 use std::path::PathBuf;
 
 use super::{AppContext, Context, ZenClashApp};
-use zenclash_core::CaptureOutcome;
+use zenclash_core::{CaptureOutcome, CoreSession, TrafficCaptureError};
+
+async fn stop_core_after_capture_release(
+    core_session: &CoreSession,
+    release: Result<CaptureOutcome, TrafficCaptureError>,
+) -> Result<(), String> {
+    match release {
+        Ok(CaptureOutcome::ReconcileNeeded { failure, .. }) => return Err(failure),
+        Err(error) => return Err(error.to_string()),
+        Ok(_) => {}
+    }
+    core_session
+        .shutdown()
+        .await
+        .map_err(|error| error.to_string())
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum QuitState {
     #[default]
     Idle,
     InProgress,
+    Blocked,
 }
 
 impl ZenClashApp {
@@ -62,41 +78,24 @@ impl ZenClashApp {
             if let Some(preferences) = preferences {
                 let _ = preferences.await;
             }
-            let mut failures = Vec::new();
-            match capture.release_owned().await {
-                Ok(CaptureOutcome::ReconcileNeeded { failure, .. }) => {
-                    failures.push(zenclash_i18n::text_with(
-                        "app.system_proxy.errors.quit_release",
-                        &[("error", failure)],
-                    ));
-                }
-                Ok(_) => {}
-                Err(error) => failures.push(zenclash_i18n::text_with(
-                    "app.system_proxy.errors.quit_release",
-                    &[("error", error.to_string())],
-                )),
-            }
-            if let Err(error) = core_session.shutdown().await {
-                failures.push(zenclash_i18n::text_with(
-                    "app.system_proxy.errors.quit_core",
-                    &[("error", error.to_string())],
-                ));
-            }
-            if failures.is_empty() {
-                Ok::<(), String>(())
-            } else {
-                Err(failures.join("; "))
-            }
+            stop_core_after_capture_release(&core_session, capture.release_owned().await).await
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        tracing::warn!(%error, "failed to disable system proxy before quitting");
-                    }
-                    Err(error) => tracing::warn!(%error, "system proxy quit workflow failed"),
+                let error = match result {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => Some(error),
+                    Err(error) => Some(error.to_string()),
+                };
+                if let Some(error) = error {
+                    tracing::warn!(%error, "quit cleanup failed; keeping the application and owned services alive");
+                    this.quit_state = QuitState::Blocked;
+                    this.show_main_window(cx);
+                    this.navigate(super::Page::SystemProxy, cx);
+                    let message = zenclash_i18n::text_with("app.system_proxy.errors.quit_blocked", &[("error", error)]);
+                    this.runtime_page.update(cx, |page, cx| page.report_system_proxy_reconcile_error(&message, cx));
+                    return;
                 }
                 if let Some(executable) = restart {
                     *this.restart_after_exit.lock() = Some(executable);
@@ -105,5 +104,52 @@ impl ZenClashApp {
             });
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zenclash_core::{
+        ControlledConfigStore, CoreKind, CoreSessionError, MihomoClient, MihomoEndpoint,
+        TrafficCaptureSession,
+    };
+
+    #[tokio::test]
+    async fn failed_capture_release_prevents_core_shutdown_and_success_allows_it() {
+        let core = CoreSession::open(
+            CoreKind::Mihomo,
+            MihomoClient::new(MihomoEndpoint::new("http://127.0.0.1:1", "")).unwrap(),
+            None,
+        );
+        let store = ControlledConfigStore::new(std::env::temp_dir());
+        let capture = TrafficCaptureSession::new(core.clone(), store.clone(), None, None, None);
+        let released = capture.release_owned().await.unwrap();
+        let partial = CaptureOutcome::ReconcileNeeded {
+            plan: None,
+            snapshot: released.snapshot().clone(),
+            failure: "native permission rejected".into(),
+        };
+        for failure in [
+            Ok(partial),
+            Err(TrafficCaptureError::Backend("release task failed".into())),
+        ] {
+            assert!(
+                stop_core_after_capture_release(&core, failure)
+                    .await
+                    .is_err()
+            );
+            assert!(!matches!(
+                core.set_mode(&store, "rule").await,
+                Err(CoreSessionError::ShuttingDown)
+            ));
+        }
+        stop_core_after_capture_release(&core, Ok(released))
+            .await
+            .unwrap();
+        assert!(matches!(
+            core.set_mode(&store, "rule").await,
+            Err(CoreSessionError::ShuttingDown)
+        ));
     }
 }

@@ -12,6 +12,7 @@ mod command;
 mod linux;
 #[cfg(any(target_os = "macos", test))]
 mod macos;
+mod native;
 mod pac;
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 mod unsupported;
@@ -29,6 +30,7 @@ use windows as platform;
 
 use crate::{AppPreferences, AppPreferencesError, AppPreferencesStore, MihomoError, MihomoResult};
 
+use native::{NativeProxyBackend, PlatformProxyBackend, ownership_service};
 pub use pac::{PacServer, PacServerStatus, default_pac_script, normalize_pac_script};
 
 const MAX_BYPASS_ENTRIES: usize = 64;
@@ -172,10 +174,18 @@ pub struct SystemProxyManager {
 }
 
 /// Coordinates the native proxy backend with the process-local PAC service.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SystemProxyController {
     pac_server: PacServer,
     operation: Arc<Mutex<()>>,
+    native: Arc<dyn NativeProxyBackend>,
+    recovery: Arc<Mutex<Option<native::NativeRecovery>>>,
+}
+
+impl Default for SystemProxyController {
+    fn default() -> Self {
+        Self::new(PacServer::default())
+    }
 }
 
 /// Exclusive native system-proxy operation owned by a controller clone.
@@ -273,6 +283,9 @@ pub enum SystemProxySessionError {
     /// Persistent preference access failed.
     #[error(transparent)]
     Preferences(#[from] AppPreferencesError),
+    /// Owned native state was safely released, but clearing its metadata failed.
+    #[error(transparent)]
+    ReleasePersistence(AppPreferencesError),
     /// Native validation, write, or readback failed.
     #[error(transparent)]
     Native(#[from] MihomoError),
@@ -312,11 +325,11 @@ impl SystemProxySession {
     pub fn snapshot(&self) -> SystemProxySessionResult<SystemProxySessionSnapshot> {
         let _operation = self.controller.begin_operation();
         let preferences = self.store.load()?;
-        let manager = SystemProxyManager::detect()?;
-        let actual = manager.status()?;
+        let service = self.controller.native.detect_service()?;
+        let actual = self.controller.native.status(&service)?;
         let ownership = match preferences.system_proxy_ownership.as_ref() {
             Some(ownership)
-                if system_proxy_status_matches_ownership(manager.service(), &actual, ownership) =>
+                if system_proxy_status_matches_ownership(&service, &actual, ownership) =>
             {
                 SystemProxyOwnershipState::Owned
             }
@@ -346,27 +359,37 @@ impl SystemProxySession {
         let operation = self.controller.begin_operation();
         let expected = self.store.load()?;
         let settings = SystemProxySettings::from_preferences(&expected);
-        let ownership = if enabled {
-            Some(apply_owned_system_proxy(&operation, port, &settings)?)
+        let transaction = if enabled {
+            let service = self.controller.native.detect_service()?;
+            Some(self.controller.stage_native(
+                service,
+                true,
+                port,
+                &settings,
+                expected.system_proxy_ownership.as_ref(),
+            )?)
         } else {
-            release_system_proxy(&operation, &expected)?;
-            None
+            operation.stage_release(expected.system_proxy_ownership.as_ref())?
         };
+        let ownership = transaction
+            .as_ref()
+            .and_then(|transaction| transaction.ownership.clone());
         match self.store.update(|preferences| {
             preferences.system_proxy_enabled = enabled;
             preferences.system_proxy_ownership.clone_from(&ownership);
         }) {
-            Ok(preferences) => Ok(preferences),
-            Err(error) => Err(SystemProxySessionError::Transaction(
-                restore_after_persist_failure(
-                    &self.store,
-                    &operation,
-                    port,
-                    &expected,
-                    &settings,
-                    &error.to_string(),
-                ),
-            )),
+            Ok(preferences) => {
+                if let Some(transaction) = transaction {
+                    transaction.commit();
+                }
+                Ok(preferences)
+            }
+            Err(error) => match transaction {
+                Some(transaction) => Err(SystemProxySessionError::Transaction(
+                    transaction.rollback(&error.to_string()).to_string(),
+                )),
+                None => Err(error.into()),
+            },
         }
     }
 
@@ -381,34 +404,45 @@ impl SystemProxySession {
         port: u16,
     ) -> SystemProxySessionResult<AppPreferences> {
         let settings = settings.normalized()?;
-        let operation = self.controller.begin_operation();
+        let _operation = self.controller.begin_operation();
         let expected = self.store.load()?;
-        let previous = SystemProxySettings::from_preferences(&expected);
         let active = expected.system_proxy_enabled;
         if active && port == 0 {
             return Err(SystemProxySessionError::MissingPort);
         }
-        let ownership = active
-            .then(|| apply_owned_system_proxy(&operation, port, &settings))
-            .transpose()?;
+        let transaction = if active {
+            let service = self.controller.native.detect_service()?;
+            Some(self.controller.stage_native(
+                service,
+                true,
+                port,
+                &settings,
+                expected.system_proxy_ownership.as_ref(),
+            )?)
+        } else {
+            None
+        };
+        let ownership = transaction
+            .as_ref()
+            .and_then(|transaction| transaction.ownership.clone());
         match self.store.update(|preferences| {
             settings.apply_to(preferences);
             if active {
                 preferences.system_proxy_ownership.clone_from(&ownership);
             }
         }) {
-            Ok(preferences) => Ok(preferences),
-            Err(error) if active => Err(SystemProxySessionError::Transaction(
-                restore_after_persist_failure(
-                    &self.store,
-                    &operation,
-                    port,
-                    &expected,
-                    &previous,
-                    &error.to_string(),
-                ),
-            )),
-            Err(error) => Err(error.into()),
+            Ok(preferences) => {
+                if let Some(transaction) = transaction {
+                    transaction.commit();
+                }
+                Ok(preferences)
+            }
+            Err(error) => match transaction {
+                Some(transaction) => Err(SystemProxySessionError::Transaction(
+                    transaction.rollback(&error.to_string()).to_string(),
+                )),
+                None => Err(error.into()),
+            },
         }
     }
 
@@ -428,8 +462,9 @@ impl SystemProxySession {
         let operation = self.controller.begin_operation();
         let preferences = self.store.load()?;
         let native = if core_available && port.is_some() {
-            let manager = SystemProxyManager::detect()?;
-            Some((manager.service().to_owned(), manager.status()?))
+            let service = self.controller.native.detect_service()?;
+            let status = self.controller.native.status(&service)?;
+            Some((service, status))
         } else {
             None
         };
@@ -449,12 +484,17 @@ impl SystemProxySession {
                 return Ok(SystemProxyReconcileOutcome::OwnershipLost);
             }
             SystemProxyReconcileDecision::Release(reason) => {
-                let Some(ownership) = preferences.system_proxy_ownership else {
+                let Some(ownership) = preferences.system_proxy_ownership.as_ref() else {
                     return Ok(SystemProxyReconcileOutcome::Unchanged);
                 };
-                let native_matched = operation.release_if_owned(&ownership)?;
+                let transaction = operation.stage_release(Some(ownership))?;
+                let native_matched = transaction.is_some();
+                if let Some(transaction) = transaction {
+                    transaction.commit();
+                }
                 self.store
-                    .update(|preferences| preferences.system_proxy_ownership = None)?;
+                    .update(|preferences| preferences.system_proxy_ownership = None)
+                    .map_err(SystemProxySessionError::ReleasePersistence)?;
                 return Ok(SystemProxyReconcileOutcome::Released {
                     reason,
                     native_matched,
@@ -466,18 +506,26 @@ impl SystemProxySession {
         };
 
         let settings = SystemProxySettings::from_preferences(&preferences);
-        let ownership = apply_owned_system_proxy(&operation, restore_port, &settings)?;
+        let service = native.expect("restore requires a native snapshot").0;
+        let transaction = self.controller.stage_native(
+            service,
+            true,
+            restore_port,
+            &settings,
+            preferences.system_proxy_ownership.as_ref(),
+        )?;
+        let ownership = transaction
+            .ownership
+            .clone()
+            .ok_or(SystemProxySessionError::MissingOwnership)?;
         if let Err(error) = self.store.update(|preferences| {
             preferences.system_proxy_ownership = Some(ownership.clone());
         }) {
-            let release = operation.release_if_owned(&ownership);
-            return Err(SystemProxySessionError::Transaction(match release {
-                Ok(_) => format!("保存所有权失败，已释放新写入的系统代理：{error}"),
-                Err(release) => {
-                    format!("保存所有权失败：{error}；释放新写入状态失败：{release}")
-                }
-            }));
+            return Err(SystemProxySessionError::Transaction(
+                transaction.rollback(&error.to_string()).to_string(),
+            ));
         }
+        transaction.commit();
         Ok(SystemProxyReconcileOutcome::Restored)
     }
 
@@ -488,16 +536,22 @@ impl SystemProxySession {
     /// Returns native or persistence errors.
     pub fn release_owned(&self) -> SystemProxySessionResult<bool> {
         let operation = self.controller.begin_operation();
+        self.controller.recover_native()?;
         let preferences = self.store.load()?;
         if !preferences.system_proxy_enabled {
             return Ok(false);
         }
-        let Some(ownership) = preferences.system_proxy_ownership else {
+        let Some(ownership) = preferences.system_proxy_ownership.as_ref() else {
             return Ok(false);
         };
-        let released = operation.release_if_owned(&ownership)?;
+        let transaction = operation.stage_release(Some(ownership))?;
+        let released = transaction.is_some();
+        if let Some(transaction) = transaction {
+            transaction.commit();
+        }
         self.store
-            .update(|preferences| preferences.system_proxy_ownership = None)?;
+            .update(|preferences| preferences.system_proxy_ownership = None)
+            .map_err(SystemProxySessionError::ReleasePersistence)?;
         Ok(released)
     }
 }
@@ -537,6 +591,13 @@ fn decide_system_proxy_reconcile(
             SystemProxyReconcileDecision::Restore
         };
     };
+    if ownership_service(ownership) != service {
+        return if actual.active() {
+            SystemProxyReconcileDecision::OwnershipLost
+        } else {
+            SystemProxyReconcileDecision::Restore
+        };
+    }
     if !system_proxy_status_matches_ownership(service, actual, ownership) {
         return SystemProxyReconcileDecision::OwnershipLost;
     }
@@ -550,83 +611,6 @@ fn decide_system_proxy_reconcile(
     }
 }
 
-fn apply_owned_system_proxy(
-    operation: &SystemProxyOperation<'_>,
-    port: u16,
-    settings: &SystemProxySettings,
-) -> SystemProxySessionResult<SystemProxyOwnership> {
-    if port == 0 {
-        return Err(SystemProxySessionError::MissingPort);
-    }
-    operation
-        .apply(
-            true,
-            settings.mode,
-            &settings.host,
-            port,
-            &settings.bypass,
-            &settings.pac_script,
-        )?
-        .ok_or(SystemProxySessionError::MissingOwnership)
-}
-
-fn release_system_proxy(
-    operation: &SystemProxyOperation<'_>,
-    preferences: &AppPreferences,
-) -> SystemProxySessionResult<()> {
-    if let Some(ownership) = &preferences.system_proxy_ownership {
-        operation.release_if_owned(ownership)?;
-    }
-    Ok(())
-}
-
-fn restore_after_persist_failure(
-    store: &AppPreferencesStore,
-    operation: &SystemProxyOperation<'_>,
-    current_port: u16,
-    expected: &AppPreferences,
-    previous: &SystemProxySettings,
-    error: &str,
-) -> String {
-    if !expected.system_proxy_enabled {
-        return match operation.set_enabled(false, previous.mode, "", 0, &[], "") {
-            Ok(()) => format!("保存失败，已释放新写入的系统代理：{error}"),
-            Err(rollback) => format!("保存失败：{error}；释放新写入状态失败：{rollback}"),
-        };
-    }
-    let previous_port = ownership_port(expected.system_proxy_ownership.as_ref())
-        .filter(|port| *port != 0)
-        .unwrap_or(current_port);
-    match apply_owned_system_proxy(operation, previous_port, previous) {
-        Ok(ownership) => {
-            if expected.system_proxy_ownership.as_ref() == Some(&ownership) {
-                return format!("保存失败，已恢复上一系统代理状态：{error}");
-            }
-            match store.update(|preferences| {
-                preferences.system_proxy_ownership = Some(ownership.clone());
-            }) {
-                Ok(_) => format!("保存失败，已恢复上一系统代理状态：{error}"),
-                Err(ownership_error) => match operation.release_if_owned(&ownership) {
-                    Ok(_) => format!(
-                        "保存失败：{error}；恢复后的所有权保存失败并已释放：{ownership_error}"
-                    ),
-                    Err(release_error) => format!(
-                        "保存失败：{error}；恢复后的所有权保存失败：{ownership_error}；释放失败：{release_error}"
-                    ),
-                },
-            }
-        }
-        Err(rollback) => format!("保存失败：{error}；恢复上一系统代理状态失败：{rollback}"),
-    }
-}
-
-fn ownership_port(ownership: Option<&SystemProxyOwnership>) -> Option<u16> {
-    match ownership {
-        Some(SystemProxyOwnership::Manual { port, .. }) => Some(*port),
-        _ => None,
-    }
-}
-
 impl SystemProxyController {
     /// Creates a controller backed by a shared PAC service owner.
     #[must_use]
@@ -634,6 +618,8 @@ impl SystemProxyController {
         Self {
             pac_server,
             operation: Arc::default(),
+            native: Arc::new(PlatformProxyBackend),
+            recovery: Arc::default(),
         }
     }
 
@@ -679,37 +665,17 @@ impl SystemProxyController {
         bypass: &[String],
         pac_script: &str,
     ) -> MihomoResult<Option<SystemProxyOwnership>> {
-        let manager = SystemProxyManager::detect()?;
-        if !enabled {
-            manager.set_enabled_with_bypass(false, "", 0, &[])?;
-            self.pac_server.stop();
-            return Ok(None);
-        }
-        let ownership = match mode {
-            SystemProxyMode::Manual => {
-                manager.set_enabled_with_bypass(true, host, port, bypass)?;
-                self.pac_server.stop();
-                let status = manager.status()?;
-                SystemProxyOwnership::Manual {
-                    service: manager.service().to_owned(),
-                    host: status.server,
-                    port: status.port,
-                    bypass: status.bypass,
-                }
-            }
-            SystemProxyMode::Pac => {
-                let pac = self.pac_server.start(host, pac_script, port)?;
-                if let Err(error) = manager.set_pac_enabled(true, &pac.url) {
-                    self.pac_server.stop();
-                    return Err(error);
-                }
-                SystemProxyOwnership::Pac {
-                    service: manager.service().to_owned(),
-                    url: pac.url,
-                }
-            }
+        let service = self.native.detect_service()?;
+        let settings = SystemProxySettings {
+            mode,
+            host: host.into(),
+            bypass: bypass.into(),
+            pac_script: pac_script.into(),
         };
-        Ok(Some(ownership))
+        let transaction = self.stage_native(service, enabled, port, &settings, None)?;
+        let ownership = transaction.ownership.clone();
+        transaction.commit();
+        Ok(ownership)
     }
 
     /// Returns the process-local PAC listener status, when present.
@@ -766,16 +732,11 @@ impl SystemProxyOperation<'_> {
     /// Returns an error when native service detection, status readback, or the
     /// owned-state clear fails.
     pub fn release_if_owned(&self, ownership: &SystemProxyOwnership) -> MihomoResult<bool> {
-        let manager = SystemProxyManager::detect()?;
-        let status = manager.status()?;
-        let matches = system_proxy_status_matches_ownership(manager.service(), &status, ownership);
-        if matches {
-            manager.set_enabled_with_bypass(false, "", 0, &[])?;
-        }
-        if matches!(ownership, SystemProxyOwnership::Pac { .. }) {
-            self.controller.pac_server.stop();
-        }
-        Ok(matches)
+        let Some(transaction) = self.stage_release(Some(ownership))? else {
+            return Ok(false);
+        };
+        transaction.commit();
+        Ok(true)
     }
 }
 

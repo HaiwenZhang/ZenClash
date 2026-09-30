@@ -129,7 +129,10 @@ impl RuntimePage {
             return self.render_offline_settings(theme, cx).into_any_element();
         }
         if matches!(self.data, RuntimeData::Empty)
-            && !matches!(self.page, Page::Logs | Page::Mihomo)
+            && !matches!(
+                self.page,
+                Page::Logs | Page::Mihomo | Page::Profiles | Page::Override | Page::Traffic
+            )
         {
             return empty_state(
                 if self.loading {

@@ -98,7 +98,7 @@ impl CoreSession {
         expected_generation: u64,
         expected_revision: [u8; 32],
     ) -> Result<bool, CoreSessionError> {
-        let _transition = self.transition.lock().await;
+        let mut active_profile = self.transition.lock().await;
         self.ensure_not_shutting_down()?;
         let Some(process) = &self.process else {
             return Ok(false);
@@ -128,9 +128,13 @@ impl CoreSession {
         }
         self.ensure_not_shutting_down()?;
         store
-            .stage_profile_restart(process.clone(), profile, overrides)
+            .stage_profile_restart(process.clone(), profile.clone(), overrides.clone())
             .await?
             .commit();
+        *active_profile = CommittedConfig {
+            profile: Some(profile),
+            overrides,
+        };
         self.next_generation();
         Ok(true)
     }

@@ -4,13 +4,11 @@ use super::super::{Context, Page, RuntimePage, YamlOverrideCatalog};
 
 impl RuntimePage {
     pub(in crate::pages::runtime) fn enabled_override_paths(&self) -> Vec<PathBuf> {
-        self.override_store.as_ref().map_or_else(Vec::new, |store| {
-            store.enabled_paths(&self.override_catalog)
-        })
+        self.overrides.enabled_paths()
     }
 
     pub(super) fn import_override_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let Some(store) = self.override_store.clone() else {
+        let Some(store) = self.overrides.store.clone() else {
             self.error = Some(zenclash_i18n::text("overrides.errors.store_unavailable"));
             cx.notify();
             return;
@@ -103,8 +101,8 @@ impl RuntimePage {
                 this.finish_mutation(token);
                 match result {
                     Ok((catalog, count)) => {
-                        this.override_catalog = catalog;
-                        this.config_preview = None;
+                        this.overrides.catalog = catalog;
+                        this.overrides.invalidate_preview();
                         this.invalidate_config_inputs(cx);
                         if this.is_page_task_current(token) {
                             this.notice = Some(zenclash_i18n::text_with(
@@ -123,7 +121,7 @@ impl RuntimePage {
     }
 
     pub(super) fn set_override_enabled(&mut self, id: &str, enabled: bool, cx: &mut Context<Self>) {
-        let before = self.override_catalog.clone();
+        let before = self.overrides.catalog.clone();
         let mut next = before.clone();
         let Some(record) = next.items.iter_mut().find(|record| record.id == id) else {
             self.error = Some(zenclash_i18n::text("overrides.errors.record_missing"));
@@ -144,7 +142,7 @@ impl RuntimePage {
     }
 
     pub(super) fn move_override(&mut self, id: &str, offset: isize, cx: &mut Context<Self>) {
-        let before = self.override_catalog.clone();
+        let before = self.overrides.catalog.clone();
         let mut next = before.clone();
         let Some(current) = next.items.iter().position(|record| record.id == id) else {
             return;
@@ -165,7 +163,8 @@ impl RuntimePage {
 
     pub(super) fn delete_disabled_override(&mut self, id: String, cx: &mut Context<Self>) {
         let Some(record) = self
-            .override_catalog
+            .overrides
+            .catalog
             .items
             .iter()
             .find(|record| record.id == id)
@@ -179,7 +178,7 @@ impl RuntimePage {
             cx.notify();
             return;
         }
-        let Some(store) = self.override_store.clone() else {
+        let Some(store) = self.overrides.store.clone() else {
             return;
         };
         let Some(token) = self.begin_mutation(Page::Override) else {
@@ -203,8 +202,8 @@ impl RuntimePage {
                 this.finish_mutation(token);
                 match result {
                     Ok(catalog) => {
-                        this.override_catalog = catalog;
-                        this.config_preview = None;
+                        this.overrides.catalog = catalog;
+                        this.overrides.invalidate_preview();
                         this.invalidate_config_inputs(cx);
                         if this.is_page_task_current(token) {
                             this.notice = Some(zenclash_i18n::text("overrides.notices.deleted"));
@@ -226,7 +225,7 @@ impl RuntimePage {
         success: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(store) = self.override_store.clone() else {
+        let Some(store) = self.overrides.store.clone() else {
             return;
         };
         let Some(token) = self.begin_mutation(Page::Override) else {
@@ -307,8 +306,8 @@ impl RuntimePage {
                 this.finish_mutation(token);
                 match result {
                     Ok(()) => {
-                        this.override_catalog = next;
-                        this.config_preview = None;
+                        this.overrides.catalog = next;
+                        this.overrides.invalidate_preview();
                         this.invalidate_config_inputs(cx);
                         if this.is_page_task_current(token) {
                             this.notice = Some(success);
