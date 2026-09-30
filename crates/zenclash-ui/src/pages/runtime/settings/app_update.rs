@@ -1,9 +1,9 @@
-use gpui::{Context, IntoElement, ParentElement, Styled, prelude::FluentBuilder};
-use gpui_component::{
+use gpui_kit::component::{
     Disableable, IconName, Sizable,
     button::{Button, ButtonVariants},
     h_flex,
 };
+use gpui_kit::{Context, IntoElement, ParentElement, Styled, prelude::FluentBuilder};
 use zenclash_core::{AppUpdateService, AppUpdateStatus};
 
 use super::super::{RuntimePage, div, info_row, message_banner, setting_card};
@@ -64,7 +64,7 @@ impl RuntimePage {
 
     pub(super) fn render_app_update(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let state = &self.app_update;

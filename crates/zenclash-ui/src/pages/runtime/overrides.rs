@@ -187,9 +187,9 @@ impl RuntimePage {
 
     pub(super) fn render_override(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         v_flex()
             .gap_4()
             .child(self.render_override_chain(theme, cx))
@@ -225,9 +225,9 @@ impl RuntimePage {
 
     fn render_override_chain(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let path = self.profile_path.as_ref().map_or_else(
             || zenclash_i18n::text("overrides.chain.unspecified"),
             |path| path.display().to_string(),
@@ -314,9 +314,9 @@ impl RuntimePage {
         &self,
         index: usize,
         record: &zenclash_core::YamlOverrideRecord,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let enabled_id = record.id.clone();
         let up_id = record.id.clone();
         let down_id = record.id.clone();
@@ -387,11 +387,11 @@ fn preview_panel<F>(
     title: String,
     payload: &str,
     button_id: &'static str,
-    theme: &gpui_component::Theme,
+    theme: &gpui_kit::component::Theme,
     copy: F,
-) -> gpui::Div
+) -> gpui_kit::Div
 where
-    F: Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+    F: Fn(&gpui_kit::ClickEvent, &mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
 {
     let (content, truncated) = preview_text(payload);
     setting_card(title, theme)

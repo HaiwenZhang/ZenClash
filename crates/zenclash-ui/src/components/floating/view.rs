@@ -1,5 +1,4 @@
-use gpui::{InteractiveElement, IntoElement, ParentElement, Render, Styled, Window, div, px};
-use gpui_component::{
+use gpui_kit::component::{
     ActiveTheme, Selectable, Sizable,
     badge::Badge,
     button::{Button, ButtonGroup},
@@ -7,6 +6,7 @@ use gpui_component::{
     progress::Progress,
     v_flex,
 };
+use gpui_kit::{InteractiveElement, IntoElement, ParentElement, Render, Styled, Window, div, px};
 use zenclash_core::format_speed;
 
 use super::FloatingTrafficWindow;
@@ -17,7 +17,7 @@ impl Render for FloatingTrafficWindow {
         clippy::too_many_lines,
         reason = "the compact floating window is a single declarative GPUI element tree"
     )]
-    fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut gpui_kit::Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let connected = self.traffic.connected;
         let outbound_mode = self.outbound_mode.displayed();
@@ -58,7 +58,7 @@ impl Render for FloatingTrafficWindow {
                                             .flex()
                                             .items_center()
                                             .justify_center()
-                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .font_weight(gpui_kit::FontWeight::BOLD)
                                             .text_size(px(10.))
                                             .child("ZC"),
                                     ),
@@ -69,7 +69,7 @@ impl Render for FloatingTrafficWindow {
                                     .child(
                                         div()
                                             .text_sm()
-                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .font_weight(gpui_kit::FontWeight::BOLD)
                                             .child("ZenClash Signal"),
                                     )
                                     .child(
@@ -119,7 +119,12 @@ impl Render for FloatingTrafficWindow {
                                 theme,
                             )),
                     )
-                    .child(Progress::new().h(px(3.)).bg(theme.primary).value(activity))
+                    .child(
+                        Progress::new("floating-activity")
+                            .h(px(3.))
+                            .color(theme.primary)
+                            .value(activity),
+                    )
                     .child(
                         h_flex()
                             .justify_between()
@@ -168,9 +173,9 @@ fn speed_panel(
     label: &'static str,
     arrow: &'static str,
     value: String,
-    accent: gpui::Hsla,
-    theme: &gpui_component::Theme,
-) -> gpui::AnyElement {
+    accent: gpui_kit::Hsla,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::AnyElement {
     h_flex()
         .flex_1()
         .min_w_0()
@@ -193,7 +198,7 @@ fn speed_panel(
                     div()
                         .font_family(theme.mono_font_family.clone())
                         .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                         .text_color(accent)
                         .child(value),
                 ),

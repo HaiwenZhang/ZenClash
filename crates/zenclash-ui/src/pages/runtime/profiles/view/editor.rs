@@ -7,9 +7,9 @@ use super::super::super::{
 impl RuntimePage {
     pub(super) fn render_remote_profile_editor(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let name = self
             .profile_forms
             .editing_profile_id
@@ -91,9 +91,9 @@ impl RuntimePage {
 
     fn render_remote_profile_route_settings(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         v_flex()
             .child(setting_switch(
                 zenclash_i18n::text("profiles.editor.proxy"),
@@ -129,7 +129,7 @@ impl RuntimePage {
             ))
     }
 
-    fn render_remote_profile_editor_actions(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_remote_profile_editor_actions(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
         h_flex()
             .px_4()
             .py_3()

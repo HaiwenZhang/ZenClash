@@ -160,9 +160,9 @@ impl RuntimePage {
 
     pub(super) fn render_resources(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let fallback_config = RuntimeConfig::default();
         let fallback_proxy = ProviderCatalog::default();
         let fallback_rules = ProviderCatalog::default();
@@ -202,9 +202,9 @@ impl RuntimePage {
     fn render_builtin_resources(
         &self,
         config: &RuntimeConfig,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let controlled = &self.controlled_config;
         let geodata_mode = config_bool(config, controlled, "geodata-mode");
         let geo_auto_update = config_bool(config, controlled, "geo-auto-update");
@@ -341,9 +341,9 @@ fn provider_section(
     is_rule: bool,
     mutating: bool,
     operations: &super::ProviderOperations,
-    theme: &gpui_component::Theme,
+    theme: &gpui_kit::component::Theme,
     cx: &mut Context<RuntimePage>,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let count = catalog.providers.len();
     v_flex()
         .gap_2()
@@ -353,7 +353,7 @@ fn provider_section(
                 .child(
                     div()
                         .text_lg()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                         .child(title),
                 )
                 .child(div().text_xs().text_color(theme.muted_foreground).child(

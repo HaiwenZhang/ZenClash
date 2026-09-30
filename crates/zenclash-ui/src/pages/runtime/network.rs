@@ -70,9 +70,9 @@ enum NetworkPreferenceChange {
 impl RuntimePage {
     pub(super) fn render_network(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let (config, system) = match &self.data {
             RuntimeData::Network { config, system } => (config.clone(), system.clone()),
             _ => (RuntimeConfig::default(), SystemNetworkSnapshot::default()),
@@ -135,9 +135,9 @@ impl RuntimePage {
 
     fn render_diagnostics_card(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let report = self.network_probe.report.as_ref();
         setting_card(zenclash_i18n::text("network.diagnostics.title"), theme)
             .child(config_input_row(
@@ -227,7 +227,7 @@ impl RuntimePage {
     fn render_public_ip_card(
         &self,
         snapshot: &NetworkProbeSnapshot,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let provider = self.preferences.network_ip_provider;
@@ -326,7 +326,7 @@ impl RuntimePage {
     fn render_latency_card(
         &self,
         snapshot: &NetworkProbeSnapshot,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let custom_urls = self
@@ -402,9 +402,9 @@ impl RuntimePage {
         index: usize,
         result: &zenclash_core::NetworkLatencyResult,
         custom: bool,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let value = result.latency_ms.map_or_else(
             || {
                 result
@@ -466,7 +466,7 @@ impl RuntimePage {
         &self,
         config: &RuntimeConfig,
         system: &SystemNetworkSnapshot,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         setting_card(zenclash_i18n::text("network.system.title"), theme)
@@ -546,8 +546,8 @@ impl RuntimePage {
 
 fn render_diagnostic_step(
     step: &DiagnosticStep,
-    theme: &gpui_component::Theme,
-) -> gpui::AnyElement {
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::AnyElement {
     let (status, color) = match &step.outcome {
         Ok(data) => (diagnostic_data_summary(data), theme.success),
         Err(error) => (error.message.clone(), theme.danger),

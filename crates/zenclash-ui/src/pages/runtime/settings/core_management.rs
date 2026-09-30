@@ -45,7 +45,7 @@ struct CoreProbeResult {
 impl RuntimePage {
     pub(super) fn render_core_management(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let requested = self.preferences.core_kind;
@@ -95,7 +95,7 @@ impl RuntimePage {
                                     .child(
                                         div()
                                             .text_sm()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                             .child(if online {
                                                 zenclash_i18n::text_with(
                                                     "core_management.summary.online",
@@ -179,9 +179,9 @@ impl RuntimePage {
     fn render_core_binary_row(
         &self,
         kind: CoreKind,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let state = self.core_management.get(kind);
         let requested = self.preferences.core_kind == kind;
         let running = self.core_kind == kind && self.runtime_core_available();
@@ -248,7 +248,7 @@ impl RuntimePage {
                                     .child(
                                         div()
                                             .text_sm()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                             .child(kind.display_name()),
                                     )
                                     .child(status_badge(status, status_color))
@@ -770,7 +770,7 @@ fn empty_source(source: &str) -> String {
     }
 }
 
-fn status_badge(label: String, color: gpui::Hsla) -> gpui::AnyElement {
+fn status_badge(label: String, color: gpui_kit::Hsla) -> gpui_kit::AnyElement {
     div()
         .px_2()
         .py(px(2.))
@@ -779,7 +779,7 @@ fn status_badge(label: String, color: gpui::Hsla) -> gpui::AnyElement {
         .border_color(color.opacity(0.4))
         .bg(color.opacity(0.09))
         .text_size(px(10.))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
         .text_color(color)
         .child(label)
         .into_any_element()

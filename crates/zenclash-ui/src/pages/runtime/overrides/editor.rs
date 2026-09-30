@@ -1,14 +1,14 @@
-use gpui::{AppContext, Context, Entity, Window};
-use gpui_component::input::InputState;
+use gpui_kit::component::input::{Editor, EditorState};
+use gpui_kit::{AppContext, Context, Entity, Window};
 use zenclash_core::{ProfileApplication, ProfileApplyOutcome, ProfileChange};
 
 use super::super::{
-    Button, ButtonVariants, Disableable, IconName, Input, ParentElement, RuntimePage, Styled,
-    h_flex, px, setting_card, v_flex,
+    Button, ButtonVariants, Disableable, IconName, ParentElement, RuntimePage, Styled, h_flex, px,
+    setting_card, v_flex,
 };
 
 pub(crate) struct ProfileEditorState {
-    pub(super) input: Entity<InputState>,
+    pub(super) input: Entity<EditorState>,
     pub(super) original: Option<String>,
     pub(super) profile_id: Option<String>,
 }
@@ -19,12 +19,11 @@ enum ProfileEditorSaveOutcome {
 }
 
 impl ProfileEditorState {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<'_, RuntimePage>) -> Self {
+    pub(crate) fn new(window: &mut Window, cx: &mut gpui_kit::App) -> Self {
         Self {
             input: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .code_editor("yaml")
-                    .rows(24)
+                EditorState::new(window, cx)
+                    .language("yaml")
                     .placeholder(zenclash_i18n::text("overrides.editor.placeholder"))
             }),
             original: None,
@@ -204,15 +203,15 @@ impl RuntimePage {
 
     pub(super) fn render_profile_yaml_editor(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         setting_card(zenclash_i18n::text("overrides.editor.title"), theme)
             .child(
                 v_flex()
                     .h(px(520.))
                     .p_3()
-                    .child(Input::new(&self.profile_editor.input).h_full()),
+                    .child(Editor::new(&self.profile_editor.input).h_full()),
             )
             .child(
                 h_flex()
@@ -239,5 +238,58 @@ impl RuntimePage {
                             })),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::component::Root;
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::{IntoElement, Render, Styled, TestAppContext, div, px, size};
+
+    use super::*;
+
+    struct Document {
+        editor: ProfileEditorState,
+    }
+
+    impl Render for Document {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(Editor::new(&self.editor.input).h_full())
+        }
+    }
+
+    #[gpui_kit::test]
+    fn yaml_editor_keeps_multiline_keyboard_editing_and_undo(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut editor = None;
+        let handle = cx.open_window(size(px(800.), px(600.)), |window, cx| {
+            let view = cx.new(|cx| {
+                let state = ProfileEditorState::new(window, cx);
+                editor = Some(state.input.clone());
+                Document { editor: state }
+            });
+            Root::new(view, window, cx)
+        });
+        let editor = editor.unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let id = ("input", editor.entity_id());
+            window.click(id, cx);
+            window.input("mixed-port: 7890", cx);
+            window.press("enter", cx);
+            window.input("mode: rule", cx);
+            assert_eq!(editor.read(cx).language_name(), "yaml");
+            assert!(editor.read(cx).is_code_editor());
+            assert_eq!(editor.read(cx).value(), "mixed-port: 7890\nmode: rule");
+            window.press("secondary-a", cx);
+            window.press("backspace", cx);
+            assert_eq!(editor.read(cx).value(), "");
+            window.press("secondary-z", cx);
+            assert_eq!(editor.read(cx).value(), "mixed-port: 7890\nmode: rule");
+        })
+        .unwrap();
     }
 }

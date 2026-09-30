@@ -85,9 +85,9 @@ impl LogUiState {
 impl RuntimePage {
     pub(super) fn render_logs(
         &mut self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let query = normalize_log_query(&self.logs.filter.read(cx).value());
         self.logs
             .presentation
@@ -212,9 +212,9 @@ impl RuntimePage {
 
     fn render_log_persistence(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let status = self.log_monitor.persistence_status();
         let path = status.path.as_deref().map_or_else(
             || zenclash_i18n::text("logs.persistence.data_directory_unavailable"),
@@ -413,8 +413,8 @@ impl RuntimePage {
         entries: &[&zenclash_core::LogEntry],
         all_empty: bool,
         page_start: usize,
-        theme: &gpui_component::Theme,
-    ) -> gpui::Div {
+        theme: &gpui_kit::component::Theme,
+    ) -> gpui_kit::Div {
         v_flex()
             .rounded(theme.radius)
             .border_1()
@@ -653,8 +653,8 @@ fn render_log_header(
     query_is_empty: bool,
     connected: bool,
     persistence: &zenclash_core::LogPersistenceStatus,
-    theme: &gpui_component::Theme,
-) -> gpui::Div {
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Div {
     let disk_color = if persistence.last_error.is_some() {
         theme.danger
     } else if persistence.enabled {

@@ -2,13 +2,14 @@ use super::{
     Button, ButtonVariants, Context, Disableable, IconName, Input, IntoElement, ParentElement,
     RuntimePage, Styled, config_input_row, div, h_flex, json, setting_card, setting_switch, v_flex,
 };
+use gpui_kit::component::input::Textarea;
 
 impl RuntimePage {
     pub(super) fn render_sniffer(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         v_flex()
             .gap_4()
             .child(self.render_sniffer_switches(theme, cx))
@@ -18,9 +19,9 @@ impl RuntimePage {
 
     fn render_sniffer_switches(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let current = self.config().cloned().unwrap_or_default().sniffing;
         setting_card(zenclash_i18n::text("sniffer.status.title"), theme)
             .child(setting_switch(
@@ -107,51 +108,51 @@ impl RuntimePage {
 
     fn render_sniffer_filters(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let inputs = &self.config_inputs.sniffer;
         setting_card(zenclash_i18n::text("sniffer.filters.title"), theme)
             .child(config_input_row(
                 zenclash_i18n::text("sniffer.filters.http_port"),
                 zenclash_i18n::text("sniffer.filters.port_description"),
-                Input::new(&inputs.http_ports),
+                Input::new(&inputs.http_ports).cleanable(true),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("sniffer.filters.tls_port"),
                 zenclash_i18n::text("sniffer.filters.port_description"),
-                Input::new(&inputs.tls_ports),
+                Input::new(&inputs.tls_ports).cleanable(true),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("sniffer.filters.quic_port"),
                 zenclash_i18n::text("sniffer.filters.port_description"),
-                Input::new(&inputs.quic_ports),
+                Input::new(&inputs.quic_ports).cleanable(true),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("sniffer.filters.skip_domain"),
                 zenclash_i18n::text("sniffer.filters.domain_description"),
-                Input::new(&inputs.skip_domain),
+                Textarea::new(&inputs.skip_domain),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("sniffer.filters.force_domain"),
                 zenclash_i18n::text("sniffer.filters.domain_description"),
-                Input::new(&inputs.force_domain),
+                Textarea::new(&inputs.force_domain),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("sniffer.filters.skip_destination"),
                 zenclash_i18n::text("sniffer.filters.address_description"),
-                Input::new(&inputs.skip_dst_address),
+                Textarea::new(&inputs.skip_dst_address),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("sniffer.filters.skip_source"),
                 zenclash_i18n::text("sniffer.filters.address_description"),
-                Input::new(&inputs.skip_src_address),
+                Textarea::new(&inputs.skip_src_address),
                 theme,
             ))
             .child(

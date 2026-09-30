@@ -5,13 +5,14 @@ use crate::pages::runtime::{
     SystemProxyStatus, div, format_port, format_proxy, h_flex, info_row, px, setting_card,
     setting_switch, v_flex,
 };
+use gpui_kit::component::input::Textarea;
 
 impl RuntimePage {
     pub(in crate::pages::runtime) fn render_system_proxy(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let (config, status) = match &self.data {
             RuntimeData::SystemProxy { config, status } => (config.clone(), status.clone()),
             _ => (RuntimeConfig::default(), SystemProxyStatus::default()),
@@ -85,9 +86,9 @@ impl RuntimePage {
     fn render_proxy_settings_summary(
         &self,
         mode: &str,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let detail = match self.preferences.system_proxy_mode {
             SystemProxyMode::Manual if self.preferences.system_proxy_bypass.is_empty() => {
                 zenclash_i18n::text("system_proxy.status.no_bypass")
@@ -143,9 +144,9 @@ impl RuntimePage {
     fn render_system_proxy_editor(
         &self,
         editor: &SystemProxyEditorState,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         v_flex()
             .p_4()
             .gap_4()
@@ -175,7 +176,7 @@ impl RuntimePage {
                                 .text_sm()
                                 .child(zenclash_i18n::text("system_proxy.fields.bypass_rules")),
                         )
-                        .child(Input::new(&editor.bypass).disabled(self.core_busy())),
+                        .child(Textarea::new(&editor.bypass).disabled(self.core_busy())),
                 )
             })
             .when(editor.mode == SystemProxyMode::Pac, |this| {
@@ -193,7 +194,7 @@ impl RuntimePage {
                                 .text_color(theme.muted_foreground)
                                 .child(zenclash_i18n::text("system_proxy.editor.pac_help")),
                         )
-                        .child(Input::new(&editor.pac_script).disabled(self.core_busy())),
+                        .child(Textarea::new(&editor.pac_script).disabled(self.core_busy())),
                 )
             })
             .child(
@@ -238,7 +239,7 @@ impl RuntimePage {
         &self,
         mode: SystemProxyMode,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         v_flex()
             .gap_2()
             .child(

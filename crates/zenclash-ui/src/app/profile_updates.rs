@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use gpui::Context;
+use gpui_kit::Context;
 use zenclash_core::ProfileStore;
 
 use super::ZenClashApp;

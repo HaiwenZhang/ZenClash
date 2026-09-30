@@ -9,8 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui::{AppContext, Application, Context, Entity, IntoElement, Render, Window, WindowOptions};
-use gpui_component::Root;
+use gpui_kit::{AppContext, Context, Entity, IntoElement, Render, Window, WindowOptions};
 use serde_json::json;
 use zenclash_core::{MihomoClient, MihomoEndpoint};
 use zenclash_ui::{assets::Assets, pages::proxies::ProxiesPage};
@@ -90,63 +89,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = MihomoClient::new(MihomoEndpoint::new(address.to_string(), ""))?;
     let handle = runtime.handle().clone();
     eprintln!("probe groups={groups} nodes={nodes} delay_s={delay} idle_s={idle}");
-    Application::new().with_assets(Assets).run(move |cx| {
-        gpui_component::init(cx);
-        let window = cx
-            .open_window(WindowOptions::default(), |window, cx| {
-                window.set_window_title("ZenClash responsiveness probe — synthetic data");
-                let page = cx.new(|cx| ProxiesPage::new(client.clone(), handle.clone(), cx));
-                let probe = cx.new(|_| Probe { page });
-                let root = cx.new(|cx| Root::new(probe.clone(), window, cx));
-                cx.spawn(async move |cx| {
-                    let started = Instant::now();
-                    let mut previous = started;
-                    let mut maximum = Duration::ZERO;
-                    let mut phase = 0;
-                    loop {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(50))
-                            .await;
-                        let now = Instant::now();
-                        let gap = now.duration_since(previous);
-                        previous = now;
-                        maximum = maximum.max(gap);
-                        if gap > Duration::from_millis(250) {
-                            eprintln!(
-                                "ui_gap_ms={} elapsed_ms={}",
-                                gap.as_millis(),
-                                started.elapsed().as_millis()
-                            );
-                        }
-                        let elapsed = started.elapsed().as_secs();
-                        if (phase == 0 && elapsed >= 1)
-                            || (phase == 1 && elapsed >= idle + delay + 5)
-                        {
-                            probe
-                                .update(cx, |probe, cx| {
-                                    probe.page = cx.new(|cx| {
-                                        ProxiesPage::new(client.clone(), handle.clone(), cx)
-                                    });
-                                    probe.page.update(cx, ProxiesPage::reload);
-                                    cx.notify();
-                                })
-                                .unwrap();
-                            phase += 1;
-                            eprintln!("load phase={phase} elapsed_s={elapsed}");
-                        }
-                        if elapsed >= idle + 2 * delay + 12 {
-                            eprintln!("probe_complete max_ui_gap_ms={}", maximum.as_millis());
-                            cx.update(|cx| cx.quit()).unwrap();
-                            break;
-                        }
+    gpui_kit::application().with_assets(Assets).run(move |cx| {
+        gpui_kit::init(cx);
+        let (window, _) = gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+            window.set_window_title("ZenClash responsiveness probe — synthetic data");
+            let page = cx.new(|cx| ProxiesPage::new(client.clone(), handle.clone(), cx));
+            let probe = cx.new(|_| Probe { page });
+            let task_probe = probe.clone();
+            cx.spawn(async move |cx| {
+                let started = Instant::now();
+                let mut previous = started;
+                let mut maximum = Duration::ZERO;
+                let mut phase = 0;
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(50))
+                        .await;
+                    let now = Instant::now();
+                    let gap = now.duration_since(previous);
+                    previous = now;
+                    maximum = maximum.max(gap);
+                    if gap > Duration::from_millis(250) {
+                        eprintln!(
+                            "ui_gap_ms={} elapsed_ms={}",
+                            gap.as_millis(),
+                            started.elapsed().as_millis()
+                        );
                     }
-                })
-                .detach();
-                root
+                    let elapsed = started.elapsed().as_secs();
+                    if (phase == 0 && elapsed >= 1) || (phase == 1 && elapsed >= idle + delay + 5) {
+                        task_probe.update(cx, |probe, cx| {
+                            probe.page =
+                                cx.new(|cx| ProxiesPage::new(client.clone(), handle.clone(), cx));
+                            probe.page.update(cx, ProxiesPage::reload);
+                            cx.notify();
+                        });
+                        phase += 1;
+                        eprintln!("load phase={phase} elapsed_s={elapsed}");
+                    }
+                    if elapsed >= idle + 2 * delay + 12 {
+                        eprintln!("probe_complete max_ui_gap_ms={}", maximum.as_millis());
+                        cx.update(|cx| cx.quit());
+                        break;
+                    }
+                }
             })
-            .expect("probe window");
-        window
-            .update(cx, |_, window, _| window.activate_window())
+            .detach();
+            probe
+        })
+        .expect("probe window");
+        cx.update_window(window, |_, window, _| window.activate_window())
             .unwrap();
     });
     Ok(())

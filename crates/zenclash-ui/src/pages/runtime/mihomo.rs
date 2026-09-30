@@ -119,9 +119,9 @@ impl RuntimePage {
     )]
     pub(super) fn render_core(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let (version, config, has_runtime_data) = match &self.data {
             RuntimeData::Core { version, config } => (version.clone(), config.clone(), true),
             _ => (VersionInfo::default(), RuntimeConfig::default(), false),
@@ -363,57 +363,57 @@ impl RuntimePage {
 
     fn render_core_inputs(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let inputs = &self.config_inputs.core;
         setting_card(zenclash_i18n::text("core_page.listeners.title"), theme)
             .child(config_input_row(
                 zenclash_i18n::text("core_page.listeners.http"),
                 zenclash_i18n::text("core_page.listeners.http_description"),
-                Input::new(&inputs.port),
+                Input::new(&inputs.port).cleanable(true),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("core_page.listeners.socks"),
                 zenclash_i18n::text("core_page.listeners.socks_description"),
-                Input::new(&inputs.socks_port),
+                Input::new(&inputs.socks_port).cleanable(true),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("core_page.listeners.mixed"),
                 zenclash_i18n::text("core_page.listeners.mixed_description"),
-                Input::new(&inputs.mixed_port),
+                Input::new(&inputs.mixed_port).cleanable(true),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("core_page.listeners.redir"),
                 zenclash_i18n::text("core_page.listeners.redir_description"),
-                Input::new(&inputs.redir_port),
+                Input::new(&inputs.redir_port).cleanable(true),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("core_page.listeners.tproxy"),
                 zenclash_i18n::text("core_page.listeners.tproxy_description"),
-                Input::new(&inputs.tproxy_port),
+                Input::new(&inputs.tproxy_port).cleanable(true),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("core_page.listeners.bind"),
                 zenclash_i18n::text("core_page.listeners.bind_description"),
-                Input::new(&inputs.bind_address),
+                Input::new(&inputs.bind_address).cleanable(true),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("core_page.listeners.interface"),
                 zenclash_i18n::text("core_page.listeners.interface_description"),
-                Input::new(&inputs.interface_name),
+                Input::new(&inputs.interface_name).cleanable(true),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("core_page.controller.log_level"),
                 "silent / error / warning / info / debug",
-                Input::new(&inputs.log_level),
+                Input::new(&inputs.log_level).cleanable(true),
                 theme,
             ))
             .child(

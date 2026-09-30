@@ -10,9 +10,9 @@ use super::super::{
 impl RuntimePage {
     pub(in super::super) fn render_profile(
         &self,
-        theme: &gpui_component::Theme,
-        cx: &mut gpui::Context<Self>,
-    ) -> gpui::AnyElement {
+        theme: &gpui_kit::component::Theme,
+        cx: &mut gpui_kit::Context<Self>,
+    ) -> gpui_kit::AnyElement {
         let (config, proxy_count, group_count, rule_count) = match &self.data {
             RuntimeData::Profile {
                 config,

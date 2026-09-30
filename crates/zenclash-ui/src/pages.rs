@@ -1,4 +1,4 @@
-use gpui_component::IconName;
+use gpui_kit::component::IconName;
 
 /// Live proxy-group selection page.
 pub mod proxies;

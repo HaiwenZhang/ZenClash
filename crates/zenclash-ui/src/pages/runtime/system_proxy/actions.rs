@@ -131,7 +131,7 @@ impl RuntimePage {
                 .default_value(preferences.system_proxy_host)
         });
         let bypass = cx.new(|cx| {
-            InputState::new(window, cx)
+            gpui_kit::component::input::TextareaState::new(window, cx)
                 .placeholder(zenclash_i18n::text(
                     "system_proxy.editor.bypass_placeholder",
                 ))
@@ -139,7 +139,7 @@ impl RuntimePage {
                 .auto_grow(5, 12)
         });
         let pac_script = cx.new(|cx| {
-            InputState::new(window, cx)
+            gpui_kit::component::input::TextareaState::new(window, cx)
                 .placeholder("function FindProxyForURL(url, host) { ... }")
                 .default_value(preferences.system_proxy_pac_script)
                 .auto_grow(8, 20)

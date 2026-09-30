@@ -6,7 +6,7 @@ use super::super::super::{
 impl RuntimePage {
     pub(in crate::pages::runtime::settings) fn render_backup_card(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         setting_card(zenclash_i18n::text("backup.local.title"), theme)

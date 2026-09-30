@@ -5,7 +5,7 @@
 <h1 align="center">ZenClash</h1>
 
 <p align="center">
-  A native Mihomo desktop client built with Rust and GPUI<br>
+  A native Mihomo desktop client built with Rust and GPUI Kit<br>
   Manage profiles, switch proxies, and monitor traffic on macOS, Windows, and Linux.
 </p>
 
@@ -73,7 +73,7 @@ cargo test --workspace --all-features --locked
 
 See the [CI workflow](.github/workflows/ci.yml) for the full Clippy rules. Real-core integration tests are ignored by default and must be run explicitly with a core path configured.
 
-Further reading: [packaging scripts](scripts) · [development and validation notes](docs/development) · [project guidelines](AGENTS.md). The development notes and guidelines are primarily in Chinese.
+Further reading: [packaging scripts](scripts) · [development and validation notes](docs/development) · [project guidelines](AGENTS.md) · [GPUI Kit migration and Windows acceptance](docs/development/gpui-kit-migration.md). The development notes and guidelines are primarily in Chinese.
 
 ## Data and Privacy
 
@@ -88,6 +88,6 @@ Further reading: [packaging scripts](scripts) · [development and validation not
 
 ## Acknowledgments and License
 
-Thanks to [Mihomo](https://github.com/MetaCubeX/mihomo), [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), and [GPUI Component](https://github.com/longbridge/gpui-component).
+Thanks to [Mihomo](https://github.com/MetaCubeX/mihomo), [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), and [GPUI Kit](https://github.com/longbridge/gpui-kit).
 
 ZenClash is licensed under [GPL-3.0-only](LICENSE). Copyright © 2026 Haiwen Zhang.

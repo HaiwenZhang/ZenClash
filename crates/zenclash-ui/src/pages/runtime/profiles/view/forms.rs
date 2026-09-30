@@ -9,9 +9,9 @@ use super::super::super::{
 impl RuntimePage {
     pub(super) fn render_subscription_form(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         setting_card(zenclash_i18n::text("profiles.form.title"), theme).child(
             v_flex()
                 .p_4()
@@ -86,9 +86,9 @@ impl RuntimePage {
 
     fn render_subscription_route_controls(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         v_flex()
             .w(px(220.))
             .gap_2()
@@ -166,9 +166,9 @@ impl RuntimePage {
     pub(super) fn render_current_profile(
         &self,
         config: &RuntimeConfig,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let path = self.profile_path.as_ref().map_or_else(
             || zenclash_i18n::text("profiles.current.unspecified"),
             |path| path.display().to_string(),
@@ -222,7 +222,11 @@ impl RuntimePage {
     }
 }
 
-fn subscription_input(label: String, input: Input, theme: &gpui_component::Theme) -> gpui::Div {
+fn subscription_input(
+    label: String,
+    input: Input,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Div {
     v_flex()
         .flex_1()
         .gap_1()

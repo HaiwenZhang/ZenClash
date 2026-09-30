@@ -1,4 +1,4 @@
-use gpui_component::{Selectable, button::ButtonVariants};
+use gpui_kit::component::{Selectable, button::ButtonVariants};
 
 use super::{
     Button, Context, Disableable, FluentBuilder, Icon, IconName, IntoElement, ParentElement,
@@ -10,7 +10,7 @@ use super::{
 impl ProxiesPage {
     pub(super) fn render_header(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let loading = self.loading;
@@ -37,7 +37,7 @@ impl ProxiesPage {
                             .child(
                                 div()
                                     .text_lg()
-                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .font_weight(gpui_kit::FontWeight::BOLD)
                                     .child(zenclash_i18n::text("proxies.header.title")),
                             )
                             .child(
@@ -116,9 +116,9 @@ impl ProxiesPage {
         &self,
         group: &ProxyGroup,
         testing_group: bool,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let expanded = self.expanded.contains(&group.name);
         let group_name = group.name.clone();
         let group_for_restore = group.name.clone();
@@ -170,7 +170,7 @@ impl ProxiesPage {
                                             .child(
                                                 div()
                                                     .text_sm()
-                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .font_weight(gpui_kit::FontWeight::BOLD)
                                                     .child(group.name.clone()),
                                             )
                                             .child(
@@ -242,7 +242,7 @@ impl ProxiesPage {
                                 |this| {
                                     this.child(
                                         Button::new((
-                                            gpui::ElementId::from("measure-restore-auto"),
+                                            gpui_kit::ElementId::from("measure-restore-auto"),
                                             group.name.clone(),
                                         ))
                                         .icon(crate::assets::AppIcon::Gauge)
@@ -277,7 +277,7 @@ impl ProxiesPage {
                                 |this| {
                                     this.child(
                                         Button::new((
-                                            gpui::ElementId::from("restore-auto"),
+                                            gpui_kit::ElementId::from("restore-auto"),
                                             group.name.clone(),
                                         ))
                                         .icon(crate::assets::AppIcon::RefreshCw)
@@ -300,7 +300,7 @@ impl ProxiesPage {
                             )
                             .child(
                                 Button::new((
-                                    gpui::ElementId::from("test-group"),
+                                    gpui_kit::ElementId::from("test-group"),
                                     group.name.clone(),
                                 ))
                                 .icon(crate::assets::AppIcon::Gauge)
@@ -333,7 +333,7 @@ impl ProxiesPage {
                             )
                             .child(
                                 Button::new((
-                                    gpui::ElementId::from("toggle-group"),
+                                    gpui_kit::ElementId::from("toggle-group"),
                                     group.name.clone(),
                                 ))
                                 .icon(if expanded {
@@ -408,7 +408,9 @@ impl ProxiesPage {
                                             .gap_2()
                                             .child(
                                                 Button::new((
-                                                    gpui::ElementId::from("previous-proxy-page"),
+                                                    gpui_kit::ElementId::from(
+                                                        "previous-proxy-page",
+                                                    ),
                                                     group.name.clone(),
                                                 ))
                                                 .icon(IconName::ChevronLeft)
@@ -428,7 +430,7 @@ impl ProxiesPage {
                                             )
                                             .child(
                                                 Button::new((
-                                                    gpui::ElementId::from("next-proxy-page"),
+                                                    gpui_kit::ElementId::from("next-proxy-page"),
                                                     group.name.clone(),
                                                 ))
                                                 .icon(IconName::ChevronRight)
@@ -459,9 +461,9 @@ impl ProxiesPage {
 
         group: &ProxyGroup,
         proxy: &ProxyNode,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let selected = group_has_unique_current(&group.behavior) && group.now == proxy.name;
         let selectable = group_allows_manual_selection(&group.behavior);
         let testing = self.testing.contains(&test_key(&group.name, &proxy.name));
@@ -542,9 +544,9 @@ impl ProxiesPage {
                             .min_w_0()
                             .text_sm()
                             .font_weight(if selected {
-                                gpui::FontWeight::BOLD
+                                gpui_kit::FontWeight::BOLD
                             } else {
-                                gpui::FontWeight::NORMAL
+                                gpui_kit::FontWeight::NORMAL
                             })
                             .text_ellipsis()
                             .whitespace_nowrap()
@@ -573,15 +575,25 @@ impl ProxiesPage {
                         capabilities
                     }),
             )
-            .child(Progress::new().h(px(3.)).bg(delay_color).value(health))
+            .child(
+                Progress::new(format!(
+                    "proxy-health:{}:{}{}",
+                    group.name.len(),
+                    group.name,
+                    proxy.name
+                ))
+                .h(px(3.))
+                .color(delay_color)
+                .value(health),
+            )
             .child(
                 h_flex()
                     .justify_end()
                     .gap_1()
                     .child(
                         Button::new((
-                            gpui::ElementId::from((
-                                gpui::ElementId::from("test-proxy"),
+                            gpui_kit::ElementId::from((
+                                gpui_kit::ElementId::from("test-proxy"),
                                 group.name.clone(),
                             )),
                             proxy.name.clone(),
@@ -609,8 +621,8 @@ impl ProxiesPage {
                     .when(selectable, |this| {
                         this.child(
                             Button::new((
-                                gpui::ElementId::from((
-                                    gpui::ElementId::from("select-proxy"),
+                                gpui_kit::ElementId::from((
+                                    gpui_kit::ElementId::from("select-proxy"),
                                     group.name.clone(),
                                 )),
                                 proxy.name.clone(),

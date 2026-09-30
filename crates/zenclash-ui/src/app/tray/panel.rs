@@ -1,14 +1,14 @@
-use gpui::{
-    AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement, ParentElement,
-    Pixels, Render, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window,
-    WindowBounds, WindowKind, WindowOptions, div, point, px, size,
-};
-use gpui_component::{
-    ActiveTheme, Disableable, Root, Selectable, Sizable,
+use gpui_kit::component::{
+    ActiveTheme, Disableable, Selectable, Sizable,
     button::{Button, ButtonVariants},
     h_flex,
     menu::{DropdownMenu, PopupMenuItem},
     v_flex,
+};
+use gpui_kit::{
+    AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement, ParentElement,
+    Pixels, Render, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window,
+    WindowBounds, WindowKind, WindowOptions, div, point, px, size,
 };
 use zenclash_core::format_speed;
 
@@ -65,10 +65,10 @@ impl ZenClashApp {
             is_minimizable: false,
             ..Default::default()
         };
-        match cx.open_window(options, |window, cx| {
+        match gpui_kit::open_window(options, cx, |window, cx| {
             let view = cx.new(|cx| {
                 let focus = cx.focus_handle();
-                focus.focus(window);
+                focus.focus(window, cx);
                 let mut subscriptions =
                     vec![cx.observe_window_activation(window, |_, window, _| {
                         if !window.is_window_active() {
@@ -85,9 +85,9 @@ impl ZenClashApp {
                 }
             });
             window.activate_window();
-            cx.new(|cx| Root::new(view, window, cx))
+            view
         }) {
-            Ok(handle) => self.status_panel = Some(handle.into()),
+            Ok((handle, _)) => self.status_panel = Some(handle),
             Err(error) => {
                 self.tray_error = Some(error.to_string());
                 self.show_main_window(cx);
@@ -118,7 +118,7 @@ impl StatusPanel {
     fn command(
         &self,
         command: TrayCommand,
-    ) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static {
+    ) -> impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut gpui_kit::App) + 'static {
         let owner = self.owner.clone();
         move |_, _, cx| {
             let _ = owner.update(cx, |app, cx| app.handle_tray_command(command.clone(), cx));
@@ -151,7 +151,7 @@ impl Render for StatusPanel {
                     .justify_between()
                     .child(
                         div()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .child(zenclash_i18n::text("app.name")),
                     )
                     .child(
@@ -273,7 +273,7 @@ impl Render for StatusPanel {
                             .child(group.name.clone()),
                     )
                     .child(
-                        Button::new((gpui::ElementId::from("panel-group"), name.clone()))
+                        Button::new((gpui_kit::ElementId::from("panel-group"), name.clone()))
                             .small()
                             .outline()
                             .label(group.now.clone())

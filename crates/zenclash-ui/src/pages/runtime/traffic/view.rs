@@ -1,6 +1,6 @@
 use chrono::{DateTime, Local, Utc};
-use gpui::SharedString;
-use gpui_component::chart::AreaChart;
+use gpui_kit::SharedString;
+use gpui_kit::component::chart::AreaChart;
 use zenclash_core::{TrafficDimension, TrafficTrendPoint};
 
 use super::{TrafficHistoryFreshness, TrafficRange, dimension_label};
@@ -21,9 +21,9 @@ struct HistoricalTrafficPoint {
 impl RuntimePage {
     pub(in crate::pages::runtime) fn render_traffic(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let realtime = self.traffic_monitor.snapshot();
         let connection_count = match &self.data {
             RuntimeData::Connections(data) => data.connections.len(),
@@ -74,7 +74,7 @@ impl RuntimePage {
             .into_any_element()
     }
 
-    fn render_traffic_signal(&self, theme: &gpui_component::Theme) -> gpui::AnyElement {
+    fn render_traffic_signal(&self, theme: &gpui_kit::component::Theme) -> gpui_kit::AnyElement {
         let history = &self.traffic_history;
         let points = historical_traffic_points(&history.overview.trend, history.range);
         let has_points = !points.is_empty();
@@ -129,7 +129,7 @@ impl RuntimePage {
                             .child(
                                 div()
                                     .text_sm()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                     .child(zenclash_i18n::text("traffic.chart.title")),
                             )
                             .child(div().text_xs().text_color(theme.muted_foreground).child(
@@ -201,7 +201,7 @@ impl RuntimePage {
 
     fn render_traffic_controls(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let history = &self.traffic_history;
@@ -258,7 +258,7 @@ impl RuntimePage {
             .child(self.render_clear_history_control(cx))
     }
 
-    fn render_clear_history_control(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_clear_history_control(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         h_flex()
             .gap_2()
             .when(self.traffic_history.clear_confirmation, |this| {
@@ -302,7 +302,7 @@ impl RuntimePage {
 
     fn render_traffic_rankings(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let history = &self.traffic_history;
@@ -323,7 +323,7 @@ impl RuntimePage {
                     .child(
                         div()
                             .text_sm()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .child(zenclash_i18n::text_with(
                                 "traffic.rankings.title",
                                 &[("dimension", dimension_label(history.dimension))],
@@ -379,7 +379,7 @@ impl RuntimePage {
                             .child(
                                 div()
                                     .text_sm()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                     .child(format_bytes(item.total)),
                             )
                             .child(div().text_color(theme.muted_foreground).child("›"))
@@ -389,7 +389,7 @@ impl RuntimePage {
 
     fn render_traffic_inspector(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let history = &self.traffic_history;
@@ -410,7 +410,7 @@ impl RuntimePage {
                     .child(
                         div()
                             .text_sm()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .child(zenclash_i18n::text("traffic.inspector.title")),
                     )
                     .child(
@@ -458,7 +458,7 @@ impl RuntimePage {
                                     .child(
                                         div()
                                             .text_sm()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                             .child(format_bytes(item.total)),
                                     )
                             })),
@@ -469,9 +469,9 @@ impl RuntimePage {
 
     fn render_traffic_details(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> Vec<gpui::AnyElement> {
+    ) -> Vec<gpui_kit::AnyElement> {
         self.traffic_history
             .details
             .iter()

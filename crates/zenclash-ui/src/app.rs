@@ -1,13 +1,13 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use gpui::{
+use gpui_kit::component::{ActiveTheme, ThemeMode, TitleBar, h_flex, v_flex};
+use gpui_kit::{
     AnyWindowHandle, App, AppContext, ClipboardItem, Context, Entity, Focusable,
     InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, SharedString, Styled,
     Subscription, Window, WindowBounds, WindowKind, WindowOptions, div, px,
 };
 #[cfg(target_os = "macos")]
-use gpui::{Pixels, Size};
-use gpui_component::{ActiveTheme, Root, ThemeMode, TitleBar, h_flex, v_flex};
+use gpui_kit::{Pixels, Size};
 use zenclash_core::{
     AppPreferences, AppPreferencesStore, AppearancePreference, ControlledConfigStore, CoreKind,
     CoreSession, LogMonitor, MihomoClient, MihomoLogLevel, MihomoProcess, OperationalStatus,
@@ -58,7 +58,7 @@ use crate::{
     reason = "the gpui actions macro controls generated marker derives and documentation"
 )]
 mod action_types {
-    use gpui::actions;
+    use gpui_kit::actions;
 
     actions!(
         zenclash,
@@ -108,7 +108,7 @@ pub struct ZenClashApp {
     client: MihomoClient,
     traffic_monitor: Arc<TrafficMonitor>,
     runtime: tokio::runtime::Handle,
-    focus_handle: gpui::FocusHandle,
+    focus_handle: gpui_kit::FocusHandle,
     proxies_page: Entity<ProxiesPage>,
     runtime_page: Entity<RuntimePage>,
     tray_core_running: Option<bool>,
@@ -152,7 +152,7 @@ struct MainWindowMemoryState {
 #[cfg(target_os = "macos")]
 impl MainWindowMemoryState {
     fn park(&mut self, current_size: Size<Pixels>) -> Size<Pixels> {
-        let parked_size = gpui::size(px(1.), px(1.));
+        let parked_size = gpui_kit::size(px(1.), px(1.));
         if current_size != parked_size && self.restore_size.is_none() {
             self.restore_size = Some(current_size);
         }
@@ -228,7 +228,7 @@ impl ZenClashApp {
             restart_after_exit,
         } = services;
         let focus_handle = cx.focus_handle();
-        focus_handle.focus(window);
+        focus_handle.focus(window, cx);
         let main_window = window.window_handle();
         let proxies_page = cx.new(|cx| ProxiesPage::new(client.clone(), runtime.clone(), cx));
         let app_profile_path = profile_path.clone();
@@ -587,9 +587,9 @@ mod memory_tests {
     #[test]
     fn parked_main_window_restores_its_previous_size() {
         let mut state = MainWindowMemoryState::default();
-        let visible_size = gpui::size(px(1280.), px(820.));
+        let visible_size = gpui_kit::size(px(1280.), px(820.));
 
-        assert_eq!(state.park(visible_size), gpui::size(px(1.), px(1.)));
+        assert_eq!(state.park(visible_size), gpui_kit::size(px(1.), px(1.)));
         assert_eq!(state.restore(), Some(visible_size));
         assert_eq!(state.restore(), None);
     }
@@ -597,10 +597,10 @@ mod memory_tests {
     #[test]
     fn repeated_parking_does_not_forget_the_visible_size() {
         let mut state = MainWindowMemoryState::default();
-        let visible_size = gpui::size(px(960.), px(640.));
+        let visible_size = gpui_kit::size(px(960.), px(640.));
 
         state.park(visible_size);
-        state.park(gpui::size(px(1.), px(1.)));
+        state.park(gpui_kit::size(px(1.), px(1.)));
 
         assert_eq!(state.restore(), Some(visible_size));
     }

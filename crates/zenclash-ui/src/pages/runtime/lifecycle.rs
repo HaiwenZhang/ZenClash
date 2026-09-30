@@ -256,6 +256,21 @@ impl RuntimePage {
                 "config_inputs.placeholders.automatic_interface",
             ),
             (
+                self.config_inputs.tun.device.clone(),
+                "config_inputs.placeholders.tun_device",
+            ),
+            (
+                self.config_inputs.tun.mtu.clone(),
+                "config_inputs.placeholders.default_mtu",
+            ),
+        ];
+        for (input, key) in localized_inputs {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(zenclash_i18n::text(key), window, cx);
+            });
+        }
+        let localized_textareas = [
+            (
                 self.config_inputs.dns.fake_ip_filter.clone(),
                 "config_inputs.placeholders.one_domain_or_rule",
             ),
@@ -308,14 +323,6 @@ impl RuntimePage {
                 "config_inputs.placeholders.one_address",
             ),
             (
-                self.config_inputs.tun.device.clone(),
-                "config_inputs.placeholders.tun_device",
-            ),
-            (
-                self.config_inputs.tun.mtu.clone(),
-                "config_inputs.placeholders.default_mtu",
-            ),
-            (
                 self.config_inputs.tun.route_include_address.clone(),
                 "config_inputs.placeholders.one_cidr",
             ),
@@ -324,7 +331,7 @@ impl RuntimePage {
                 "config_inputs.placeholders.one_cidr",
             ),
         ];
-        for (input, key) in localized_inputs {
+        for (input, key) in localized_textareas {
             input.update(cx, |input, cx| {
                 input.set_placeholder(zenclash_i18n::text(key), window, cx);
             });

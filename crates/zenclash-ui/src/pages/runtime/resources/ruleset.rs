@@ -19,9 +19,9 @@ pub(crate) struct RulesetUiState {
 impl RuntimePage {
     pub(super) fn render_ruleset_converter(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let source = self.ruleset.source.as_deref().map_or_else(
             || zenclash_i18n::text("resources.ruleset.none"),
             compact_path,
@@ -67,9 +67,9 @@ impl RuntimePage {
     fn render_ruleset_controls(
         &self,
         source: String,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         v_flex()
             .gap_3()
             .p_4()
@@ -161,9 +161,9 @@ impl RuntimePage {
     fn render_ruleset_result(
         &self,
         result: &RulesetConversion,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let (preview, truncated) = ruleset_preview(&result.content);
         v_flex()
             .gap_2()

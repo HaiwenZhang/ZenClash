@@ -8,7 +8,7 @@ use crate::assets::AppIcon;
 impl RuntimePage {
     fn render_header(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let traffic = self.traffic_monitor.snapshot();
@@ -45,7 +45,7 @@ impl RuntimePage {
                             .child(
                                 div()
                                     .text_lg()
-                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .font_weight(gpui_kit::FontWeight::BOLD)
                                     .child(self.page.label()),
                             )
                             .child(
@@ -84,7 +84,7 @@ impl RuntimePage {
             )
     }
 
-    fn render_status(&self, theme: &gpui_component::Theme) -> gpui::AnyElement {
+    fn render_status(&self, theme: &gpui_kit::component::Theme) -> gpui_kit::AnyElement {
         v_flex()
             .gap_2()
             .when_some(self.startup_error.clone(), |this, error| {
@@ -101,9 +101,9 @@ impl RuntimePage {
 
     fn render_body(
         &mut self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         if self.persistent_loading
             || (matches!(
                 self.page,
@@ -163,7 +163,7 @@ impl RuntimePage {
 }
 
 impl Focusable for RuntimePage {
-    fn focus_handle(&self, _: &App) -> gpui::FocusHandle {
+    fn focus_handle(&self, _: &App) -> gpui_kit::FocusHandle {
         self.focus_handle.clone()
     }
 }

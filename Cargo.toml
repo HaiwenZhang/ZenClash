@@ -18,12 +18,7 @@ cron = "0.15"
 futures-util = "0.3"
 getrandom = "0.3"
 flate2 = "1.1"
-# Compile Metal source at application startup on macOS. This keeps development
-# builds working on Xcode installations where the optional offline Metal
-# toolchain component is not installed.
-gpui = { version = "0.2.2", features = ["runtime_shaders"] }
-gpui-component = "0.5.1"
-gpui-component-assets = "0.5.1"
+gpui-kit = { version = "0.7", features = ["tree-sitter-yaml"] }
 http = "1.1"
 libc = "0.2"
 objc2 = "0.6.4"

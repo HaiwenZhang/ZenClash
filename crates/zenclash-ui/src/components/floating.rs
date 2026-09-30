@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use gpui::{Context, Task};
+use gpui_kit::{Context, Task};
 use zenclash_core::{MihomoClient, TrafficMonitor, TrafficSnapshot};
 
 use super::{mode::OutboundModeCoordinator, sidebar::OutboundMode};

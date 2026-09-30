@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
-use gpui::{
-    App, Context, Focusable, InteractiveElement, IntoElement, ParentElement, Render, Styled,
-    Window, div, prelude::FluentBuilder, px,
-};
-use gpui_component::{
+use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, Sizable, button::Button, h_flex, progress::Progress,
     scroll::ScrollableElement, switch::Switch, v_flex,
+};
+use gpui_kit::{
+    App, Context, Focusable, InteractiveElement, IntoElement, ParentElement, Render, Styled,
+    Window, div, prelude::FluentBuilder, px,
 };
 use zenclash_core::{
     ConnectionPolicy, DelayHistory, MihomoClient, ProxyCatalog, ProxyDelayTarget, ProxyGroup,
@@ -45,7 +45,7 @@ pub struct ProxiesPage {
     delay_generation: u64,
     error: Option<String>,
     notice: Option<String>,
-    focus_handle: gpui::FocusHandle,
+    focus_handle: gpui_kit::FocusHandle,
 }
 
 impl ProxiesPage {
@@ -236,7 +236,7 @@ fn toggle_expanded_group(expanded: &mut HashSet<String>, name: &str) {
 }
 
 impl Focusable for ProxiesPage {
-    fn focus_handle(&self, _: &App) -> gpui::FocusHandle {
+    fn focus_handle(&self, _: &App) -> gpui_kit::FocusHandle {
         self.focus_handle.clone()
     }
 }

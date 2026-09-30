@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use gpui::PathPromptOptions;
+use gpui_kit::PathPromptOptions;
 use zenclash_core::BackupManager;
 
 use super::super::super::{Context, Page, PreferencesRestored, ProfileActivated, RuntimePage};

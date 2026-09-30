@@ -1,11 +1,11 @@
 use super::{
-    AppContext, Context, FloatingTrafficWindow, OutboundMode, Page, Root, TitleBar, WindowBounds,
+    AppContext, Context, FloatingTrafficWindow, OutboundMode, Page, TitleBar, WindowBounds,
     WindowKind, WindowOptions, ZenClashApp, px,
 };
 
 impl ZenClashApp {
     #[cfg(target_os = "macos")]
-    pub(in crate::app) fn park_main_window(&mut self, window: &mut gpui::Window) {
+    pub(in crate::app) fn park_main_window(&mut self, window: &mut gpui_kit::Window) {
         let parked_size = self.main_window_memory.park(window.bounds().size);
         window.resize(parked_size);
     }
@@ -59,21 +59,23 @@ impl ZenClashApp {
         let traffic_monitor = self.traffic_monitor.clone();
         let outbound_mode = self.outbound_mode.clone();
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(gpui::size(px(390.), px(230.)), cx)),
+            window_bounds: Some(WindowBounds::centered(
+                gpui_kit::size(px(390.), px(230.)),
+                cx,
+            )),
             titlebar: Some(TitleBar::title_bar_options()),
             kind: WindowKind::Floating,
             is_resizable: false,
             is_minimizable: false,
             ..Default::default()
         };
-        match cx.open_window(options, |window, cx| {
+        match gpui_kit::open_window(options, cx, |window, cx| {
             window.set_window_title("ZenClash Signal");
-            let floating = cx.new(|cx| {
+            cx.new(|cx| {
                 FloatingTrafficWindow::new(client, runtime, traffic_monitor, outbound_mode, cx)
-            });
-            cx.new(|cx| Root::new(floating, window, cx))
+            })
         }) {
-            Ok(handle) => self.floating_window = Some(handle.into()),
+            Ok((handle, _)) => self.floating_window = Some(handle),
             Err(error) => tracing::warn!(%error, "failed to open floating traffic window"),
         }
         self.refresh_tray_menu(cx);

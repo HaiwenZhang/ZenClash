@@ -2,11 +2,14 @@
 //! Uses the production input model in a real GPUI window, with generated configuration only.
 mod pages {
     pub mod runtime {
-        use gpui::{
-            AppContext, Application, Context, Focusable, IntoElement, ParentElement, Render,
-            Window, WindowOptions,
+        use gpui_kit::component::{
+            input::{Input, Textarea},
+            v_flex,
         };
-        use gpui_component::{Root, input::Input, v_flex};
+        use gpui_kit::{
+            AppContext, Context, Focusable, IntoElement, ParentElement, Render, Window,
+            WindowOptions,
+        };
         use serde_json::json;
         use std::path::Path;
 
@@ -20,17 +23,17 @@ mod pages {
         impl Render for RuntimePage {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
                 v_flex()
-                    .child(Input::new(&self.inputs.dns.nameserver))
+                    .child(Textarea::new(&self.inputs.dns.nameserver))
                     .child(Input::new(&self.inputs.core.mixed_port))
             }
         }
 
         pub fn run() {
-            Application::new().with_assets(zenclash_ui::assets::Assets).run(|cx| {
-        gpui_component::init(cx);
+            gpui_kit::application().with_assets(zenclash_ui::assets::Assets).run(|cx| {
+        gpui_kit::init(cx);
         cx.spawn(async move |cx| {
             let mut page = None;
-            let handle = cx.open_window(WindowOptions::default(), |window, cx| {
+            let (handle, _) = cx.update(|cx| gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
                 window.activate_window();
                 let view = cx.new(|cx| RuntimePage {
                     inputs: config_inputs::ConfigInputs::new(&json!({
@@ -38,18 +41,18 @@ mod pages {
                     }), Some(Path::new("fixture-a.yaml")), window, cx),
                 });
                 page = Some(view.clone());
-                cx.new(|cx| Root::new(view, window, cx))
-            }).expect("test window");
+                view
+            })).expect("test window");
             let page = page.expect("test page");
             cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
-            handle.update(cx, |_, window, cx| {
+            cx.update_window(handle, |_, window, cx| {
                 page.update(cx, |page, cx| {
                     let dns = page.inputs.dns.nameserver.clone();
                     let port = page.inputs.core.mixed_port.clone();
                     let original_id = dns.entity_id();
                     dns.update(cx, |input, cx| {
                         input.set_value("editing after submit", window, cx);
-                        input.set_cursor_position(gpui_component::input::Position::new(0, 4), window, cx);
+                        input.set_cursor_position(gpui_kit::component::input::Position::new(0, 4), window, cx);
                     });
                     let cursor = dns.read(cx).cursor_position();
                     let incoming = json!({"dns": {"nameserver": ["submitted earlier"]}, "mixed-port": 7891});
@@ -92,7 +95,7 @@ mod pages {
                     eprintln!("config_form_state_passed: identity, dirty edits, save readback, focus, cursor, profile switch, backup reset");
                 });
             }).expect("form assertions");
-            cx.update(|cx| cx.quit()).expect("quit");
+            cx.update(|cx| cx.quit());
         }).detach();
     });
         }

@@ -3,14 +3,15 @@ use super::{
     ParentElement, RuntimeData, RuntimePage, Styled, config_input_row, empty_dash, h_flex,
     info_row, json, message_banner, setting_card, setting_switch, v_flex,
 };
+use gpui_kit::component::input::Textarea;
 use zenclash_core::{CapabilityState, CaptureOutcome, CapturePlan};
 
 impl RuntimePage {
     pub(super) fn render_tun(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         v_flex()
             .gap_4()
             .child(self.render_tun_permissions(theme, cx))
@@ -20,7 +21,7 @@ impl RuntimePage {
             .into_any_element()
     }
 
-    fn render_tun_runtime(&self, theme: &gpui_component::Theme) -> gpui::Div {
+    fn render_tun_runtime(&self, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
         let snapshot = self.operational_status.snapshot();
         let tun = snapshot.capture.tun.value();
         let mut card = setting_card(zenclash_i18n::text("tun.runtime.title"), theme);
@@ -67,9 +68,9 @@ impl RuntimePage {
 
     fn render_tun_permissions(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let permissions = match &self.data {
             RuntimeData::Tun { permissions, .. } => Some(permissions),
             _ => None,
@@ -152,9 +153,9 @@ impl RuntimePage {
 
     fn render_tun_switches(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let tun = self.config().cloned().unwrap_or_default().tun;
         setting_card(zenclash_i18n::text("tun.switches.title"), theme)
             .child(setting_switch(
@@ -310,45 +311,45 @@ impl RuntimePage {
 
     fn render_tun_routes(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let inputs = &self.config_inputs.tun;
         setting_card(zenclash_i18n::text("tun.routes.title"), theme)
             .child(config_input_row(
                 zenclash_i18n::text("tun.switches.stack"),
                 zenclash_i18n::text("tun.routes.stack_description"),
-                Input::new(&inputs.stack),
+                Input::new(&inputs.stack).cleanable(true),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("tun.routes.device_name"),
                 zenclash_i18n::text("tun.routes.device_description"),
-                Input::new(&inputs.device),
+                Input::new(&inputs.device).cleanable(true),
                 theme,
             ))
             .child(config_input_row(
                 "MTU",
                 zenclash_i18n::text("tun.routes.mtu_description"),
-                Input::new(&inputs.mtu),
+                Input::new(&inputs.mtu).cleanable(true),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("tun.switches.dns_hijack"),
                 zenclash_i18n::text("tun.routes.dns_description"),
-                Input::new(&inputs.dns_hijack),
+                Input::new(&inputs.dns_hijack).cleanable(true),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("tun.routes.include"),
                 zenclash_i18n::text("tun.routes.include_description"),
-                Input::new(&inputs.route_include_address),
+                Textarea::new(&inputs.route_include_address),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("tun.routes.exclude"),
                 zenclash_i18n::text("tun.routes.exclude_description"),
-                Input::new(&inputs.route_exclude_address),
+                Textarea::new(&inputs.route_exclude_address),
                 theme,
             ))
             .child(

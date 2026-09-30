@@ -1,5 +1,6 @@
-use gpui::{AppContext, Context, Entity, Focusable, SharedString, Window};
-use gpui_component::input::InputState;
+use gpui_kit::base::input::{InputBaseState, InputModeKind};
+use gpui_kit::component::input::{AnyInputState, InputState, TextareaState};
+use gpui_kit::{AppContext, Context, Entity, Focusable, SharedString, Window};
 use serde_json::{Map, Number, Value};
 use std::{
     collections::HashMap,
@@ -42,17 +43,17 @@ pub(super) struct DnsInputs {
     pub enhanced_mode: Entity<InputState>,
     pub fake_ip_range: Entity<InputState>,
     pub fake_ip_filter_mode: Entity<InputState>,
-    pub fake_ip_filter: Entity<InputState>,
-    pub default_nameserver: Entity<InputState>,
-    pub nameserver: Entity<InputState>,
-    pub proxy_server_nameserver: Entity<InputState>,
-    pub direct_nameserver: Entity<InputState>,
-    pub fallback: Entity<InputState>,
+    pub fake_ip_filter: Entity<TextareaState>,
+    pub default_nameserver: Entity<TextareaState>,
+    pub nameserver: Entity<TextareaState>,
+    pub proxy_server_nameserver: Entity<TextareaState>,
+    pub direct_nameserver: Entity<TextareaState>,
+    pub fallback: Entity<TextareaState>,
     pub fallback_geoip_code: Entity<InputState>,
-    pub fallback_ipcidr: Entity<InputState>,
-    pub fallback_domain: Entity<InputState>,
-    pub nameserver_policy: Entity<InputState>,
-    pub hosts: Entity<InputState>,
+    pub fallback_ipcidr: Entity<TextareaState>,
+    pub fallback_domain: Entity<TextareaState>,
+    pub nameserver_policy: Entity<TextareaState>,
+    pub hosts: Entity<TextareaState>,
     source: Value,
 }
 
@@ -60,10 +61,10 @@ pub(super) struct SnifferInputs {
     pub http_ports: Entity<InputState>,
     pub tls_ports: Entity<InputState>,
     pub quic_ports: Entity<InputState>,
-    pub skip_domain: Entity<InputState>,
-    pub force_domain: Entity<InputState>,
-    pub skip_dst_address: Entity<InputState>,
-    pub skip_src_address: Entity<InputState>,
+    pub skip_domain: Entity<TextareaState>,
+    pub force_domain: Entity<TextareaState>,
+    pub skip_dst_address: Entity<TextareaState>,
+    pub skip_src_address: Entity<TextareaState>,
     source: Value,
 }
 
@@ -72,8 +73,8 @@ pub(super) struct TunInputs {
     pub device: Entity<InputState>,
     pub mtu: Entity<InputState>,
     pub dns_hijack: Entity<InputState>,
-    pub route_include_address: Entity<InputState>,
-    pub route_exclude_address: Entity<InputState>,
+    pub route_include_address: Entity<TextareaState>,
+    pub route_exclude_address: Entity<TextareaState>,
     source: Value,
 }
 
@@ -87,7 +88,7 @@ impl ConfigInputs {
         config: &Value,
         profile: Option<&Path>,
         window: &mut Window,
-        cx: &mut Context<super::RuntimePage>,
+        cx: &mut gpui_kit::App,
     ) -> Self {
         let mut fields = HashMap::new();
         let mut factory = InputFactory {
@@ -114,25 +115,25 @@ impl ConfigInputs {
         self.profile.as_deref() == profile
     }
 
-    pub(super) fn submitted(&self, patch: &Value, cx: &gpui::App) -> SubmittedInputs {
+    pub(super) fn submitted(&self, patch: &Value, cx: &gpui_kit::App) -> SubmittedInputs {
         SubmittedInputs {
             profile: self.profile.clone(),
             values: self
                 .fields
                 .iter()
                 .filter(|(key, _)| patch.pointer(key).is_some())
-                .map(|(&key, field)| (key, field.input.read(cx).value().to_string()))
+                .map(|(&key, field)| (key, field.input.value(cx).to_string()))
                 .collect(),
         }
     }
 
-    pub(super) fn accept_submitted(&mut self, submitted: SubmittedInputs, cx: &gpui::App) {
+    pub(super) fn accept_submitted(&mut self, submitted: SubmittedInputs, cx: &gpui_kit::App) {
         if self.profile != submitted.profile {
             return;
         }
         for (key, value) in submitted.values {
             if let Some(field) = self.fields.get_mut(key) {
-                field.baseline.accept(&field.input.read(cx).value(), &value);
+                field.baseline.accept(&field.input.value(cx), &value);
             }
         }
     }
@@ -146,7 +147,7 @@ impl ConfigInputs {
         config: &Value,
         profile: Option<&Path>,
         window: &mut Window,
-        cx: &mut Context<super::RuntimePage>,
+        cx: &mut gpui_kit::App,
     ) {
         let reset = self.reset || self.profile.as_deref() != profile;
         let focused = reset
@@ -154,7 +155,6 @@ impl ConfigInputs {
                 self.fields.iter().find_map(|(&key, field)| {
                     field
                         .input
-                        .read(cx)
                         .focus_handle(cx)
                         .is_focused(window)
                         .then_some(key)
@@ -174,7 +174,7 @@ impl ConfigInputs {
         self.sniffer = SnifferInputs::new(config, &mut factory);
         self.tun = TunInputs::new(config, &mut factory);
         if let Some(field) = focused.and_then(|key| self.fields.get(key)) {
-            field.input.update(cx, |input, cx| input.focus(window, cx));
+            field.input.focus_handle(cx).focus(window, cx);
         }
         self.profile = profile.map(Path::to_path_buf);
         self.reset = false;
@@ -199,7 +199,7 @@ impl FieldBaseline {
 }
 
 struct InputField {
-    input: Entity<InputState>,
+    input: AnyInputState,
     baseline: FieldBaseline,
     placeholder: SharedString,
 }
@@ -224,20 +224,26 @@ pub(super) fn config_source(config: &Value, keys: &[&str]) -> Value {
     )
 }
 
-pub(super) struct InputFactory<'a, 'b> {
+pub(super) struct InputFactory<'a> {
     window: &'a mut Window,
-    cx: &'a mut Context<'b, super::RuntimePage>,
+    cx: &'a mut gpui_kit::App,
     fields: &'a mut HashMap<&'static str, InputField>,
 }
 
-impl InputFactory<'_, '_> {
+impl InputFactory<'_> {
     pub(super) fn single(
         &mut self,
         key: &'static str,
         value: String,
         placeholder: impl Into<SharedString>,
     ) -> Entity<InputState> {
-        self.field(key, value, placeholder.into(), false)
+        self.field(
+            key,
+            value,
+            placeholder.into(),
+            |state| state.as_input().cloned(),
+            InputState::new,
+        )
     }
 
     fn multi(
@@ -245,21 +251,33 @@ impl InputFactory<'_, '_> {
         key: &'static str,
         value: String,
         placeholder: impl Into<SharedString>,
-    ) -> Entity<InputState> {
-        self.field(key, value, placeholder.into(), true)
+    ) -> Entity<TextareaState> {
+        self.field(
+            key,
+            value,
+            placeholder.into(),
+            |state| state.as_textarea().cloned(),
+            |window, cx| TextareaState::new(window, cx).auto_grow(2, 7),
+        )
     }
 
-    fn field(
+    fn field<M: InputModeKind>(
         &mut self,
         key: &'static str,
         value: String,
         placeholder: SharedString,
-        multiline: bool,
-    ) -> Entity<InputState> {
-        if let Some(field) = self.fields.get_mut(key) {
-            let current = field.input.read(self.cx).value();
+        cached: impl FnOnce(&AnyInputState) -> Option<Entity<InputBaseState<M>>>,
+        create: impl FnOnce(&mut Window, &mut Context<InputBaseState<M>>) -> InputBaseState<M>,
+    ) -> Entity<InputBaseState<M>>
+    where
+        AnyInputState: From<Entity<InputBaseState<M>>>,
+    {
+        if let Some(field) = self.fields.get_mut(key)
+            && let Some(input) = cached(&field.input)
+        {
+            let current = input.read(self.cx).value();
             if let Some(value) = field.baseline.refresh(&current, value) {
-                field.input.update(self.cx, |input, cx| {
+                input.update(self.cx, |input, cx| {
                     let focused = input.focus_handle(cx).is_focused(self.window);
                     let cursor = input.cursor_position();
                     input.set_value(value, self.window, cx);
@@ -269,24 +287,22 @@ impl InputFactory<'_, '_> {
                 });
             }
             if field.placeholder != placeholder {
-                field.input.update(self.cx, |input, cx| {
+                input.update(self.cx, |input, cx| {
                     input.set_placeholder(placeholder.clone(), self.window, cx)
                 });
                 field.placeholder = placeholder;
             }
-            return field.input.clone();
+            return input;
         }
-        let input = input(
-            value.clone(),
-            placeholder.clone(),
-            multiline,
-            self.window,
-            self.cx,
-        );
+        let input = self.cx.new(|cx| {
+            create(self.window, cx)
+                .placeholder(placeholder.clone())
+                .default_value(value.clone())
+        });
         self.fields.insert(
             key,
             InputField {
-                input: input.clone(),
+                input: input.clone().into(),
                 baseline: FieldBaseline(value),
                 placeholder,
             },
@@ -296,7 +312,7 @@ impl InputFactory<'_, '_> {
 }
 
 impl DnsInputs {
-    fn new(config: &Value, factory: &mut InputFactory<'_, '_>) -> Self {
+    fn new(config: &Value, factory: &mut InputFactory<'_>) -> Self {
         Self {
             enhanced_mode: factory.single(
                 "/dns/enhanced-mode",
@@ -372,7 +388,7 @@ impl DnsInputs {
         }
     }
 
-    pub fn patch(&self, cx: &gpui::App) -> Result<Value, String> {
+    pub fn patch(&self, cx: &gpui_kit::App) -> Result<Value, String> {
         let enhanced_mode = text(&self.enhanced_mode, cx);
         if !enhanced_mode.is_empty()
             && !matches!(enhanced_mode.as_str(), "fake-ip" | "redir-host" | "normal")
@@ -507,7 +523,7 @@ impl DnsInputs {
 }
 
 impl SnifferInputs {
-    fn new(config: &Value, factory: &mut InputFactory<'_, '_>) -> Self {
+    fn new(config: &Value, factory: &mut InputFactory<'_>) -> Self {
         Self {
             http_ports: factory.single(
                 "/sniffer/sniff/HTTP/ports",
@@ -548,7 +564,7 @@ impl SnifferInputs {
         }
     }
 
-    pub fn patch(&self, cx: &gpui::App) -> Value {
+    pub fn patch(&self, cx: &gpui_kit::App) -> Value {
         let mut sniff = Map::new();
         for (key, input, pointer) in [
             ("HTTP", &self.http_ports, "/sniffer/sniff/HTTP/ports"),
@@ -608,7 +624,7 @@ impl SnifferInputs {
 }
 
 impl TunInputs {
-    fn new(config: &Value, factory: &mut InputFactory<'_, '_>) -> Self {
+    fn new(config: &Value, factory: &mut InputFactory<'_>) -> Self {
         Self {
             stack: factory.single(
                 "/tun/stack",
@@ -644,7 +660,7 @@ impl TunInputs {
         }
     }
 
-    pub fn patch(&self, cx: &gpui::App) -> Result<Value, String> {
+    pub fn patch(&self, cx: &gpui_kit::App) -> Result<Value, String> {
         let stack = text(&self.stack, cx);
         if !stack.is_empty() && !matches!(stack.as_str(), "gvisor" | "mixed" | "system") {
             return Err(zenclash_i18n::text("config_inputs.errors.tun_stack"));
@@ -722,8 +738,8 @@ fn insert_optional_string(
 fn insert_optional_lines(
     map: &mut Map<String, Value>,
     key: &str,
-    input: &Entity<InputState>,
-    cx: &gpui::App,
+    input: &Entity<TextareaState>,
+    cx: &gpui_kit::App,
     source: &Value,
     pointer: &str,
 ) {
@@ -750,30 +766,14 @@ fn insert_optional_mapping(
     Ok(())
 }
 
-fn input(
-    value: String,
-    placeholder: SharedString,
-    multiline: bool,
-    window: &mut Window,
-    cx: &mut Context<super::RuntimePage>,
-) -> Entity<InputState> {
-    cx.new(|cx| {
-        let state = InputState::new(window, cx)
-            .placeholder(placeholder)
-            .default_value(value);
-        if multiline {
-            state.auto_grow(2, 7)
-        } else {
-            state
-        }
-    })
-}
-
-pub(super) fn text(input: &Entity<InputState>, cx: &gpui::App) -> String {
+pub(super) fn text<M: InputModeKind>(
+    input: &Entity<InputBaseState<M>>,
+    cx: &gpui_kit::App,
+) -> String {
     input.read(cx).value().trim().to_owned()
 }
 
-fn lines(input: &Entity<InputState>, cx: &gpui::App) -> Vec<String> {
+fn lines(input: &Entity<TextareaState>, cx: &gpui_kit::App) -> Vec<String> {
     text(input, cx)
         .lines()
         .map(str::trim)
@@ -782,7 +782,7 @@ fn lines(input: &Entity<InputState>, cx: &gpui::App) -> Vec<String> {
         .collect()
 }
 
-fn csv(input: &Entity<InputState>, cx: &gpui::App) -> Vec<String> {
+fn csv(input: &Entity<InputState>, cx: &gpui_kit::App) -> Vec<String> {
     text(input, cx)
         .split(',')
         .map(str::trim)
@@ -791,7 +791,7 @@ fn csv(input: &Entity<InputState>, cx: &gpui::App) -> Vec<String> {
         .collect()
 }
 
-fn ports(input: &Entity<InputState>, cx: &gpui::App) -> Vec<Value> {
+fn ports(input: &Entity<InputState>, cx: &gpui_kit::App) -> Vec<Value> {
     csv(input, cx)
         .into_iter()
         .map(|port| {
@@ -886,6 +886,10 @@ fn config_mapping(config: &Value, pointer: &str) -> String {
         .trim()
         .to_owned()
 }
+
+#[cfg(test)]
+#[path = "config_inputs/ui_tests.rs"]
+mod ui_tests;
 
 #[cfg(test)]
 mod tests {

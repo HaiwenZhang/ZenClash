@@ -4,9 +4,9 @@ use super::{
     ActiveTheme, App, Context, Focusable, InteractiveElement, IntoElement, Page, ParentElement,
     Render, Sidebar, Styled, TitleBar, Window, ZenClashApp, div, h_flex, v_flex,
 };
-use gpui::prelude::FluentBuilder as _;
-use gpui::{ClickEvent, MouseButton, Pixels, RenderOnce, StatefulInteractiveElement as _, px};
-use gpui_component::{Icon, IconName, Sizable as _};
+use gpui_kit::component::{Icon, IconName, Sizable as _};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::{ClickEvent, MouseButton, Pixels, RenderOnce, StatefulInteractiveElement as _, px};
 
 const MAIN_WINDOW_TITLE_BAR_SELECTOR: &str = "main-window-title-bar";
 const MAIN_WINDOW_DRAG_SELECTOR: &str = "main-window-drag-area";
@@ -178,7 +178,7 @@ fn main_window_title_bar(
 }
 
 impl Focusable for ZenClashApp {
-    fn focus_handle(&self, _: &App) -> gpui::FocusHandle {
+    fn focus_handle(&self, _: &App) -> gpui_kit::FocusHandle {
         self.focus_handle.clone()
     }
 }
@@ -244,7 +244,7 @@ impl Render for ZenClashApp {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Element, ElementId, IntoElement};
+    use gpui_kit::{Element, ElementId, IntoElement};
 
     use super::{
         MAIN_WINDOW_CLOSE_SELECTOR, MAIN_WINDOW_MINIMIZE_SELECTOR, MAIN_WINDOW_TITLE_BAR_SELECTOR,

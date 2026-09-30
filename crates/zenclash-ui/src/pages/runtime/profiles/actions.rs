@@ -376,7 +376,7 @@ impl RuntimePage {
                 }
             });
             if let Some(focus) = restore_focus {
-                let _ = cx.update_window(window_handle, |_, window, _| focus.focus(window));
+                let _ = cx.update_window(window_handle, |_, window, cx| focus.focus(window, cx));
             }
         })
         .detach();

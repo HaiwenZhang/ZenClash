@@ -1,14 +1,14 @@
-use gpui::{Menu, MenuItem};
+use gpui_kit::{Menu, MenuItem};
 
 use super::{
     App, AppContext, AppPreferences, AppPreferencesStore, AppServices, AppearancePreference,
-    KeyBinding, LogMonitor, NetworkTrayIcon, Quit, Root, SharedString, ShowStatusMenu, ThemeMode,
+    KeyBinding, LogMonitor, NetworkTrayIcon, Quit, SharedString, ShowStatusMenu, ThemeMode,
     TitleBar, ToggleFloatingWindow, WindowBounds, WindowOptions, ZenClashApp, apply_zen_theme, px,
 };
 
 /// Registers `ZenClash` actions, native menus, and platform-appropriate key bindings.
 pub fn init(cx: &mut App) {
-    gpui_component::init(cx);
+    gpui_kit::init(cx);
     cx.bind_keys([KeyBinding::new(
         "escape",
         super::CloseStatusPanel,
@@ -35,14 +35,15 @@ pub(super) fn refresh_native_app_menu(cx: &mut App) {
         cx.set_menus(vec![Menu {
             name: zenclash_i18n::text("app.menu.title").into(),
             items: vec![MenuItem::action(zenclash_i18n::text("app.menu.quit"), Quit)],
+            disabled: false,
         }]);
     }
 }
 
 #[cfg(target_os = "macos")]
 fn keep_main_window_alive_when_closed(
-    window: &gpui::Window,
-    app: gpui::WeakEntity<ZenClashApp>,
+    window: &gpui_kit::Window,
+    app: gpui_kit::WeakEntity<ZenClashApp>,
     cx: &App,
 ) {
     window.on_window_should_close(cx, move |window, cx| {
@@ -59,7 +60,10 @@ fn keep_main_window_alive_when_closed(
 pub fn create_main_window(services: AppServices, cx: &mut App) {
     let title = SharedString::from("ZenClash");
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::centered(gpui::size(px(1280.), px(820.)), cx)),
+        window_bounds: Some(WindowBounds::centered(
+            gpui_kit::size(px(1280.), px(820.)),
+            cx,
+        )),
         titlebar: Some(TitleBar::title_bar_options()),
         ..Default::default()
     };
@@ -86,17 +90,20 @@ pub fn create_main_window(services: AppServices, cx: &mut App) {
     .detach();
 
     cx.spawn(async move |cx| {
-        let result = cx.open_window(options, |window, cx| {
-            let theme = match preferences.appearance {
-                AppearancePreference::System => ThemeMode::from(window.appearance()),
-                AppearancePreference::Dark => ThemeMode::Dark,
-                AppearancePreference::Light => ThemeMode::Light,
-            };
-            apply_zen_theme(theme, Some(window), cx);
-            window.set_window_title(&title);
-            window.activate_window();
-            let network_tray =
-                match NetworkTrayIcon::new(services.core_kind, services.traffic_monitor.clone()) {
+        let result = cx.update(|cx| {
+            gpui_kit::open_window(options, cx, |window, cx| {
+                let theme = match preferences.appearance {
+                    AppearancePreference::System => ThemeMode::from(window.appearance()),
+                    AppearancePreference::Dark => ThemeMode::Dark,
+                    AppearancePreference::Light => ThemeMode::Light,
+                };
+                apply_zen_theme(theme, Some(window), cx);
+                window.set_window_title(&title);
+                window.activate_window();
+                let network_tray = match NetworkTrayIcon::new(
+                    services.core_kind,
+                    services.traffic_monitor.clone(),
+                ) {
                     Ok(tray) => {
                         if let Err(error) = tray.set_visible(preferences.traffic_tray_visible) {
                             tracing::warn!(%error, "failed to restore traffic tray visibility");
@@ -108,23 +115,24 @@ pub fn create_main_window(services: AppServices, cx: &mut App) {
                         None
                     }
                 };
-            let app = cx.new(|cx| {
-                ZenClashApp::new(
-                    services,
-                    network_tray,
-                    preferences_store,
-                    preferences,
-                    window,
-                    cx,
-                )
-            });
-            #[cfg(target_os = "macos")]
-            keep_main_window_alive_when_closed(window, app.downgrade(), cx);
-            let app_for_global_quit = app.downgrade();
-            cx.on_action(move |_: &Quit, cx| {
-                let _ = app_for_global_quit.update(cx, |app, cx| app.begin_quit(None, cx));
-            });
-            cx.new(|cx| Root::new(app, window, cx))
+                let app = cx.new(|cx| {
+                    ZenClashApp::new(
+                        services,
+                        network_tray,
+                        preferences_store,
+                        preferences,
+                        window,
+                        cx,
+                    )
+                });
+                #[cfg(target_os = "macos")]
+                keep_main_window_alive_when_closed(window, app.downgrade(), cx);
+                let app_for_global_quit = app.downgrade();
+                cx.on_action(move |_: &Quit, cx| {
+                    let _ = app_for_global_quit.update(cx, |app, cx| app.begin_quit(None, cx));
+                });
+                app
+            })
         });
         if let Err(error) = result {
             tracing::error!(%error, "failed to open ZenClash window");

@@ -109,9 +109,9 @@ impl RuntimePage {
 
     pub(super) fn render_rules(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let rules = match &self.data {
             RuntimeData::Rules(data) => data.rules.as_slice(),
             _ => &[],
@@ -166,7 +166,7 @@ impl RuntimePage {
                                 div()
                                     .font_family(theme.mono_font_family.clone())
                                     .text_lg()
-                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .font_weight(gpui_kit::FontWeight::BOLD)
                                     .text_color(theme.primary)
                                     .child(if query.is_empty() {
                                         rules.len().to_string()
@@ -250,9 +250,9 @@ impl RuntimePage {
         &self,
         position: usize,
         rule: &zenclash_core::Rule,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let runtime_index = rule.index;
         let stats = rule.extra.as_ref();
         let disabled = stats.is_some_and(|stats| stats.disabled);
@@ -339,7 +339,11 @@ impl RuntimePage {
     }
 }
 
-fn rule_badge(text: String, color: gpui::Hsla, theme: &gpui_component::Theme) -> gpui::Div {
+fn rule_badge(
+    text: String,
+    color: gpui_kit::Hsla,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Div {
     div()
         .px_2()
         .py_1()

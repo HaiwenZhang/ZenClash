@@ -1,10 +1,14 @@
-use gpui::{
-    App, IntoElement, ParentElement, RenderOnce, Styled, Window, div, prelude::FluentBuilder as _,
-    rems,
+use gpui_kit::component::{
+    ActiveTheme, Collapsible, Icon, IconName, Selectable, Sizable,
+    button::Button,
+    button::ButtonVariants,
+    h_flex,
+    sidebar::{Sidebar as GpuiSidebar, SidebarItem},
+    v_flex,
 };
-use gpui_component::{
-    ActiveTheme, Collapsible, Icon, IconName, Selectable, Sizable, button::Button,
-    button::ButtonVariants, h_flex, sidebar::Sidebar as GpuiSidebar, v_flex,
+use gpui_kit::{
+    App, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce, Styled, Window,
+    div, prelude::FluentBuilder as _, rems,
 };
 
 use crate::{
@@ -97,7 +101,7 @@ impl Sidebar {
     }
 }
 
-#[derive(IntoElement)]
+#[derive(Clone, IntoElement)]
 struct SidebarNavigation {
     current_page: Page,
     pages: Vec<Page>,
@@ -122,6 +126,17 @@ impl Collapsible for SidebarNavigation {
 
     fn is_collapsed(&self) -> bool {
         self.collapsed
+    }
+}
+
+impl SidebarItem for SidebarNavigation {
+    fn render(
+        self,
+        id: impl Into<ElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> impl IntoElement {
+        div().id(id).child(RenderOnce::render(self, window, cx))
     }
 }
 
@@ -162,7 +177,7 @@ impl RenderOnce for Sidebar {
             "sidebar.collapse"
         });
 
-        GpuiSidebar::left()
+        GpuiSidebar::new("main-sidebar")
             .w(rems(15.))
             .collapsible(true)
             .collapsed(self.collapsed)
@@ -202,7 +217,7 @@ impl RenderOnce for Sidebar {
                                         .child(
                                             div()
                                                 .text_lg()
-                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                                 .child(zenclash_i18n::text("app.name")),
                                         )
                                         .child(

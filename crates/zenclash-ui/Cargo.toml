@@ -12,9 +12,7 @@ path = "src/main.rs"
 [dependencies]
 chrono.workspace = true
 futures-util.workspace = true
-gpui.workspace = true
-gpui-component.workspace = true
-gpui-component-assets.workspace = true
+gpui-kit.workspace = true
 parking_lot.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
@@ -48,3 +46,6 @@ objc2-foundation = { workspace = true, features = [
     "NSString",
     "NSTimer",
 ] }
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }

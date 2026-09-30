@@ -1,11 +1,6 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use gpui::{
-    AnyWindowHandle, App, AppContext, ClipboardItem, Context, Entity, EventEmitter, Focusable,
-    InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render,
-    StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::FluentBuilder, px,
-};
-use gpui_component::{
+use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable,
     button::{Button, ButtonVariants},
     h_flex,
@@ -13,6 +8,11 @@ use gpui_component::{
     scroll::ScrollableElement,
     switch::Switch,
     v_flex,
+};
+use gpui_kit::{
+    AnyWindowHandle, App, AppContext, ClipboardItem, Context, Entity, EventEmitter, Focusable,
+    InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render,
+    StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::FluentBuilder, px,
 };
 use serde_json::{Value, json};
 use zenclash_core::{
@@ -125,7 +125,7 @@ pub struct RuntimePage {
     error: Option<String>,
     startup_error: Option<String>,
     notice: Option<String>,
-    focus_handle: gpui::FocusHandle,
+    focus_handle: gpui_kit::FocusHandle,
     window_handle: AnyWindowHandle,
     ui_visibility: lifecycle::UiVisibility,
     live_updates_enabled: tokio::sync::watch::Sender<bool>,

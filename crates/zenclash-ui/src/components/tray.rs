@@ -372,7 +372,10 @@ impl NetworkTrayIcon {
         self.icon.show_menu();
     }
 
-    pub(crate) fn panel_anchor(&self, fallback_scale: f32) -> Option<gpui::Bounds<gpui::Pixels>> {
+    pub(crate) fn panel_anchor(
+        &self,
+        fallback_scale: f32,
+    ) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
         let rect = self.icon.rect()?;
         #[cfg(target_os = "macos")]
         let scale = self
@@ -393,9 +396,9 @@ impl NetworkTrayIcon {
         let scale = f64::from(fallback_scale);
         let position = rect.position.to_logical::<f32>(scale);
         let size = rect.size.to_logical::<f32>(scale);
-        Some(gpui::Bounds::new(
-            gpui::point(gpui::px(position.x), gpui::px(position.y)),
-            gpui::size(gpui::px(size.width), gpui::px(size.height)),
+        Some(gpui_kit::Bounds::new(
+            gpui_kit::point(gpui_kit::px(position.x), gpui_kit::px(position.y)),
+            gpui_kit::size(gpui_kit::px(size.width), gpui_kit::px(size.height)),
         ))
     }
 }

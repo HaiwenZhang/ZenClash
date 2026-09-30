@@ -1,5 +1,5 @@
-use gpui::{App, Hsla, Window, rgb};
-use gpui_component::{Theme, ThemeMode};
+use gpui_kit::component::{Theme, ThemeMode};
+use gpui_kit::{App, Hsla, Window, rgb};
 
 /// Primary dark background used by the `ZenClash` visual system.
 pub const DEEP_INK: u32 = 0x0007_1218;
@@ -34,7 +34,7 @@ pub fn color(hex: u32) -> Hsla {
 }
 
 /// Maps combined throughput to the zero-to-100 activity scale used by
-/// `gpui-component` progress indicators.
+/// `GPUI Kit` progress indicators.
 #[must_use]
 pub fn throughput_activity_percent(bytes_per_second: u64) -> f32 {
     const FULL_ACTIVITY_BYTES: u128 = 4 * 1024 * 1024;
@@ -43,7 +43,7 @@ pub fn throughput_activity_percent(bytes_per_second: u64) -> f32 {
     f32::from(u8::try_from(percent).unwrap_or(100))
 }
 
-/// Applies the `ZenClash` "network oscilloscope" palette to gpui-component so
+/// Applies the `ZenClash` "network oscilloscope" palette to GPUI Kit so
 /// every stock component participates in the same visual system.
 pub fn apply_zen_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
     Theme::change(mode, None, cx);
@@ -158,12 +158,11 @@ pub fn apply_zen_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut Ap
 fn configure_theme_metrics(theme: &mut Theme) {
     theme.font_family = ".SystemUIFont".into();
     theme.mono_font_family = "SF Mono".into();
-    theme.font_size = gpui::px(15.);
-    theme.mono_font_size = gpui::px(12.);
-    theme.radius = gpui::px(8.);
-    theme.radius_lg = gpui::px(12.);
+    theme.font_size = gpui_kit::px(15.);
+    theme.mono_font_size = gpui_kit::px(12.);
+    theme.radius = gpui_kit::px(8.);
+    theme.radius_lg = gpui_kit::px(12.);
     theme.shadow = !theme.mode.is_dark();
-    theme.tile_shadow = false;
 }
 
 #[cfg(test)]

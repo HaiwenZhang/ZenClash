@@ -3,13 +3,14 @@ use super::{
     RuntimePage, Styled, config_input_row, empty_dash, h_flex, info_row, json, setting_card,
     setting_switch, v_flex,
 };
+use gpui_kit::component::input::Textarea;
 
 impl RuntimePage {
     pub(super) fn render_dns(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         v_flex()
             .gap_4()
             .child(self.render_dns_switches(theme, cx))
@@ -20,9 +21,9 @@ impl RuntimePage {
 
     fn render_dns_switches(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let config = self.config().cloned().unwrap_or_default();
         setting_card(zenclash_i18n::text("dns.status.title"), theme)
             .child(setting_switch(
@@ -140,100 +141,100 @@ impl RuntimePage {
         self.apply_controlled_config(json!({"dns": {key: value}}), success, cx);
     }
 
-    fn render_dns_resolvers(&self, theme: &gpui_component::Theme) -> gpui::Div {
+    fn render_dns_resolvers(&self, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
         let inputs = &self.config_inputs.dns;
         setting_card(zenclash_i18n::text("dns.resolvers.title"), theme)
             .child(config_input_row(
                 zenclash_i18n::text("dns.resolvers.enhanced_mode"),
                 "fake-ip / redir-host / normal",
-                Input::new(&inputs.enhanced_mode),
+                Input::new(&inputs.enhanced_mode).cleanable(true),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("dns.resolvers.fake_ip_pool"),
                 zenclash_i18n::text("dns.resolvers.fake_ip_pool_description"),
-                Input::new(&inputs.fake_ip_range),
+                Input::new(&inputs.fake_ip_range).cleanable(true),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("dns.resolvers.filter_mode"),
                 "blacklist / whitelist / rule",
-                Input::new(&inputs.fake_ip_filter_mode),
+                Input::new(&inputs.fake_ip_filter_mode).cleanable(true),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("dns.resolvers.fake_ip_filter"),
                 zenclash_i18n::text("dns.resolvers.fake_ip_filter_description"),
-                Input::new(&inputs.fake_ip_filter),
+                Textarea::new(&inputs.fake_ip_filter),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("dns.resolvers.default"),
                 zenclash_i18n::text("dns.resolvers.default_description"),
-                Input::new(&inputs.default_nameserver),
+                Textarea::new(&inputs.default_nameserver),
                 theme,
             ))
             .child(config_input_row(
                 "Nameserver",
                 zenclash_i18n::text("dns.resolvers.nameserver_description"),
-                Input::new(&inputs.nameserver),
+                Textarea::new(&inputs.nameserver),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("dns.resolvers.proxy"),
                 zenclash_i18n::text("dns.resolvers.proxy_description"),
-                Input::new(&inputs.proxy_server_nameserver),
+                Textarea::new(&inputs.proxy_server_nameserver),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("dns.resolvers.direct"),
                 zenclash_i18n::text("dns.resolvers.direct_description"),
-                Input::new(&inputs.direct_nameserver),
+                Textarea::new(&inputs.direct_nameserver),
                 theme,
             ))
             .child(config_input_row(
                 "Fallback",
                 zenclash_i18n::text("dns.resolvers.fallback_description"),
-                Input::new(&inputs.fallback),
+                Textarea::new(&inputs.fallback),
                 theme,
             ))
     }
 
     fn render_dns_policy(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let inputs = &self.config_inputs.dns;
         setting_card(zenclash_i18n::text("dns.policy.title"), theme)
             .child(config_input_row(
                 zenclash_i18n::text("dns.policy.country"),
                 zenclash_i18n::text("dns.policy.country_description"),
-                Input::new(&inputs.fallback_geoip_code),
+                Input::new(&inputs.fallback_geoip_code).cleanable(true),
                 theme,
             ))
             .child(config_input_row(
                 "Fallback IP CIDR",
                 zenclash_i18n::text("dns.policy.cidr_description"),
-                Input::new(&inputs.fallback_ipcidr),
+                Textarea::new(&inputs.fallback_ipcidr),
                 theme,
             ))
             .child(config_input_row(
                 zenclash_i18n::text("dns.policy.domain"),
                 zenclash_i18n::text("dns.policy.domain_description"),
-                Input::new(&inputs.fallback_domain),
+                Textarea::new(&inputs.fallback_domain),
                 theme,
             ))
             .child(config_input_row(
                 "Nameserver Policy",
                 zenclash_i18n::text("dns.policy.nameserver_policy_description"),
-                Input::new(&inputs.nameserver_policy),
+                Textarea::new(&inputs.nameserver_policy),
                 theme,
             ))
             .child(config_input_row(
                 "Hosts",
                 zenclash_i18n::text("dns.policy.hosts_description"),
-                Input::new(&inputs.hosts),
+                Textarea::new(&inputs.hosts),
                 theme,
             ))
             .child(

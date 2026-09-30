@@ -12,7 +12,7 @@ pub mod app;
 pub mod assets;
 /// Reusable GPUI widgets used by the application shell and pages.
 pub mod components;
-/// `ZenClash` colors and gpui-component theme configuration.
+/// `ZenClash` colors and GPUI Kit theme configuration.
 pub mod design;
 /// Navigable application pages and their live Mihomo views.
 pub mod pages;

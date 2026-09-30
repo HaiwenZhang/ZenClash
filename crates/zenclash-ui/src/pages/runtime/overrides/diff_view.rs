@@ -1,4 +1,4 @@
-use gpui::{AnyElement, FontWeight};
+use gpui_kit::{AnyElement, FontWeight};
 use zenclash_core::{ConfigDiffEntry, ConfigDiffKind, ConfigDiffReport};
 
 use super::super::{
@@ -8,8 +8,8 @@ use super::super::{
 
 pub(super) fn render_config_diff(
     report: &ConfigDiffReport,
-    theme: &gpui_component::Theme,
-) -> gpui::Div {
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Div {
     let added = count_kind(report, ConfigDiffKind::Added);
     let removed = count_kind(report, ConfigDiffKind::Removed);
     let changed = count_kind(report, ConfigDiffKind::Changed);
@@ -51,7 +51,7 @@ pub(super) fn render_config_diff(
         )
 }
 
-fn render_diff_entry(entry: &ConfigDiffEntry, theme: &gpui_component::Theme) -> AnyElement {
+fn render_diff_entry(entry: &ConfigDiffEntry, theme: &gpui_kit::component::Theme) -> AnyElement {
     let (label, color) = match entry.kind {
         ConfigDiffKind::Added => (zenclash_i18n::text("overrides.diff.added"), theme.success),
         ConfigDiffKind::Removed => (zenclash_i18n::text("overrides.diff.removed"), theme.danger),
@@ -87,7 +87,7 @@ fn render_diff_entry(entry: &ConfigDiffEntry, theme: &gpui_component::Theme) -> 
         .into_any_element()
 }
 
-fn render_values(entry: &ConfigDiffEntry, theme: &gpui_component::Theme) -> gpui::Div {
+fn render_values(entry: &ConfigDiffEntry, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
     h_flex()
         .items_start()
         .gap_3()
@@ -104,7 +104,11 @@ fn render_values(entry: &ConfigDiffEntry, theme: &gpui_component::Theme) -> gpui
         ))
 }
 
-fn value_column(label: String, value: Option<&str>, theme: &gpui_component::Theme) -> gpui::Div {
+fn value_column(
+    label: String,
+    value: Option<&str>,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Div {
     v_flex()
         .min_w_0()
         .flex_1()

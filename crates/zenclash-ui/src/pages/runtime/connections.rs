@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use gpui_component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 
 use super::{
     AppContext, Button, ButtonVariants, Context, Disableable, Entity, FluentBuilder, Icon,
@@ -273,9 +273,9 @@ impl RuntimePage {
     )]
     pub(super) fn render_connections(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let Some(projection) = &self.connections.projection else {
             return v_flex()
                 .child(Input::new(&self.connections.filter).small())
@@ -675,11 +675,15 @@ fn present_connections(
     result
 }
 
-fn connection_element_id(action: &'static str, id: &str) -> gpui::ElementId {
-    (gpui::ElementId::from(action), id.to_owned()).into()
+fn connection_element_id(action: &'static str, id: &str) -> gpui_kit::ElementId {
+    (gpui_kit::ElementId::from(action), id.to_owned()).into()
 }
 
-fn connection_detail(label: String, value: String, theme: &gpui_component::Theme) -> gpui::Div {
+fn connection_detail(
+    label: String,
+    value: String,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Div {
     h_flex()
         .gap_3()
         .text_xs()

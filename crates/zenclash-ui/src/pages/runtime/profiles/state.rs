@@ -1,5 +1,5 @@
-use gpui::{AppContext, Context, Entity, Window};
-use gpui_component::input::InputState;
+use gpui_kit::component::input::InputState;
+use gpui_kit::{AppContext, Context, Entity, Window};
 use zenclash_core::RemoteProfileRoute;
 
 /// Input and editor state owned by the profiles page.

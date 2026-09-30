@@ -13,9 +13,9 @@ const UPDATE_INTERVALS: [u32; 4] = [60, 6 * 60, 12 * 60, 24 * 60];
 impl RuntimePage {
     pub(super) fn render_managed_profiles(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let mut card = setting_card(zenclash_i18n::text("profiles.catalog.title"), theme);
         if self.profile_catalog.profiles.is_empty() {
             return card.child(empty_state(
@@ -34,9 +34,9 @@ impl RuntimePage {
         &self,
         index: usize,
         profile: &ProfileRecord,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let active = self.profile_catalog.active.as_deref() == Some(profile.id.as_str());
         let source = profile_source(&profile.source);
 
@@ -96,7 +96,7 @@ impl RuntimePage {
         profile: &ProfileRecord,
         active: bool,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let activate_id = profile.id.clone();
         let update_id = profile.id.clone();
         let edit_id = profile.id.clone();
@@ -159,9 +159,9 @@ impl RuntimePage {
         &self,
         index: usize,
         profile: &ProfileRecord,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> gpui_kit::Div {
         let interval_minutes = profile.update_interval_minutes;
         let update_cron = profile.update_cron.clone();
         let auto_update = profile.auto_update;
@@ -273,8 +273,8 @@ fn profile_source(source: &ProfileSource) -> String {
 
 fn render_subscription_usage(
     usage: &SubscriptionUsage,
-    theme: &gpui_component::Theme,
-) -> gpui::AnyElement {
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::AnyElement {
     let quota = if usage.total == 0 {
         zenclash_i18n::text_with(
             "profiles.usage.no_total",
@@ -321,8 +321,8 @@ fn format_subscription_expiry(expire: u64) -> String {
 fn profile_heading(
     profile: &ProfileRecord,
     active: bool,
-    theme: &gpui_component::Theme,
-) -> gpui::Div {
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Div {
     h_flex()
         .gap_2()
         .child(
@@ -333,7 +333,7 @@ fn profile_heading(
         )
         .child(
             div()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .child(profile.name.clone()),
         )
         .child(

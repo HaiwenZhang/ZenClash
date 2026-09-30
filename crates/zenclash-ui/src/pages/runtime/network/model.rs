@@ -88,7 +88,10 @@ pub(super) fn path_observation(
     })
 }
 
-pub(super) fn latency_color(latency: Option<u64>, theme: &gpui_component::Theme) -> gpui::Hsla {
+pub(super) fn latency_color(
+    latency: Option<u64>,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Hsla {
     match latency {
         Some(0..100) => theme.success,
         Some(100..300) => theme.warning,

@@ -1,10 +1,10 @@
-//! Application-owned assets layered on top of the gpui-component icon bundle.
+//! Application-owned assets layered on top of the GPUI Kit icon bundle.
 
 use std::borrow::Cow;
 
-use gpui::{AssetSource, Result, SharedString};
-use gpui_component::IconNamed;
-use gpui_component_assets::Assets as ComponentAssets;
+use gpui_kit::assets::Assets as ComponentAssets;
+use gpui_kit::component::IconNamed;
+use gpui_kit::{AssetSource, Result, SharedString};
 
 /// Asset path for the monochrome `ZenClash` brand mark.
 pub const ZENCLASH_MARK_PATH: &str = "icons/zenclash-mark.svg";
@@ -25,7 +25,7 @@ pub const SQUARE_MOUSE_POINTER_ICON_PATH: &str = "icons/square-mouse-pointer.svg
 /// Asset path for the square exit icon used by export commands.
 pub const SQUARE_ARROW_RIGHT_EXIT_ICON_PATH: &str = "icons/square-arrow-right-exit.svg";
 
-/// Application-owned icons that are not included in gpui-component's bundle.
+/// Application-owned icons that are not included in GPUI Kit's bundle.
 #[derive(Clone, Copy)]
 pub enum AppIcon {
     /// Home destination.
@@ -53,7 +53,7 @@ impl IconNamed for AppIcon {
     }
 }
 
-/// Combined application and gpui-component asset source.
+/// Combined application and GPUI Kit asset source.
 pub struct Assets;
 
 impl AssetSource for Assets {
@@ -130,7 +130,7 @@ impl AssetSource for Assets {
 
 #[cfg(test)]
 mod tests {
-    use gpui::AssetSource as _;
+    use gpui_kit::AssetSource as _;
 
     use super::{
         Assets, GAUGE_ICON_PATH, GROUP_ICON_PATH, HOUSE_ICON_PATH, RADIO_ICON_PATH,

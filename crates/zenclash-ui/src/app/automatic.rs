@@ -1,6 +1,6 @@
 use std::{path::PathBuf, time::Duration};
 
-use gpui::Context;
+use gpui_kit::Context;
 use zenclash_core::{NetworkReachability, YamlOverrideStore};
 
 use super::{ZenClashApp, system_proxy::QuitState};

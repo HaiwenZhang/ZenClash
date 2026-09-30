@@ -1,8 +1,8 @@
 use super::{
-    App, Disableable, FluentBuilder, Icon, IconName, Input, IntoElement, ParentElement, Styled,
-    Switch, Window, div, h_flex, px, v_flex,
+    App, Disableable, FluentBuilder, Icon, IconName, IntoElement, ParentElement, Styled, Switch,
+    Window, div, h_flex, px, v_flex,
 };
-use gpui::SharedString;
+use gpui_kit::SharedString;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ListPage {
@@ -58,9 +58,9 @@ pub(super) fn pagination_summary(page: ListPage, total: usize) -> String {
 }
 
 pub(super) fn setting_card(
-    title: impl Into<gpui::SharedString>,
-    theme: &gpui_component::Theme,
-) -> gpui::Div {
+    title: impl Into<gpui_kit::SharedString>,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Div {
     let title = title.into();
     v_flex()
         .rounded(theme.radius_lg)
@@ -78,7 +78,7 @@ pub(super) fn setting_card(
                 .border_color(theme.border)
                 .bg(theme.muted.opacity(0.34))
                 .text_sm()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .child(div().size(px(6.)).rounded_full().bg(theme.primary))
                 .child(title),
         )
@@ -87,9 +87,9 @@ pub(super) fn setting_card(
 pub(super) fn config_input_row(
     label: impl Into<SharedString>,
     description: impl Into<SharedString>,
-    input: Input,
-    theme: &gpui_component::Theme,
-) -> gpui::AnyElement {
+    input: impl IntoElement,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::AnyElement {
     let label = label.into();
     let description = description.into();
     h_flex()
@@ -113,15 +113,15 @@ pub(super) fn config_input_row(
                         .child(description),
                 ),
         )
-        .child(div().flex_1().max_w(px(680.)).child(input.cleanable(true)))
+        .child(div().flex_1().max_w(px(680.)).child(input))
         .into_any_element()
 }
 
 pub(super) fn info_row(
     label: impl ToString,
     value: impl ToString,
-    theme: &gpui_component::Theme,
-) -> gpui::AnyElement {
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::AnyElement {
     let label = SharedString::from(label.to_string());
     let value = SharedString::from(value.to_string());
     h_flex()
@@ -149,13 +149,13 @@ pub(super) fn info_row(
 }
 
 pub(super) fn setting_switch<F>(
-    label: impl Into<gpui::SharedString>,
-    description: impl Into<gpui::SharedString>,
+    label: impl Into<gpui_kit::SharedString>,
+    description: impl Into<gpui_kit::SharedString>,
     checked: bool,
     id: &'static str,
-    theme: &gpui_component::Theme,
+    theme: &gpui_kit::component::Theme,
     listener: F,
-) -> gpui::AnyElement
+) -> gpui_kit::AnyElement
 where
     F: Fn(&bool, &mut Window, &mut App) + 'static,
 {
@@ -163,14 +163,14 @@ where
 }
 
 pub(super) fn setting_switch_disabled<F>(
-    label: impl Into<gpui::SharedString>,
-    description: impl Into<gpui::SharedString>,
+    label: impl Into<gpui_kit::SharedString>,
+    description: impl Into<gpui_kit::SharedString>,
     checked: bool,
     id: &'static str,
-    theme: &gpui_component::Theme,
+    theme: &gpui_kit::component::Theme,
     disabled: bool,
     listener: F,
-) -> gpui::AnyElement
+) -> gpui_kit::AnyElement
 where
     F: Fn(&bool, &mut Window, &mut App) + 'static,
 {
@@ -203,9 +203,9 @@ where
 pub(super) fn metric(
     label: impl ToString,
     value: String,
-    color: gpui::Hsla,
-    theme: &gpui_component::Theme,
-) -> gpui::AnyElement {
+    color: gpui_kit::Hsla,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::AnyElement {
     let label = SharedString::from(label.to_string());
     v_flex()
         .relative()
@@ -232,7 +232,7 @@ pub(super) fn metric(
         .child(
             div()
                 .text_size(px(10.))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .text_color(theme.muted_foreground)
                 .child(label),
         )
@@ -240,7 +240,7 @@ pub(super) fn metric(
             div()
                 .font_family(theme.mono_font_family.clone())
                 .text_lg()
-                .font_weight(gpui::FontWeight::BOLD)
+                .font_weight(gpui_kit::FontWeight::BOLD)
                 .text_color(color)
                 .child(value),
         )
@@ -249,9 +249,9 @@ pub(super) fn metric(
 
 pub(super) fn message_banner(
     message: String,
-    color: gpui::Hsla,
-    theme: &gpui_component::Theme,
-) -> gpui::AnyElement {
+    color: gpui_kit::Hsla,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::AnyElement {
     h_flex()
         .gap_3()
         .p_3()
@@ -277,9 +277,9 @@ pub(super) fn message_banner(
 }
 
 pub(super) fn empty_state(
-    message: impl Into<gpui::SharedString>,
-    theme: &gpui_component::Theme,
-) -> gpui::AnyElement {
+    message: impl Into<gpui_kit::SharedString>,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::AnyElement {
     let message = message.into();
     div()
         .p_5()

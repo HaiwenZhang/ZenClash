@@ -5,7 +5,7 @@
 <h1 align="center">ZenClash</h1>
 
 <p align="center">
-  基于 Rust 与 GPUI 的原生 Mihomo 桌面客户端<br>
+  基于 Rust 与 GPUI Kit 的原生 Mihomo 桌面客户端<br>
   在 macOS、Windows 和 Linux 上管理订阅、切换节点、查看流量。
 </p>
 
@@ -73,7 +73,7 @@ cargo test --workspace --all-features --locked
 
 完整 Clippy 规则见 [CI 工作流](.github/workflows/ci.yml)。真实内核集成测试默认忽略，需要提供内核路径后显式运行。
 
-更多开发资料：[打包脚本](scripts) · [开发与验收文档](docs/development) · [项目规约](AGENTS.md)。
+更多开发资料：[打包脚本](scripts) · [开发与验收文档](docs/development) · [项目规约](AGENTS.md) · [GPUI Kit 迁移与 Windows 验收](docs/development/gpui-kit-migration.md)。
 
 ## 数据与隐私
 
@@ -88,6 +88,6 @@ cargo test --workspace --all-features --locked
 
 ## 致谢与许可证
 
-感谢 [Mihomo](https://github.com/MetaCubeX/mihomo)、[GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) 和 [GPUI Component](https://github.com/longbridge/gpui-component)。
+感谢 [Mihomo](https://github.com/MetaCubeX/mihomo)、[GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) 和 [GPUI Kit](https://github.com/longbridge/gpui-kit)。
 
 ZenClash 采用 [GPL-3.0-only](LICENSE) 许可证。Copyright © 2026 Haiwen Zhang。

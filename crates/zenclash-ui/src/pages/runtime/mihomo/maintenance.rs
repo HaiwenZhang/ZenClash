@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use gpui::{Context, IntoElement, ParentElement, Styled, prelude::FluentBuilder};
-use gpui_component::{
+use gpui_kit::component::{
     Disableable, IconName, Sizable,
     button::{Button, ButtonVariants},
     h_flex, v_flex,
 };
+use gpui_kit::{Context, IntoElement, ParentElement, Styled, prelude::FluentBuilder};
 use zenclash_core::{MihomoClient, MihomoProcess, MihomoRelease, MihomoReleaseService};
 
 use super::super::{
@@ -124,9 +124,9 @@ impl RuntimePage {
         &self,
         current_version: &str,
         managed_process: bool,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let releases = self.core_releases.releases.clone();
         setting_card(
             zenclash_i18n::text("core_page.maintenance.versioned_title"),
@@ -163,7 +163,7 @@ impl RuntimePage {
                         .gap_1()
                         .child(
                             h_flex().gap_2().child(release.tag.clone()).child(
-                                gpui::div()
+                                gpui_kit::div()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
                                     .child(if release.prerelease {
@@ -174,7 +174,7 @@ impl RuntimePage {
                             ),
                         )
                         .child(
-                            gpui::div()
+                            gpui_kit::div()
                                 .text_xs()
                                 .text_color(theme.muted_foreground)
                                 .child(format!(

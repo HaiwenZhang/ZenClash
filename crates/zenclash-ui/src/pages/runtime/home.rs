@@ -3,8 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use gpui::{IntoElement, ParentElement, SharedString, Styled, div, px, rems};
-use gpui_component::{
+use gpui_kit::component::{
     Disableable, Icon, IconName, Selectable, Sizable,
     button::{Button, ButtonVariants},
     chart::AreaChart,
@@ -14,6 +13,7 @@ use gpui_component::{
     switch::Switch,
     v_flex,
 };
+use gpui_kit::{IntoElement, ParentElement, SharedString, Styled, div, px, rems};
 use zenclash_core::{
     CapabilityState, CaptureOutcome, CapturePlan, CaptureStatus, ConnectionPolicy, Observation,
     OperationalSnapshot, ProcessRecoveryStatus, ProcessStatus, ProxyCatalog, ProxyGroup,
@@ -70,9 +70,9 @@ struct ModeTransition {
 impl RuntimePage {
     pub(in crate::pages::runtime) fn render_home(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let fallback_config = RuntimeConfig::default();
         let fallback_proxies = ProxyCatalog::default();
         let (config, proxies) = match &self.data {
@@ -143,8 +143,8 @@ impl RuntimePage {
     fn render_home_evidence(
         &self,
         operational: &OperationalSnapshot,
-        theme: &gpui_component::Theme,
-    ) -> gpui::AnyElement {
+        theme: &gpui_kit::component::Theme,
+    ) -> gpui_kit::AnyElement {
         let process = operational.process.value();
         let controller = operational.controller.value();
         let controller_ready = controller.is_some_and(|controller| controller.authenticated);
@@ -215,9 +215,9 @@ impl RuntimePage {
 
     fn render_home_profile(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let active = self.profile_catalog.active_profile();
         let name = active.map_or_else(
             || zenclash_i18n::text("home.profile.none"),
@@ -326,7 +326,12 @@ impl RuntimePage {
                                         .child(usage),
                                 ),
                         )
-                        .child(Progress::new().h_1().bg(theme.primary).value(usage_percent)),
+                        .child(
+                            Progress::new("traffic-activity")
+                                .h_1()
+                                .color(theme.primary)
+                                .value(usage_percent),
+                        ),
                 )
                 .child(div().flex_1())
                 .child(
@@ -349,9 +354,9 @@ impl RuntimePage {
         &self,
         config: &RuntimeConfig,
         proxies: &ProxyCatalog,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let selection = current_proxy_summary(config, proxies);
         let latency_color = match selection.delay {
             Some(1..=499) => theme.success,
@@ -484,9 +489,9 @@ impl RuntimePage {
         &self,
         config: &RuntimeConfig,
         capture: &CaptureStatus,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let transition = self.home.capture_transition.as_ref();
         let effective_capture = transition
             .and_then(|transition| transition.confirmed.as_ref())
@@ -580,7 +585,7 @@ impl RuntimePage {
                                         .child(
                                             div()
                                                 .text_sm()
-                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                                 .child(zenclash_i18n::text("tray.system_proxy")),
                                         )
                                         .child(
@@ -616,7 +621,7 @@ impl RuntimePage {
                                         .child(
                                             div()
                                                 .text_sm()
-                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                                 .child(zenclash_i18n::text("home.controls.tun")),
                                         )
                                         .child(
@@ -677,7 +682,7 @@ impl RuntimePage {
                                 .child(
                                     div()
                                         .text_sm()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                         .child(zenclash_i18n::text("home.controls.routing_mode")),
                                 )
                                 .child(div().text_xs().text_color(theme.muted_foreground).child(
@@ -724,8 +729,8 @@ impl RuntimePage {
     fn render_home_traffic(
         &self,
         streams: &StreamStatuses,
-        theme: &gpui_component::Theme,
-    ) -> gpui::AnyElement {
+        theme: &gpui_kit::component::Theme,
+    ) -> gpui_kit::AnyElement {
         let traffic = self.traffic_monitor.snapshot();
         let (traffic_status, status_color) = stream_status_text(&streams.traffic, theme);
         let (connections_status, connections_color) =
@@ -1318,8 +1323,8 @@ fn capture_status_text(capture: &CaptureStatus) -> String {
 
 fn process_evidence(
     process: Option<&ProcessStatus>,
-    theme: &gpui_component::Theme,
-) -> (String, gpui::Hsla) {
+    theme: &gpui_kit::component::Theme,
+) -> (String, gpui_kit::Hsla) {
     let (key, attempts) = process_evidence_copy(process);
     let text = attempts.map_or_else(
         || zenclash_i18n::text(key),
@@ -1375,8 +1380,8 @@ fn process_evidence_copy(process: Option<&ProcessStatus>) -> (&'static str, Opti
 
 fn stream_status_text(
     observation: &Observation<StreamStatus>,
-    theme: &gpui_component::Theme,
-) -> (String, gpui::Hsla) {
+    theme: &gpui_kit::component::Theme,
+) -> (String, gpui_kit::Hsla) {
     match observation {
         Observation::Fresh { .. } => (zenclash_i18n::text("home.traffic.live"), theme.success),
         Observation::Stale { observed_at_ms, .. } => (
@@ -1400,8 +1405,8 @@ fn stream_status_text(
 fn home_card(
     title: impl Into<SharedString>,
     icon: IconName,
-    theme: &gpui_component::Theme,
-) -> gpui::Div {
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Div {
     let title = title.into();
     v_flex()
         .min_w(rems(20.))
@@ -1433,7 +1438,7 @@ fn home_card(
                 .child(
                     div()
                         .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                         .child(title),
                 ),
         )
@@ -1447,7 +1452,7 @@ fn mode_button<A>(
     action: A,
 ) -> Button
 where
-    A: gpui::Action + Clone + 'static,
+    A: gpui_kit::Action + Clone + 'static,
 {
     let is_selected = value == selected;
     Button::new(id)
@@ -1535,9 +1540,9 @@ fn observed_capture_plan(capture: &CaptureStatus) -> Option<CapturePlan> {
 
 fn status_label(
     label: impl Into<SharedString>,
-    color: gpui::Hsla,
-    theme: &gpui_component::Theme,
-) -> gpui::AnyElement {
+    color: gpui_kit::Hsla,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::AnyElement {
     let label = label.into();
     h_flex()
         .gap_2()
@@ -1551,9 +1556,9 @@ fn status_label(
 fn series_label(
     label: impl Into<SharedString>,
     value: String,
-    color: gpui::Hsla,
-    theme: &gpui_component::Theme,
-) -> gpui::AnyElement {
+    color: gpui_kit::Hsla,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::AnyElement {
     let label = label.into();
     h_flex()
         .gap_2()
@@ -1563,7 +1568,7 @@ fn series_label(
         .child(
             div()
                 .font_family(theme.mono_font_family.clone())
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .child(value),
         )
         .into_any_element()
@@ -1572,9 +1577,9 @@ fn series_label(
 fn traffic_metric(
     label: impl Into<SharedString>,
     value: String,
-    color: gpui::Hsla,
-    theme: &gpui_component::Theme,
-) -> gpui::AnyElement {
+    color: gpui_kit::Hsla,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::AnyElement {
     let label = label.into();
     v_flex()
         .min_w(rems(7.5))
@@ -1590,7 +1595,7 @@ fn traffic_metric(
             div()
                 .font_family(theme.mono_font_family.clone())
                 .text_sm()
-                .font_weight(gpui::FontWeight::BOLD)
+                .font_weight(gpui_kit::FontWeight::BOLD)
                 .text_color(color)
                 .child(value),
         )

@@ -504,7 +504,12 @@ impl ProxiesPage {
         cx.spawn(async move |this, cx| {
             let mut failures = 0usize;
             let mut first_error = None;
-            while let Some(batch) = receive_batch(&mut receiver).await {
+            while let Some(batch) = receive_batch(&mut receiver, || {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+            })
+            .await
+            {
                 let applied = this.update(cx, |this, cx| {
                     if !token.is_current(this.delay_generation) {
                         return false;
@@ -640,9 +645,12 @@ impl Drop for PresentationTasks {
     }
 }
 
-async fn receive_batch<T>(receiver: &mut tokio::sync::mpsc::Receiver<T>) -> Option<Vec<T>> {
+async fn receive_batch<T, D: std::future::Future<Output = ()>>(
+    receiver: &mut tokio::sync::mpsc::Receiver<T>,
+    delay: impl FnOnce() -> D,
+) -> Option<Vec<T>> {
     let first = receiver.recv().await?;
-    gpui::Timer::after(std::time::Duration::from_millis(50)).await;
+    delay().await;
     let mut batch = vec![first];
     while batch.len() < 64 {
         let Ok(item) = receiver.try_recv() else {
@@ -658,12 +666,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn batch_wait_can_start_on_the_gpui_executor_without_a_tokio_runtime() {
+    fn coalescing_delay_starts_only_after_the_first_measurement() {
+        use futures_util::FutureExt;
+
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(64);
+        let started = std::cell::Cell::new(false);
+        let mut batch = std::pin::pin!(receive_batch(&mut receiver, || {
+            started.set(true);
+            std::future::pending::<()>()
+        }));
+        assert!(batch.as_mut().now_or_never().is_none());
+        assert!(!started.get());
+        sender.try_send(42).unwrap();
+        assert!(batch.as_mut().now_or_never().is_none());
+        assert!(started.get());
+    }
+
+    #[gpui_kit::test]
+    fn batch_wait_can_start_on_the_gpui_executor_without_a_tokio_runtime(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
         use futures_util::FutureExt;
 
         let (sender, mut receiver) = tokio::sync::mpsc::channel(64);
         sender.try_send(42).unwrap();
-        let _ = receive_batch(&mut receiver).now_or_never();
+        let _ = receive_batch(&mut receiver, || {
+            cx.background_executor
+                .timer(std::time::Duration::from_millis(50))
+        })
+        .now_or_never();
     }
 
     #[tokio::test]
@@ -674,14 +705,28 @@ mod tests {
         }
         drop(sender);
         assert_eq!(
-            receive_batch(&mut receiver).await.unwrap(),
+            receive_batch(&mut receiver, || tokio::time::sleep(
+                std::time::Duration::from_millis(50)
+            ))
+            .await
+            .unwrap(),
             (0..64).collect::<Vec<_>>()
         );
         assert_eq!(
-            receive_batch(&mut receiver).await.unwrap(),
+            receive_batch(&mut receiver, || tokio::time::sleep(
+                std::time::Duration::from_millis(50)
+            ))
+            .await
+            .unwrap(),
             (64..100).collect::<Vec<_>>()
         );
-        assert!(receive_batch(&mut receiver).await.is_none());
+        assert!(
+            receive_batch(&mut receiver, || tokio::time::sleep(
+                std::time::Duration::from_millis(50)
+            ))
+            .await
+            .is_none()
+        );
     }
 
     #[tokio::test]
@@ -690,7 +735,9 @@ mod tests {
         sender.send(42).await.unwrap();
         let batch = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            receive_batch(&mut receiver),
+            receive_batch(&mut receiver, || {
+                tokio::time::sleep(std::time::Duration::from_millis(50))
+            }),
         )
         .await
         .unwrap();

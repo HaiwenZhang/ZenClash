@@ -10,7 +10,6 @@ use std::{
     time::Duration,
 };
 
-use gpui::Application;
 use tracing_subscriber::{EnvFilter, filter::Directive};
 use zenclash_core::{
     AppInstanceLock, AppPreferences, AppPreferencesStore, ControlledConfigStore, CoreKind,
@@ -299,7 +298,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let restart_after_exit = Arc::new(parking_lot::Mutex::new(None));
     let app_restart_after_exit = Arc::clone(&restart_after_exit);
 
-    Application::new().with_assets(Assets).run(move |cx| {
+    gpui_kit::application().with_assets(Assets).run(move |cx| {
         app::init(cx);
         app::create_main_window(
             app::AppServices {

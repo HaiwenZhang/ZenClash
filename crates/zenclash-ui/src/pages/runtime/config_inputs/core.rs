@@ -1,5 +1,5 @@
-use gpui::Entity;
-use gpui_component::input::InputState;
+use gpui_kit::Entity;
+use gpui_kit::component::input::InputState;
 use serde_json::{Map, Value};
 
 use super::{InputFactory, config_number_or_empty, config_source, config_string, text};
@@ -17,7 +17,7 @@ pub(in crate::pages::runtime) struct CoreInputs {
 }
 
 impl CoreInputs {
-    pub(super) fn new(config: &Value, factory: &mut InputFactory<'_, '_>) -> Self {
+    pub(super) fn new(config: &Value, factory: &mut InputFactory<'_>) -> Self {
         Self {
             port: factory.single(
                 "/port",
@@ -75,7 +75,7 @@ impl CoreInputs {
         }
     }
 
-    pub(in crate::pages::runtime) fn patch(&self, cx: &gpui::App) -> Result<Value, String> {
+    pub(in crate::pages::runtime) fn patch(&self, cx: &gpui_kit::App) -> Result<Value, String> {
         let log_level = text(&self.log_level, cx).to_ascii_lowercase();
         if !log_level.is_empty()
             && !matches!(

@@ -20,7 +20,7 @@ const DIAGNOSTIC_TOOL_PAGES: [Page; 1] = [Page::Mihomo];
 impl RuntimePage {
     pub(super) fn render_offline_settings(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         v_flex()
@@ -31,9 +31,9 @@ impl RuntimePage {
 
     pub(super) fn render_settings(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let (config, autostart) = match &self.data {
             RuntimeData::Settings { config, autostart } => (config.clone(), autostart.clone()),
             _ => (
@@ -59,7 +59,7 @@ impl RuntimePage {
             .into_any_element()
     }
 
-    fn render_version_info(&self, theme: &gpui_component::Theme) -> impl IntoElement {
+    fn render_version_info(&self, theme: &gpui_kit::component::Theme) -> impl IntoElement {
         let snapshot = self.operational_status.snapshot();
         let bundled = env!("ZENCLASH_BUILD_MIHOMO_VERSION");
         let running = match &snapshot.controller {
@@ -96,7 +96,7 @@ impl RuntimePage {
             ))
     }
 
-    fn render_advanced_tools(&self, theme: &gpui_component::Theme) -> impl IntoElement {
+    fn render_advanced_tools(&self, theme: &gpui_kit::component::Theme) -> impl IntoElement {
         setting_card(zenclash_i18n::text("settings.advanced_tools.title"), theme).child(
             v_flex()
                 .p_4()
@@ -132,7 +132,7 @@ impl RuntimePage {
         &self,
         config: &RuntimeConfig,
         autostart: &AutostartStatus,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         setting_card(zenclash_i18n::text("settings.application.title"), theme)
@@ -189,7 +189,7 @@ impl RuntimePage {
 
     fn language_setting(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         h_flex()
@@ -379,7 +379,7 @@ impl RuntimePage {
 
     fn traffic_history_setting(
         &self,
-        theme: &gpui_component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         v_flex()
@@ -545,8 +545,8 @@ fn advanced_tool_group(
     label: String,
     description: String,
     pages: &'static [Page],
-    theme: &gpui_component::Theme,
-) -> gpui::AnyElement {
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::AnyElement {
     h_flex()
         .items_start()
         .gap_4()
@@ -582,7 +582,7 @@ fn advanced_tool_button(page: Page) -> Button {
         .on_click(move |_, window, cx| dispatch_navigate(page, window, cx))
 }
 
-fn theme_setting(theme: &gpui_component::Theme) -> gpui::Div {
+fn theme_setting(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
     h_flex()
         .min_h(px(58.))
         .px_4()
@@ -638,7 +638,7 @@ fn theme_setting(theme: &gpui_component::Theme) -> gpui::Div {
         )
 }
 
-fn tray_setting(theme: &gpui_component::Theme) -> gpui::Div {
+fn tray_setting(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
     h_flex()
         .min_h(px(58.))
         .px_4()
