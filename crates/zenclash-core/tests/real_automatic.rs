@@ -47,14 +47,13 @@ impl Fixture {
             .wait_until_ready(Duration::from_secs(10))
             .await
             .unwrap();
-        let client = MihomoClient::new(process.endpoint().clone())
+        let client = MihomoClient::from_process(process.clone())
             .unwrap()
-            .with_config_validator(process.config_validator());
-        let session = CoreSession::open(CoreKind::Mihomo, client, Some(process.clone()));
+            .with_config_validator(process.config_validator()).unwrap();
+        let session = CoreSession::open(CoreKind::Mihomo, client).unwrap();
         let capture = TrafficCaptureSession::new(
             session.clone(),
             store.clone(),
-            None,
             None,
             Some(source.clone()),
         );

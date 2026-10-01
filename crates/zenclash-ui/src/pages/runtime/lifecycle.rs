@@ -2,7 +2,7 @@ use super::{
     AppContext, ConfigInputs, ConfigInputsTaskToken, Context, ControlledConfigStore, Duration,
     MihomoLogLevel, Page, PageTaskToken, ProfileActivated, ProfileCatalog, ProfileStore,
     RuntimeConfig, RuntimeConfigApplied, RuntimeData, RuntimePage, RuntimePageServices, Value,
-    Window, YamlOverrideCatalog, YamlOverrideStore, config_input_snapshot, load_page_with_binary,
+    Window, YamlOverrideCatalog, YamlOverrideStore, config_input_snapshot, load_page_with_core,
 };
 use zenclash_core::{CoreApplyKind, EffectiveConfigIntent};
 
@@ -372,10 +372,9 @@ impl RuntimePage {
     ) {
         let name = outcome.name().to_owned();
         self.synchronize_profile_receipt(&outcome, cx);
-        self.notice = Some(zenclash_i18n::text_with(
-            "runtime.lifecycle.profile_updated",
-            &[("name", name)],
-        ));
+        self.notice = Some(outcome.warning().unwrap_or_else(|| {
+            zenclash_i18n::text_with("runtime.lifecycle.profile_updated", &[("name", name)])
+        }));
         cx.notify();
     }
 
@@ -414,6 +413,7 @@ impl RuntimePage {
 
     pub(super) fn synchronize_profile_recovery(&mut self) {
         self.profiles.recovery = self.profile_service.latest_recovery();
+        self.profiles.pending_finalization = self.profile_service.pending_finalization();
     }
 
     pub(crate) fn report_background_profile_error(&mut self, error: &str, cx: &mut Context<Self>) {
@@ -447,7 +447,6 @@ impl RuntimePage {
             log_monitor,
             operational_status,
             traffic_capture,
-            process,
             profile_path,
             controlled_config_store,
             preferences_store,
@@ -499,7 +498,6 @@ impl RuntimePage {
             log_monitor,
             operational_status,
             traffic_capture,
-            process,
             profile_path,
             controlled_config_store,
             controlled_config,
@@ -883,10 +881,10 @@ impl RuntimePage {
         self.error = None;
         let page = self.page;
         let client = self.client.clone();
-        let mihomo_binary = self.mihomo_binary();
+        let core = self.core_session.clone();
         let task = self
             .runtime
-            .spawn(async move { load_page_with_binary(client, page, mihomo_binary).await });
+            .spawn(async move { load_page_with_core(client, page, Some(core)).await });
         self.page_read_task.replace(&task);
         cx.spawn(async move |this, cx| {
             let result = match task.await {
@@ -1144,10 +1142,12 @@ impl RuntimePage {
     ) {
         let name = receipt.name().to_owned();
         if self.synchronize_profile_receipt(&receipt, cx) {
-            self.notice = Some(zenclash_i18n::text_with(
-                "runtime.lifecycle.tray_profile_selected",
-                &[("name", name)],
-            ));
+            self.notice = Some(receipt.warning().unwrap_or_else(|| {
+                zenclash_i18n::text_with(
+                    "runtime.lifecycle.tray_profile_selected",
+                    &[("name", name)],
+                )
+            }));
             self.refresh(cx);
         }
         cx.notify();
@@ -1185,7 +1185,9 @@ impl RuntimePage {
         let mutation = self.mutations.begin(domain)?;
         if matches!(
             domain,
-            super::busy::MutationDomain::Core | super::busy::MutationDomain::Backup
+            super::busy::MutationDomain::Core
+                | super::busy::MutationDomain::Backup
+                | super::busy::MutationDomain::BackupRecovery
         ) {
             self.invalidate_page_load();
         }
@@ -1269,10 +1271,7 @@ impl RuntimePage {
     }
 
     pub(super) fn mihomo_binary(&self) -> Option<std::path::PathBuf> {
-        self.process
-            .as_ref()
-            .map(|process| process.launch_config().binary.clone())
-            .or_else(|| std::env::var_os("ZENCLASH_MIHOMO_BINARY").map(std::path::PathBuf::from))
+        self.core_session.runtime_descriptor().binary().map(std::path::Path::to_path_buf)
     }
 }
 

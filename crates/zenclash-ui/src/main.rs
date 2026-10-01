@@ -15,7 +15,7 @@ use zenclash_core::{
     AppInstanceLock, AppPreferences, AppPreferencesStore, ControlledConfigStore, CoreKind,
     CoreSession, EffectiveConfigIntent, LogMonitor, MihomoClient, MihomoEndpoint,
     MihomoLaunchConfig, MihomoProcess, ProfileStore, TrafficHistoryStore, TrafficMonitor,
-    TunPermissionManager, YamlOverrideStore, bundled_recovery_profile,
+    YamlOverrideStore, bundled_recovery_profile,
 };
 use zenclash_ui::{app, assets::Assets};
 
@@ -249,17 +249,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         core_kind,
         mihomo_process.as_ref(),
     );
-    let client = MihomoClient::new(endpoint.clone())?.with_core_kind(core_kind);
-    let client = mihomo_process.as_ref().map_or(client.clone(), |process| {
-        client.with_config_validator(process.config_validator())
-    });
-    let core_session = CoreSession::open_with_config(
-        core_kind,
-        client.clone(),
-        mihomo_process.clone(),
-        profile_path.clone(),
-        override_paths.clone(),
-    );
+    let client = match &mihomo_process {
+        Some(process) => MihomoClient::from_process(process.clone())?,
+        None => MihomoClient::new(endpoint)?.with_core_kind(core_kind)?,
+    };
+    let core_session = CoreSession::open_with_config(core_kind, client.clone(), profile_path.clone(), override_paths.clone())?;
     if startup_error.is_none()
         && mihomo_process.is_none()
         && core_kind.capabilities().full_config_reload
@@ -278,28 +272,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else if !core_kind.capabilities().full_config_reload {
         tracing::info!(core = %core_kind, "skipping unsupported full configuration hot reload");
     }
-    let traffic = TrafficMonitor::start(runtime.handle(), endpoint.clone());
-    let logs = LogMonitor::start(
+    let traffic = TrafficMonitor::start_with_client(runtime.handle(), client.clone());
+    let logs = LogMonitor::start_with_client(
         runtime.handle(),
-        endpoint,
+        client.clone(),
         zenclash_core::MihomoLogLevel::Info,
     );
     let traffic_history_store = TrafficHistoryStore::discover()
         .inspect_err(|error| tracing::warn!(%error, "failed to discover traffic-history database"))
         .ok();
-    let tun_permissions = mihomo_process
-        .as_ref()
-        .map(|process| process.snapshot().binary)
-        .or_else(|| {
-            std::env::var_os(core_kind.binary_environment_variable()).map(PathBuf::from)
-        })
-        .and_then(|binary| {
-            TunPermissionManager::new(&binary)
-                .inspect_err(|error| {
-                    tracing::warn!(%error, path = %binary.display(), "TUN permission manager unavailable");
-                })
-                .ok()
-        });
     let runtime_handle = runtime.handle().clone();
     let traffic_history_session = traffic_history_store.clone().map(|store| {
         app::TrafficHistorySession::start(&runtime_handle, client.clone(), store, &preferences)
@@ -324,8 +305,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 log_monitor: logs,
                 traffic_history_store,
                 traffic_history_session: app_traffic_history_session,
-                tun_permissions,
-                mihomo_process,
                 profile_path,
                 controlled_config_store,
                 runtime: runtime_handle,

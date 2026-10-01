@@ -9,6 +9,56 @@ use super::super::super::profiles::workflow::CoreProfileRuntime;
 use super::super::super::{Page, load_page};
 use super::RestoreOutcome;
 
+pub(super) enum RetryOutcome {
+    Failed {
+        runtime_version: u64,
+        error: String,
+    },
+    Restored {
+        runtime_version: u64,
+        refresh: Result<Box<RetryRefresh>, String>,
+    },
+}
+
+pub(super) struct RetryRefresh {
+    pub(super) snapshot: zenclash_core::BackupDataSnapshot,
+    pub(super) page_data: super::super::super::RuntimeData,
+}
+
+pub(super) async fn retry_runtime(
+    runtime: CoreProfileRuntime,
+    data_root: Option<PathBuf>,
+) -> RetryOutcome {
+    let outcome = match runtime.retry_backup_restore().await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return RetryOutcome::Failed {
+                runtime_version: runtime.session().generation(),
+                error,
+            };
+        }
+    };
+    let refresh = async {
+        let root = data_root
+            .ok_or_else(|| zenclash_i18n::text("backup.errors.retry_state_unavailable"))?;
+        let snapshot =
+            tokio::task::spawn_blocking(move || BackupManager::new(root).read_snapshot())
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?;
+        let page_data = load_page(runtime.client().clone(), Page::Settings).await?;
+        Ok(Box::new(RetryRefresh {
+            snapshot,
+            page_data,
+        }))
+    }
+    .await;
+    RetryOutcome::Restored {
+        runtime_version: outcome.generation,
+        refresh,
+    }
+}
+
 pub(super) async fn restore_backup(
     archive: PathBuf,
     runtime: CoreProfileRuntime,
@@ -35,6 +85,26 @@ async fn restore_prepared(
     manager: BackupManager,
     prepared: PreparedBackupRestore,
     runtime: CoreProfileRuntime,
+) -> Result<RestoreOutcome, String> {
+    let admission = runtime
+        .session()
+        .begin_backup_restore()
+        .await
+        .map_err(|error| error.to_string())?;
+    // One admitted completion owns activation through cleanup; dropping the UI waiter cannot
+    // release disk authority while an accepted runtime or blocking persistence task continues.
+    tokio::spawn(restore_admitted(manager, prepared, runtime, admission))
+        .await
+        .map_err(|error| {
+            zenclash_i18n::text_with("backup.errors.state_task", &[("error", error.to_string())])
+        })?
+}
+
+async fn restore_admitted(
+    manager: BackupManager,
+    prepared: PreparedBackupRestore,
+    runtime: CoreProfileRuntime,
+    admission: zenclash_core::CoreBackupAdmission,
 ) -> Result<RestoreOutcome, String> {
     let file_count = prepared.file_count();
     let payload_bytes = prepared.payload_bytes();
@@ -92,7 +162,14 @@ async fn restore_prepared(
                 ],
             );
             if runtime.session().generation() != previous_runtime_version {
-                return rollback_after_runtime_accept(transaction, runtime, root, reason).await;
+                return rollback_after_runtime_accept(
+                    transaction,
+                    runtime,
+                    root,
+                    reason,
+                    &admission,
+                )
+                .await;
             }
             return rollback_restore(transaction, reason).await;
         }
@@ -102,8 +179,14 @@ async fn restore_prepared(
         Err(error) => {
             let runtime_restore =
                 zenclash_i18n::text_with("backup.errors.restored_settings", &[("error", error)]);
-            return rollback_after_runtime_accept(transaction, runtime, root, runtime_restore)
-                .await;
+            return rollback_after_runtime_accept(
+                transaction,
+                runtime,
+                root,
+                runtime_restore,
+                &admission,
+            )
+            .await;
         }
     };
     let cleanup_warning = tokio::task::spawn_blocking(move || transaction.commit())
@@ -220,6 +303,7 @@ async fn rollback_after_runtime_accept<T>(
     runtime: CoreProfileRuntime,
     data_root: PathBuf,
     reason: String,
+    admission: &zenclash_core::CoreBackupAdmission,
 ) -> Result<T, String> {
     let (transaction, rollback) = tokio::task::spawn_blocking(move || {
         let rollback = transaction.rollback_in_place();
@@ -263,7 +347,11 @@ async fn rollback_after_runtime_accept<T>(
         )
     })?;
     let runtime_restore = match restored_state {
-        Ok(controlled) => runtime.restore_snapshot(&controlled, &snapshot).await,
+        Ok(controlled) => {
+            runtime
+                .restore_backup_snapshot(&controlled, &snapshot, admission)
+                .await
+        }
         Err(error) => {
             return Err(zenclash_i18n::text_with(
                 "backup.errors.override_read",
@@ -292,6 +380,152 @@ mod tests {
     use zenclash_core::{
         AppearancePreference, CoreKind, CoreSession, MihomoClient, MihomoEndpoint,
     };
+
+    #[tokio::test]
+    async fn cancelled_backup_waiter_keeps_completion_owned_until_shutdown() {
+        successful_backup(true).await;
+    }
+
+    #[tokio::test]
+    async fn committed_backup_returns_stores_with_live_ordinary_write_authority() {
+        successful_backup(false).await;
+    }
+
+    async fn successful_backup(cancel_waiter: bool) {
+        let root = std::env::temp_dir().join(format!(
+            "zenclash-backup-owned-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("source");
+        let target = root.join("target");
+        for (data_root, port) in [(&source, 7890), (&target, 7891)] {
+            AppPreferencesStore::new(data_root.join("preferences.json"))
+                .save(&AppPreferences::default())
+                .unwrap();
+            let input = data_root.join("input.yaml");
+            std::fs::write(
+                &input,
+                format!("mixed-port: {port}\nrules: [MATCH,DIRECT]\n"),
+            )
+            .unwrap();
+            let profiles = ProfileStore::new(data_root.join("profiles")).unwrap();
+            let profile = profiles.import_local(input).unwrap();
+            profiles.activate(&profile.id).unwrap();
+            YamlOverrideStore::new(data_root.join("yaml-overrides")).unwrap();
+        }
+        let previous = ProfileStore::new(target.join("profiles"))
+            .unwrap()
+            .active_path()
+            .unwrap()
+            .unwrap();
+        ControlledConfigStore::new(target.join("controlled-config"))
+            .materialize(&previous)
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut entered_tx = Some(entered_tx);
+            let mut release_rx = Some(release_rx);
+            for (index, response) in [
+                b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n".as_slice(),
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".as_slice(),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") {
+                    headers.push(stream.read_u8().await.unwrap());
+                }
+                let text = String::from_utf8(headers).unwrap();
+                let length = text
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                let mut body = vec![0; length];
+                stream.read_exact(&mut body).await.unwrap();
+                if index == 0 {
+                    assert!(text.starts_with("PUT /configs"));
+                } else {
+                    assert!(text.starts_with("GET /configs"));
+                    entered_tx.take().unwrap().send(()).unwrap();
+                    release_rx.take().unwrap().await.unwrap();
+                }
+                stream.write_all(response).await.unwrap();
+                if index == 1 {
+                    break;
+                }
+            }
+        });
+        let client =
+            MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+        let session = CoreSession::open_with_config(CoreKind::Mihomo, client, Some(previous), Vec::new()).unwrap();
+        let runtime = CoreProfileRuntime::new(session.clone(), None);
+        let archive = root.join("backup.zip");
+        BackupManager::new(&source).export_to(&archive).unwrap();
+        let manager = BackupManager::new(&target);
+        let prepared = manager.prepare_restore(&archive).unwrap();
+        let waiter = tokio::spawn(restore_prepared(manager, prepared, runtime));
+        tokio::time::timeout(Duration::from_secs(5), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        if cancel_waiter {
+            waiter.abort();
+            assert!(matches!(waiter.await, Err(error) if error.is_cancelled()));
+            let stopping = session.clone();
+            let mut shutdown = tokio::spawn(async move { stopping.shutdown().await });
+            let early = tokio::time::timeout(Duration::from_millis(100), &mut shutdown).await;
+            let waited = early.is_err();
+            release_tx.send(()).unwrap();
+            server.await.unwrap();
+            if let Ok(result) = early {
+                result.unwrap().unwrap();
+            } else {
+                shutdown.await.unwrap().unwrap();
+            }
+            assert!(
+                waited,
+                "shutdown completed in the admitted backup readback/cleanup gap"
+            );
+            assert!(
+                std::fs::read_to_string(
+                    ProfileStore::new(target.join("profiles"))
+                        .unwrap()
+                        .active_path()
+                        .unwrap()
+                        .unwrap()
+                )
+                .unwrap()
+                .contains("7890")
+            );
+        } else {
+            release_tx.send(()).unwrap();
+            let outcome = waiter.await.unwrap().unwrap();
+            server.await.unwrap();
+            let input = root.join("after.yaml");
+            std::fs::write(&input, "mixed-port: 7892\nrules: [MATCH,DIRECT]\n").unwrap();
+            tokio::task::spawn_blocking(move || {
+                outcome.profile_store.import_local(&input).unwrap();
+                outcome.controlled_store.materialize(&input).unwrap();
+                outcome.override_store.import_paths(vec![input]).unwrap();
+            })
+            .await
+            .unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn a_lost_reload_response_restores_the_exact_previous_runtime_before_releasing_data() {
@@ -381,13 +615,7 @@ mod tests {
         });
         let client =
             MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
-        let session = CoreSession::open_with_config(
-            CoreKind::Mihomo,
-            client,
-            None,
-            Some(previous.clone()),
-            Vec::new(),
-        );
+        let session = CoreSession::open_with_config(CoreKind::Mihomo, client, Some(previous.clone()), Vec::new()).unwrap();
         let runtime = CoreProfileRuntime::new(session.clone(), None);
         let archive = root.join("backup.zip");
         BackupManager::new(&source).export_to(&archive).unwrap();
@@ -472,13 +700,7 @@ mod tests {
         });
         let client =
             MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
-        let session = CoreSession::open_with_config(
-            CoreKind::Mihomo,
-            client,
-            None,
-            Some(profile.clone()),
-            Vec::new(),
-        );
+        let session = CoreSession::open_with_config(CoreKind::Mihomo, client, Some(profile.clone()), Vec::new()).unwrap();
         let runtime = CoreProfileRuntime::new(session.clone(), None);
         let archive = root.join("backup.zip");
         BackupManager::new(&source).export_to(&archive).unwrap();
@@ -491,12 +713,18 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-        let rollback = tokio::spawn(rollback_after_runtime_accept::<()>(
-            transaction,
-            runtime,
-            target.clone(),
-            "settings refresh failed".into(),
-        ));
+        let admission = session.begin_backup_restore().await.unwrap();
+        let rollback_root = target.clone();
+        let rollback = tokio::spawn(async move {
+            rollback_after_runtime_accept::<()>(
+                transaction,
+                runtime,
+                rollback_root,
+                "settings refresh failed".into(),
+                &admission,
+            )
+            .await
+        });
         tokio::time::timeout(Duration::from_secs(5), accepted_rx)
             .await
             .unwrap()

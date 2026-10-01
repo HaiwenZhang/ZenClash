@@ -4,7 +4,7 @@ use super::{
     info_row, json, message_banner, setting_card, setting_switch, v_flex,
 };
 use gpui_kit::component::input::Textarea;
-use zenclash_core::{CapabilityState, CaptureOutcome, CapturePlan};
+use zenclash_core::{CapabilityState, CaptureOutcome, CapturePlan, CoreTunPermissionStatus, Observation};
 
 impl RuntimePage {
     pub(super) fn render_tun(
@@ -75,47 +75,32 @@ impl RuntimePage {
             RuntimeData::Tun { permissions, .. } => Some(permissions),
             _ => None,
         };
-        let (granted, can_request) = permissions
-            .and_then(|permissions| permissions.as_ref().ok())
-            .map_or((false, self.mihomo_binary().is_some()), |status| {
-                (status.granted, status.can_request)
-            });
+        // Only current evidence can authorize an action; a retained stale value cannot.
+        let current = permissions.filter(|observation| observation.is_fresh()).and_then(Observation::value);
+        let (granted, can_request) = current.map_or((false, false), |status| (status.granted(), status.can_request()));
         let mut card = setting_card(zenclash_i18n::text("tun.permissions.title"), theme);
-        match permissions {
-            Some(Ok(status)) => {
-                card = card
-                    .child(info_row(
-                        zenclash_i18n::text("tun.permissions.status"),
-                        if status.granted {
-                            zenclash_i18n::text("tun.permissions.ready")
-                        } else if !status.can_request {
-                            zenclash_i18n::text("tun.permissions.unavailable")
-                        } else {
-                            zenclash_i18n::text("tun.permissions.install")
-                        },
-                        theme,
-                    ))
-                    .child(info_row(
-                        zenclash_i18n::text("tun.permissions.verification"),
-                        &status.detail,
-                        theme,
-                    ))
-                    .child(info_row(
-                        zenclash_i18n::text("tun.permissions.core"),
-                        status.binary.display().to_string(),
-                        theme,
-                    ));
+        if let Some(status) = current {
+            card = card.child(info_row(
+                zenclash_i18n::text("tun.permissions.status"),
+                zenclash_i18n::text(if granted { "tun.permissions.ready" } else if can_request { "tun.permissions.install" } else { "tun.permissions.unavailable" }),
+                theme,
+            ));
+            match status {
+                CoreTunPermissionStatus::Local(status) => {
+                    card = card.child(info_row(zenclash_i18n::text("tun.permissions.verification"), &status.detail, theme))
+                        .child(info_row(zenclash_i18n::text("tun.permissions.core"), status.binary.display().to_string(), theme));
+                }
+                CoreTunPermissionStatus::Service => {
+                    card = card.child(info_row(zenclash_i18n::text("tun.permissions.verification"), zenclash_i18n::text("tun.permissions.service_authority"), theme));
+                }
+                _ => {}
             }
-            Some(Err(error)) => {
-                card = card.child(message_banner(error.clone(), theme.warning, theme));
-            }
-            None => {
-                card = card.child(message_banner(
-                    zenclash_i18n::text("tun.permissions.loading"),
-                    theme.primary,
-                    theme,
-                ));
-            }
+        } else {
+            let message = match permissions {
+                Some(Observation::Failed { failure, .. } | Observation::Stale { failure, .. }) => failure.message.clone(),
+                _ => zenclash_i18n::text("tun.permissions.loading"),
+            };
+            card = card.child(message_banner(message, theme.warning, theme));
         }
         card.child(
             h_flex().justify_end().p_4().child(
@@ -139,11 +124,6 @@ impl RuntimePage {
     }
 
     fn grant_tun_permissions(&mut self, cx: &mut Context<Self>) {
-        if self.mihomo_binary().is_none() {
-            self.error = Some(zenclash_i18n::text("tun.errors.external_core"));
-            cx.notify();
-            return;
-        }
         self.apply_tun_plan(
             true,
             zenclash_i18n::text("tun.notices.permission_ready"),

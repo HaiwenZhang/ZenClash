@@ -75,8 +75,10 @@ impl RuntimePage {
             cx.notify();
             return;
         }
-        if self.process.is_none() {
-            self.error = Some(zenclash_i18n::text("core_page.errors.external_install"));
+        if self.core_session.runtime_descriptor().backend() != zenclash_core::CoreRuntimeBackend::Local {
+            self.error = Some(zenclash_i18n::text(if self.core_session.runtime_descriptor().backend() == zenclash_core::CoreRuntimeBackend::Service {
+                "core_page.maintenance.service_upgrade"
+            } else { "core_page.errors.external_install" }));
             cx.notify();
             return;
         }

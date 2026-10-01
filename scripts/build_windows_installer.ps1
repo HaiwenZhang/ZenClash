@@ -93,6 +93,8 @@ try {
         $env:ZENCLASH_BUNDLED_MIHOMO_VERSION = $BundledMihomoVersion
         cargo build --release --locked -p zenclash-ui --bin zenclash --target x86_64-pc-windows-msvc
         if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+        cargo build --release --locked -p zenclash-service --features server --bin zenclash-service --target x86_64-pc-windows-msvc
+        if ($LASTEXITCODE -ne 0) { throw "Service cargo build failed" }
     }
     finally {
         $env:ZENCLASH_VERSION = $PreviousBuildVersion
@@ -102,6 +104,11 @@ try {
 
     $CargoTargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $ProjectRoot "target" }
     $ZenClashBinary = Join-Path $CargoTargetDir "x86_64-pc-windows-msvc\release\zenclash.exe"
+    $ServiceBinary = Join-Path $CargoTargetDir "x86_64-pc-windows-msvc\release\zenclash-service.exe"
+    if (-not (Test-Path -LiteralPath $ServiceBinary -PathType Leaf) -or
+        (Get-Item -LiteralPath $ServiceBinary).Length -eq 0) {
+        throw "Service executable is missing or empty: $ServiceBinary"
+    }
     Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -122,6 +129,12 @@ public static class ZenClashIconResource
         throw "The ZenClash executable does not contain a Windows icon resource"
     }
     Copy-Item $ZenClashBinary (Join-Path $StageDir "zenclash.exe")
+    $StagedService = Join-Path $StageDir "zenclash-service.exe"
+    Copy-Item -LiteralPath $ServiceBinary -Destination $StagedService
+    $ServiceVersion = (& $StagedService --version) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($ServiceVersion)) {
+        throw "The packaged service executable failed its version check"
+    }
     $ResourcesDir = Join-Path $StageDir "resources"
     New-Item -ItemType Directory -Force -Path $ResourcesDir | Out-Null
     Copy-Item $MihomoBinary (Join-Path $ResourcesDir "mihomo.exe")

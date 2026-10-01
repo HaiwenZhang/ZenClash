@@ -1330,7 +1330,7 @@ fn process_evidence(
         {
             theme.success
         }
-        Some(ProcessRecoveryStatus::Recovering | ProcessRecoveryStatus::NetworkSuspended) => {
+        Some(ProcessRecoveryStatus::Recovering | ProcessRecoveryStatus::NetworkSuspended | ProcessRecoveryStatus::Unknown) => {
             theme.warning
         }
         Some(
@@ -1358,6 +1358,7 @@ fn process_evidence_copy(process: Option<&ProcessStatus>) -> (&'static str, Opti
             Some(process.recovery_attempts),
         ),
         ProcessRecoveryStatus::Stopped => ("home.evidence.core_stopped", None),
+        ProcessRecoveryStatus::Unknown => ("core_page.status.unreadable", None),
         ProcessRecoveryStatus::NetworkSuspended => ("automatic.network_stopped", None),
         ProcessRecoveryStatus::Stable if process.running && process.recovery_attempts > 0 => (
             "home.evidence.core_recovered",

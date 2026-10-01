@@ -8,6 +8,7 @@ use gpui_kit::test::TestWindowExt;
 use gpui_kit::{TestAppContext, VisualTestContext, size};
 
 use super::*;
+use zenclash_core::MihomoProcess;
 
 struct Fixture {
     root: PathBuf,
@@ -50,23 +51,10 @@ impl Fixture {
             .unwrap();
         let endpoint = zenclash_core::MihomoEndpoint::new("http://127.0.0.1:1", "");
         let client = MihomoClient::new(zenclash_core::MihomoEndpoint::new(controller, "")).unwrap();
-        let core = CoreSession::open_with_config(
-            CoreKind::Mihomo,
-            client,
-            None,
-            Some(profile.clone()),
-            Vec::new(),
-        );
+        let core = CoreSession::open_with_config(CoreKind::Mihomo, client, Some(profile.clone()), Vec::new()).unwrap();
         let traffic = TrafficMonitor::start(runtime.handle(), endpoint.clone());
         let logs = LogMonitor::start(runtime.handle(), endpoint, MihomoLogLevel::Info);
-        let status = OperationalStatus::start(
-            runtime.handle(),
-            core.clone(),
-            None,
-            None,
-            traffic.clone(),
-            logs.clone(),
-        );
+        let status = OperationalStatus::start(runtime.handle(), core.clone(), None, traffic.clone(), logs.clone());
         Self {
             root,
             runtime: Some(runtime),
@@ -96,14 +84,7 @@ impl Fixture {
             traffic_monitor: self.traffic.clone(),
             log_monitor: self.logs.clone(),
             operational_status: self.status.clone(),
-            traffic_capture: TrafficCaptureSession::new(
-                self.core.clone(),
-                self.controlled.clone(),
-                None,
-                None,
-                Some(self.profile.clone()),
-            ),
-            process: None,
+            traffic_capture: TrafficCaptureSession::new(self.core.clone(), self.controlled.clone(), None, Some(self.profile.clone())),
             profile_path: Some(self.profile.clone()),
             controlled_config_store: self.controlled.clone(),
             preferences_store: None,
@@ -170,6 +151,61 @@ fn open(
         Root::new(view, window, cx)
     });
     (handle.into(), page.unwrap())
+}
+
+// Ordinary owned children exercise UI binding behavior, not Mihomo or TUN acceptance.
+fn owned_ui_children(fixture: &Fixture) -> [Arc<MihomoProcess>; 2] {
+    let source = fixture.root.join("ui-owned-child.rs");
+    fs::write(&source, "fn main() { std::thread::sleep(std::time::Duration::from_secs(30)); }")
+        .unwrap();
+    let binary = fixture.root.join(if cfg!(windows) { "ui-owned-child.exe" } else { "ui-owned-child" });
+    let compilation = std::process::Command::new("rustc")
+        .args(["--edition=2024", "--crate-name", "ui_owned_child"])
+        .arg(source)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(compilation.status.success(), "{}", String::from_utf8_lossy(&compilation.stderr));
+    std::array::from_fn(|index| {
+        let directory = fixture.root.join(format!("owned-{index}"));
+        fs::create_dir_all(&directory).unwrap();
+        let executable = directory.join(binary.file_name().unwrap());
+        fs::copy(&binary, &executable).unwrap();
+        let config = directory.join("profile.yaml");
+        fs::write(&config, "rules: [MATCH,DIRECT]\n").unwrap();
+        MihomoProcess::spawn(MihomoLaunchConfig {
+            kind: CoreKind::Mihomo,
+            binary: executable,
+            config_file: config,
+            home_dir: directory.join("home"),
+            endpoint: zenclash_core::MihomoEndpoint::new("http://127.0.0.1:1", ""),
+            controller_override: None,
+        }).unwrap()
+    })
+}
+
+#[gpui_kit::test]
+fn actual_owner_switch_updates_the_ui_binary_source_and_detach_clears_it(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let [previous, replacement] = owned_ui_children(&fixture);
+    let runtime = fixture.runtime.as_ref().unwrap();
+    runtime.block_on(fixture.core.switch_to_process(previous.clone())).unwrap();
+    let (window, page) = open(cx, &fixture, Page::Mihomo);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    runtime.block_on(fixture.core.switch_to_process(replacement.clone())).unwrap();
+    assert!(previous.snapshot().pid.is_none());
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(page.read(cx).mihomo_binary().as_deref(), Some(replacement.launch_config().binary.as_path()));
+    }).unwrap();
+    runtime.block_on(fixture.core.switch_to_direct(zenclash_core::MihomoEndpoint::default())).unwrap();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(page.read(cx).mihomo_binary().is_none());
+        window.remove_window();
+    }).unwrap();
+    assert!(replacement.snapshot().pid.is_none());
 }
 
 #[gpui_kit::test]
@@ -835,6 +871,9 @@ fn exercise_delayed_yaml_save(cx: &mut TestAppContext, newer_mode: bool) {
 struct ControllerFixture {
     url: String,
     stopped: Arc<std::sync::atomic::AtomicBool>,
+    apply_failures: Arc<std::sync::atomic::AtomicUsize>,
+    apply_requests: Arc<std::sync::atomic::AtomicUsize>,
+    blocked_apply: Arc<std::sync::atomic::AtomicBool>,
     server: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -846,8 +885,15 @@ impl ControllerFixture {
         let address = listener.local_addr().unwrap();
         let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let server_stop = stopped.clone();
+        let apply_failures = Arc::new(std::sync::atomic::AtomicUsize::new(usize::from(
+            fail_first_apply,
+        )));
+        let apply_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let blocked_apply = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let failures = apply_failures.clone();
+        let requests = apply_requests.clone();
+        let blocked = blocked_apply.clone();
         let server = std::thread::spawn(move || {
-            let mut should_fail = fail_first_apply;
             let mut mode = "rule".to_owned();
             while !server_stop.load(std::sync::atomic::Ordering::Acquire) {
                 match listener.accept() {
@@ -879,9 +925,23 @@ impl ControllerFixture {
                         stream.read_exact(&mut payload).unwrap();
                         let is_apply = request.starts_with(b"PUT /configs")
                             || request.starts_with(b"PATCH /configs");
-                        if is_apply && should_fail {
-                            should_fail = false;
-                            continue;
+                        if is_apply {
+                            requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            while blocked.load(std::sync::atomic::Ordering::Acquire)
+                                && !server_stop.load(std::sync::atomic::Ordering::Acquire)
+                            {
+                                std::thread::sleep(Duration::from_millis(2));
+                            }
+                            if failures
+                                .fetch_update(
+                                    std::sync::atomic::Ordering::SeqCst,
+                                    std::sync::atomic::Ordering::SeqCst,
+                                    |remaining| remaining.checked_sub(1),
+                                )
+                                .is_ok()
+                            {
+                                continue;
+                            }
                         }
                         if request.starts_with(b"PATCH /configs") {
                             let patch: serde_json::Value =
@@ -924,9 +984,341 @@ impl ControllerFixture {
         Self {
             url: format!("http://{address}"),
             stopped,
+            apply_failures,
+            apply_requests,
+            blocked_apply,
             server: Some(server),
         }
     }
+}
+
+fn retain_failed_backup_snapshot(fixture: &Fixture) {
+    zenclash_core::AppPreferencesStore::new(fixture.root.join("preferences.json"))
+        .save(&AppPreferences::default())
+        .unwrap();
+    YamlOverrideStore::new(fixture.root.join("yaml-overrides")).unwrap();
+    let controlled = ControlledConfigStore::new(fixture.root.join("controlled-config"));
+    controlled.materialize(&fixture.profile).unwrap();
+    let manager = zenclash_core::BackupManager::new(&fixture.root);
+    let archive = fixture.root.join("retry-fixture.zip");
+    manager.export_to(&archive).unwrap();
+    let mut transaction = manager
+        .prepare_restore(&archive)
+        .unwrap()
+        .activate_for_session(&fixture.core)
+        .unwrap();
+    let snapshot = transaction.previous_runtime_snapshot().unwrap();
+    transaction.rollback_in_place().unwrap();
+    let controlled = transaction.authorize_controlled_store(controlled).unwrap();
+    fixture.runtime.as_ref().unwrap().block_on(async {
+        let admission = fixture.core.begin_backup_restore().await.unwrap();
+        assert!(
+            fixture
+                .core
+                .restore_backup_snapshot(&controlled, &snapshot, &admission)
+                .await
+                .is_err()
+        );
+    });
+    assert!(fixture.core.pending_backup_restore().is_some());
+}
+
+#[gpui_kit::test]
+fn backup_retry_button_preserves_failed_snapshot_then_refreshes_after_success(
+    cx: &mut TestAppContext,
+) {
+    use std::sync::atomic::Ordering;
+    let controller = ControllerFixture::new(true);
+    let fixture = Fixture::with_controller(controller.url.clone());
+    retain_failed_backup_snapshot(&fixture);
+    controller.apply_failures.store(1, Ordering::SeqCst);
+    let (window, page) = open(cx, &fixture, Page::Settings);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("backup-retry-runtime", cx);
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| {
+        !page.mutation_busy(busy::MutationDomain::Backup) && page.error.is_some()
+    });
+    assert_eq!(
+        fixture.core.pending_backup_restore(),
+        Some(fixture.core.generation())
+    );
+    assert_eq!(controller.apply_requests.load(Ordering::SeqCst), 2);
+    let saved = zenclash_core::AppPreferencesStore::new(fixture.root.join("preferences.json"))
+        .update(|preferences| preferences.appearance = zenclash_core::AppearancePreference::Dark)
+        .unwrap();
+    let applied = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = applied.clone();
+    let session = fixture.core.clone();
+    let _subscription = cx.update(|cx| {
+        cx.subscribe(&page, move |_, event: &ProfileActivated, _| {
+            assert_eq!(event.runtime_version, session.generation());
+            observed.fetch_add(1, Ordering::SeqCst);
+        })
+    });
+    cx.update_window(window, |_, window, cx| {
+        window.click("backup-retry-runtime", cx)
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| {
+        !page.mutation_busy(busy::MutationDomain::Backup) && page.notice.is_some()
+    });
+    cx.update_window(window, |_, window, cx| {
+        let page = page.read(cx);
+        assert_eq!(page.preferences, saved);
+        assert_eq!(page.profile_path.as_ref(), Some(&fixture.profile));
+        assert!(page.error.is_none());
+        assert!(fixture.core.pending_backup_restore().is_none());
+        assert_eq!(controller.apply_requests.load(Ordering::SeqCst), 3);
+        assert_eq!(applied.load(Ordering::SeqCst), 1);
+        window.render_frame(cx);
+        assert!(window.try_find("backup-retry-runtime").is_none());
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn late_backup_retry_refresh_cannot_replace_a_newer_profile_or_notice(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering;
+    let controller = ControllerFixture::new(true);
+    let fixture = Fixture::with_controller(controller.url.clone());
+    retain_failed_backup_snapshot(&fixture);
+    controller.blocked_apply.store(true, Ordering::Release);
+    let (window, page) = open(cx, &fixture, Page::Settings);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("backup-retry-runtime", cx);
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |_| {
+        controller.apply_requests.load(Ordering::SeqCst) == 2
+    });
+    controller.blocked_apply.store(false, Ordering::Release);
+    let candidate = fixture.root.join("newer-profile.yaml");
+    fs::write(&candidate, "mixed-port: 7999\nrules: [MATCH,DIRECT]\n").unwrap();
+    fixture.runtime.as_ref().unwrap().block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while fixture.core.pending_backup_restore().is_some() {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+        fixture
+            .core
+            .apply(
+                &fixture.controlled,
+                zenclash_core::EffectiveConfigIntent::ActivateProfile {
+                    profile: candidate.clone(),
+                    overrides: vec![],
+                },
+            )
+            .await
+            .unwrap();
+    });
+    cx.update_window(window, |_, _, cx| {
+        page.update(cx, |page, cx| {
+            page.synchronize_committed_profile(cx);
+            page.notice = Some("newer operation notice".into());
+        });
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| {
+        !page.mutation_busy(busy::MutationDomain::Backup)
+    });
+    cx.update_window(window, |_, window, cx| {
+        let page = page.read(cx);
+        assert_eq!(page.profile_path.as_ref(), Some(&candidate));
+        assert_eq!(page.notice.as_deref(), Some("newer operation notice"));
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn backup_retry_ignores_duplicate_click_and_synchronizes_after_navigation(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering;
+    let controller = ControllerFixture::new(true);
+    let fixture = Fixture::with_controller(controller.url.clone());
+    retain_failed_backup_snapshot(&fixture);
+    controller.blocked_apply.store(true, Ordering::Release);
+    let (window, page) = open(cx, &fixture, Page::Settings);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("backup-retry-runtime", cx);
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |_| {
+        controller.apply_requests.load(Ordering::SeqCst) == 2
+    });
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            page.read(cx)
+                .mutations
+                .active(busy::MutationDomain::BackupRecovery)
+        );
+        window.click("backup-retry-runtime", cx);
+        page.update(cx, |page, cx| {
+            page.switch_to(Page::Dns, cx);
+            page.notice = Some("new page notice".into());
+        });
+    })
+    .unwrap();
+    controller.blocked_apply.store(false, Ordering::Release);
+    fixture.settle(cx, &page, |page| {
+        !page.mutation_busy(busy::MutationDomain::Backup)
+    });
+    cx.update_window(window, |_, window, cx| {
+        let page = page.read(cx);
+        assert!(fixture.core.pending_backup_restore().is_none());
+        assert_eq!(controller.apply_requests.load(Ordering::SeqCst), 2);
+        assert_eq!(page.profile_path.as_ref(), Some(&fixture.profile));
+        assert_eq!(page.notice.as_deref(), Some("new page notice"));
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn backup_retry_refresh_failure_keeps_the_accepted_runtime_and_reports_refresh_failure(
+    cx: &mut TestAppContext,
+) {
+    let controller = ControllerFixture::new(true);
+    let fixture = Fixture::with_controller(controller.url.clone());
+    retain_failed_backup_snapshot(&fixture);
+    let (window, page) = open(cx, &fixture, Page::Settings);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    fs::write(
+        fixture.root.join("preferences.json"),
+        b"invalid persisted JSON",
+    )
+    .unwrap();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("backup-retry-runtime", cx);
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| {
+        !page.mutation_busy(busy::MutationDomain::Backup) && page.error.is_some()
+    });
+    cx.update_window(window, |_, window, cx| {
+        let page = page.read(cx);
+        assert!(fixture.core.pending_backup_restore().is_none());
+        let localized = zenclash_i18n::text("backup.errors.retry_refresh_failed");
+        assert!(
+            page.error
+                .as_ref()
+                .unwrap()
+                .starts_with(localized.split("%{error}").next().unwrap())
+        );
+        assert_eq!(page.profile_path.as_ref(), Some(&fixture.profile));
+        window.render_frame(cx);
+        assert!(window.try_find("backup-retry-runtime").is_none());
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn backup_retry_is_reachable_by_tab_and_activates_once_with_enter(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering;
+    let controller = ControllerFixture::new(true);
+    let fixture = Fixture::with_controller(controller.url.clone());
+    retain_failed_backup_snapshot(&fixture);
+    let (window, page) = open(cx, &fixture, Page::Settings);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        // Start contextual keyboard traversal in RuntimePage's retained focus region.
+        let focus = page.read(cx).focus_handle.clone();
+        window.focus(&focus, cx);
+        for _ in 0..80 {
+            window.press("tab", cx);
+            if window.find("backup-retry-runtime").focused() == Some(true) {
+                break;
+            }
+        }
+        assert_eq!(window.find("backup-retry-runtime").focused(), Some(true));
+        window.press("enter", cx);
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| {
+        !page.mutation_busy(busy::MutationDomain::Backup) && page.notice.is_some()
+    });
+    assert!(fixture.core.pending_backup_restore().is_none());
+    assert_eq!(controller.apply_requests.load(Ordering::SeqCst), 2);
+    cx.update_window(window, |_, window, _| window.remove_window())
+        .unwrap();
+}
+
+#[gpui_kit::test]
+fn cancelled_backup_retry_waiter_still_records_the_accepted_shared_business_result(
+    cx: &mut TestAppContext,
+) {
+    use std::sync::atomic::Ordering;
+    let controller = ControllerFixture::new(true);
+    let fixture = Fixture::with_controller(controller.url.clone());
+    retain_failed_backup_snapshot(&fixture);
+    let service = crate::ProfileService::new(fixture.core.clone(), None);
+    let record = fixture
+        .profiles
+        .load()
+        .unwrap()
+        .active_profile()
+        .unwrap()
+        .clone();
+    let version = fixture.core.generation();
+    service
+        .publish_test_outcome(
+            zenclash_core::ProfileApplyOutcome::CommittedButRuntimeUnknown {
+                source_version: (&record).into(),
+                profile: record,
+                path: fixture.profile.clone(),
+                cause: zenclash_core::ProfileApplicationError::Task(
+                    "fixture pending result".into(),
+                ),
+                runtime_version: version,
+            },
+        )
+        .unwrap();
+    controller.blocked_apply.store(true, Ordering::Release);
+    let completion = service.clone();
+    let task = fixture
+        .runtime
+        .as_ref()
+        .unwrap()
+        .spawn(async move { completion.retry_backup_restore().await });
+    fixture.runtime.as_ref().unwrap().block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while controller.apply_requests.load(Ordering::SeqCst) != 2 {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        controller.blocked_apply.store(false, Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while service.pending_finalization().is_some()
+                || fixture.core.pending_backup_restore().is_some()
+            {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+    });
+    assert!(fixture.core.generation() > version);
+    assert_eq!(controller.apply_requests.load(Ordering::SeqCst), 2);
+    cx.run_until_parked();
 }
 
 impl Drop for ControllerFixture {
@@ -1051,6 +1443,111 @@ fn delayed_backup_completion_synchronizes_current_business_state_after_navigatio
         cx.update_window(window, |_, window, _| window.remove_window())
             .unwrap();
     });
+}
+
+#[gpui_kit::test]
+fn a_saved_profile_confirmation_uses_a_separate_button_and_preserves_data_on_failure(
+    cx: &mut TestAppContext,
+) {
+    let fixture = Fixture::new();
+    let (window, page) = open(cx, &fixture, Page::Profiles);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    let record = fixture
+        .profiles
+        .load()
+        .unwrap()
+        .active_profile()
+        .unwrap()
+        .clone();
+    let before = fs::read(&fixture.profile).unwrap();
+    let version = fixture.core.generation();
+    cx.update_window(window, |_, window, cx| {
+        page.update(cx, |page, cx| {
+            // Typed committed outcome fixture; this is UI recovery coverage, not native service validation.
+            page.profile_service
+                .publish_test_outcome(
+                    zenclash_core::ProfileApplyOutcome::CommittedButRuntimeUnknown {
+                        source_version: (&record).into(),
+                        profile: record.clone(),
+                        path: fixture.profile.clone(),
+                        cause: zenclash_core::ProfileApplicationError::Task(
+                            "commit reply lost".into(),
+                        ),
+                        runtime_version: version,
+                    },
+                )
+                .unwrap();
+            page.synchronize_profile_recovery();
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("reapply-profile-recovery").is_none());
+        window.find("confirm-service-profile");
+        window.click("confirm-service-profile", cx);
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| !page.core_busy() && page.error.is_some());
+    cx.update_window(window, |_, window, cx| {
+        let page = page.read(cx);
+        assert_eq!(page.profiles.pending_finalization, Some(version));
+        assert!(page.profiles.recovery.is_none());
+        assert_eq!(page.profile_path.as_ref(), Some(&fixture.profile));
+        assert_eq!(fixture.core.generation(), version);
+        assert_eq!(
+            fixture.profiles.active_path().unwrap(),
+            Some(fixture.profile.clone())
+        );
+        assert_eq!(fs::read(&fixture.profile).unwrap(), before);
+        window.render_frame(cx);
+        window.find("confirm-service-profile");
+        assert!(window.try_find("reapply-profile-recovery").is_none());
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_committed_tray_receipt_keeps_the_pending_service_warning(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (window, page) = open(cx, &fixture, Page::Profiles);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    let profile = fixture
+        .profiles
+        .load()
+        .unwrap()
+        .active_profile()
+        .unwrap()
+        .clone();
+    cx.update_window(window, |_, window, cx| {
+        page.update(cx, |page, cx| {
+            let receipt = page
+                .profile_service
+                .publish_test_outcome(
+                    zenclash_core::ProfileApplyOutcome::CommittedButRuntimeUnknown {
+                        source_version: (&profile).into(),
+                        profile,
+                        path: fixture.profile.clone(),
+                        cause: zenclash_core::ProfileApplicationError::Task(
+                            "commit reply lost".into(),
+                        ),
+                        runtime_version: fixture.core.generation(),
+                    },
+                )
+                .unwrap();
+            let warning = receipt.warning().unwrap();
+            page.profile_activated_from_tray(receipt, cx);
+            assert_eq!(page.notice.as_deref(), Some(warning.as_str()));
+            assert_eq!(
+                page.profiles.pending_finalization,
+                Some(fixture.core.generation())
+            );
+            assert_eq!(page.profile_path.as_ref(), Some(&fixture.profile));
+        });
+        window.render_frame(cx);
+        window.find("confirm-service-profile");
+        window.remove_window();
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]

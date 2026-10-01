@@ -58,6 +58,8 @@ TUN 需要系统权限；Windows 暂不支持在应用内自动获取 TUN 所需
 
 准备当前 Rust stable 工具链、对应平台的原生构建工具，以及一个可执行的 Mihomo 内核。Linux 依赖可通过 `sudo scripts/install_linux_build_deps.sh` 安装。
 
+三平台 TUN 服务正在按 [开发计划](docs/development/tun-service-plan.md) 实施，尚未完成应用内安装流程与实机验收。三平台打包脚本已增加独立服务产物；其部署边界与验证入口见 [服务打包记录](docs/development/tun-service-packaging.md)。
+
 在仓库根目录运行（macOS / Linux）：
 
 ```sh

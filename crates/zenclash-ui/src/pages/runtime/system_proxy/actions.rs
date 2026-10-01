@@ -25,8 +25,7 @@ impl RuntimePage {
     ) {
         let port = self.system_proxy_port();
         if enabled && port == 0 {
-            self.error = Some(self.unavailable_system_proxy_message());
-            cx.notify();
+            self.load_unavailable_system_proxy_message(cx);
             return;
         }
         let page = self.page;
@@ -308,17 +307,31 @@ impl RuntimePage {
             .unwrap_or_default()
     }
 
-    fn unavailable_system_proxy_message(&self) -> String {
-        let listener_error = self.process.as_ref().and_then(|process| {
-            process.recent_logs().into_iter().rev().find(|line| {
+    fn load_unavailable_system_proxy_message(&mut self, cx: &mut Context<Self>) {
+        let core = self.core_session.clone();
+        let version = core.generation();
+        let token = self.page_task_token_for(self.page);
+        let task = self.runtime.spawn(async move {
+            let logs = core.recent_runtime_logs().await.unwrap_or_default();
+            let listener_error = logs.iter().rev().find(|line| {
                 let normalized = line.to_ascii_lowercase();
                 normalized.contains("start http server error")
                     || normalized.contains("start mixed server error")
                     || normalized.contains("address already in use")
-            })
+            });
+            unavailable_message(listener_error.map(String::as_str))
         });
-        unavailable_message(listener_error.as_deref())
+        cx.spawn(async move |this, cx| {
+            let message = task.await.unwrap_or_else(|_| unavailable_message(None));
+            let _ = this.update(cx, |this, cx| {
+                if this.profile_service.is_current(version) {
+                    this.set_page_error(token, message);
+                    cx.notify();
+                }
+            });
+        }).detach();
     }
+
 }
 
 fn unavailable_message(listener_error: Option<&str>) -> String {

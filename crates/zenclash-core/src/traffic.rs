@@ -7,12 +7,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use futures_util::StreamExt;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
 
-use crate::{MihomoEndpoint, websocket::connect_stream};
+use crate::{MihomoClient, MihomoEndpoint, client::ControllerBinding};
 
 /// Latest values and connection health from Mihomo's `/traffic` stream.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,13 +94,23 @@ impl TrafficMonitor {
     /// Starts a reconnecting traffic monitor on the supplied Tokio runtime.
     #[must_use]
     pub fn start(runtime: &Handle, endpoint: MihomoEndpoint) -> Arc<Self> {
+        Self::start_binding(runtime, ControllerBinding::direct(endpoint))
+    }
+
+    /// Starts a monitor following every transport switch of the shared client.
+    #[must_use]
+    pub fn start_with_client(runtime: &Handle, client: MihomoClient) -> Arc<Self> {
+        Self::start_binding(runtime, client.binding)
+    }
+
+    fn start_binding(runtime: &Handle, binding: Arc<ControllerBinding>) -> Arc<Self> {
         let snapshot = Arc::new(RwLock::new(TrafficSnapshot::default()));
         let samples = Arc::new(RwLock::new(initial_samples()));
         let revision = TrafficRevision::new();
         let expected_generation = Arc::new(AtomicU64::new(0));
         let (generation, generation_updates) = watch::channel(0);
         let task = runtime.spawn(run_monitor(
-            endpoint,
+            binding,
             snapshot.clone(),
             samples.clone(),
             revision.clone(),
@@ -172,7 +181,7 @@ impl Drop for TrafficMonitor {
 }
 
 async fn run_monitor(
-    endpoint: MihomoEndpoint,
+    binding: Arc<ControllerBinding>,
     snapshot: Arc<RwLock<TrafficSnapshot>>,
     samples: Arc<RwLock<VecDeque<TrafficSample>>>,
     revision: Arc<TrafficRevision>,
@@ -180,10 +189,17 @@ async fn run_monitor(
     mut generation_updates: watch::Receiver<u64>,
 ) {
     let mut backoff = crate::websocket::ReconnectBackoff::default();
+    let mut transport_updates = binding.subscribe();
     loop {
+        let transport_generation = transport_updates.borrow_and_update().generation;
         let generation = *generation_updates.borrow_and_update();
         let mut generation_changed = false;
-        match connect_stream(&endpoint, "/traffic", &[], "连接 Mihomo 流量流超时").await {
+        let connection = tokio::select! {
+            changed = transport_updates.changed() => { if changed.is_err() { return; } continue; }
+            changed = generation_updates.changed() => { if changed.is_err() { return; } continue; }
+            connection = binding.connect("/traffic", &[], "连接 Mihomo 流量流超时") => connection,
+        };
+        match connection {
             Ok(mut socket) => {
                 update_connection_for_generation(
                     &snapshot,
@@ -195,6 +211,11 @@ async fn run_monitor(
                 );
                 loop {
                     let message = tokio::select! {
+                        changed = transport_updates.changed() => {
+                            if changed.is_err() { return; }
+                            generation_changed = true;
+                            break;
+                        }
                         changed = generation_updates.changed() => {
                             if changed.is_err() {
                                 return;
@@ -208,7 +229,10 @@ async fn run_monitor(
                         break;
                     };
                     match message {
-                        Ok(message) if message.is_text() || message.is_binary() => {
+                        Ok(message)
+                            if (message.is_text() || message.is_binary())
+                                && binding.is_current(transport_generation) =>
+                        {
                             match serde_json::from_slice::<TrafficFrame>(&message.into_data()) {
                                 Ok(frame) => {
                                     backoff.reset();
@@ -262,10 +286,6 @@ async fn run_monitor(
             }
         }
 
-        if generation_changed {
-            backoff.reset();
-            continue;
-        }
         update_connection_for_generation(
             &snapshot,
             false,
@@ -274,7 +294,15 @@ async fn run_monitor(
             &expected_generation,
             &revision,
         );
+        if generation_changed {
+            backoff.reset();
+            continue;
+        }
         tokio::select! {
+            changed = transport_updates.changed() => {
+                if changed.is_err() { return; }
+                backoff.reset();
+            }
             changed = generation_updates.changed() => {
                 if changed.is_err() {
                     return;
@@ -588,5 +616,59 @@ mod tests {
         );
 
         assert!(updates.has_changed().unwrap());
+    }
+    #[tokio::test]
+    async fn monitor_reconnects_when_an_existing_client_clone_switches_controller() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::{accept_async, tungstenite::Message};
+        let first = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let second = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let first_endpoint =
+            MihomoEndpoint::new(format!("http://{}", first.local_addr().unwrap()), "");
+        let second_endpoint =
+            MihomoEndpoint::new(format!("http://{}", second.local_addr().unwrap()), "");
+        let first_server = tokio::spawn(async move {
+            let (stream, _) = first.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            socket
+                .send(Message::Text(r#"{"up":10,"down":20}"#.into()))
+                .await
+                .unwrap();
+            futures_util::StreamExt::next(&mut socket).await;
+        });
+        let second_server = tokio::spawn(async move {
+            let (stream, _) = second.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            socket
+                .send(Message::Text(r#"{"up":30,"down":40}"#.into()))
+                .await
+                .unwrap();
+            futures_util::StreamExt::next(&mut socket).await;
+        });
+        let client = MihomoClient::new(first_endpoint).unwrap();
+        let monitor = TrafficMonitor::start_with_client(&Handle::current(), client.clone());
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while monitor.snapshot().upload != 10 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        client.switch_to_direct(second_endpoint).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while monitor.snapshot().upload != 30 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(monitor.samples().back().unwrap().download, 40);
+        drop(monitor);
+        first_server.await.unwrap();
+        second_server.await.unwrap();
     }
 }

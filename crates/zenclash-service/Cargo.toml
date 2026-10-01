@@ -1,0 +1,51 @@
+[package]
+name = "zenclash-service"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default = []
+server = ["dep:futures-util", "dep:url", "dep:serde_yaml", "dep:tokio-tungstenite", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]
+
+[[bin]]
+name = "zenclash-service"
+required-features = ["server"]
+
+[dependencies]
+getrandom.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "process", "signal"] }
+futures-util = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+serde_yaml = { workspace = true, optional = true }
+sha2.workspace = true
+tokio-tungstenite = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+    "Win32_System_Services",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_Memory",
+    "Win32_UI_Shell",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_SystemInformation",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

@@ -6,6 +6,10 @@ mod app_update;
 mod autostart;
 mod backup;
 mod client;
+mod service_runtime;
+mod service_runtime_session;
+
+pub use service_runtime::ServiceRuntimeBundle;
 mod config_diff;
 mod controlled_config;
 mod core_backend;
@@ -22,6 +26,7 @@ mod models;
 mod network;
 mod network_diagnostics;
 mod operational_status;
+mod owned_core;
 mod platform_command;
 mod preferences;
 mod process;
@@ -59,11 +64,12 @@ pub use controlled_config::{
     ListenerPortFallback,
 };
 pub use core_backend::{CoreCapabilities, CoreKind, ParseCoreKindError};
+pub use owned_core::{CoreRuntimeBackend, CoreRuntimeDescriptor, CoreTunPermissionStatus};
 pub use core_installation::{CoreBinaryError, CoreBinaryInfo, validate_core_binary};
 pub use core_session::{
-    CoreApplyKind, CoreApplyOutcome, CoreCommittedProfileSnapshot, CoreInstallOutcome,
-    CoreLifecyclePhase, CoreLifecycleSnapshot, CoreMaintenanceIntent, CoreRestoreSnapshot,
-    CoreSession, CoreSessionError, CoreSessionSnapshot, EffectiveConfigIntent,
+    CoreApplyKind, CoreApplyOutcome, CoreBackupAdmission, CoreCommittedProfileSnapshot,
+    CoreInstallOutcome, CoreLifecyclePhase, CoreLifecycleSnapshot, CoreMaintenanceIntent,
+    CoreRestoreSnapshot, CoreSession, CoreSessionError, CoreSessionSnapshot, EffectiveConfigIntent,
 };
 pub use core_update::{
     CoreUpdateError, CoreUpdateResult, CoreUpdateTransaction, MihomoRelease, MihomoReleaseAsset,

@@ -1,0 +1,24 @@
+[Unit]
+Description=ZenClash privileged Mihomo runtime service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/var/lib/zenclash-service/zenclash-service run
+User=root
+Group=root
+UMask=0077
+RuntimeDirectory=zenclash-service
+RuntimeDirectoryMode=0755
+KillMode=control-group
+TimeoutStopSec=15
+SendSIGKILL=yes
+Restart=no
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/zenclash-service /run/zenclash-service
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

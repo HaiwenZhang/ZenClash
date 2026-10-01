@@ -7,6 +7,7 @@ pub(super) enum MutationDomain {
     TrafficHistory,
     Network,
     Backup,
+    BackupRecovery,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -25,9 +26,19 @@ impl MutationState {
     pub(super) fn busy(&self, domain: MutationDomain) -> bool {
         self.active.iter().any(|token| {
             token.domain == domain
-                || token.domain == MutationDomain::Backup
-                || domain == MutationDomain::Backup
+                || matches!(
+                    token.domain,
+                    MutationDomain::Backup | MutationDomain::BackupRecovery
+                )
+                || matches!(
+                    domain,
+                    MutationDomain::Backup | MutationDomain::BackupRecovery
+                )
         })
+    }
+
+    pub(super) fn active(&self, domain: MutationDomain) -> bool {
+        self.active.iter().any(|token| token.domain == domain)
     }
 
     pub(super) fn begin(&mut self, domain: MutationDomain) -> Option<MutationToken> {
@@ -82,6 +93,7 @@ mod tests {
             MutationDomain::TrafficHistory,
             MutationDomain::Network,
             MutationDomain::Backup,
+            MutationDomain::BackupRecovery,
         ] {
             let mut state = MutationState::default();
             let pending = state.begin(domain).unwrap();
@@ -104,5 +116,20 @@ mod tests {
         assert!(state.busy(MutationDomain::Logs));
         state.finish(new);
         assert!(!state.busy(MutationDomain::Logs));
+    }
+
+    #[test]
+    fn backup_recovery_waiting_is_distinct_from_other_conflicting_operations() {
+        let mut state = MutationState::default();
+        let export = state.begin(MutationDomain::Backup).unwrap();
+        assert!(state.busy(MutationDomain::BackupRecovery));
+        assert!(!state.active(MutationDomain::BackupRecovery));
+        state.finish(export);
+        let recovery = state.begin(MutationDomain::BackupRecovery).unwrap();
+        assert!(state.active(MutationDomain::BackupRecovery));
+        assert!(state.begin(MutationDomain::Core).is_none());
+        assert!(state.begin(MutationDomain::Backup).is_none());
+        state.finish(recovery);
+        assert!(!state.active(MutationDomain::BackupRecovery));
     }
 }

@@ -23,10 +23,11 @@ sha2.workspace = true
 socket2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tokio-tungstenite.workspace = true
+tokio-tungstenite = { workspace = true, features = ["connect", "rustls-tls-webpki-roots"] }
 tracing.workspace = true
 zip.workspace = true
 zenclash-i18n.workspace = true
+zenclash-service = { path = "../zenclash-service" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true

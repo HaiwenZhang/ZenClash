@@ -759,6 +759,24 @@ profiles:
     reapply:
       zh-CN: 重新应用 %{name}
       en: Reapply %{name}
+    pending_description:
+      zh-CN: 配置和启动缓存已保存。确认服务已应用的配置版本后才能完成本次操作。
+      en: The profile and startup cache are saved. Confirm the revision already applied by the service to finish this operation.
+    saved_pending:
+      zh-CN: "配置已保存，服务确认尚未完成：%{error}"
+      en: "The profile is saved, but service confirmation is pending: %{error}"
+    confirm:
+      zh-CN: 确认服务状态
+      en: Confirm Service State
+    confirmed:
+      zh-CN: 已确认服务正在使用保存的配置
+      en: The service is confirmed to be using the saved profile
+    confirm_failed:
+      zh-CN: "服务状态仍未确认：%{error}"
+      en: "Service state is still unconfirmed: %{error}"
+    confirm_stale:
+      zh-CN: 运行配置已变化，请确认最新的服务状态
+      en: The runtime configuration has changed. Confirm the latest service state.
   metrics:
     proxies:
       zh-CN: 代理对象
@@ -2888,6 +2906,12 @@ core_page:
     release_previous_stopped:
       zh-CN: "%{error}；旧内核保持停止"
       en: "%{error}; the previous core remains stopped."
+    binding_changed:
+      zh-CN: 控制器已切换，请重试
+      en: Controller changed; please retry
+    binding_retirement:
+      zh-CN: 释放旧内核的后台任务异常结束：%{error}
+      en: "The previous-core release task ended unexpectedly: %{error}"
     release_previous_restored_stopped:
       zh-CN: "%{error}；旧内核已恢复并保持停止%{cleanup}"
       en: "%{error}; the previous core was restored and remains stopped%{cleanup}"
@@ -3254,6 +3278,18 @@ overrides:
 
 backup:
   local:
+    runtime_pending:
+      zh-CN: 运行状态待恢复
+      en: Runtime recovery pending
+    runtime_pending_description:
+      zh-CN: 已保留上次配置快照，可重试恢复内核运行状态。
+      en: The previous configuration snapshot is retained. Retry to restore the core runtime.
+    retry_runtime:
+      zh-CN: 重试恢复
+      en: Retry recovery
+    retrying_runtime:
+      zh-CN: 正在恢复并刷新
+      en: Restoring and refreshing
     title:
       zh-CN: 本地备份与恢复
       en: Local Backup & Restore
@@ -3286,6 +3322,9 @@ backup:
     exported:
       zh-CN: 已导出 %{count} 个文件（%{size}）到 %{path}
       en: Exported %{count} files (%{size}) to %{path}
+    runtime_recovered:
+      zh-CN: 上次配置的运行状态已恢复。
+      en: The previous configuration is running again.
     cleanup_warning:
       zh-CN: ；但旧快照清理失败：%{warning}
       en: "; however, old snapshot cleanup failed: %{warning}"
@@ -3293,6 +3332,18 @@ backup:
       zh-CN: 备份已验证并恢复：%{count} 个文件，共 %{size}%{warning}
       en: "Backup verified and restored: %{count} files, %{size} total%{warning}"
   errors:
+    retry_task:
+      zh-CN: "恢复重试任务异常结束：%{error}"
+      en: "The recovery retry task ended unexpectedly: %{error}"
+    retry_state_unavailable:
+      zh-CN: 无法确定本地数据目录。
+      en: The local data directory could not be determined.
+    retry_failed:
+      zh-CN: "运行状态恢复失败，快照已保留，可再次重试：%{error}"
+      en: "Runtime recovery failed. The snapshot is retained for another retry: %{error}"
+    retry_refresh_failed:
+      zh-CN: "运行状态已恢复，但刷新界面数据失败：%{error}"
+      en: "The runtime was restored, but refreshing the displayed data failed: %{error}"
     save_dialog:
       zh-CN: 无法打开备份保存对话框：%{error}
       en: "Could not open the backup save dialog: %{error}"
@@ -3710,6 +3761,9 @@ settings:
     controller:
       zh-CN: 控制器
       en: Controller
+    service_managed_controller:
+      zh-CN: 由服务托管
+      en: Managed by service
     autostart:
       title:
         zh-CN: 登录时自动启动

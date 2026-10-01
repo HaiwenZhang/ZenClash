@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 use reqwest::Method;
 use serde::Serialize;
 
-use super::{MihomoClient, MihomoError, MihomoResult, VersionInfo, request};
+use super::{MihomoClient, MihomoError, MihomoResult, VersionInfo};
 use crate::{
     ConnectionsSnapshot, ConnectionsSummary, DelayResult, DnsQueryResponse, DnsRecordType,
     ProviderCatalog, ProxyCatalog, RuleCatalog, RuntimeConfig, TrafficAccountingSnapshot,
@@ -92,13 +92,16 @@ impl MihomoClient {
         let path = format!("/group/{}/delay", encode_path_segment(group));
         let timeout = timeout_ms.to_string();
         let url = validated_test_url(test_url)?;
-        let response = self
-            .request(Method::GET, &path)?
-            .query(&[("url", url.as_str()), ("timeout", timeout.as_str())])
-            .send()
-            .await?;
-        let response = request::ensure_success(response).await?;
-        Ok(response.json().await?)
+        self.send_api(
+            Method::GET,
+            &path,
+            &[("url", url.as_str()), ("timeout", timeout.as_str())],
+            None,
+            None,
+        )
+        .await?
+        .json()
+        .await
     }
 
     /// Measures one proxy's delay through Mihomo.
@@ -148,13 +151,16 @@ impl MihomoClient {
         };
         let timeout = timeout_ms.to_string();
         let url = validated_test_url(test_url)?;
-        let response = self
-            .request(Method::GET, &path)?
-            .query(&[("url", url.as_str()), ("timeout", timeout.as_str())])
-            .send()
-            .await?;
-        let response = request::ensure_success(response).await?;
-        Ok(response.json().await?)
+        self.send_api(
+            Method::GET,
+            &path,
+            &[("url", url.as_str()), ("timeout", timeout.as_str())],
+            None,
+            None,
+        )
+        .await?
+        .json()
+        .await
     }
 
     /// Fetches proxy-provider metadata.
@@ -196,13 +202,16 @@ impl MihomoClient {
         record_type: DnsRecordType,
     ) -> MihomoResult<DnsQueryResponse> {
         require_non_empty(name, "DNS 查询名称")?;
-        let response = self
-            .request(Method::GET, "/dns/query")?
-            .query(&[("name", name.trim()), ("type", record_type.api_value())])
-            .send()
-            .await?;
-        let response = request::ensure_success(response).await?;
-        Ok(response.json().await?)
+        self.send_api(
+            Method::GET,
+            "/dns/query",
+            &[("name", name.trim()), ("type", record_type.api_value())],
+            None,
+            None,
+        )
+        .await?
+        .json()
+        .await
     }
 
     /// Flushes Mihomo's regular DNS cache without changing fake-IP mappings.
@@ -325,8 +334,15 @@ impl MihomoClient {
                 "运行时配置补丁必须是 JSON 对象".into(),
             ));
         }
-        self.patch_configs(body).await?;
-        let config = self.runtime_config().await?;
+        let client = self.pin_binding()?;
+        client.patch_configs(body).await?;
+        let config = client.runtime_config().await.map_err(|error| {
+            if matches!(error, MihomoError::StaleBinding) {
+                MihomoError::StaleTransport
+            } else {
+                error
+            }
+        })?;
         let actual = serde_json::to_value(&config).map_err(|error| {
             MihomoError::Process(format!("无法验证 Mihomo 运行时配置：{error}"))
         })?;
@@ -344,6 +360,7 @@ impl MihomoClient {
     ///
     /// Returns filesystem, validation, transport or API-status errors.
     pub async fn reload_config(&self, path: impl AsRef<Path>, force: bool) -> MihomoResult<()> {
+        let client = self.pin_binding()?;
         let path = path.as_ref().to_path_buf();
         let display_path = path.display().to_string();
         let payload = tokio::task::spawn_blocking(move || read_profile_bytes(&path))
@@ -356,7 +373,7 @@ impl MihomoClient {
             })?;
         let payload = String::from_utf8(payload)
             .map_err(|error| MihomoError::InvalidInput(format!("待重载配置不是 UTF-8：{error}")))?;
-        self.reload_payload(payload, force).await
+        client.reload_payload(payload, force).await
     }
 
     /// Asks Mihomo to reload an in-memory YAML payload.
@@ -369,8 +386,9 @@ impl MihomoClient {
         payload: impl Into<String>,
         force: bool,
     ) -> MihomoResult<()> {
-        let payload = self.normalize_config_payload(payload.into())?;
-        self.reload_exact_payload(payload, force).await
+        let client = self.pin_binding()?;
+        let payload = client.normalize_config_payload(payload.into())?;
+        client.reload_exact_payload(payload, force).await
     }
 
     pub(crate) async fn reload_exact_payload(
@@ -378,32 +396,87 @@ impl MihomoClient {
         payload: String,
         force: bool,
     ) -> MihomoResult<()> {
-        let write_lease = self.acquire_write_lease().await?;
-        let client = write_lease
-            .as_ref()
-            .map_or_else(|| self.clone(), |lease| self.with_write_lease(lease));
-        let _mutation_guard = client.mutation_gate.lock().await;
-        client.validate_config_payload_unlocked(&payload).await?;
-        let response = client
-            .request(Method::PUT, "/configs")?
-            .query(&[("force", force)])
-            .json(&serde_json::json!({ "payload": payload }))
-            .send()
-            .await?;
-        request::ensure_success(response).await?;
-        Ok(())
+        self.prepare_runtime_payload(payload)
+            .await?
+            .apply(force)
+            .await?
+            .commit()
+            .await
+    }
+
+    pub(crate) async fn prepare_runtime_payload(
+        &self,
+        payload: String,
+    ) -> MihomoResult<PreparedConfig> {
+        self.prepare_runtime(
+            payload,
+            None,
+            crate::core_session::RuntimeRestoreAuthority::Ordinary,
+        )
+        .await
+    }
+
+    pub(crate) async fn prepare_saved_runtime(
+        &self,
+        payload: String,
+        bundle: Option<std::sync::Arc<crate::ServiceRuntimeBundle>>,
+        authority: crate::core_session::RuntimeRestoreAuthority,
+    ) -> MihomoResult<PreparedConfig> {
+        let client = self.pin_binding()?;
+        if client.service_client().is_some() && bundle.is_none() {
+            return Err(MihomoError::Process(
+                "No accepted service runtime snapshot".into(),
+            ));
+        }
+        client.prepare_runtime(payload, bundle, authority).await
+    }
+
+    async fn prepare_runtime(
+        &self,
+        payload: String,
+        bundle: Option<std::sync::Arc<crate::ServiceRuntimeBundle>>,
+        authority: crate::core_session::RuntimeRestoreAuthority,
+    ) -> MihomoResult<PreparedConfig> {
+        let client = self.pin_binding()?;
+        let write_lease = client.acquire_write_lease().await?;
+        client.ensure_binding_current()?;
+        let client = match write_lease.as_ref() {
+            Some(lease) => client.with_write_lease(lease)?,
+            None => client,
+        };
+        let mutation_guard = client.mutation_gate.clone().lock_owned().await;
+        client.ensure_binding_current()?;
+        let prepared = if let Some(runtime) = client.runtime_session() {
+            PreparedConfigKind::Service(match bundle {
+                Some(bundle) => runtime.prepare_restore(bundle, &authority).await?,
+                None => runtime.prepare(&payload).await?,
+            })
+        } else {
+            client.validate_config_payload_unlocked(&payload).await?;
+            PreparedConfigKind::Direct(payload)
+        };
+        Ok(PreparedConfig {
+            client,
+            prepared,
+            mutation_guard,
+            write_lease,
+        })
     }
 
     pub(crate) async fn validate_config_payload(&self, payload: &str) -> MihomoResult<()> {
-        let write_lease = self.acquire_write_lease().await?;
-        let client = write_lease
-            .as_ref()
-            .map_or_else(|| self.clone(), |lease| self.with_write_lease(lease));
+        let client = self.pin_binding()?;
+        let write_lease = client.acquire_write_lease().await?;
+        client.ensure_binding_current()?;
+        let client = match write_lease.as_ref() {
+            Some(lease) => client.with_write_lease(lease)?,
+            None => client,
+        };
         let _mutation_guard = client.mutation_gate.lock().await;
         client.validate_config_payload_unlocked(payload).await
     }
 
     async fn validate_config_payload_unlocked(&self, payload: &str) -> MihomoResult<()> {
+        self.ensure_binding_current()?;
         if payload.trim().is_empty() {
             return Err(MihomoError::InvalidInput("重载配置内容不能为空".into()));
         }
@@ -413,7 +486,9 @@ impl MihomoClient {
                 MAX_PROFILE_BYTES / 1024 / 1024
             )));
         }
-        if let Some(validator) = self.config_validator.clone() {
+        if let Some(runtime) = self.runtime_session() {
+            let _validated = runtime.prepare(payload).await?;
+        } else if let Some(validator) = self.current_config_validator() {
             let write_lease = validator
                 .acquire_write_lease()
                 .await
@@ -468,8 +543,7 @@ impl MihomoClient {
             "/providers/proxies/{}/healthcheck",
             encode_path_segment(provider)
         );
-        let response = self.request(Method::GET, &path)?.send().await?;
-        request::ensure_success(response).await?;
+        self.send_api(Method::GET, &path, &[], None, None).await?;
         Ok(())
     }
 
@@ -513,10 +587,13 @@ impl MihomoClient {
     ///
     /// Returns transport or API-status errors reported by Mihomo.
     pub async fn update_geodata(&self) -> MihomoResult<()> {
-        let write_lease = self.acquire_write_lease().await?;
-        let client = write_lease
-            .as_ref()
-            .map_or_else(|| self.clone(), |lease| self.with_write_lease(lease));
+        let client = self.pin_binding()?;
+        let write_lease = client.acquire_write_lease().await?;
+        client.ensure_binding_current()?;
+        let client = match write_lease.as_ref() {
+            Some(lease) => client.with_write_lease(lease)?,
+            None => client,
+        };
         client
             .send_long_operation(Method::POST, "/configs/geo")
             .await
@@ -544,9 +621,10 @@ impl MihomoClient {
         index: usize,
         disabled: bool,
     ) -> MihomoResult<RuleCatalog> {
-        let _mutation_guard = self.mutation_gate.lock().await;
-        self.patch_rule_disabled(index, disabled).await?;
-        let catalog = self.rule_catalog().await?;
+        let client = self.pin_binding()?;
+        let _mutation_guard = client.mutation_gate.lock().await;
+        client.patch_rule_disabled(index, disabled).await?;
+        let catalog = client.rule_catalog().await?;
         let verified = catalog.rules.iter().any(|rule| {
             rule.index == Some(index)
                 && rule
@@ -571,29 +649,97 @@ impl MihomoClient {
     ///
     /// Returns transport or API-status errors reported by Mihomo.
     pub async fn apply_rule_disabled(&self, index: usize, disabled: bool) -> MihomoResult<()> {
-        let _mutation_guard = self.mutation_gate.lock().await;
-        self.patch_rule_disabled(index, disabled).await
+        let client = self.pin_binding()?;
+        let _mutation_guard = client.mutation_gate.lock().await;
+        client.patch_rule_disabled(index, disabled).await
     }
 
     async fn patch_rule_disabled(&self, index: usize, disabled: bool) -> MihomoResult<()> {
         let body = serde_json::json!({index.to_string(): disabled});
-        let response = self
-            .request(Method::PATCH, "/rules/disable")?
-            .json(&body)
-            .send()
+        self.send_api(Method::PATCH, "/rules/disable", &[], Some(body), None)
             .await?;
-        request::ensure_success(response).await?;
         Ok(())
     }
 
     async fn send_long_operation(&self, method: Method, path: &str) -> MihomoResult<()> {
-        let _mutation_guard = self.mutation_gate.lock().await;
-        let response = self
-            .request(method, path)?
-            .timeout(Duration::from_secs(120))
-            .send()
+        let client = self.pin_binding()?;
+        let _mutation_guard = client.mutation_gate.lock().await;
+        client
+            .send_api(method, path, &[], None, Some(Duration::from_secs(120)))
             .await?;
-        request::ensure_success(response).await?;
+        Ok(())
+    }
+}
+
+pub(crate) struct PreparedConfig {
+    client: MihomoClient,
+    prepared: PreparedConfigKind,
+    mutation_guard: tokio::sync::OwnedMutexGuard<()>,
+    write_lease: Option<crate::data_coordinator::DataWriteLease>,
+}
+
+enum PreparedConfigKind {
+    Direct(String),
+    Service(crate::service_runtime_session::PreparedRuntime),
+}
+
+pub(crate) struct AppliedConfig {
+    client: MihomoClient,
+    service: Option<crate::service_runtime_session::AppliedRuntime>,
+    _mutation_guard: tokio::sync::OwnedMutexGuard<()>,
+    _write_lease: Option<crate::data_coordinator::DataWriteLease>,
+}
+
+impl PreparedConfig {
+    pub(crate) async fn apply(self, force: bool) -> MihomoResult<AppliedConfig> {
+        let service = match self.prepared {
+            PreparedConfigKind::Service(prepared) => Some(prepared.apply(force).await?),
+            PreparedConfigKind::Direct(payload) => {
+                self.client.send_runtime_payload(payload, force).await?;
+                None
+            }
+        };
+        Ok(AppliedConfig {
+            client: self.client,
+            service,
+            _mutation_guard: self.mutation_guard,
+            _write_lease: self.write_lease,
+        })
+    }
+}
+
+impl AppliedConfig {
+    pub(crate) async fn commit(self) -> MihomoResult<()> {
+        if let Some(service) = self.service {
+            service.commit().await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn rollback(self, previous_payload: Option<String>) -> MihomoResult<()> {
+        if let Some(service) = self.service {
+            return service.rollback().await;
+        }
+        let payload = previous_payload.ok_or_else(|| {
+            MihomoError::Process(zenclash_i18n::text("backup.errors.no_runtime_snapshot"))
+        })?;
+        self.client
+            .validate_config_payload_unlocked(&payload)
+            .await?;
+        self.client.send_runtime_payload(payload, true).await
+    }
+}
+
+impl MihomoClient {
+    async fn send_runtime_payload(&self, payload: String, force: bool) -> MihomoResult<()> {
+        self.send_api(
+            Method::PUT,
+            "/configs",
+            &[("force", if force { "true" } else { "false" })],
+            Some(serde_json::json!({ "payload": payload })),
+            None,
+        )
+        .await?;
         Ok(())
     }
 }
@@ -637,7 +783,133 @@ pub(super) fn encode_path_segment(value: &str) -> String {
 
 #[cfg(test)]
 mod verification_tests {
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::Arc,
+        task::{Context, Wake, Waker},
+        time::Duration,
+    };
+
+    use parking_lot::Mutex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use super::json_contains;
+    use crate::{MihomoClient, MihomoEndpoint, MihomoError, MihomoResult};
+
+    type SwitchFuture = Pin<Box<dyn Future<Output = MihomoResult<()>> + Send>>;
+
+    struct SwitchOnUnlock(Mutex<Option<SwitchFuture>>);
+
+    impl Wake for SwitchOnUnlock {
+        fn wake(self: Arc<Self>) {
+            let mut future = self.0.lock();
+            if let Some(switch) = future.as_mut()
+                && switch
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_ready()
+            {
+                *future = None;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn verified_patch_binding_switch_after_send_keeps_unknown_outcome() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (received, received_waiter) = tokio::sync::oneshot::channel();
+        let (release, release_waiter) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(stream.read_u8().await.unwrap());
+            }
+            assert!(headers.starts_with(b"PATCH /configs "));
+            let headers = String::from_utf8(headers).unwrap();
+            let length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse().unwrap())
+                })
+                .unwrap();
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).await.unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                serde_json::json!({"mode":"global"})
+            );
+            received.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), release_waiter)
+                .await
+                .unwrap()
+                .unwrap();
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(300), listener.accept())
+                    .await
+                    .is_err(),
+                "verification was sent to the retired controller"
+            );
+        });
+        let client =
+            MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+        let pinned = client.pin_binding().unwrap();
+        let body = serde_json::json!({"mode":"global"});
+        let mut patch = Box::pin(pinned.patch_configs_verified(&body));
+        tokio::select! {
+            result = &mut patch => panic!("patch finished before response: {result:?}"),
+            result = received_waiter => result.unwrap(),
+        }
+        let replacement = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let switch_client = client.clone();
+        let endpoint =
+            MihomoEndpoint::new(format!("http://{}", replacement.local_addr().unwrap()), "");
+        let switch = Arc::new(SwitchOnUnlock(Mutex::new(Some(Box::pin(async move {
+            switch_client.switch_to_direct(endpoint).await
+        })))));
+        let waker = Waker::from(switch.clone());
+        assert!(
+            switch
+                .0
+                .lock()
+                .as_mut()
+                .unwrap()
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        release.send(()).unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(5), patch)
+            .await
+            .unwrap()
+            .unwrap_err();
+        let retirement = switch.0.lock().take();
+        if let Some(retirement) = retirement {
+            tokio::time::timeout(Duration::from_secs(5), retirement)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert!(
+            matches!(error, MihomoError::StaleTransport),
+            "PATCH was already sent: {error}"
+        );
+        assert!(error.mutation_result_unknown());
+        assert!(
+            replacement
+                .poll_accept(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        server.await.unwrap();
+    }
 
     #[test]
     fn matches_nested_runtime_patch_as_a_subset() {

@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{Read, Write},
+    io::{BufRead, Read, Write},
     net::TcpListener,
     path::{Path, PathBuf},
     thread,
@@ -30,6 +30,253 @@ fn write_profile(root: &Path) -> PathBuf {
     )
     .unwrap();
     path
+}
+
+#[tokio::test]
+async fn profile_mode_replaced_after_preflight_sends_no_patch_and_keeps_generation() {
+    profile_mode_replaced_after_preflight(false).await;
+}
+
+#[tokio::test]
+async fn profile_mode_zero_send_reports_cache_failure_without_runtime_change() {
+    profile_mode_replaced_after_preflight(true).await;
+}
+
+async fn profile_mode_replaced_after_preflight(fail_cache_restore: bool) {
+    use std::{task::Context, time::Duration};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let root = test_root("profile-mode-zero-send");
+    let profile = write_profile(&root);
+    let mut store = ControlledConfigStore::new(root.join("store"));
+    store.materialize(&profile).unwrap();
+    let previous_cache = fs::read(store.runtime_path()).unwrap();
+    let previous_layer = store.load().unwrap();
+    let (gate, entered, release) = super::ModePatchGate::new();
+    store.mode_patch_gate = Some(gate);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            headers.push(stream.read_u8().await.unwrap());
+        }
+        assert!(headers.starts_with(b"GET /configs "));
+        let body = r#"{"mode":"rule"}"#;
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_millis(300), listener.accept())
+            .await
+            .is_ok()
+    });
+    let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+    let session = crate::CoreSession::open_with_config(CoreKind::Mihomo, client.clone(), Some(profile), vec![]).unwrap();
+    let operation = {
+        let session = session.clone();
+        let store = store.clone();
+        tokio::spawn(async move { session.set_mode(&store, "global").await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), entered)
+        .await
+        .unwrap()
+        .unwrap();
+    let replacement = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    client
+        .switch_to_direct(MihomoEndpoint::new(
+            format!("http://{}", replacement.local_addr().unwrap()),
+            "",
+        ))
+        .await
+        .unwrap();
+    if fail_cache_restore {
+        fs::remove_file(store.runtime_path()).unwrap();
+        fs::create_dir(store.runtime_path()).unwrap();
+    }
+    drop(release);
+    let result = tokio::time::timeout(Duration::from_secs(5), operation)
+        .await
+        .unwrap()
+        .unwrap();
+    if fail_cache_restore {
+        assert!(matches!(
+            result,
+            Err(crate::CoreSessionError::Config(ControlledConfigError::Io(
+                _
+            )))
+        ));
+        assert!(store.runtime_path().is_dir());
+    } else {
+        assert!(matches!(
+            result,
+            Err(crate::CoreSessionError::Config(
+                ControlledConfigError::Profile(crate::MihomoError::StaleBinding)
+            ))
+        ));
+        assert_eq!(fs::read(store.runtime_path()).unwrap(), previous_cache);
+    }
+    assert_eq!(session.generation(), 0);
+    assert_eq!(store.load().unwrap(), previous_layer);
+    assert!(
+        replacement
+            .poll_accept(&mut Context::from_waker(std::task::Waker::noop()))
+            .is_pending()
+    );
+    assert!(
+        !server.await.unwrap(),
+        "zero-send rejection attempted a controller rollback"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn reload_rejects_a_binding_switched_while_waiting_for_store_mutation() {
+    use std::{future::Future, task::Context, time::Duration};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let root = test_root("reload-binding-admission");
+    let profile = write_profile(&root);
+    let lease = crate::data_coordinator::DataWriteLease::shared([root.clone()]);
+    let store = ControlledConfigStore::new(root.join("store")).with_write_lease(&lease);
+    store.materialize(&profile).unwrap();
+    let previous_cache = fs::read(store.runtime_path()).unwrap();
+    let client = MihomoClient::new(MihomoEndpoint::default())
+        .unwrap()
+        .with_config_validator(crate::CoreConfigValidator::new(
+            CoreKind::Mihomo,
+            root.join("unused-kernel"),
+            root.join("home"),
+        )).unwrap();
+    let mutation = store.mutation_gate.lock().await;
+    let mut operation = Box::pin(store.reload_profile(&client, &profile));
+    assert!(
+        operation
+            .as_mut()
+            .poll(&mut Context::from_waker(std::task::Waker::noop()))
+            .is_pending()
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let Ok(Ok((mut stream, _))) =
+            tokio::time::timeout(Duration::from_millis(300), listener.accept()).await
+        else {
+            return false;
+        };
+        let mut request = [0_u8; 4096];
+        assert_ne!(stream.read(&mut request).await.unwrap(), 0);
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        true
+    });
+    client
+        .switch_to_direct(MihomoEndpoint::new(format!("http://{address}"), ""))
+        .await
+        .unwrap();
+    drop(mutation);
+    assert!(matches!(
+        operation.await,
+        Err(ControlledConfigError::Profile(
+            crate::MihomoError::StaleBinding
+        ))
+    ));
+    assert!(
+        !server.await.unwrap(),
+        "stale reload reached the replacement controller"
+    );
+    assert_eq!(fs::read(store.runtime_path()).unwrap(), previous_cache);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn cancelling_the_waiter_keeps_patch_cache_and_session_consistent_with_persistence() {
+    let root = test_root("cancel-patch-persistence");
+    let profile = write_profile(&root);
+    let mut store = ControlledConfigStore::new(root.join("store"));
+    store.materialize(&profile).unwrap();
+    let (gate, waiting, release) = super::CommitGate::new();
+    store.commit_gate = Some(gate);
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = std::io::BufReader::new(&mut stream);
+        let mut content_length = 0;
+        loop {
+            let mut line = String::new();
+            assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                content_length = value.trim().parse::<usize>().unwrap();
+            }
+        }
+        let mut body = vec![0; content_length];
+        reader.read_exact(&mut body).unwrap();
+        drop(reader);
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+            .unwrap();
+    });
+    let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+    let session = crate::CoreSession::open_with_config(CoreKind::Mihomo, client, Some(profile.clone()), vec![]).unwrap();
+    let worker_session = session.clone();
+    let worker_store = store.clone();
+    let outer = tokio::spawn(async move {
+        worker_session
+            .apply(
+                &worker_store,
+                crate::EffectiveConfigIntent::Patch {
+                    profile,
+                    patch: serde_json::json!({"mode": "global"}),
+                    overrides: vec![],
+                },
+            )
+            .await
+    });
+    waiting.await.unwrap();
+    outer.abort();
+    assert!(outer.await.unwrap_err().is_cancelled());
+    release.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if store
+                .load_json()
+                .unwrap()
+                .get("mode")
+                .and_then(serde_json::Value::as_str)
+                == Some("global")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    session.shutdown().await.unwrap();
+    server.join().unwrap();
+    assert!(
+        fs::read_to_string(store.runtime_path())
+            .unwrap()
+            .contains("mode: global")
+    );
+    assert_eq!(session.generation(), 1);
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

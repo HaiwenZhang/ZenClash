@@ -1,97 +1,128 @@
 use super::*;
 
 impl CoreSession {
-    /// Immediately prevents new automatic work while asynchronous exit cleanup runs.
+    /// Immediately closes runtime publication admission while asynchronous cleanup runs.
     pub fn request_shutdown(&self) {
         self.shutdown_requested.store(true, Ordering::Release);
+        self.client.close_runtime_admission();
     }
 
     pub(crate) fn is_shutting_down(&self) -> bool {
         self.shutdown_requested.load(Ordering::Acquire)
     }
 
-    /// Stops an owned running core after link loss without erasing its capture intent.
+    /// Stops the actual owned core after link loss while retaining its accepted runtime.
     ///
     /// # Errors
-    /// Reports native capture release, process shutdown, or application exit failures.
+    /// Returns capture release, stale admission, native Stop confirmation or shutdown errors.
     pub async fn suspend_for_network(
         &self,
         capture: &TrafficCaptureSession,
     ) -> Result<bool, CoreSessionError> {
-        {
-            let _transition = self.transition.lock().await;
-            self.ensure_not_shutting_down()?;
-            let Some(process) = &self.process else {
-                return Ok(false);
-            };
-            if !process.is_running() || self.lifecycle.read().phase == CoreLifecyclePhase::Stopped {
+        let session = self.clone();
+        let capture = capture.clone();
+        tokio::spawn(async move {
+            let client = session.client.pin_binding()?;
+            {
+                let _transition = session.transition.lock().await;
+                client.ensure_binding_current()?;
+                session.ensure_not_shutting_down()?;
+                if client.owned_core().is_none()
+                    || session.lifecycle.read().phase == CoreLifecyclePhase::Stopped
+                {
+                    return Ok(false);
+                }
+                session.network_suspended.store(true, Ordering::Release);
+                session.lifecycle.write().phase = CoreLifecyclePhase::NetworkSuspended;
+            }
+            // Capture may itself acquire Transition. Recheck the same pin afterward.
+            let released = CoreRecoveryCapture::release_owned(&capture).await;
+            let lease = session.acquire_process_write_lease(&client).await?;
+            let _transition = session.transition.clone().lock_owned().await;
+            client.ensure_binding_current()?;
+            session.ensure_not_shutting_down()?;
+            if !session.network_suspended.load(Ordering::Acquire) {
                 return Ok(false);
             }
-            self.network_suspended.store(true, Ordering::Release);
-            self.lifecycle.write().phase = CoreLifecyclePhase::NetworkSuspended;
-        }
-        // Capture operations may themselves wait for the core transition gate.
-        let released = CoreRecoveryCapture::release_owned(capture).await;
-        let _transition = self.transition.lock().await;
-        self.ensure_not_shutting_down()?;
-        if !self.network_suspended.load(Ordering::Acquire) {
-            return Ok(false);
-        }
-        if let Some(process) = &self.process {
-            process.stop_async().await?;
-        }
-        self.next_generation();
-        released.map_err(|error| CoreSessionError::Process(MihomoError::Process(error)))?;
-        Ok(true)
+            let _mutation = client.lock_runtime_binding().await?;
+            if let Err(error) = session
+                .maintain_owned(
+                    &client,
+                    CoreMaintenanceIntent::Stop,
+                    CORE_READY_TIMEOUT,
+                    &lease,
+                )
+                .await
+            {
+                session.lifecycle.write().phase = CoreLifecyclePhase::Unknown;
+                return Err(error);
+            }
+            session.next_generation();
+            released.map_err(|error| CoreSessionError::Process(MihomoError::Process(error)))?;
+            Ok(true)
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))?
     }
 
-    /// Resumes only a core previously suspended by link loss and reconciles capture.
+    /// Resumes the accepted runtime after link loss and restores capture intent.
     ///
     /// # Errors
-    /// Returns readiness, capture recovery, or application exit failures. A failed
-    /// attempt remains eligible for a later network-recovery retry.
+    /// Returns restart confirmation, capture, stale admission or shutdown failures.
     pub async fn resume_after_network(
         &self,
         capture: &TrafficCaptureSession,
     ) -> Result<bool, CoreSessionError> {
-        {
-            let lease = self.acquire_process_write_lease().await?;
-            let _transition = self.transition.lock().await;
-            self.ensure_not_shutting_down()?;
-            if !self.network_suspended.load(Ordering::Acquire) {
-                return Ok(false);
-            }
-            let Some(process) = &self.process else {
-                return Ok(false);
-            };
-            if !process.is_running() {
-                process
-                    .restart_and_wait_until_with_lease(
+        let session = self.clone();
+        let capture = capture.clone();
+        tokio::spawn(async move {
+            let client = session.client.pin_binding()?;
+            {
+                let lease = session.acquire_process_write_lease(&client).await?;
+                let _transition = session.transition.clone().lock_owned().await;
+                client.ensure_binding_current()?;
+                session.ensure_not_shutting_down()?;
+                if !session.network_suspended.load(Ordering::Acquire)
+                    || client.owned_core().is_none()
+                {
+                    return Ok(false);
+                }
+                let _mutation = client.lock_runtime_binding().await?;
+                if let Err(error) = session
+                    .maintain_owned(
+                        &client,
+                        CoreMaintenanceIntent::Restart,
                         CORE_READY_TIMEOUT,
-                        Some(self.shutdown_requested.clone()),
                         &lease,
                     )
-                    .await?;
-                self.next_generation();
+                    .await
+                {
+                    session.lifecycle.write().phase = CoreLifecyclePhase::Unknown;
+                    return Err(error);
+                }
+                session.next_generation();
             }
-        }
-        CoreRecoveryCapture::reconcile(capture)
-            .await
-            .map_err(|error| CoreSessionError::Process(MihomoError::Process(error)))?;
-        let _transition = self.transition.lock().await;
-        self.ensure_not_shutting_down()?;
-        if self.network_suspended.swap(false, Ordering::AcqRel) {
-            *self.lifecycle.write() = CoreLifecycleSnapshot::new(true);
-            return Ok(true);
-        }
-        Ok(false)
+            CoreRecoveryCapture::reconcile(&capture)
+                .await
+                .map_err(|error| CoreSessionError::Process(MihomoError::Process(error)))?;
+            let _transition = session.transition.lock().await;
+            client.ensure_binding_current()?;
+            session.ensure_not_shutting_down()?;
+            if session.network_suspended.swap(false, Ordering::AcqRel) {
+                *session.lifecycle.write() = CoreLifecycleSnapshot::new(true);
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))?
     }
 
-    /// Restarts a changed active source only if the observed core generation is current.
+    /// Applies a changed source only while its observed runtime generation remains current.
     ///
     /// # Errors
-    /// Returns validation, source, restart or rollback failures. External and
-    /// intentionally stopped cores are left untouched.
+    /// Returns source validation, configuration transaction, stale admission or shutdown errors.
     pub async fn restart_changed_source(
         &self,
         store: &ControlledConfigStore,
@@ -100,16 +131,18 @@ impl CoreSession {
         expected_generation: u64,
         expected_revision: [u8; 32],
     ) -> Result<bool, CoreSessionError> {
+        let client = self.client.pin_binding()?;
         let lease = store
-            .acquire_write_lease_for_paths(self.write_scopes())
+            .acquire_write_lease_for_paths(self.write_scopes_for_client(&client))
             .await?;
+        client.ensure_binding_current()?;
         let store = store.with_write_lease(&lease);
+        let client = client.with_write_lease(&lease)?;
         let mut active_profile = self.transition.lock().await;
+        client.ensure_binding_current()?;
         self.ensure_not_shutting_down()?;
-        let Some(process) = &self.process else {
-            return Ok(false);
-        };
-        if !process.is_running()
+        if client.owned_core().is_none()
+            || self.snapshot().running != Some(true)
             || self.network_suspended.load(Ordering::Acquire)
             || self.generation.load(Ordering::Acquire) != expected_generation
         {
@@ -120,31 +153,50 @@ impl CoreSession {
         let check_overrides = overrides.clone();
         let kind = self.kind;
         let current = tokio::task::spawn_blocking(move || {
-            if check_store.pending_source_revision(kind, &check_profile, &check_overrides)?
-                != Some(expected_revision)
-            {
-                return Ok::<_, ControlledConfigError>(false);
-            }
-            Ok(true)
+            Ok::<_, ControlledConfigError>(
+                check_store.pending_source_revision(kind, &check_profile, &check_overrides)?
+                    == Some(expected_revision),
+            )
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
         if !current {
             return Ok(false);
         }
+        client.ensure_binding_current()?;
         self.ensure_not_shutting_down()?;
-        store
-            .stage_profile_restart(
-                process.clone(),
-                profile.clone(),
-                overrides.clone(),
-                Some(self.shutdown_requested.clone()),
-            )
-            .await
-            .map_err(|error| self.runtime_mutation_error(error))?
-            .commit();
+        match client.owned_core() {
+            Some(crate::owned_core::OwnedCore::Local(process)) => {
+                let _mutation = client.lock_runtime_binding().await?;
+                store
+                    .stage_profile_restart(
+                        process,
+                        profile.clone(),
+                        overrides.clone(),
+                        Some(self.shutdown_requested.clone()),
+                    )
+                    .await
+                    .map_err(|error| self.runtime_mutation_error(error))?
+                    .commit()
+                    .await?;
+            }
+            Some(crate::owned_core::OwnedCore::Service(_)) => {
+                store
+                    .stage_profile_reload(
+                        &client,
+                        profile.clone(),
+                        active_profile.profile.clone(),
+                        overrides.clone(),
+                    )
+                    .await
+                    .map_err(|error| self.runtime_mutation_error(error))?
+                    .commit()
+                    .await?;
+            }
+            None => return Ok(false),
+        }
         let committed = CommittedConfig {
-            profile: Some(profile.clone()),
+            profile: Some(profile),
             overrides,
         };
         *active_profile = committed.clone();
@@ -160,11 +212,10 @@ mod tests {
     #[tokio::test]
     async fn automatic_network_actions_never_control_an_external_process() {
         let client = MihomoClient::new(crate::MihomoEndpoint::default()).unwrap();
-        let session = CoreSession::open(CoreKind::Mihomo, client, None);
+        let session = CoreSession::open(CoreKind::Mihomo, client).unwrap();
         let capture = TrafficCaptureSession::new(
             session.clone(),
             ControlledConfigStore::new(std::env::temp_dir()),
-            None,
             None,
             None,
         );

@@ -58,9 +58,22 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo scripts/install_linux_build_deps.sh
 
+      - name: Test Windows helper payload packaging behavior
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/tests/build_windows_installer_test.ps1
+
       - name: Test Debian packaging behavior
         if: runner.os == 'Linux'
         run: bash scripts/tests/build_deb_package_test.sh
+
+      - name: Test RPM payload packaging behavior
+        if: runner.os == 'Linux'
+        run: bash scripts/tests/build_rpm_package_test.sh
+
+      - name: Test macOS helper payload packaging behavior
+        if: runner.os == 'macOS'
+        run: bash scripts/tests/build_macos_app_test.sh
 
       - name: Run Clippy
         run: >-

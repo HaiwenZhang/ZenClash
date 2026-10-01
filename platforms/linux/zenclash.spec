@@ -25,6 +25,9 @@ management, runtime configuration and a bundled real Mihomo core.
 
 %install
 install -Dpm0755 %{payload_dir}/zenclash %{buildroot}%{_bindir}/zenclash
+install -Dpm0755 %{payload_dir}/zenclash-service %{buildroot}%{_prefix}/lib/zenclash/zenclash-service
+install -Dpm0644 %{payload_dir}/zenclash-service.service %{buildroot}%{_prefix}/lib/systemd/system/zenclash-service.service
+install -Dpm0644 %{payload_dir}/org.zenclash.service.policy %{buildroot}%{_datadir}/polkit-1/actions/org.zenclash.service.policy
 install -Dpm0755 %{payload_dir}/mihomo %{buildroot}%{_prefix}/lib/zenclash/mihomo
 install -Dpm0644 %{payload_dir}/geoip.metadb %{buildroot}%{_prefix}/lib/zenclash/geoip.metadb
 install -Dpm0644 %{payload_dir}/profile.yaml %{buildroot}%{_prefix}/lib/zenclash/profile.yaml
@@ -36,6 +39,9 @@ install -Dpm0644 %{payload_dir}/LICENSE %{buildroot}%{_licensedir}/zenclash/LICE
 %files
 %license %{_licensedir}/zenclash/LICENSE
 %{_bindir}/zenclash
+%{_prefix}/lib/zenclash/zenclash-service
+%{_prefix}/lib/systemd/system/zenclash-service.service
+%{_datadir}/polkit-1/actions/org.zenclash.service.policy
 %{_prefix}/lib/zenclash/mihomo
 %{_prefix}/lib/zenclash/geoip.metadb
 %{_prefix}/lib/zenclash/profile.yaml

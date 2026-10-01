@@ -38,6 +38,40 @@ pub struct MihomoProcess {
     logs: Arc<RwLock<VecDeque<String>>>,
     last_exit_reason: RwLock<Option<String>>,
     config: MihomoLaunchConfig,
+    #[cfg(test)]
+    drop_gate: Mutex<Option<TestDropGate>>,
+}
+
+#[cfg(test)]
+struct TestDropGate {
+    started: std::sync::mpsc::Sender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+pub(crate) struct TestDropPause {
+    started: std::sync::mpsc::Receiver<()>,
+    resume: Option<std::sync::mpsc::Sender<()>>,
+}
+
+#[cfg(test)]
+impl TestDropPause {
+    pub(crate) fn wait_started(&self) {
+        self.started.recv_timeout(Duration::from_secs(2)).unwrap();
+    }
+
+    pub(crate) fn resume(&mut self) {
+        if let Some(resume) = self.resume.take() {
+            let _ = resume.send(());
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestDropPause {
+    fn drop(&mut self) {
+        self.resume();
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -79,7 +113,24 @@ impl MihomoProcess {
             logs,
             last_exit_reason: RwLock::new(None),
             config,
+            #[cfg(test)]
+            drop_gate: Mutex::new(None),
         }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_last_drop_for_test(&self) -> TestDropPause {
+        let (started, observed) = std::sync::mpsc::channel();
+        let (resume, resumed) = std::sync::mpsc::channel();
+        let previous = self.drop_gate.lock().replace(TestDropGate {
+            started,
+            resume: resumed,
+        });
+        assert!(previous.is_none());
+        TestDropPause {
+            started: observed,
+            resume: Some(resume),
+        }
     }
 
     /// Stops the current child and starts the same binary and configuration.
@@ -540,6 +591,12 @@ fn configure_child_command(_command: &mut Command) {}
 
 impl Drop for MihomoProcess {
     fn drop(&mut self) {
+        #[cfg(test)]
+        if let Some(gate) = self.drop_gate.get_mut().take() {
+            let _ = gate.started.send(());
+            // A panicking/cancelled test releases its RAII sender; timeout is the final bound.
+            let _ = gate.resume.recv_timeout(Duration::from_secs(2));
+        }
         if let Err(error) = self.stop() {
             tracing::warn!(%error, "failed to stop Mihomo while dropping process owner");
         }

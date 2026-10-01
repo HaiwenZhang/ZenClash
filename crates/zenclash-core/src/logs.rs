@@ -9,13 +9,15 @@ use std::{
 };
 
 use chrono::{Days, Local, NaiveTime, TimeZone};
-use futures_util::StreamExt;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
 
-use crate::{MihomoEndpoint, websocket::connect_stream};
+use crate::{
+    MihomoClient, MihomoEndpoint,
+    client::{ControllerBinding, ControllerStream},
+};
 
 mod file;
 
@@ -211,6 +213,24 @@ impl LogMonitor {
     /// compatible cores emit their own frame-writing diagnostics into `/logs`.
     #[must_use]
     pub fn start(runtime: &Handle, endpoint: MihomoEndpoint, level: MihomoLogLevel) -> Arc<Self> {
+        Self::start_binding(runtime, ControllerBinding::direct(endpoint), level)
+    }
+
+    /// Starts a monitor following the client's Direct or native Service transport.
+    #[must_use]
+    pub fn start_with_client(
+        runtime: &Handle,
+        client: MihomoClient,
+        level: MihomoLogLevel,
+    ) -> Arc<Self> {
+        Self::start_binding(runtime, client.binding, level)
+    }
+
+    fn start_binding(
+        runtime: &Handle,
+        binding: Arc<ControllerBinding>,
+        level: MihomoLogLevel,
+    ) -> Arc<Self> {
         let level = level.realtime_stream_level();
         let entries = Arc::new(RwLock::new(LogBuffer::default()));
         let stream = Arc::new(RwLock::new(LogStreamSnapshot::default()));
@@ -220,7 +240,7 @@ impl LogMonitor {
         let expected_generation = Arc::new(AtomicU64::new(0));
         let (generation, generation_receiver) = watch::channel(0);
         let task = runtime.spawn(run_monitor(
-            endpoint,
+            binding,
             level_receiver,
             generation_receiver,
             LogMonitorState {
@@ -444,18 +464,26 @@ struct LogMonitorState {
 }
 
 async fn run_monitor(
-    endpoint: MihomoEndpoint,
+    binding: Arc<ControllerBinding>,
     mut level: watch::Receiver<MihomoLogLevel>,
     mut generation_updates: watch::Receiver<u64>,
     state: LogMonitorState,
 ) {
     let mut backoff = crate::websocket::ReconnectBackoff::default();
+    let mut transport_updates = binding.subscribe();
     loop {
+        let transport_generation = transport_updates.borrow_and_update().generation;
         let requested_level = *level.borrow();
         let generation = *generation_updates.borrow_and_update();
         let mut level_changed = false;
         let mut generation_changed = false;
-        match connect_log_stream(&endpoint, requested_level).await {
+        let connection = tokio::select! {
+            changed = transport_updates.changed() => { if changed.is_err() { return; } continue; }
+            changed = generation_updates.changed() => { if changed.is_err() { return; } continue; }
+            changed = level.changed() => { if changed.is_err() { return; } continue; }
+            connection = connect_log_stream(&binding, requested_level) => connection,
+        };
+        match connection {
             Ok(mut socket) => {
                 if update_log_connection(
                     &state.stream,
@@ -468,6 +496,11 @@ async fn run_monitor(
                 }
                 loop {
                     let message = tokio::select! {
+                        changed = transport_updates.changed() => {
+                            if changed.is_err() { return; }
+                            generation_changed = true;
+                            break;
+                        }
                         changed = level.changed() => {
                             if changed.is_err() {
                                 return;
@@ -488,9 +521,15 @@ async fn run_monitor(
                         break;
                     };
                     match message {
-                        Ok(message) if message.is_text() || message.is_binary() => {
+                        Ok(message)
+                            if (message.is_text() || message.is_binary())
+                                && binding.is_current(transport_generation) =>
+                        {
                             match parse_log_frame(&message.into_data(), now_ms()) {
                                 Ok(entry) => {
+                                    if !log_level_accepts(requested_level, &entry.level) {
+                                        continue;
+                                    }
                                     backoff.reset();
                                     accept_log_entry(
                                         &state.entries,
@@ -559,6 +598,10 @@ async fn run_monitor(
             continue;
         }
         tokio::select! {
+            changed = transport_updates.changed() => {
+                if changed.is_err() { return; }
+                backoff.reset();
+            }
             changed = level.changed() => {
                 if changed.is_err() {
                     return;
@@ -732,29 +775,42 @@ fn now_ms() -> u64 {
 }
 
 async fn connect_log_stream(
-    endpoint: &MihomoEndpoint,
+    binding: &Arc<ControllerBinding>,
     level: MihomoLogLevel,
-) -> Result<crate::websocket::MihomoSocket, String> {
-    let structured = connect_stream(
-        endpoint,
-        "/logs",
-        &[("level", level.api_value()), ("format", "structured")],
-        "连接 Mihomo 结构化日志流超时",
-    )
-    .await;
+) -> Result<ControllerStream, String> {
+    let structured = binding
+        .connect(
+            "/logs",
+            &[("level", level.api_value()), ("format", "structured")],
+            "连接 Mihomo 结构化日志流超时",
+        )
+        .await;
     match structured {
         Ok(socket) => Ok(socket),
-        Err(structured_error) => connect_stream(
-            endpoint,
-            "/logs",
-            &[("level", level.api_value())],
-            "连接 Mihomo 日志流超时",
-        )
-        .await
-        .map_err(|plain_error| {
-            format!("结构化日志不可用：{structured_error}；plain 回退失败：{plain_error}")
-        }),
+        Err(error) if binding.service().is_some() => Err(error),
+        Err(structured_error) => binding
+            .connect(
+                "/logs",
+                &[("level", level.api_value())],
+                "连接 Mihomo 日志流超时",
+            )
+            .await
+            .map_err(|plain_error| {
+                format!("结构化日志不可用：{structured_error}；plain 回退失败：{plain_error}")
+            }),
     }
+}
+
+fn log_level_accepts(level: MihomoLogLevel, received: &str) -> bool {
+    let rank = |level| match level {
+        MihomoLogLevel::Silent => 0,
+        MihomoLogLevel::Error => 1,
+        MihomoLogLevel::Warning => 2,
+        MihomoLogLevel::Info => 3,
+        MihomoLogLevel::Debug => 4,
+    };
+    MihomoLogLevel::from_api(received)
+        .is_some_and(|received| received != MihomoLogLevel::Silent && rank(received) <= rank(level))
 }
 
 fn parse_log_frame(data: &[u8], received_at_ms: u64) -> Result<LogEntry, serde_json::Error> {
@@ -1167,5 +1223,14 @@ mod tests {
         monitor.set_level(MihomoLogLevel::Warning);
 
         assert_eq!(monitor.level(), MihomoLogLevel::Warning);
+    }
+    #[test]
+    fn native_debug_stream_obeys_the_user_severity_threshold() {
+        assert!(!log_level_accepts(MihomoLogLevel::Silent, "error"));
+        assert!(log_level_accepts(MihomoLogLevel::Warning, "warn"));
+        assert!(log_level_accepts(MihomoLogLevel::Warning, "error"));
+        assert!(!log_level_accepts(MihomoLogLevel::Warning, "info"));
+        assert!(!log_level_accepts(MihomoLogLevel::Info, "debug"));
+        assert!(!log_level_accepts(MihomoLogLevel::Info, "unrecognized"));
     }
 }

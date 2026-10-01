@@ -58,6 +58,7 @@ fn exited_process_snapshot_does_not_expose_a_stale_pid() {
     let mut child = Command::new("/usr/bin/true").spawn().unwrap();
     child.wait().unwrap();
     let process = MihomoProcess {
+        drop_gate: Mutex::new(None),
         child: Mutex::new(Some(child)),
         logs: Arc::new(RwLock::new(VecDeque::new())),
         last_exit_reason: RwLock::new(None),
@@ -256,6 +257,7 @@ fn stop_gives_the_child_a_graceful_sigterm_window() {
 #[test]
 fn ui_metadata_and_logs_remain_available_while_lifecycle_lock_is_held() {
     let process = MihomoProcess {
+        drop_gate: Mutex::new(None),
         child: parking_lot::Mutex::new(None),
         logs: std::sync::Arc::new(parking_lot::RwLock::new(VecDeque::from(["ready".into()]))),
         last_exit_reason: parking_lot::RwLock::new(None),
@@ -269,11 +271,7 @@ fn ui_metadata_and_logs_remain_available_while_lifecycle_lock_is_held() {
         },
     };
     let process = std::sync::Arc::new(process);
-    let session = crate::CoreSession::open(
-        CoreKind::Mihomo,
-        MihomoClient::new(MihomoEndpoint::default()).unwrap(),
-        Some(process.clone()),
-    );
+    let session = crate::CoreSession::open(CoreKind::Mihomo, MihomoClient::from_process(process.clone()).unwrap()).unwrap();
     let transition = process.child.lock();
     let reader = process.clone();
     let (sender, receiver) = std::sync::mpsc::channel();

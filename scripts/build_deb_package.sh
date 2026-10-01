@@ -50,8 +50,25 @@ bundled_mihomo_version="$("${mihomo_path}" -v)"
 ZENCLASH_VERSION="${version}" \
 ZENCLASH_BUNDLED_MIHOMO_VERSION="${bundled_mihomo_version}" \
 cargo build --release --locked -p zenclash-ui --bin zenclash
+ZENCLASH_VERSION="${version}" \
+cargo build --release --locked -p zenclash-service --features server --bin zenclash-service
+
+service_path="${cargo_output_root}/release/zenclash-service"
+if [[ ! -s "${service_path}" || ! -x "${service_path}" ]]; then
+  echo "Service executable is missing or empty: ${service_path}" >&2
+  exit 1
+fi
+if ! service_version="$("${service_path}" --version)" || [[ -z "${service_version//[[:space:]]/}" ]]; then
+  echo "Service version check failed: ${service_path}" >&2
+  exit 1
+fi
 
 install -Dm755 "${cargo_output_root}/release/zenclash" "${package_root}/usr/bin/zenclash"
+install -Dm755 "${service_path}" "${package_root}/usr/lib/zenclash/zenclash-service"
+install -Dm644 "${project_root}/platforms/linux/zenclash-service.service" \
+  "${package_root}/usr/lib/systemd/system/zenclash-service.service"
+install -Dm644 "${project_root}/platforms/linux/org.zenclash.service.policy" \
+  "${package_root}/usr/share/polkit-1/actions/org.zenclash.service.policy"
 install -Dm755 "${mihomo_path}" "${package_root}/usr/lib/zenclash/mihomo"
 install -Dm644 "${geodata_path}" "${package_root}/usr/lib/zenclash/geoip.metadb"
 install -Dm644 "${profile_path}" "${package_root}/usr/lib/zenclash/profile.yaml"
@@ -88,5 +105,8 @@ grep -Eq '[[:space:]]\./usr/lib/zenclash/mihomo$' "${package_contents_path}"
 grep -Eq '[[:space:]]\./usr/lib/zenclash/geoip.metadb$' "${package_contents_path}"
 grep -Eq '[[:space:]]\./usr/lib/zenclash/recovery.yaml$' "${package_contents_path}"
 grep -Eq '[[:space:]]\./usr/share/doc/zenclash/LICENSE$' "${package_contents_path}"
+grep -Eq '[[:space:]]\./usr/lib/zenclash/zenclash-service$' "${package_contents_path}"
+grep -Eq '[[:space:]]\./usr/lib/systemd/system/zenclash-service.service$' "${package_contents_path}"
+grep -Eq '[[:space:]]\./usr/share/polkit-1/actions/org.zenclash.service.policy$' "${package_contents_path}"
 
 echo "Built ${package_path}"

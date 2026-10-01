@@ -159,7 +159,7 @@ mod tests {
         let client =
             MihomoClient::new(zenclash_core::MihomoEndpoint::new("http://127.0.0.1:1", ""))
                 .unwrap();
-        let session = CoreSession::open(CoreKind::Mihomo, client, None);
+        let session = CoreSession::open(CoreKind::Mihomo, client).unwrap();
         let controlled = ControlledConfigStore::new(root.join("controlled"));
         let runtime = CoreProfileRuntime::new(session.clone(), Some(overrides.clone()));
 

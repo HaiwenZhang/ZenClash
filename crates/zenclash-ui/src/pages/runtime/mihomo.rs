@@ -4,7 +4,7 @@ use super::{
     config_input_row, format_port, h_flex, info_row, json, load_page, message_banner, metric,
     setting_card, setting_switch, v_flex,
 };
-use zenclash_core::CoreMaintenanceIntent;
+use zenclash_core::{CoreMaintenanceIntent, CoreRuntimeBackend, Observation};
 
 mod maintenance;
 
@@ -126,32 +126,24 @@ impl RuntimePage {
             RuntimeData::Core { version, config } => (version.clone(), config.clone(), true),
             _ => (VersionInfo::default(), RuntimeConfig::default(), false),
         };
-        let process = self.process.as_ref().map(|process| process.launch_config());
-        let managed_process = process.is_some();
+        let descriptor = self.core_session.runtime_descriptor();
+        let managed_process = descriptor.backend() != CoreRuntimeBackend::Direct;
+        let local_source = descriptor.backend() == CoreRuntimeBackend::Local;
         let operational = self.operational_status.snapshot();
-        let observed = operational.process.value();
-        let process_running = observed.map_or(has_runtime_data, |snapshot| snapshot.running);
+        let observed = match &operational.process {
+            Observation::Fresh { value, .. } if value.generation == self.core_session.generation() => Some(value),
+            _ => None,
+        };
+        let process_running = observed.map(|snapshot| snapshot.running);
         let process_status = observed.map_or_else(
-            || {
-                if managed_process {
-                    zenclash_i18n::text("core_page.status.unreadable")
-                } else if has_runtime_data {
-                    zenclash_i18n::text("core_page.status.external_connected")
-                } else {
-                    zenclash_i18n::text("core_page.status.external_unreachable")
-                }
-            },
+            || zenclash_i18n::text(if managed_process { "core_page.status.unreadable" } else if has_runtime_data { "core_page.status.external_connected" } else { "core_page.status.external_unreachable" }),
             |snapshot| {
                 if !snapshot.managed {
-                    zenclash_i18n::text(if has_runtime_data {
-                        "core_page.status.external_connected"
-                    } else {
-                        "core_page.status.external_unreachable"
-                    })
+                    zenclash_i18n::text(if has_runtime_data { "core_page.status.external_connected" } else { "core_page.status.external_unreachable" })
                 } else if snapshot.running {
-                    zenclash_i18n::text_with(
-                        "core_page.status.running",
-                        &[("pid", snapshot.pid.unwrap_or_default().to_string())],
+                    snapshot.pid.filter(|pid| *pid != 0).map_or_else(
+                        || zenclash_i18n::text("core_page.status.running_without_pid"),
+                        |pid| zenclash_i18n::text_with("core_page.status.running", &[("pid", pid.to_string())]),
                     )
                 } else {
                     zenclash_i18n::text("core_page.status.stopped")
@@ -178,10 +170,10 @@ impl RuntimePage {
                     .child(metric(
                         zenclash_i18n::text("core_page.metrics.status"),
                         process_status,
-                        if process_running {
-                            theme.success
-                        } else {
-                            theme.danger
+                        match process_running {
+                            Some(true) => theme.success,
+                            Some(false) => theme.danger,
+                            None => theme.warning,
                         },
                         theme,
                     ))
@@ -272,7 +264,14 @@ impl RuntimePage {
                     setting_card(zenclash_i18n::text("core_page.controller.title"), theme)
                         .child(info_row(
                             "External Controller",
-                            &self.client.endpoint().controller,
+                            self.client.endpoint().map_or_else(
+                                || {
+                                    zenclash_i18n::text(
+                                        "settings.application.service_managed_controller",
+                                    )
+                                },
+                                |endpoint| endpoint.controller,
+                            ),
                             theme,
                         ))
                         .child(info_row("HTTP", format_port(config.port), theme))
@@ -337,23 +336,26 @@ impl RuntimePage {
                             ),
                     ),
             )
-            .child(self.render_versioned_core_updates(&version.version, managed_process, theme, cx))
-            .when_some(process, |this, snapshot| {
+            .child(self.render_versioned_core_updates(&version.version, local_source, theme, cx))
+            .when(descriptor.backend() == CoreRuntimeBackend::Service, |this| {
+                this.child(message_banner(zenclash_i18n::text("core_page.maintenance.service_upgrade"), theme.warning, theme))
+            })
+            .when(local_source, |this| {
                 this.child(
                     setting_card(zenclash_i18n::text("core_page.process.title"), theme)
                         .child(info_row(
                             zenclash_i18n::text("core_page.process.binary"),
-                            snapshot.binary.display().to_string(),
+                            descriptor.binary().map_or_else(|| "—".to_owned(), |path| path.display().to_string()),
                             theme,
                         ))
                         .child(info_row(
                             zenclash_i18n::text("core_page.process.config"),
-                            snapshot.config_file.display().to_string(),
+                            descriptor.config_file().map_or_else(|| "—".to_owned(), |path| path.display().to_string()),
                             theme,
                         ))
                         .child(info_row(
                             zenclash_i18n::text("core_page.process.directory"),
-                            snapshot.home_dir.display().to_string(),
+                            descriptor.home_dir().map_or_else(|| "—".to_owned(), |path| path.display().to_string()),
                             theme,
                         )),
                 )

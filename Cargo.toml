@@ -2,6 +2,7 @@
 members = [
     "crates/zenclash-core",
     "crates/zenclash-i18n",
+    "crates/zenclash-service",
     "crates/zenclash-ui",
 ]
 resolver = "2"
@@ -20,6 +21,9 @@ getrandom = "0.3"
 flate2 = "1.1"
 gpui-kit = { version = "0.7", features = ["tree-sitter-yaml"] }
 http = "1.1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 libc = "0.2"
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false }
@@ -37,10 +41,11 @@ sha2 = "0.10"
 socket2 = "0.6"
 thiserror = "1.0"
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tray-icon = "0.24.2"
+url = "2"
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",

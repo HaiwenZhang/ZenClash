@@ -182,6 +182,20 @@ pub enum ProfileApplyOutcome {
         /// Core-session generation of the completed, unsuccessful runtime restoration.
         runtime_version: u64,
     },
+    /// The source and startup cache are committed, but service finalization is unconfirmed.
+    /// Recovery must confirm the pending revision; it must not roll back durable user data.
+    CommittedButRuntimeUnknown {
+        /// Durable managed-profile metadata.
+        profile: ProfileRecord,
+        /// Durable source path.
+        path: PathBuf,
+        /// Source revision saved before the finalization failure.
+        source_version: ProfileVersion,
+        /// Service finalization or status failure.
+        cause: ProfileApplicationError,
+        /// Generation describing the committed source identity.
+        runtime_version: u64,
+    },
 }
 
 /// Cloneable owner of managed-profile and runtime application ordering.
@@ -190,6 +204,8 @@ pub struct ProfileApplication {
     store: ProfileStore,
     controlled: ControlledConfigStore,
     session: CoreSession,
+    #[cfg(test)]
+    commit_gate: Option<std::sync::Arc<crate::controlled_config::CommitGate>>,
 }
 
 struct StagedProfile {
@@ -542,6 +558,8 @@ impl ProfileApplication {
             store,
             controlled,
             session,
+            #[cfg(test)]
+            commit_gate: None,
         }
     }
 
@@ -565,6 +583,8 @@ impl ProfileApplication {
             store: self.store.with_write_lease(&lease),
             controlled: self.controlled.with_write_lease(&lease),
             session: self.session.clone(),
+            #[cfg(test)]
+            commit_gate: self.commit_gate.clone(),
         };
         application.apply_with_write_lease(change).await
     }
@@ -888,46 +908,76 @@ impl ProfileApplication {
             }
         };
 
-        let commit = run_store(move || staged.commit()).await;
-        match commit {
-            Ok(committed) => match runtime.commit(committed.path.clone()) {
-                Some(applied) => ProfileApplyOutcome::Applied {
-                    profile: committed.record,
-                    path: committed.path,
-                    source_version,
-                    runtime_version: applied.generation,
-                    kind: applied.kind,
+        let failure_recovery = recovery.clone();
+        #[cfg(test)]
+        let commit_gate = self.commit_gate.clone();
+        // Admission already holds the session transition and all write authority.
+        // Hand that single transaction to its completion owner before starting persistence.
+        let completion = tokio::spawn(async move {
+            let commit = run_store(move || {
+                #[cfg(test)]
+                if let Some(gate) = commit_gate {
+                    gate.wait();
+                }
+                staged.commit()
+            })
+            .await;
+            match commit {
+                Ok(committed) => match runtime.commit(committed.path.clone()).await {
+                    Ok(Some(applied)) => ProfileApplyOutcome::Applied {
+                        profile: committed.record,
+                        path: committed.path,
+                        source_version,
+                        runtime_version: applied.generation,
+                        kind: applied.kind,
+                    },
+                    Ok(None) => ProfileApplyOutcome::Stored {
+                        profile: committed.record,
+                        path: committed.path,
+                        source_version,
+                    },
+                    Err((cause, runtime_version)) => {
+                        ProfileApplyOutcome::CommittedButRuntimeUnknown {
+                            profile: committed.record,
+                            path: committed.path,
+                            source_version,
+                            cause: cause.into(),
+                            runtime_version,
+                        }
+                    }
                 },
-                None => ProfileApplyOutcome::Stored {
-                    profile: committed.record,
-                    path: committed.path,
-                    source_version,
+                Err(cause) => match runtime.rollback().await {
+                    CoreProfileRollbackOutcome::Runtime {
+                        result: Ok(()),
+                        runtime_version,
+                    } => ProfileApplyOutcome::RolledBack {
+                        last_known_good,
+                        cause,
+                        runtime_version,
+                    },
+                    CoreProfileRollbackOutcome::Validated => ProfileApplyOutcome::Rejected {
+                        last_known_good,
+                        cause,
+                    },
+                    CoreProfileRollbackOutcome::Runtime {
+                        result: Err(rollback),
+                        runtime_version,
+                    } => ProfileApplyOutcome::PersistedButRuntimeUnknown {
+                        recovery,
+                        cause,
+                        rollback: rollback.into(),
+                        runtime_version,
+                    },
                 },
-            },
-            Err(cause) => match runtime.rollback().await {
-                CoreProfileRollbackOutcome::Runtime {
-                    result: Ok(()),
-                    runtime_version,
-                } => ProfileApplyOutcome::RolledBack {
-                    last_known_good,
-                    cause,
-                    runtime_version,
-                },
-                CoreProfileRollbackOutcome::Validated => ProfileApplyOutcome::Rejected {
-                    last_known_good,
-                    cause,
-                },
-                CoreProfileRollbackOutcome::Runtime {
-                    result: Err(rollback),
-                    runtime_version,
-                } => ProfileApplyOutcome::PersistedButRuntimeUnknown {
-                    recovery,
-                    cause,
-                    rollback: rollback.into(),
-                    runtime_version,
-                },
-            },
-        }
+            }
+        });
+        completion
+            .await
+            .unwrap_or_else(|error| ProfileApplyOutcome::RuntimeUnknown {
+                recovery: failure_recovery,
+                cause: ProfileApplicationError::Task(error.to_string()),
+                runtime_version: self.session.mark_runtime_unknown(),
+            })
     }
 
     async fn last_known_good(&self) -> Result<Option<ProfileVersion>, ProfileApplicationError> {
@@ -990,6 +1040,70 @@ mod tests {
     use crate::{CoreKind, MihomoClient, MihomoEndpoint};
 
     use super::*;
+
+    #[tokio::test]
+    async fn cancelling_the_waiter_does_not_abandon_admitted_profile_persistence() {
+        let fixture = Fixture::new("cancel-persistence");
+        fixture
+            .controlled
+            .materialize_with_overrides_for_core(
+                fixture.store.profile_path(&fixture.previous),
+                &[],
+                CoreKind::Mihomo,
+            )
+            .unwrap();
+        let (address, server) =
+            response_server("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n".into());
+        let mut application = fixture.application(address);
+        let session = application.session.clone();
+        let (gate, waiting, release) = crate::controlled_config::CommitGate::new();
+        application.commit_gate = Some(gate);
+        let id = fixture.candidate.id.clone();
+        let outer = tokio::spawn(async move {
+            application
+                .apply(ProfileChange::ActivateExisting {
+                    id,
+                    overrides: vec![],
+                })
+                .await
+        });
+        waiting.await.unwrap();
+        outer.abort();
+        assert!(outer.await.unwrap_err().is_cancelled());
+        let shutdown_session = session.clone();
+        let shutdown = tokio::spawn(async move { shutdown_session.shutdown().await });
+        tokio::task::yield_now().await;
+        let shutdown_waited = !shutdown.is_finished();
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if fixture.store.load().unwrap().active.as_deref()
+                    == Some(fixture.candidate.id.as_str())
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        shutdown.await.unwrap().unwrap();
+        server.join().unwrap();
+        assert!(
+            shutdown_waited,
+            "shutdown must wait for the admitted persistence owner"
+        );
+        assert!(
+            std::fs::read_to_string(fixture.controlled.runtime_path())
+                .unwrap()
+                .contains("MATCH,REJECT")
+        );
+        assert_eq!(session.generation(), 1);
+        assert_eq!(
+            session.committed_profile_snapshot().profile_path.as_deref(),
+            Some(fixture.store.profile_path(&fixture.candidate).as_path())
+        );
+    }
 
     #[tokio::test]
     async fn existing_profile_is_applied_through_one_transaction_interface() {
@@ -1216,7 +1330,7 @@ mod tests {
     async fn missing_profile_is_rejected_without_contacting_the_runtime() {
         let fixture = Fixture::new("missing");
         let client = MihomoClient::new(MihomoEndpoint::default()).unwrap();
-        let session = CoreSession::open(CoreKind::Mihomo, client, None);
+        let session = CoreSession::open(CoreKind::Mihomo, client).unwrap();
         let application =
             ProfileApplication::new(fixture.store.clone(), fixture.controlled.clone(), session);
 
@@ -1427,7 +1541,7 @@ mod tests {
             )
             .unwrap();
         let client = MihomoClient::new(MihomoEndpoint::default()).unwrap();
-        let session = CoreSession::open(CoreKind::Mihomo, client, None);
+        let session = CoreSession::open(CoreKind::Mihomo, client).unwrap();
         let application = ProfileApplication::new(
             fixture.store.clone(),
             fixture.controlled.clone(),
@@ -1519,8 +1633,8 @@ mod tests {
                 CoreKind::Mihomo,
                 validator,
                 fixture.root.join("validator-home"),
-            ));
-        let session = CoreSession::open(CoreKind::Mihomo, client, None);
+            )).unwrap();
+        let session = CoreSession::open(CoreKind::Mihomo, client).unwrap();
         let application =
             ProfileApplication::new(fixture.store.clone(), fixture.controlled.clone(), session);
 
@@ -1547,7 +1661,7 @@ mod tests {
         let override_path = fixture.root.join("sources").join("invalid-override.yaml");
         fs::write(&override_path, "rules: [").unwrap();
         let client = MihomoClient::new(MihomoEndpoint::default()).unwrap();
-        let session = CoreSession::open(CoreKind::Mihomo, client, None);
+        let session = CoreSession::open(CoreKind::Mihomo, client).unwrap();
         let application =
             ProfileApplication::new(fixture.store.clone(), fixture.controlled.clone(), session);
 
@@ -1609,7 +1723,7 @@ mod tests {
         fn application(&self, address: std::net::SocketAddr) -> ProfileApplication {
             let client =
                 MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
-            let session = CoreSession::open(CoreKind::Mihomo, client, None);
+            let session = CoreSession::open(CoreKind::Mihomo, client).unwrap();
             ProfileApplication::new(self.store.clone(), self.controlled.clone(), session)
         }
 

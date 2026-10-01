@@ -287,8 +287,9 @@ async fn application_shutdown_during_release_download_never_restarts_the_owned_c
         controller_override: None,
     })
     .unwrap();
-    let client = MihomoClient::new(endpoint).unwrap();
-    let session = CoreSession::open(CoreKind::Mihomo, client.clone(), Some(process.clone()));
+    let client = MihomoClient::from_process(process.clone()).unwrap();
+    assert_eq!(client.endpoint(), Some(endpoint));
+    let session = CoreSession::open(CoreKind::Mihomo, client.clone()).unwrap();
     let service = MihomoReleaseService::with_base(&format!("http://{address}/"), true).unwrap();
     let installing = {
         let session = session.clone();
@@ -618,13 +619,7 @@ async fn exercise_managed_install(case: ManagedInstallCase) {
         controller_override: None,
     })
     .unwrap();
-    let session = CoreSession::open_with_config(
-        CoreKind::Mihomo,
-        MihomoClient::new(endpoint).unwrap(),
-        Some(process.clone()),
-        Some(source_a),
-        vec![],
-    );
+    let session = CoreSession::open_with_config(CoreKind::Mihomo, MihomoClient::from_process(process.clone()).unwrap(), Some(source_a), vec![]).unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while !directory.join("data/old-startup.yaml").is_file() {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -799,13 +794,9 @@ async fn external_and_experimental_sessions_reject_release_installation_before_d
         },
     };
     for kind in [CoreKind::Mihomo, CoreKind::Meow] {
-        let session = CoreSession::open(
-            kind,
-            MihomoClient::new(MihomoEndpoint::new("http://127.0.0.1:1", ""))
+        let session = CoreSession::open(kind, MihomoClient::new(MihomoEndpoint::new("http://127.0.0.1:1", ""))
                 .unwrap()
-                .with_core_kind(kind),
-            None,
-        );
+                .with_core_kind(kind).unwrap()).unwrap();
         assert!(matches!(
             session.install_release(&service, &release).await,
             Err(CoreSessionError::ExternalRestartUnsupported { .. })

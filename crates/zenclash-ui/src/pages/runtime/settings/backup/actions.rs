@@ -6,10 +6,97 @@ use zenclash_core::BackupManager;
 use super::super::super::{Context, Page, PreferencesRestored, RuntimePage};
 use super::{
     RestoreOutcome, format_backup_size,
-    workflow::{refresh_committed_state, restore_backup},
+    workflow::{RetryOutcome, refresh_committed_state, restore_backup, retry_runtime},
 };
 
 impl RuntimePage {
+    pub(super) fn retry_backup_runtime(&mut self, cx: &mut Context<Self>) {
+        if self.profile_service.pending_backup_restore().is_none() {
+            return;
+        }
+        let Some(token) = self.begin_scoped_mutation(
+            Page::Settings,
+            crate::pages::runtime::busy::MutationDomain::BackupRecovery,
+        ) else {
+            return;
+        };
+        let data_root = self
+            .controlled_config_store
+            .root()
+            .parent()
+            .map(std::path::Path::to_path_buf);
+        let runtime = self.profile_service.clone();
+        let task = self.runtime.spawn(retry_runtime(runtime, data_root));
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.finish_mutation(token);
+                match result {
+                    Ok(RetryOutcome::Failed {
+                        runtime_version,
+                        error,
+                    }) if this.profile_service.is_current(runtime_version)
+                        && this.profile_service.pending_backup_restore().is_some() =>
+                    {
+                        this.set_page_error(
+                            token,
+                            zenclash_i18n::text_with(
+                                "backup.errors.retry_failed",
+                                &[("error", error)],
+                            ),
+                        );
+                    }
+                    Ok(RetryOutcome::Restored {
+                        runtime_version,
+                        refresh,
+                    }) if this.profile_service.is_current(runtime_version) => {
+                        this.synchronize_committed_profile(cx);
+                        match refresh {
+                            Ok(refresh) => {
+                                let snapshot = refresh.snapshot;
+                                this.profiles.catalog = snapshot.profiles;
+                                this.profiles.generation = this.profiles.generation.wrapping_add(1);
+                                this.controlled_config = snapshot.controlled_config;
+                                this.controlled_config_generation =
+                                    this.controlled_config_generation.wrapping_add(1);
+                                this.overrides.catalog = snapshot.overrides;
+                                this.preferences = snapshot.preferences.clone();
+                                this.system_proxy_editor = None;
+                                cx.emit(PreferencesRestored {
+                                    scope: crate::pages::runtime::PreferenceScope::Restore,
+                                    preferences: snapshot.preferences,
+                                });
+                                if this.replace_page_data(token, refresh.page_data, cx) {
+                                    this.notice = Some(zenclash_i18n::text(
+                                        "backup.notices.runtime_recovered",
+                                    ));
+                                }
+                            }
+                            Err(error) => this.set_page_error(
+                                token,
+                                zenclash_i18n::text_with(
+                                    "backup.errors.retry_refresh_failed",
+                                    &[("error", error)],
+                                ),
+                            ),
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => this.set_page_error(
+                        token,
+                        zenclash_i18n::text_with(
+                            "backup.errors.retry_task",
+                            &[("error", error.to_string())],
+                        ),
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     pub(super) fn choose_backup_export(&mut self, cx: &mut Context<Self>) {
         let token = self.page_task_token_for(Page::Settings);
         let directory = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());

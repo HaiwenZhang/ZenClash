@@ -83,6 +83,9 @@ jobs:
       - name: Test Debian packaging behavior
         run: bash scripts/tests/build_deb_package_test.sh
 
+      - name: Test RPM payload packaging behavior
+        run: bash scripts/tests/build_rpm_package_test.sh
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -153,6 +156,9 @@ jobs:
       - name: Run native core tests
         run: cargo test --locked -p zenclash-core --lib
 
+      - name: Test macOS helper payload packaging behavior
+        run: bash scripts/tests/build_macos_app_test.sh
+
       - name: Build DMG
         env:
           GH_TOKEN: ${{ github.token }}
@@ -183,6 +189,10 @@ jobs:
 
       - name: Run native core tests
         run: cargo test --locked -p zenclash-core --lib
+
+      - name: Test Windows helper payload packaging behavior
+        shell: pwsh
+        run: scripts/tests/build_windows_installer_test.ps1
 
       - name: Build Inno Setup installer
         shell: pwsh

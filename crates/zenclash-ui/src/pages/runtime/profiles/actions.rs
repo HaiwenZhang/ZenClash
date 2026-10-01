@@ -9,6 +9,47 @@ use super::{
 mod catalog;
 
 impl RuntimePage {
+    pub(super) fn confirm_service_profile(&mut self, version: u64, cx: &mut Context<Self>) {
+        let Some(token) = self.begin_mutation(Page::Profiles) else {
+            return;
+        };
+        let service = self.profile_service.clone();
+        let task = self
+            .runtime
+            .spawn(async move { service.confirm_service_runtime(version).await });
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "profiles.recovery.confirm_failed",
+                        &[("error", error.to_string())],
+                    )
+                })
+                .and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                this.finish_mutation(token);
+                match result {
+                    Ok(()) => {
+                        if this.is_page_task_current(token)
+                            && this.profile_service.pending_finalization().is_none()
+                        {
+                            this.notice = Some(zenclash_i18n::text("profiles.recovery.confirmed"));
+                        }
+                    }
+                    Err(error) => {
+                        if this.profile_service.pending_finalization() == Some(version) {
+                            this.set_profile_page_error(token, error);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     pub(super) fn reload_profile(&mut self, cx: &mut Context<Self>) {
         if self.profile_path.is_none() {
             self.error = Some(zenclash_i18n::text("profiles.errors.profile_path_missing"));
@@ -411,7 +452,12 @@ impl RuntimePage {
                     if token.page == Page::Home {
                         self.home.action_error = None;
                     }
-                    self.notice = Some(notice(&outcome.name));
+                    self.notice = Some(
+                        outcome
+                            .receipt
+                            .warning()
+                            .unwrap_or_else(|| notice(&outcome.name)),
+                    );
                 }
             }
             Err(error) => {

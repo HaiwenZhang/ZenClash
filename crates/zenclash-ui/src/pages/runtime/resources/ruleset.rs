@@ -290,6 +290,7 @@ impl RuntimePage {
             return;
         };
         let behavior = self.ruleset.behavior;
+        let runtime_version = self.core_session.generation();
         let Some(token) = self.begin_mutation(Page::Resources) else {
             return;
         };
@@ -310,6 +311,10 @@ impl RuntimePage {
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.finish_mutation(token);
+                if !this.profile_service.is_current(runtime_version) {
+                    cx.notify();
+                    return;
+                }
                 match result {
                     Ok(conversion) if this.is_page_task_current(token) => {
                         this.notice = Some(zenclash_i18n::text_with(

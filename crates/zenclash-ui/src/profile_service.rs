@@ -48,6 +48,23 @@ impl ProfileRecoveryState {
         self.unresolved = None;
         self.latest_failure = None;
     }
+
+    fn pending_finalization(&self) -> Option<u64> {
+        match self.unresolved.as_deref() {
+            Some(ProfileApplyOutcome::CommittedButRuntimeUnknown {
+                runtime_version, ..
+            }) => Some(*runtime_version),
+            _ => None,
+        }
+    }
+
+    fn confirm_pending(&mut self, version: u64) -> bool {
+        if self.pending_finalization() != Some(version) {
+            return false;
+        }
+        self.clear_failure();
+        true
+    }
 }
 
 /// An accepted business result, retaining the complete core receipt.
@@ -67,6 +84,20 @@ impl ProfileReceipt {
     }
     pub(crate) fn runtime_version(&self) -> Option<u64> {
         self.runtime_version
+    }
+
+    pub(crate) fn warning(&self) -> Option<String> {
+        matches!(
+            self._outcome.as_ref(),
+            ProfileApplyOutcome::CommittedButRuntimeUnknown { .. }
+        )
+        .then(|| {
+            failure_message(
+                self._outcome.as_ref(),
+                ChangeContext::Selection,
+                CoreKind::Mihomo,
+            )
+        })
     }
 }
 
@@ -130,6 +161,33 @@ impl ProfileService {
             ) => Some(recovery.clone()),
             _ => None,
         }
+    }
+
+    pub(crate) fn pending_finalization(&self) -> Option<u64> {
+        self.failure.lock().pending_finalization()
+    }
+
+    pub(crate) async fn confirm_service_runtime(&self, version: u64) -> Result<(), String> {
+        // The retained outcome identifies a durable profile commit. Ordinary mode
+        // and settings changes can advance CoreSession without replacing that commit.
+        // Native reconciliation verifies the service revision; only a newer outcome
+        // may supersede this confirmation token.
+        if self.pending_finalization() != Some(version) {
+            return Err(zenclash_i18n::text("profiles.recovery.confirm_stale"));
+        }
+        self.client()
+            .reconcile_service_runtime()
+            .await
+            .map_err(|error| {
+                zenclash_i18n::text_with(
+                    "profiles.recovery.confirm_failed",
+                    &[("error", error.to_string())],
+                )
+            })?;
+        if !self.failure.lock().confirm_pending(version) {
+            return Err(zenclash_i18n::text("profiles.recovery.confirm_stale"));
+        }
+        Ok(())
     }
 
     pub(crate) fn committed_profile(&self) -> CoreCommittedProfileSnapshot {
@@ -282,6 +340,12 @@ impl ProfileService {
                 path,
                 runtime_version,
                 ..
+            }
+            | ProfileApplyOutcome::CommittedButRuntimeUnknown {
+                profile,
+                path,
+                runtime_version,
+                ..
             } => Ok(ProfileReceipt {
                 path: path.clone(),
                 name: profile.name.clone(),
@@ -317,6 +381,9 @@ impl ProfileService {
             }
             | ProfileApplyOutcome::PersistedButRuntimeUnknown {
                 runtime_version, ..
+            }
+            | ProfileApplyOutcome::CommittedButRuntimeUnknown {
+                runtime_version, ..
             } => Some(*runtime_version),
             ProfileApplyOutcome::Stored { .. } | ProfileApplyOutcome::Rejected { .. } => None,
         };
@@ -333,7 +400,8 @@ impl ProfileService {
                 state.latest_failure = Some(Arc::clone(outcome));
             }
             ProfileApplyOutcome::RuntimeUnknown { .. }
-            | ProfileApplyOutcome::PersistedButRuntimeUnknown { .. } => {
+            | ProfileApplyOutcome::PersistedButRuntimeUnknown { .. }
+            | ProfileApplyOutcome::CommittedButRuntimeUnknown { .. } => {
                 state.unresolved = Some(Arc::clone(outcome));
                 state.latest_failure = Some(Arc::clone(outcome));
             }
@@ -342,6 +410,14 @@ impl ProfileService {
             }
             ProfileApplyOutcome::Stored { .. } => {}
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_test_outcome(
+        &self,
+        outcome: ProfileApplyOutcome,
+    ) -> Result<ProfileReceipt, ProfileFailure> {
+        self.finish_apply(Arc::new(outcome), ChangeContext::Selection)
     }
 
     pub(crate) async fn reload_with_overrides(
@@ -394,14 +470,38 @@ impl ProfileService {
         }
     }
 
-    pub(crate) async fn restore_snapshot(
+    pub(crate) fn pending_backup_restore(&self) -> Option<u64> {
+        self.session.pending_backup_restore()
+    }
+
+    pub(crate) async fn retry_backup_restore(&self) -> Result<CoreApplyOutcome, String> {
+        let service = self.clone();
+        // The accepted core result and shared recovery record have one completion
+        // owner even when the foreground waiter disappears.
+        tokio::spawn(async move {
+            let outcome = service
+                .session
+                .retry_backup_restore()
+                .await
+                .map_err(|error| error.to_string())?;
+            service.record_accepted_runtime(&outcome);
+            Ok(outcome)
+        })
+        .await
+        .map_err(|error| {
+            zenclash_i18n::text_with("backup.errors.retry_task", &[("error", error.to_string())])
+        })?
+    }
+
+    pub(crate) async fn restore_backup_snapshot(
         &self,
         controlled: &ControlledConfigStore,
         snapshot: &CoreRestoreSnapshot,
+        admission: &zenclash_core::CoreBackupAdmission,
     ) -> Result<CoreApplyOutcome, String> {
         let outcome = self
             .session
-            .restore_snapshot(controlled, snapshot)
+            .restore_backup_snapshot(controlled, snapshot, admission)
             .await
             .map_err(|error| error.to_string())?;
         self.record_accepted_runtime(&outcome);
@@ -432,6 +532,10 @@ fn failure_message(
             },
             &[("core", core), ("error", cause.to_string())],
         ),
+        ProfileApplyOutcome::CommittedButRuntimeUnknown { cause, .. } => zenclash_i18n::text_with(
+            "profiles.recovery.saved_pending",
+            &[("error", cause.to_string())],
+        ),
         ProfileApplyOutcome::PersistedButRuntimeUnknown {
             cause, rollback, ..
         } => zenclash_i18n::text_with(
@@ -454,6 +558,183 @@ fn failure_message(
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn committed_fixture() -> (
+        PathBuf,
+        ProfileStore,
+        ProfileService,
+        Arc<ProfileApplyOutcome>,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "zenclash-committed-confirmation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = ProfileStore::new(root.join("profiles")).unwrap();
+        let source = root.join("source.yaml");
+        std::fs::write(&source, "mixed-port: 7890\nrules: [MATCH,DIRECT]\n").unwrap();
+        let previous = store.import_local(&source).unwrap();
+        store.activate(&previous.id).unwrap();
+        std::fs::write(&source, "mixed-port: 7891\nrules: [MATCH,REJECT]\n").unwrap();
+        let profile = store.import_local(&source).unwrap();
+        let path = store.activate(&profile.id).unwrap();
+        let client =
+            MihomoClient::new(zenclash_core::MihomoEndpoint::new("http://127.0.0.1:1", ""))
+                .unwrap();
+        let session = CoreSession::open_with_config(CoreKind::Mihomo, client, Some(path.clone()), Vec::new()).unwrap();
+        let outcome = Arc::new(ProfileApplyOutcome::CommittedButRuntimeUnknown {
+            source_version: (&profile).into(),
+            profile,
+            path,
+            cause: zenclash_core::ProfileApplicationError::Task("commit reply lost".into()),
+            runtime_version: session.generation(),
+        });
+        (root, store, ProfileService::new(session, None), outcome)
+    }
+
+    #[test]
+    fn committed_source_returns_a_saved_receipt_and_separate_confirmation() {
+        let (root, store, service, outcome) = committed_fixture();
+        let receipt = service
+            .finish_apply(outcome, ChangeContext::Selection)
+            .unwrap();
+        assert_eq!(
+            receipt.runtime_version(),
+            Some(service.session().generation())
+        );
+        assert!(receipt.warning().is_some());
+        assert_eq!(service.pending_finalization(), receipt.runtime_version());
+        assert!(
+            service.latest_recovery().is_none(),
+            "durable data must not offer old-source rollback"
+        );
+        assert_eq!(
+            service.committed_profile().profile_path.as_deref(),
+            Some(receipt.path())
+        );
+        assert_eq!(
+            store.active_path().unwrap().as_deref(),
+            Some(receipt.path())
+        );
+        assert!(
+            std::fs::read_to_string(receipt.path())
+                .unwrap()
+                .contains("7891")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_service_confirmation_keeps_the_saved_source_and_pending_action() {
+        let (root, store, service, outcome) = committed_fixture();
+        let receipt = service
+            .finish_apply(outcome, ChangeContext::Editor)
+            .unwrap();
+        let version = receipt.runtime_version().unwrap();
+        let before = store.load().unwrap();
+        let payload = std::fs::read(receipt.path()).unwrap();
+        // A Direct client cannot confirm a Service commit. No activation or reload is allowed.
+        assert!(service.confirm_service_runtime(version).await.is_err());
+        assert_eq!(service.pending_finalization(), Some(version));
+        assert_eq!(store.load().unwrap().active, before.active);
+        assert_eq!(std::fs::read(receipt.path()).unwrap(), payload);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_successful_mode_change_does_not_make_the_saved_commit_unconfirmable() {
+        let (root, _, service, outcome) = committed_fixture();
+        let receipt = service
+            .finish_apply(outcome, ChangeContext::Selection)
+            .unwrap();
+        let version = receipt.runtime_version().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        service
+            .session()
+            .switch_to_direct(zenclash_core::MihomoEndpoint::new(
+                format!("http://{address}"),
+                "",
+            ))
+            .await
+            .unwrap();
+        let server = tokio::spawn(async move {
+            for (method, mode) in [("GET", "rule"), ("PATCH", ""), ("GET", "global")] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 8192];
+                let count = stream.read(&mut request).await.unwrap();
+                assert!(request[..count].starts_with(format!("{method} /configs").as_bytes()));
+                let response = if method == "PATCH" {
+                    "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n".to_owned()
+                } else {
+                    let body = format!("{{\"mixed-port\":7891,\"mode\":\"{mode}\"}}");
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        service
+            .session()
+            .set_mode(
+                &ControlledConfigStore::new(root.join("controlled")),
+                "global",
+            )
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert!(service.session().generation() > version);
+        assert_eq!(service.pending_finalization(), Some(version));
+        let failure = service.confirm_service_runtime(version).await.unwrap_err();
+        assert_eq!(
+            failure,
+            zenclash_i18n::text_with(
+                "profiles.recovery.confirm_failed",
+                &[(
+                    "error",
+                    zenclash_core::MihomoError::StaleTransport.to_string()
+                )]
+            ),
+            "confirmation must reach the client instead of rejecting an unrelated mode generation"
+        );
+        assert_eq!(service.pending_finalization(), Some(version));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn late_service_confirmation_cannot_clear_a_newer_pending_commit() {
+        let (root, _, service, outcome) = committed_fixture();
+        service.record_outcome(&outcome);
+        let ProfileApplyOutcome::CommittedButRuntimeUnknown {
+            profile,
+            path,
+            source_version,
+            runtime_version,
+            ..
+        } = outcome.as_ref()
+        else {
+            unreachable!()
+        };
+        service.record_outcome(&Arc::new(ProfileApplyOutcome::CommittedButRuntimeUnknown {
+            profile: profile.clone(),
+            path: path.clone(),
+            source_version: source_version.clone(),
+            cause: zenclash_core::ProfileApplicationError::Task("second commit reply lost".into()),
+            runtime_version: runtime_version + 1,
+        }));
+        let mut state = service.failure.lock();
+        assert!(!state.confirm_pending(*runtime_version));
+        drop(state);
+        assert_eq!(service.pending_finalization(), Some(runtime_version + 1));
+        assert!(service.failure.lock().confirm_pending(runtime_version + 1));
+        assert!(service.pending_finalization().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn delayed_acceptance_does_not_clear_a_newer_unknown_runtime() {
@@ -511,7 +792,7 @@ mod tests {
         ))
         .unwrap();
         let session =
-            CoreSession::open_with_config(CoreKind::Mihomo, client, None, Some(path), Vec::new());
+            CoreSession::open_with_config(CoreKind::Mihomo, client, Some(path), Vec::new()).unwrap();
         let service = ProfileService::new(session.clone(), Some(overrides));
         // Execute a real first transition, then pause its service continuation at the
         // await boundary while another entry point completes and publishes its result.
@@ -627,7 +908,7 @@ mod tests {
         ))
         .unwrap();
         let session =
-            CoreSession::open_with_config(CoreKind::Mihomo, client, None, Some(path), Vec::new());
+            CoreSession::open_with_config(CoreKind::Mihomo, client, Some(path), Vec::new()).unwrap();
         let service = ProfileService::new(session.clone(), Some(overrides));
         let other_entry_point = service.clone();
         let failure = service

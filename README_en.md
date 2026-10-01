@@ -58,6 +58,8 @@ TUN requires system permissions. On Windows, ZenClash cannot yet request the adm
 
 You need the current Rust stable toolchain, your platform's native build tools, and a working Mihomo executable. On Linux, install dependencies with `sudo scripts/install_linux_build_deps.sh`.
 
+The TUN service for all three platforms is being implemented according to the [development plan](docs/development/tun-service-plan.md). In-app installation and native acceptance remain unfinished. Packaging scripts for all three platforms now include the separate service artifact; see the [service packaging record](docs/development/tun-service-packaging.md) for deployment boundaries and validation commands.
+
 Run from the repository root on macOS or Linux:
 
 ```sh

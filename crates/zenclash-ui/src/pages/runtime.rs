@@ -17,15 +17,15 @@ use gpui_kit::{
 use serde_json::{Value, json};
 use zenclash_core::{
     AppPreferences, AppPreferencesStore, AutostartStatus, ConfigDiffReport, ConnectionsSnapshot,
-    ControlledConfigStore, CoreBinaryInfo, CoreKind, CoreSession, DiagnosticData, DiagnosticReport,
+    ControlledConfigStore, CoreBinaryInfo, CoreKind, CoreSession, CoreTunPermissionStatus, DiagnosticData, DiagnosticReport,
     DiagnosticRoute, DiagnosticStep, DiagnosticStepKind, LogMonitor, LogTimeSource, MihomoClient,
-    MihomoLaunchConfig, MihomoLogLevel, MihomoProcess, NetworkLatencyTarget,
+    MihomoLaunchConfig, MihomoLogLevel, NetworkLatencyTarget,
     NetworkProbeRoutePreference, NetworkProbeSnapshot, Observation, OperationalStatus,
     ProfileCatalog, ProfileStore, ProviderCatalog, ProviderKind, ProviderOperations,
     ProxyOperations, ProxyVisibility, PublicIpProvider, RecoveryAction, RemoteProfileOptions,
     RemoteProfileRoute, RuleCatalog, RuntimeConfig, SystemNetworkSnapshot, SystemProxyManager,
     SystemProxyMode, SystemProxySession, SystemProxyStatus, TrafficCaptureSession,
-    TrafficHistoryStore, TrafficMonitor, TunPermissionManager, TunPermissionStatus, VersionInfo,
+    TrafficHistoryStore, TrafficMonitor, VersionInfo,
     YamlOverrideCatalog, YamlOverrideStore, default_pac_script, default_system_proxy_bypass,
     diff_yaml_configs, format_log_entries, format_log_entries_support_safe, format_speed,
     normalize_pac_script, normalize_system_proxy_bypass, normalize_system_proxy_host,
@@ -68,7 +68,7 @@ use common::{
     yes_no,
 };
 use config_inputs::{ConfigInputs, config_input_snapshot};
-use loader::{load_page, load_page_with_binary};
+use loader::{load_page, load_page_with_core};
 use mihomo::CoreReleaseState;
 use state::{ConfigInputsTaskToken, PageTaskToken, RuntimeData};
 
@@ -84,7 +84,6 @@ pub struct RuntimePage {
     log_monitor: Arc<LogMonitor>,
     operational_status: Arc<OperationalStatus>,
     traffic_capture: TrafficCaptureSession,
-    process: Option<Arc<MihomoProcess>>,
     profile_path: Option<PathBuf>,
     controlled_config_store: ControlledConfigStore,
     controlled_config: Value,
@@ -108,6 +107,7 @@ pub struct RuntimePage {
     system_proxy_editor: Option<system_proxy::SystemProxyEditorState>,
     core_releases: CoreReleaseState,
     data: RuntimeData,
+    data_runtime_version: u64,
     home: home::HomeUiState,
     traffic_history: traffic::TrafficHistoryUiState,
     network_probe: network::NetworkProbeUiState,
@@ -153,8 +153,6 @@ pub struct RuntimePageServices {
     pub operational_status: Arc<OperationalStatus>,
     /// Serialized System Proxy/TUN capture plan owner.
     pub traffic_capture: TrafficCaptureSession,
-    /// Managed Mihomo process, when `ZenClash` launched the core.
-    pub process: Option<Arc<MihomoProcess>>,
     /// Active YAML path used by the managed core.
     pub profile_path: Option<PathBuf>,
     /// Persistent controlled-config layer merged over the active profile.

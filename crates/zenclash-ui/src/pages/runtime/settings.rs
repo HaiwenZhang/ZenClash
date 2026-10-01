@@ -138,7 +138,10 @@ impl RuntimePage {
         setting_card(zenclash_i18n::text("settings.application.title"), theme)
             .child(info_row(
                 zenclash_i18n::text("settings.application.controller"),
-                self.client.endpoint().controller.clone(),
+                self.client.endpoint().map_or_else(
+                    || zenclash_i18n::text("settings.application.service_managed_controller"),
+                    |endpoint| endpoint.controller,
+                ),
                 theme,
             ))
             .child(super::common::setting_switch_disabled(

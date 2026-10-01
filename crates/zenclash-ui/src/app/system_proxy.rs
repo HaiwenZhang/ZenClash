@@ -127,13 +127,9 @@ mod tests {
 
     #[tokio::test]
     async fn failed_capture_release_prevents_core_shutdown_and_success_allows_it() {
-        let core = CoreSession::open(
-            CoreKind::Mihomo,
-            MihomoClient::new(MihomoEndpoint::new("http://127.0.0.1:1", "")).unwrap(),
-            None,
-        );
+        let core = CoreSession::open(CoreKind::Mihomo, MihomoClient::new(MihomoEndpoint::new("http://127.0.0.1:1", "")).unwrap()).unwrap();
         let store = ControlledConfigStore::new(std::env::temp_dir());
-        let capture = TrafficCaptureSession::new(core.clone(), store.clone(), None, None, None);
+        let capture = TrafficCaptureSession::new(core.clone(), store.clone(), None, None);
         let released = capture.release_owned().await.unwrap();
         let partial = CaptureOutcome::ReconcileNeeded {
             plan: None,

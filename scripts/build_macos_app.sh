@@ -1,8 +1,8 @@
-#!/bin/zsh
+#!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="${0:A:h}"
-PROJECT_ROOT="${SCRIPT_DIR:h}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 VERSION="${ZENCLASH_VERSION:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' "${PROJECT_ROOT}/Cargo.toml" | head -n 1)}"
 OUTPUT_DIR="${ZENCLASH_OUTPUT_DIR:-${PROJECT_ROOT}/target}"
 TARGET_TRIPLE="aarch64-apple-darwin"
@@ -70,17 +70,32 @@ bundled_mihomo_version="$("${MIHOMO_PATH}" -v)"
 ZENCLASH_VERSION="${VERSION}" \
 ZENCLASH_BUNDLED_MIHOMO_VERSION="${bundled_mihomo_version}" \
 cargo build --release --locked -p zenclash-ui --bin zenclash --target "${TARGET_TRIPLE}"
+ZENCLASH_VERSION="${VERSION}" \
+cargo build --release --locked -p zenclash-service --features server --bin zenclash-service --target "${TARGET_TRIPLE}"
+
+SERVICE_PATH="${CARGO_OUTPUT_ROOT}/${TARGET_TRIPLE}/release/zenclash-service"
+if [[ ! -f "${SERVICE_PATH}" || ! -s "${SERVICE_PATH}" || ! -x "${SERVICE_PATH}" ]]; then
+  echo "The service build did not produce an executable: ${SERVICE_PATH}" >&2
+  exit 1
+fi
+if ! service_version="$("${SERVICE_PATH}" --version)" || [[ -z "${service_version}" ]]; then
+  echo "The service executable failed its version check." >&2
+  exit 1
+fi
 
 rm -rf "${APP_DIR}"
 mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}"
 cp "${CARGO_OUTPUT_ROOT}/${TARGET_TRIPLE}/release/zenclash" "${MACOS_DIR}/zenclash"
+cp "${SERVICE_PATH}" "${MACOS_DIR}/zenclash-service"
 cp "${PROJECT_ROOT}/platforms/macos/Info.plist" "${CONTENTS_DIR}/Info.plist"
+cp "${PROJECT_ROOT}/platforms/macos/org.zenclash.service.plist" "${RESOURCES_DIR}/org.zenclash.service.plist"
 cp "${MIHOMO_PATH}" "${RESOURCES_DIR}/mihomo"
 cp "${GEODATA_PATH}" "${RESOURCES_DIR}/geoip.metadb"
 cp "${PROFILE_PATH}" "${RESOURCES_DIR}/profile.yaml"
 cp "${PROJECT_ROOT}/platforms/common/recovery.yaml" "${RESOURCES_DIR}/recovery.yaml"
 cp "${PROJECT_ROOT}/LICENSE" "${RESOURCES_DIR}/LICENSE.txt"
-chmod 755 "${MACOS_DIR}/zenclash" "${RESOURCES_DIR}/mihomo"
+chmod 755 "${MACOS_DIR}/zenclash" "${MACOS_DIR}/zenclash-service" "${RESOURCES_DIR}/mihomo"
+chmod 644 "${RESOURCES_DIR}/org.zenclash.service.plist"
 "${RESOURCES_DIR}/mihomo" -v
 
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "${CONTENTS_DIR}/Info.plist"
@@ -94,9 +109,16 @@ fi
 
 if [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
   codesign --force --options runtime --timestamp --sign "${APPLE_SIGNING_IDENTITY}" "${RESOURCES_DIR}/mihomo"
-  codesign --force --options runtime --timestamp --sign "${APPLE_SIGNING_IDENTITY}" "${APP_DIR}"
+  codesign --force --options runtime --timestamp --sign "${APPLE_SIGNING_IDENTITY}" "${MACOS_DIR}/zenclash-service"
 else
   codesign --force --sign - "${RESOURCES_DIR}/mihomo"
+  codesign --force --sign - "${MACOS_DIR}/zenclash-service"
+fi
+
+codesign --verify --strict --verbose=2 "${MACOS_DIR}/zenclash-service"
+if [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+  codesign --force --options runtime --timestamp --sign "${APPLE_SIGNING_IDENTITY}" "${APP_DIR}"
+else
   codesign --force --deep --sign - "${APP_DIR}"
 fi
 

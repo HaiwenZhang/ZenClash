@@ -7491,6 +7491,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
@@ -9692,6 +9693,7 @@ dependencies = [
  "tracing",
  "windows-sys 0.61.2",
  "zenclash-i18n",
+ "zenclash-service",
  "zip",
 ]
 
@@ -9701,6 +9703,27 @@ version = "0.1.2"
 dependencies = [
  "rust-i18n",
  "serde_yaml",
+]
+
+[[package]]
+name = "zenclash-service"
+version = "0.1.2"
+dependencies = [
+ "futures-util",
+ "getrandom 0.3.4",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
+ "url",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

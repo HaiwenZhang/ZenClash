@@ -9,6 +9,136 @@ use super::{api::encode_path_segment, *};
 use crate::DnsRecordType;
 
 #[tokio::test]
+async fn replacing_an_external_binding_does_not_run_its_previous_validator() {
+    let directory = std::env::temp_dir().join(format!(
+        "zenclash-stale-validator-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let client = MihomoClient::new(MihomoEndpoint::default())
+        .unwrap()
+        .with_config_validator(crate::CoreConfigValidator::new(
+            crate::CoreKind::Mihomo,
+            directory.join("previous-binary-does-not-exist"),
+            directory.join("previous-home"),
+        ))
+        .unwrap();
+    let clone = client.clone();
+    client
+        .switch_to_direct(MihomoEndpoint::new("http://127.0.0.1:1", "replacement"))
+        .await
+        .unwrap();
+
+    let result = clone
+        .validate_config_payload("rules:\n  - MATCH,DIRECT\n")
+        .await;
+    let previous_home_created = directory.join("previous-home").exists();
+    if directory.exists() {
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    assert!(
+        result.is_ok(),
+        "new external binding used the old validator: {result:?}"
+    );
+    assert!(!previous_home_created);
+}
+
+#[test]
+fn service_preflight_rejection_is_definitive_but_lost_response_is_unknown() {
+    use zenclash_service::{FrameError, ServiceClientError, ServiceErrorCode};
+    let rejected = MihomoError::Service(ServiceClientError::Rejected(
+        ServiceErrorCode::InvalidConfiguration,
+    ));
+    let lost = MihomoError::Service(ServiceClientError::Frame(FrameError::Timeout));
+    let connection = MihomoError::Service(ServiceClientError::Connection(std::io::Error::other(
+        "unavailable",
+    )));
+    assert!(!rejected.mutation_result_unknown());
+    assert!(!connection.mutation_result_unknown());
+    assert!(lost.mutation_result_unknown());
+}
+
+#[tokio::test]
+async fn clones_use_the_committed_transport_after_a_switch() {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 2048];
+        let size = stream.read(&mut request).unwrap();
+        assert!(String::from_utf8_lossy(&request[..size]).contains("Bearer replacement"));
+        let body = r#"{"version":"replacement"}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    let client = MihomoClient::new(MihomoEndpoint::default()).unwrap();
+    let clone = client.clone();
+    let mut changed = clone.binding.subscribe();
+    client
+        .switch_to_direct(MihomoEndpoint::new(
+            format!("http://{address}"),
+            "replacement",
+        ))
+        .await
+        .unwrap();
+    changed.changed().await.unwrap();
+    assert_eq!(clone.endpoint().unwrap().secret, "replacement");
+    assert_eq!(clone.version().await.unwrap().version, "replacement");
+    server.join().unwrap();
+}
+
+#[tokio::test]
+async fn response_from_the_previous_transport_is_rejected() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let (received, wait_received) = tokio::sync::oneshot::channel();
+    let (resume, wait_resume) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 2048];
+        assert!(stream.read(&mut request).await.unwrap() > 0);
+        received.send(()).unwrap();
+        wait_resume.await.unwrap();
+        let body = r#"{"version":"stale"}"#;
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+    let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+    let clone = client.clone();
+    let request = tokio::spawn(async move { clone.version().await });
+    wait_received.await.unwrap();
+    client
+        .switch_to_direct(MihomoEndpoint::default())
+        .await
+        .unwrap();
+    resume.send(()).unwrap();
+    assert!(matches!(
+        request.await.unwrap(),
+        Err(MihomoError::StaleTransport)
+    ));
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn connection_consumers_share_a_request_and_close_invalidates_the_snapshot() {
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
     let address = listener.local_addr().unwrap();

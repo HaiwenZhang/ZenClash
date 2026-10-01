@@ -5,14 +5,21 @@ use std::{sync::Arc, time::Duration};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{CoreConfigValidator, CoreKind, MihomoEndpoint};
+use crate::{CoreConfigValidator, CoreKind, MihomoEndpoint, MihomoProcess, owned_core::OwnedCore};
 
 mod api;
+pub(crate) use api::AppliedConfig;
 mod connections;
 mod request;
+mod transport;
+
+pub(crate) use transport::{ControllerBinding, ControllerStream};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod ownership_tests;
 
 /// Result type returned by Mihomo process, endpoint and API operations.
 pub type MihomoResult<T> = Result<T, MihomoError>;
@@ -27,6 +34,18 @@ pub enum MihomoError {
     /// HTTP transport, timeout or response-decoding failure.
     #[error("Mihomo request failed: {0}")]
     Http(#[from] reqwest::Error),
+    /// Authenticated native service transport or policy rejection.
+    #[error("Mihomo service request failed: {0}")]
+    Service(#[from] zenclash_service::ServiceClientError),
+    /// A response belongs to a backend replaced before the request completed.
+    #[error("Mihomo controller changed during the request")]
+    StaleTransport,
+    /// Binding changed before dispatch: no request was sent and the outcome is definitive.
+    #[error("{}", zenclash_i18n::text("core_page.errors.binding_changed"))]
+    StaleBinding,
+    /// The controller's JSON response does not match the requested schema.
+    #[error("invalid Mihomo response: {0}")]
+    Decode(#[from] serde_json::Error),
     /// Non-success response returned by Mihomo, including its bounded message.
     #[error("Mihomo API returned HTTP {status}: {message}")]
     Api {
@@ -57,11 +76,11 @@ pub struct VersionInfo {
 /// Cloneable HTTP client for Mihomo's external-controller API.
 #[derive(Clone)]
 pub struct MihomoClient {
-    kind: CoreKind,
-    endpoint: MihomoEndpoint,
+    pub(crate) binding: Arc<ControllerBinding>,
     http: reqwest::Client,
     mutation_gate: Arc<tokio::sync::Mutex<()>>,
-    config_validator: Option<CoreConfigValidator>,
+    config_validator: Option<(u64, CoreConfigValidator)>,
+    pinned_binding: Option<transport::BindingSnapshot>,
     connections: Arc<connections::ConnectionCache>,
     pub(crate) delay_gate: Arc<tokio::sync::Semaphore>,
 }
@@ -73,60 +92,161 @@ impl MihomoClient {
     ///
     /// Returns an error if the underlying HTTP client cannot be constructed.
     pub fn new(endpoint: MihomoEndpoint) -> MihomoResult<Self> {
+        Self::new_binding(ControllerBinding::direct(endpoint))
+    }
+
+    /// Creates a client using verified native IPC and a user-readable resource home.
+    ///
+    /// # Errors
+    /// Returns an error if the HTTP client used for future Direct bindings cannot be built.
+    pub fn from_service(
+        service: Arc<zenclash_service::ServiceClient>,
+        source_home: std::path::PathBuf,
+    ) -> MihomoResult<Self> {
+        Self::new_binding(ControllerBinding::service_binding(service, source_home))
+    }
+
+    /// Creates a client retaining the actual managed child and its controller.
+    /// All clones share this ownership and transport through one binding.
+    ///
+    /// # Errors
+    /// Returns an error if the underlying HTTP client cannot be constructed.
+    pub fn from_process(process: Arc<MihomoProcess>) -> MihomoResult<Self> {
+        Self::new_binding(ControllerBinding::process_binding(process))
+    }
+
+    fn new_binding(binding: Arc<ControllerBinding>) -> MihomoResult<Self> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("ZenClash/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(30))
             .build()?;
         Ok(Self {
-            kind: CoreKind::Mihomo,
-            endpoint,
+            binding,
             http,
             mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
             config_validator: None,
+            pinned_binding: None,
             connections: Arc::default(),
             delay_gate: Arc::new(tokio::sync::Semaphore::new(16)),
         })
     }
 
-    /// Selects the concrete runtime backend that receives configuration payloads.
+    /// Selects the external runtime kind during unique, unused binding construction.
+    ///
+    /// # Errors
+    /// Rejects a different owned kind or changing kind after sharing or using the binding.
     #[must_use]
-    pub fn with_core_kind(mut self, kind: CoreKind) -> Self {
-        self.kind = kind;
-        self
+    pub fn with_core_kind(mut self, kind: CoreKind) -> MihomoResult<Self> {
+        if self.binding.descriptor().kind() != kind {
+            Arc::get_mut(&mut self.binding)
+                .ok_or_else(|| {
+                    MihomoError::InvalidInput(zenclash_i18n::text(
+                        "core_page.errors.runtime_kind_locked",
+                    ))
+                })?
+                .initialize_kind(kind)?;
+        }
+        Ok(self)
     }
 
-    /// Enables target-core `-t` validation before complete configuration reloads.
+    /// Enables executable validation for the same initially declared runtime kind.
     ///
-    /// External controllers can omit this because their executable and writable
-    /// home are not owned by ZenClash; managed processes should always provide it.
-    #[must_use]
-    pub fn with_config_validator(mut self, validator: CoreConfigValidator) -> Self {
-        self.kind = validator.kind();
-        self.config_validator = Some(validator);
-        self
+    /// # Errors
+    /// Rejects validators for a different actual runtime implementation.
+    pub fn with_config_validator(mut self, validator: CoreConfigValidator) -> MihomoResult<Self> {
+        self = self.with_core_kind(validator.kind())?;
+        self.config_validator = Some((self.binding.generation(), validator));
+        Ok(self)
     }
 
     pub(crate) fn write_scopes(&self) -> Vec<std::path::PathBuf> {
-        self.config_validator
-            .as_ref()
-            .map_or_else(Vec::new, CoreConfigValidator::write_scopes)
+        let mut scopes = self.current_config_validator()
+            .map_or_else(Vec::new, |validator| validator.write_scopes());
+        match self.owned_core() {
+            Some(OwnedCore::Local(process)) => {
+                // Restart also validates the actual launch config, which can be outside home.
+                scopes.extend(process.write_scopes());
+            }
+            Some(OwnedCore::Service(runtime)) => scopes.push(runtime.source_home().to_path_buf()),
+            None => {}
+        }
+        scopes
     }
 
-    pub(crate) fn with_write_lease(&self, lease: &crate::data_coordinator::DataWriteLease) -> Self {
-        Self {
-            config_validator: self
-                .config_validator
-                .as_ref()
-                .map(|validator| validator.with_write_lease(lease)),
+    pub(crate) fn pin_binding(&self) -> MihomoResult<Self> {
+        Ok(Self {
+            pinned_binding: Some(self.operation_binding()?),
             ..self.clone()
+        })
+    }
+
+    pub(crate) fn ensure_binding_current(&self) -> MihomoResult<()> {
+        self.operation_binding().map(|_| ())
+    }
+
+    pub(crate) fn mark_runtime_binding_used(&self) {
+        self.binding.mark_used();
+    }
+
+    pub(crate) fn close_runtime_admission(&self) {
+        self.binding.close_admission();
+    }
+
+    pub(crate) fn runtime_descriptor(&self) -> crate::owned_core::CoreRuntimeDescriptor {
+        self.binding.descriptor()
+    }
+
+    pub(crate) async fn lock_runtime_binding(
+        &self,
+    ) -> MihomoResult<tokio::sync::OwnedMutexGuard<()>> {
+        let guard = self.mutation_gate.clone().lock_owned().await;
+        self.ensure_binding_current()?;
+        Ok(guard)
+    }
+
+    pub(super) fn operation_binding(&self) -> MihomoResult<transport::BindingSnapshot> {
+        self.binding.mark_used();
+        let binding = self.binding_snapshot();
+        if !self.binding.is_current(binding.generation) {
+            return Err(MihomoError::StaleBinding);
         }
+        Ok(binding)
+    }
+
+    fn binding_snapshot(&self) -> transport::BindingSnapshot {
+        self.pinned_binding
+            .clone()
+            .unwrap_or_else(|| self.binding.snapshot())
+    }
+
+    pub(crate) fn with_write_lease(
+        &self,
+        lease: &crate::data_coordinator::DataWriteLease,
+    ) -> MihomoResult<Self> {
+        let binding = self.operation_binding()?;
+        let validator = self.validator_for_binding(&binding);
+        if validator.as_ref().is_some_and(|validator| {
+            validator
+                .write_scopes()
+                .iter()
+                .any(|path| !lease.covers(path))
+        }) {
+            return Err(MihomoError::StaleBinding);
+        }
+        Ok(Self {
+            config_validator: self
+                .validator_for_binding(&binding)
+                .map(|validator| (binding.generation, validator.with_write_lease(lease))),
+            pinned_binding: Some(binding),
+            ..self.clone()
+        })
     }
 
     async fn acquire_write_lease(
         &self,
     ) -> MihomoResult<Option<crate::data_coordinator::DataWriteLease>> {
-        match &self.config_validator {
+        match self.current_config_validator() {
             Some(validator) => validator
                 .acquire_write_lease()
                 .await
@@ -136,7 +256,53 @@ impl MihomoClient {
         }
     }
 
+    pub(crate) fn current_config_validator(&self) -> Option<CoreConfigValidator> {
+        self.validator_for_binding(&self.binding_snapshot())
+    }
+
+    fn validator_for_binding(
+        &self,
+        binding: &transport::BindingSnapshot,
+    ) -> Option<CoreConfigValidator> {
+        let explicit = self
+            .config_validator
+            .as_ref()
+            .and_then(|(generation, validator)| {
+                (*generation == binding.generation).then_some(validator)
+            });
+        match &binding.backend {
+            transport::ControllerBackend::Local(process) => {
+                let actual = process.config_validator();
+                // Preserve a temporary write lease only when it authorizes this actual child.
+                Some(match explicit {
+                    Some(validator)
+                        if validator.kind() == process.kind()
+                            && validator.write_scopes() == actual.write_scopes() =>
+                    {
+                        validator.clone()
+                    }
+                    _ => actual,
+                })
+            }
+            transport::ControllerBackend::Direct(_) => explicit.cloned(),
+            transport::ControllerBackend::Service { .. } => None,
+        }
+    }
+
+    fn current_kind(&self) -> CoreKind {
+        self.binding_snapshot().kind
+    }
+
+    pub(crate) fn binding_snapshot_kind(&self) -> CoreKind {
+        self.binding_snapshot().kind
+    }
+
+    pub(crate) fn owned_core(&self) -> Option<OwnedCore> {
+        self.binding_snapshot().owned_core()
+    }
+
     pub(crate) fn normalize_config_payload(&self, payload: String) -> MihomoResult<String> {
+        self.ensure_binding_current()?;
         if payload.trim().is_empty() {
             return Err(MihomoError::InvalidInput("重载配置内容不能为空".into()));
         }
@@ -146,13 +312,218 @@ impl MihomoClient {
                 crate::profiles::MAX_PROFILE_BYTES / 1024 / 1024
             )));
         }
-        crate::controlled_config::normalize_runtime_payload(self.kind, payload)
+        crate::controlled_config::normalize_runtime_payload(self.current_kind(), payload)
             .map_err(|error| MihomoError::InvalidInput(error.to_string()))
     }
 
-    /// Returns the controller address and secret used by this client.
+    /// Returns the ordinary controller endpoint, or `None` for native service IPC.
     #[must_use]
-    pub const fn endpoint(&self) -> &MihomoEndpoint {
-        &self.endpoint
+    pub fn endpoint(&self) -> Option<MihomoEndpoint> {
+        self.binding.endpoint()
+    }
+
+    /// Returns the authenticated service owner without exposing its controller.
+    #[must_use]
+    pub fn service_client(&self) -> Option<Arc<zenclash_service::ServiceClient>> {
+        self.runtime_session().map(|runtime| runtime.client.clone())
+    }
+
+    pub(super) fn runtime_session(
+        &self,
+    ) -> Option<Arc<crate::service_runtime_session::ServiceRuntimeSession>> {
+        match self.owned_core() {
+            Some(OwnedCore::Service(runtime)) => Some(runtime),
+            Some(OwnedCore::Local(_)) | None => None,
+        }
+    }
+
+    /// Commits a service transport to every clone after pending mutations finish.
+    /// The caller coordinates process stop/start and business generation first.
+    ///
+    /// # Errors
+    /// Rejects non-Mihomo clients or exhausted binding generations.
+    pub(crate) async fn switch_to_service(
+        &self,
+        service: Arc<zenclash_service::ServiceClient>,
+        source_home: std::path::PathBuf,
+    ) -> MihomoResult<()> {
+        if self.current_kind() != CoreKind::Mihomo {
+            return Err(MihomoError::InvalidInput("服务仅支持 Mihomo 内核".into()));
+        }
+        let guard = self.mutation_gate.clone().lock_owned().await;
+        self.ensure_binding_current()?;
+        self.binding.ensure_open()?;
+        if let Some(runtime) = self.binding.runtime() {
+            if Arc::ptr_eq(&runtime.client, &service) {
+                if runtime.source_home() != source_home {
+                    return Err(MihomoError::InvalidInput(
+                        "服务资源目录不能在同一会话内更改".into(),
+                    ));
+                }
+                runtime.reconcile().await?;
+                return Ok(());
+            }
+            runtime.release_owned().await?;
+        }
+        self.publish_backend(
+            transport::ControllerBackend::Service {
+                runtime: crate::service_runtime_session::ServiceRuntimeSession::new(
+                    service,
+                    source_home,
+                ),
+            },
+            guard,
+        )
+        .await
+    }
+
+    /// Publishes a real managed child and its controller to every existing clone.
+    /// The caller coordinates confirmed stop/start before changing ownership.
+    /// Retired local children are stopped on a blocking worker before completion.
+    ///
+    /// # Errors
+    /// Rejects a different core kind, unresolved service mutation, or exhausted generation.
+    pub(crate) async fn switch_to_process(&self, process: Arc<MihomoProcess>) -> MihomoResult<()> {
+        let guard = self.mutation_gate.clone().lock_owned().await;
+        self.ensure_binding_current()?;
+        self.binding.ensure_open()?;
+        if process.kind() != self.current_kind() {
+            return Err(MihomoError::InvalidInput(
+                "绑定的进程与客户端内核类型不一致".into(),
+            ));
+        }
+        if let Some(runtime) = self.binding.runtime() {
+            runtime.release_owned().await?;
+        }
+        self.publish_backend(transport::ControllerBackend::Local(process), guard)
+            .await
+    }
+
+    /// Commits an ordinary controller transport to every existing client clone.
+    ///
+    /// # Errors
+    /// Returns an error if the binding generation is exhausted.
+    pub(crate) async fn switch_to_direct(&self, endpoint: MihomoEndpoint) -> MihomoResult<()> {
+        let guard = self.mutation_gate.clone().lock_owned().await;
+        self.ensure_binding_current()?;
+        self.binding.ensure_open()?;
+        if let Some(runtime) = self.binding.runtime() {
+            runtime.release_owned().await?;
+        }
+        self.publish_backend(transport::ControllerBackend::Direct(endpoint), guard)
+            .await
+    }
+
+    async fn publish_backend(
+        &self,
+        backend: transport::ControllerBackend,
+        guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> MihomoResult<()> {
+        self.binding.ensure_open()?;
+        let replacement = match &backend {
+            transport::ControllerBackend::Local(process) => Some(process.clone()),
+            _ => None,
+        };
+        let retired = self.binding.replace(backend)?;
+        self.invalidate_connections();
+        tokio::task::spawn_blocking(move || {
+            let result = match &retired.backend {
+                transport::ControllerBackend::Local(process)
+                    if !replacement
+                        .as_ref()
+                        .is_some_and(|next| Arc::ptr_eq(process, next)) =>
+                {
+                    process.stop()
+                }
+                _ => Ok(()),
+            };
+            drop(retired);
+            drop(replacement);
+            // Keep publication admission even if the awaiting caller is cancelled.
+            // At most one retirement task can exist for this shared binding.
+            drop(guard);
+            result
+        })
+        .await
+        .map_err(|error| {
+            MihomoError::Process(zenclash_i18n::text_with(
+                "core_page.errors.binding_retirement",
+                &[("error", error.to_string())],
+            ))
+        })?
+    }
+
+    /// Retains the exact bundle already started and committed by the managed service.
+    /// Callers must supply the original snapshot rather than rereading its source files.
+    ///
+    /// # Errors
+    /// Rejects a changed binding, pending candidate, or mismatched service revision.
+    pub async fn adopt_service_runtime(
+        &self,
+        bundle: crate::ServiceRuntimeBundle,
+        revision: u64,
+    ) -> MihomoResult<()> {
+        let client = self.pin_binding()?;
+        let _guard = client.mutation_gate.lock().await;
+        client.ensure_binding_current()?;
+        let runtime = client.runtime_session().ok_or(MihomoError::StaleBinding)?;
+        runtime.adopt(bundle, revision).await
+    }
+
+    /// Confirms a pending service commit after its response was lost.
+    /// Only status and an idempotent commit are used; resources are never reread.
+    ///
+    /// # Errors
+    /// Returns unknown state when the applied revision cannot be confirmed.
+    pub async fn reconcile_service_runtime(&self) -> MihomoResult<()> {
+        let client = self.pin_binding()?;
+        let _guard = client.mutation_gate.lock().await;
+        client.ensure_binding_current()?;
+        let runtime = client.runtime_session().ok_or(MihomoError::StaleBinding)?;
+        runtime.reconcile().await
+    }
+
+    /// Restores a service revision whose candidate was not durably committed.
+    /// A pending finalization is rejected because its user data is already saved.
+    ///
+    /// # Errors
+    /// Returns transport errors or a missing accepted snapshot after stopping the kernel.
+    pub async fn rollback_service_runtime(&self) -> MihomoResult<()> {
+        let client = self.pin_binding()?;
+        let _guard = client.mutation_gate.lock().await;
+        client.ensure_binding_current()?;
+        let runtime = client.runtime_session().ok_or(MihomoError::StaleBinding)?;
+        runtime.restore_active().await
+    }
+
+    pub(crate) fn service_runtime_snapshot(
+        &self,
+    ) -> MihomoResult<Option<Arc<crate::ServiceRuntimeBundle>>> {
+        self.ensure_binding_current()?;
+        self.runtime_session()
+            .map(|runtime| runtime.snapshot())
+            .transpose()
+    }
+}
+
+impl MihomoError {
+    /// Reports whether a failed mutation may already have changed the controller.
+    /// Policy/input rejection and failure to establish native IPC are definitive.
+    #[must_use]
+    pub fn mutation_result_unknown(&self) -> bool {
+        matches!(
+            self,
+            Self::Http(_)
+                | Self::StaleTransport
+                | Self::Service(
+                    zenclash_service::ServiceClientError::Frame(_)
+                        | zenclash_service::ServiceClientError::UnexpectedResponse
+                        | zenclash_service::ServiceClientError::Rejected(
+                            zenclash_service::ServiceErrorCode::OutcomeUnknown
+                                | zenclash_service::ServiceErrorCode::Internal
+                                | zenclash_service::ServiceErrorCode::KernelFailed
+                        )
+                )
+        )
     }
 }

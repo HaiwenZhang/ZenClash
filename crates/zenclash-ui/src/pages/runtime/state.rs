@@ -1,6 +1,6 @@
 use super::{
     AutostartStatus, ConnectionsSnapshot, Observation, Page, ProviderCatalog, RuleCatalog,
-    RuntimeConfig, SystemNetworkSnapshot, SystemProxyStatus, TunPermissionStatus, VersionInfo,
+    RuntimeConfig, SystemNetworkSnapshot, SystemProxyStatus, CoreTunPermissionStatus, VersionInfo,
 };
 use std::path::{Path, PathBuf};
 use zenclash_core::ProxyCatalog;
@@ -40,7 +40,7 @@ pub(super) enum RuntimeData {
     },
     Tun {
         config: RuntimeConfig,
-        permissions: Result<TunPermissionStatus, String>,
+        permissions: Observation<CoreTunPermissionStatus>,
     },
     Settings {
         config: Option<RuntimeConfig>,

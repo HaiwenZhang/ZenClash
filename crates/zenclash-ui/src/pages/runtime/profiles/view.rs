@@ -96,9 +96,10 @@ impl RuntimePage {
             .when(self.profiles.forms.adding_subscription, |this| {
                 this.child(self.render_subscription_form(theme, cx))
             })
-            .when(self.profiles.recovery.is_some(), |this| {
-                this.child(self.render_profile_recovery(theme, cx))
-            })
+            .when(
+                self.profiles.recovery.is_some() || self.profiles.pending_finalization.is_some(),
+                |this| this.child(self.render_profile_recovery(theme, cx)),
+            )
             .child(self.render_managed_profiles(theme, cx))
             .when(self.profiles.forms.editing_profile_id.is_some(), |this| {
                 this.child(self.render_remote_profile_editor(theme, cx))

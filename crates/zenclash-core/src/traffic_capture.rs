@@ -10,13 +10,14 @@ use std::{
 use parking_lot::RwLock;
 use thiserror::Error;
 
-#[cfg(unix)]
-use crate::CoreMaintenanceIntent;
 use crate::{
-    CapabilityState, ControlledConfigStore, CoreKind, CoreSession, EffectiveConfigIntent,
+    ControlledConfigStore, CoreSession, EffectiveConfigIntent,
     Observation, RecoveryAction, SystemProxyOwnershipState, SystemProxySession,
-    SystemProxySessionSnapshot, TunCaptureStatus, TunPermissionManager, YamlOverrideStore,
+    SystemProxySessionSnapshot, TunCaptureStatus, YamlOverrideStore,
 };
+
+#[cfg(test)]
+use crate::CapabilityState;
 
 type CaptureFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
 
@@ -165,7 +166,6 @@ impl TrafficCaptureSession {
         core_session: CoreSession,
         controlled: ControlledConfigStore,
         system_proxy: Option<SystemProxySession>,
-        tun_permissions: Option<TunPermissionManager>,
         profile: Option<PathBuf>,
     ) -> Self {
         let profile = Arc::new(RwLock::new(profile));
@@ -173,7 +173,6 @@ impl TrafficCaptureSession {
             core_session,
             controlled,
             system_proxy,
-            tun_permissions,
             profile: profile.clone(),
         });
         Self {
@@ -429,7 +428,6 @@ struct ProductionCaptureBackend {
     core_session: CoreSession,
     controlled: ControlledConfigStore,
     system_proxy: Option<SystemProxySession>,
-    tun_permissions: Option<TunPermissionManager>,
     profile: Arc<RwLock<Option<PathBuf>>>,
 }
 
@@ -441,7 +439,12 @@ impl CaptureBackend for ProductionCaptureBackend {
             let system_proxy = read_system_proxy(self.system_proxy.clone()).await;
             let (tun, system_proxy_port) = match config {
                 Ok(config) => {
-                    let tun = observe_tun(core.kind, &config, self.tun_permissions.clone()).await;
+                    let tun = crate::operational_status::observe_runtime_tun(
+                        &self.core_session,
+                        core.kind,
+                        config.clone(),
+                    )
+                    .await;
                     (tun, config.system_proxy_port())
                 }
                 Err(error) => (Err(error.to_string()), None),
@@ -450,7 +453,7 @@ impl CaptureBackend for ProductionCaptureBackend {
                 system_proxy,
                 tun,
                 system_proxy_port,
-                core_available: core.running,
+                core_available: !core.managed || core.running == Some(true),
             })
         })
     }
@@ -526,29 +529,10 @@ impl CaptureBackend for ProductionCaptureBackend {
 
     fn ensure_tun_permission(&self) -> CaptureFuture<'_, ()> {
         Box::pin(async move {
-            let permissions = self
-                .tun_permissions
-                .clone()
-                .ok_or_else(|| "当前 runtime 没有可授权的受管内核".to_owned())?;
-            let permission_result = tokio::task::spawn_blocking(move || {
-                let already_granted = permissions.status()?.granted;
-                permissions.request_grant().map(|_| already_granted)
-            })
-            .await
-            .map_err(|error| format!("TUN 授权任务异常结束：{error}"))?
-            .map_err(|error| error.to_string());
-            #[cfg(unix)]
-            let already_granted = permission_result?;
-            #[cfg(not(unix))]
-            permission_result?;
-            #[cfg(unix)]
-            if !already_granted {
-                self.core_session
-                    .maintain(CoreMaintenanceIntent::Restart)
-                    .await
-                    .map_err(|error| format!("TUN 授权后重启内核失败：{error}"))?;
-            }
-            Ok(())
+            self.core_session
+                .ensure_tun_permission()
+                .await
+                .map_err(|error| error.to_string())
         })
     }
 
@@ -558,7 +542,8 @@ impl CaptureBackend for ProductionCaptureBackend {
                 return Ok(());
             };
             let core = self.core_session.snapshot();
-            let running = core.running && !self.core_session.is_shutting_down();
+            let running = (!core.managed || core.running == Some(true))
+                && !self.core_session.is_shutting_down();
             let port = if running {
                 self.core_session
                     .client()
@@ -605,54 +590,6 @@ async fn read_system_proxy(
         .await
         .map_err(|error| format!("系统代理读取任务异常结束：{error}"))?
         .map_err(|error| error.to_string())
-}
-
-async fn observe_tun(
-    kind: CoreKind,
-    config: &crate::RuntimeConfig,
-    permissions: Option<TunPermissionManager>,
-) -> Result<TunCaptureStatus, String> {
-    if kind == CoreKind::Meow {
-        return Ok(TunCaptureStatus {
-            requested: false,
-            configured: false,
-            permission: CapabilityState::Unsupported,
-            runtime: crate::TunRuntimeObservation {
-                device_name: None,
-                device: CapabilityState::Unsupported,
-                route: CapabilityState::Unsupported,
-                detail: "meow-rs 未声明 TUN 能力".into(),
-            },
-            observed: CapabilityState::Unsupported,
-        });
-    }
-    if !config.tun.enable {
-        return Ok(TunCaptureStatus {
-            requested: false,
-            configured: false,
-            permission: CapabilityState::Unknown,
-            runtime: crate::TunRuntimeObserver::observe(&config.tun),
-            observed: CapabilityState::Inactive,
-        });
-    }
-    let permissions = permissions.ok_or_else(|| "TUN 已配置，但没有可检查的内核权限".to_owned())?;
-    let status = tokio::task::spawn_blocking(move || permissions.status())
-        .await
-        .map_err(|error| format!("TUN 权限读取任务异常结束：{error}"))?
-        .map_err(|error| error.to_string())?;
-    if !status.granted {
-        return Err(format!("TUN 已配置，但权限未就绪：{}", status.detail));
-    }
-    let config = config.clone();
-    tokio::task::spawn_blocking(move || {
-        Ok(TunCaptureStatus::from_platform(
-            kind,
-            &config,
-            Some(&status),
-        ))
-    })
-    .await
-    .map_err(|error| format!("TUN 设备与路由读取任务异常结束：{error}"))?
 }
 
 fn observed_capture_plan(

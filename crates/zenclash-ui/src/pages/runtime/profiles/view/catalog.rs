@@ -36,12 +36,27 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
         let mut card = setting_card(zenclash_i18n::text("profiles.recovery.title"), theme).child(
-            div()
-                .px_4()
-                .py_3()
-                .text_sm()
-                .child(zenclash_i18n::text("profiles.recovery.description")),
+            div().px_4().py_3().text_sm().child(zenclash_i18n::text(
+                if self.profiles.pending_finalization.is_some() {
+                    "profiles.recovery.pending_description"
+                } else {
+                    "profiles.recovery.description"
+                },
+            )),
         );
+        if let Some(version) = self.profiles.pending_finalization {
+            return card.child(
+                h_flex().px_4().pb_3().child(
+                    Button::new("confirm-service-profile")
+                        .label(zenclash_i18n::text("profiles.recovery.confirm"))
+                        .outline()
+                        .disabled(self.core_busy())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.confirm_service_profile(version, cx)
+                        })),
+                ),
+            );
+        }
         if let Some(recovery) = &self.profiles.recovery {
             let known = recovery.last_known_good.as_ref().and_then(|version| {
                 self.profiles

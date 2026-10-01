@@ -304,10 +304,12 @@ impl RuntimePage {
                         };
                         this.reload_profile_catalog(cx);
                         if is_profile_page {
-                            this.notice = Some(zenclash_i18n::text_with(
-                                "profiles.notices.updated",
-                                &[("name", outcome.receipt.name().to_owned())],
-                            ));
+                            this.notice = Some(outcome.receipt.warning().unwrap_or_else(|| {
+                                zenclash_i18n::text_with(
+                                    "profiles.notices.updated",
+                                    &[("name", outcome.receipt.name().to_owned())],
+                                )
+                            }));
                         }
                     }
                     Err(error) => {

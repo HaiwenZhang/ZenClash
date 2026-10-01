@@ -213,21 +213,28 @@ pub enum ProcessRecoveryStatus {
     NetworkSuspended,
     /// ZenClash observes an external core and cannot recover its process.
     External,
+    /// Native managed liveness is unavailable or lifecycle acknowledgement is uncertain.
+    Unknown,
 }
 
 impl ProcessStatus {
-    fn from_session(session: &CoreSession) -> Self {
-        Self::from_snapshot(session, session.snapshot())
-    }
-
     fn from_snapshot(session: &CoreSession, snapshot: CoreSessionSnapshot) -> Self {
         let process = session.managed_process_snapshot();
         let lifecycle = session.lifecycle_snapshot();
         Self {
             kind: snapshot.kind,
             managed: snapshot.managed,
-            pid: process.as_ref().and_then(|process| process.pid),
-            running: snapshot.running,
+            pid: process
+                .as_ref()
+                .and_then(|process| process.pid)
+                .or_else(|| {
+                    session
+                        .client()
+                        .service_client()
+                        .and_then(|client| client.snapshot())
+                        .and_then(|status| status.pid)
+                }),
+            running: snapshot.running.unwrap_or(false),
             generation: snapshot.generation,
             exit_reason: lifecycle.exit_reason.or_else(|| {
                 process
@@ -237,6 +244,7 @@ impl ProcessStatus {
             recovery_attempts: lifecycle.recovery_attempts,
             recovery: match lifecycle.phase {
                 CoreLifecyclePhase::Stable => ProcessRecoveryStatus::Stable,
+                CoreLifecyclePhase::Unknown => ProcessRecoveryStatus::Unknown,
                 CoreLifecyclePhase::Recovering => ProcessRecoveryStatus::Recovering,
                 CoreLifecyclePhase::Failed => ProcessRecoveryStatus::Failed,
                 CoreLifecyclePhase::ShuttingDown | CoreLifecyclePhase::Stopped => {
@@ -507,18 +515,10 @@ impl OperationalStatus {
         runtime: &Handle,
         core_session: CoreSession,
         system_proxy: Option<SystemProxySession>,
-        tun_permissions: Option<crate::TunPermissionManager>,
         traffic: Arc<TrafficMonitor>,
         logs: Arc<LogMonitor>,
     ) -> Arc<Self> {
-        let now = now_ms();
-        let initial = OperationalSnapshot {
-            process: Observation::Fresh {
-                value: ProcessStatus::from_session(&core_session),
-                observed_at_ms: now,
-            },
-            ..OperationalSnapshot::default()
-        };
+        let initial = OperationalSnapshot::default();
         let (snapshot, _) = watch::channel(initial);
         let status = Arc::new(Self {
             snapshot,
@@ -529,7 +529,6 @@ impl OperationalStatus {
             weak,
             core_session,
             system_proxy,
-            tun_permissions,
             traffic,
             logs,
         ));
@@ -632,7 +631,6 @@ async fn run_status_monitor(
     status: Weak<OperationalStatus>,
     core_session: CoreSession,
     system_proxy: Option<SystemProxySession>,
-    tun_permissions: Option<crate::TunPermissionManager>,
     traffic: Arc<TrafficMonitor>,
     logs: Arc<LogMonitor>,
 ) {
@@ -643,7 +641,6 @@ async fn run_status_monitor(
             &status,
             &core_session,
             system_proxy.clone(),
-            tun_permissions.clone(),
             &traffic,
             &logs,
             refresh_platform,
@@ -658,7 +655,6 @@ async fn refresh_status(
     status: &OperationalStatus,
     core_session: &CoreSession,
     system_proxy: Option<SystemProxySession>,
-    tun_permissions: Option<crate::TunPermissionManager>,
     traffic: &TrafficMonitor,
     logs: &LogMonitor,
     refresh_platform: bool,
@@ -670,25 +666,52 @@ async fn refresh_status(
         traffic,
         logs,
         refresh_platform,
-        move |kind, config| async move {
-            tokio::task::spawn_blocking(move || {
-                let permission = tun_permissions
-                    .as_ref()
-                    .map(crate::TunPermissionManager::status)
-                    .transpose()
-                    .map_err(|error| error.to_string())?;
-                Ok::<_, String>(TunCaptureStatus::from_platform(
-                    kind,
-                    &config,
-                    permission.as_ref(),
-                ))
-            })
-            .await
-            .map_err(|error| format!("TUN 平台读取任务异常结束：{error}"))
-            .and_then(|result| result)
-        },
+        move |kind, config| observe_runtime_tun(core_session, kind, config),
     )
     .await;
+}
+
+pub(crate) async fn observe_runtime_tun(
+    session: &CoreSession,
+    kind: CoreKind,
+    config: RuntimeConfig,
+) -> Result<TunCaptureStatus, String> {
+    if kind == CoreKind::Meow || !config.tun.enable {
+        return tokio::task::spawn_blocking(move || {
+            TunCaptureStatus::from_platform(kind, &config, None)
+        })
+        .await
+        .map_err(|error| error.to_string());
+    }
+    let evidence = session
+        .tun_permission_status()
+        .await
+        .map_err(|error| error.to_string())?;
+    let Observation::Fresh {
+        value: permission, ..
+    } = evidence
+    else {
+        return Err(zenclash_i18n::text(
+            "core_page.errors.runtime_authority_unavailable",
+        ));
+    };
+    tokio::task::spawn_blocking(move || {
+        let runtime = crate::TunRuntimeObserver::observe(&config.tun);
+        let permission = if permission.granted() {
+            CapabilityState::Active
+        } else {
+            CapabilityState::Inactive
+        };
+        TunCaptureStatus {
+            requested: config.tun.enable,
+            configured: config.tun.enable,
+            observed: aggregate_tun_state(config.tun.enable, permission, &runtime),
+            permission,
+            runtime,
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())
 }
 
 async fn refresh_status_with_tun_reader<F, R>(
@@ -742,9 +765,20 @@ async fn refresh_status_with_tun_reader<F, R>(
             logs.synchronize_generation(current.generation);
             let now = now_ms();
             let mut next = status.snapshot();
-            next.process = Observation::Fresh {
-                value: ProcessStatus::from_snapshot(core_session, current),
-                observed_at_ms: now,
+            next.process = if current.managed && current.running.is_none() {
+                Observation::Failed {
+                    failure: OperationalFailure {
+                        message: zenclash_i18n::text(
+                            "core_page.errors.runtime_authority_unavailable",
+                        ),
+                        occurred_at_ms: now,
+                    },
+                    recovery: RecoveryAction::InspectCore,
+                }
+            } else {
+                let mut value = ProcessStatus::from_snapshot(core_session, current);
+                if !current.managed { value.running = version.is_ok(); }
+                Observation::Fresh { value, observed_at_ms: now }
             };
             if !same_generation(expected, current) {
                 reset_old_generation_streams(&mut next.streams, current.generation);
@@ -780,7 +814,7 @@ async fn refresh_status_with_tun_reader<F, R>(
             }
             if let Some(tun) = tun {
                 next.capture.tun = Observation::record(
-                    &next.capture.tun,
+                    &Observation::Loading,
                     tun,
                     now,
                     if current.kind == CoreKind::Meow {
@@ -1020,7 +1054,7 @@ mod tests {
             }
         });
         let client = crate::MihomoClient::new(endpoint).unwrap();
-        let core = CoreSession::open(CoreKind::Mihomo, client, None);
+        let core = CoreSession::open(CoreKind::Mihomo, client).unwrap();
         let runtime = Handle::current();
         let offline = crate::MihomoEndpoint::new("http://127.0.0.1:1", "");
         let traffic = TrafficMonitor::start(&runtime, offline.clone());
@@ -1081,12 +1115,12 @@ mod tests {
             crate::MihomoEndpoint::new(format!("http://{}", listener.local_addr().unwrap()), "");
         let runtime = tokio::runtime::Handle::current();
         let client = crate::MihomoClient::new(endpoint.clone()).unwrap();
-        let core = crate::CoreSession::open(crate::CoreKind::Mihomo, client, None);
+        let core = crate::CoreSession::open(crate::CoreKind::Mihomo, client).unwrap();
         let traffic = crate::TrafficMonitor::start(&runtime, endpoint.clone());
         let logs = crate::LogMonitor::start(&runtime, endpoint, crate::MihomoLogLevel::Info);
         let traffic_weak = std::sync::Arc::downgrade(&traffic);
         let logs_weak = std::sync::Arc::downgrade(&logs);
-        let status = super::OperationalStatus::start(&runtime, core, None, None, traffic, logs);
+        let status = super::OperationalStatus::start(&runtime, core, None, traffic, logs);
         tokio::task::yield_now().await;
         status.stop();
         drop(status);
@@ -1278,7 +1312,7 @@ mod tests {
         let expected = CoreSessionSnapshot {
             kind: CoreKind::Mihomo,
             managed: true,
-            running: true,
+            running: Some(true),
             generation: 3,
         };
         let current = CoreSessionSnapshot {

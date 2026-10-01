@@ -11,9 +11,9 @@ use gpui_kit::{
 use gpui_kit::{Pixels, Size};
 use zenclash_core::{
     AppPreferences, AppPreferencesStore, AppearancePreference, ControlledConfigStore, CoreKind,
-    CoreSession, LogMonitor, MihomoClient, MihomoLogLevel, MihomoProcess, OperationalStatus,
+    CoreSession, LogMonitor, MihomoClient, MihomoLogLevel, OperationalStatus,
     SystemProxyController, SystemProxySession, TrafficCaptureSession, TrafficHistoryStore,
-    TrafficMonitor, TunPermissionManager,
+    TrafficMonitor,
 };
 
 mod actions;
@@ -192,10 +192,6 @@ pub struct AppServices {
     pub traffic_history_store: Option<TrafficHistoryStore>,
     /// Owned sampler shared with the executable for final shutdown flushing.
     pub traffic_history_session: Option<Arc<TrafficHistorySession>>,
-    /// TUN permission manager validated before GPUI starts handling events.
-    pub tun_permissions: Option<TunPermissionManager>,
-    /// Managed Mihomo child, absent when `ZenClash` attaches to an external core.
-    pub mihomo_process: Option<Arc<MihomoProcess>>,
     /// Active Clash/Mihomo YAML path, when known.
     pub profile_path: Option<PathBuf>,
     /// Persistent controlled-config layer merged over the active profile.
@@ -231,8 +227,6 @@ impl ZenClashApp {
             log_monitor,
             traffic_history_store,
             traffic_history_session,
-            tun_permissions,
-            mihomo_process,
             profile_path,
             controlled_config_store,
             runtime,
@@ -250,23 +244,10 @@ impl ZenClashApp {
         let system_proxy_session = preferences_store
             .clone()
             .map(|store| SystemProxySession::new(store, system_proxy_controller.clone()));
-        let traffic_capture = TrafficCaptureSession::new(
-            core_session.clone(),
-            controlled_config_store.clone(),
-            system_proxy_session.clone(),
-            tun_permissions.clone(),
-            profile_path.clone(),
-        );
+        let traffic_capture = TrafficCaptureSession::new(core_session.clone(), controlled_config_store.clone(), system_proxy_session.clone(), profile_path.clone());
         let _supervisor_started =
             core_session.start_supervisor_with_capture(&runtime, traffic_capture.clone());
-        let operational_status = OperationalStatus::start(
-            &runtime,
-            core_session.clone(),
-            system_proxy_session.clone(),
-            tun_permissions,
-            traffic_monitor.clone(),
-            log_monitor.clone(),
-        );
+        let operational_status = OperationalStatus::start(&runtime, core_session.clone(), system_proxy_session.clone(), traffic_monitor.clone(), log_monitor.clone());
         let profile_service =
             crate::ProfileService::new(core_session.clone(), override_store.clone());
         let runtime_page = cx.new(|cx| {
@@ -284,7 +265,6 @@ impl ZenClashApp {
                     log_monitor: log_monitor.clone(),
                     operational_status: operational_status.clone(),
                     traffic_capture: traffic_capture.clone(),
-                    process: mihomo_process.clone(),
                     profile_path,
                     controlled_config_store,
                     preferences_store: preferences_store.clone(),

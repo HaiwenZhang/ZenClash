@@ -9,6 +9,9 @@ mock_target="${test_root}/target"
 output_dir="${test_root}/dist"
 dpkg_log="${test_root}/dpkg-deb.log"
 control_copy="${test_root}/control"
+service_copy="${test_root}/zenclash-service"
+unit_copy="${test_root}/zenclash-service.service"
+policy_copy="${test_root}/org.zenclash.service.policy"
 
 cleanup() {
   rm -rf "${test_root}"
@@ -21,8 +24,24 @@ cat >"${mock_bin}/cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 mkdir -p "${MOCK_TARGET_DIR}/release"
-printf '#!/usr/bin/env bash\nexit 0\n' >"${MOCK_TARGET_DIR}/release/zenclash"
-chmod +x "${MOCK_TARGET_DIR}/release/zenclash"
+case " $* " in
+  *" -p zenclash-service "*)
+    [[ " $* " == *" --features server "* ]]
+    if [[ "${MOCK_MISSING_SERVICE:-0}" == 0 ]]; then
+      case "${MOCK_SERVICE_VERSION:-valid}" in
+        valid) printf '#!/usr/bin/env bash\nprintf "zenclash-service fixture\\n"\n' ;;
+        empty) printf '#!/usr/bin/env bash\nexit 0\n' ;;
+        failed) printf '#!/usr/bin/env bash\nexit 7\n' ;;
+        *) exit 2 ;;
+      esac >"${MOCK_TARGET_DIR}/release/zenclash-service"
+      chmod +x "${MOCK_TARGET_DIR}/release/zenclash-service"
+    fi
+    ;;
+  *)
+    printf '#!/usr/bin/env bash\nexit 0\n' >"${MOCK_TARGET_DIR}/release/zenclash"
+    chmod +x "${MOCK_TARGET_DIR}/release/zenclash"
+    ;;
+esac
 EOF
 
 cat >"${mock_bin}/dpkg" <<'EOF'
@@ -42,6 +61,10 @@ case "${1:-}" in
     package_path="${4:?missing package path}"
     mkdir -p "$(dirname "${package_path}")"
     cp "${3:?missing package root}/DEBIAN/control" "${MOCK_CONTROL_COPY}"
+    [[ -x "${3}/usr/lib/zenclash/zenclash-service" ]]
+    cp "${3}/usr/lib/zenclash/zenclash-service" "${MOCK_SERVICE_COPY}"
+    cp "${3}/usr/lib/systemd/system/zenclash-service.service" "${MOCK_UNIT_COPY}"
+    cp "${3}/usr/share/polkit-1/actions/org.zenclash.service.policy" "${MOCK_POLICY_COPY}"
     : >"${package_path}"
     ;;
   --info)
@@ -55,6 +78,9 @@ case "${1:-}" in
     printf '%s\n' '-rw-r--r-- root/root 1 ./usr/lib/zenclash/geoip.metadb'
     printf '%s\n' '-rw-r--r-- root/root 1 ./usr/lib/zenclash/recovery.yaml'
     printf '%s\n' '-rw-r--r-- root/root 1 ./usr/share/doc/zenclash/LICENSE'
+    printf '%s\n' '-rwxr-xr-x root/root 1 ./usr/lib/zenclash/zenclash-service'
+    printf '%s\n' '-rw-r--r-- root/root 1 ./usr/lib/systemd/system/zenclash-service.service'
+    printf '%s\n' '-rw-r--r-- root/root 1 ./usr/share/polkit-1/actions/org.zenclash.service.policy'
     ;;
   *)
     printf 'Unexpected dpkg-deb invocation: %s\n' "$*" >&2
@@ -93,6 +119,9 @@ printf 'fixture\n' >"${test_root}/geoip.metadb"
 PATH="${mock_bin}:${PATH}" \
   MOCK_CONTROL_COPY="${control_copy}" \
   MOCK_DPKG_LOG="${dpkg_log}" \
+  MOCK_SERVICE_COPY="${service_copy}" \
+  MOCK_UNIT_COPY="${unit_copy}" \
+  MOCK_POLICY_COPY="${policy_copy}" \
   MOCK_TARGET_DIR="${mock_target}" \
   CARGO_TARGET_DIR="${mock_target}" \
   ZENCLASH_MIHOMO_BINARY="${test_root}/mihomo" \
@@ -106,5 +135,41 @@ package_path="${output_dir}/ZenClash-9.8.7-Ubuntu-24.04+-amd64.deb"
 grep -Fxq \
   'Depends: libasound2t64, libfontconfig1, libgtk-3-0t64, libayatana-appindicator3-1, libvulkan1, libwayland-client0, libxdo3, libxkbcommon-x11-0' \
   "${control_copy}"
+cmp "${mock_target}/release/zenclash-service" "${service_copy}"
+cmp "${project_root}/platforms/linux/zenclash-service.service" "${unit_copy}"
+cmp "${project_root}/platforms/linux/org.zenclash.service.policy" "${policy_copy}"
+
+rm -f "${mock_target}/release/zenclash-service" "${package_path}"
+if PATH="${mock_bin}:${PATH}" \
+  MOCK_TARGET_DIR="${mock_target}" \
+  MOCK_MISSING_SERVICE=1 \
+  CARGO_TARGET_DIR="${mock_target}" \
+  ZENCLASH_MIHOMO_BINARY="${test_root}/mihomo" \
+  ZENCLASH_GEODATA_FILE="${test_root}/geoip.metadb" \
+  bash "${project_root}/scripts/build_deb_package.sh" 9.8.7 "${output_dir}" >"${test_root}/missing.log" 2>&1; then
+  echo 'Packaging unexpectedly succeeded without the service binary' >&2
+  exit 1
+fi
+[[ ! -f "${package_path}" ]]
+
+for version_failure in empty failed; do
+  : >"${dpkg_log}"
+  if PATH="${mock_bin}:${PATH}" \
+    MOCK_TARGET_DIR="${mock_target}" \
+    MOCK_SERVICE_VERSION="${version_failure}" \
+    MOCK_DPKG_LOG="${dpkg_log}" \
+    MOCK_CONTROL_COPY="${control_copy}" \
+    MOCK_SERVICE_COPY="${service_copy}" \
+    MOCK_UNIT_COPY="${unit_copy}" \
+    MOCK_POLICY_COPY="${policy_copy}" \
+    CARGO_TARGET_DIR="${mock_target}" \
+    ZENCLASH_MIHOMO_BINARY="${test_root}/mihomo" \
+    ZENCLASH_GEODATA_FILE="${test_root}/geoip.metadb" \
+    bash "${project_root}/scripts/build_deb_package.sh" 9.8.7 "${output_dir}" >"${test_root}/${version_failure}.log" 2>&1; then
+    echo "DEB packaging unexpectedly accepted ${version_failure} service version output" >&2
+    exit 1
+  fi
+  [[ ! -f "${package_path}" && ! -s "${dpkg_log}" ]]
+done
 
 printf 'DEB packaging regression test passed\n'

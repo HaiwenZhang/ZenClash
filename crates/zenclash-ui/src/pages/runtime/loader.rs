@@ -1,6 +1,6 @@
 use super::{
-    MihomoClient, Observation, Page, PathBuf, ProxyOperations, ProxyVisibility, RecoveryAction,
-    RuntimeData, SystemNetworkSnapshot, SystemProxyManager, TunPermissionManager,
+    CoreSession, MihomoClient, Observation, Page, ProxyOperations, ProxyVisibility, RecoveryAction,
+    RuntimeData, SystemNetworkSnapshot, SystemProxyManager,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -28,13 +28,13 @@ impl Drop for PageReadTask {
 }
 
 pub(super) async fn load_page(client: MihomoClient, page: Page) -> Result<RuntimeData, String> {
-    load_page_with_binary(client, page, None).await
+    load_page_with_core(client, page, None).await
 }
 
-pub(super) async fn load_page_with_binary(
+pub(super) async fn load_page_with_core(
     client: MihomoClient,
     page: Page,
-    mihomo_binary: Option<PathBuf>,
+    core: Option<CoreSession>,
 ) -> Result<RuntimeData, String> {
     match page {
         Page::Home => load_dashboard(client).await,
@@ -81,7 +81,7 @@ pub(super) async fn load_page_with_binary(
         }
         Page::SystemProxy => load_system_proxy(client).await,
         Page::Network => load_network(client).await,
-        Page::Tun => load_tun(client, mihomo_binary).await,
+        Page::Tun => load_tun(client, core).await,
         Page::Settings => load_settings(client).await,
         Page::Logs | Page::Override => Ok(RuntimeData::Empty),
         _ => client
@@ -156,23 +156,22 @@ async fn load_network(client: MihomoClient) -> Result<RuntimeData, String> {
 
 async fn load_tun(
     client: MihomoClient,
-    mihomo_binary: Option<PathBuf>,
+    core: Option<CoreSession>,
 ) -> Result<RuntimeData, String> {
-    let permission_task = tokio::task::spawn_blocking(move || {
-        let binary = mihomo_binary
-            .ok_or_else(|| zenclash_i18n::text("runtime.load_errors.external_binary"))?;
-        TunPermissionManager::new(binary)
-            .and_then(|manager| manager.status())
-            .map_err(|error| error.to_string())
-    });
+    let permission_task = async {
+        match core {
+            Some(core) => core.tun_permission_status().await.map_err(|error| error.to_string()),
+            None => Ok(Observation::Loading),
+        }
+    };
     let (config, permissions) = tokio::join!(client.runtime_config(), permission_task);
     let config = config.map_err(|error| error.to_string())?;
-    let permissions = permissions.map_err(|error| {
-        zenclash_i18n::text_with(
-            "runtime.load_errors.tun_permission",
-            &[("error", error.to_string())],
-        )
-    })?;
+    let permissions = permissions.unwrap_or_else(|error| Observation::record(
+        &Observation::Loading,
+        Err::<zenclash_core::CoreTunPermissionStatus, _>(error),
+        now_ms(),
+        RecoveryAction::Retry,
+    ));
     Ok(RuntimeData::Tun {
         config,
         permissions,

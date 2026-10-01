@@ -329,17 +329,11 @@ mod tests {
         std::fs::write(&profile, "mode: rule\nrules: [MATCH,DIRECT]\n").unwrap();
         std::fs::write(&yaml_override, "mode: rule\n").unwrap();
         let controlled = ControlledConfigStore::new(root.join("controlled"));
-        let session = CoreSession::open_with_config(
-            zenclash_core::CoreKind::Mihomo,
-            zenclash_core::MihomoClient::new(zenclash_core::MihomoEndpoint::new(
+        let session = CoreSession::open_with_config(zenclash_core::CoreKind::Mihomo, zenclash_core::MihomoClient::new(zenclash_core::MihomoEndpoint::new(
                 "http://127.0.0.1:1",
                 "",
             ))
-            .unwrap(),
-            None,
-            Some(profile),
-            vec![yaml_override],
-        );
+            .unwrap(), Some(profile), vec![yaml_override]).unwrap();
         let coordinator = OutboundModeCoordinator::new_unsynchronized(OutboundMode::Rule);
         coordinator.synchronize(OutboundMode::Rule, 0);
         let mut updates = coordinator.subscribe();

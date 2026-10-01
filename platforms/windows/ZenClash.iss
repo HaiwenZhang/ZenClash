@@ -33,7 +33,8 @@ OutputDir={#OutputDir}
 OutputBaseFilename=ZenClash-{#AppVersion}-windows-x64-setup
 
 [Files]
-Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceDir}\zenclash-service.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "zenclash-service.exe"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\ZenClash"; Filename: "{app}\zenclash.exe"; WorkingDir: "{app}"; IconFilename: "{app}\zenclash.exe"; IconIndex: 0

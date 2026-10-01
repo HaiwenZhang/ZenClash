@@ -28,9 +28,9 @@ async fn drives_the_supplied_profile_through_a_real_mihomo_process() {
     verify_real_ruleset_conversion(&inputs);
     verify_real_listener_conflict_fallback(&inputs).await;
     let process = start_mihomo(&inputs).await;
-    let client = MihomoClient::new(process.endpoint().clone())
+    let client = MihomoClient::from_process(process.clone())
         .expect("real client")
-        .with_config_validator(process.config_validator());
+        .with_config_validator(process.config_validator()).unwrap();
     verify_real_operational_status(&client, process.clone()).await;
     let persistent_logs = LogMonitor::start(
         &tokio::runtime::Handle::current(),
@@ -65,8 +65,8 @@ async fn verify_real_operational_status(client: &MihomoClient, process: Arc<Miho
     let runtime = tokio::runtime::Handle::current();
     let traffic = TrafficMonitor::start(&runtime, process.endpoint().clone());
     let logs = LogMonitor::start(&runtime, process.endpoint().clone(), MihomoLogLevel::Info);
-    let session = CoreSession::open(CoreKind::Mihomo, client.clone(), Some(process));
-    let status = OperationalStatus::start(&runtime, session, None, None, traffic, logs);
+    let session = CoreSession::open(CoreKind::Mihomo, client.clone()).unwrap();
+    let status = OperationalStatus::start(&runtime, session, None, traffic, logs);
 
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -967,7 +967,8 @@ async fn verify_profile_workflows(
     let profile_store = ProfileStore::new(home.join("profile-integration-store"))
         .expect("create integration profile store");
     let controlled = ControlledConfigStore::new(home.join("profile-integration-controlled"));
-    let session = CoreSession::open(CoreKind::Mihomo, client.clone(), Some(process));
+    assert_eq!(client.endpoint(), Some(process.endpoint().clone()));
+    let session = CoreSession::open(CoreKind::Mihomo, client.clone()).unwrap();
     let application = ProfileApplication::new(profile_store.clone(), controlled, session);
     let local = match application
         .apply(ProfileChange::ImportLocal {

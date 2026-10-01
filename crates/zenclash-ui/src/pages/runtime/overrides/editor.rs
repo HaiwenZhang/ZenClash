@@ -133,6 +133,7 @@ impl RuntimePage {
                 match result {
                     Ok(outcome) => {
                         this.synchronize_profile_recovery();
+                        let warning = outcome.warning();
                         let applied_path = outcome
                             .runtime_version()
                             .map(|version| (outcome.path().to_path_buf(), version));
@@ -144,6 +145,14 @@ impl RuntimePage {
                             applied_path,
                             cx,
                         );
+                        if this.is_page_task_current(token)
+                            && outcome
+                                .runtime_version()
+                                .is_some_and(|version| this.profile_service.is_current(version))
+                            && warning.is_some()
+                        {
+                            this.notice = warning;
+                        }
                     }
                     Err(error) => {
                         this.synchronize_profile_recovery();
