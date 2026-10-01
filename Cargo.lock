@@ -9690,7 +9690,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
  "zenclash-i18n",
  "zip",
 ]
@@ -9715,12 +9715,14 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "parking_lot",
+ "raw-window-handle",
  "serde_json",
  "serde_yaml",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "tray-icon",
+ "windows-sys 0.61.2",
  "zenclash-core",
  "zenclash-i18n",
 ]

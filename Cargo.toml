@@ -25,6 +25,7 @@ objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false }
 objc2-foundation = { version = "0.3.2", default-features = false }
 parking_lot = "0.12"
+raw-window-handle = "0.6"
 percent-encoding = "2.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rust-i18n = "4"
@@ -40,11 +41,15 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = ["c
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tray-icon = "0.24.2"
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinInet",
+    "Win32_Networking_WinSock",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 zenclash-i18n = { path = "crates/zenclash-i18n" }

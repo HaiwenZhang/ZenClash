@@ -9,7 +9,7 @@ use gpui_kit::component::{
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
 };
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{ClickEvent, MouseButton, Pixels, RenderOnce, px};
+use gpui_kit::{ClickEvent, Pixels, RenderOnce, WindowControlArea, px};
 
 const MAIN_WINDOW_TITLE_BAR_SELECTOR: &str = "main-window-title-bar";
 const MAIN_WINDOW_DRAG_SELECTOR: &str = "main-window-drag-area";
@@ -34,6 +34,14 @@ const WINDOWS_WINDOW_CONTROLS: [WindowsWindowControl; 3] = [
 ];
 
 impl WindowsWindowControl {
+    fn area(self) -> WindowControlArea {
+        match self {
+            Self::Minimize => WindowControlArea::Min,
+            Self::Zoom => WindowControlArea::Max,
+            Self::Close => WindowControlArea::Close,
+        }
+    }
+
     fn selector(self) -> &'static str {
         match self {
             Self::Minimize => MAIN_WINDOW_MINIMIZE_SELECTOR,
@@ -102,6 +110,7 @@ impl RenderOnce for WindowsWindowControls {
                 let on_close_window = self.on_close_window.clone();
 
                 Button::new(control.selector())
+                    .window_control_area(control.area())
                     .icon(control.icon(is_maximized))
                     .accessibility_label(control.label(is_maximized))
                     .tooltip(control.label(is_maximized))
@@ -122,20 +131,25 @@ impl RenderOnce for WindowsWindowControls {
                     .items_center()
                     .occlude()
                     .text_color(cx.theme().foreground)
-                    .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    })
                     .on_click(move |event, window, cx| {
+                        // Let GPUI's native caption handling toggle minimize/maximize.
+                        // Its Windows `zoom_window` API only maximizes; consuming the
+                        // mouse event would prevent the native restore operation.
+                        if matches!(event, ClickEvent::Mouse(_))
+                            && control != WindowsWindowControl::Close
+                        {
+                            return;
+                        }
                         cx.stop_propagation();
                         match control {
                             WindowsWindowControl::Minimize => {
-                                #[cfg(target_os = "windows")]
-                                super::platform::minimize_active_window();
+                                window.minimize_window();
                             }
                             WindowsWindowControl::Zoom => {
                                 #[cfg(target_os = "windows")]
-                                super::platform::toggle_active_window_maximized();
+                                super::platform::toggle_window_maximized(window);
+                                #[cfg(not(target_os = "windows"))]
+                                window.zoom_window();
                             }
                             WindowsWindowControl::Close => {
                                 on_close_window(event, window, cx);
@@ -175,12 +189,7 @@ fn main_window_title_bar(
                         .id(MAIN_WINDOW_DRAG_SELECTOR)
                         .flex_1()
                         .h_full()
-                        .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                            window.prevent_default();
-                            cx.stop_propagation();
-                            #[cfg(target_os = "windows")]
-                            super::platform::start_active_window_drag();
-                        }),
+                        .window_control_area(WindowControlArea::Drag),
                 )
             },
         );
@@ -279,8 +288,8 @@ mod tests {
         use gpui_kit::component::Root;
         use gpui_kit::test::TestWindowExt;
         use gpui_kit::{
-            AppContext, Context, FocusHandle, InteractiveElement, ParentElement, Render, Styled,
-            div, px, size,
+            AppContext, Context, FocusHandle, InputEvent, InteractiveElement, MouseButton,
+            MouseDownEvent, MouseUpEvent, ParentElement, Render, Styled, div, px, size,
         };
         use std::{cell::Cell, rc::Rc};
 
@@ -337,6 +346,36 @@ mod tests {
             assert_eq!(closes.get(), 1);
             window.click(MAIN_WINDOW_CLOSE_SELECTOR, cx);
             assert_eq!(closes.get(), 2);
+            for selector in [MAIN_WINDOW_MINIMIZE_SELECTOR, MAIN_WINDOW_ZOOM_SELECTOR] {
+                window.hover(selector, cx);
+                let position = window.find(selector).bounds().center();
+                window.dispatch_event(
+                    MouseDownEvent {
+                        button: MouseButton::Left,
+                        position,
+                        modifiers: Default::default(),
+                        click_count: 1,
+                        first_mouse: false,
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.render_frame(cx);
+                let result = window.dispatch_event(
+                    MouseUpEvent {
+                        button: MouseButton::Left,
+                        position,
+                        modifiers: Default::default(),
+                        click_count: 1,
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                assert!(
+                    result.propagate,
+                    "native caption handling must receive mouse-up"
+                );
+            }
             window.remove_window();
         })
         .unwrap();
@@ -350,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn native_window_drag_workaround_is_windows_only() {
+    fn native_window_drag_region_is_windows_only() {
         let actual = ["windows", "linux", "macos"].map(needs_native_window_drag);
 
         assert_eq!(actual, [true, false, false]);

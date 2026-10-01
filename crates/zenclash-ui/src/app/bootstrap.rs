@@ -65,6 +65,7 @@ pub fn create_main_window(services: AppServices, cx: &mut App) {
             cx,
         )),
         titlebar: Some(TitleBar::title_bar_options()),
+        app_owns_titlebar_drag: false,
         ..Default::default()
     };
 
@@ -136,6 +137,14 @@ pub fn create_main_window(services: AppServices, cx: &mut App) {
                 });
                 #[cfg(target_os = "macos")]
                 keep_main_window_alive_when_closed(window, app.downgrade(), cx);
+                #[cfg(target_os = "windows")]
+                {
+                    let app_for_native_close = app.downgrade();
+                    window.on_window_should_close(cx, move |_, cx| {
+                        let _ = app_for_native_close.update(cx, |app, cx| app.begin_quit(None, cx));
+                        false
+                    });
+                }
                 let app_for_global_quit = app.downgrade();
                 cx.on_action(move |_: &Quit, cx| {
                     let _ = app_for_global_quit.update(cx, |app, cx| app.begin_quit(None, cx));

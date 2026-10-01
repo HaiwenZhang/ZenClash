@@ -95,21 +95,11 @@ fn eligible_interface(name: &str) -> bool {
 
 #[cfg(windows)]
 fn detect() -> NetworkReachability {
-    let script = "$ErrorActionPreference='Stop'; $active=@(Get-NetIPConfiguration | Where-Object {$_.NetAdapter.HardwareInterface -and $_.NetAdapter.Status -eq 'Up' -and ($_.IPv4Address -or $_.IPv6Address)}); if($active.Count -gt 0){'online'}else{'offline'}";
-    match crate::platform_command::output(
-        "powershell.exe",
-        &["-NoProfile", "-NonInteractive", "-Command", script],
-    ) {
-        Ok(output) if output.status.success() => {
-            match String::from_utf8_lossy(&output.stdout).trim() {
-                "online" => NetworkReachability::Online,
-                "offline" => NetworkReachability::Offline,
-                _ => NetworkReachability::Unknown,
-            }
-        }
-        _ => NetworkReachability::Unknown,
-    }
+    windows::detect()
 }
+
+#[cfg(windows)]
+mod windows;
 
 #[cfg(not(any(unix, windows)))]
 fn detect() -> NetworkReachability {
