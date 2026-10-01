@@ -137,7 +137,7 @@ impl PacServer {
             .spawn(move || run_server(&listener, &script, &worker_shutdown))
             .map_err(|error| MihomoError::Process(format!("无法启动 PAC 服务线程：{error}")))?;
         Ok(RunningPacServer {
-            status: status.clone(),
+            status,
             shutdown,
             thread: Some(thread),
         })

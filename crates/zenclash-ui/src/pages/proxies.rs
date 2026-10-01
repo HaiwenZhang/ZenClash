@@ -509,178 +509,180 @@ mod tests {
     use gpui_kit::{AnyWindowHandle, AppContext, Entity, TestAppContext, size};
 
     #[gpui_kit::test]
-    async fn identical_node_labels_keep_independent_keyboard_selection_and_delay_controls(
+    fn identical_node_labels_keep_independent_keyboard_selection_and_delay_controls(
         cx: &mut TestAppContext,
     ) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        cx.foreground_executor().clone().block_test(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        cx.executor().allow_parking();
-        let catalog_json = r#"{"proxies":{"a":{"name":"HK","provider-name":"Airport A","history":[{"delay":100}]},"b":{"name":"HK","provider-name":"Airport B","history":[{"delay":77}]},"Proxy":{"type":"Selector","now":"a","all":["a","b"],"test-url":"http://127.0.0.1/"}}}"#;
-        let (window, page, runtime) = open_catalog(cx, ProxyCatalog::default());
-        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let address = listener.local_addr().unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let server = runtime.spawn(async move {
-            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-            let mut selected = String::new();
-            let mut measured = Vec::new();
-            for _ in 0..5 {
-                let (mut stream, _) = tokio::time::timeout(
-                    std::time::Duration::from_secs(5), listener.accept(),
-                ).await.unwrap().unwrap();
-                let mut headers = Vec::new();
-                loop {
-                    headers.push(stream.read_u8().await.unwrap());
-                    if headers.ends_with(b"\r\n\r\n") { break; }
-                    assert!(headers.len() <= 8192);
-                }
-                let headers = String::from_utf8(headers).unwrap();
-                let body = if headers.starts_with("GET /proxies ") {
-                    catalog_json.to_owned()
-                } else if headers.starts_with("PUT /proxies/Proxy ") {
-                    let length = headers.lines().find_map(|line| {
-                        let (key, value) = line.split_once(':')?;
-                        key.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().unwrap())
-                    }).unwrap();
-                    let mut payload = vec![0; length];
-                    stream.read_exact(&mut payload).await.unwrap();
-                    selected = serde_json::from_slice::<serde_json::Value>(&payload).unwrap()["name"]
-                        .as_str().unwrap().to_owned();
-                    String::new()
-                } else if headers.starts_with("GET /proxies/Proxy ") {
-                    serde_json::json!({"now": selected}).to_string()
-                } else {
-                    let delay = if headers.starts_with("GET /providers/proxies/Airport%20A/HK/healthcheck?") {
-                        measured.push("Airport A");
-                        42
+            cx.executor().allow_parking();
+            let catalog_json = r#"{"proxies":{"a":{"name":"HK","provider-name":"Airport A","history":[{"delay":100}]},"b":{"name":"HK","provider-name":"Airport B","history":[{"delay":77}]},"Proxy":{"type":"Selector","now":"a","all":["a","b"],"test-url":"http://127.0.0.1/"}}}"#;
+            let (window, page, runtime) = open_catalog(cx, ProxyCatalog::default());
+            let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let address = listener.local_addr().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let server = runtime.spawn(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let mut selected = String::new();
+                let mut measured = Vec::new();
+                for _ in 0..5 {
+                    let (mut stream, _) = tokio::time::timeout(
+                        std::time::Duration::from_secs(5), listener.accept(),
+                    ).await.unwrap().unwrap();
+                    let mut headers = Vec::new();
+                    loop {
+                        headers.push(stream.read_u8().await.unwrap());
+                        if headers.ends_with(b"\r\n\r\n") { break; }
+                        assert!(headers.len() <= 8192);
+                    }
+                    let headers = String::from_utf8(headers).unwrap();
+                    let body = if headers.starts_with("GET /proxies ") {
+                        catalog_json.to_owned()
+                    } else if headers.starts_with("PUT /proxies/Proxy ") {
+                        let length = headers.lines().find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        }).unwrap();
+                        let mut payload = vec![0; length];
+                        stream.read_exact(&mut payload).await.unwrap();
+                        selected = serde_json::from_slice::<serde_json::Value>(&payload).unwrap()["name"]
+                            .as_str().unwrap().to_owned();
+                        String::new()
+                    } else if headers.starts_with("GET /proxies/Proxy ") {
+                        serde_json::json!({"now": selected}).to_string()
                     } else {
-                        assert!(headers.starts_with("GET /providers/proxies/Airport%20B/HK/healthcheck?"), "{headers}");
-                        measured.push("Airport B");
-                        77
+                        let delay = if headers.starts_with("GET /providers/proxies/Airport%20A/HK/healthcheck?") {
+                            measured.push("Airport A");
+                            42
+                        } else {
+                            assert!(headers.starts_with("GET /providers/proxies/Airport%20B/HK/healthcheck?"), "{headers}");
+                            measured.push("Airport B");
+                            77
+                        };
+                        serde_json::json!({"delay": delay, "meanDelay": delay}).to_string()
                     };
-                    serde_json::json!({"delay": delay, "meanDelay": delay}).to_string()
-                };
-                let status = if body.is_empty() { "204 No Content" } else { "200 OK" };
-                stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
-            }
-            measured.sort_unstable();
-            (selected, measured)
-        });
-        let client = MihomoClient::new(zenclash_core::MihomoEndpoint::new(
-            format!("http://{address}"),
-            "",
-        ))
-        .unwrap();
-        let fetch_client = client.clone();
-        let catalog = runtime
-            .spawn(async move { fetch_client.proxy_catalog().await.unwrap() })
-            .await
-            .unwrap();
-        let id = |action: &'static str, key: &str, provider: &str| {
-            let group = gpui_kit::ElementId::from((gpui_kit::ElementId::from(action), "Proxy"));
-            let node = gpui_kit::ElementId::from((group, key.to_owned()));
-            gpui_kit::ElementId::from((node, provider.to_owned()))
-        };
-        let (select_b, test_a, test_b) = cx
-            .update_window(window, |_, window, cx| {
-                page.update(cx, |page, cx| {
-                    page.client = client;
-                    let indices = presentation::visible_group_indices(&catalog, "rule", false);
-                    page.install_catalog(catalog, "rule".into(), indices);
-                    page.expanded.insert("Proxy".into());
-                    cx.notify();
-                });
-                let focus = page.read(cx).focus_handle.clone();
-                window.focus(&focus, cx);
-                window.render_frame(cx);
-                let control = |window: &mut Window, action: &'static str, key, provider| {
-                    let expected = id(action, key, provider);
-                    if window.try_find(expected.clone()).is_some() {
-                        expected
-                    } else {
-                        // Exercise the previous controls as well: the regression
-                        // must fail on the selected/requested node, not a missing ID.
-                        let group =
-                            gpui_kit::ElementId::from((gpui_kit::ElementId::from(action), "Proxy"));
-                        gpui_kit::ElementId::from((group, "HK"))
-                    }
-                };
-                let select_b = control(window, "select-proxy", "b", "Airport B");
-                let test_a = control(window, "test-proxy", "a", "Airport A");
-                let test_b = control(window, "test-proxy", "b", "Airport B");
-                for _ in 0..40 {
-                    if window.find(select_b.clone()).focused() == Some(true) {
-                        break;
-                    }
-                    window.press("tab", cx);
+                    let status = if body.is_empty() { "204 No Content" } else { "200 OK" };
+                    stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
                 }
-                assert_eq!(window.find(select_b.clone()).focused(), Some(true));
-                window.press("enter", cx);
-                (select_b, test_a, test_b)
+                measured.sort_unstable();
+                (selected, measured)
+            });
+            let client = MihomoClient::new(zenclash_core::MihomoEndpoint::new(
+                format!("http://{address}"),
+                "",
+            ))
+            .unwrap();
+            let fetch_client = client.clone();
+            let catalog = runtime
+                .spawn(async move { fetch_client.proxy_catalog().await.unwrap() })
+                .await
+                .unwrap();
+            let id = |action: &'static str, key: &str, provider: &str| {
+                let group = gpui_kit::ElementId::from((gpui_kit::ElementId::from(action), "Proxy"));
+                let node = gpui_kit::ElementId::from((group, key.to_owned()));
+                gpui_kit::ElementId::from((node, provider.to_owned()))
+            };
+            let (select_b, test_a, test_b) = cx
+                .update_window(window, |_, window, cx| {
+                    page.update(cx, |page, cx| {
+                        page.client = client;
+                        let indices = presentation::visible_group_indices(&catalog, "rule", false);
+                        page.install_catalog(catalog, "rule".into(), indices);
+                        page.expanded.insert("Proxy".into());
+                        cx.notify();
+                    });
+                    let focus = page.read(cx).focus_handle.clone();
+                    window.focus(&focus, cx);
+                    window.render_frame(cx);
+                    let control = |window: &mut Window, action: &'static str, key, provider| {
+                        let expected = id(action, key, provider);
+                        if window.try_find(expected.clone()).is_some() {
+                            expected
+                        } else {
+                            // Exercise the previous controls as well: the regression
+                            // must fail on the selected/requested node, not a missing ID.
+                            let group =
+                                gpui_kit::ElementId::from((gpui_kit::ElementId::from(action), "Proxy"));
+                            gpui_kit::ElementId::from((group, "HK"))
+                        }
+                    };
+                    let select_b = control(window, "select-proxy", "b", "Airport B");
+                    let test_a = control(window, "test-proxy", "a", "Airport A");
+                    let test_b = control(window, "test-proxy", "b", "Airport B");
+                    for _ in 0..40 {
+                        if window.find(select_b.clone()).focused() == Some(true) {
+                            break;
+                        }
+                        window.press("tab", cx);
+                    }
+                    assert_eq!(window.find(select_b.clone()).focused(), Some(true));
+                    window.press("enter", cx);
+                    (select_b, test_a, test_b)
+                })
+                .unwrap();
+            cx.run_until_parked();
+            for _ in 0..1000 {
+                if cx.update(|cx| page.read(cx).catalog.as_ref().unwrap().groups()[0].now == "b") {
+                    break;
+                }
+                runtime
+                    .spawn(async {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    })
+                    .await
+                    .unwrap();
+            }
+            cx.update_window(window, |_, window, cx| {
+                assert_eq!(page.read(cx).catalog.as_ref().unwrap().groups()[0].now, "b");
+                window.render_frame(cx);
+                assert_eq!(
+                    window.find(select_b).label(),
+                    Some(zenclash_i18n::text("proxies.actions.current").as_str())
+                );
+                window.click(test_a, cx);
+                window.click(test_b, cx);
+                let page = page.read(cx);
+                let group = &page.catalog.as_ref().unwrap().groups()[0];
+                let testing = page.testing.get("Proxy");
+                assert!(
+                    group
+                        .all
+                        .iter()
+                        .all(|node| testing.is_some_and(|testing| testing.contains(node))),
+                    "the same-label controls did not start independent provider measurements"
+                );
+                assert_eq!(page.active_testing_groups["Proxy"], 2);
             })
             .unwrap();
-        cx.run_until_parked();
-        for _ in 0..1000 {
-            if cx.update(|cx| page.read(cx).catalog.as_ref().unwrap().groups()[0].now == "b") {
-                break;
+            let (selected, measured) = server.await.unwrap();
+            assert_eq!(selected, "b");
+            assert_eq!(measured, ["Airport A", "Airport B"]);
+            for _ in 0..1000 {
+                if cx.update(|cx| page.read(cx).testing.is_empty()) {
+                    break;
+                }
+                runtime
+                    .spawn(async {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    })
+                    .await
+                    .unwrap();
             }
-            runtime
-                .spawn(async {
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                })
-                .await
-                .unwrap();
-        }
-        cx.update_window(window, |_, window, cx| {
-            assert_eq!(page.read(cx).catalog.as_ref().unwrap().groups()[0].now, "b");
-            window.render_frame(cx);
-            assert_eq!(
-                window.find(select_b).label(),
-                Some(zenclash_i18n::text("proxies.actions.current").as_str())
-            );
-            window.click(test_a, cx);
-            window.click(test_b, cx);
-            let page = page.read(cx);
-            let group = &page.catalog.as_ref().unwrap().groups()[0];
-            let testing = page.testing.get("Proxy");
-            assert!(
-                group
+            cx.update_window(window, |_, window, cx| {
+                let page = page.read(cx);
+                assert!(page.testing.is_empty());
+                let catalog = page.catalog.as_ref().unwrap();
+                let delays = catalog.groups()[0]
                     .all
                     .iter()
-                    .all(|node| testing.is_some_and(|testing| testing.contains(node))),
-                "the same-label controls did not start independent provider measurements"
-            );
-            assert_eq!(page.active_testing_groups["Proxy"], 2);
-        })
-        .unwrap();
-        let (selected, measured) = server.await.unwrap();
-        assert_eq!(selected, "b");
-        assert_eq!(measured, ["Airport A", "Airport B"]);
-        for _ in 0..1000 {
-            if cx.update(|cx| page.read(cx).testing.is_empty()) {
-                break;
-            }
-            runtime
-                .spawn(async {
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                })
-                .await
-                .unwrap();
-        }
-        cx.update_window(window, |_, window, cx| {
-            let page = page.read(cx);
-            assert!(page.testing.is_empty());
-            let catalog = page.catalog.as_ref().unwrap();
-            let delays = catalog.groups()[0]
-                .all
-                .iter()
-                .map(|node| catalog.node(node).unwrap().latest_delay())
-                .collect::<Vec<_>>();
-            assert_eq!(delays, [Some(42), Some(77)]);
-            window.remove_window();
-        })
-        .unwrap();
+                    .map(|node| catalog.node(node).unwrap().latest_delay())
+                    .collect::<Vec<_>>();
+                assert_eq!(delays, [Some(42), Some(77)]);
+                window.remove_window();
+            })
+            .unwrap();
+        });
     }
 
     #[gpui_kit::test]
@@ -825,148 +827,150 @@ mod tests {
         (window.into(), page.unwrap(), runtime)
     }
 
-    async fn assert_delayed_catalog_mode(
+    fn assert_delayed_catalog_mode(
         cx: &mut TestAppContext,
         controller_mode: &str,
         subsequent_modes: &[&str],
         expected_mode: &str,
         expected_group: &str,
     ) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        cx.foreground_executor().clone().block_test(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        cx.executor().allow_parking();
-        let (window, page, runtime) = open_catalog(cx, ProxyCatalog::default());
-        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let address = listener.local_addr().unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let (requested, request_received) = tokio::sync::oneshot::channel();
-        let (release, response_released) = tokio::sync::oneshot::channel();
-        let config = serde_json::json!({"mode": controller_mode}).to_string();
-        let server = runtime.spawn(async move {
-            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-            let mut requested = Some(requested);
-            let mut response_released = Some(response_released);
-            let mut replies = tokio::task::JoinSet::new();
-            for _ in 0..2 {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                loop {
-                    let mut chunk = [0_u8; 1024];
-                    let read = stream.read(&mut chunk).await.unwrap();
-                    assert!(read > 0, "controller request closed before its headers");
-                    request.extend_from_slice(&chunk[..read]);
-                    if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
-                        break;
+            cx.executor().allow_parking();
+            let (window, page, runtime) = open_catalog(cx, ProxyCatalog::default());
+            let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let address = listener.local_addr().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let (requested, request_received) = tokio::sync::oneshot::channel();
+            let (release, response_released) = tokio::sync::oneshot::channel();
+            let config = serde_json::json!({"mode": controller_mode}).to_string();
+            let server = runtime.spawn(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let mut requested = Some(requested);
+                let mut response_released = Some(response_released);
+                let mut replies = tokio::task::JoinSet::new();
+                for _ in 0..2 {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    loop {
+                        let mut chunk = [0_u8; 1024];
+                        let read = stream.read(&mut chunk).await.unwrap();
+                        assert!(read > 0, "controller request closed before its headers");
+                        request.extend_from_slice(&chunk[..read]);
+                        if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                            break;
+                        }
+                        assert!(request.len() <= 8192, "unexpected controller request size");
                     }
-                    assert!(request.len() <= 8192, "unexpected controller request size");
+                    let request = String::from_utf8(request).unwrap();
+                    let (body, ready, wait) = if request.starts_with("GET /configs ") {
+                        (config.clone(), requested.take(), response_released.take())
+                    } else {
+                        assert!(request.starts_with("GET /proxies "), "{request}");
+                        (r#"{"proxies":{"DIRECT":{"name":"DIRECT","type":"Direct"},"Proxy":{"name":"Proxy","type":"Selector","now":"DIRECT","all":["DIRECT"]},"GLOBAL":{"name":"GLOBAL","type":"Selector","now":"DIRECT","all":["DIRECT"]}}}"#.into(), None, None)
+                    };
+                    replies.spawn(async move {
+                        if let Some(ready) = ready {
+                            ready.send(()).unwrap();
+                            wait.unwrap().await.unwrap();
+                        }
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        stream.write_all(response.as_bytes()).await.unwrap();
+                    });
                 }
-                let request = String::from_utf8(request).unwrap();
-                let (body, ready, wait) = if request.starts_with("GET /configs ") {
-                    (config.clone(), requested.take(), response_released.take())
-                } else {
-                    assert!(request.starts_with("GET /proxies "), "{request}");
-                    (r#"{"proxies":{"DIRECT":{"name":"DIRECT","type":"Direct"},"Proxy":{"name":"Proxy","type":"Selector","now":"DIRECT","all":["DIRECT"]},"GLOBAL":{"name":"GLOBAL","type":"Selector","now":"DIRECT","all":["DIRECT"]}}}"#.into(), None, None)
-                };
-                replies.spawn(async move {
-                    if let Some(ready) = ready {
-                        ready.send(()).unwrap();
-                        wait.unwrap().await.unwrap();
-                    }
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
-                    stream.write_all(response.as_bytes()).await.unwrap();
-                });
-            }
-            while let Some(result) = replies.join_next().await {
-                result.unwrap();
-            }
-        });
-        cx.update_window(window, |_, _, cx| {
-            page.update(cx, |page, cx| {
-                page.client = MihomoClient::new(zenclash_core::MihomoEndpoint::new(
-                    format!("http://{address}"),
-                    "",
-                ))
-                .unwrap();
-                page.reload(cx);
+                while let Some(result) = replies.join_next().await {
+                    result.unwrap();
+                }
             });
-        })
-        .unwrap();
-        runtime
-            .spawn(async move {
-                tokio::time::timeout(std::time::Duration::from_secs(5), request_received)
-                    .await
-                    .unwrap()
+            cx.update_window(window, |_, _, cx| {
+                page.update(cx, |page, cx| {
+                    page.client = MihomoClient::new(zenclash_core::MihomoEndpoint::new(
+                        format!("http://{address}"),
+                        "",
+                    ))
                     .unwrap();
+                    page.reload(cx);
+                });
             })
-            .await
             .unwrap();
-        cx.update_window(window, |_, _, cx| {
-            page.update(cx, |page, cx| {
-                assert!(page.loading);
-                for mode in subsequent_modes {
-                    page.set_outbound_mode(mode, cx);
-                }
-            });
-        })
-        .unwrap();
-        release.send(()).unwrap();
-        server.await.unwrap();
-        for _ in 0..1000 {
-            if cx.update(|cx| !page.read(cx).loading) {
-                break;
-            }
             runtime
-                .spawn(async {
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                .spawn(async move {
+                    tokio::time::timeout(std::time::Duration::from_secs(5), request_received)
+                        .await
+                        .unwrap()
+                        .unwrap();
                 })
                 .await
                 .unwrap();
-        }
-        cx.update_window(window, |_, window, cx| {
-            assert!(
-                !page.read(cx).loading,
-                "delayed controller response was not committed"
-            );
-            assert_eq!(page.read(cx).error, None);
-            assert_eq!(page.read(cx).outbound_mode, expected_mode);
-            window.render_frame(cx);
-            for group in ["GLOBAL", "Proxy"] {
-                assert_eq!(
-                    window
-                        .try_find((gpui_kit::ElementId::from("toggle-group"), group))
-                        .is_some(),
-                    group == expected_group,
-                    "wrong group presentation after controller response"
-                );
+            cx.update_window(window, |_, _, cx| {
+                page.update(cx, |page, cx| {
+                    assert!(page.loading);
+                    for mode in subsequent_modes {
+                        page.set_outbound_mode(mode, cx);
+                    }
+                });
+            })
+            .unwrap();
+            release.send(()).unwrap();
+            server.await.unwrap();
+            for _ in 0..1000 {
+                if cx.update(|cx| !page.read(cx).loading) {
+                    break;
+                }
+                runtime
+                    .spawn(async {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    })
+                    .await
+                    .unwrap();
             }
-            window.remove_window();
-        })
-        .unwrap();
+            cx.update_window(window, |_, window, cx| {
+                assert!(
+                    !page.read(cx).loading,
+                    "delayed controller response was not committed"
+                );
+                assert_eq!(page.read(cx).error, None);
+                assert_eq!(page.read(cx).outbound_mode, expected_mode);
+                window.render_frame(cx);
+                for group in ["GLOBAL", "Proxy"] {
+                    assert_eq!(
+                        window
+                            .try_find((gpui_kit::ElementId::from("toggle-group"), group))
+                            .is_some(),
+                        group == expected_group,
+                        "wrong group presentation after controller response"
+                    );
+                }
+                window.remove_window();
+            })
+            .unwrap();
+        });
     }
 
     #[gpui_kit::test]
-    async fn delayed_catalog_response_discovers_controller_mode_without_new_input(
+    fn delayed_catalog_response_discovers_controller_mode_without_new_input(
         cx: &mut TestAppContext,
     ) {
-        assert_delayed_catalog_mode(cx, "global", &[], "global", "GLOBAL").await;
+        assert_delayed_catalog_mode(cx, "global", &[], "global", "GLOBAL");
     }
 
     #[gpui_kit::test]
-    async fn delayed_catalog_response_preserves_a_newer_mode(cx: &mut TestAppContext) {
-        assert_delayed_catalog_mode(cx, "rule", &["global"], "global", "GLOBAL").await;
+    fn delayed_catalog_response_preserves_a_newer_mode(cx: &mut TestAppContext) {
+        assert_delayed_catalog_mode(cx, "rule", &["global"], "global", "GLOBAL");
     }
 
     #[gpui_kit::test]
-    async fn delayed_catalog_response_preserves_same_mode_reaffirmation(cx: &mut TestAppContext) {
-        assert_delayed_catalog_mode(cx, "global", &["rule", "RULE"], "rule", "Proxy").await;
+    fn delayed_catalog_response_preserves_same_mode_reaffirmation(cx: &mut TestAppContext) {
+        assert_delayed_catalog_mode(cx, "global", &["rule", "RULE"], "rule", "Proxy");
     }
 
     #[gpui_kit::test]
-    async fn delayed_catalog_response_preserves_mode_after_aba_changes(cx: &mut TestAppContext) {
-        assert_delayed_catalog_mode(cx, "global", &["global", "rule"], "rule", "Proxy").await;
+    fn delayed_catalog_response_preserves_mode_after_aba_changes(cx: &mut TestAppContext) {
+        assert_delayed_catalog_mode(cx, "global", &["global", "rule"], "rule", "Proxy");
     }
 
     #[gpui_kit::test]

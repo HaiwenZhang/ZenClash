@@ -734,7 +734,7 @@ fn failed_restore_retry_preserves_a_new_external_proxy_and_remains_recoverable()
     let external = SystemProxyStatus {
         server: "new.external.test".into(),
         secure_server: "new.external.test".into(),
-        ..before.clone()
+        ..before
     };
     fixture
         .backend

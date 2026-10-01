@@ -55,7 +55,7 @@ impl RuntimePage {
         self.network_probe.revision = self.network_probe.revision.wrapping_add(1);
         let revision = self.network_probe.revision;
         let operational_status = self.operational_status.clone();
-        let diagnostics = NetworkDiagnostics::new(self.client.clone(), operational_status.clone());
+        let diagnostics = NetworkDiagnostics::new(self.client.clone(), operational_status);
         let task = self
             .runtime
             .spawn(async move { diagnostics.run(plan).await });

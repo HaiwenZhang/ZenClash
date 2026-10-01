@@ -506,7 +506,10 @@ impl SystemProxySession {
         };
 
         let settings = SystemProxySettings::from_preferences(&preferences);
-        let service = native.expect("restore requires a native snapshot").0;
+        let service = match native {
+            Some((service, _)) => service,
+            None => self.controller.native.detect_service()?,
+        };
         let transaction = self.controller.stage_native(
             service,
             true,

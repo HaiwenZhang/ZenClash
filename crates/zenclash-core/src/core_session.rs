@@ -535,7 +535,7 @@ impl CoreSession {
             }
         };
         let committed = CommittedConfig {
-            profile: Some(profile.clone()),
+            profile: Some(profile),
             overrides: active_overrides,
         };
         *active_profile = committed.clone();
@@ -578,13 +578,11 @@ impl CoreSession {
                 )
                 .await
                 .map_err(|error| self.runtime_mutation_error(error))?;
-        } else {
-            if let Err(error) = client.set_mode(mode).await {
-                if !matches!(&error, MihomoError::InvalidInput(_)) {
-                    self.next_generation();
-                }
-                return Err(error.into());
+        } else if let Err(error) = client.set_mode(mode).await {
+            if !matches!(&error, MihomoError::InvalidInput(_)) {
+                self.next_generation();
             }
+            return Err(error.into());
         }
         Ok(self.next_generation())
     }
