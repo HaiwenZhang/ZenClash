@@ -184,15 +184,19 @@ where
         .border_b_1()
         .border_color(theme.border)
         .child(
-            v_flex().gap_1().child(div().text_sm().child(label)).child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(description),
-            ),
+            v_flex()
+                .gap_1()
+                .child(div().text_sm().child(label.clone()))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(description),
+                ),
         )
         .child(
             Switch::new(id)
+                .accessibility_label(label)
                 .checked(checked)
                 .disabled(disabled)
                 .on_click(listener),

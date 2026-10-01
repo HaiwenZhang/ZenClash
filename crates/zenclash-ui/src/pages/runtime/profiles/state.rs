@@ -4,13 +4,13 @@ use zenclash_core::RemoteProfileRoute;
 
 /// Input and editor state owned by the profiles page.
 pub(crate) struct ProfileFormState {
-    pub(super) adding_subscription: bool,
-    pub(super) subscription_error: Option<String>,
-    pub(super) subscription_name: Entity<InputState>,
-    pub(super) subscription_url: Entity<InputState>,
+    pub(in crate::pages::runtime) adding_subscription: bool,
+    pub(in crate::pages::runtime) subscription_error: Option<String>,
+    pub(in crate::pages::runtime) subscription_name: Entity<InputState>,
+    pub(in crate::pages::runtime) subscription_url: Entity<InputState>,
     pub(super) subscription_user_agent: Entity<InputState>,
     pub(super) subscription_authorization: Entity<InputState>,
-    pub(super) subscription_route: RemoteProfileRoute,
+    pub(in crate::pages::runtime) subscription_route: RemoteProfileRoute,
     pub(super) request_name: Entity<InputState>,
     pub(super) request_url: Entity<InputState>,
     pub(super) request_user_agent: Entity<InputState>,

@@ -138,6 +138,7 @@ impl Render for StatusPanel {
         let error = app
             .tray_command_error
             .clone()
+            .or_else(|| app.mode_error.clone())
             .or_else(|| app.tray_error.clone());
         let profiles_owner = self.owner.clone();
         let refresh_owner = self.owner.clone();

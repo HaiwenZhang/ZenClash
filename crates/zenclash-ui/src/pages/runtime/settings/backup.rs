@@ -11,19 +11,20 @@ mod actions;
 mod view;
 mod workflow;
 
-pub(super) struct RestoreOutcome {
-    preferences: AppPreferences,
-    catalog: ProfileCatalog,
-    profile_store: ProfileStore,
-    controlled_store: ControlledConfigStore,
-    controlled_config: serde_json::Value,
-    override_store: YamlOverrideStore,
-    override_catalog: YamlOverrideCatalog,
-    profile_path: PathBuf,
-    page_data: RuntimeData,
-    file_count: usize,
-    payload_bytes: u64,
-    cleanup_warning: Option<String>,
+pub(in crate::pages::runtime) struct RestoreOutcome {
+    pub(in crate::pages::runtime) data_root: PathBuf,
+    pub(in crate::pages::runtime) preferences: AppPreferences,
+    pub(in crate::pages::runtime) catalog: ProfileCatalog,
+    pub(in crate::pages::runtime) profile_store: ProfileStore,
+    pub(in crate::pages::runtime) controlled_store: ControlledConfigStore,
+    pub(in crate::pages::runtime) controlled_config: serde_json::Value,
+    pub(in crate::pages::runtime) override_store: YamlOverrideStore,
+    pub(in crate::pages::runtime) override_catalog: YamlOverrideCatalog,
+    pub(in crate::pages::runtime) runtime_version: u64,
+    pub(in crate::pages::runtime) page_data: RuntimeData,
+    pub(in crate::pages::runtime) file_count: usize,
+    pub(in crate::pages::runtime) payload_bytes: u64,
+    pub(in crate::pages::runtime) cleanup_warning: Option<String>,
 }
 
 pub(super) fn format_backup_size(bytes: u64) -> String {

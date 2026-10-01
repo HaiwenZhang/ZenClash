@@ -79,13 +79,22 @@ pub fn create_main_window(services: AppServices, cx: &mut App) {
     }
 
     let core_session = services.core_session.clone();
+    let history = services.traffic_history_session.clone();
+    let runtime = services.runtime.clone();
     cx.on_app_quit(move |_| {
         let core_session = core_session.clone();
-        async move {
+        let history = history.clone();
+        let task = runtime.spawn(async move {
+            if let Some(history) = history
+                && let Err(error) = history.shutdown().await
+            {
+                tracing::warn!(%error, "failed to flush traffic history during native application quit");
+            }
             if let Err(error) = core_session.shutdown().await {
                 tracing::warn!(%error, "failed to stop managed core during native application quit");
             }
-        }
+        });
+        async move { let _ = task.await; }
     })
     .detach();
 

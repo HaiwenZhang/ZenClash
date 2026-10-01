@@ -1,6 +1,7 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use gpui_kit::component::{ActiveTheme, ThemeMode, TitleBar, h_flex, v_flex};
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::{ActiveTheme, ThemeMode, TitleBar, WindowExt, h_flex, v_flex};
 use gpui_kit::{
     AnyWindowHandle, App, AppContext, ClipboardItem, Context, Entity, Focusable,
     InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, SharedString, Styled,
@@ -27,6 +28,7 @@ mod view;
 
 pub use bootstrap::{create_main_window, init};
 use platform::{open_directory, tray_directories};
+pub use traffic_history::TrafficHistorySession;
 use tray::LatestCommandQueue;
 
 use crate::{
@@ -105,6 +107,7 @@ pub struct ZenClashApp {
     outbound_mode: OutboundModeCoordinator,
     core_kind: CoreKind,
     core_session: CoreSession,
+    profile_service: crate::ProfileService,
     client: MihomoClient,
     traffic_monitor: Arc<TrafficMonitor>,
     runtime: tokio::runtime::Handle,
@@ -123,6 +126,7 @@ pub struct ZenClashApp {
     tray_state: TrayMenuState,
     tray_error: Option<String>,
     tray_command_error: Option<String>,
+    mode_error: Option<String>,
     tray_refreshing: bool,
     tray_refresh_pending: bool,
     tray_menu_requested: bool,
@@ -139,7 +143,7 @@ pub struct ZenClashApp {
     preferences_save_task: Option<tokio::task::JoinHandle<()>>,
     restart_after_exit: Arc<parking_lot::Mutex<Option<PathBuf>>>,
     log_monitor: Arc<LogMonitor>,
-    traffic_history_policy: Arc<traffic_history::TrafficHistoryPolicy>,
+    traffic_history_session: Option<Arc<TrafficHistorySession>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -186,6 +190,8 @@ pub struct AppServices {
     pub log_monitor: Arc<LogMonitor>,
     /// Traffic-history store discovered before GPUI starts handling events.
     pub traffic_history_store: Option<TrafficHistoryStore>,
+    /// Owned sampler shared with the executable for final shutdown flushing.
+    pub traffic_history_session: Option<Arc<TrafficHistorySession>>,
     /// TUN permission manager validated before GPUI starts handling events.
     pub tun_permissions: Option<TunPermissionManager>,
     /// Managed Mihomo child, absent when `ZenClash` attaches to an external core.
@@ -224,6 +230,7 @@ impl ZenClashApp {
             traffic_monitor,
             log_monitor,
             traffic_history_store,
+            traffic_history_session,
             tun_permissions,
             mihomo_process,
             profile_path,
@@ -239,8 +246,6 @@ impl ZenClashApp {
         let proxies_page = cx.new(|cx| ProxiesPage::new(client.clone(), runtime.clone(), cx));
         let app_profile_path = profile_path.clone();
         let app_controlled_config_store = controlled_config_store.clone();
-        let traffic_history_policy =
-            Arc::new(traffic_history::TrafficHistoryPolicy::new(&preferences));
         let system_proxy_controller = SystemProxyController::default();
         let system_proxy_session = preferences_store
             .clone()
@@ -262,6 +267,8 @@ impl ZenClashApp {
             traffic_monitor.clone(),
             log_monitor.clone(),
         );
+        let profile_service =
+            crate::ProfileService::new(core_session.clone(), override_store.clone());
         let runtime_page = cx.new(|cx| {
             RuntimePage::new(
                 Page::Home,
@@ -270,6 +277,7 @@ impl ZenClashApp {
                     override_store,
                     core_kind,
                     core_session: core_session.clone(),
+                    profile_service: profile_service.clone(),
                     client: client.clone(),
                     runtime: runtime.clone(),
                     traffic_monitor: traffic_monitor.clone(),
@@ -307,6 +315,7 @@ impl ZenClashApp {
             outbound_mode: OutboundModeCoordinator::new_unsynchronized(OutboundMode::default()),
             core_kind,
             core_session,
+            profile_service,
             client,
             traffic_monitor,
             runtime,
@@ -325,6 +334,7 @@ impl ZenClashApp {
             tray_state: TrayMenuState::default(),
             tray_error: None,
             tray_command_error: None,
+            mode_error: None,
             tray_refreshing: false,
             tray_refresh_pending: false,
             tray_menu_requested: false,
@@ -341,7 +351,7 @@ impl ZenClashApp {
             preferences_save_task: None,
             restart_after_exit,
             log_monitor,
-            traffic_history_policy,
+            traffic_history_session,
             _subscriptions: vec![
                 profile_subscription,
                 proxy_selection_subscription,
@@ -355,7 +365,6 @@ impl ZenClashApp {
         app.start_mode_sync(cx);
         app.start_profile_updates(cx);
         app.start_automatic_runtime(cx);
-        app.start_traffic_history(traffic_history_store);
         app.start_tray_updates(cx);
         app.refresh_tray_menu(cx);
         app
@@ -366,8 +375,16 @@ impl ZenClashApp {
         cx: &mut Context<Self>,
     ) -> Subscription {
         cx.subscribe(runtime_page, |this, _, event: &ProfileActivated, cx| {
-            this.profile_path = Some(event.path.clone());
-            this.traffic_capture.set_profile(Some(event.path.clone()));
+            let snapshot = this.profile_service.committed_profile();
+            let path = if snapshot.generation == event.runtime_version {
+                event.path.clone()
+            } else if let Some(path) = snapshot.profile_path {
+                path
+            } else {
+                return;
+            };
+            this.profile_path = Some(path.clone());
+            this.traffic_capture.set_profile(Some(path));
             if this.current_page == Page::Proxies && this.main_window_visible {
                 this.proxies_page
                     .update(cx, super::pages::proxies::ProxiesPage::profile_activated);
@@ -428,8 +445,9 @@ impl ZenClashApp {
                 if matches!(
                     event.scope,
                     PreferenceScope::Restore | PreferenceScope::TrafficHistory
-                ) {
-                    this.traffic_history_policy.update(&this.preferences);
+                ) && let Some(history) = &this.traffic_history_session
+                {
+                    history.update_preferences(&this.preferences);
                 }
                 if event.scope == PreferenceScope::Restore {
                     if let Err(error) = bootstrap::configure_log_monitor(
@@ -523,6 +541,16 @@ impl ZenClashApp {
                                 page.set_outbound_mode(displayed.api_value(), cx);
                             });
                             let pending = mode.is_pending();
+                            let error = mode.error();
+                            if error != this.mode_error {
+                                this.mode_error = error.clone();
+                                if let Some(error) = error {
+                                    let _ = cx.update_window(this.main_window, |_, window, cx| {
+                                        window.push_notification(Notification::error(error), cx);
+                                    });
+                                }
+                                cx.notify();
+                            }
                             this.runtime_page.update(cx, |page, cx| {
                                 page.update_home_mode_transition_if_active(displayed, pending, cx);
                             });

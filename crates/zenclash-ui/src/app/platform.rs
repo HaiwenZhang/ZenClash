@@ -5,7 +5,7 @@ use std::{
     thread,
 };
 
-use zenclash_core::{CoreKind, ProfileStore};
+use zenclash_core::CoreKind;
 
 #[cfg(target_os = "windows")]
 mod windows {
@@ -78,6 +78,7 @@ pub(super) use windows::{
 pub(super) fn tray_directories(
     profile_path: Option<&Path>,
     core_kind: CoreKind,
+    data_root: Option<&Path>,
 ) -> Vec<(String, PathBuf)> {
     let mut directories = Vec::new();
     if let Some(config_dir) = profile_path.and_then(Path::parent) {
@@ -86,12 +87,8 @@ pub(super) fn tray_directories(
             config_dir.to_path_buf(),
         ));
     }
-    if let Ok(store) = ProfileStore::discover() {
-        let data = store
-            .root()
-            .parent()
-            .unwrap_or_else(|| store.root())
-            .to_path_buf();
+    if let Some(data) = data_root {
+        let data = data.to_path_buf();
         directories.push((zenclash_i18n::text("app.directories.data"), data.clone()));
         directories.push((
             zenclash_i18n::text_with(

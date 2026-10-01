@@ -84,6 +84,7 @@ pub(super) fn install_bundled_core(
     bundled: &Path,
     home_dir: &Path,
 ) -> MihomoResult<PathBuf> {
+    let _write_lease = crate::data_coordinator::DataWriteAccess::new(home_dir).acquire();
     let cores = home_dir.join("cores");
     let name = executable_filename(kind);
     let target = cores.join(&name);
@@ -120,6 +121,7 @@ pub(super) fn install_bundled_mihomo_data(home_dir: &Path) -> MihomoResult<()> {
 }
 
 fn install_bundled_data_file(bundled: &Path, home_dir: &Path, name: &str) -> MihomoResult<()> {
+    let _write_lease = crate::data_coordinator::DataWriteAccess::new(home_dir).acquire();
     let target = home_dir.join(name);
     match target.symlink_metadata() {
         Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {

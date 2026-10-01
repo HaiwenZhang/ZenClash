@@ -14,6 +14,7 @@ use thiserror::Error;
 
 use crate::{
     CoreKind, MihomoClient, MihomoError, MihomoProcess,
+    data_coordinator::{DataWriteAccess, DataWriteLease, shared_transaction},
     listener_fallback::{
         SessionListenerFallback, apply_session_fallbacks, resolve_conflicts,
         validate_listener_change,
@@ -50,20 +51,23 @@ pub(crate) struct RuntimeApplicationTransaction {
     cache: RuntimeCacheTransaction,
     recovery: RuntimeApplicationRecovery,
     _mutation_guard: tokio::sync::OwnedMutexGuard<()>,
+    _write_lease: DataWriteLease,
 }
 
 #[must_use]
 pub(crate) struct RuntimeCandidateValidation {
     _mutation_guard: tokio::sync::OwnedMutexGuard<()>,
+    _write_lease: DataWriteLease,
 }
 
 enum RuntimeApplicationRecovery {
     HotReload {
-        client: MihomoClient,
+        client: Box<MihomoClient>,
         previous_payload: Option<String>,
     },
     Restart {
         process: Arc<MihomoProcess>,
+        cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
     },
 }
 
@@ -81,12 +85,12 @@ impl RuntimeApplicationTransaction {
                 let cache = rollback_runtime_cache(self.cache).await;
                 let runtime = match previous_payload {
                     Some(payload) => client
-                        .reload_payload(payload, true)
+                        .reload_exact_payload(payload, true)
                         .await
                         .map_err(ControlledConfigError::Profile),
-                    None => Err(ControlledConfigError::Transaction(
-                        "没有可用于恢复的上一运行配置".into(),
-                    )),
+                    None => Err(ControlledConfigError::Transaction(zenclash_i18n::text(
+                        "backup.errors.no_runtime_snapshot",
+                    ))),
                 };
                 match (cache, runtime) {
                     (Ok(()), Ok(())) => Ok(()),
@@ -97,11 +101,15 @@ impl RuntimeApplicationTransaction {
                     ))),
                 }
             }
-            RuntimeApplicationRecovery::Restart { process } => {
+            RuntimeApplicationRecovery::Restart { process, cancelled } => {
                 let cache = rollback_runtime_cache(self.cache).await;
                 let runtime = if cache.is_ok() {
                     process
-                        .restart_and_wait(std::time::Duration::from_secs(20))
+                        .restart_and_wait_until_with_lease(
+                            std::time::Duration::from_secs(20),
+                            cancelled,
+                            &self._write_lease,
+                        )
                         .await
                         .map_err(ControlledConfigError::Profile)
                 } else {
@@ -119,6 +127,36 @@ impl RuntimeApplicationTransaction {
                 }
             }
         }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RuntimeMutationError {
+    pub(crate) cause: ControlledConfigError,
+    pub(crate) attempted: bool,
+}
+
+impl RuntimeMutationError {
+    fn attempted(cause: ControlledConfigError) -> Self {
+        Self {
+            cause,
+            attempted: true,
+        }
+    }
+}
+
+impl From<ControlledConfigError> for RuntimeMutationError {
+    fn from(cause: ControlledConfigError) -> Self {
+        Self {
+            cause,
+            attempted: false,
+        }
+    }
+}
+
+impl From<MihomoError> for RuntimeMutationError {
+    fn from(cause: MihomoError) -> Self {
+        ControlledConfigError::Profile(cause).into()
     }
 }
 
@@ -144,6 +182,14 @@ pub enum ControlledConfigError {
     /// The override changed after an update was prepared.
     #[error("受控配置已被其他操作修改，请刷新后重试")]
     ConcurrentModification,
+    /// An enabled YAML override would persist a different outbound mode.
+    #[error("{}", zenclash_i18n::text_with("mode.errors.override_conflict", &[("requested", requested.clone()), ("effective", effective.clone())]))]
+    ModeOverrideConflict {
+        /// Outbound mode requested by the caller.
+        requested: String,
+        /// Outbound mode supplied by the enabled YAML override chain.
+        effective: String,
+    },
     /// The override exceeded the defensive file-size limit.
     #[error("受控配置超过 16 MiB 限制")]
     TooLarge,
@@ -212,6 +258,7 @@ impl ControlledConfigUpdate {
 #[derive(Clone, Debug)]
 pub struct ControlledConfigStore {
     root: PathBuf,
+    write_access: DataWriteAccess,
     transaction: Arc<Mutex<()>>,
     mutation_gate: Arc<tokio::sync::Mutex<()>>,
     session_listener_fallbacks: Arc<Mutex<BTreeMap<String, SessionListenerFallback>>>,
@@ -230,11 +277,40 @@ impl ControlledConfigStore {
     /// Creates a store rooted at an explicit directory.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
         Self {
-            root: root.into(),
-            transaction: Arc::new(Mutex::new(())),
+            write_access: DataWriteAccess::new(&root),
+            transaction: shared_transaction(&root),
+            root,
             mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
             session_listener_fallbacks: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    pub(crate) async fn acquire_write_lease(&self) -> ControlledConfigResult<DataWriteLease> {
+        self.write_access
+            .acquire_async()
+            .await
+            .map_err(|error| ControlledConfigError::Task(error.to_string()))
+    }
+
+    pub(crate) async fn acquire_write_lease_for_paths(
+        &self,
+        paths: Vec<PathBuf>,
+    ) -> ControlledConfigResult<DataWriteLease> {
+        if paths.is_empty() {
+            return self.acquire_write_lease().await;
+        }
+        self.write_access
+            .acquire_paths_async(paths)
+            .await
+            .map_err(ControlledConfigError::Task)
+    }
+
+    pub(crate) fn with_write_lease(&self, lease: &DataWriteLease) -> Self {
+        Self {
+            write_access: self.write_access.authorized(lease),
+            ..self.clone()
         }
     }
 
@@ -345,6 +421,7 @@ impl ControlledConfigStore {
     ///
     /// Returns an error when merging or the atomic cache write fails.
     pub fn materialize(&self, profile: impl AsRef<Path>) -> ControlledConfigResult<PathBuf> {
+        let _write_lease = self.write_access.acquire();
         let payload = self.effective_payload(profile)?;
         self.write_runtime_payload(&payload)
     }
@@ -359,6 +436,7 @@ impl ControlledConfigStore {
         profile: impl AsRef<Path>,
         overrides: &[PathBuf],
     ) -> ControlledConfigResult<PathBuf> {
+        let _write_lease = self.write_access.acquire();
         let payload = self.effective_with_overrides(profile, overrides)?;
         self.write_runtime_payload(&payload)
     }
@@ -382,6 +460,7 @@ impl ControlledConfigStore {
         overrides: &[PathBuf],
         kind: CoreKind,
     ) -> ControlledConfigResult<PathBuf> {
+        let _write_lease = self.write_access.acquire();
         let payload = self.effective_with_overrides(profile, overrides)?;
         let payload = normalize_runtime_payload(kind, payload)?;
         self.write_runtime_payload(&payload)
@@ -407,6 +486,7 @@ impl ControlledConfigStore {
     pub fn resolve_startup_listener_conflicts(
         &self,
     ) -> ControlledConfigResult<Vec<ListenerPortFallback>> {
+        let _write_lease = self.write_access.acquire();
         let path = self.runtime_path();
         let bytes = read_profile_bytes(&path).map_err(|error| match error {
             crate::ProfileStoreError::Io(error) => ControlledConfigError::Io(error),
@@ -487,8 +567,8 @@ impl ControlledConfigStore {
 
     /// Applies and persists a JSON patch while preserving ordered YAML overrides.
     ///
-    /// Both the accepted payload and any rollback payload contain the same
-    /// explicit override layer, so settings changes cannot silently remove it.
+    /// The candidate includes the current explicit override chain. On failure,
+    /// rollback replays the cached payload from the previous application.
     ///
     /// # Errors
     ///
@@ -500,14 +580,39 @@ impl ControlledConfigStore {
         patch: &serde_json::Value,
         overrides: Vec<PathBuf>,
     ) -> ControlledConfigResult<()> {
-        let _mutation_guard = self.mutation_gate.lock().await;
-        let prepare_store = self.clone();
+        self.apply_json_update_for_session(client, profile, patch, overrides)
+            .await
+            .map_err(|error| error.cause)
+    }
+
+    pub(crate) async fn apply_json_update_for_session(
+        &self,
+        client: &MihomoClient,
+        profile: impl AsRef<Path>,
+        patch: &serde_json::Value,
+        overrides: Vec<PathBuf>,
+    ) -> Result<(), RuntimeMutationError> {
+        let write_lease = self
+            .acquire_write_lease_for_paths(client.write_scopes())
+            .await?;
+        let leased_client = client.with_write_lease(&write_lease);
+        let client = &leased_client;
+        let leased_store = self.with_write_lease(&write_lease);
+        let _mutation_guard = leased_store.mutation_gate.lock().await;
+        let prepare_lease = leased_store.write_access.acquire();
+        let prepare_store = leased_store.with_write_lease(&prepare_lease);
         let profile = profile.as_ref().to_path_buf();
         let patch = patch.clone();
-        let update =
-            tokio::task::spawn_blocking(move || prepare_store.prepare_json_update(profile, &patch))
-                .await
-                .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let (update, applied_payload) = tokio::task::spawn_blocking(move || {
+            let _write_lease = prepare_lease;
+            let applied_payload = prepare_store.cached_runtime_payload()?;
+            Ok::<_, ControlledConfigError>((
+                prepare_store.prepare_json_update(profile, &patch)?,
+                applied_payload,
+            ))
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
         let next_base = update.next_payload().to_owned();
         let previous_base = update.previous_payload().to_owned();
         let (next_runtime, previous_runtime) = tokio::task::spawn_blocking(move || {
@@ -518,22 +623,38 @@ impl ControlledConfigStore {
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        let previous_runtime = self.apply_session_listener_fallbacks(&previous_runtime)?;
-        let next_runtime = self.apply_session_listener_fallbacks(&next_runtime)?;
-        validate_listener_change(&previous_runtime, &next_runtime, true)
+        let previous_runtime = leased_store.apply_session_listener_fallbacks(&previous_runtime)?;
+        let next_runtime = leased_store.apply_session_listener_fallbacks(&next_runtime)?;
+        let previous_runtime = applied_payload.as_deref().unwrap_or(&previous_runtime);
+        validate_listener_change(previous_runtime, &next_runtime, true)
             .map_err(ControlledConfigError::ListenerFallback)?;
-        let cache = self.accept_runtime_payload(client, next_runtime).await?;
-        let commit_store = self.clone();
+        let cache = leased_store
+            .accept_runtime_payload_for_session(client, next_runtime)
+            .await?;
+        let commit_lease = leased_store.write_access.acquire();
+        let commit_store = leased_store.with_write_lease(&commit_lease);
         let commit_update = update.clone();
-        let commit = tokio::task::spawn_blocking(move || commit_store.commit(&commit_update))
-            .await
-            .map_err(|error| ControlledConfigError::Task(error.to_string()))?;
+        let commit = tokio::task::spawn_blocking(move || {
+            let _write_lease = commit_lease;
+            commit_store.commit(&commit_update)
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))
+        .and_then(|result| result);
         if let Err(error) = commit {
             let cache_rollback = tokio::task::spawn_blocking(move || cache.rollback())
                 .await
                 .map_err(|task| ControlledConfigError::Task(task.to_string()))
                 .and_then(|result| result);
-            let runtime_rollback = client.reload_payload(previous_runtime, true).await;
+            let runtime_rollback = match applied_payload {
+                Some(payload) => client
+                    .reload_exact_payload(payload, true)
+                    .await
+                    .map_err(ControlledConfigError::Profile),
+                None => Err(ControlledConfigError::Transaction(zenclash_i18n::text(
+                    "backup.errors.no_runtime_snapshot",
+                ))),
+            };
             return match (cache_rollback, runtime_rollback) {
                 (Ok(()), Ok(())) => Err(ControlledConfigError::Transaction(format!(
                     "保存失败，启动缓存与 Mihomo 均已恢复上一版本：{error}"
@@ -543,7 +664,8 @@ impl ControlledConfigStore {
                     result_label(cache),
                     result_label(runtime)
                 ))),
-            };
+            }
+            .map_err(RuntimeMutationError::attempted);
         }
         cache.commit();
         Ok(())
@@ -569,38 +691,83 @@ impl ControlledConfigStore {
         mode: &str,
         overrides: Vec<PathBuf>,
     ) -> ControlledConfigResult<()> {
+        self.apply_mode_update_for_session(client, profile, mode, overrides)
+            .await
+            .map_err(|error| error.cause)
+    }
+
+    pub(crate) async fn apply_mode_update_for_session(
+        &self,
+        client: &MihomoClient,
+        profile: impl AsRef<Path>,
+        mode: &str,
+        overrides: Vec<PathBuf>,
+    ) -> Result<(), RuntimeMutationError> {
+        let write_lease = self
+            .acquire_write_lease_for_paths(client.write_scopes())
+            .await?;
+        let leased_client = client.with_write_lease(&write_lease);
+        let client = &leased_client;
+        let leased_store = self.with_write_lease(&write_lease);
         let mode = mode.trim().to_ascii_lowercase();
         if !matches!(mode.as_str(), "rule" | "global" | "direct") {
-            return Err(ControlledConfigError::Profile(MihomoError::InvalidInput(
-                format!("不支持的出站模式：{mode}"),
-            )));
+            return Err(
+                ControlledConfigError::Profile(MihomoError::InvalidInput(format!(
+                    "不支持的出站模式：{mode}"
+                )))
+                .into(),
+            );
         }
 
-        let _mutation_guard = self.mutation_gate.lock().await;
-        let prepare_store = self.clone();
+        let _mutation_guard = leased_store.mutation_gate.lock().await;
+        let prepare_lease = leased_store.write_access.acquire();
+        let prepare_store = leased_store.with_write_lease(&prepare_lease);
         let profile = profile.as_ref().to_path_buf();
         let patch = serde_json::json!({"mode": mode.clone()});
-        let update =
-            tokio::task::spawn_blocking(move || prepare_store.prepare_json_update(profile, &patch))
-                .await
-                .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let update = tokio::task::spawn_blocking(move || {
+            let _write_lease = prepare_lease;
+            prepare_store.prepare_json_update(profile, &patch)
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
         let next_base = update.next_payload().to_owned();
-        let next_runtime =
-            tokio::task::spawn_blocking(move || merge_payload_overrides(&next_base, &overrides))
-                .await
-                .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        let next_runtime = self.apply_session_listener_fallbacks(&next_runtime)?;
-        let cache_store = self.clone();
-        let cache =
-            tokio::task::spawn_blocking(move || cache_store.stage_runtime_payload(&next_runtime))
-                .await
-                .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let requested = mode.clone();
+        let next_runtime = tokio::task::spawn_blocking(move || {
+            let runtime = merge_payload_overrides(&next_base, &overrides)?;
+            let value: Value = serde_yaml::from_str(&runtime)?;
+            let effective = value.get("mode").unwrap_or(&Value::Null);
+            if !effective
+                .as_str()
+                .is_some_and(|mode| mode.eq_ignore_ascii_case(&requested))
+            {
+                let effective = match effective.as_str() {
+                    Some(mode) => mode.to_owned(),
+                    None => serde_yaml::to_string(effective)?.trim().to_owned(),
+                };
+                return Err(ControlledConfigError::ModeOverrideConflict {
+                    requested,
+                    effective,
+                });
+            }
+            Ok::<_, ControlledConfigError>(runtime)
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let next_runtime = leased_store.apply_session_listener_fallbacks(&next_runtime)?;
+        let cache_lease = leased_store.write_access.acquire();
+        let cache_store = leased_store.with_write_lease(&cache_lease);
+        let cache = tokio::task::spawn_blocking(move || {
+            let _write_lease = cache_lease;
+            cache_store.stage_runtime_payload(&next_runtime)
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
 
         let previous_mode = match client.runtime_config().await {
             Ok(config) => config.mode,
             Err(error) => {
                 rollback_runtime_cache(cache).await?;
-                return Err(ControlledConfigError::Profile(error));
+                return Err(ControlledConfigError::Profile(error).into());
             }
         };
         if let Err(error) = client.set_mode(&mode).await {
@@ -613,14 +780,20 @@ impl ControlledConfigStore {
                     result_label(cache),
                     result_label(runtime)
                 ))),
-            };
+            }
+            .map_err(RuntimeMutationError::attempted);
         }
 
-        let commit_store = self.clone();
+        let commit_lease = leased_store.write_access.acquire();
+        let commit_store = leased_store.with_write_lease(&commit_lease);
         let commit_update = update.clone();
-        let commit = tokio::task::spawn_blocking(move || commit_store.commit(&commit_update))
-            .await
-            .map_err(|error| ControlledConfigError::Task(error.to_string()))?;
+        let commit = tokio::task::spawn_blocking(move || {
+            let _write_lease = commit_lease;
+            commit_store.commit(&commit_update)
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))
+        .and_then(|result| result);
         if let Err(error) = commit {
             let cache_rollback = rollback_runtime_cache(cache).await;
             let runtime_rollback = client.set_mode(&previous_mode).await;
@@ -633,7 +806,8 @@ impl ControlledConfigStore {
                     result_label(cache),
                     result_label(runtime)
                 ))),
-            };
+            }
+            .map_err(RuntimeMutationError::attempted);
         }
         cache.commit();
         Ok(())
@@ -657,14 +831,38 @@ impl ControlledConfigStore {
         patch: &serde_json::Value,
         overrides: Vec<PathBuf>,
     ) -> ControlledConfigResult<()> {
-        let _mutation_guard = self.mutation_gate.lock().await;
-        let prepare_store = self.clone();
+        self.apply_json_update_with_restart_for_session(process, profile, patch, overrides, None)
+            .await
+            .map_err(|error| error.cause)
+    }
+
+    pub(crate) async fn apply_json_update_with_restart_for_session(
+        &self,
+        process: Arc<MihomoProcess>,
+        profile: impl AsRef<Path>,
+        patch: &serde_json::Value,
+        overrides: Vec<PathBuf>,
+        cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<(), RuntimeMutationError> {
+        let write_lease = self
+            .acquire_write_lease_for_paths(process.write_scopes())
+            .await?;
+        let leased_store = self.with_write_lease(&write_lease);
+        let _mutation_guard = leased_store.mutation_gate.lock().await;
+        let prepare_lease = leased_store.write_access.acquire();
+        let prepare_store = leased_store.with_write_lease(&prepare_lease);
         let profile = profile.as_ref().to_path_buf();
         let patch = patch.clone();
-        let update =
-            tokio::task::spawn_blocking(move || prepare_store.prepare_json_update(profile, &patch))
-                .await
-                .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let (update, applied_payload) = tokio::task::spawn_blocking(move || {
+            let _write_lease = prepare_lease;
+            let applied_payload = prepare_store.cached_runtime_payload()?;
+            Ok::<_, ControlledConfigError>((
+                prepare_store.prepare_json_update(profile, &patch)?,
+                applied_payload,
+            ))
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
         let next_base = update.next_payload().to_owned();
         let previous_base = update.previous_payload().to_owned();
         let kind = process.kind();
@@ -679,23 +877,36 @@ impl ControlledConfigStore {
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        let next_runtime = self.apply_session_listener_fallbacks(&next_runtime)?;
-        let previous_runtime = self.apply_session_listener_fallbacks(&previous_runtime)?;
-        validate_listener_change(&previous_runtime, &next_runtime, process.is_running())
+        let next_runtime = leased_store.apply_session_listener_fallbacks(&next_runtime)?;
+        let previous_runtime = leased_store.apply_session_listener_fallbacks(&previous_runtime)?;
+        let previous_runtime = applied_payload.as_deref().unwrap_or(&previous_runtime);
+        validate_listener_change(previous_runtime, &next_runtime, process.is_running())
             .map_err(ControlledConfigError::ListenerFallback)?;
-        let cache = self
-            .accept_runtime_payload_with_restart(process.clone(), next_runtime)
+        let cache = leased_store
+            .accept_runtime_payload_with_restart_for_session(
+                process.clone(),
+                next_runtime,
+                cancelled.clone(),
+            )
             .await?;
-        let commit_store = self.clone();
+        let commit_lease = leased_store.write_access.acquire();
+        let commit_store = leased_store.with_write_lease(&commit_lease);
         let commit_update = update.clone();
-        let commit = tokio::task::spawn_blocking(move || commit_store.commit(&commit_update))
-            .await
-            .map_err(|error| ControlledConfigError::Task(error.to_string()))?;
+        let commit = tokio::task::spawn_blocking(move || {
+            let _write_lease = commit_lease;
+            commit_store.commit(&commit_update)
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))
+        .and_then(|result| result);
         if let Err(error) = commit {
-            let rollback = rollback_cache_and_restart(cache, process).await;
-            return Err(ControlledConfigError::Transaction(format!(
-                "保存失败：{error}；运行内核恢复：{rollback}"
-            )));
+            let rollback =
+                rollback_cache_and_restart(cache, process, &write_lease, cancelled).await;
+            return Err(RuntimeMutationError::attempted(
+                ControlledConfigError::Transaction(format!(
+                    "保存失败：{error}；运行内核恢复：{rollback}"
+                )),
+            ));
         }
         cache.commit();
         Ok(())
@@ -715,14 +926,23 @@ impl ControlledConfigStore {
         client: &MihomoClient,
         profile: impl AsRef<Path>,
     ) -> ControlledConfigResult<()> {
-        let _mutation_guard = self.mutation_gate.lock().await;
-        let store = self.clone();
+        let write_lease = self
+            .acquire_write_lease_for_paths(client.write_scopes())
+            .await?;
+        let leased_client = client.with_write_lease(&write_lease);
+        let client = &leased_client;
+        let leased_store = self.with_write_lease(&write_lease);
+        let _mutation_guard = leased_store.mutation_gate.lock().await;
+        let store = leased_store.clone();
         let profile = profile.as_ref().to_path_buf();
         let payload = tokio::task::spawn_blocking(move || store.effective_payload(profile))
             .await
             .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        let payload = self.validate_candidate_listeners(payload, true)?;
-        self.accept_runtime_payload(client, payload).await?.commit();
+        let payload = leased_store.validate_candidate_listeners(payload, true)?;
+        leased_store
+            .accept_runtime_payload(client, payload)
+            .await?
+            .commit();
         Ok(())
     }
 
@@ -742,16 +962,38 @@ impl ControlledConfigStore {
         profile: impl AsRef<Path>,
         overrides: Vec<PathBuf>,
     ) -> ControlledConfigResult<()> {
-        let _mutation_guard = self.mutation_gate.lock().await;
-        let store = self.clone();
+        self.reload_with_overrides_for_session(client, profile, overrides)
+            .await
+            .map_err(|error| error.cause)
+    }
+
+    pub(crate) async fn reload_with_overrides_for_session(
+        &self,
+        client: &MihomoClient,
+        profile: impl AsRef<Path>,
+        overrides: Vec<PathBuf>,
+    ) -> Result<(), RuntimeMutationError> {
+        let write_lease = self
+            .acquire_write_lease_for_paths(client.write_scopes())
+            .await?;
+        let leased_client = client.with_write_lease(&write_lease);
+        let client = &leased_client;
+        let leased_store = self.with_write_lease(&write_lease);
+        let _mutation_guard = leased_store.mutation_gate.lock().await;
+        let worker_lease = leased_store.write_access.acquire();
+        let store = leased_store.with_write_lease(&worker_lease);
         let profile = profile.as_ref().to_path_buf();
         let payload = tokio::task::spawn_blocking(move || {
+            let _write_lease = worker_lease;
             store.effective_with_overrides(profile, &overrides)
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        let payload = self.validate_candidate_listeners(payload, true)?;
-        self.accept_runtime_payload(client, payload).await?.commit();
+        let payload = leased_store.validate_candidate_listeners(payload, true)?;
+        leased_store
+            .accept_runtime_payload_for_session(client, payload)
+            .await?
+            .commit();
         Ok(())
     }
 
@@ -759,36 +1001,40 @@ impl ControlledConfigStore {
         &self,
         client: &MihomoClient,
         candidate: PathBuf,
-        previous: Option<PathBuf>,
+        _previous: Option<PathBuf>,
         overrides: Vec<PathBuf>,
-    ) -> ControlledConfigResult<RuntimeApplicationTransaction> {
-        let mutation_guard = self.mutation_gate.clone().lock_owned().await;
-        let store = self.clone();
-        let previous_cached = self.cached_runtime_payload()?;
-        let (candidate_payload, previous_payload) = tokio::task::spawn_blocking(move || {
-            let candidate_payload = store.effective_with_overrides(candidate, &overrides)?;
-            let previous_payload = previous
-                .map(|path| store.effective_with_overrides(path, &overrides))
-                .transpose()?;
-            Ok::<_, ControlledConfigError>((candidate_payload, previous_payload))
+    ) -> Result<RuntimeApplicationTransaction, RuntimeMutationError> {
+        let write_lease = self
+            .acquire_write_lease_for_paths(client.write_scopes())
+            .await?;
+        let leased_client = client.with_write_lease(&write_lease);
+        let client = &leased_client;
+        let leased_store = self.with_write_lease(&write_lease);
+        let mutation_guard = leased_store.mutation_gate.clone().lock_owned().await;
+        let worker_lease = leased_store.write_access.acquire();
+        let store = leased_store.with_write_lease(&worker_lease);
+        // Source files and the candidate override chain can differ from the
+        // accepted revision. Only the applied cache is a truthful rollback.
+        let previous_payload = leased_store.cached_runtime_payload()?;
+        let candidate_payload = tokio::task::spawn_blocking(move || {
+            let _write_lease = worker_lease;
+            store.effective_with_overrides(candidate, &overrides)
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        let previous_payload = previous_payload
-            .map(|payload| self.apply_session_listener_fallbacks(&payload))
-            .transpose()?
-            .or(previous_cached);
-        let candidate_payload = self.validate_candidate_listeners(candidate_payload, true)?;
-        let cache = self
-            .accept_runtime_payload(client, candidate_payload)
+        let candidate_payload =
+            leased_store.validate_candidate_listeners(candidate_payload, true)?;
+        let cache = leased_store
+            .accept_runtime_payload_for_session(client, candidate_payload)
             .await?;
         Ok(RuntimeApplicationTransaction {
             cache,
             recovery: RuntimeApplicationRecovery::HotReload {
-                client: client.clone(),
+                client: Box::new(client.clone()),
                 previous_payload,
             },
             _mutation_guard: mutation_guard,
+            _write_lease: write_lease,
         })
     }
 
@@ -799,9 +1045,17 @@ impl ControlledConfigStore {
         candidate: PathBuf,
         overrides: Vec<PathBuf>,
     ) -> ControlledConfigResult<RuntimeCandidateValidation> {
-        let mutation_guard = self.mutation_gate.clone().lock_owned().await;
-        let store = self.clone();
+        let write_lease = self
+            .acquire_write_lease_for_paths(client.write_scopes())
+            .await?;
+        let leased_client = client.with_write_lease(&write_lease);
+        let client = &leased_client;
+        let leased_store = self.with_write_lease(&write_lease);
+        let mutation_guard = leased_store.mutation_gate.clone().lock_owned().await;
+        let worker_lease = leased_store.write_access.acquire();
+        let store = leased_store.with_write_lease(&worker_lease);
         let payload = tokio::task::spawn_blocking(move || {
+            let _write_lease = worker_lease;
             store.effective_with_overrides(candidate, &overrides)
         })
         .await
@@ -810,6 +1064,7 @@ impl ControlledConfigStore {
         client.validate_config_payload(&payload).await?;
         Ok(RuntimeCandidateValidation {
             _mutation_guard: mutation_guard,
+            _write_lease: write_lease,
         })
     }
 
@@ -828,17 +1083,36 @@ impl ControlledConfigStore {
         profile: impl AsRef<Path>,
         overrides: Vec<PathBuf>,
     ) -> ControlledConfigResult<()> {
-        let _mutation_guard = self.mutation_gate.lock().await;
-        let store = self.clone();
+        self.restart_with_overrides_for_session(process, profile, overrides, None)
+            .await
+            .map_err(|error| error.cause)
+    }
+
+    pub(crate) async fn restart_with_overrides_for_session(
+        &self,
+        process: Arc<MihomoProcess>,
+        profile: impl AsRef<Path>,
+        overrides: Vec<PathBuf>,
+        cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<(), RuntimeMutationError> {
+        let write_lease = self
+            .acquire_write_lease_for_paths(process.write_scopes())
+            .await?;
+        let leased_store = self.with_write_lease(&write_lease);
+        let _mutation_guard = leased_store.mutation_gate.lock().await;
+        let worker_lease = leased_store.write_access.acquire();
+        let store = leased_store.with_write_lease(&worker_lease);
         let profile = profile.as_ref().to_path_buf();
         let payload = tokio::task::spawn_blocking(move || {
+            let _write_lease = worker_lease;
             store.effective_with_overrides(profile, &overrides)
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
         let payload = normalize_runtime_payload(process.kind(), payload)?;
-        let payload = self.validate_candidate_listeners(payload, process.is_running())?;
-        self.accept_runtime_payload_with_restart(process, payload)
+        let payload = leased_store.validate_candidate_listeners(payload, process.is_running())?;
+        leased_store
+            .accept_runtime_payload_with_restart_for_session(process, payload, cancelled)
             .await?
             .commit();
         Ok(())
@@ -849,23 +1123,35 @@ impl ControlledConfigStore {
         process: Arc<MihomoProcess>,
         candidate: PathBuf,
         overrides: Vec<PathBuf>,
-    ) -> ControlledConfigResult<RuntimeApplicationTransaction> {
-        let mutation_guard = self.mutation_gate.clone().lock_owned().await;
-        let store = self.clone();
+        cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<RuntimeApplicationTransaction, RuntimeMutationError> {
+        let write_lease = self
+            .acquire_write_lease_for_paths(process.write_scopes())
+            .await?;
+        let leased_store = self.with_write_lease(&write_lease);
+        let mutation_guard = leased_store.mutation_gate.clone().lock_owned().await;
+        let worker_lease = leased_store.write_access.acquire();
+        let store = leased_store.with_write_lease(&worker_lease);
         let payload = tokio::task::spawn_blocking(move || {
+            let _write_lease = worker_lease;
             store.effective_with_overrides(candidate, &overrides)
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
         let payload = normalize_runtime_payload(process.kind(), payload)?;
-        let payload = self.validate_candidate_listeners(payload, process.is_running())?;
-        let cache = self
-            .accept_runtime_payload_with_restart(process.clone(), payload)
+        let payload = leased_store.validate_candidate_listeners(payload, process.is_running())?;
+        let cache = leased_store
+            .accept_runtime_payload_with_restart_for_session(
+                process.clone(),
+                payload,
+                cancelled.clone(),
+            )
             .await?;
         Ok(RuntimeApplicationTransaction {
             cache,
-            recovery: RuntimeApplicationRecovery::Restart { process },
+            recovery: RuntimeApplicationRecovery::Restart { process, cancelled },
             _mutation_guard: mutation_guard,
+            _write_lease: write_lease,
         })
     }
 
@@ -875,6 +1161,7 @@ impl ControlledConfigStore {
     ///
     /// Returns an error for concurrent modification or an atomic write failure.
     pub fn commit(&self, update: &ControlledConfigUpdate) -> ControlledConfigResult<()> {
+        let _write_lease = self.write_access.acquire();
         let _transaction = self.transaction.lock();
         if self.current_patch_bytes_unlocked()? != update.expected_patch {
             return Err(ControlledConfigError::ConcurrentModification);
@@ -935,6 +1222,7 @@ impl ControlledConfigStore {
     /// Returns the original non-recoverable error or a filesystem error while
     /// moving the malformed document to its timestamped backup path.
     pub fn quarantine_invalid_patch(&self) -> ControlledConfigResult<Option<PathBuf>> {
+        let _write_lease = self.write_access.acquire();
         let _transaction = self.transaction.lock();
         let error = match self.load_unlocked() {
             Ok(_) => return Ok(None),
@@ -966,15 +1254,29 @@ impl ControlledConfigStore {
         client: &MihomoClient,
         payload: String,
     ) -> ControlledConfigResult<RuntimeCacheTransaction> {
+        self.accept_runtime_payload_for_session(client, payload)
+            .await
+            .map_err(|error| error.cause)
+    }
+
+    async fn accept_runtime_payload_for_session(
+        &self,
+        client: &MihomoClient,
+        payload: String,
+    ) -> Result<RuntimeCacheTransaction, RuntimeMutationError> {
         let payload = client.normalize_config_payload(payload)?;
         let payload = self.apply_session_listener_fallbacks(&payload)?;
-        let store = self.clone();
+        let worker_lease = self.write_access.acquire();
+        let store = self.with_write_lease(&worker_lease);
         let cache_payload = payload.clone();
-        let cache =
-            tokio::task::spawn_blocking(move || store.stage_runtime_payload(&cache_payload))
-                .await
-                .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let cache = tokio::task::spawn_blocking(move || {
+            let _write_lease = worker_lease;
+            store.stage_runtime_payload(&cache_payload)
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
         if let Err(error) = client.reload_payload(payload, true).await {
+            let attempted = matches!(&error, MihomoError::Http(_));
             return match tokio::task::spawn_blocking(move || cache.rollback()).await {
                 Ok(Ok(())) => Err(ControlledConfigError::Profile(error)),
                 Ok(Err(rollback)) => Err(ControlledConfigError::Transaction(format!(
@@ -983,21 +1285,29 @@ impl ControlledConfigStore {
                 Err(task) => Err(ControlledConfigError::Task(format!(
                     "Mihomo 拒绝配置：{error}；缓存恢复任务异常结束：{task}"
                 ))),
-            };
+            }
+            .map_err(|cause| RuntimeMutationError { cause, attempted });
         }
         Ok(cache)
     }
 
-    async fn accept_runtime_payload_with_restart(
+    async fn accept_runtime_payload_with_restart_for_session(
         &self,
         process: Arc<MihomoProcess>,
         payload: String,
-    ) -> ControlledConfigResult<RuntimeCacheTransaction> {
+        cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<RuntimeCacheTransaction, RuntimeMutationError> {
+        let write_lease = self
+            .acquire_write_lease_for_paths(process.write_scopes())
+            .await?;
+        let leased_store = self.with_write_lease(&write_lease);
         let payload = normalize_runtime_payload(process.kind(), payload)?;
         let payload = self.apply_session_listener_fallbacks(&payload)?;
-        let store = self.clone();
-        let validator = process.config_validator();
+        let worker_lease = leased_store.write_access.acquire();
+        let store = leased_store.with_write_lease(&worker_lease);
+        let validator = process.config_validator().with_write_lease(&worker_lease);
         let cache = tokio::task::spawn_blocking(move || {
+            let _write_lease = worker_lease;
             validator.validate_payload(&payload).map_err(|error| {
                 ControlledConfigError::Profile(MihomoError::Process(error.to_string()))
             })?;
@@ -1005,14 +1315,25 @@ impl ControlledConfigStore {
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let attempted = cancelled
+            .as_ref()
+            .is_none_or(|flag| !flag.load(std::sync::atomic::Ordering::Acquire));
         if let Err(error) = process
-            .restart_and_wait(std::time::Duration::from_secs(20))
+            .restart_and_wait_until_with_lease(
+                std::time::Duration::from_secs(20),
+                cancelled.clone(),
+                &write_lease,
+            )
             .await
         {
-            let rollback = rollback_cache_and_restart(cache, process).await;
-            return Err(ControlledConfigError::Transaction(format!(
-                "新配置启动失败：{error}；上一配置恢复：{rollback}"
-            )));
+            let rollback =
+                rollback_cache_and_restart(cache, process, &write_lease, cancelled).await;
+            return Err(RuntimeMutationError {
+                attempted,
+                cause: ControlledConfigError::Transaction(format!(
+                    "新配置启动失败：{error}；上一配置恢复：{rollback}"
+                )),
+            });
         }
         Ok(cache)
     }
@@ -1055,7 +1376,7 @@ impl ControlledConfigStore {
         Ok(candidate)
     }
 
-    fn cached_runtime_payload(&self) -> ControlledConfigResult<Option<String>> {
+    pub(crate) fn cached_runtime_payload(&self) -> ControlledConfigResult<Option<String>> {
         let bytes = match std::fs::read(self.runtime_path()) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1065,8 +1386,78 @@ impl ControlledConfigStore {
             return Err(ControlledConfigError::TooLarge);
         }
         String::from_utf8(bytes).map(Some).map_err(|error| {
-            ControlledConfigError::Transaction(format!("运行缓存不是 UTF-8：{error}"))
+            ControlledConfigError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
         })
+    }
+
+    pub(crate) async fn restore_exact_runtime_payload(
+        &self,
+        client: &MihomoClient,
+        process: Option<Arc<MihomoProcess>>,
+        payload: String,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<(), RuntimeMutationError> {
+        let write_lease = self.acquire_write_lease().await?;
+        let store = self.with_write_lease(&write_lease);
+        let _mutation_guard = store.mutation_gate.lock().await;
+        // Validate before touching the cache, without remerging source files or fallbacks.
+        if process.is_none() {
+            client.validate_config_payload(&payload).await?;
+        }
+        let worker_lease = store.write_access.acquire();
+        let cache_store = store.with_write_lease(&worker_lease);
+        let validator = process
+            .as_ref()
+            .map(|process| process.config_validator().with_write_lease(&worker_lease));
+        let cache_payload = payload.clone();
+        let cache = tokio::task::spawn_blocking(move || {
+            let _write_lease = worker_lease;
+            if let Some(validator) = validator {
+                validator
+                    .validate_payload(&cache_payload)
+                    .map_err(|error| {
+                        ControlledConfigError::Profile(MihomoError::Process(error.to_string()))
+                    })?;
+            }
+            cache_store.stage_runtime_payload(&cache_payload)
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let (applied, attempted) = if let Some(process) = process {
+            let attempted = !cancelled.load(std::sync::atomic::Ordering::Acquire);
+            (
+                process
+                    .restart_and_wait_until_with_lease(
+                        std::time::Duration::from_secs(20),
+                        Some(cancelled),
+                        &write_lease,
+                    )
+                    .await,
+                attempted,
+            )
+        } else {
+            let applied = client.reload_exact_payload(payload, true).await;
+            let attempted = applied
+                .as_ref()
+                .err()
+                .is_some_and(|error| matches!(error, MihomoError::Http(_)));
+            (applied, attempted)
+        };
+        if let Err(error) = applied {
+            let cache_rollback = rollback_runtime_cache(cache).await;
+            return Err(RuntimeMutationError {
+                attempted,
+                cause: ControlledConfigError::Transaction(zenclash_i18n::text_with(
+                    "backup.errors.exact_runtime_restore_failed",
+                    &[
+                        ("error", error.to_string()),
+                        ("cache", result_label(cache_rollback)),
+                    ],
+                )),
+            });
+        }
+        cache.commit();
+        Ok(())
     }
 }
 
@@ -1167,6 +1558,8 @@ async fn rollback_runtime_cache(cache: RuntimeCacheTransaction) -> ControlledCon
 async fn rollback_cache_and_restart(
     cache: RuntimeCacheTransaction,
     process: Arc<MihomoProcess>,
+    write_lease: &DataWriteLease,
+    cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> String {
     let cache_rollback = tokio::task::spawn_blocking(move || cache.rollback())
         .await
@@ -1177,7 +1570,11 @@ async fn rollback_cache_and_restart(
     }
     result_label(
         process
-            .restart_and_wait(std::time::Duration::from_secs(20))
+            .restart_and_wait_until_with_lease(
+                std::time::Duration::from_secs(20),
+                cancelled,
+                write_lease,
+            )
             .await,
     )
 }

@@ -15,7 +15,10 @@ use super::{
     SubscriptionMetadata, atomic_write, download_profile, normalized_profile_name,
     normalized_remote_url, normalized_user_agent, read_profile_bytes, validate_clash_yaml,
 };
-use crate::{ControlledConfigStore, CoreApplyKind, CoreSession, CoreSessionError, MihomoError};
+use crate::{
+    ControlledConfigStore, CoreApplyKind, CoreSession, CoreSessionError, MihomoError,
+    core_session::{CoreProfileRollbackOutcome, CoreProfileStageError},
+};
 
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -156,6 +159,8 @@ pub enum ProfileApplyOutcome {
         last_known_good: Option<ProfileVersion>,
         /// Typed persistence failure that triggered runtime rollback.
         cause: ProfileApplicationError,
+        /// Core-session generation of the completed runtime restoration.
+        runtime_version: u64,
     },
     /// The source was not committed, but a transport failure obscured runtime truth.
     RuntimeUnknown {
@@ -163,6 +168,8 @@ pub enum ProfileApplyOutcome {
         recovery: ProfileRecovery,
         /// Transport or recovery failure that made runtime state uncertain.
         cause: ProfileApplicationError,
+        /// Core-session generation that invalidated observations of the uncertain runtime.
+        runtime_version: u64,
     },
     /// Persistence may be partial and runtime rollback also failed.
     PersistedButRuntimeUnknown {
@@ -172,6 +179,8 @@ pub enum ProfileApplyOutcome {
         cause: ProfileApplicationError,
         /// Runtime recovery failure that left effective state uncertain.
         rollback: ProfileApplicationError,
+        /// Core-session generation of the completed, unsuccessful runtime restoration.
+        runtime_version: u64,
     },
 }
 
@@ -189,6 +198,7 @@ struct StagedProfile {
     candidate_path: PathBuf,
     expected_catalog: ProfileCatalog,
     disposition: StagedProfileDisposition,
+    _write_lease: crate::data_coordinator::DataWriteLease,
 }
 
 enum StagedProfileDisposition {
@@ -210,6 +220,7 @@ struct CommittedProfile {
 
 impl StagedProfile {
     fn existing(store: ProfileStore, id: &str) -> ProfileStoreResult<Self> {
+        let _write_lease = store.write_access.acquire();
         let _transaction = store.transaction.lock();
         let catalog = store.load_unlocked()?;
         let record = catalog
@@ -222,11 +233,13 @@ impl StagedProfile {
         let payload = read_profile_bytes(&source_path)?;
         let candidate_path = write_staging_payload(store.root(), &payload)?;
         drop(_transaction);
+        let store = store.with_write_lease(&_write_lease);
         Ok(Self {
             store,
             record,
             candidate_path,
             expected_catalog: catalog,
+            _write_lease,
             disposition: StagedProfileDisposition::ExistingActivation {
                 source_path,
                 expected_payload: payload,
@@ -264,17 +277,20 @@ impl StagedProfile {
         subscription: SubscriptionMetadata,
     ) -> ProfileStoreResult<Self> {
         validate_clash_yaml(&payload)?;
+        let _write_lease = store.write_access.acquire();
         let _transaction = store.transaction.lock();
         let catalog = store.load_unlocked()?;
         let record =
             ProfileStore::new_profile_record(&catalog, name, source, payload.len(), subscription);
         let candidate_path = write_staging_payload(store.root(), payload.as_bytes())?;
         drop(_transaction);
+        let store = store.with_write_lease(&_write_lease);
         Ok(Self {
             store,
             record,
             candidate_path,
             expected_catalog: catalog,
+            _write_lease,
             disposition: StagedProfileDisposition::New,
         })
     }
@@ -286,6 +302,7 @@ impl StagedProfile {
         subscription: SubscriptionMetadata,
     ) -> ProfileStoreResult<Self> {
         validate_clash_yaml(&payload)?;
+        let _write_lease = store.write_access.acquire();
         let _transaction = store.transaction.lock();
         let catalog = store.load_unlocked()?;
         let index = catalog
@@ -317,11 +334,13 @@ impl StagedProfile {
         }
         let candidate_path = write_staging_payload(store.root(), payload.as_bytes())?;
         drop(_transaction);
+        let store = store.with_write_lease(&_write_lease);
         Ok(Self {
             store,
             record,
             candidate_path,
             expected_catalog: catalog,
+            _write_lease,
             disposition: StagedProfileDisposition::Update {
                 source_path,
                 expected_payload,
@@ -336,6 +355,7 @@ impl StagedProfile {
         new_payload: String,
     ) -> ProfileStoreResult<Self> {
         validate_clash_yaml(&new_payload)?;
+        let _write_lease = store.write_access.acquire();
         let _transaction = store.transaction.lock();
         let catalog = store.load_unlocked()?;
         let record = catalog
@@ -356,11 +376,13 @@ impl StagedProfile {
         record.size_bytes = new_payload.len() as u64;
         let candidate_path = write_staging_payload(store.root(), new_payload.as_bytes())?;
         drop(_transaction);
+        let store = store.with_write_lease(&_write_lease);
         Ok(Self {
             store,
             record,
             candidate_path,
             expected_catalog: catalog,
+            _write_lease,
             disposition: StagedProfileDisposition::Update {
                 source_path,
                 expected_payload: persisted_payload,
@@ -400,6 +422,7 @@ impl StagedProfile {
     }
 
     fn commit(self) -> ProfileStoreResult<CommittedProfile> {
+        let _write_lease = self.store.write_access.acquire();
         let _transaction = self.store.transaction.lock();
         let mut catalog = self.store.load_unlocked()?;
         if catalog != self.expected_catalog {
@@ -463,14 +486,13 @@ impl StagedProfile {
                 let payload = read_profile_bytes(&self.candidate_path)?;
                 atomic_write(source_path, &payload)?;
                 catalog.profiles[index] = self.record.clone();
-                if let Err(error) = self.store.save_unlocked(&catalog) {
-                    return match atomic_write(source_path, expected_payload) {
-                        Ok(()) => Err(error),
-                        Err(rollback) => Err(ProfileStoreError::Transaction(format!(
-                            "保存配置索引失败：{error}；恢复上一版本配置失败：{rollback}"
-                        ))),
-                    };
-                }
+                self.store.save_catalog_or_restore_payload_unlocked(
+                    &catalog,
+                    source_path,
+                    expected_payload,
+                    "保存配置索引失败",
+                    "恢复上一版本配置失败",
+                )?;
                 Ok(CommittedProfile {
                     record: self.record.clone(),
                     path: source_path.clone(),
@@ -525,6 +547,29 @@ impl ProfileApplication {
 
     /// Applies one managed-profile change and classifies its recovery state.
     pub async fn apply(&self, change: ProfileChange) -> ProfileApplyOutcome {
+        let mut scopes = self.session.write_scopes();
+        scopes.extend([
+            self.store.root().to_path_buf(),
+            self.controlled.root().to_path_buf(),
+        ]);
+        let lease = match self.store.write_access.acquire_paths_async(scopes).await {
+            Ok(lease) => lease,
+            Err(error) => {
+                return ProfileApplyOutcome::Rejected {
+                    last_known_good: None,
+                    cause: ProfileApplicationError::Task(error),
+                };
+            }
+        };
+        let application = Self {
+            store: self.store.with_write_lease(&lease),
+            controlled: self.controlled.with_write_lease(&lease),
+            session: self.session.clone(),
+        };
+        application.apply_with_write_lease(change).await
+    }
+
+    async fn apply_with_write_lease(&self, change: ProfileChange) -> ProfileApplyOutcome {
         match change {
             ProfileChange::ImportLocal { source, overrides } => {
                 self.import_local(source, overrides).await
@@ -825,13 +870,17 @@ impl ProfileApplication {
             .await
         {
             Ok(runtime) => runtime,
-            Err(cause) if core_error_runtime_unknown(&cause) => {
+            Err(CoreProfileStageError::RuntimeUnknown {
+                cause,
+                runtime_version,
+            }) => {
                 return ProfileApplyOutcome::RuntimeUnknown {
                     recovery,
                     cause: cause.into(),
+                    runtime_version,
                 };
             }
-            Err(cause) => {
+            Err(CoreProfileStageError::Rejected(cause)) => {
                 return ProfileApplyOutcome::Rejected {
                     last_known_good,
                     cause: cause.into(),
@@ -856,18 +905,26 @@ impl ProfileApplication {
                 },
             },
             Err(cause) => match runtime.rollback().await {
-                Ok(()) if changes_runtime => ProfileApplyOutcome::RolledBack {
+                CoreProfileRollbackOutcome::Runtime {
+                    result: Ok(()),
+                    runtime_version,
+                } => ProfileApplyOutcome::RolledBack {
+                    last_known_good,
+                    cause,
+                    runtime_version,
+                },
+                CoreProfileRollbackOutcome::Validated => ProfileApplyOutcome::Rejected {
                     last_known_good,
                     cause,
                 },
-                Ok(()) => ProfileApplyOutcome::Rejected {
-                    last_known_good,
-                    cause,
-                },
-                Err(rollback) => ProfileApplyOutcome::PersistedButRuntimeUnknown {
+                CoreProfileRollbackOutcome::Runtime {
+                    result: Err(rollback),
+                    runtime_version,
+                } => ProfileApplyOutcome::PersistedButRuntimeUnknown {
                     recovery,
                     cause,
                     rollback: rollback.into(),
+                    runtime_version,
                 },
             },
         }
@@ -908,14 +965,6 @@ impl ProfileApplication {
             .into())
         }
     }
-}
-
-fn core_error_runtime_unknown(error: &CoreSessionError) -> bool {
-    matches!(
-        error,
-        CoreSessionError::Config(crate::ControlledConfigError::Profile(MihomoError::Http(_)))
-            | CoreSessionError::Config(crate::ControlledConfigError::Transaction(_))
-    )
 }
 
 async fn run_store<T, F>(operation: F) -> Result<T, ProfileApplicationError>
@@ -1032,6 +1081,14 @@ mod tests {
     #[tokio::test]
     async fn runtime_is_restored_when_the_staged_source_changes_before_commit() {
         let fixture = Fixture::new("commit-race");
+        fixture
+            .controlled
+            .materialize_with_overrides_for_core(
+                fixture.store.profile_path(&fixture.previous),
+                &[],
+                CoreKind::Mihomo,
+            )
+            .unwrap();
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let candidate_path = fixture.store.profile_path(&fixture.candidate);
@@ -1061,7 +1118,13 @@ mod tests {
             .await;
         let observed_runtime_payloads = server.join().unwrap();
 
-        assert!(matches!(outcome, ProfileApplyOutcome::RolledBack { .. }));
+        assert!(matches!(
+            outcome,
+            ProfileApplyOutcome::RolledBack {
+                runtime_version: 1,
+                ..
+            }
+        ));
         assert!(observed_runtime_payloads[0].contains("MATCH,REJECT"));
         assert!(observed_runtime_payloads[1].contains("MATCH,DIRECT"));
         assert_eq!(
@@ -1123,9 +1186,15 @@ mod tests {
             .await;
         server.join().unwrap();
 
-        let ProfileApplyOutcome::RuntimeUnknown { recovery, cause } = outcome else {
+        let ProfileApplyOutcome::RuntimeUnknown {
+            recovery,
+            cause,
+            runtime_version,
+        } = outcome
+        else {
             panic!("expected runtime-unknown outcome");
         };
+        assert_eq!(runtime_version, 1);
         assert!(matches!(cause, ProfileApplicationError::Runtime(_)));
         assert_eq!(
             recovery.last_known_good.map(|version| version.profile_id),

@@ -1,7 +1,8 @@
 use super::{
     CatalogTaskToken, ConnectionPolicy, Context, DelayTaskToken, ProxiesPage, ProxyDelayTarget,
-    ProxyOperations, ProxySelectionTaskToken, ProxyVisibility, append_delay,
-    apply_optimistic_selection, take_untested_proxies, test_key,
+    ProxyNodeId, ProxyOperations, ProxySelectionTaskToken, ProxyTestKey, ProxyVisibility,
+    append_delay, apply_optimistic_selection, insert_inflight_test, remove_inflight_test,
+    take_untested_group_proxies,
 };
 use futures_util::{StreamExt, stream};
 
@@ -24,17 +25,21 @@ impl ProxiesPage {
         cx.notify();
 
         let client = self.client.clone();
+        let mode_revision = self.mode_revision;
         let visibility = if self.show_hidden {
             ProxyVisibility::IncludeHidden
         } else {
             ProxyVisibility::VisibleOnly
         };
+        let show_hidden = self.show_hidden;
         let task = self.runtime.spawn(async move {
             let operations = ProxyOperations::new(client.clone());
             let (catalog, config) =
                 tokio::try_join!(operations.catalog(visibility), client.runtime_config())
                     .map_err(|error| error.to_string())?;
-            Ok::<_, String>((catalog, config.mode))
+            let indices =
+                super::presentation::visible_group_indices(&catalog, &config.mode, show_hidden);
+            Ok::<_, String>((catalog, config.mode, indices))
         });
         self.presentation_tasks.track(&task);
 
@@ -58,15 +63,21 @@ impl ProxiesPage {
                 this.loading = false;
                 this.loading_token = None;
                 match result {
-                    Ok((catalog, mode)) => {
+                    Ok((catalog, mut mode, mut indices)) => {
+                        if mode_revision != this.mode_revision {
+                            mode = this.outbound_mode.clone();
+                            indices = super::presentation::visible_group_indices(
+                                &catalog,
+                                &mode,
+                                this.show_hidden,
+                            );
+                        }
                         if this.expanded.is_empty()
                             && let Some(group) = catalog.groups_for_mode(&mode).next()
                         {
                             this.expanded.insert(group.name.clone());
                         }
-                        this.group_orders.clear();
-                        this.catalog = Some(catalog);
-                        this.outbound_mode = mode;
+                        this.install_catalog(catalog, mode, indices);
                         this.test_failures.clear();
                         this.error = None;
                     }
@@ -76,6 +87,43 @@ impl ProxiesPage {
             });
         })
         .detach();
+    }
+
+    pub(super) fn install_catalog(
+        &mut self,
+        catalog: super::ProxyCatalog,
+        mode: String,
+        indices: Vec<usize>,
+    ) {
+        if !self.outbound_mode.eq_ignore_ascii_case(&mode) {
+            self.mode_revision = self.mode_revision.wrapping_add(1);
+            self.group_page_index = 0;
+        }
+        self.set_group_indices(indices);
+        self.group_orders.clear();
+        self.catalog = Some(std::sync::Arc::new(catalog));
+        self.outbound_mode = mode;
+    }
+
+    fn set_group_indices(&mut self, indices: Vec<usize>) {
+        self.group_page_index = super::group_page(indices.len(), self.group_page_index).index;
+        self.visible_group_indices = indices;
+    }
+
+    fn refresh_group_indices(&mut self) {
+        let indices = self.catalog.as_ref().map_or_else(Vec::new, |catalog| {
+            super::presentation::visible_group_indices(
+                catalog,
+                &self.outbound_mode,
+                self.show_hidden,
+            )
+        });
+        self.set_group_indices(indices);
+    }
+
+    pub(super) fn set_catalog_page(&mut self, page: usize, cx: &mut Context<Self>) {
+        self.group_page_index = super::group_page(self.visible_group_indices.len(), page).index;
+        cx.notify();
     }
 
     /// Invalidates an older catalog request and loads current controller state.
@@ -92,9 +140,12 @@ impl ProxiesPage {
         self.switching.clear();
         self.group_orders.clear();
         self.catalog = None;
+        self.visible_group_indices = Vec::new();
+        self.group_page_index = 0;
         self.expanded.clear();
         self.proxy_pages.clear();
         self.testing.clear();
+        self.active_testing_groups.clear();
         self.test_failures.clear();
         self.restoring_auto = None;
         self.measuring_and_restoring_auto = None;
@@ -121,6 +172,8 @@ impl ProxiesPage {
             return;
         }
         self.show_hidden = show_hidden;
+        self.group_page_index = 0;
+        self.refresh_group_indices();
         self.group_orders.clear();
         self.expanded.clear();
         self.proxy_pages.clear();
@@ -141,10 +194,14 @@ impl ProxiesPage {
     }
 
     pub(crate) fn set_outbound_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
+        // Reaffirming the same mode also supersedes an older controller read.
+        self.mode_revision = self.mode_revision.wrapping_add(1);
         if self.outbound_mode.eq_ignore_ascii_case(mode) {
             return;
         }
         self.outbound_mode = mode.to_ascii_lowercase();
+        self.group_page_index = 0;
+        self.refresh_group_indices();
         self.group_orders.clear();
         self.expanded.clear();
         self.proxy_pages.clear();
@@ -299,8 +356,8 @@ impl ProxiesPage {
                             tracing::warn!(%warning, "automatic proxy group restored with a warning");
                         }
                         if let Some(catalog) = outcome.catalog {
-                            this.group_orders.clear();
-                            this.catalog = Some(catalog);
+                            let indices = super::presentation::visible_group_indices(&catalog, &this.outbound_mode, this.show_hidden);
+                            this.install_catalog(catalog, this.outbound_mode.clone(), indices);
                         }
                         this.error = None;
                         this.notice = warning.or_else(|| {
@@ -363,17 +420,16 @@ impl ProxiesPage {
                             tracing::warn!(%warning, "group delay completed with a readback warning");
                         }
                         if let Some(catalog) = outcome.selection.catalog {
-                            this.group_orders.clear();
-                            this.catalog = Some(catalog);
+                            let indices = super::presentation::visible_group_indices(&catalog, &this.outbound_mode, this.show_hidden);
+                            this.install_catalog(catalog, this.outbound_mode.clone(), indices);
                         }
-                        this.group_orders.invalidate_delays(&group);
-                        if let Some(group) = this.catalog.as_mut().and_then(|catalog| catalog.groups.iter_mut().find(|item| item.name == group)) {
-                            for proxy in &mut group.all {
-                                if let Some(&delay) = outcome.delays.get(&proxy.name) {
-                                    append_delay(proxy, delay, delay);
-                                }
-                            }
-                        }
+                        let results = this.catalog.as_ref().and_then(|catalog| {
+                            let group = catalog.groups().iter().find(|item| item.name == group)?;
+                            Some(group.all.iter().filter_map(|id| {
+                                outcome.delays.get(id.controller_name()).copied().map(|delay| (id.clone(), delay))
+                            }).collect::<Vec<_>>())
+                        }).unwrap_or_default();
+                        for (id, delay) in results { this.record_node_delay(&id, delay, delay, None); }
                         this.error = None;
                         this.notice = warning.or_else(|| {
                             Some(zenclash_i18n::text(
@@ -392,26 +448,36 @@ impl ProxiesPage {
     pub(super) fn test_proxy(
         &mut self,
         group: String,
-        proxy: String,
+        node: ProxyNodeId,
         test_url: Option<String>,
-        provider: Option<String>,
         cx: &mut Context<Self>,
     ) {
         if self.proxy_selection_blocked(&group) || self.loading {
             return;
         }
-        let test_key = test_key(&group, &proxy);
-        if !self.testing.insert(test_key.clone()) {
+        let Some(proxy) = self
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.node(&node))
+        else {
             return;
-        }
+        };
+        let target = ProxyDelayTarget {
+            name: if node.provider().is_some() {
+                proxy.name.clone()
+            } else {
+                node.controller_name().to_owned()
+            },
+            provider: node.provider().map(str::to_owned),
+        };
+        let Some(test_key) = self.start_node_test(&group, node.clone()) else {
+            return;
+        };
         let token = DelayTaskToken(self.delay_generation);
         cx.notify();
 
         let operations = ProxyOperations::new(self.client.clone());
-        let target = ProxyDelayTarget {
-            name: proxy.clone(),
-            provider,
-        };
+
         let task = self.runtime.spawn(async move {
             operations
                 .measure(&target, test_url.as_deref(), 5_000)
@@ -429,21 +495,20 @@ impl ProxiesPage {
                 )),
             };
             let _ = this.update(cx, |this, cx| {
-                if !token.is_current(this.delay_generation) {
+                if !this.finish_proxy_test(token, &group, &test_key) {
                     return;
                 }
-                this.testing.remove(&test_key);
                 match result {
                     Ok(result) => {
-                        this.test_failures.remove(&test_key);
-                        this.record_delay(&group, &proxy, result.delay, result.mean_delay);
+                        this.record_node_delay(&node, result.delay, result.mean_delay, None);
                     }
                     Err(error) => {
-                        this.test_failures.insert(
-                            test_key.clone(),
-                            super::DelayTestFailure::from_error(&error),
+                        this.record_node_delay(
+                            &node,
+                            0,
+                            0,
+                            Some(super::DelayTestFailure::from_error(&error)),
                         );
-                        this.record_delay(&group, &proxy, 0, 0);
                         this.error = Some(error);
                     }
                 }
@@ -453,6 +518,43 @@ impl ProxiesPage {
         .detach();
     }
 
+    #[cfg(test)]
+    pub(super) fn start_proxy_test(&mut self, group: &str, proxy: &str) -> Option<ProxyTestKey> {
+        self.start_node_test(group, ProxyNodeId::new(proxy.to_owned(), None))
+    }
+
+    fn start_node_test(&mut self, group: &str, node: ProxyNodeId) -> Option<ProxyTestKey> {
+        let key = ProxyTestKey {
+            group: group.to_owned(),
+            node,
+        };
+        insert_inflight_test(
+            &mut self.testing,
+            &mut self.active_testing_groups,
+            group,
+            key.clone(),
+        )
+        .then_some(key)
+    }
+
+    pub(super) fn finish_proxy_test(
+        &mut self,
+        token: DelayTaskToken,
+        group: &str,
+        key: &ProxyTestKey,
+    ) -> bool {
+        if !token.is_current(self.delay_generation) {
+            return false;
+        }
+        remove_inflight_test(
+            &mut self.testing,
+            &mut self.active_testing_groups,
+            group,
+            key,
+        );
+        true
+    }
+
     pub(super) fn test_group(&mut self, group_name: &str, cx: &mut Context<Self>) {
         if self.proxy_selection_blocked(group_name)
             || self.loading
@@ -460,16 +562,24 @@ impl ProxiesPage {
         {
             return;
         }
-        let Some(group) = self
-            .catalog
-            .as_ref()
-            .and_then(|catalog| catalog.groups.iter().find(|group| group.name == group_name))
+        let Some(catalog) = self.catalog.as_deref() else {
+            return;
+        };
+        let Some(group) = catalog
+            .groups()
+            .iter()
+            .find(|group| group.name == group_name)
         else {
             return;
         };
         let group_name = group.name.clone();
         let test_url = group.test_url.clone();
-        let proxies = take_untested_proxies(&mut self.testing, group);
+        let proxies = take_untested_group_proxies(
+            &mut self.testing,
+            &mut self.active_testing_groups,
+            catalog,
+            group,
+        );
         if proxies.is_empty() {
             return;
         }
@@ -482,7 +592,7 @@ impl ProxiesPage {
         let operations = ProxyOperations::new(self.client.clone());
         let (sender, mut receiver) = tokio::sync::mpsc::channel(64);
         let task = self.runtime.spawn(async move {
-            let mut measurements = stream::iter(proxies.into_iter().map(|(index, target)| {
+            let mut measurements = stream::iter(proxies.into_iter().map(|(node, target)| {
                 let operations = operations.clone();
                 let test_url = test_url.clone();
                 async move {
@@ -490,7 +600,7 @@ impl ProxiesPage {
                         .measure(&target, test_url.as_deref(), 5_000)
                         .await
                         .map_err(|error| error.to_string());
-                    (index, target.name, result)
+                    (node, result)
                 }
             }))
             .buffer_unordered(MAX_DELAY_TEST_CONCURRENCY);
@@ -514,38 +624,34 @@ impl ProxiesPage {
                     if !token.is_current(this.delay_generation) {
                         return false;
                     }
-                    let mut group = this.catalog.as_mut().and_then(|catalog| {
-                        catalog
-                            .groups
-                            .iter_mut()
-                            .find(|group| group.name == group_name)
-                    });
-                    this.group_orders.invalidate_delays(&group_name);
-                    for (index, name, result) in batch {
-                        let key = test_key(&group_name, &name);
-                        this.testing.remove(&key);
+                    for (node, result) in batch {
+                        let key = ProxyTestKey {
+                            group: group_name.clone(),
+                            node: node.clone(),
+                        };
+                        remove_inflight_test(
+                            &mut this.testing,
+                            &mut this.active_testing_groups,
+                            &group_name,
+                            &key,
+                        );
                         if let Some(progress) = this.group_progress.get_mut(&group_name) {
                             progress.0 += 1;
                         }
-                        let (delay, mean_delay) = match result {
+                        match result {
                             Ok(result) => {
-                                this.test_failures.remove(&key);
-                                (result.delay, result.mean_delay)
+                                this.record_node_delay(&node, result.delay, result.mean_delay, None)
                             }
                             Err(error) => {
                                 failures += 1;
-                                this.test_failures
-                                    .insert(key, super::DelayTestFailure::from_error(&error));
+                                this.record_node_delay(
+                                    &node,
+                                    0,
+                                    0,
+                                    Some(super::DelayTestFailure::from_error(&error)),
+                                );
                                 first_error.get_or_insert(error);
-                                (0, 0)
                             }
-                        };
-                        if let Some(proxy) = group
-                            .as_deref_mut()
-                            .and_then(|group| group.all.get_mut(index))
-                            .filter(|proxy| proxy.name == name)
-                        {
-                            append_delay(proxy, delay, mean_delay);
                         }
                     }
                     if let Some(error) = &first_error {
@@ -576,18 +682,48 @@ impl ProxiesPage {
         .detach();
     }
 
-    pub(super) fn record_delay(&mut self, group: &str, proxy: &str, delay: u32, mean_delay: u32) {
+    #[cfg(test)]
+    pub(super) fn record_delay(&mut self, group: &str, name: &str, delay: u32, mean_delay: u32) {
+        let node = self.catalog.as_ref().and_then(|catalog| {
+            let group = catalog.groups().iter().find(|item| item.name == group)?;
+            group
+                .all
+                .iter()
+                .find(|id| {
+                    id.controller_name() == name
+                        || catalog.node(id).is_some_and(|node| node.name == name)
+                })
+                .cloned()
+        });
+        if let Some(node) = node {
+            self.record_node_delay(&node, delay, mean_delay, None);
+        }
+    }
+
+    pub(super) fn record_node_delay(
+        &mut self,
+        id: &ProxyNodeId,
+        delay: u32,
+        mean_delay: u32,
+        failure: Option<super::DelayTestFailure>,
+    ) {
         let Some(catalog) = self.catalog.as_mut() else {
             return;
         };
-        let Some(group) = catalog.groups.iter_mut().find(|item| item.name == group) else {
+        let catalog = std::sync::Arc::make_mut(catalog);
+        let Some(node) = catalog.node_mut(id) else {
             return;
         };
-        let Some(proxy) = group.all.iter_mut().find(|item| item.name == proxy) else {
-            return;
-        };
-        append_delay(proxy, delay, mean_delay);
-        self.group_orders.invalidate_delays(&group.name);
+        append_delay(node, delay, mean_delay);
+        if let Some(failure) = failure {
+            self.test_failures.insert(id.clone(), failure);
+        } else {
+            self.test_failures.remove(id);
+        }
+        for &index in catalog.referencing_groups(id) {
+            self.group_orders
+                .invalidate_delays(&catalog.groups()[index].name);
+        }
     }
 
     fn next_catalog_task(&mut self) -> CatalogTaskToken {
@@ -601,6 +737,7 @@ impl ProxiesPage {
         let token = self.next_catalog_task();
         self.delay_generation = self.delay_generation.wrapping_add(1);
         self.testing.clear();
+        self.active_testing_groups.clear();
         self.group_orders.clear();
         self.test_failures.clear();
         self.restoring_auto = None;

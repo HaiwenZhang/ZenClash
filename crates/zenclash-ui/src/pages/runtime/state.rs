@@ -43,8 +43,8 @@ pub(super) enum RuntimeData {
         permissions: Result<TunPermissionStatus, String>,
     },
     Settings {
-        config: RuntimeConfig,
-        autostart: AutostartStatus,
+        config: Option<RuntimeConfig>,
+        autostart: Result<AutostartStatus, String>,
     },
 }
 
@@ -151,10 +151,7 @@ mod tests {
                 observed_at_ms: 10,
             },
             proxies: Observation::Fresh {
-                value: ProxyCatalog {
-                    proxy_count: 42,
-                    ..ProxyCatalog::default()
-                },
+                value: ProxyCatalog::from_group_nodes(Vec::new(), 42),
                 observed_at_ms: 10,
             },
         };

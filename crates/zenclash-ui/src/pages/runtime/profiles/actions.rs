@@ -1,7 +1,7 @@
 use super::{
     super::{
-        AppContext, Context, Page, PageTaskToken, PathBuf, PathPromptOptions, ProfileActivated,
-        RemoteProfileOptions, RuntimePage, Window, load_page,
+        AppContext, Context, Page, PageTaskToken, PathBuf, PathPromptOptions, RemoteProfileOptions,
+        RuntimePage, Window, load_page,
     },
     workflow,
 };
@@ -10,20 +10,22 @@ mod catalog;
 
 impl RuntimePage {
     pub(super) fn reload_profile(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.profile_path.clone() else {
+        if self.profile_path.is_none() {
             self.error = Some(zenclash_i18n::text("profiles.errors.profile_path_missing"));
             cx.notify();
             return;
-        };
+        }
         let Some(token) = self.begin_mutation(Page::Profiles) else {
             return;
         };
         let client = self.client.clone();
         let controlled = self.controlled_config_store.clone();
-        let core_runtime = workflow::CoreProfileRuntime::new(self.core_session.clone());
+        let core_runtime = self.profile_service.clone();
         let task = self.runtime.spawn(async move {
-            workflow::reload_effective(controlled, &core_runtime, &path).await?;
-            load_page(client, Page::Profiles).await
+            let outcome = workflow::reload_effective(controlled, &core_runtime).await?;
+            load_page(client, Page::Profiles)
+                .await
+                .map(|data| (outcome.generation, data))
         });
         cx.spawn(async move |this, cx| {
             let result = match task.await {
@@ -36,7 +38,12 @@ impl RuntimePage {
             let _ = this.update(cx, |this, cx| {
                 this.finish_mutation(token);
                 match result {
-                    Ok(data) => {
+                    Ok((runtime_version, data)) => {
+                        this.synchronize_committed_profile(cx);
+                        if !this.profile_service.is_current(runtime_version) {
+                            this.refresh(cx);
+                            return;
+                        }
                         if this.replace_page_data(token, data, cx) {
                             this.notice =
                                 Some(if this.core_kind.capabilities().full_config_reload {
@@ -113,7 +120,7 @@ impl RuntimePage {
             self.home.action_error = None;
         }
         let controlled = self.controlled_config_store.clone();
-        let core_runtime = workflow::CoreProfileRuntime::new(self.core_session.clone());
+        let core_runtime = self.profile_service.clone();
         let task = self.runtime.spawn(workflow::import_local(
             store,
             controlled,
@@ -215,7 +222,7 @@ impl RuntimePage {
             return;
         };
         let controlled = self.controlled_config_store.clone();
-        let core_runtime = workflow::CoreProfileRuntime::new(self.core_session.clone());
+        let core_runtime = self.profile_service.clone();
         let task = self.runtime.spawn(workflow::add_remote(
             store,
             controlled,
@@ -291,7 +298,7 @@ impl RuntimePage {
             self.home.action_error = None;
         }
         let controlled = self.controlled_config_store.clone();
-        let core_runtime = workflow::CoreProfileRuntime::new(self.core_session.clone());
+        let core_runtime = self.profile_service.clone();
         let task = self.runtime.spawn(workflow::activate_existing_for_page(
             store,
             controlled,
@@ -395,11 +402,9 @@ impl RuntimePage {
         token: PageTaskToken,
         cx: &mut Context<Self>,
     ) {
-        self.profile_path = Some(outcome.path.clone());
-        self.invalidate_config_inputs(cx);
-        self.overrides.invalidate_preview();
-        self.reload_profile_catalog(cx);
-        cx.emit(ProfileActivated { path: outcome.path });
+        if !self.synchronize_profile_receipt(&outcome.receipt, cx) {
+            return;
+        }
         match outcome.refresh {
             Ok(data) => {
                 if self.replace_page_data(token, data, cx) {
@@ -422,6 +427,7 @@ impl RuntimePage {
     }
 
     fn set_profile_page_error(&mut self, token: PageTaskToken, error: String) {
+        self.synchronize_profile_recovery();
         if token.page == Page::Home && self.is_page_task_current(token) {
             self.home.action_error = Some(error);
         } else {

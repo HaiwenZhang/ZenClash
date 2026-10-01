@@ -17,15 +17,16 @@ use super::{
     h_flex, info_row, json, message_banner, metric, px, setting_card, v_flex,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(super) struct NetworkProbeUiState {
     pub(super) latency_name: Entity<InputState>,
     pub(super) latency_url: Entity<InputState>,
     pub(super) dns_name: Entity<InputState>,
-    snapshot: Option<NetworkProbeSnapshot>,
+    pub(super) snapshot: Option<NetworkProbeSnapshot>,
     report: Option<DiagnosticReport>,
-    loading: bool,
-    revision: u64,
+    pub(super) loading: bool,
+    pub(super) revision: u64,
+    pub(super) task: super::loader::PageReadTask,
     cache_confirmation: Option<DnsCacheAction>,
 }
 
@@ -48,6 +49,7 @@ impl NetworkProbeUiState {
             report: None,
             loading: false,
             revision: 0,
+            task: super::loader::PageReadTask::default(),
             cache_confirmation: None,
         }
     }

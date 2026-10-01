@@ -1,8 +1,8 @@
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 use super::SystemProxyStatus;
 #[cfg(target_os = "windows")]
 use super::command::run_checked;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 use crate::{MihomoError, MihomoResult};
 
 #[cfg(target_os = "windows")]
@@ -94,6 +94,52 @@ pub(super) fn set_pac_enabled(_service: &str, enabled: bool, url: &str) -> Mihom
 fn update_pac_registry(enabled: bool, url: &str) -> MihomoResult<()> {
     set_proxy_enabled(false)?;
     add_value("AutoConfigURL", "REG_SZ", if enabled { url } else { "" })
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn restore_snapshot(previous: &SystemProxyStatus) -> MihomoResult<()> {
+    let proxy = snapshot_proxy_server(previous)?;
+    let update = (|| {
+        set_proxy_enabled(false)?;
+        add_value("AutoConfigURL", "REG_SZ", "")?;
+        add_value("ProxyServer", "REG_SZ", &proxy)?;
+        add_value("ProxyOverride", "REG_SZ", &previous.bypass.join(";"))?;
+        add_value("AutoConfigURL", "REG_SZ", &previous.auto_url)?;
+        set_proxy_enabled(previous.enabled || previous.secure_enabled)
+    })();
+    combine_update_and_notification(update, notify_wininet())
+}
+
+fn snapshot_proxy_server(previous: &SystemProxyStatus) -> MihomoResult<String> {
+    let active = previous.enabled || previous.secure_enabled;
+    let mut entries = Vec::new();
+    for (scheme, enabled, host, port) in [
+        ("http", previous.enabled, &previous.server, previous.port),
+        (
+            "https",
+            previous.secure_enabled,
+            &previous.secure_server,
+            previous.secure_port,
+        ),
+    ] {
+        if host.is_empty() && port == 0 && !enabled {
+            continue;
+        }
+        // WinINET has one manual enable bit; an enabled snapshot cannot also
+        // contain a configured but individually disabled protocol endpoint.
+        if host.is_empty() || port == 0 || (active && !enabled) {
+            return Err(MihomoError::Process(zenclash_i18n::text(
+                "system_proxy.errors.verification",
+            )));
+        }
+        entries.push(format!("{scheme}={host}:{port}"));
+    }
+    if previous.auto_enabled == previous.auto_url.is_empty() {
+        return Err(MihomoError::Process(zenclash_i18n::text(
+            "system_proxy.errors.verification",
+        )));
+    }
+    Ok(entries.join(";"))
 }
 
 #[cfg(target_os = "windows")]
@@ -218,7 +264,71 @@ fn parse_bypass(value: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_bypass, parse_proxy_server, registry_string_value};
+    use super::{
+        SystemProxyStatus, parse_bypass, parse_proxy_server, registry_string_value,
+        snapshot_proxy_server,
+    };
+
+    #[test]
+    fn restore_mapping_preserves_distinct_endpoints_with_manual_and_pac_enabled() {
+        let previous = SystemProxyStatus {
+            enabled: true,
+            server: "http.original.test".into(),
+            port: 8080,
+            secure_enabled: true,
+            secure_server: "https.original.test".into(),
+            secure_port: 8443,
+            auto_enabled: true,
+            auto_url: "http://pac.original.test/pac".into(),
+            ..Default::default()
+        };
+        let stored = snapshot_proxy_server(&previous).unwrap();
+        assert_eq!(
+            parse_proxy_server(&stored).unwrap(),
+            (previous.server, 8080, previous.secure_server, 8443)
+        );
+    }
+
+    #[test]
+    fn restore_mapping_keeps_disabled_cached_endpoints_and_accepts_absent_ones() {
+        let mut previous = SystemProxyStatus::default();
+        assert_eq!(snapshot_proxy_server(&previous).unwrap(), "");
+        previous.server = "http.cached.test".into();
+        previous.port = 8080;
+        previous.secure_server = "https.cached.test".into();
+        previous.secure_port = 8443;
+        let stored = snapshot_proxy_server(&previous).unwrap();
+        assert_eq!(
+            parse_proxy_server(&stored).unwrap(),
+            (previous.server, 8080, previous.secure_server, 8443)
+        );
+    }
+
+    #[test]
+    fn restore_mapping_retains_single_enabled_protocol_without_enabling_another() {
+        for secure in [false, true] {
+            let mut previous = SystemProxyStatus::default();
+            if secure {
+                previous.secure_enabled = true;
+                previous.secure_server = "secure.test".into();
+                previous.secure_port = 8443;
+            } else {
+                previous.enabled = true;
+                previous.server = "http.test".into();
+                previous.port = 8080;
+            }
+            let stored = snapshot_proxy_server(&previous).unwrap();
+            assert_eq!(
+                parse_proxy_server(&stored).unwrap(),
+                (
+                    previous.server,
+                    previous.port,
+                    previous.secure_server,
+                    previous.secure_port
+                )
+            );
+        }
+    }
 
     #[test]
     fn parses_protocol_specific_proxy_server() {

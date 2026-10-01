@@ -107,6 +107,35 @@ impl MihomoClient {
         self
     }
 
+    pub(crate) fn write_scopes(&self) -> Vec<std::path::PathBuf> {
+        self.config_validator
+            .as_ref()
+            .map_or_else(Vec::new, CoreConfigValidator::write_scopes)
+    }
+
+    pub(crate) fn with_write_lease(&self, lease: &crate::data_coordinator::DataWriteLease) -> Self {
+        Self {
+            config_validator: self
+                .config_validator
+                .as_ref()
+                .map(|validator| validator.with_write_lease(lease)),
+            ..self.clone()
+        }
+    }
+
+    async fn acquire_write_lease(
+        &self,
+    ) -> MihomoResult<Option<crate::data_coordinator::DataWriteLease>> {
+        match &self.config_validator {
+            Some(validator) => validator
+                .acquire_write_lease()
+                .await
+                .map(Some)
+                .map_err(MihomoError::Process),
+            None => Ok(None),
+        }
+    }
+
     pub(crate) fn normalize_config_payload(&self, payload: String) -> MihomoResult<String> {
         if payload.trim().is_empty() {
             return Err(MihomoError::InvalidInput("重载配置内容不能为空".into()));

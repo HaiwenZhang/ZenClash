@@ -377,7 +377,7 @@ impl RuntimePage {
             group
                 .all
                 .iter()
-                .map(|node| node.name.clone())
+                .map(|id| id.controller_name().to_owned())
                 .collect::<Vec<_>>()
         });
         let can_switch = can_switch && !nodes.is_empty();
@@ -1054,18 +1054,7 @@ fn apply_home_proxy_selection(data: &mut RuntimeData, group_name: &str, proxy_na
         Observation::Fresh { value, .. } | Observation::Stale { value, .. } => value,
         Observation::Loading | Observation::Failed { .. } => return false,
     };
-    let Some(group) = catalog
-        .groups
-        .iter_mut()
-        .find(|group| group.name == group_name)
-    else {
-        return false;
-    };
-    group.now = proxy_name.to_owned();
-    if matches!(group.behavior, ProxyGroupBehavior::Automatic { .. }) {
-        group.behavior = ProxyGroupBehavior::Automatic { fixed: true };
-    }
-    true
+    catalog.set_group_selection(group_name, proxy_name.to_owned())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1150,7 +1139,11 @@ fn current_proxy_summary(config: &RuntimeConfig, proxies: &ProxyCatalog) -> Curr
             delay: None,
         };
     }
-    let node = group.all.iter().find(|node| node.name == group.now);
+    let node = group
+        .all
+        .iter()
+        .find(|id| id.controller_name() == group.now)
+        .and_then(|id| proxies.node(id));
     let behavior = match group.behavior {
         ProxyGroupBehavior::Automatic { fixed: true } => {
             Some(zenclash_i18n::text("home.proxy.fixed"))
@@ -1661,11 +1654,14 @@ mod tests {
 
     #[test]
     fn rule_mode_summary_uses_the_primary_group_current_node() {
-        let catalog = ProxyCatalog {
-            groups: vec![ProxyGroup {
-                name: "Proxy".into(),
-                now: "HK 01".into(),
-                all: vec![ProxyNode {
+        let catalog = ProxyCatalog::from_group_nodes(
+            vec![(
+                ProxyGroup {
+                    name: "Proxy".into(),
+                    now: "HK 01".into(),
+                    ..ProxyGroup::default()
+                },
+                vec![ProxyNode {
                     name: "HK 01".into(),
                     kind: "Hysteria2".into(),
                     history: vec![DelayHistory {
@@ -1674,10 +1670,9 @@ mod tests {
                     }],
                     ..ProxyNode::default()
                 }],
-                ..ProxyGroup::default()
-            }],
-            proxy_count: 1,
-        };
+            )],
+            1,
+        );
 
         let summary = current_proxy_summary(
             &RuntimeConfig {
@@ -1695,15 +1690,18 @@ mod tests {
         let mut data = RuntimeData::Dashboard {
             config: Observation::Loading,
             proxies: Observation::Fresh {
-                value: ProxyCatalog {
-                    groups: vec![ProxyGroup {
-                        name: "Proxy".into(),
-                        now: "HK 01".into(),
-                        behavior: ProxyGroupBehavior::Automatic { fixed: false },
-                        ..ProxyGroup::default()
-                    }],
-                    proxy_count: 1,
-                },
+                value: ProxyCatalog::from_group_nodes(
+                    vec![(
+                        ProxyGroup {
+                            name: "Proxy".into(),
+                            now: "HK 01".into(),
+                            behavior: ProxyGroupBehavior::Automatic { fixed: false },
+                            ..ProxyGroup::default()
+                        },
+                        Vec::new(),
+                    )],
+                    1,
+                ),
                 observed_at_ms: 10,
             },
         };
@@ -1712,7 +1710,7 @@ mod tests {
         let RuntimeData::Dashboard { proxies, .. } = data else {
             panic!("expected dashboard data");
         };
-        let group = &proxies.value().expect("fresh proxy catalog").groups[0];
+        let group = &proxies.value().expect("fresh proxy catalog").groups()[0];
         assert_eq!(group.now, "US 02");
         assert_eq!(
             group.behavior,
@@ -1726,16 +1724,18 @@ mod tests {
             name: "Balance".into(),
             behavior: ProxyGroupBehavior::LoadBalance,
             now: "HK 01".into(),
-            all: vec![ProxyNode {
-                name: "HK 01".into(),
-                ..ProxyNode::default()
-            }],
             ..ProxyGroup::default()
         };
-        let catalog = ProxyCatalog {
-            groups: vec![group.clone()],
-            proxy_count: 2,
-        };
+        let catalog = ProxyCatalog::from_group_nodes(
+            vec![(
+                group.clone(),
+                vec![ProxyNode {
+                    name: "HK 01".into(),
+                    ..Default::default()
+                }],
+            )],
+            2,
+        );
 
         let summary = current_proxy_summary(
             &RuntimeConfig {

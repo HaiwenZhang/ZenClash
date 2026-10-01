@@ -1,11 +1,8 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-
-use parking_lot::Mutex;
 
 use super::{
     ProfileCatalog, ProfileRecord, ProfileSource, ProfileStore, ProfileStoreError,
@@ -43,12 +40,31 @@ impl ProfileStore {
     ///
     /// Returns an error when the directory cannot be created.
     pub fn new(root: impl Into<PathBuf>) -> ProfileStoreResult<Self> {
+        Self::open(root.into(), None)
+    }
+
+    pub(crate) fn open(
+        root: PathBuf,
+        lease: Option<&crate::data_coordinator::DataWriteLease>,
+    ) -> ProfileStoreResult<Self> {
+        let access =
+            crate::data_coordinator::DataWriteAccess::for_store(&root, &["files", "staging"]);
+        let write_access = lease.map_or(access.clone(), |lease| access.authorized(lease));
         let store = Self {
-            root: root.into(),
-            transaction: Arc::new(Mutex::new(())),
+            transaction: crate::data_coordinator::shared_transaction(&root),
+            root,
+            write_access,
         };
+        let _write_lease = store.write_access.acquire();
         fs::create_dir_all(store.files_dir())?;
         Ok(store)
+    }
+
+    pub(crate) fn with_write_lease(&self, lease: &crate::data_coordinator::DataWriteLease) -> Self {
+        Self {
+            write_access: self.write_access.authorized(lease),
+            ..self.clone()
+        }
     }
 
     /// Returns the root directory containing the index and managed files.
@@ -68,6 +84,7 @@ impl ProfileStore {
     /// Returns the original non-recoverable error or an I/O error while moving
     /// the invalid index to its timestamped backup.
     pub fn quarantine_invalid_index(&self) -> ProfileStoreResult<Option<PathBuf>> {
+        let _write_lease = self.write_access.acquire();
         let _transaction = self.transaction.lock();
         let error = match self.load_unlocked() {
             Ok(_) => return Ok(None),
@@ -169,6 +186,7 @@ impl ProfileStore {
         payload: &str,
         subscription: SubscriptionMetadata,
     ) -> ProfileStoreResult<ProfileRecord> {
+        let _write_lease = self.write_access.acquire();
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
         let record = Self::new_profile_record(&catalog, name, source, payload.len(), subscription);

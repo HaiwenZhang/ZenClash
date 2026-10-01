@@ -4,7 +4,6 @@ use gpui_kit::Context;
 use zenclash_core::ProfileStore;
 
 use super::ZenClashApp;
-use crate::pages::runtime::profiles::workflow;
 
 const PROFILE_UPDATE_SCAN_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -12,7 +11,7 @@ impl ZenClashApp {
     pub(super) fn start_profile_updates(&mut self, cx: &mut Context<Self>) {
         let runtime = self.runtime.clone();
         let controlled = self.controlled_config_store.clone();
-        let core_session = self.core_session.clone();
+        let profile_service = self.profile_service.clone();
         cx.spawn(async move |this, cx| {
             loop {
                 let scan = runtime.spawn_blocking(|| {
@@ -27,14 +26,15 @@ impl ZenClashApp {
                 match scan.await {
                     Ok(Ok((store, profile_ids))) => {
                         for id in profile_ids {
-                            let core_runtime =
-                                workflow::CoreProfileRuntime::new(core_session.clone());
-                            let task = runtime.spawn(workflow::update_remote_background(
-                                store.clone(),
-                                controlled.clone(),
-                                core_runtime,
-                                id,
-                            ));
+                            let service = profile_service.clone();
+                            let update_store = store.clone();
+                            let controlled = controlled.clone();
+                            let task = runtime.spawn(async move {
+                                service
+                                    .update_remote(update_store, controlled, id)
+                                    .await
+                                    .map_err(|error| error.to_string())
+                            });
                             let result = task
                                 .await
                                 .map_err(|error| {

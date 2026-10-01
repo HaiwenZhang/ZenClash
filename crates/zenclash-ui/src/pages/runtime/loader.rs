@@ -52,7 +52,7 @@ pub(super) async fn load_page_with_binary(
             Ok(RuntimeData::Profile {
                 config: config.ok(),
                 proxy_count: proxies.as_ref().ok().map(|catalog| catalog.proxy_count),
-                group_count: proxies.ok().map(|catalog| catalog.groups.len()),
+                group_count: proxies.ok().map(|catalog| catalog.groups().len()),
                 rule_count: rules.ok().map(|catalog| catalog.rules.len()),
             })
         }
@@ -186,18 +186,33 @@ async fn load_settings(client: MihomoClient) -> Result<RuntimeData, String> {
         manager.status().map_err(|error| error.to_string())
     });
     let (config, autostart) = tokio::join!(client.runtime_config(), autostart_task);
-    let config = config.map_err(|error| error.to_string())?;
-    let autostart = autostart.map_err(|error| {
-        zenclash_i18n::text_with(
-            "runtime.load_errors.autostart",
-            &[("error", error.to_string())],
-        )
-    })??;
-    Ok(RuntimeData::Settings { config, autostart })
+    let autostart = autostart
+        .map_err(|error| {
+            zenclash_i18n::text_with(
+                "runtime.load_errors.autostart",
+                &[("error", error.to_string())],
+            )
+        })
+        .and_then(|status| status);
+    Ok(RuntimeData::Settings {
+        config: config.ok(),
+        autostart,
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn controller_failure_does_not_discard_local_settings() {
+        let client =
+            super::MihomoClient::new(zenclash_core::MihomoEndpoint::new("http://127.0.0.1:1", ""))
+                .unwrap();
+        let data = super::load_settings(client).await.unwrap();
+        assert!(matches!(
+            data,
+            super::RuntimeData::Settings { config: None, .. }
+        ));
+    }
     #[tokio::test]
     async fn cancelling_a_page_read_closes_a_slow_controller_request() {
         use tokio::{

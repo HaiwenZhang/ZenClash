@@ -1,6 +1,5 @@
 use gpui_kit::component::input::{Editor, EditorState};
 use gpui_kit::{AppContext, Context, Entity, Window};
-use zenclash_core::{ProfileApplication, ProfileApplyOutcome, ProfileChange};
 
 use super::super::{
     Button, ButtonVariants, Disableable, IconName, ParentElement, RuntimePage, Styled, h_flex, px,
@@ -8,14 +7,9 @@ use super::super::{
 };
 
 pub(crate) struct ProfileEditorState {
-    pub(super) input: Entity<EditorState>,
-    pub(super) original: Option<String>,
-    pub(super) profile_id: Option<String>,
-}
-
-enum ProfileEditorSaveOutcome {
-    Applied(std::path::PathBuf),
-    Stored,
+    pub(in crate::pages::runtime) input: Entity<EditorState>,
+    pub(in crate::pages::runtime) original: Option<String>,
+    pub(in crate::pages::runtime) profile_id: Option<String>,
 }
 
 impl ProfileEditorState {
@@ -47,13 +41,20 @@ impl ProfileEditorState {
 }
 
 impl RuntimePage {
-    fn release_profile_yaml_editor_text(&self, cx: &mut Context<Self>) {
+    fn release_profile_yaml_editor_text(&self, saved: String, cx: &mut Context<Self>) {
         let input = self.overrides.editor.input.clone();
+        let page = cx.entity().downgrade();
         let window_handle = self.window_handle;
         cx.defer(move |cx| {
             let _ = cx.update_window(window_handle, |_, window, cx| {
-                input.update(cx, |input, cx| {
-                    input.set_value(String::new(), window, cx);
+                let _ = page.update(cx, |page, cx| {
+                    if page.overrides.editor.original.is_none() {
+                        input.update(cx, |input, cx| {
+                            if input.value() == saved {
+                                input.set_value(String::new(), window, cx);
+                            }
+                        });
+                    }
                 });
             });
         });
@@ -108,44 +109,15 @@ impl RuntimePage {
             return;
         };
         let controlled = self.controlled_config_store.clone();
-        let core_session = self.core_session.clone();
-        let core_name = self.core_kind.display_name();
+        let service = self.profile_service.clone();
+        let submitted_id = id.clone();
+        let submitted_original = original.clone();
+        let submitted_payload = candidate.clone();
         let task = self.runtime.spawn(async move {
-            let overrides = super::super::profiles::workflow::load_enabled_overrides().await?;
-            let application = ProfileApplication::new(store, controlled, core_session);
-            match application
-                .apply(ProfileChange::EditYaml {
-                    id,
-                    expected_payload: original,
-                    new_payload: candidate,
-                    overrides,
-                })
+            service
+                .edit_yaml(store, controlled, id, original, candidate)
                 .await
-            {
-                ProfileApplyOutcome::Applied { path, .. } => {
-                    Ok(ProfileEditorSaveOutcome::Applied(path))
-                }
-                ProfileApplyOutcome::Stored { .. } => Ok(ProfileEditorSaveOutcome::Stored),
-                ProfileApplyOutcome::Rejected { cause, .. } => Err(cause.to_string()),
-                ProfileApplyOutcome::RolledBack { cause, .. } => Err(zenclash_i18n::text_with(
-                    "overrides.errors.editor_rejected_rolled_back",
-                    &[("core", core_name.to_owned()), ("error", cause.to_string())],
-                )),
-                ProfileApplyOutcome::RuntimeUnknown { cause, .. } => Err(zenclash_i18n::text_with(
-                    "overrides.errors.editor_runtime_unknown",
-                    &[("core", core_name.to_owned()), ("error", cause.to_string())],
-                )),
-                ProfileApplyOutcome::PersistedButRuntimeUnknown {
-                    cause, rollback, ..
-                } => Err(zenclash_i18n::text_with(
-                    "overrides.errors.editor_rejected_rollback_failed",
-                    &[
-                        ("core", core_name.to_owned()),
-                        ("error", cause.to_string()),
-                        ("rollback", rollback.to_string()),
-                    ],
-                )),
-            }
+                .map_err(|error| error.to_string())
         });
         cx.spawn(async move |this, cx| {
             let result = task
@@ -158,43 +130,76 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.finish_mutation(token);
                 match result {
-                    Ok(ProfileEditorSaveOutcome::Applied(path))
-                        if this.is_page_task_current(token) =>
-                    {
-                        this.profile_path = Some(path.clone());
-                        this.overrides.editor.original = None;
-                        this.overrides.editor.profile_id = None;
-                        this.overrides.invalidate_preview();
-                        this.release_profile_yaml_editor_text(cx);
-                        this.invalidate_config_inputs(cx);
-                        this.reload_profile_catalog(cx);
-                        this.notice = Some(zenclash_i18n::text_with(
-                            "overrides.notices.editor_saved",
-                            &[("core", this.core_kind.display_name().to_owned())],
-                        ));
-                        cx.emit(super::super::ProfileActivated { path });
+                    Ok(outcome) => {
+                        this.synchronize_profile_recovery();
+                        let applied_path = outcome
+                            .runtime_version()
+                            .map(|version| (outcome.path().to_path_buf(), version));
+                        this.complete_profile_yaml_save(
+                            token,
+                            submitted_id,
+                            submitted_original,
+                            submitted_payload,
+                            applied_path,
+                            cx,
+                        );
                     }
-                    Ok(ProfileEditorSaveOutcome::Stored) if this.is_page_task_current(token) => {
-                        this.overrides.editor.original = None;
-                        this.overrides.editor.profile_id = None;
-                        this.overrides.invalidate_preview();
-                        this.release_profile_yaml_editor_text(cx);
-                        this.invalidate_config_inputs(cx);
-                        this.reload_profile_catalog(cx);
-                        this.notice = Some(zenclash_i18n::text(
-                            "overrides.notices.editor_saved_inactive",
-                        ));
+                    Err(error) => {
+                        this.synchronize_profile_recovery();
+                        this.finish_mutation(token);
+                        this.set_page_error(token, error);
                     }
-                    Ok(_) => {}
-                    Err(error) => this.set_page_error(token, error),
                 }
                 cx.notify();
             });
         })
         .detach();
         cx.notify();
+    }
+
+    pub(in crate::pages::runtime) fn complete_profile_yaml_save(
+        &mut self,
+        token: super::super::PageTaskToken,
+        id: String,
+        original: String,
+        saved: String,
+        applied_path: Option<(std::path::PathBuf, u64)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.finish_mutation(token);
+        if self.overrides.editor.profile_id.as_deref() == Some(id.as_str())
+            && self.overrides.editor.original.as_deref() == Some(original.as_str())
+        {
+            if self.overrides.editor.input.read(cx).value() == saved {
+                self.overrides.editor.original = None;
+                self.overrides.editor.profile_id = None;
+                self.release_profile_yaml_editor_text(saved, cx);
+            } else {
+                // This acknowledgement becomes the baseline for the newer draft.
+                self.overrides.editor.original = Some(saved);
+            }
+        }
+        self.overrides.invalidate_preview();
+        let was_applied = applied_path.is_some();
+        let is_current = applied_path
+            .as_ref()
+            .is_some_and(|(_, version)| self.profile_service.is_current(*version));
+        if was_applied {
+            self.synchronize_committed_profile(cx);
+        }
+        self.invalidate_config_inputs(cx);
+        self.reload_profile_catalog(cx);
+        if self.is_page_task_current(token) {
+            self.notice = Some(if is_current {
+                zenclash_i18n::text_with(
+                    "overrides.notices.editor_saved",
+                    &[("core", self.core_kind.display_name().to_owned())],
+                )
+            } else {
+                zenclash_i18n::text("overrides.notices.editor_saved_inactive")
+            });
+        }
     }
 
     pub(super) fn render_profile_yaml_editor(

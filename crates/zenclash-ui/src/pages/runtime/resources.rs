@@ -34,10 +34,11 @@ impl RuntimePage {
             return;
         };
         let client = self.client.clone();
+        let session = self.core_session.clone();
         let task = self.runtime.spawn(async move {
             match resource {
-                BuiltinResource::GeoData => client.update_geodata().await,
-                BuiltinResource::ExternalUi => client.update_external_ui().await,
+                BuiltinResource::GeoData => session.update_geodata().await,
+                BuiltinResource::ExternalUi => session.update_external_ui().await,
             }
             .map_err(|error| error.to_string())?;
             load_page(client, Page::Resources).await

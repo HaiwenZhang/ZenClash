@@ -202,6 +202,7 @@ pub type AppPreferencesResult<T> = Result<T, AppPreferencesError>;
 pub struct AppPreferencesStore {
     path: PathBuf,
     transaction: Arc<Mutex<()>>,
+    write_access: crate::data_coordinator::DataWriteAccess,
 }
 
 impl AppPreferencesStore {
@@ -218,9 +219,11 @@ impl AppPreferencesStore {
     /// Creates a store backed by an explicit path.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
         Self {
-            path: path.into(),
-            transaction: Arc::new(Mutex::new(())),
+            transaction: crate::data_coordinator::shared_transaction(&path),
+            write_access: crate::data_coordinator::DataWriteAccess::new(&path),
+            path,
         }
     }
 
@@ -258,6 +261,7 @@ impl AppPreferencesStore {
     /// Returns an error when serialization or the atomic filesystem update
     /// fails.
     pub fn save(&self, preferences: &AppPreferences) -> AppPreferencesResult<()> {
+        let _write_lease = self.write_access.acquire();
         let _transaction = self.transaction.lock();
         self.save_unlocked(preferences)
     }
@@ -276,6 +280,7 @@ impl AppPreferencesStore {
         &self,
         mutate: impl FnOnce(&mut AppPreferences),
     ) -> AppPreferencesResult<AppPreferences> {
+        let _write_lease = self.write_access.acquire();
         let _transaction = self.transaction.lock();
         let mut preferences = self.load_unlocked()?;
         mutate(&mut preferences);
@@ -295,6 +300,7 @@ impl AppPreferencesStore {
         expected: &AppPreferences,
         next: &AppPreferences,
     ) -> AppPreferencesResult<()> {
+        let _write_lease = self.write_access.acquire();
         let _transaction = self.transaction.lock();
         if &self.load_unlocked()? != expected {
             return Err(AppPreferencesError::ConcurrentModification);
@@ -335,6 +341,7 @@ impl AppPreferencesStore {
     /// Returns the original non-recoverable error or a filesystem error while
     /// moving the invalid document.
     pub fn quarantine_invalid_preferences(&self) -> AppPreferencesResult<Option<PathBuf>> {
+        let _write_lease = self.write_access.acquire();
         let _transaction = self.transaction.lock();
         let error = match self.load_unlocked() {
             Ok(_) => return Ok(None),

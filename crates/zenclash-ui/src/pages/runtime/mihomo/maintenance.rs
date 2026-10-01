@@ -1,15 +1,14 @@
-use std::sync::Arc;
-
 use gpui_kit::component::{
     Disableable, IconName, Sizable,
     button::{Button, ButtonVariants},
     h_flex, v_flex,
 };
 use gpui_kit::{Context, IntoElement, ParentElement, Styled, prelude::FluentBuilder};
-use zenclash_core::{MihomoClient, MihomoProcess, MihomoRelease, MihomoReleaseService};
+use zenclash_core::{CoreInstallOutcome, CoreSession, MihomoRelease, MihomoReleaseService};
 
 use super::super::{
-    Page, RuntimePage, format_bytes, info_row, load_page, message_banner, setting_card,
+    Page, RuntimeConfigApplied, RuntimePage, format_bytes, info_row, load_page, message_banner,
+    setting_card,
 };
 
 #[derive(Default)]
@@ -76,19 +75,21 @@ impl RuntimePage {
             cx.notify();
             return;
         }
-        let Some(process) = self.process.clone() else {
+        if self.process.is_none() {
             self.error = Some(zenclash_i18n::text("core_page.errors.external_install"));
             cx.notify();
             return;
-        };
+        }
         let Some(token) = self.begin_mutation(Page::Mihomo) else {
             return;
         };
         let client = self.client.clone();
+        let session = self.core_session.clone();
         let tag = release.tag.clone();
         let task = self.runtime.spawn(async move {
-            install_release(client.clone(), process, release).await?;
-            load_page(client, Page::Mihomo).await
+            let outcome = install_release(session, release).await?;
+            let refreshed = load_page(client, Page::Mihomo).await;
+            Ok::<_, String>((outcome, refreshed))
         });
         cx.spawn(async move |this, cx| {
             let result = task
@@ -103,12 +104,28 @@ impl RuntimePage {
             let _ = this.update(cx, |this, cx| {
                 this.finish_mutation(token);
                 match result {
-                    Ok(data) => {
-                        if this.replace_page_data(token, data, cx) {
-                            this.notice = Some(zenclash_i18n::text_with(
-                                "core_page.notices.release_installed",
-                                &[("version", tag)],
-                            ));
+                    Ok((outcome, refreshed)) => {
+                        // The executable transition committed even if its page has since closed.
+                        cx.emit(RuntimeConfigApplied);
+                        if !this.profile_service.is_current(outcome.generation) {
+                            this.invalidate_page_load();
+                            this.refresh(cx);
+                            return;
+                        }
+                        match refreshed {
+                            Ok(data) => {
+                                if this.replace_page_data(token, data, cx) {
+                                    if let Some(error) = outcome.cleanup_error {
+                                        this.error = Some(error);
+                                    } else {
+                                        this.notice = Some(zenclash_i18n::text_with(
+                                            "core_page.notices.release_installed",
+                                            &[("version", tag)],
+                                        ));
+                                    }
+                                }
+                            }
+                            Err(error) => this.set_page_error(token, error),
                         }
                     }
                     Err(error) => this.set_page_error(token, error),
@@ -235,15 +252,13 @@ impl RuntimePage {
 }
 
 async fn install_release(
-    client: MihomoClient,
-    process: Arc<MihomoProcess>,
+    session: CoreSession,
     release: MihomoRelease,
-) -> Result<(), String> {
-    MihomoReleaseService::new()
-        .map_err(|error| error.to_string())?
-        .install_managed(&release, process, client)
+) -> Result<CoreInstallOutcome, String> {
+    let service = MihomoReleaseService::new().map_err(|error| error.to_string())?;
+    session
+        .install_release(&service, &release)
         .await
-        .map(|_| ())
         .map_err(|error| error.to_string())
 }
 

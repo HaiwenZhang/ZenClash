@@ -32,6 +32,7 @@ impl UiVisibility {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct LiveUpdateActions {
     notify: bool,
+    notify_logs: bool,
     refresh_page: bool,
     refresh_history: bool,
 }
@@ -75,6 +76,7 @@ impl LiveUpdateSchedule {
         let mut actions = LiveUpdateActions::default();
         if page == Page::Logs && log_revision != self.log_revision {
             actions.notify = true;
+            actions.notify_logs = true;
         }
         self.log_revision = log_revision;
 
@@ -365,24 +367,57 @@ impl RuntimePage {
 
     pub(crate) fn profile_updated_in_background(
         &mut self,
-        outcome: super::profiles::workflow::BackgroundUpdateOutcome,
+        outcome: crate::profile_service::ProfileReceipt,
         cx: &mut Context<Self>,
     ) {
-        self.reload_profile_catalog(cx);
+        let name = outcome.name().to_owned();
+        self.synchronize_profile_receipt(&outcome, cx);
         self.notice = Some(zenclash_i18n::text_with(
             "runtime.lifecycle.profile_updated",
-            &[("name", outcome.name)],
+            &[("name", name)],
         ));
-        if outcome.active {
-            self.profile_path = Some(outcome.path.clone());
-            self.invalidate_config_inputs(cx);
-            self.overrides.invalidate_preview();
-            cx.emit(ProfileActivated { path: outcome.path });
-        }
         cx.notify();
     }
 
+    pub(super) fn synchronize_profile_receipt(
+        &mut self,
+        receipt: &crate::profile_service::ProfileReceipt,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.reload_profile_catalog(cx);
+        self.synchronize_profile_recovery();
+        let Some(runtime_version) = receipt.runtime_version() else {
+            return false;
+        };
+        let accepted = self.profile_service.is_current(runtime_version);
+        // A later mode/upgrade transition may invalidate the receipt without
+        // changing its profile. Publish current core truth instead of losing
+        // the only path notification from that completed profile transaction.
+        self.synchronize_committed_profile(cx);
+        accepted
+    }
+
+    pub(super) fn synchronize_committed_profile(&mut self, cx: &mut Context<Self>) {
+        self.synchronize_profile_recovery();
+        let snapshot = self.profile_service.committed_profile();
+        let Some(path) = snapshot.profile_path else {
+            return;
+        };
+        self.profile_path = Some(path.clone());
+        self.invalidate_config_inputs(cx);
+        self.overrides.invalidate_preview();
+        cx.emit(ProfileActivated {
+            path,
+            runtime_version: snapshot.generation,
+        });
+    }
+
+    pub(super) fn synchronize_profile_recovery(&mut self) {
+        self.profiles.recovery = self.profile_service.latest_recovery();
+    }
+
     pub(crate) fn report_background_profile_error(&mut self, error: &str, cx: &mut Context<Self>) {
+        self.synchronize_profile_recovery();
         tracing::warn!(%error, "automatic profile update failed");
         if self.page == Page::Profiles {
             self.error = Some(zenclash_i18n::text_with(
@@ -405,6 +440,7 @@ impl RuntimePage {
             override_store,
             core_kind,
             core_session,
+            profile_service,
             client,
             runtime,
             traffic_monitor,
@@ -422,6 +458,7 @@ impl RuntimePage {
             startup_error,
         } = services;
         let initial_profile = profile_path.clone();
+        let initial_runtime_version = core_session.generation();
         let persistent_task = {
             let profile = profile_path.clone();
             let store = controlled_config_store.clone();
@@ -455,6 +492,7 @@ impl RuntimePage {
             page,
             core_kind,
             core_session,
+            profile_service,
             client,
             runtime,
             traffic_monitor,
@@ -522,7 +560,12 @@ impl RuntimePage {
                 this.set_window_active(window.is_window_active(), cx);
             });
         this._subscriptions.push(window_activation_subscription);
-        this.finish_initial_persistent_state(persistent_task, initial_profile, cx);
+        this.finish_initial_persistent_state(
+            persistent_task,
+            initial_profile,
+            initial_runtime_version,
+            cx,
+        );
         this.refresh(cx);
         this.refresh_app_update(cx);
         Self::start_operational_updates(
@@ -543,6 +586,7 @@ impl RuntimePage {
         &self,
         task: tokio::task::JoinHandle<InitialPersistentState>,
         profile: Option<std::path::PathBuf>,
+        runtime_version: u64,
         cx: &mut Context<Self>,
     ) {
         let window_handle = self.window_handle;
@@ -560,9 +604,16 @@ impl RuntimePage {
                             }
                             this.overrides.store = state.override_store;
                             this.overrides.catalog = state.override_catalog;
-                            this.controlled_config = state.controlled_config;
-                            this.error = state.error;
-                            if this.profile_path == profile && this.config_inputs_generation == 0 {
+                            if this.profile_service.is_current(runtime_version) {
+                                this.controlled_config = state.controlled_config;
+                                this.error = state.error;
+                            } else {
+                                this.reload_controlled_config(cx);
+                            }
+                            if this.profile_path == profile
+                                && this.config_inputs_generation == 0
+                                && this.profile_service.is_current(runtime_version)
+                            {
                                 let config = config_input_snapshot(state.effective_config);
                                 this.config_inputs.refresh(
                                     &config,
@@ -696,6 +747,10 @@ impl RuntimePage {
     fn update_live_update_activity(&mut self, was_enabled: bool, cx: &mut Context<Self>) {
         let enabled = self.ui_visibility.updates_enabled();
         if !enabled {
+            if self.network_probe.loading {
+                self.cancel_network_probe();
+            }
+            self.logs.cancel_refresh();
             self.traffic_history.cancel_query();
             if self.ui_visibility.window_visible && self.ui_visibility.page_presented {
                 self.overrides.cancel_preview();
@@ -734,6 +789,9 @@ impl RuntimePage {
         }
         if self.page == Page::Traffic {
             self.refresh_traffic_history(cx);
+        }
+        if self.page == Page::Logs {
+            self.update_log_presentation(cx);
         }
     }
 
@@ -797,7 +855,10 @@ impl RuntimePage {
                             if actions.refresh_history {
                                 this.refresh_traffic_history(cx);
                             }
-                            if actions.notify && !actions.refresh_page && !actions.refresh_history {
+                            if this.page == Page::Logs {
+                                this.update_log_presentation(cx);
+                            }
+                            if actions.notify && !actions.notify_logs && !actions.refresh_page && !actions.refresh_history {
                                 cx.notify();
                             }
                         }).is_err() {
@@ -818,6 +879,7 @@ impl RuntimePage {
         self.loading = true;
         self.load_generation = self.load_generation.wrapping_add(1);
         let generation = self.load_generation;
+        let runtime_version = self.core_session.generation();
         self.error = None;
         let page = self.page;
         let client = self.client.clone();
@@ -840,6 +902,10 @@ impl RuntimePage {
                 }
                 this.loading = false;
                 if this.page != page {
+                    return;
+                }
+                if !this.profile_service.is_current(runtime_version) {
+                    this.refresh(cx);
                     return;
                 }
                 match result {
@@ -908,7 +974,7 @@ impl RuntimePage {
                 )
                 .await
                 .map_err(|error| error.to_string())?;
-            Ok::<_, String>(outcome.kind)
+            Ok::<_, String>(outcome)
         });
         cx.spawn(async move |this, cx| {
             let result = task
@@ -923,7 +989,14 @@ impl RuntimePage {
             let _ = this.update(cx, |this, cx| {
                 this.finish_mutation(token);
                 match result {
-                    Ok(apply_kind) => {
+                    Ok(outcome) => {
+                        if !this.profile_service.is_current(outcome.generation) {
+                            this.reload_controlled_config(cx);
+                            this.invalidate_config_inputs(cx);
+                            this.invalidate_page_load();
+                            this.refresh(cx);
+                            return;
+                        }
                         this.config_inputs.accept_submitted(submitted_inputs, cx);
                         if let Some(level) = requested_log_level {
                             this.log_monitor.set_level(level);
@@ -934,7 +1007,7 @@ impl RuntimePage {
                         this.invalidate_page_load();
                         this.refresh(cx);
                         if this.is_page_task_current(token) {
-                            this.notice = Some(if apply_kind == CoreApplyKind::Restarted {
+                            this.notice = Some(if outcome.kind == CoreApplyKind::Restarted {
                                 let saved = success.replace(
                                     &zenclash_i18n::text("runtime.lifecycle.hot_reload_term"),
                                     &zenclash_i18n::text("runtime.lifecycle.save_term"),
@@ -981,6 +1054,7 @@ impl RuntimePage {
             generation: self.config_inputs_generation,
         };
         self.config_inputs_loading = true;
+        let runtime_version = self.core_session.generation();
         let controlled = self.controlled_config_store.clone();
         let overrides = self.enabled_override_paths();
         let task = self.runtime.spawn_blocking(move || {
@@ -1003,6 +1077,10 @@ impl RuntimePage {
                         return;
                     }
                     this.config_inputs_loading = false;
+                    if !this.profile_service.is_current(runtime_version) {
+                        this.refresh_config_inputs(cx);
+                        return;
+                    }
                     match result {
                         Ok(config) => {
                             this.config_inputs.refresh(
@@ -1061,23 +1139,22 @@ impl RuntimePage {
 
     pub(crate) fn profile_activated_from_tray(
         &mut self,
-        path: std::path::PathBuf,
-        name: &str,
+        receipt: crate::profile_service::ProfileReceipt,
         cx: &mut Context<Self>,
     ) {
-        self.profile_path = Some(path.clone());
-        self.invalidate_config_inputs(cx);
-        self.overrides.invalidate_preview();
-        self.reload_profile_catalog(cx);
-        self.notice = Some(zenclash_i18n::text_with(
-            "runtime.lifecycle.tray_profile_selected",
-            &[("name", name.to_owned())],
-        ));
-        cx.emit(super::ProfileActivated { path });
-        self.refresh(cx);
+        let name = receipt.name().to_owned();
+        if self.synchronize_profile_receipt(&receipt, cx) {
+            self.notice = Some(zenclash_i18n::text_with(
+                "runtime.lifecycle.tray_profile_selected",
+                &[("name", name)],
+            ));
+            self.refresh(cx);
+        }
+        cx.notify();
     }
 
     pub(crate) fn report_tray_profile_error(&mut self, error: &str, cx: &mut Context<Self>) {
+        self.synchronize_profile_recovery();
         self.error = Some(zenclash_i18n::text_with(
             "runtime.lifecycle.tray_profile_failed",
             &[("error", error.to_owned())],
@@ -1121,6 +1198,7 @@ impl RuntimePage {
     }
 
     pub(super) fn finish_mutation(&mut self, token: PageTaskToken) {
+        self.synchronize_profile_recovery();
         if let Some(mutation) = token.mutation {
             self.mutations.finish(mutation);
         }
@@ -1177,14 +1255,15 @@ impl RuntimePage {
     pub(super) const fn config(&self) -> Option<&RuntimeConfig> {
         match &self.data {
             RuntimeData::Dashboard { config, .. } => config.value(),
-            RuntimeData::Profile { config, .. } => config.as_ref(),
+            RuntimeData::Profile { config, .. } | RuntimeData::Settings { config, .. } => {
+                config.as_ref()
+            }
             RuntimeData::Config(config)
             | RuntimeData::Core { config, .. }
             | RuntimeData::Resources { config, .. }
             | RuntimeData::SystemProxy { config, .. }
             | RuntimeData::Network { config, .. }
-            | RuntimeData::Tun { config, .. }
-            | RuntimeData::Settings { config, .. } => Some(config),
+            | RuntimeData::Tun { config, .. } => Some(config),
             _ => None,
         }
     }

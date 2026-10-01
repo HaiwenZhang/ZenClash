@@ -13,6 +13,7 @@ mod core_installation;
 mod core_session;
 mod core_update;
 mod core_validation;
+mod data_coordinator;
 mod endpoint;
 mod instance_lock;
 mod listener_fallback;
@@ -46,8 +47,8 @@ pub use app_update::{
 };
 pub use autostart::{AutostartError, AutostartManager, AutostartResult, AutostartStatus};
 pub use backup::{
-    BackupError, BackupExportSummary, BackupManager, BackupRestoreTransaction, BackupResult,
-    PreparedBackupRestore,
+    BackupDataSnapshot, BackupError, BackupExportSummary, BackupManager, BackupRestoreTransaction,
+    BackupResult, PreparedBackupRestore,
 };
 pub use client::{MihomoClient, MihomoError, MihomoResult, VersionInfo};
 pub use config_diff::{
@@ -60,9 +61,9 @@ pub use controlled_config::{
 pub use core_backend::{CoreCapabilities, CoreKind, ParseCoreKindError};
 pub use core_installation::{CoreBinaryError, CoreBinaryInfo, validate_core_binary};
 pub use core_session::{
-    CoreApplyKind, CoreApplyOutcome, CoreLifecyclePhase, CoreLifecycleSnapshot,
-    CoreMaintenanceIntent, CoreSession, CoreSessionError, CoreSessionSnapshot,
-    EffectiveConfigIntent,
+    CoreApplyKind, CoreApplyOutcome, CoreCommittedProfileSnapshot, CoreInstallOutcome,
+    CoreLifecyclePhase, CoreLifecycleSnapshot, CoreMaintenanceIntent, CoreRestoreSnapshot,
+    CoreSession, CoreSessionError, CoreSessionSnapshot, EffectiveConfigIntent,
 };
 pub use core_update::{
     CoreUpdateError, CoreUpdateResult, CoreUpdateTransaction, MihomoRelease, MihomoReleaseAsset,
@@ -120,7 +121,7 @@ pub use provider_operations::{
     ProviderOperationResult, ProviderOperationalStatus, ProviderOperations,
 };
 pub use proxy::{
-    DelayHistory, DelayResult, ProxyCatalog, ProxyGroup, ProxyGroupBehavior, ProxyNode,
+    DelayHistory, DelayResult, ProxyCatalog, ProxyGroup, ProxyGroupBehavior, ProxyNode, ProxyNodeId,
 };
 pub use proxy_operations::{
     ConnectionPolicy, ProxyDelayTarget, ProxyGroupMeasurementOutcome, ProxyOperations,

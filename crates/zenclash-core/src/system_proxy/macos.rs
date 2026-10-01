@@ -6,6 +6,14 @@ use super::SystemProxyStatus;
 use crate::{MihomoError, MihomoResult};
 
 #[cfg(target_os = "macos")]
+mod snapshot;
+
+#[cfg(target_os = "macos")]
+pub(super) fn restore_snapshot(previous: &SystemProxyStatus) -> MihomoResult<()> {
+    snapshot::restore(previous)
+}
+
+#[cfg(target_os = "macos")]
 pub(super) fn detect() -> MihomoResult<String> {
     if let Ok(service) = std::env::var("ZENCLASH_NETWORK_SERVICE")
         && !service.trim().is_empty()

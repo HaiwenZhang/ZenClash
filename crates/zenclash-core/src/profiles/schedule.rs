@@ -32,6 +32,7 @@ impl ProfileStore {
             )));
         }
 
+        let _write_lease = self.write_access.acquire();
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
         let profile = remote_profile_mut(&mut catalog.profiles, id)?;
@@ -70,6 +71,7 @@ impl ProfileStore {
             parse_profile_schedule(expression)?;
         }
 
+        let _write_lease = self.write_access.acquire();
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
         let profile = remote_profile_mut(&mut catalog.profiles, id)?;

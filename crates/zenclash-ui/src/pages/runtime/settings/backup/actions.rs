@@ -3,8 +3,11 @@ use std::path::PathBuf;
 use gpui_kit::PathPromptOptions;
 use zenclash_core::BackupManager;
 
-use super::super::super::{Context, Page, PreferencesRestored, ProfileActivated, RuntimePage};
-use super::{RestoreOutcome, format_backup_size, workflow::restore_backup};
+use super::super::super::{Context, Page, PreferencesRestored, RuntimePage};
+use super::{
+    RestoreOutcome, format_backup_size,
+    workflow::{refresh_committed_state, restore_backup},
+};
 
 impl RuntimePage {
     pub(super) fn choose_backup_export(&mut self, cx: &mut Context<Self>) {
@@ -139,13 +142,8 @@ impl RuntimePage {
         ) else {
             return;
         };
-        let core_runtime = super::super::super::profiles::workflow::CoreProfileRuntime::new(
-            self.core_session.clone(),
-        );
-        let previous_profile = self.profile_path.clone();
-        let task = self
-            .runtime
-            .spawn(restore_backup(archive, core_runtime, previous_profile));
+        let core_runtime = self.profile_service.clone();
+        let task = self.runtime.spawn(restore_backup(archive, core_runtime));
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
@@ -169,13 +167,37 @@ impl RuntimePage {
         cx.notify();
     }
 
-    pub(in crate::pages::runtime::settings) fn apply_restore_outcome(
+    pub(in crate::pages::runtime) fn apply_restore_outcome(
         &mut self,
         outcome: RestoreOutcome,
         token: super::super::super::PageTaskToken,
         cx: &mut Context<Self>,
     ) {
-        self.profile_path = Some(outcome.profile_path.clone());
+        let task = self
+            .runtime
+            .spawn_blocking(move || refresh_committed_state(outcome));
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(outcome) => this.finish_restore_outcome(outcome, token, cx),
+                    Err(error) => this.set_page_error(token, error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn finish_restore_outcome(
+        &mut self,
+        outcome: RestoreOutcome,
+        token: super::super::super::PageTaskToken,
+        cx: &mut Context<Self>,
+    ) {
         self.profiles.store = Some(outcome.profile_store);
         self.profiles.generation = self.profiles.generation.wrapping_add(1);
         self.profiles.catalog = outcome.catalog;
@@ -187,16 +209,16 @@ impl RuntimePage {
         self.config_inputs.reset_on_next_refresh();
         self.invalidate_config_inputs(cx);
         self.overrides.invalidate_preview();
-        cx.emit(ProfileActivated {
-            path: outcome.profile_path,
-        });
+        self.synchronize_committed_profile(cx);
         self.preferences = outcome.preferences.clone();
         self.system_proxy_editor = None;
         cx.emit(PreferencesRestored {
             scope: crate::pages::runtime::PreferenceScope::Restore,
             preferences: outcome.preferences,
         });
-        if self.replace_page_data(token, outcome.page_data, cx) {
+        if self.profile_service.is_current(outcome.runtime_version)
+            && self.replace_page_data(token, outcome.page_data, cx)
+        {
             let warning = outcome.cleanup_warning.map_or_else(String::new, |warning| {
                 zenclash_i18n::text_with("backup.notices.cleanup_warning", &[("warning", warning)])
             });

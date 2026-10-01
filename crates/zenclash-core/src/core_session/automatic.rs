@@ -55,6 +55,7 @@ impl CoreSession {
         capture: &TrafficCaptureSession,
     ) -> Result<bool, CoreSessionError> {
         {
+            let lease = self.acquire_process_write_lease().await?;
             let _transition = self.transition.lock().await;
             self.ensure_not_shutting_down()?;
             if !self.network_suspended.load(Ordering::Acquire) {
@@ -65,9 +66,10 @@ impl CoreSession {
             };
             if !process.is_running() {
                 process
-                    .restart_and_wait_until(
+                    .restart_and_wait_until_with_lease(
                         CORE_READY_TIMEOUT,
                         Some(self.shutdown_requested.clone()),
+                        &lease,
                     )
                     .await?;
                 self.next_generation();
@@ -98,6 +100,10 @@ impl CoreSession {
         expected_generation: u64,
         expected_revision: [u8; 32],
     ) -> Result<bool, CoreSessionError> {
+        let lease = store
+            .acquire_write_lease_for_paths(self.write_scopes())
+            .await?;
+        let store = store.with_write_lease(&lease);
         let mut active_profile = self.transition.lock().await;
         self.ensure_not_shutting_down()?;
         let Some(process) = &self.process else {
@@ -128,14 +134,21 @@ impl CoreSession {
         }
         self.ensure_not_shutting_down()?;
         store
-            .stage_profile_restart(process.clone(), profile.clone(), overrides.clone())
-            .await?
+            .stage_profile_restart(
+                process.clone(),
+                profile.clone(),
+                overrides.clone(),
+                Some(self.shutdown_requested.clone()),
+            )
+            .await
+            .map_err(|error| self.runtime_mutation_error(error))?
             .commit();
-        *active_profile = CommittedConfig {
-            profile: Some(profile),
+        let committed = CommittedConfig {
+            profile: Some(profile.clone()),
             overrides,
         };
-        self.next_generation();
+        *active_profile = committed.clone();
+        self.next_generation_with_config(Some(committed));
         Ok(true)
     }
 }

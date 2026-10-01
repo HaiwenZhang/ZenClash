@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
+        atomic::{AtomicUsize, Ordering},
         mpsc::{self, RecvTimeoutError, SyncSender, TrySendError},
     },
     thread,
@@ -21,6 +22,7 @@ const MEBIBYTE: u64 = 1024 * 1024;
 const MIN_MAX_MEBIBYTES: u16 = 1;
 const MAX_MAX_MEBIBYTES: u16 = 100;
 const FILE_QUEUE_CAPACITY: usize = 512;
+const FILE_QUEUE_BYTES: usize = 4 * 1024 * 1024;
 const COMPACTION_RETAIN_PERCENT: u64 = 50;
 const TRUNCATE_MARKER: &[u8] =
     b"\n[ZENCLASH] Log compacted after reaching the configured size limit.\n";
@@ -51,7 +53,7 @@ pub struct LogPersistenceStatus {
     pub max_bytes: u64,
     /// Last successfully observed file size.
     pub size_bytes: u64,
-    /// Entries discarded because the disk queue was full.
+    /// Entries discarded because of queue capacity or the per-entry byte limit.
     pub dropped_entries: u64,
     /// Most recent writer error, cleared after a successful write.
     pub last_error: Option<String>,
@@ -91,8 +93,19 @@ impl LogFileConfig {
 }
 
 enum LogFileCommand {
-    Append(LogEntry),
+    Append(Arc<LogEntry>, LogByteReservation),
     Refresh,
+}
+
+struct LogByteReservation {
+    queued_bytes: Arc<AtomicUsize>,
+    bytes: usize,
+}
+
+impl Drop for LogByteReservation {
+    fn drop(&mut self) {
+        self.queued_bytes.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
 }
 
 #[derive(Clone)]
@@ -100,10 +113,11 @@ pub(super) struct LogFileSender {
     sender: SyncSender<LogFileCommand>,
     settings: Arc<RwLock<Option<LogFileConfig>>>,
     status: Arc<RwLock<LogPersistenceStatus>>,
+    queued_bytes: Arc<AtomicUsize>,
 }
 
 impl LogFileSender {
-    pub(super) fn append(&self, entry: LogEntry) {
+    pub(super) fn append(&self, entry: Arc<LogEntry>, bytes: usize) {
         if !self
             .settings
             .read()
@@ -112,17 +126,46 @@ impl LogFileSender {
         {
             return;
         }
-        match self.sender.try_send(LogFileCommand::Append(entry)) {
+        if bytes > super::MAX_LOG_ENTRY_BYTES {
+            let mut status = self.status.write();
+            status.dropped_entries = status.dropped_entries.saturating_add(1);
+            status.last_error = Some(zenclash_i18n::text("logs.errors.entry_too_large"));
+            return;
+        }
+        let reserved = self
+            .queued_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current
+                    .checked_add(bytes)
+                    .filter(|next| *next <= FILE_QUEUE_BYTES)
+            })
+            .is_ok();
+        if !reserved {
+            self.record_full_queue();
+            return;
+        }
+        let reservation = LogByteReservation {
+            queued_bytes: self.queued_bytes.clone(),
+            bytes,
+        };
+        match self
+            .sender
+            .try_send(LogFileCommand::Append(entry, reservation))
+        {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
-                let mut status = self.status.write();
-                status.dropped_entries = status.dropped_entries.saturating_add(1);
-                status.last_error = Some("日志磁盘队列已满；已丢弃一条落盘记录".into());
+                self.record_full_queue();
             }
             Err(TrySendError::Disconnected(_)) => {
                 self.status.write().last_error = Some("日志文件写入线程已停止".into());
             }
         }
+    }
+
+    fn record_full_queue(&self) {
+        let mut status = self.status.write();
+        status.dropped_entries = status.dropped_entries.saturating_add(1);
+        status.last_error = Some("日志磁盘队列已满；已丢弃一条落盘记录".into());
     }
 }
 
@@ -136,10 +179,12 @@ impl LogFileWorker {
         let (sender, receiver) = mpsc::sync_channel(FILE_QUEUE_CAPACITY);
         let settings = Arc::new(RwLock::new(None));
         let status = Arc::new(RwLock::new(LogPersistenceStatus::default()));
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
         let file_sender = LogFileSender {
             sender,
             settings: settings.clone(),
             status: status.clone(),
+            queued_bytes,
         };
         let thread_settings = settings;
         let thread_status = status.clone();
@@ -164,10 +209,12 @@ impl LogFileWorker {
                         refresh_file_status(&thread_status, &config);
                         observed = Instant::now();
                     }
-                    if let Some(LogFileCommand::Append(entry)) = command
+                    if let Some(LogFileCommand::Append(entry, reservation)) = command
                         && config.enabled
                     {
                         let result = writer.append(&config, &entry);
+                        drop(entry);
+                        drop(reservation);
                         let mut snapshot = thread_status.write();
                         if snapshot.path.as_ref() != Some(&config.path) {
                             continue;
@@ -249,10 +296,18 @@ fn refresh_file_status(status: &RwLock<LogPersistenceStatus>, config: &LogFileCo
 struct BoundedLogFile {
     path: Option<PathBuf>,
     size: u64,
+    write_access: Option<crate::data_coordinator::DataWriteAccess>,
 }
 
 impl BoundedLogFile {
     fn append(&mut self, config: &LogFileConfig, entry: &LogEntry) -> LogPersistenceResult<u64> {
+        if self.path.as_ref() != Some(&config.path) {
+            self.write_access = None;
+        }
+        let _write_lease = self
+            .write_access
+            .get_or_insert_with(|| crate::data_coordinator::DataWriteAccess::new(&config.path))
+            .acquire();
         self.synchronize_path(config)?;
         let data = format_log_entries(std::slice::from_ref(entry)).into_bytes();
         let max_bytes = usize::try_from(config.max_bytes)
@@ -375,6 +430,91 @@ mod tests {
         }
     }
 
+    fn queue_fixture(capacity: usize) -> (LogFileSender, mpsc::Receiver<LogFileCommand>) {
+        let (sender, receiver) = mpsc::sync_channel(capacity);
+        (
+            LogFileSender {
+                sender,
+                settings: Arc::new(RwLock::new(Some(LogFileConfig::from_bytes(
+                    test_path("queue"),
+                    true,
+                    MEBIBYTE,
+                )))),
+                status: Arc::default(),
+                queued_bytes: Arc::default(),
+            },
+            receiver,
+        )
+    }
+
+    fn append_entry(sender: &LogFileSender, entry: Arc<LogEntry>) {
+        let bytes = super::super::log_entry_bytes(&entry);
+        sender.append(entry, bytes);
+    }
+
+    #[test]
+    fn byte_budget_rejects_before_entry_capacity_and_is_reusable_after_consumption() {
+        let (sender, receiver) = queue_fixture(FILE_QUEUE_CAPACITY);
+        let entry = Arc::new(entry(&"x".repeat(60 * 1024), 1));
+        let bytes = super::super::log_entry_bytes(&entry);
+        let admitted = FILE_QUEUE_BYTES / bytes;
+        assert!(admitted < FILE_QUEUE_CAPACITY);
+        for _ in 0..=admitted {
+            sender.append(entry.clone(), bytes);
+        }
+        assert_eq!(
+            sender.queued_bytes.load(Ordering::Acquire),
+            admitted * bytes
+        );
+        assert_eq!(sender.status.read().dropped_entries, 1);
+
+        let command = receiver.try_recv().unwrap();
+        assert_eq!(
+            sender.queued_bytes.load(Ordering::Acquire),
+            admitted * bytes
+        );
+        let LogFileCommand::Append(queued_entry, _) = &command else {
+            panic!("expected a queued log entry");
+        };
+        assert!(Arc::ptr_eq(queued_entry, &entry));
+        drop(command);
+        sender.append(entry, bytes);
+
+        let pending = receiver.try_iter().collect::<Vec<_>>();
+        assert_eq!(pending.len(), admitted);
+        assert_eq!(sender.status.read().dropped_entries, 1);
+        drop(pending);
+        assert_eq!(sender.queued_bytes.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn dropping_the_receiver_releases_all_queued_bytes_with_a_live_sender() {
+        let (sender, receiver) = queue_fixture(FILE_QUEUE_CAPACITY);
+        append_entry(&sender, Arc::new(entry("queued", 1)));
+        assert!(sender.queued_bytes.load(Ordering::Acquire) > 0);
+
+        drop(receiver);
+
+        assert_eq!(sender.queued_bytes.load(Ordering::Acquire), 0);
+        append_entry(&sender, Arc::new(entry("disconnected", 2)));
+        assert_eq!(sender.queued_bytes.load(Ordering::Acquire), 0);
+        assert!(sender.status.read().last_error.is_some());
+    }
+
+    #[test]
+    fn a_full_entry_queue_rolls_back_the_rejected_byte_reservation() {
+        let (sender, receiver) = queue_fixture(1);
+        let entry = Arc::new(entry("small", 1));
+        let bytes = super::super::log_entry_bytes(&entry);
+        sender.append(entry.clone(), bytes);
+        sender.append(entry, bytes);
+
+        assert_eq!(sender.queued_bytes.load(Ordering::Acquire), bytes);
+        assert_eq!(sender.status.read().dropped_entries, 1);
+        drop(receiver);
+        assert_eq!(sender.queued_bytes.load(Ordering::Acquire), 0);
+    }
+
     #[test]
     fn compaction_keeps_the_latest_entry_below_the_limit() {
         let path = test_path("compact");
@@ -419,7 +559,7 @@ mod tests {
         let worker = LogFileWorker::start();
         worker.configure(path.clone(), true, 1).unwrap();
 
-        worker.sender().append(entry("queued.example.com", 42));
+        append_entry(&worker.sender(), Arc::new(entry("queued.example.com", 42)));
         for _ in 0..100 {
             if worker.status().size_bytes > 0 {
                 break;

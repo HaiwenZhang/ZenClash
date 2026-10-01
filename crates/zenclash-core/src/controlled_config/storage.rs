@@ -9,6 +9,7 @@ pub(super) struct RuntimeCacheTransaction {
     path: PathBuf,
     previous: Option<Vec<u8>>,
     active: bool,
+    _write_lease: crate::data_coordinator::DataWriteLease,
 }
 
 impl RuntimeCacheTransaction {
@@ -36,6 +37,7 @@ impl ControlledConfigStore {
         &self,
         payload: &str,
     ) -> ControlledConfigResult<RuntimeCacheTransaction> {
+        let write_lease = self.write_access.acquire();
         let _transaction = self.transaction.lock();
         let path = self.runtime_path();
         let previous = if path.exists() {
@@ -51,6 +53,7 @@ impl ControlledConfigStore {
             path,
             previous,
             active: true,
+            _write_lease: write_lease,
         })
     }
 

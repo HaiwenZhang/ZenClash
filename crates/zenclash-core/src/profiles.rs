@@ -97,11 +97,13 @@ pub type ProfileStoreResult<T> = Result<T, ProfileStoreError>;
 
 /// Manages an indexed directory of local and remote Clash/Mihomo profiles.
 ///
-/// Clones share a transaction lock. This prevents concurrent UI workflows
+/// Handles rooted at the same normalized directory share a transaction lock.
+/// This prevents concurrent UI workflows
 /// from overwriting a newer catalog snapshot while a profile file and the
 /// index are being updated together.
 #[derive(Clone, Debug)]
 pub struct ProfileStore {
     root: PathBuf,
     transaction: Arc<Mutex<()>>,
+    write_access: crate::data_coordinator::DataWriteAccess,
 }

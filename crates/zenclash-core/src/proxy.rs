@@ -1,4 +1,7 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -120,20 +123,55 @@ impl ProxyGroupBehavior {
     }
 }
 
-/// Selectable Mihomo proxy group with its resolved member nodes.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+/// Controller identity shared by every reference to one provider node.
+///
+/// Identity uses the controller map key, rather than its potentially duplicated
+/// display name. IDs remain comparable across catalog refreshes.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ProxyNodeId(Arc<NodeIdentity>);
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct NodeIdentity {
+    controller_name: String,
+    provider: Option<String>,
+}
+
+impl ProxyNodeId {
+    /// Builds an identity using a controller map key and its optional provider.
+    #[must_use]
+    pub fn new(controller_name: String, provider: Option<String>) -> Self {
+        Self(Arc::new(NodeIdentity {
+            controller_name,
+            provider,
+        }))
+    }
+
+    /// Returns the key accepted by non-provider controller endpoints.
+    #[must_use]
+    pub fn controller_name(&self) -> &str {
+        &self.0.controller_name
+    }
+
+    /// Returns the provider identity, absent for controller-local nodes.
+    #[must_use]
+    pub fn provider(&self) -> Option<&str> {
+        self.0.provider.as_deref()
+    }
+}
+
+/// Selectable Mihomo proxy group with references into its owning catalog.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProxyGroup {
     /// Group name.
     pub name: String,
     /// Mihomo group implementation type.
     pub kind: String,
     /// Domain behavior derived from the Mihomo group type and fixed state.
-    #[serde(default)]
     pub behavior: ProxyGroupBehavior,
     /// Currently selected member name.
     pub now: String,
-    /// Resolved member nodes in Mihomo order.
-    pub all: Vec<ProxyNode>,
+    /// Canonical member identities in Mihomo order.
+    pub all: Arc<[ProxyNodeId]>,
     /// Optional URL used for group health checks.
     pub test_url: Option<String>,
     /// Whether Mihomo marks this group as hidden.
@@ -141,15 +179,100 @@ pub struct ProxyGroup {
 }
 
 /// Resolved proxy groups and aggregate proxy count.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProxyCatalog {
-    /// Selectable groups exposed by Mihomo.
-    pub groups: Vec<ProxyGroup>,
+    groups: Vec<ProxyGroup>,
     /// Total raw proxy entries, including group objects.
     pub proxy_count: usize,
+    nodes: HashMap<ProxyNodeId, Arc<ProxyNode>>,
+    references: Arc<HashMap<ProxyNodeId, Vec<usize>>>,
 }
 
 impl ProxyCatalog {
+    /// Constructs a catalog from resolved groups, deduplicating controller name and provider.
+    ///
+    /// Use [`RawProxyCatalog`] for controller responses whose map key differs
+    /// from the display name. This constructor uses each node name as its key.
+    #[must_use]
+    pub fn from_group_nodes(groups: Vec<(ProxyGroup, Vec<ProxyNode>)>, proxy_count: usize) -> Self {
+        let mut nodes: HashMap<ProxyNodeId, Arc<ProxyNode>> = HashMap::new();
+        let groups = groups
+            .into_iter()
+            .map(|(mut group, members)| {
+                group.all = members
+                    .into_iter()
+                    .map(|node| {
+                        let identity =
+                            ProxyNodeId::new(node.name.clone(), node.provider_name.clone());
+                        if let Some((id, _)) = nodes.get_key_value(&identity) {
+                            return id.clone();
+                        }
+                        nodes.insert(identity.clone(), Arc::new(node));
+                        identity
+                    })
+                    .collect();
+                group
+            })
+            .collect();
+        Self::with_nodes(groups, nodes, proxy_count)
+    }
+
+    fn with_nodes(
+        groups: Vec<ProxyGroup>,
+        nodes: HashMap<ProxyNodeId, Arc<ProxyNode>>,
+        proxy_count: usize,
+    ) -> Self {
+        let references = prepare_references(&groups);
+        Self {
+            groups,
+            nodes,
+            references: Arc::new(references),
+            proxy_count,
+        }
+    }
+
+    /// Reads selectable groups whose member identities belong to this catalog.
+    #[must_use]
+    pub fn groups(&self) -> &[ProxyGroup] {
+        &self.groups
+    }
+
+    /// Updates confirmed or optimistic selection without changing membership identity.
+    /// Returns whether the group exists in this snapshot.
+    pub fn set_group_selection(&mut self, group: &str, member: String) -> bool {
+        let Some(group) = self.groups.iter_mut().find(|item| item.name == group) else {
+            return false;
+        };
+        group.now = member;
+        if matches!(group.behavior, ProxyGroupBehavior::Automatic { .. }) {
+            group.behavior = ProxyGroupBehavior::Automatic { fixed: true };
+        }
+        true
+    }
+
+    /// Looks up a prepared node without constructing a string key.
+    #[must_use]
+    pub fn node(&self, id: &ProxyNodeId) -> Option<&ProxyNode> {
+        self.nodes.get(id).map(Arc::as_ref)
+    }
+
+    /// Mutates only this snapshot's node, copying its payload only if another snapshot owns it.
+    pub fn node_mut(&mut self, id: &ProxyNodeId) -> Option<&mut ProxyNode> {
+        self.nodes.get_mut(id).map(Arc::make_mut)
+    }
+
+    /// Returns the prepared indices of groups that reference this identity.
+    #[must_use]
+    pub fn referencing_groups(&self, id: &ProxyNodeId) -> &[usize] {
+        self.references.get(id).map_or(&[], Vec::as_slice)
+    }
+
+    pub(crate) fn hide_hidden_groups(&mut self) {
+        self.groups.retain(|group| !group.hidden);
+        let references = prepare_references(&self.groups);
+        self.references = Arc::new(references);
+    }
+
     /// Iterates over the strategy groups relevant to one outbound mode.
     ///
     /// Rule mode exposes profile-defined groups but not Mihomo's synthetic
@@ -170,6 +293,19 @@ impl ProxyCatalog {
             .into_iter()
             .filter(move |group| group_visible_in_mode(&group.name, mode))
     }
+}
+
+fn prepare_references(groups: &[ProxyGroup]) -> HashMap<ProxyNodeId, Vec<usize>> {
+    let mut references = HashMap::<ProxyNodeId, Vec<usize>>::new();
+    for (index, group) in groups.iter().enumerate() {
+        for id in group.all.iter() {
+            let references = references.entry(id.clone()).or_default();
+            if references.last() != Some(&index) {
+                references.push(index);
+            }
+        }
+    }
+    references
 }
 
 fn group_visible_in_mode(group: &str, mode: &str) -> bool {
@@ -240,21 +376,21 @@ where
 }
 
 impl RawProxy {
-    fn to_node(&self, fallback_name: &str) -> ProxyNode {
+    fn into_node(self, fallback_name: &str) -> ProxyNode {
         ProxyNode {
             name: if self.name.is_empty() {
                 fallback_name.to_owned()
             } else {
-                self.name.clone()
+                self.name
             },
-            kind: self.kind.clone(),
+            kind: self.kind,
             alive: self.alive,
             udp: self.udp,
             xudp: self.xudp,
             tfo: self.tfo,
             mptcp: self.mptcp,
             smux: self.smux,
-            history: self.history.clone(),
+            history: self.history,
             provider_name: self
                 .provider_name
                 .as_deref()
@@ -266,57 +402,65 @@ impl RawProxy {
 impl From<RawProxyCatalog> for ProxyCatalog {
     fn from(raw: RawProxyCatalog) -> Self {
         let proxy_count = raw.proxies.len();
-        let mut groups = Vec::with_capacity(raw.proxies.len());
-
-        for (key, proxy) in &raw.proxies {
-            if proxy.all.is_empty() {
-                continue;
+        let mut nodes = HashMap::with_capacity(proxy_count);
+        let mut identities = HashMap::with_capacity(proxy_count);
+        let mut pending_groups = Vec::new();
+        for (key, mut proxy) in raw.proxies {
+            if !proxy.all.is_empty() {
+                let members = std::mem::take(&mut proxy.all);
+                let group = ProxyGroup {
+                    name: if proxy.name.is_empty() {
+                        key.clone()
+                    } else {
+                        proxy.name.clone()
+                    },
+                    kind: proxy.kind.clone(),
+                    behavior: ProxyGroupBehavior::from_mihomo(&proxy.kind, proxy.fixed),
+                    now: std::mem::take(&mut proxy.now),
+                    test_url: proxy
+                        .test_url
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|url| !url.is_empty())
+                        .map(str::to_owned),
+                    hidden: proxy.hidden,
+                    ..Default::default()
+                };
+                pending_groups.push((group, members));
             }
-
-            let all = proxy
-                .all
-                .iter()
+            let node = proxy.into_node(&key);
+            let id = ProxyNodeId::new(key.clone(), node.provider_name.clone());
+            identities.insert(key, id.clone());
+            nodes.insert(id, Arc::new(node));
+        }
+        let mut groups = Vec::with_capacity(pending_groups.len());
+        for (mut group, members) in pending_groups {
+            group.all = members
+                .into_iter()
                 .map(|name| {
-                    raw.proxies.get(name).map_or_else(
-                        || ProxyNode {
+                    if let Some(id) = identities.get(&name) {
+                        return id.clone();
+                    }
+                    let id = ProxyNodeId::new(name.clone(), None);
+                    nodes.insert(
+                        id.clone(),
+                        Arc::new(ProxyNode {
                             name: name.clone(),
-                            ..ProxyNode::default()
-                        },
-                        |proxy| proxy.to_node(name),
-                    )
+                            ..Default::default()
+                        }),
+                    );
+                    identities.insert(name, id.clone());
+                    id
                 })
                 .collect();
-
-            groups.push(ProxyGroup {
-                name: if proxy.name.is_empty() {
-                    key.clone()
-                } else {
-                    proxy.name.clone()
-                },
-                kind: proxy.kind.clone(),
-                behavior: ProxyGroupBehavior::from_mihomo(&proxy.kind, proxy.fixed),
-                now: proxy.now.clone(),
-                all,
-                test_url: proxy
-                    .test_url
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|url| !url.is_empty())
-                    .map(str::to_owned),
-                hidden: proxy.hidden,
-            });
+            groups.push(group);
         }
-
         groups.sort_by(|left, right| {
             group_display_priority(left)
                 .cmp(&group_display_priority(right))
                 .then_with(|| left.name.cmp(&right.name))
         });
-
-        Self {
-            groups,
-            proxy_count,
-        }
+        Self::with_nodes(groups, nodes, proxy_count)
     }
 }
 
@@ -347,6 +491,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn repeated_group_members_resolve_to_one_canonical_node_allocation() {
+        let raw: RawProxyCatalog = serde_json::from_str(
+            r#"{"proxies":{"HK":{"name":"HK","type":"Shadowsocks","provider-name":"Airport A","history":[{"delay":100}]},"first":{"name":"first","type":"Selector","all":["HK"]},"second":{"name":"second","type":"Selector","all":["HK"]}}}"#,
+        ).unwrap();
+        let catalog = ProxyCatalog::from(raw);
+        let first = catalog.node(&catalog.groups[0].all[0]).unwrap();
+        let second = catalog.node(&catalog.groups[1].all[0]).unwrap();
+        assert_eq!(first, second);
+        assert!(
+            std::ptr::eq(first, second),
+            "one Mihomo node was allocated separately for each group"
+        );
+    }
+
+    #[test]
+    fn canonical_identity_uses_controller_key_and_provider_and_preserves_missing_members() {
+        let raw: RawProxyCatalog = serde_json::from_str(
+            r#"{"proxies":{"a":{"name":"HK","provider-name":"Airport A","history":[{"delay":42}]},"b":{"name":"HK","provider-name":"Airport B","history":[{"delay":77}]},"first":{"type":"Selector","all":["a","b","missing"]},"second":{"type":"Selector","all":["a","missing"]}}}"#,
+        ).unwrap();
+        let catalog = ProxyCatalog::from(raw);
+        let first = &catalog.groups[0].all;
+        let second = &catalog.groups[1].all;
+        assert_ne!(first[0], first[1]);
+        assert_eq!(first[0].controller_name(), "a");
+        assert_eq!(first[0].provider(), Some("Airport A"));
+        assert_eq!(catalog.node(&first[0]).unwrap().name, "HK");
+        assert_eq!(catalog.node(&first[1]).unwrap().latest_delay(), Some(77));
+        assert!(std::ptr::eq(
+            catalog.node(&first[2]).unwrap(),
+            catalog.node(&second[1]).unwrap()
+        ));
+        assert_eq!(catalog.node(&first[2]).unwrap().name, "missing");
+        assert_eq!(catalog.referencing_groups(&first[0]), [0, 1]);
+    }
+
+    #[test]
+    fn hiding_groups_rebases_the_prepared_reference_indices() {
+        let raw: RawProxyCatalog = serde_json::from_str(
+            r#"{"proxies":{"HK":{"history":[{"delay":42}]},"GLOBAL":{"type":"Selector","hidden":true,"all":["HK"]},"visible":{"type":"Selector","all":["HK"]}}}"#,
+        ).unwrap();
+        let mut catalog = ProxyCatalog::from(raw);
+        let id = catalog.groups[0].all[0].clone();
+        assert_eq!(catalog.referencing_groups(&id), [0, 1]);
+        catalog.hide_hidden_groups();
+        assert_eq!(catalog.groups.len(), 1);
+        assert_eq!(catalog.groups[0].name, "visible");
+        assert_eq!(catalog.referencing_groups(&id), [0]);
+    }
+
+    #[test]
     fn resolves_group_members_from_mihomo_catalog() {
         let raw: RawProxyCatalog = serde_json::from_str(
             r#"{
@@ -364,9 +558,19 @@ mod tests {
         assert_eq!(catalog.groups.len(), 1);
         assert_eq!(catalog.groups[0].name, "Proxy");
         assert_eq!(catalog.groups[0].now, "HK 01");
-        assert_eq!(catalog.groups[0].all[0].latest_delay(), Some(42));
         assert_eq!(
-            catalog.groups[0].all[1].capabilities().collect::<Vec<_>>(),
+            catalog
+                .node(&catalog.groups[0].all[0])
+                .unwrap()
+                .latest_delay(),
+            Some(42)
+        );
+        assert_eq!(
+            catalog
+                .node(&catalog.groups[0].all[1])
+                .unwrap()
+                .capabilities()
+                .collect::<Vec<_>>(),
             vec!["UDP"]
         );
     }
@@ -488,7 +692,13 @@ mod tests {
 
         let catalog = ProxyCatalog::from(raw);
 
-        assert_eq!(catalog.groups[0].all[0].provider_name, None);
+        assert_eq!(
+            catalog
+                .node(&catalog.groups[0].all[0])
+                .unwrap()
+                .provider_name,
+            None
+        );
     }
 
     #[test]
@@ -501,7 +711,11 @@ mod tests {
         let catalog = ProxyCatalog::from(raw);
 
         assert_eq!(
-            catalog.groups[0].all[0].provider_name.as_deref(),
+            catalog
+                .node(&catalog.groups[0].all[0])
+                .unwrap()
+                .provider_name
+                .as_deref(),
             Some("Airport A")
         );
     }
@@ -555,15 +769,20 @@ mod tests {
     }
 
     fn mode_catalog() -> ProxyCatalog {
-        ProxyCatalog {
-            groups: ["GLOBAL", "Proxy", "Streaming"]
+        ProxyCatalog::from_group_nodes(
+            ["GLOBAL", "Proxy", "Streaming"]
                 .into_iter()
-                .map(|name| ProxyGroup {
-                    name: name.into(),
-                    ..ProxyGroup::default()
+                .map(|name| {
+                    (
+                        ProxyGroup {
+                            name: name.into(),
+                            ..ProxyGroup::default()
+                        },
+                        Vec::new(),
+                    )
                 })
                 .collect(),
-            proxy_count: 3,
-        }
+            3,
+        )
     }
 }

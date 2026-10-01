@@ -2,8 +2,10 @@ use std::time::Duration;
 
 use http::{HeaderValue, header::AUTHORIZATION};
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async,
-    tungstenite::{client::IntoClientRequest, handshake::client::Request},
+    MaybeTlsStream, WebSocketStream, connect_async_with_config,
+    tungstenite::{
+        client::IntoClientRequest, handshake::client::Request, protocol::WebSocketConfig,
+    },
 };
 
 use crate::MihomoEndpoint;
@@ -43,11 +45,19 @@ pub async fn connect_stream(
     timeout_message: &str,
 ) -> Result<MihomoSocket, String> {
     let request = stream_request(endpoint, path, query)?;
-    tokio::time::timeout(CONNECT_TIMEOUT, connect_async(request))
-        .await
-        .map_err(|_| timeout_message.to_owned())?
-        .map(|(socket, _)| socket)
-        .map_err(|error| error.to_string())
+    let config = (path == "/logs").then(|| WebSocketConfig {
+        max_message_size: Some(128 * 1024),
+        max_frame_size: Some(128 * 1024),
+        ..WebSocketConfig::default()
+    });
+    tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        connect_async_with_config(request, config, false),
+    )
+    .await
+    .map_err(|_| timeout_message.to_owned())?
+    .map(|(socket, _)| socket)
+    .map_err(|error| error.to_string())
 }
 
 fn stream_request(
@@ -76,7 +86,94 @@ fn stream_request(
 
 #[cfg(test)]
 mod tests {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{
+        Message,
+        protocol::frame::{
+            Frame,
+            coding::{Data, OpCode},
+        },
+    };
+
     use super::*;
+
+    async fn log_socket_fixture(
+        messages: Vec<Message>,
+    ) -> (MihomoSocket, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let endpoint =
+            MihomoEndpoint::new(format!("http://{}", listener.local_addr().unwrap()), "");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            for message in messages {
+                if socket.send(message).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let socket = connect_stream(&endpoint, "/logs", &[], "fixture timed out")
+            .await
+            .unwrap();
+        (socket, server)
+    }
+
+    #[tokio::test]
+    async fn log_socket_accepts_a_legal_frame_and_rejects_one_above_128_kib() {
+        let legal = r#"{"type":"info","payload":"legal frame"}"#;
+        let (mut socket, server) = log_socket_fixture(vec![
+            Message::Text(legal.into()),
+            Message::Binary(vec![b'x'; 128 * 1024 + 1]),
+        ])
+        .await;
+
+        let first = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.into_text().unwrap(), legal);
+        let oversized = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            oversized,
+            Err(tokio_tungstenite::tungstenite::Error::Capacity(_))
+        ));
+        drop(socket);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn log_socket_rejects_a_large_message_split_into_legal_sized_frames() {
+        let (mut socket, server) = log_socket_fixture(vec![
+            Message::Frame(Frame::message(
+                vec![b'x'; 80 * 1024],
+                OpCode::Data(Data::Text),
+                false,
+            )),
+            Message::Frame(Frame::message(
+                vec![b'x'; 80 * 1024],
+                OpCode::Data(Data::Continue),
+                true,
+            )),
+        ])
+        .await;
+
+        let oversized = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            oversized,
+            Err(tokio_tungstenite::tungstenite::Error::Capacity(_))
+        ));
+        drop(socket);
+        server.await.unwrap();
+    }
 
     #[test]
     fn reconnect_delay_grows_is_bounded_and_resets_after_data() {

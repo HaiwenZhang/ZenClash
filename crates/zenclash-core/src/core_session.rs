@@ -15,9 +15,13 @@ use thiserror::Error;
 use tokio::runtime::Handle;
 
 use crate::{
-    CaptureOutcome, ControlledConfigError, ControlledConfigStore, CoreKind, MihomoClient,
-    MihomoError, MihomoProcess, TrafficCaptureSession,
-    controlled_config::{RuntimeApplicationTransaction, RuntimeCandidateValidation},
+    CaptureOutcome, ControlledConfigError, ControlledConfigStore, CoreKind, CoreUpdateError,
+    MihomoClient, MihomoError, MihomoProcess, MihomoRelease, MihomoReleaseService,
+    TrafficCaptureSession, VersionInfo,
+    controlled_config::{
+        RuntimeApplicationTransaction, RuntimeCandidateValidation, RuntimeMutationError,
+    },
+    data_coordinator::DataWriteLease,
 };
 
 const CORE_READY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -94,6 +98,11 @@ pub enum EffectiveConfigIntent {
         /// Ordered explicit YAML override files.
         overrides: Vec<PathBuf>,
     },
+    /// Reapply the profile committed when this intent enters the transition gate.
+    ReapplyCurrent {
+        /// Current ordered explicit YAML override files.
+        overrides: Vec<PathBuf>,
+    },
 }
 
 /// Maintenance transition requested for a managed runtime core.
@@ -123,6 +132,39 @@ pub struct CoreApplyOutcome {
     pub generation: u64,
 }
 
+/// Accepted managed-core installation and its session generation.
+#[derive(Debug)]
+pub struct CoreInstallOutcome {
+    /// Version reported by the accepted controller.
+    pub version: VersionInfo,
+    /// Session generation after the executable transition.
+    pub generation: u64,
+    /// Cleanup failure after acceptance; the new executable remains active.
+    pub cleanup_error: Option<String>,
+}
+
+/// In-memory committed source identity paired with the current runtime generation.
+///
+/// The source may remain recorded while its owned core is stopped. This snapshot
+/// reports the last committed source, rather than inferring identity from disk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoreCommittedProfileSnapshot {
+    /// Source successfully committed to this runtime session, absent before first application.
+    pub profile_path: Option<PathBuf>,
+    /// Runtime generation paired atomically with this source identity.
+    pub generation: u64,
+}
+
+/// Opaque exact runtime configuration captured before a whole-data restore.
+///
+/// The snapshot retains the committed source identity and override chain together
+/// with the applied startup payload. Source files are never recomputed on recovery.
+#[derive(Clone)]
+pub struct CoreRestoreSnapshot {
+    committed: CommittedConfig,
+    payload: Option<String>,
+}
+
 /// Point-in-time state exposed by [`CoreSession`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CoreSessionSnapshot {
@@ -132,7 +174,7 @@ pub struct CoreSessionSnapshot {
     pub managed: bool,
     /// Whether the managed process is running, or the external session remains attached.
     pub running: bool,
-    /// Number of successful runtime transitions.
+    /// Runtime version, including recovery after an accepted temporary configuration.
     pub generation: u64,
 }
 
@@ -190,6 +232,9 @@ pub enum CoreSessionError {
     /// Effective configuration preparation, application, or persistence failed.
     #[error(transparent)]
     Config(#[from] ControlledConfigError),
+    /// Managed release preparation, activation or recovery failed.
+    #[error(transparent)]
+    Update(#[from] CoreUpdateError),
     /// Managed process transition failed.
     #[error(transparent)]
     Process(#[from] MihomoError),
@@ -199,9 +244,18 @@ pub enum CoreSessionError {
         /// External runtime-core implementation.
         core: CoreKind,
     },
+    /// The selected backend cannot install official Mihomo releases.
+    #[error("{}", zenclash_i18n::text_with("core_page.errors.release_unsupported", &[("core", core.display_name().to_owned())]))]
+    ReleaseUnsupported {
+        /// Runtime core implementation that rejected this operation.
+        core: CoreKind,
+    },
     /// An operation raced with explicit application shutdown.
     #[error("内核会话正在停止，拒绝开始新的运行时操作")]
     ShuttingDown,
+    /// A reapplication has no source configuration successfully committed to this session.
+    #[error("{}", zenclash_i18n::text("overrides.notices.saved_unapplied"))]
+    NoCommittedProfile,
 }
 
 /// Cloneable owner of serialized effective-config and lifecycle transitions.
@@ -211,6 +265,7 @@ pub struct CoreSession {
     client: MihomoClient,
     process: Option<Arc<MihomoProcess>>,
     transition: Arc<tokio::sync::Mutex<CommittedConfig>>,
+    committed_profile: Arc<RwLock<CommittedProfileCache>>,
     generation: Arc<AtomicU64>,
     shutdown_requested: Arc<AtomicBool>,
     supervisor_started: Arc<AtomicBool>,
@@ -218,19 +273,55 @@ pub struct CoreSession {
     lifecycle: Arc<RwLock<CoreLifecycleSnapshot>>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct CommittedConfig {
     profile: Option<PathBuf>,
     overrides: Vec<PathBuf>,
+}
+
+struct CommittedProfileCache {
+    config: CommittedConfig,
+    generation: u64,
+}
+
+#[derive(Debug)]
+pub(crate) enum CoreProfileStageError {
+    Rejected(CoreSessionError),
+    RuntimeUnknown {
+        cause: CoreSessionError,
+        runtime_version: u64,
+    },
+}
+
+impl From<CoreSessionError> for CoreProfileStageError {
+    fn from(error: CoreSessionError) -> Self {
+        Self::Rejected(error)
+    }
+}
+
+impl From<ControlledConfigError> for CoreProfileStageError {
+    fn from(error: ControlledConfigError) -> Self {
+        Self::Rejected(error.into())
+    }
+}
+
+pub(crate) enum CoreProfileRollbackOutcome {
+    Validated,
+    Runtime {
+        result: Result<(), CoreSessionError>,
+        runtime_version: u64,
+    },
 }
 
 #[must_use]
 pub(crate) struct CoreProfileApplication {
     state: CoreProfileApplicationState,
     generation: Arc<AtomicU64>,
+    committed_profile: Arc<RwLock<CommittedProfileCache>>,
     client: MihomoClient,
     transition_guard: tokio::sync::OwnedMutexGuard<CommittedConfig>,
     overrides: Vec<PathBuf>,
+    _write_lease: DataWriteLease,
 }
 
 enum CoreProfileApplicationState {
@@ -246,26 +337,40 @@ impl CoreProfileApplication {
         match self.state {
             CoreProfileApplicationState::Runtime { transaction, kind } => {
                 transaction.commit();
-                *self.transition_guard = CommittedConfig {
+                let config = CommittedConfig {
                     profile: Some(profile),
                     overrides: self.overrides,
                 };
+                *self.transition_guard = config.clone();
                 self.client.invalidate_connections();
-                let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+                let generation = advance_profile_snapshot(
+                    &self.generation,
+                    &self.committed_profile,
+                    Some(config),
+                );
                 Some(CoreApplyOutcome { kind, generation })
             }
             CoreProfileApplicationState::Validated(_validation) => None,
         }
     }
 
-    pub(crate) async fn rollback(self) -> Result<(), CoreSessionError> {
+    pub(crate) async fn rollback(self) -> CoreProfileRollbackOutcome {
         self.client.invalidate_connections();
         match self.state {
-            CoreProfileApplicationState::Runtime { transaction, .. } => transaction
-                .rollback()
-                .await
-                .map_err(CoreSessionError::Config),
-            CoreProfileApplicationState::Validated(_) => Ok(()),
+            CoreProfileApplicationState::Runtime { transaction, .. } => {
+                let result = transaction
+                    .rollback()
+                    .await
+                    .map_err(CoreSessionError::Config);
+                // Readers may have observed the accepted candidate before persistence failed.
+                let runtime_version =
+                    advance_profile_snapshot(&self.generation, &self.committed_profile, None);
+                CoreProfileRollbackOutcome::Runtime {
+                    result,
+                    runtime_version,
+                }
+            }
+            CoreProfileApplicationState::Validated(_) => CoreProfileRollbackOutcome::Validated,
         }
     }
 }
@@ -299,6 +404,13 @@ impl CoreSession {
             client,
             lifecycle: Arc::new(RwLock::new(CoreLifecycleSnapshot::new(process.is_some()))),
             process,
+            committed_profile: Arc::new(RwLock::new(CommittedProfileCache {
+                config: CommittedConfig {
+                    profile: profile.clone(),
+                    overrides: overrides.clone(),
+                },
+                generation: 0,
+            })),
             transition: Arc::new(tokio::sync::Mutex::new(CommittedConfig {
                 profile,
                 overrides,
@@ -376,7 +488,17 @@ impl CoreSession {
         store: &ControlledConfigStore,
         intent: EffectiveConfigIntent,
     ) -> Result<CoreApplyOutcome, CoreSessionError> {
+        let _write_lease = store
+            .acquire_write_lease_for_paths(self.write_scopes())
+            .await?;
+        let store = store.with_write_lease(&_write_lease);
+        let client = self.client.with_write_lease(&_write_lease);
         let mut active_profile = self.transition.lock().await;
+        if matches!(&intent, EffectiveConfigIntent::ReapplyCurrent { .. })
+            && active_profile.profile.is_none()
+        {
+            return Err(CoreSessionError::NoCommittedProfile);
+        }
         self.ensure_running_operations_allowed()?;
         let (kind, profile, active_overrides) = match intent {
             EffectiveConfigIntent::Patch {
@@ -391,24 +513,35 @@ impl CoreSession {
                         (profile.clone(), active_profile.overrides.clone())
                     });
                 let kind = self
-                    .apply_patch(store, profile.clone(), patch, overrides.clone())
+                    .apply_patch(&store, &client, profile.clone(), patch, overrides.clone())
                     .await?;
                 (kind, profile, overrides)
             }
             EffectiveConfigIntent::ActivateProfile { profile, overrides } => {
                 let kind = self
-                    .activate_profile(store, profile.clone(), overrides.clone())
+                    .activate_profile(&store, &client, profile.clone(), overrides.clone())
+                    .await?;
+                (kind, profile, overrides)
+            }
+            EffectiveConfigIntent::ReapplyCurrent { overrides } => {
+                let profile = active_profile
+                    .profile
+                    .clone()
+                    .ok_or(CoreSessionError::NoCommittedProfile)?;
+                let kind = self
+                    .activate_profile(&store, &client, profile.clone(), overrides.clone())
                     .await?;
                 (kind, profile, overrides)
             }
         };
-        *active_profile = CommittedConfig {
-            profile: Some(profile),
+        let committed = CommittedConfig {
+            profile: Some(profile.clone()),
             overrides: active_overrides,
         };
+        *active_profile = committed.clone();
         Ok(CoreApplyOutcome {
             kind,
-            generation: self.next_generation(),
+            generation: self.next_generation_with_config(Some(committed)),
         })
     }
 
@@ -420,26 +553,38 @@ impl CoreSession {
     ///
     /// # Errors
     ///
-    /// Returns controller, persistence or lifecycle errors without advancing
-    /// the session generation.
+    /// Returns controller, persistence or lifecycle errors. Failures after a
+    /// runtime mutation attempt invalidate reads by advancing the generation;
+    /// preflight rejection leaves the current generation unchanged.
     pub async fn set_mode(
         &self,
         store: &ControlledConfigStore,
         mode: &str,
     ) -> Result<u64, CoreSessionError> {
+        let _write_lease = store
+            .acquire_write_lease_for_paths(self.write_scopes())
+            .await?;
+        let store = store.with_write_lease(&_write_lease);
+        let client = self.client.with_write_lease(&_write_lease);
         let active_profile = self.transition.lock().await;
         self.ensure_running_operations_allowed()?;
         if let Some(profile) = active_profile.profile.as_ref() {
             store
-                .apply_mode_update_with_overrides(
-                    &self.client,
+                .apply_mode_update_for_session(
+                    &client,
                     profile,
                     mode,
                     active_profile.overrides.clone(),
                 )
-                .await?;
+                .await
+                .map_err(|error| self.runtime_mutation_error(error))?;
         } else {
-            self.client.set_mode(mode).await?;
+            if let Err(error) = client.set_mode(mode).await {
+                if !matches!(&error, MihomoError::InvalidInput(_)) {
+                    self.next_generation();
+                }
+                return Err(error.into());
+            }
         }
         Ok(self.next_generation())
     }
@@ -451,14 +596,19 @@ impl CoreSession {
         previous: Option<PathBuf>,
         overrides: Vec<PathBuf>,
         apply_runtime: bool,
-    ) -> Result<CoreProfileApplication, CoreSessionError> {
+    ) -> Result<CoreProfileApplication, CoreProfileStageError> {
+        let write_lease = store
+            .acquire_write_lease_for_paths(self.write_scopes())
+            .await?;
+        let store = store.with_write_lease(&write_lease);
+        let client = self.client.with_write_lease(&write_lease);
         let transition_guard = self.transition.clone().lock_owned().await;
         self.ensure_running_operations_allowed()?;
         let active_overrides = overrides.clone();
         let state = if !apply_runtime {
             CoreProfileApplicationState::Validated(
                 store
-                    .stage_profile_validation(self.kind, &self.client, candidate, overrides)
+                    .stage_profile_validation(self.kind, &client, candidate, overrides)
                     .await?,
             )
         } else if !self.kind.capabilities().full_config_reload {
@@ -469,21 +619,26 @@ impl CoreSession {
                             self.require_managed_restart()?,
                             candidate,
                             overrides,
+                            Some(self.shutdown_requested.clone()),
                         )
-                        .await?,
+                        .await
+                        .map_err(|error| self.profile_stage_error(error))?,
                 ),
                 kind: CoreApplyKind::Restarted,
             }
         } else {
             match store
-                .stage_profile_reload(&self.client, candidate.clone(), previous, overrides.clone())
+                .stage_profile_reload(&client, candidate.clone(), previous, overrides.clone())
                 .await
             {
                 Ok(transaction) => CoreProfileApplicationState::Runtime {
                     transaction: Box::new(transaction),
                     kind: CoreApplyKind::HotReloaded,
                 },
-                Err(error) if should_restart_after_hot_reload(&error) && self.process.is_some() => {
+                Err(error)
+                    if should_restart_after_hot_reload(&error.cause) && self.process.is_some() =>
+                {
+                    let hot_reload_attempted = error.attempted;
                     CoreProfileApplicationState::Runtime {
                         transaction: Box::new(
                             store
@@ -491,21 +646,28 @@ impl CoreSession {
                                     self.process.clone().expect("managed process checked"),
                                     candidate,
                                     overrides,
+                                    Some(self.shutdown_requested.clone()),
                                 )
-                                .await?,
+                                .await
+                                .map_err(|mut error| {
+                                    error.attempted |= hot_reload_attempted;
+                                    self.profile_stage_error(error)
+                                })?,
                         ),
                         kind: CoreApplyKind::Restarted,
                     }
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(self.profile_stage_error(error)),
             }
         };
         Ok(CoreProfileApplication {
             state,
             generation: self.generation.clone(),
+            committed_profile: self.committed_profile.clone(),
             client: self.client.clone(),
             transition_guard,
             overrides: active_overrides,
+            _write_lease: write_lease,
         })
     }
 
@@ -523,6 +685,7 @@ impl CoreSession {
         intent: CoreMaintenanceIntent,
         timeout: Duration,
     ) -> Result<u64, CoreSessionError> {
+        let lease = self.acquire_process_write_lease().await?;
         let _transition = self.transition.lock().await;
         self.ensure_not_shutting_down()?;
         self.network_suspended.store(false, Ordering::Release);
@@ -533,7 +696,11 @@ impl CoreSession {
         match intent {
             CoreMaintenanceIntent::Restart => {
                 process
-                    .restart_and_wait_until(timeout, Some(self.shutdown_requested.clone()))
+                    .restart_and_wait_until_with_lease(
+                        timeout,
+                        Some(self.shutdown_requested.clone()),
+                        &lease,
+                    )
                     .await?;
             }
             CoreMaintenanceIntent::Stop => {
@@ -544,6 +711,150 @@ impl CoreSession {
         }
         *self.lifecycle.write() = CoreLifecycleSnapshot::new(true);
         Ok(self.next_generation())
+    }
+
+    /// Downloads a Mihomo release, then serializes executable activation and recovery.
+    ///
+    /// Dropping the caller does not abandon an activated file transaction. Application
+    /// shutdown cancels preparation and prevents both candidate and recovery restarts.
+    ///
+    /// # Errors
+    /// Returns unsupported-core, lifecycle, release verification or recovery errors.
+    pub async fn install_release(
+        &self,
+        service: &MihomoReleaseService,
+        release: &MihomoRelease,
+    ) -> Result<CoreInstallOutcome, CoreSessionError> {
+        self.ensure_not_shutting_down()?;
+        let process = self.require_managed_restart()?;
+        if self.kind != CoreKind::Mihomo {
+            return Err(CoreSessionError::ReleaseUnsupported { core: self.kind });
+        }
+        let session = self.clone();
+        let service = service.clone();
+        let release = release.clone();
+        tokio::spawn(async move {
+            let lease = session.acquire_process_write_lease().await?;
+            session.ensure_not_shutting_down()?;
+            let prepared = service
+                .prepare_until(
+                    &release,
+                    process.launch_config().binary.clone(),
+                    Some(session.shutdown_requested.clone()),
+                )
+                .await?;
+            let _transition = session.transition.lock().await;
+            if let Err(error) = session.ensure_not_shutting_down() {
+                tokio::task::spawn_blocking(move || drop(prepared))
+                    .await
+                    .map_err(|error| ControlledConfigError::Task(error.to_string()))?;
+                return Err(error);
+            }
+            let previous_pid = process.snapshot().pid;
+            let previous_phase = session.lifecycle.read().phase;
+            let result = service
+                .install_prepared(
+                    prepared,
+                    process.clone(),
+                    session.client.with_write_lease(&lease),
+                    session.shutdown_requested.clone(),
+                    &lease,
+                )
+                .await;
+            session.client.invalidate_connections();
+            match result {
+                Ok(crate::core_update::InstalledCore {
+                    version,
+                    cleanup_error,
+                }) => {
+                    let generation = session.next_generation();
+                    session.network_suspended.store(false, Ordering::Release);
+                    let mut lifecycle = session.lifecycle.write();
+                    *lifecycle = CoreLifecycleSnapshot::new(true);
+                    lifecycle.last_error = cleanup_error.clone();
+                    if session.is_shutting_down() {
+                        lifecycle.phase = CoreLifecyclePhase::ShuttingDown;
+                    }
+                    Ok(CoreInstallOutcome {
+                        version,
+                        generation,
+                        cleanup_error,
+                    })
+                }
+                Err(error) => {
+                    let snapshot = process.snapshot();
+                    if snapshot.pid != previous_pid {
+                        session.next_generation();
+                    }
+                    let running = snapshot.running;
+                    let mut lifecycle = session.lifecycle.write();
+                    lifecycle.phase = if session.is_shutting_down() {
+                        CoreLifecyclePhase::ShuttingDown
+                    } else if running {
+                        CoreLifecyclePhase::Stable
+                    } else if matches!(
+                        previous_phase,
+                        CoreLifecyclePhase::Stopped | CoreLifecyclePhase::NetworkSuspended
+                    ) {
+                        previous_phase
+                    } else {
+                        CoreLifecyclePhase::Failed
+                    };
+                    lifecycle.last_error = Some(error.to_string());
+                    Err(error.into())
+                }
+            }
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))?
+    }
+
+    /// Updates GeoData through the same managed-directory and transition boundary.
+    ///
+    /// # Errors
+    /// Returns lifecycle or controller failures.
+    pub async fn update_geodata(&self) -> Result<(), CoreSessionError> {
+        self.update_builtin_resource(true).await
+    }
+
+    /// Updates the external UI files through the same managed-directory boundary.
+    ///
+    /// # Errors
+    /// Returns lifecycle or controller failures.
+    pub async fn update_external_ui(&self) -> Result<(), CoreSessionError> {
+        self.update_builtin_resource(false).await
+    }
+
+    async fn update_builtin_resource(&self, geodata: bool) -> Result<(), CoreSessionError> {
+        let session = self.clone();
+        tokio::spawn(async move {
+            let lease = session.acquire_process_write_lease().await?;
+            let client = session.client.with_write_lease(&lease);
+            let _transition = session.transition.lock().await;
+            session.ensure_running_operations_allowed()?;
+            if geodata {
+                client.update_geodata().await?;
+            } else {
+                client.update_external_ui().await?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))?
+    }
+
+    pub(crate) fn write_scopes(&self) -> Vec<PathBuf> {
+        let mut scopes = self.client.write_scopes();
+        if let Some(process) = &self.process {
+            scopes.extend(process.write_scopes());
+        }
+        scopes
+    }
+
+    async fn acquire_process_write_lease(&self) -> Result<DataWriteLease, CoreSessionError> {
+        DataWriteLease::shared_async(self.write_scopes())
+            .await
+            .map_err(|error| ControlledConfigError::Task(error.to_string()).into())
     }
 
     /// Stops the managed child, or detaches from an external controller.
@@ -577,13 +888,94 @@ impl CoreSession {
         self.process.is_some()
     }
 
-    /// Returns the last successful transition generation without inspecting the child.
+    /// Returns the runtime version without inspecting the child.
+    ///
+    /// Recovery after an accepted temporary configuration also advances this version,
+    /// so reads of that temporary state cannot remain current after rollback.
     #[must_use]
     pub fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
+        self.committed_profile.read().generation
     }
 
-    /// Captures ownership, running state, and successful transition generation.
+    /// Reads the last committed runtime source and its paired generation.
+    ///
+    /// This only copies prepared in-memory state under a short lock. It never
+    /// inspects files, the child process, or the asynchronous transition gate.
+    #[must_use]
+    pub fn committed_profile_snapshot(&self) -> CoreCommittedProfileSnapshot {
+        let cached = self.committed_profile.read();
+        CoreCommittedProfileSnapshot {
+            profile_path: cached.config.profile.clone(),
+            generation: cached.generation,
+        }
+    }
+
+    // The caller has already reserved all session/data scopes exclusively, before swapping files.
+    pub(crate) fn capture_restore_snapshot(
+        &self,
+        store: &ControlledConfigStore,
+    ) -> Result<CoreRestoreSnapshot, CoreSessionError> {
+        self.ensure_not_shutting_down()?;
+        let committed = self.committed_profile.read().config.clone();
+        let payload = store.cached_runtime_payload()?;
+        Ok(CoreRestoreSnapshot { committed, payload })
+    }
+
+    /// Reapplies the exact runtime payload captured before a data restore.
+    ///
+    /// Resolve this snapshot under the restore's exclusive write authority and
+    /// pass its authorized controlled store. Source files and override documents
+    /// may have changed; they are never read to recreate the previous runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing-snapshot, validation, controller, process or exit error.
+    pub async fn restore_snapshot(
+        &self,
+        store: &ControlledConfigStore,
+        snapshot: &CoreRestoreSnapshot,
+    ) -> Result<CoreApplyOutcome, CoreSessionError> {
+        let lease = store
+            .acquire_write_lease_for_paths(self.write_scopes())
+            .await?;
+        let store = store.with_write_lease(&lease);
+        let client = self.client.with_write_lease(&lease);
+        let mut committed = self.transition.lock().await;
+        self.ensure_running_operations_allowed()?;
+        let payload = snapshot.payload.clone().ok_or_else(|| {
+            CoreSessionError::Config(ControlledConfigError::Transaction(zenclash_i18n::text(
+                "backup.errors.no_runtime_snapshot",
+            )))
+        })?;
+        let process = if self.kind.capabilities().full_config_reload {
+            None
+        } else {
+            Some(self.require_managed_restart()?)
+        };
+        let kind = if process.is_some() {
+            CoreApplyKind::Restarted
+        } else {
+            CoreApplyKind::HotReloaded
+        };
+        let result = store
+            .restore_exact_runtime_payload(
+                &client,
+                process,
+                payload,
+                self.shutdown_requested.clone(),
+            )
+            .await;
+        if let Err(error) = result {
+            return Err(self.runtime_mutation_error(error));
+        }
+        *committed = snapshot.committed.clone();
+        Ok(CoreApplyOutcome {
+            kind,
+            generation: self.next_generation_with_config(Some(snapshot.committed.clone())),
+        })
+    }
+
+    /// Captures ownership, running state, and the current runtime generation.
     /// Run off the UI thread because process inspection can wait for a transition.
     #[must_use]
     pub fn snapshot(&self) -> CoreSessionSnapshot {
@@ -594,7 +986,7 @@ impl CoreSession {
                 .process
                 .as_ref()
                 .is_none_or(|process| process.is_running()),
-            generation: self.generation.load(Ordering::Acquire),
+            generation: self.generation(),
         }
     }
 
@@ -613,6 +1005,7 @@ impl CoreSession {
     async fn apply_patch(
         &self,
         store: &ControlledConfigStore,
+        client: &MihomoClient,
         profile: PathBuf,
         patch: serde_json::Value,
         overrides: Vec<PathBuf>,
@@ -620,60 +1013,90 @@ impl CoreSession {
         if !self.kind.capabilities().full_config_reload {
             let process = self.require_managed_restart()?;
             store
-                .apply_json_update_with_restart(process, profile, &patch, overrides)
-                .await?;
+                .apply_json_update_with_restart_for_session(
+                    process,
+                    profile,
+                    &patch,
+                    overrides,
+                    Some(self.shutdown_requested.clone()),
+                )
+                .await
+                .map_err(|error| self.runtime_mutation_error(error))?;
             return Ok(CoreApplyKind::Restarted);
         }
 
         match store
-            .apply_json_update_with_overrides(&self.client, &profile, &patch, overrides.clone())
+            .apply_json_update_for_session(client, &profile, &patch, overrides.clone())
             .await
         {
             Ok(()) => Ok(CoreApplyKind::HotReloaded),
-            Err(error) if should_restart_after_hot_reload(&error) && self.process.is_some() => {
+            Err(error)
+                if should_restart_after_hot_reload(&error.cause) && self.process.is_some() =>
+            {
+                let hot_reload_attempted = error.attempted;
                 store
-                    .apply_json_update_with_restart(
+                    .apply_json_update_with_restart_for_session(
                         self.process.clone().expect("managed process checked"),
                         profile,
                         &patch,
                         overrides,
+                        Some(self.shutdown_requested.clone()),
                     )
-                    .await?;
+                    .await
+                    .map_err(|mut error| {
+                        error.attempted |= hot_reload_attempted;
+                        self.runtime_mutation_error(error)
+                    })?;
                 Ok(CoreApplyKind::Restarted)
             }
-            Err(error) => Err(error.into()),
+            Err(error) => Err(self.runtime_mutation_error(error)),
         }
     }
 
     async fn activate_profile(
         &self,
         store: &ControlledConfigStore,
+        client: &MihomoClient,
         profile: PathBuf,
         overrides: Vec<PathBuf>,
     ) -> Result<CoreApplyKind, CoreSessionError> {
         if !self.kind.capabilities().full_config_reload {
             store
-                .restart_with_overrides(self.require_managed_restart()?, profile, overrides)
-                .await?;
+                .restart_with_overrides_for_session(
+                    self.require_managed_restart()?,
+                    profile,
+                    overrides,
+                    Some(self.shutdown_requested.clone()),
+                )
+                .await
+                .map_err(|error| self.runtime_mutation_error(error))?;
             return Ok(CoreApplyKind::Restarted);
         }
 
         match store
-            .reload_with_overrides(&self.client, &profile, overrides.clone())
+            .reload_with_overrides_for_session(client, &profile, overrides.clone())
             .await
         {
             Ok(()) => Ok(CoreApplyKind::HotReloaded),
-            Err(error) if should_restart_after_hot_reload(&error) && self.process.is_some() => {
+            Err(error)
+                if should_restart_after_hot_reload(&error.cause) && self.process.is_some() =>
+            {
+                let hot_reload_attempted = error.attempted;
                 store
-                    .restart_with_overrides(
+                    .restart_with_overrides_for_session(
                         self.process.clone().expect("managed process checked"),
                         profile,
                         overrides,
+                        Some(self.shutdown_requested.clone()),
                     )
-                    .await?;
+                    .await
+                    .map_err(|mut error| {
+                        error.attempted |= hot_reload_attempted;
+                        self.runtime_mutation_error(error)
+                    })?;
                 Ok(CoreApplyKind::Restarted)
             }
-            Err(error) => Err(error.into()),
+            Err(error) => Err(self.runtime_mutation_error(error)),
         }
     }
 
@@ -684,8 +1107,31 @@ impl CoreSession {
     }
 
     fn next_generation(&self) -> u64 {
+        self.next_generation_with_config(None)
+    }
+
+    fn next_generation_with_config(&self, config: Option<CommittedConfig>) -> u64 {
         self.client.invalidate_connections();
-        self.generation.fetch_add(1, Ordering::AcqRel) + 1
+        advance_profile_snapshot(&self.generation, &self.committed_profile, config)
+    }
+
+    fn runtime_mutation_error(&self, error: RuntimeMutationError) -> CoreSessionError {
+        if error.attempted {
+            self.next_generation();
+        }
+        error.cause.into()
+    }
+
+    fn profile_stage_error(&self, error: RuntimeMutationError) -> CoreProfileStageError {
+        let cause = CoreSessionError::Config(error.cause);
+        if error.attempted {
+            CoreProfileStageError::RuntimeUnknown {
+                cause,
+                runtime_version: self.next_generation(),
+            }
+        } else {
+            CoreProfileStageError::Rejected(cause)
+        }
     }
 
     fn ensure_running_operations_allowed(&self) -> Result<(), CoreSessionError> {
@@ -707,6 +1153,20 @@ impl CoreSession {
             Ok(())
         }
     }
+}
+
+fn advance_profile_snapshot(
+    generation: &AtomicU64,
+    committed_profile: &RwLock<CommittedProfileCache>,
+    config: Option<CommittedConfig>,
+) -> u64 {
+    let mut snapshot = committed_profile.write();
+    if let Some(config) = config {
+        snapshot.config = config;
+    }
+    let generation = generation.fetch_add(1, Ordering::AcqRel) + 1;
+    snapshot.generation = generation;
+    generation
 }
 
 async fn supervise_managed_core(
@@ -789,6 +1249,13 @@ async fn supervise_managed_core(
 }
 
 async fn recover_managed_core(session: &CoreSession, policy: CoreRecoveryPolicy) -> bool {
+    let lease = match session.acquire_process_write_lease().await {
+        Ok(lease) => lease,
+        Err(error) => {
+            session.lifecycle.write().last_error = Some(error.to_string());
+            return false;
+        }
+    };
     let _transition = session.transition.lock().await;
     if session.shutdown_requested.load(Ordering::Acquire)
         || session.network_suspended.load(Ordering::Acquire)
@@ -810,9 +1277,10 @@ async fn recover_managed_core(session: &CoreSession, policy: CoreRecoveryPolicy)
         lifecycle.recovery_attempts
     };
     match process
-        .restart_and_wait_until(
+        .restart_and_wait_until_with_lease(
             policy.ready_timeout,
             Some(session.shutdown_requested.clone()),
+            &lease,
         )
         .await
     {
@@ -861,16 +1329,647 @@ mod tests {
 
     #[tokio::test]
     async fn queued_mode_uses_the_profile_committed_by_the_preceding_transition() {
-        queued_update_uses_committed_config(false).await;
+        queued_update_uses_committed_config(QueuedConfigUpdate::Mode).await;
     }
 
     #[tokio::test]
     async fn queued_patch_uses_the_profile_and_override_chain_committed_by_the_preceding_transition()
      {
-        queued_update_uses_committed_config(true).await;
+        queued_update_uses_committed_config(QueuedConfigUpdate::Patch).await;
     }
 
-    async fn queued_update_uses_committed_config(patch: bool) {
+    #[tokio::test]
+    async fn queued_override_reapply_does_not_reactivate_the_previously_displayed_profile() {
+        queued_update_uses_committed_config(QueuedConfigUpdate::Reapply).await;
+    }
+
+    #[tokio::test]
+    async fn reapply_without_a_committed_profile_does_not_mutate_saved_configuration() {
+        let root = std::env::temp_dir().join(format!(
+            "zenclash-reapply-uncommitted-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let yaml_override = root.join("saved.yaml");
+        std::fs::write(&yaml_override, "allow-lan: true\n").unwrap();
+        let store = ControlledConfigStore::new(root.join("controlled"));
+        let session = CoreSession::open(
+            CoreKind::Mihomo,
+            MihomoClient::new(MihomoEndpoint::new("http://127.0.0.1:1", "")).unwrap(),
+            None,
+        );
+        assert!(matches!(
+            session
+                .apply(
+                    &store,
+                    EffectiveConfigIntent::ReapplyCurrent {
+                        overrides: vec![yaml_override.clone()]
+                    }
+                )
+                .await,
+            Err(CoreSessionError::NoCommittedProfile)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(yaml_override).unwrap(),
+            "allow-lan: true\n"
+        );
+        assert!(!store.runtime_path().exists());
+        assert_eq!(session.generation(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn committed_profile_snapshot_does_not_read_disk_or_wait_for_an_active_transition() {
+        let root = std::env::temp_dir().join(format!(
+            "zenclash-committed-snapshot-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.yaml");
+        std::fs::write(&source, "mode: rule\n").unwrap();
+        let session = CoreSession::open_with_config(
+            CoreKind::Mihomo,
+            MihomoClient::new(MihomoEndpoint::default()).unwrap(),
+            None,
+            Some(source.clone()),
+            vec![],
+        );
+        std::fs::remove_file(&source).unwrap();
+        let _active_transition = session.transition.lock().await;
+        assert_eq!(
+            session.committed_profile_snapshot(),
+            CoreCommittedProfileSnapshot {
+                profile_path: Some(source),
+                generation: 0,
+            }
+        );
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rolling_back_an_accepted_profile_invalidates_reads_of_the_temporary_runtime() {
+        let root = std::env::temp_dir().join(format!(
+            "zenclash-profile-rollback-generation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let previous = root.join("a.yaml");
+        let candidate = root.join("b.yaml");
+        std::fs::write(&previous, "mixed-port: 8011\nmode: rule\n").unwrap();
+        std::fs::write(&candidate, "mixed-port: 8012\nmode: rule\n").unwrap();
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut bytes = [0_u8; 4096];
+                    let length = stream.read(&mut bytes).unwrap();
+                    assert_ne!(length, 0, "request closed before its body was received");
+                    request.extend_from_slice(&bytes[..length]);
+                    if let Some(header_end) =
+                        request.windows(4).position(|part| part == b"\r\n\r\n")
+                    {
+                        let headers = String::from_utf8_lossy(&request[..header_end]);
+                        let body_length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= header_end + 4 + body_length {
+                            break;
+                        }
+                    }
+                }
+                requests.push(String::from_utf8(request).unwrap());
+                if index == 1 {
+                    let body = r#"{"mixed-port":8012,"mode":"rule"}"#;
+                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                } else {
+                    stream
+                        .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                        .unwrap();
+                }
+            }
+            requests
+        });
+        let store = ControlledConfigStore::new(root.join("controlled"));
+        store
+            .materialize_with_overrides_for_core(&previous, &[], CoreKind::Mihomo)
+            .unwrap();
+        let session = CoreSession::open_with_config(
+            CoreKind::Mihomo,
+            MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap(),
+            None,
+            Some(previous.clone()),
+            vec![],
+        );
+        let transaction = session
+            .stage_profile_application(&store, candidate, Some(previous.clone()), vec![], true)
+            .await
+            .unwrap();
+        let read_generation = session.generation();
+        let observed_runtime = session.client.runtime_config().await.unwrap();
+        match transaction.rollback().await {
+            CoreProfileRollbackOutcome::Runtime { result, .. } => result.unwrap(),
+            CoreProfileRollbackOutcome::Validated => panic!("runtime transaction was not applied"),
+        }
+        let requests = server.join().unwrap();
+        let restored: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(store.runtime_path()).unwrap()).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(requests[0].starts_with("PUT /configs?force=true "));
+        assert!(requests[0].contains("8012"));
+        assert!(requests[1].starts_with("GET /configs "));
+        assert!(requests[2].starts_with("PUT /configs?force=true "));
+        assert!(requests[2].contains("8011"));
+        assert_eq!(observed_runtime.mixed_port, 8012);
+        assert_eq!(restored["mixed-port"].as_u64(), Some(8011));
+        assert_eq!(
+            session.committed_profile_snapshot().profile_path,
+            Some(previous)
+        );
+        assert!(
+            session.generation() > read_generation,
+            "a read of the accepted candidate remained current after runtime rollback"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_snapshot_replays_unnormalized_applied_bytes_after_sources_are_deleted() {
+        let root = lifecycle_test_root("raw-runtime-snapshot");
+        std::fs::create_dir_all(&root).unwrap();
+        let previous = root.join("previous.yaml");
+        let overlay = root.join("overlay.yaml");
+        let candidate = root.join("candidate.yaml");
+        std::fs::write(&previous, "mixed-port: 8011\nmode: rule\n").unwrap();
+        std::fs::write(&overlay, "allow-lan: true\n").unwrap();
+        std::fs::write(&candidate, "mixed-port: 8012\nmode: global\n").unwrap();
+        let store = ControlledConfigStore::new(root.join("controlled"));
+        store
+            .materialize_with_overrides(&previous, std::slice::from_ref(&overlay))
+            .unwrap();
+        let applied_bytes = std::fs::read_to_string(store.runtime_path()).unwrap();
+        assert!(!applied_bytes.contains("geox-url"));
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let mut payloads = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut bytes = [0_u8; 4096];
+                    let length = stream.read(&mut bytes).unwrap();
+                    assert_ne!(length, 0);
+                    request.extend_from_slice(&bytes[..length]);
+                    if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]);
+                        assert!(headers.starts_with("PUT /configs?force=true "));
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        if request.len() >= end + 4 + length {
+                            payloads.push(
+                                serde_json::from_slice::<serde_json::Value>(&request[end + 4..])
+                                    .unwrap()["payload"]
+                                    .as_str()
+                                    .unwrap()
+                                    .to_owned(),
+                            );
+                            break;
+                        }
+                    }
+                }
+                stream
+                    .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                    .unwrap();
+            }
+            payloads
+        });
+        let session = CoreSession::open_with_config(
+            CoreKind::Mihomo,
+            MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap(),
+            None,
+            Some(previous.clone()),
+            vec![overlay.clone()],
+        );
+        let exclusive = DataWriteLease::exclusive(vec![root.clone()]);
+        let authorized = store.with_write_lease(&exclusive);
+        let snapshot = session.capture_restore_snapshot(&authorized).unwrap();
+        assert_eq!(
+            session
+                .apply(
+                    &authorized,
+                    EffectiveConfigIntent::ActivateProfile {
+                        profile: candidate,
+                        overrides: vec![],
+                    }
+                )
+                .await
+                .unwrap()
+                .generation,
+            1
+        );
+        std::fs::remove_file(&previous).unwrap();
+        std::fs::remove_file(&overlay).unwrap();
+        assert_eq!(
+            session
+                .restore_snapshot(&authorized, &snapshot)
+                .await
+                .unwrap()
+                .generation,
+            2
+        );
+        let payloads = server.join().unwrap();
+        assert!(payloads[0].contains("8012"));
+        assert_eq!(
+            payloads[1], applied_bytes,
+            "restore normalized or regenerated the accepted payload"
+        );
+        assert_eq!(
+            std::fs::read_to_string(store.runtime_path()).unwrap(),
+            applied_bytes
+        );
+        assert_eq!(
+            session.committed_profile_snapshot().profile_path,
+            Some(previous)
+        );
+        assert_eq!(session.transition.lock().await.overrides, vec![overlay]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn mode_preflight_read_failure_preserves_runtime_version_and_startup_cache() {
+        let root = lifecycle_test_root("mode-preflight-version");
+        std::fs::create_dir_all(&root).unwrap();
+        let profile = root.join("source.yaml");
+        std::fs::write(&profile, "mixed-port: 8011\nmode: rule\n").unwrap();
+        let store = ControlledConfigStore::new(root.join("controlled"));
+        store
+            .materialize_with_overrides_for_core(&profile, &[], CoreKind::Mihomo)
+            .unwrap();
+        let previous_cache = std::fs::read(store.runtime_path()).unwrap();
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                let mut bytes = [0_u8; 4096];
+                let length = stream.read(&mut bytes).unwrap();
+                assert_ne!(length, 0);
+                request.extend_from_slice(&bytes[..length]);
+            }
+            stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let session = CoreSession::open_with_config(
+            CoreKind::Mihomo,
+            MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap(),
+            None,
+            Some(profile),
+            vec![],
+        );
+        assert!(session.set_mode(&store, "global").await.is_err());
+        assert!(server.join().unwrap().starts_with("GET /configs "));
+        assert_eq!(
+            session.generation(),
+            0,
+            "a failed preflight query must not invalidate runtime reads"
+        );
+        assert_eq!(std::fs::read(store.runtime_path()).unwrap(), previous_cache);
+        assert_eq!(store.load_json().unwrap(), serde_json::json!({}));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_patch_does_not_invalidate_the_committed_runtime() {
+        let root = lifecycle_test_root("invalid-patch-version");
+        std::fs::create_dir_all(&root).unwrap();
+        let profile = root.join("source.yaml");
+        std::fs::write(&profile, "mixed-port: 8011\nmode: rule\n").unwrap();
+        let store = ControlledConfigStore::new(root.join("controlled"));
+        store
+            .materialize_with_overrides_for_core(&profile, &[], CoreKind::Mihomo)
+            .unwrap();
+        let previous_cache = std::fs::read(store.runtime_path()).unwrap();
+        let session = CoreSession::open_with_config(
+            CoreKind::Mihomo,
+            MihomoClient::new(MihomoEndpoint::new("http://127.0.0.1:1", "")).unwrap(),
+            None,
+            Some(profile.clone()),
+            vec![],
+        );
+        assert!(matches!(
+            session
+                .apply(
+                    &store,
+                    EffectiveConfigIntent::Patch {
+                        profile,
+                        patch: serde_json::json!([]),
+                        overrides: vec![],
+                    }
+                )
+                .await,
+            Err(CoreSessionError::Config(ControlledConfigError::NotMapping))
+        ));
+        assert_eq!(session.generation(), 0);
+        assert_eq!(std::fs::read(store.runtime_path()).unwrap(), previous_cache);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unreadable_applied_cache_is_rejected_before_runtime_application() {
+        let root = lifecycle_test_root("invalid-cache-version");
+        std::fs::create_dir_all(&root).unwrap();
+        let profile = root.join("source.yaml");
+        std::fs::write(&profile, "mode: rule\n").unwrap();
+        let store = ControlledConfigStore::new(root.join("controlled"));
+        std::fs::create_dir_all(store.root()).unwrap();
+        std::fs::write(store.runtime_path(), [0xff_u8]).unwrap();
+        let session = CoreSession::open_with_config(
+            CoreKind::Mihomo,
+            MihomoClient::new(MihomoEndpoint::new("http://127.0.0.1:1", "")).unwrap(),
+            None,
+            Some(profile.clone()),
+            vec![],
+        );
+        assert!(matches!(
+            session
+                .stage_profile_application(&store, profile.clone(), Some(profile), vec![], true)
+                .await,
+            Err(CoreProfileStageError::Rejected(CoreSessionError::Config(
+                ControlledConfigError::Io(_)
+            )))
+        ));
+        assert_eq!(session.generation(), 0);
+        assert_eq!(std::fs::read(store.runtime_path()).unwrap(), vec![0xff]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn direct_mode_rollback_invalidates_reads_of_the_temporary_runtime() {
+        direct_rollback_invalidates_runtime_reads(true, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn direct_patch_rollback_invalidates_reads_of_the_temporary_runtime() {
+        direct_rollback_invalidates_runtime_reads(false, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn direct_patch_rollback_restores_the_applied_cache_after_sources_and_overrides_change() {
+        direct_rollback_invalidates_runtime_reads(false, true, false).await;
+    }
+
+    #[tokio::test]
+    async fn direct_patch_without_an_applied_cache_reports_unknown_after_persistence_failure() {
+        direct_rollback_invalidates_runtime_reads(false, false, true).await;
+    }
+
+    async fn direct_rollback_invalidates_runtime_reads(
+        mode_update: bool,
+        changed_sources: bool,
+        missing_cache: bool,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let root = lifecycle_test_root(if mode_update {
+            "direct-mode-rollback"
+        } else {
+            "direct-patch-rollback"
+        });
+        std::fs::create_dir_all(&root).unwrap();
+        let profile = root.join("source.yaml");
+        std::fs::write(&profile, "mixed-port: 8011\nmode: rule\n").unwrap();
+        let overlay = root.join("override.yaml");
+        std::fs::write(&overlay, "allow-lan: true\n").unwrap();
+        let overrides = if changed_sources {
+            vec![overlay.clone()]
+        } else {
+            vec![]
+        };
+        let store = ControlledConfigStore::new(root.join("controlled"));
+        store
+            .materialize_with_overrides_for_core(&profile, &overrides, CoreKind::Mihomo)
+            .unwrap();
+        let applied_payload = std::fs::read_to_string(store.runtime_path()).unwrap();
+        if missing_cache {
+            std::fs::remove_file(store.runtime_path()).unwrap();
+        }
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let state = Arc::new(tokio::sync::Mutex::new((8011_u16, "rule".to_owned())));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let entered = Arc::new(parking_lot::Mutex::new(Some(entered_tx)));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let payloads = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        let server_payloads = payloads.clone();
+        let server_state = state.clone();
+        let server_release = release.clone();
+        let server = tokio::spawn(async move {
+            let mut workers = tokio::task::JoinSet::new();
+            for _ in 0..if mode_update {
+                6
+            } else if missing_cache {
+                2
+            } else {
+                3
+            } {
+                let (mut stream, _) =
+                    tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let state = server_state.clone();
+                let payloads = server_payloads.clone();
+                let release = server_release.clone();
+                let entered = entered.clone();
+                workers.spawn(async move {
+                    let mut request = Vec::new();
+                    let header_end = loop {
+                        let mut bytes = [0_u8; 4096];
+                        let length = stream.read(&mut bytes).await.unwrap();
+                        assert_ne!(length, 0);
+                        request.extend_from_slice(&bytes[..length]);
+                        if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&request[..end]);
+                            let length = headers.lines().find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+                            }).unwrap_or(0);
+                            if request.len() >= end + 4 + length { break end; }
+                        }
+                    };
+                    let mutation = !request.starts_with(b"GET ");
+                    let body = if mutation {
+                        let patch: serde_json::Value = serde_json::from_slice(&request[header_end + 4..]).unwrap();
+                        let mut current = state.lock().await;
+                        if mode_update {
+                            current.1 = patch["mode"].as_str().unwrap().to_owned();
+                        } else {
+                            payloads.lock().push(patch["payload"].as_str().unwrap().to_owned());
+                            let payload: serde_yaml::Value = serde_yaml::from_str(patch["payload"].as_str().unwrap()).unwrap();
+                            current.0 = payload["mixed-port"].as_u64().unwrap() as u16;
+                        }
+                        String::new()
+                    } else {
+                        let current = state.lock().await;
+                        serde_json::json!({"mixed-port": current.0, "mode": current.1}).to_string()
+                    };
+                    if mutation {
+                        let first = entered.lock().take();
+                        if let Some(entered) = first {
+                            entered.send(()).unwrap();
+                            tokio::time::timeout(Duration::from_secs(5), release.notified()).await.unwrap();
+                        }
+                    }
+                    let status = if mutation { "204 No Content" } else { "200 OK" };
+                    stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                });
+            }
+            while let Some(result) = workers.join_next().await {
+                result.unwrap();
+            }
+        });
+        let session = CoreSession::open_with_config(
+            CoreKind::Mihomo,
+            MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap(),
+            None,
+            Some(profile.clone()),
+            overrides,
+        );
+        if changed_sources {
+            std::fs::write(&profile, "mixed-port: 7998\nmode: rule\n").unwrap();
+            std::fs::write(&overlay, "allow-lan: false\n").unwrap();
+        }
+        let mutation_session = session.clone();
+        let mutation_store = store.clone();
+        let mutation_profile = profile.clone();
+        let mutation = tokio::spawn(async move {
+            if mode_update {
+                mutation_session
+                    .set_mode(&mutation_store, "global")
+                    .await
+                    .map(|_| ())
+            } else {
+                mutation_session
+                    .apply(
+                        &mutation_store,
+                        EffectiveConfigIntent::Patch {
+                            profile: mutation_profile,
+                            patch: serde_json::json!({"mixed-port":8012}),
+                            overrides: vec![],
+                        },
+                    )
+                    .await
+                    .map(|_| ())
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let read_generation = session.generation();
+        let temporary = session.client.runtime_config().await.unwrap();
+        let concurrent = store
+            .prepare_json_update(&profile, &serde_json::json!({"allow-lan":true}))
+            .unwrap();
+        store.commit(&concurrent).unwrap();
+        release.notify_one();
+        let result = mutation.await.unwrap();
+        server.await.unwrap();
+        assert!(
+            matches!(
+                result,
+                Err(CoreSessionError::Config(
+                    ControlledConfigError::Transaction(_)
+                ))
+            ),
+            "{result:?}"
+        );
+        if missing_cache {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains(&zenclash_i18n::text("backup.errors.no_runtime_snapshot"))
+            );
+            assert!(!store.runtime_path().exists());
+            assert_eq!(
+                payloads.lock().len(),
+                1,
+                "missing applied cache must not trigger a guessed runtime restore"
+            );
+            assert_eq!(state.lock().await.0, 8012);
+            assert!(session.generation() > read_generation);
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        let restored: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(store.runtime_path()).unwrap()).unwrap();
+        let runtime = state.lock().await.clone();
+        std::fs::remove_dir_all(root).unwrap();
+        if changed_sources {
+            assert_eq!(
+                payloads.lock().last(),
+                Some(&applied_payload),
+                "rollback rebuilt modified source or override files instead of restoring the applied payload"
+            );
+        }
+        assert_eq!(runtime, (8011, "rule".to_owned()));
+        assert_eq!(restored["mixed-port"].as_u64(), Some(8011));
+        assert_eq!(restored["mode"].as_str(), Some("rule"));
+        if mode_update {
+            assert_eq!(temporary.mode, "global");
+        } else {
+            assert_eq!(temporary.mixed_port, 8012);
+        }
+        assert!(
+            session.generation() > read_generation,
+            "temporary runtime query remained current after direct rollback"
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    enum QueuedConfigUpdate {
+        Mode,
+        Patch,
+        Reapply,
+    }
+
+    async fn queued_update_uses_committed_config(update: QueuedConfigUpdate) {
+        let complete_reload = !matches!(update, QueuedConfigUpdate::Mode);
         let root = std::env::temp_dir().join(format!(
             "zenclash-queued-mode-{}-{}",
             std::process::id(),
@@ -895,7 +1994,7 @@ mod tests {
         let server = thread::spawn(move || {
             let mut entered = Some(entered);
             let mut requests = Vec::new();
-            for index in 0..if patch { 2 } else { 4 } {
+            for index in 0..if complete_reload { 2 } else { 4 } {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut bytes = [0_u8; 8_192];
                 let length = stream.read(&mut bytes).unwrap();
@@ -904,7 +2003,7 @@ mod tests {
                     entered.take().unwrap().send(()).unwrap();
                     released.recv_timeout(Duration::from_secs(5)).unwrap();
                 }
-                if patch || matches!(index, 0 | 2) {
+                if complete_reload || matches!(index, 0 | 2) {
                     stream
                         .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
                         .unwrap();
@@ -951,7 +2050,17 @@ mod tests {
             let session = session.clone();
             let store = store.clone();
             tokio::spawn(async move {
-                if patch {
+                if matches!(update, QueuedConfigUpdate::Reapply) {
+                    session
+                        .apply(
+                            &store,
+                            EffectiveConfigIntent::ReapplyCurrent {
+                                overrides: vec![previous_override],
+                            },
+                        )
+                        .await
+                        .map(|outcome| outcome.generation)
+                } else if matches!(update, QueuedConfigUpdate::Patch) {
                     session
                         .apply(
                             &store,
@@ -971,17 +2080,31 @@ mod tests {
         release.send(()).unwrap();
         assert_eq!(activation.await.unwrap().unwrap().generation, 1);
         assert_eq!(mode.await.unwrap().unwrap(), 2);
+        assert_eq!(
+            session.committed_profile_snapshot(),
+            CoreCommittedProfileSnapshot {
+                profile_path: Some(root.join("b.yaml")),
+                generation: 2,
+            }
+        );
         let runtime: serde_yaml::Value =
             serde_yaml::from_str(&std::fs::read_to_string(store.runtime_path()).unwrap()).unwrap();
         assert_eq!(runtime["mixed-port"].as_u64(), Some(8012));
-        assert_eq!(runtime["mode"].as_str(), Some("global"));
-        assert_eq!(runtime["allow-lan"].as_bool(), Some(true));
+        if !matches!(update, QueuedConfigUpdate::Reapply) {
+            assert_eq!(runtime["mode"].as_str(), Some("global"));
+        }
+        assert_eq!(
+            runtime["allow-lan"].as_bool(),
+            Some(!matches!(update, QueuedConfigUpdate::Reapply))
+        );
         let requests = server.join().unwrap();
-        assert!(requests[if patch { 1 } else { 2 }].starts_with(if patch {
-            "PUT /configs?force=true "
-        } else {
-            "PATCH /configs "
-        }));
+        assert!(
+            requests[if complete_reload { 1 } else { 2 }].starts_with(if complete_reload {
+                "PUT /configs?force=true "
+            } else {
+                "PATCH /configs "
+            })
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1142,7 +2265,10 @@ mod tests {
             snapshot.running,
             "external process ownership is not inferred"
         );
-        assert_eq!(snapshot.generation, 0);
+        assert_eq!(
+            snapshot.generation, 1,
+            "the uncertain reload must invalidate previous runtime reads"
+        );
         assert_eq!(
             session.lifecycle_snapshot().phase,
             CoreLifecyclePhase::External
@@ -1446,6 +2572,150 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_during_configuration_validation_does_not_launch_a_candidate_or_recovery_child()
+     {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let root = lifecycle_test_root("config-restart-shutdown");
+        let source = root.join("source.yaml");
+        let candidate = root.join("candidate.yaml");
+        let launches = root.join("launches");
+        let armed = root.join("armed");
+        let validating = root.join("validating");
+        let release = root.join("release");
+        std::fs::write(&source, "mixed-port: 8011\nmode: rule\n").unwrap();
+        std::fs::write(&candidate, "mixed-port: 8012\nmode: rule\n").unwrap();
+        let store = ControlledConfigStore::new(root.join("controlled"));
+        store
+            .materialize_with_overrides_for_core(&source, &[], CoreKind::Mihomo)
+            .unwrap();
+        let previous_cache = std::fs::read(store.runtime_path()).unwrap();
+        let binary = root.join("mihomo");
+        std::fs::write(&binary, format!("#!/bin/sh\nif [ \"$1\" = '-t' ]; then\n  if [ -f '{}' ]; then touch '{}'; while [ ! -f '{}' ]; do sleep 0.01; done; fi\n  exit 0\nfi\nprintf x >> '{}'\ntrap 'exit 0' TERM INT\nwhile true; do sleep 0.01; done\n", armed.display(), validating.display(), release.display(), launches.display())).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let endpoint =
+            MihomoEndpoint::new(format!("http://{}", listener.local_addr().unwrap()), "");
+        let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
+        let server_launches = launches.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let accepted = tokio::select! { accepted = listener.accept() => accepted.unwrap(), _ = &mut stop_rx => break };
+                let (mut stream, _) = accepted;
+                let mut request = Vec::new();
+                loop {
+                    let mut bytes = [0_u8; 4096];
+                    let length = stream.read(&mut bytes).await.unwrap();
+                    assert_ne!(length, 0);
+                    request.extend_from_slice(&bytes[..length]);
+                    if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                if request.starts_with(b"PUT ") {
+                    continue;
+                } // A lost reload response forces managed restart.
+                assert!(request.starts_with(b"GET /version "));
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while std::fs::read(&server_launches).unwrap().len() < 2 {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                let body = r#"{"meta":true,"version":"fixture"}"#;
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let process = MihomoProcess::spawn(MihomoLaunchConfig {
+            kind: CoreKind::Mihomo,
+            binary,
+            config_file: store.runtime_path(),
+            home_dir: root.join("data"),
+            endpoint: endpoint.clone(),
+            controller_override: None,
+        })
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !launches.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let session = CoreSession::open_with_config(
+            CoreKind::Mihomo,
+            MihomoClient::new(endpoint).unwrap(),
+            Some(process.clone()),
+            Some(source),
+            vec![],
+        );
+        std::fs::write(&armed, []).unwrap();
+        let apply_session = session.clone();
+        let apply_store = store.clone();
+        let apply = tokio::spawn(async move {
+            apply_session
+                .apply(
+                    &apply_store,
+                    EffectiveConfigIntent::ActivateProfile {
+                        profile: candidate,
+                        overrides: vec![],
+                    },
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !validating.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        session.request_shutdown();
+        let shutdown_session = session.clone();
+        let shutdown = tokio::spawn(async move { shutdown_session.shutdown().await });
+        std::fs::write(&release, []).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), apply)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), shutdown)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        stop_tx.send(()).unwrap();
+        server.await.unwrap();
+        let launch_count = std::fs::read(&launches).unwrap().len();
+        let cache = std::fs::read(store.runtime_path()).unwrap();
+        let running = process.is_running();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            result.is_err(),
+            "configuration restart was accepted after shutdown: {result:?}"
+        );
+        assert_eq!(
+            launch_count, 1,
+            "shutdown launched a candidate or recovery child"
+        );
+        assert_eq!(cache, previous_cache);
+        assert!(!running);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_restarts_serialize_without_overlapping_children() {
         let root = lifecycle_test_root("serialized-restarts");
         let launches = root.join("launches");
@@ -1529,7 +2799,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[cfg(unix)]
     fn lifecycle_test_root(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "zenclash-core-session-{label}-{}-{}",

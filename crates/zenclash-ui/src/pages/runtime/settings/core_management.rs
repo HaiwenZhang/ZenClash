@@ -369,7 +369,13 @@ impl RuntimePage {
             .process
             .value()
             .is_some_and(|process| process.running)
-            || matches!(self.data, RuntimeData::Settings { .. })
+            || matches!(
+                self.data,
+                RuntimeData::Settings {
+                    config: Some(_),
+                    ..
+                }
+            )
     }
 
     pub(in crate::pages::runtime) fn refresh_core_management(&mut self, cx: &mut Context<Self>) {

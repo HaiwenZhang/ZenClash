@@ -1,6 +1,7 @@
 use zenclash_core::{
     DiagnosticData, DiagnosticPlan, DiagnosticReport, DiagnosticStepKind, NetworkDiagnostics,
-    NetworkLatencyTarget, NetworkProbeRoutePreference, NetworkProbeSnapshot, SupportSafe,
+    NetworkLatencyTarget, NetworkProbeRoute, NetworkProbeRoutePreference, NetworkProbeSnapshot,
+    SupportSafe,
 };
 
 use super::{DnsCacheAction, NetworkPreferenceChange, model};
@@ -8,6 +9,7 @@ use crate::pages::runtime::{ClipboardItem, Context, Page, RuntimeData, RuntimePa
 
 impl RuntimePage {
     pub(in crate::pages::runtime) fn cancel_network_probe(&mut self) {
+        self.network_probe.task.cancel();
         self.network_probe.loading = false;
         self.network_probe.revision = self.network_probe.revision.wrapping_add(1);
     }
@@ -57,6 +59,7 @@ impl RuntimePage {
         let task = self
             .runtime
             .spawn(async move { diagnostics.run(plan).await });
+        self.network_probe.task.replace(&task);
         cx.spawn(async move |this, cx| {
             let result = task.await.map_err(|error| {
                 zenclash_i18n::text_with(
@@ -65,40 +68,65 @@ impl RuntimePage {
                 )
             });
             let _ = this.update(cx, |this, cx| {
-                let path = result.as_ref().map_err(Clone::clone).and_then(|report| {
-                    let route = mihomo_route.as_ref().map_err(Clone::clone)?;
-                    let snapshot =
-                        diagnostic_network_snapshot(report, DiagnosticStepKind::NetworkMihomo)?;
-                    model::path_observation(route, generation, snapshot)
-                });
-                operational_status.record_path(generation, path);
-                if this.page != Page::Network || this.network_probe.revision != revision {
-                    return;
-                }
-                this.network_probe.loading = false;
-                match result {
-                    Ok(report) => {
-                        this.network_probe.snapshot = Some(
-                            diagnostic_network_snapshot(&report, selected_kind)
-                                .cloned()
-                                .unwrap_or_else(|error| NetworkProbeSnapshot {
-                                    public_ip_error: Some(error),
-                                    ..NetworkProbeSnapshot::default()
-                                }),
-                        );
-                        this.network_probe.report = Some(report);
-                    }
-                    Err(error) => {
-                        this.network_probe.snapshot = Some(NetworkProbeSnapshot {
-                            public_ip_error: Some(error),
-                            ..Default::default()
-                        });
-                    }
-                }
-                cx.notify();
+                this.complete_network_probe(
+                    revision,
+                    generation,
+                    mihomo_route,
+                    selected_kind,
+                    result,
+                    cx,
+                );
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    pub(in crate::pages::runtime) fn complete_network_probe(
+        &mut self,
+        revision: u64,
+        generation: u64,
+        mihomo_route: Result<NetworkProbeRoute, String>,
+        selected_kind: DiagnosticStepKind,
+        result: Result<DiagnosticReport, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.page != Page::Network
+            || self.network_probe.revision != revision
+            || !self.network_probe.loading
+        {
+            return;
+        }
+        self.network_probe.loading = false;
+        if self.core_session.generation() != generation {
+            cx.notify();
+            return;
+        }
+        let path = result.as_ref().map_err(Clone::clone).and_then(|report| {
+            let route = mihomo_route.as_ref().map_err(Clone::clone)?;
+            let snapshot = diagnostic_network_snapshot(report, DiagnosticStepKind::NetworkMihomo)?;
+            model::path_observation(route, generation, snapshot)
+        });
+        self.operational_status.record_path(generation, path);
+        match result {
+            Ok(report) => {
+                self.network_probe.snapshot = Some(
+                    diagnostic_network_snapshot(&report, selected_kind)
+                        .cloned()
+                        .unwrap_or_else(|error| NetworkProbeSnapshot {
+                            public_ip_error: Some(error),
+                            ..Default::default()
+                        }),
+                );
+                self.network_probe.report = Some(report);
+            }
+            Err(error) => {
+                self.network_probe.snapshot = Some(NetworkProbeSnapshot {
+                    public_ip_error: Some(error),
+                    ..Default::default()
+                })
+            }
+        }
         cx.notify();
     }
 

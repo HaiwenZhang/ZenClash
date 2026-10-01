@@ -5,9 +5,37 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use super::{MAX_PROFILE_BYTES, MAX_PROFILE_INDEX_BYTES, ProfileStoreError, ProfileStoreResult};
+use super::{
+    MAX_PROFILE_BYTES, MAX_PROFILE_INDEX_BYTES, ProfileCatalog, ProfileStore, ProfileStoreError,
+    ProfileStoreResult,
+};
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+impl ProfileStore {
+    /// Saves an updated catalog after its payload write, restoring the payload on failure.
+    /// The caller retains the transaction lock and owns revision checks and write ordering.
+    /// New-profile cleanup and active-selection recovery have different semantics and
+    /// remain in their existing transaction paths.
+    pub(super) fn save_catalog_or_restore_payload_unlocked(
+        &self,
+        catalog: &ProfileCatalog,
+        path: &Path,
+        previous_payload: &[u8],
+        catalog_failure: &str,
+        restore_failure: &str,
+    ) -> ProfileStoreResult<()> {
+        let Err(error) = self.save_unlocked(catalog) else {
+            return Ok(());
+        };
+        match atomic_write(path, previous_payload) {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(ProfileStoreError::Transaction(format!(
+                "{catalog_failure}：{error}；{restore_failure}：{rollback}"
+            ))),
+        }
+    }
+}
 
 pub fn read_profile_bytes(path: &Path) -> ProfileStoreResult<Vec<u8>> {
     let file = fs::File::open(path)?;

@@ -24,11 +24,11 @@ impl ZenClashApp {
                 client.proxy_catalog(), client.rule_catalog(), client.runtime_config());
             match (proxies, rules, config) {
                 (Ok(proxies), Ok(rules), Ok(config)) => {
-                    let groups: Vec<_> = proxies.groups.iter()
+                    let groups: Vec<_> = proxies.groups().iter()
                         .filter(|group| group.name.starts_with("group-")).collect();
                     !config.tun.enable && groups.len() == 20
                         && groups.iter().all(|group| group.all.len() == @NODES@
-                            && group.all.iter().enumerate().all(|(index, node)| node.name == format!("node-{index:05}")))
+                            && group.all.iter().enumerate().all(|(index, node)| proxies.node(node).is_some_and(|node| node.name == format!("node-{index:05}"))))
                         && rules.rules.len() == @RULES@ + 1
                         && rules.rules.iter().take(@RULES@).enumerate()
                             .all(|(index, rule)| rule.payload == format!("fixture-{index:06}.example"))

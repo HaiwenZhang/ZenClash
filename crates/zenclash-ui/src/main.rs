@@ -301,6 +301,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .ok()
         });
     let runtime_handle = runtime.handle().clone();
+    let traffic_history_session = traffic_history_store.clone().map(|store| {
+        app::TrafficHistorySession::start(&runtime_handle, client.clone(), store, &preferences)
+    });
+    let app_traffic_history_session = traffic_history_session.clone();
+    let shutdown_core = core_session.clone();
     let restart_after_exit = Arc::new(parking_lot::Mutex::new(None));
     let app_restart_after_exit = Arc::clone(&restart_after_exit);
 
@@ -318,6 +323,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 traffic_monitor: traffic,
                 log_monitor: logs,
                 traffic_history_store,
+                traffic_history_session: app_traffic_history_session,
                 tun_permissions,
                 mihomo_process,
                 profile_path,
@@ -331,6 +337,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
         cx.activate(true);
     });
+    // GPUI's native quit observers have a 200 ms deadline. Finish on Tokio after
+    // the event loop returns, before dropping the runtime or allowing restart.
+    let shutdown_result = runtime.block_on(async {
+        let mut failures = Vec::new();
+        if let Some(history) = traffic_history_session
+            && let Err(error) = history.shutdown().await
+        {
+            failures.push(error);
+        }
+        // The native event loop has already exited: always stop the owned child,
+        // even when history persistence failed. Any failure prevents restart.
+        if let Err(error) = shutdown_core.shutdown().await {
+            failures.push(error.to_string());
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    });
+    shutdown_result.map_err(std::io::Error::other)?;
     drop(_instance_lock);
     if let Some(executable) = restart_after_exit.lock().take() {
         spawn_restarted_process(&executable).map_err(|error| {

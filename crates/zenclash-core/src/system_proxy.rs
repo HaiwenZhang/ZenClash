@@ -8,7 +8,7 @@ use thiserror::Error;
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod command;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 mod linux;
 #[cfg(any(target_os = "macos", test))]
 mod macos;

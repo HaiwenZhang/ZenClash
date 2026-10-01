@@ -459,6 +459,115 @@ async fn reload_profile_restores_startup_cache_when_mihomo_rejects_payload() {
 }
 
 #[tokio::test]
+async fn profile_rollback_restores_the_exact_applied_payload_after_sources_change() {
+    let root = test_root("profile-rollback-applied-snapshot");
+    fs::create_dir_all(&root).unwrap();
+    let previous_profile = root.join("previous.yaml");
+    let candidate = root.join("candidate.yaml");
+    let previous_override = root.join("previous-override.yaml");
+    let next_override = root.join("next-override.yaml");
+    fs::write(&previous_profile, "mode: rule\nrules: ['MATCH,DIRECT']\n").unwrap();
+    fs::write(&candidate, "mode: rule\nrules: ['MATCH,REJECT']\n").unwrap();
+    fs::write(&previous_override, "mode: direct\n").unwrap();
+    fs::write(&next_override, "mode: global\n").unwrap();
+    let store = ControlledConfigStore::new(root.join("store"));
+    store
+        .materialize_with_overrides_for_core(
+            &previous_profile,
+            &[previous_override],
+            CoreKind::Mihomo,
+        )
+        .unwrap();
+    let applied_payload = fs::read_to_string(store.runtime_path()).unwrap();
+    fs::write(&previous_profile, "mode: global\nrules: ['MATCH,REJECT']\n").unwrap();
+    let (client, requests) = reload_fixture(2);
+
+    let transaction = store
+        .stage_profile_reload(
+            &client,
+            candidate,
+            Some(previous_profile),
+            vec![next_override],
+        )
+        .await
+        .unwrap();
+    transaction.rollback().await.unwrap();
+
+    let requests = requests.join().unwrap();
+    assert_eq!(
+        requests[1]["payload"].as_str(),
+        Some(applied_payload.as_str())
+    );
+    assert_eq!(
+        fs::read_to_string(store.runtime_path()).unwrap(),
+        applied_payload
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn accepted_profile_without_an_applied_snapshot_reports_unknown_on_rollback() {
+    let root = test_root("profile-rollback-without-snapshot");
+    let profile = write_profile(&root);
+    let candidate = root.join("candidate.yaml");
+    fs::write(&candidate, "mode: global\nrules: ['MATCH,REJECT']\n").unwrap();
+    let store = ControlledConfigStore::new(root.join("store"));
+    let (client, requests) = reload_fixture(1);
+
+    let transaction = store
+        .stage_profile_reload(&client, candidate, Some(profile), Vec::new())
+        .await
+        .unwrap();
+    assert!(store.runtime_path().exists());
+    let error = transaction.rollback().await.unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains(&zenclash_i18n::text("backup.errors.no_runtime_snapshot"))
+    );
+    assert!(!store.runtime_path().exists());
+    assert_eq!(requests.join().unwrap().len(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn reload_fixture(count: usize) -> (MihomoClient, thread::JoinHandle<Vec<serde_json::Value>>) {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = thread::spawn(move || {
+        (0..count)
+            .map(|_| {
+                let (stream, _) = listener.accept().unwrap();
+                let mut stream = std::io::BufReader::new(stream);
+                let mut content_length = 0;
+                loop {
+                    let mut line = String::new();
+                    assert!(std::io::BufRead::read_line(&mut stream, &mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        content_length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; content_length];
+                stream.read_exact(&mut body).unwrap();
+                write!(
+                    stream.get_mut(),
+                    "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+                serde_json::from_slice(&body).unwrap()
+            })
+            .collect()
+    });
+    let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+    (client, requests)
+}
+
+#[tokio::test]
 async fn settings_update_preserves_ordered_overrides_in_runtime_and_cache() {
     let root = test_root("settings-with-overrides");
     let profile = write_profile(&root);
@@ -501,6 +610,84 @@ async fn settings_update_preserves_ordered_overrides_in_runtime_and_cache() {
     let runtime = fs::read_to_string(store.runtime_path()).unwrap();
     assert!(runtime.contains("ipv6: false"));
     assert!(server.join().unwrap().contains("ipv6: false"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn conflicting_yaml_mode_is_rejected_before_runtime_or_storage_changes() {
+    let root = test_root("mode-override-conflict");
+    let profile = write_profile(&root);
+    let yaml_override = root.join("mode.yaml");
+    fs::write(&yaml_override, "mode: rule\n").unwrap();
+    let store = ControlledConfigStore::new(root.join("store"));
+    store
+        .materialize_with_overrides_for_core(
+            &profile,
+            std::slice::from_ref(&yaml_override),
+            CoreKind::Mihomo,
+        )
+        .unwrap();
+    let previous_runtime = fs::read(store.runtime_path()).unwrap();
+    let previous_patch = store.load_json().unwrap();
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (stop, stopped) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut requests = Vec::new();
+        while stopped.try_recv().is_err() {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                        .unwrap();
+                    let mut bytes = [0_u8; 8192];
+                    let read = stream.read(&mut bytes).unwrap();
+                    let request = String::from_utf8_lossy(&bytes[..read]).into_owned();
+                    let body = if request.starts_with("GET ") {
+                        if requests.is_empty() {
+                            r#"{"mode":"rule"}"#
+                        } else {
+                            r#"{"mode":"global"}"#
+                        }
+                    } else {
+                        ""
+                    };
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                    requests.push(request);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(std::time::Duration::from_millis(2));
+                }
+                Err(error) => panic!("controller accept failed: {error}"),
+            }
+        }
+        requests
+    });
+    let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+    let result = store
+        .apply_mode_update_with_overrides(&client, &profile, "global", vec![yaml_override])
+        .await;
+    stop.send(()).unwrap();
+    let requests = server.join().unwrap();
+
+    assert!(
+        matches!(result, Err(ControlledConfigError::ModeOverrideConflict { requested, effective })
+            if requested == "global" && effective == "rule"),
+        "a conflicting YAML mode was not reported as a typed conflict"
+    );
+    assert!(
+        requests.is_empty(),
+        "a rejected mode reached the controller"
+    );
+    assert_eq!(store.load_json().unwrap(), previous_patch);
+    assert_eq!(fs::read(store.runtime_path()).unwrap(), previous_runtime);
     fs::remove_dir_all(root).unwrap();
 }
 

@@ -5,11 +5,12 @@ pub(crate) mod workflow;
 
 pub(crate) use state::ProfileFormState;
 
-use zenclash_core::{ProfileCatalog, ProfileStore};
+use zenclash_core::{ProfileCatalog, ProfileRecovery, ProfileStore};
 
 pub(super) struct ProfileLibrary {
     pub(super) store: Option<ProfileStore>,
     pub(super) catalog: ProfileCatalog,
+    pub(super) recovery: Option<ProfileRecovery>,
     pub(super) forms: ProfileFormState,
     pub(super) generation: u64,
     pub(super) read_task: super::loader::PageReadTask,
@@ -24,6 +25,7 @@ impl ProfileLibrary {
         Self {
             store,
             catalog,
+            recovery: None,
             forms,
             generation: 0,
             read_task: super::loader::PageReadTask::default(),

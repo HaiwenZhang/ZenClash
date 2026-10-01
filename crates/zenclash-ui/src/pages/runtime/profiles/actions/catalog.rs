@@ -1,6 +1,6 @@
 use zenclash_core::ProfileSource;
 
-use super::{Context, Page, ProfileActivated, RemoteProfileOptions, RuntimePage, Window, workflow};
+use super::{Context, Page, RemoteProfileOptions, RuntimePage, Window, workflow};
 
 impl RuntimePage {
     pub(in super::super) fn begin_edit_remote_profile(
@@ -176,7 +176,10 @@ impl RuntimePage {
                                 Some(zenclash_i18n::text("profiles.notices.request_saved"));
                         }
                     }
-                    Err(error) => this.set_page_error(token, error),
+                    Err(error) => {
+                        this.synchronize_profile_recovery();
+                        this.set_page_error(token, error);
+                    }
                 }
                 cx.notify();
             });
@@ -237,7 +240,10 @@ impl RuntimePage {
                             });
                         }
                     }
-                    Err(error) => this.set_page_error(token, error),
+                    Err(error) => {
+                        this.synchronize_profile_recovery();
+                        this.set_page_error(token, error);
+                    }
                 }
                 cx.notify();
             });
@@ -254,7 +260,7 @@ impl RuntimePage {
             return;
         };
         let controlled = self.controlled_config_store.clone();
-        let core_runtime = workflow::CoreProfileRuntime::new(self.core_session.clone());
+        let core_runtime = self.profile_service.clone();
         let task = self
             .runtime
             .spawn(workflow::update_remote(store, controlled, core_runtime, id));
@@ -272,6 +278,17 @@ impl RuntimePage {
                 this.finish_mutation(token);
                 match result {
                     Ok(outcome) => {
+                        let accepted = this.synchronize_profile_receipt(&outcome.receipt, cx);
+                        if !accepted && outcome.receipt.runtime_version().is_some() {
+                            this.refresh(cx);
+                            cx.notify();
+                            return;
+                        }
+                        if !this.profile_service.is_current(outcome.refresh_version) {
+                            this.refresh(cx);
+                            cx.notify();
+                            return;
+                        }
                         let is_profile_page = match outcome.refresh {
                             Ok(data) => this.replace_page_data(token, data, cx),
                             Err(error) => {
@@ -289,17 +306,14 @@ impl RuntimePage {
                         if is_profile_page {
                             this.notice = Some(zenclash_i18n::text_with(
                                 "profiles.notices.updated",
-                                &[("name", outcome.name)],
+                                &[("name", outcome.receipt.name().to_owned())],
                             ));
                         }
-                        if outcome.active {
-                            this.profile_path = Some(outcome.path.clone());
-                            this.invalidate_config_inputs(cx);
-                            this.overrides.invalidate_preview();
-                            cx.emit(ProfileActivated { path: outcome.path });
-                        }
                     }
-                    Err(error) => this.set_page_error(token, error),
+                    Err(error) => {
+                        this.synchronize_profile_recovery();
+                        this.set_page_error(token, error);
+                    }
                 }
                 cx.notify();
             });
@@ -335,7 +349,10 @@ impl RuntimePage {
                             this.notice = Some(zenclash_i18n::text("profiles.notices.deleted"));
                         }
                     }
-                    Err(error) => this.set_page_error(token, error),
+                    Err(error) => {
+                        this.synchronize_profile_recovery();
+                        this.set_page_error(token, error);
+                    }
                 }
                 cx.notify();
             });

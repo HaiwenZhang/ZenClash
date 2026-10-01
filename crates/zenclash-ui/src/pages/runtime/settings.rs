@@ -7,7 +7,7 @@ use super::{
 use crate::components::sidebar::dispatch_navigate;
 
 mod app_update;
-mod backup;
+pub(super) mod backup;
 mod core_management;
 pub(in crate::pages::runtime) use app_update::AppUpdateUiState;
 pub(in crate::pages::runtime) use core_management::CoreManagementUiState;
@@ -18,28 +18,18 @@ const CONFIGURATION_TOOL_PAGES: [Page; 4] =
 const DIAGNOSTIC_TOOL_PAGES: [Page; 1] = [Page::Mihomo];
 
 impl RuntimePage {
-    pub(super) fn render_offline_settings(
-        &self,
-        theme: &gpui_kit::component::Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        v_flex()
-            .gap_4()
-            .child(self.render_version_info(theme))
-            .child(self.render_core_management(theme, cx))
-    }
-
     pub(super) fn render_settings(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let (config, autostart) = match &self.data {
-            RuntimeData::Settings { config, autostart } => (config.clone(), autostart.clone()),
-            _ => (
-                self.config().cloned().unwrap_or_default(),
-                AutostartStatus::default(),
+        let (config, autostart, autostart_error) = match &self.data {
+            RuntimeData::Settings { config, autostart } => (
+                config.as_ref(),
+                autostart.as_ref().ok(),
+                autostart.as_ref().err(),
             ),
+            _ => (None, None, None),
         };
         v_flex()
             .gap_4()
@@ -47,7 +37,17 @@ impl RuntimePage {
             .child(self.render_advanced_tools(theme))
             .child(self.render_core_management(theme, cx))
             .child(self.render_app_update(theme, cx))
-            .child(self.render_application_settings(&config, &autostart, theme, cx))
+            .when(config.is_none(), |this| {
+                this.child(super::message_banner(
+                    zenclash_i18n::text("runtime.empty.unavailable"),
+                    theme.warning,
+                    theme,
+                ))
+            })
+            .when_some(autostart_error, |this, error| {
+                this.child(super::message_banner(error.clone(), theme.warning, theme))
+            })
+            .child(self.render_application_settings(config, autostart, theme, cx))
             .when(self.core_kind.is_experimental(), |this| {
                 this.child(super::message_banner(
                     zenclash_i18n::text("settings.experimental_core"),
@@ -130,8 +130,8 @@ impl RuntimePage {
 
     fn render_application_settings(
         &self,
-        config: &RuntimeConfig,
-        autostart: &AutostartStatus,
+        config: Option<&RuntimeConfig>,
+        autostart: Option<&AutostartStatus>,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -141,46 +141,57 @@ impl RuntimePage {
                 self.client.endpoint().controller.clone(),
                 theme,
             ))
-            .child(setting_switch(
+            .child(super::common::setting_switch_disabled(
                 zenclash_i18n::text("settings.application.autostart.title"),
-                if autostart.enabled && !autostart.matches_current_executable {
+                if autostart.is_none() {
+                    zenclash_i18n::text("common.status.unavailable")
+                } else if autostart
+                    .is_some_and(|status| status.enabled && !status.matches_current_executable)
+                {
                     zenclash_i18n::text("settings.application.autostart.stale")
                 } else {
                     zenclash_i18n::text("settings.application.autostart.current")
                 },
-                autostart.enabled,
+                autostart.is_some_and(|status| status.enabled),
                 "settings-autostart",
                 theme,
+                autostart.is_none() || self.core_busy(),
                 cx.listener(|this, checked, _, cx| {
                     this.set_autostart(*checked, cx);
                 }),
             ))
             .child(info_row(
                 zenclash_i18n::text("settings.application.autostart.location"),
-                if autostart.location.is_empty() {
+                if autostart.is_none() {
+                    zenclash_i18n::text("common.status.unavailable")
+                } else if autostart.is_some_and(|status| status.location.is_empty()) {
                     zenclash_i18n::text("settings.application.autostart.waiting")
                 } else {
-                    autostart.location.clone()
+                    autostart
+                        .map(|status| status.location.clone())
+                        .unwrap_or_default()
                 },
                 theme,
             ))
-            .child(setting_switch(
-                "IPv6",
-                zenclash_i18n::text_with(
-                    "settings.application.ipv6.description",
-                    &[("core", self.core_kind.display_name().to_owned())],
-                ),
-                config.ipv6,
-                "settings-ipv6",
-                theme,
-                cx.listener(|this, checked, _, cx| {
-                    this.apply_controlled_config(
-                        json!({"ipv6": *checked}),
-                        zenclash_i18n::text("settings.application.ipv6.saved"),
-                        cx,
-                    );
-                }),
-            ))
+            .when_some(config, |this, config| {
+                this.child(setting_switch(
+                    "IPv6",
+                    zenclash_i18n::text_with(
+                        "settings.application.ipv6.description",
+                        &[("core", self.core_kind.display_name().to_owned())],
+                    ),
+                    config.ipv6,
+                    "settings-ipv6",
+                    theme,
+                    cx.listener(|this, checked, _, cx| {
+                        this.apply_controlled_config(
+                            json!({"ipv6": *checked}),
+                            zenclash_i18n::text("settings.application.ipv6.saved"),
+                            cx,
+                        );
+                    }),
+                ))
+            })
             .child(self.language_setting(theme, cx))
             .child(theme_setting(theme))
             .child(tray_setting(theme))
@@ -337,13 +348,10 @@ impl RuntimePage {
                     &[("error", error.to_string())],
                 )
             })??;
-            let config = client
-                .runtime_config()
-                .await
-                .map_err(|error| error.to_string())?;
+            let config = client.runtime_config().await.ok();
             Ok::<_, String>(RuntimeData::Settings {
                 config,
-                autostart: status,
+                autostart: Ok(status),
             })
         });
         cx.spawn(async move |this, cx| {

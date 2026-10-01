@@ -6,11 +6,15 @@ use zenclash_core::{CaptureOutcome, CoreSession, TrafficCaptureError};
 async fn stop_core_after_capture_release(
     core_session: &CoreSession,
     release: Result<CaptureOutcome, TrafficCaptureError>,
+    history: Option<&super::TrafficHistorySession>,
 ) -> Result<(), String> {
     match release {
         Ok(CaptureOutcome::ReconcileNeeded { failure, .. }) => return Err(failure),
         Err(error) => return Err(error.to_string()),
         Ok(_) => {}
+    }
+    if let Some(history) = history {
+        history.shutdown().await?;
     }
     core_session
         .shutdown()
@@ -74,11 +78,17 @@ impl ZenClashApp {
         let capture = self.traffic_capture.clone();
         let core_session = self.core_session.clone();
         let preferences = self.preferences_save_task.take();
+        let history = self.traffic_history_session.clone();
         let task = self.runtime.spawn(async move {
             if let Some(preferences) = preferences {
                 let _ = preferences.await;
             }
-            stop_core_after_capture_release(&core_session, capture.release_owned().await).await
+            stop_core_after_capture_release(
+                &core_session,
+                capture.release_owned().await,
+                history.as_deref(),
+            )
+            .await
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -135,7 +145,7 @@ mod tests {
             Err(TrafficCaptureError::Backend("release task failed".into())),
         ] {
             assert!(
-                stop_core_after_capture_release(&core, failure)
+                stop_core_after_capture_release(&core, failure, None)
                     .await
                     .is_err()
             );
@@ -144,7 +154,7 @@ mod tests {
                 Err(CoreSessionError::ShuttingDown)
             ));
         }
-        stop_core_after_capture_release(&core, Ok(released))
+        stop_core_after_capture_release(&core, Ok(released), None)
             .await
             .unwrap();
         assert!(matches!(

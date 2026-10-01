@@ -893,3 +893,72 @@ fn remote_update_refuses_to_overwrite_a_profile_changed_during_download() {
     );
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn independent_stores_preserve_changes_committed_during_another_catalog_transaction() {
+    let root = test_root("independent-store-transactions");
+    let store = ProfileStore::new(root.join("store")).unwrap();
+    verify_independent_catalog_updates(&store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn replacing_a_symlinked_store_keeps_existing_and_new_handles_in_one_transaction() {
+    use std::os::unix::fs::symlink;
+
+    let root = test_root("symlink-store-transactions");
+    let physical = root.join("physical");
+    let logical = root.join("store");
+    fs::create_dir_all(&physical).unwrap();
+    symlink(&physical, &logical).unwrap();
+    let store = ProfileStore::new(&logical).unwrap();
+    // Whole-root restores replace managed directory symlinks with staged trees.
+    fs::remove_file(&logical).unwrap();
+    fs::rename(&physical, &logical).unwrap();
+    verify_independent_catalog_updates(&store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn verify_independent_catalog_updates(store: &ProfileStore) {
+    let profile = store
+        .store_profile(
+            "remote".into(),
+            ProfileSource::Remote {
+                url: "https://example.invalid/profile.yaml".into(),
+                user_agent: "fixture".into(),
+                options: RemoteProfileOptions::default(),
+            },
+            "mixed-port: 7890\n",
+        )
+        .unwrap();
+    let independent = ProfileStore::new(store.root()).unwrap();
+    let transaction = store.transaction.lock();
+    let mut catalog = store.load_unlocked().unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (completed_tx, completed_rx) = mpsc::channel();
+    let writer = thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        completed_tx
+            .send(independent.set_update_policy(&profile.id, true, 15))
+            .unwrap();
+    });
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let early_completion = completed_rx.recv_timeout(Duration::from_millis(100));
+    catalog.profiles[0].name = "renamed".into();
+    store.save_unlocked(&catalog).unwrap();
+    drop(transaction);
+    let result = early_completion
+        .unwrap_or_else(|_| completed_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+    result.unwrap();
+    writer.join().unwrap();
+    let updated = store.load().unwrap().profiles.remove(0);
+    assert_eq!(
+        (
+            updated.name.as_str(),
+            updated.auto_update,
+            updated.update_interval_minutes
+        ),
+        ("renamed", true, 15),
+    );
+}

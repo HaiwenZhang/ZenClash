@@ -10,6 +10,8 @@ struct TrayMenuSnapshot {
     system_proxy: Result<bool, String>,
     profiles: Result<zenclash_core::ProfileCatalog, String>,
     mode_generation: u64,
+    core_generation: u64,
+    directories: Vec<(String, std::path::PathBuf)>,
     profile_path: Option<std::path::PathBuf>,
 }
 
@@ -26,13 +28,25 @@ impl ZenClashApp {
         self.tray_refresh_pending = false;
         let mode_generation = self.outbound_mode.generation();
         let client = self.client.clone();
+        let core_generation = self.core_session.generation();
+        let core_kind = self.core_kind;
+        let profile_path = self.profile_path.clone();
+        let directories_profile = profile_path.clone();
         let operational_status = self.operational_status.clone();
         let task = self.runtime.spawn(async move {
             let proxy_operations = ProxyOperations::new(client.clone());
-            let profile_catalog_task = tokio::task::spawn_blocking(|| {
-                let store =
-                    zenclash_core::ProfileStore::discover().map_err(|error| error.to_string())?;
-                store.load().map_err(|error| error.to_string())
+            let profile_catalog_task = tokio::task::spawn_blocking(move || {
+                let store = zenclash_core::ProfileStore::discover();
+                let data_root = store
+                    .as_ref()
+                    .ok()
+                    .map(|store| store.root().parent().unwrap_or(store.root()));
+                let directories =
+                    tray_directories(directories_profile.as_deref(), core_kind, data_root);
+                let catalog = store
+                    .and_then(|store| store.load())
+                    .map_err(|error| error.to_string());
+                (catalog, directories)
             });
             let (config, catalog, profiles) = tokio::join!(
                 client.runtime_config(),
@@ -49,24 +63,38 @@ impl ZenClashApp {
                 Observation::Failed { failure, .. } => Err(failure.message),
                 Observation::Loading => Err(zenclash_i18n::text("system_proxy.status.loading")),
             };
-            let profiles = profiles
-                .map_err(|error| {
-                    zenclash_i18n::text_with(
+            let (profiles, directories) = profiles.unwrap_or_else(|error| {
+                (
+                    Err(zenclash_i18n::text_with(
                         "tray.errors.config_directory",
                         &[("error", error.to_string())],
-                    )
-                })
-                .and_then(|result| result);
-            Ok::<_, String>((config, groups, system_proxy, profiles, mode_generation))
+                    )),
+                    Vec::new(),
+                )
+            });
+            Ok::<_, String>((
+                config,
+                groups,
+                system_proxy,
+                profiles,
+                directories,
+                mode_generation,
+            ))
         });
-        let profile_path = self.profile_path.clone();
 
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.tray_refreshing = false;
                 match result {
-                    Ok(Ok((config, groups, system_proxy, profiles, mode_generation))) => {
+                    Ok(Ok((
+                        config,
+                        groups,
+                        system_proxy,
+                        profiles,
+                        directories,
+                        mode_generation,
+                    ))) => {
                         this.apply_tray_menu_state(
                             TrayMenuSnapshot {
                                 config,
@@ -74,6 +102,8 @@ impl ZenClashApp {
                                 system_proxy,
                                 profiles,
                                 mode_generation,
+                                core_generation,
+                                directories,
                                 profile_path,
                             },
                             cx,
@@ -106,8 +136,14 @@ impl ZenClashApp {
             system_proxy,
             profiles: profile_catalog,
             mode_generation,
+            core_generation,
+            directories,
             profile_path,
         } = snapshot;
+        if self.core_session.generation() != core_generation {
+            self.tray_refresh_pending = true;
+            return;
+        }
         self.outbound_mode
             .synchronize(OutboundMode::from_api(&config.mode), mode_generation);
         let mixed_port = config.system_proxy_port().unwrap_or_default();
@@ -162,7 +198,7 @@ impl ZenClashApp {
             profile_name,
             profiles,
             groups,
-            directories: tray_directories(profile_path.as_deref(), self.core_kind),
+            directories,
         };
         if let Some(tray) = self.network_tray.as_mut()
             && let Err(error) = tray.update_menu(&state)
@@ -179,21 +215,21 @@ fn tray_proxy_groups(
     outbound_mode: &str,
 ) -> Vec<TrayProxyGroup> {
     catalog
-        .into_groups_for_mode(outbound_mode)
+        .groups_for_mode(outbound_mode)
         .map(|group| {
             let selectable = matches!(
                 &group.behavior,
                 ProxyGroupBehavior::Selector | ProxyGroupBehavior::Automatic { .. }
             );
             let automatic = matches!(&group.behavior, ProxyGroupBehavior::Automatic { .. });
-            let (proxies, has_more) = bounded_tray_proxy_nodes(group.all, &group.now);
+            let (proxies, has_more) = bounded_tray_proxy_nodes(&catalog, &group.all, &group.now);
             TrayProxyGroup {
                 selectable,
                 automatic,
                 has_more,
-                name: group.name,
-                now: group.now,
-                test_url: group.test_url,
+                name: group.name.clone(),
+                now: group.now.clone(),
+                test_url: group.test_url.clone(),
                 proxies: proxies.into(),
             }
         })
@@ -201,27 +237,35 @@ fn tray_proxy_groups(
 }
 
 fn bounded_tray_proxy_nodes(
-    mut proxies: Vec<zenclash_core::ProxyNode>,
+    catalog: &zenclash_core::ProxyCatalog,
+    proxies: &[zenclash_core::ProxyNodeId],
     current: &str,
 ) -> (Vec<TrayProxyNode>, bool) {
     let limit = crate::components::tray::MAX_TRAY_PROXY_NODES;
     let has_more = proxies.len() > limit;
-    if has_more
-        && let Some(current_index) = proxies.iter().position(|proxy| proxy.name == current)
-        && current_index >= limit
-    {
-        proxies.swap(limit - 1, current_index);
-    }
-    let proxies = proxies
-        .into_iter()
-        .take(limit)
-        .map(|proxy| {
-            let delay = proxy.latest_delay();
-            TrayProxyNode {
-                name: proxy.name,
-                provider: proxy.provider_name,
-                delay,
-            }
+    let current_index = has_more
+        .then(|| {
+            proxies
+                .iter()
+                .position(|id| id.controller_name() == current)
+        })
+        .flatten();
+    let proxies = (0..proxies.len().min(limit))
+        .filter_map(|index| {
+            let index = if index + 1 == limit {
+                current_index
+                    .filter(|&index| index >= limit)
+                    .unwrap_or(index)
+            } else {
+                index
+            };
+            let id = &proxies[index];
+            let proxy = catalog.node(id)?;
+            Some(TrayProxyNode {
+                name: id.controller_name().to_owned(),
+                provider: proxy.provider_name.clone(),
+                delay: proxy.latest_delay(),
+            })
         })
         .collect();
     (proxies, has_more)
@@ -240,7 +284,12 @@ mod tests {
             })
             .collect();
 
-        let (nodes, has_more) = bounded_tray_proxy_nodes(proxies, "node-29");
+        let catalog = zenclash_core::ProxyCatalog::from_group_nodes(
+            vec![(zenclash_core::ProxyGroup::default(), proxies)],
+            30,
+        );
+        let (nodes, has_more) =
+            bounded_tray_proxy_nodes(&catalog, &catalog.groups()[0].all, "node-29");
 
         assert_eq!(
             (

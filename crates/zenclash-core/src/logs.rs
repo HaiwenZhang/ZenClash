@@ -22,6 +22,34 @@ mod file;
 pub use file::{LogPersistenceError, LogPersistenceResult, LogPersistenceStatus};
 
 const MAX_LOG_ENTRIES: usize = 500;
+const MAX_LOG_BUFFER_BYTES: usize = 2 * 1024 * 1024;
+const MAX_LOG_ENTRY_BYTES: usize = 64 * 1024;
+
+#[derive(Default)]
+struct LogBuffer {
+    entries: VecDeque<BufferedLogEntry>,
+    bytes: usize,
+}
+
+#[derive(Clone)]
+struct BufferedLogEntry {
+    entry: Arc<LogEntry>,
+    bytes: usize,
+}
+
+impl BufferedLogEntry {
+    fn prepare(entry: LogEntry) -> Option<Self> {
+        let bytes = log_entry_bytes(&entry);
+        (bytes <= MAX_LOG_ENTRY_BYTES).then(|| Self {
+            entry: Arc::new(entry),
+            bytes,
+        })
+    }
+}
+
+fn log_entry_bytes(entry: &LogEntry) -> usize {
+    serde_json::to_vec(entry).map_or(usize::MAX, |payload| payload.len())
+}
 
 /// Severity threshold accepted by Mihomo's `/logs` stream.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -166,7 +194,7 @@ pub enum LogStreamFormat {
 
 /// Maintains a bounded, reconnecting Mihomo `/logs` stream.
 pub struct LogMonitor {
-    entries: Arc<RwLock<VecDeque<Arc<LogEntry>>>>,
+    entries: Arc<RwLock<LogBuffer>>,
     stream: Arc<RwLock<LogStreamSnapshot>>,
     revision: Arc<AtomicU64>,
     level: watch::Sender<MihomoLogLevel>,
@@ -184,7 +212,7 @@ impl LogMonitor {
     #[must_use]
     pub fn start(runtime: &Handle, endpoint: MihomoEndpoint, level: MihomoLogLevel) -> Arc<Self> {
         let level = level.realtime_stream_level();
-        let entries = Arc::new(RwLock::new(VecDeque::new()));
+        let entries = Arc::new(RwLock::new(LogBuffer::default()));
         let stream = Arc::new(RwLock::new(LogStreamSnapshot::default()));
         let revision = Arc::new(AtomicU64::new(0));
         let file = file::LogFileWorker::start();
@@ -220,8 +248,9 @@ impl LogMonitor {
     pub fn entries(&self) -> Vec<LogEntry> {
         self.entries
             .read()
+            .entries
             .iter()
-            .map(|entry| entry.as_ref().clone())
+            .map(|buffered| buffered.entry.as_ref().clone())
             .collect()
     }
 
@@ -229,21 +258,28 @@ impl LogMonitor {
     /// cloning every payload and structured field.
     #[must_use]
     pub fn shared_entries(&self) -> Vec<Arc<LogEntry>> {
-        self.entries.read().iter().cloned().collect()
+        self.entries
+            .read()
+            .entries
+            .iter()
+            .map(|buffered| Arc::clone(&buffered.entry))
+            .collect()
     }
 
     /// Returns the number of currently buffered entries without cloning them.
     #[must_use]
     pub fn entry_count(&self) -> usize {
-        self.entries.read().len()
+        self.entries.read().entries.len()
     }
 
     /// Removes all currently buffered log entries.
     pub fn clear(&self) {
         let mut entries = self.entries.write();
-        if !entries.is_empty() {
-            entries.clear();
+        if !entries.entries.is_empty() {
+            let previous = std::mem::take(&mut *entries);
+            drop(entries);
             self.revision.fetch_add(1, Ordering::AcqRel);
+            drop(previous);
         }
     }
 
@@ -400,7 +436,7 @@ pub fn format_log_entries_support_safe(entries: &[LogEntry]) -> String {
 }
 
 struct LogMonitorState {
-    entries: Arc<RwLock<VecDeque<Arc<LogEntry>>>>,
+    entries: Arc<RwLock<LogBuffer>>,
     stream: Arc<RwLock<LogStreamSnapshot>>,
     revision: Arc<AtomicU64>,
     expected_generation: Arc<AtomicU64>,
@@ -568,7 +604,7 @@ fn update_log_connection(
 }
 
 fn accept_log_entry(
-    entries: &RwLock<VecDeque<Arc<LogEntry>>>,
+    entries: &RwLock<LogBuffer>,
     stream: &RwLock<LogStreamSnapshot>,
     revision: &AtomicU64,
     file_sender: &file::LogFileSender,
@@ -579,32 +615,44 @@ fn accept_log_entry(
     if expected_generation.load(Ordering::Acquire) != generation {
         return false;
     }
+    let Some(entry) = BufferedLogEntry::prepare(entry) else {
+        push_monitor_error_for_generation(
+            entries,
+            stream,
+            revision,
+            file_sender,
+            zenclash_i18n::text("logs.errors.entry_too_large"),
+            generation,
+            expected_generation,
+        );
+        return false;
+    };
     {
         let mut stream = stream.write();
         if stream.generation != generation {
             return false;
         }
         stream.connected = true;
-        stream.updated_at_ms = if entry.received_at_ms == 0 {
-            entry.timestamp_ms
+        stream.updated_at_ms = if entry.entry.received_at_ms == 0 {
+            entry.entry.timestamp_ms
         } else {
-            entry.received_at_ms
+            entry.entry.received_at_ms
         };
         stream.last_error = None;
-        stream.format = if entry.core_time.is_some() || !entry.fields.is_null() {
+        stream.format = if entry.entry.core_time.is_some() || !entry.entry.fields.is_null() {
             LogStreamFormat::Structured
         } else {
             LogStreamFormat::Plain
         };
     }
-    push_bounded(entries, entry.clone());
+    let entry = push_prepared_bounded(entries, entry);
     revision.fetch_add(1, Ordering::AcqRel);
-    file_sender.append(entry);
+    file_sender.append(entry.entry, entry.bytes);
     true
 }
 
 fn push_monitor_error_for_generation(
-    entries: &RwLock<VecDeque<Arc<LogEntry>>>,
+    entries: &RwLock<LogBuffer>,
     stream: &RwLock<LogStreamSnapshot>,
     revision: &AtomicU64,
     file_sender: &file::LogFileSender,
@@ -632,30 +680,45 @@ fn push_monitor_error_for_generation(
         timestamp_ms,
         ..LogEntry::default()
     };
-    push_bounded(entries, entry.clone());
+    let Some(entry) = push_bounded(entries, entry) else {
+        return false;
+    };
     revision.fetch_add(1, Ordering::AcqRel);
-    file_sender.append(entry);
+    file_sender.append(entry.entry, entry.bytes);
     true
 }
 
-fn push_bounded(entries: &RwLock<VecDeque<Arc<LogEntry>>>, entry: LogEntry) {
+fn push_bounded(entries: &RwLock<LogBuffer>, entry: LogEntry) -> Option<BufferedLogEntry> {
+    BufferedLogEntry::prepare(entry).map(|entry| push_prepared_bounded(entries, entry))
+}
+
+fn push_prepared_bounded(entries: &RwLock<LogBuffer>, entry: BufferedLogEntry) -> BufferedLogEntry {
     let mut entries = entries.write();
-    if entry.level == "error"
-        && entries
-            .back()
-            .is_some_and(|previous| previous.level == "error" && previous.payload == entry.payload)
+    let mut retired = Vec::new();
+    if entry.entry.level == "error"
+        && entries.entries.back().is_some_and(|previous| {
+            previous.entry.level == "error" && previous.entry.payload == entry.entry.payload
+        })
+        && let Some(previous) = entries.entries.pop_back()
     {
-        if let Some(previous) = entries.back_mut() {
-            let previous = Arc::make_mut(previous);
-            previous.timestamp_ms = entry.timestamp_ms;
-            previous.received_at_ms = entry.received_at_ms;
+        entries.bytes -= previous.bytes;
+        retired.push(previous);
+    }
+    while entries.entries.len() >= MAX_LOG_ENTRIES
+        || entries.bytes.saturating_add(entry.bytes) > MAX_LOG_BUFFER_BYTES
+    {
+        if let Some(previous) = entries.entries.pop_front() {
+            entries.bytes -= previous.bytes;
+            retired.push(previous);
+        } else {
+            break;
         }
-        return;
     }
-    if entries.len() >= MAX_LOG_ENTRIES {
-        entries.pop_front();
-    }
-    entries.push_back(Arc::new(entry));
+    entries.bytes += entry.bytes;
+    entries.entries.push_back(entry.clone());
+    drop(entries);
+    drop(retired);
+    entry
 }
 
 fn now_ms() -> u64 {
@@ -854,7 +917,7 @@ mod tests {
 
     #[test]
     fn repeated_connection_error_updates_timestamp_without_flooding_log() {
-        let entries = RwLock::new(VecDeque::new());
+        let entries = RwLock::new(LogBuffer::default());
         push_bounded(
             &entries,
             LogEntry {
@@ -878,8 +941,9 @@ mod tests {
         assert_eq!(
             entries
                 .read()
+                .entries
                 .iter()
-                .map(|entry| entry.as_ref().clone())
+                .map(|entry| entry.entry.as_ref().clone())
                 .collect::<Vec<_>>(),
             vec![LogEntry {
                 level: "error".into(),
@@ -892,16 +956,16 @@ mod tests {
 
     #[test]
     fn bounded_log_buffer_discards_the_oldest_entry() {
-        let entries = RwLock::new(
-            (0..MAX_LOG_ENTRIES)
-                .map(|index| {
-                    Arc::new(LogEntry {
-                        payload: index.to_string(),
-                        ..LogEntry::default()
-                    })
-                })
-                .collect(),
-        );
+        let entries = RwLock::new(LogBuffer::default());
+        for index in 0..MAX_LOG_ENTRIES {
+            push_bounded(
+                &entries,
+                LogEntry {
+                    payload: index.to_string(),
+                    ..LogEntry::default()
+                },
+            );
+        }
 
         push_bounded(
             &entries,
@@ -912,16 +976,105 @@ mod tests {
         );
 
         let entries = entries.read();
-        assert_eq!(entries.len(), MAX_LOG_ENTRIES);
+        assert_eq!(entries.entries.len(), MAX_LOG_ENTRIES);
         assert_eq!(
-            entries.front().map(|entry| entry.payload.as_str()),
+            entries
+                .entries
+                .front()
+                .map(|entry| entry.entry.payload.as_str()),
             Some("1")
         );
         assert_eq!(
-            entries.back().map(|entry| entry.payload.as_str()),
+            entries
+                .entries
+                .back()
+                .map(|entry| entry.entry.payload.as_str()),
             Some("latest")
         );
         drop(entries);
+    }
+
+    #[test]
+    fn log_buffer_byte_budget_keeps_the_newest_entries() {
+        let entries = RwLock::new(LogBuffer::default());
+        for index in 0..500 {
+            push_bounded(
+                &entries,
+                LogEntry {
+                    payload: format!("{index:03}:{}", "x".repeat(16 * 1024)),
+                    ..LogEntry::default()
+                },
+            );
+        }
+        let entries = entries.read();
+        let bytes: usize = entries
+            .entries
+            .iter()
+            .map(|entry| serde_json::to_vec(entry.entry.as_ref()).unwrap().len())
+            .sum();
+        assert!(bytes <= 2 * 1024 * 1024);
+        assert_eq!(entries.bytes, bytes);
+        assert!(
+            entries
+                .entries
+                .back()
+                .unwrap()
+                .entry
+                .payload
+                .starts_with("499:")
+        );
+    }
+
+    #[test]
+    fn log_buffer_byte_budget_rejects_one_oversized_entry() {
+        let entries = RwLock::new(LogBuffer::default());
+        push_bounded(
+            &entries,
+            LogEntry {
+                payload: "x".repeat(128 * 1024),
+                ..LogEntry::default()
+            },
+        );
+        assert!(entries.read().entries.is_empty());
+    }
+
+    #[test]
+    fn oversized_frames_produce_a_bounded_diagnostic_without_advancing_accepted_time() {
+        let entries = RwLock::new(LogBuffer::default());
+        let stream = RwLock::new(LogStreamSnapshot {
+            generation: 7,
+            connected: true,
+            updated_at_ms: 123,
+            ..LogStreamSnapshot::default()
+        });
+        let revision = AtomicU64::new(0);
+        let generation = AtomicU64::new(7);
+        let file = file::LogFileWorker::start();
+        for timestamp in [456, 789] {
+            assert!(!accept_log_entry(
+                &entries,
+                &stream,
+                &revision,
+                &file.sender(),
+                LogEntry {
+                    level: "info".into(),
+                    payload: "x".repeat(MAX_LOG_ENTRY_BYTES),
+                    received_at_ms: timestamp,
+                    ..LogEntry::default()
+                },
+                7,
+                &generation,
+            ));
+        }
+
+        let expected = zenclash_i18n::text("logs.errors.entry_too_large");
+        let entries = entries.read();
+        assert_eq!(entries.entries.len(), 1);
+        assert_eq!(entries.entries[0].entry.payload, expected);
+        assert!(entries.bytes < 1024);
+        assert_eq!(stream.read().last_error.as_deref(), Some(expected.as_str()));
+        assert_eq!(stream.read().updated_at_ms, 123);
+        assert_eq!(revision.load(Ordering::Acquire), 2);
     }
 
     #[test]
@@ -947,7 +1100,7 @@ mod tests {
 
     #[test]
     fn late_log_frame_from_an_old_generation_is_rejected() {
-        let entries = RwLock::new(VecDeque::new());
+        let entries = RwLock::new(LogBuffer::default());
         let stream = RwLock::new(LogStreamSnapshot {
             generation: 2,
             connected: true,
@@ -973,7 +1126,7 @@ mod tests {
         );
 
         assert!(!accepted);
-        assert!(entries.read().is_empty());
+        assert!(entries.read().entries.is_empty());
         assert_eq!(stream.read().generation, 2);
         assert_eq!(stream.read().updated_at_ms, 0);
         assert_eq!(revision.load(Ordering::Acquire), 0);

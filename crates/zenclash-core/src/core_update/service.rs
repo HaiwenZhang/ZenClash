@@ -117,24 +117,46 @@ impl MihomoReleaseService {
         release: &MihomoRelease,
         target: impl AsRef<Path>,
     ) -> CoreUpdateResult<PreparedCoreUpdate> {
-        validate_asset_url(&release.asset.download_url, self.allow_insecure_assets)?;
-        let target = std::fs::canonicalize(target.as_ref()).map_err(|error| {
-            CoreUpdateError::Io(format!(
-                "无法解析当前内核 {}：{error}",
-                target.as_ref().display()
-            ))
-        })?;
-        if !target.is_file() {
-            return Err(CoreUpdateError::Io(format!(
-                "当前内核不是普通文件：{}",
-                target.display()
-            )));
-        }
-        let archive = self.download(&release.asset).await?;
-        let release = release.clone();
-        tokio::task::spawn_blocking(move || prepare_downloaded(&release, &target, &archive))
+        self.prepare_until(release, target.as_ref().to_path_buf(), None)
             .await
-            .map_err(|error| CoreUpdateError::Io(format!("候选内核任务异常结束：{error}")))?
+    }
+
+    pub(crate) async fn prepare_until(
+        &self,
+        release: &MihomoRelease,
+        target: std::path::PathBuf,
+        cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> CoreUpdateResult<PreparedCoreUpdate> {
+        validate_asset_url(&release.asset.download_url, self.allow_insecure_assets)?;
+        let archive = tokio::select! {
+            biased;
+            () = super::workflow::wait_for_cancellation(cancelled.clone()) => {
+                return Err(CoreUpdateError::Cancelled);
+            }
+            result = self.download(&release.asset) => result?,
+        };
+        let release = release.clone();
+        tokio::task::spawn_blocking(move || {
+            if super::workflow::is_cancelled(&cancelled) {
+                return Err(CoreUpdateError::Cancelled);
+            }
+            let target = std::fs::canonicalize(&target).map_err(|error| {
+                CoreUpdateError::Io(format!("无法解析当前内核 {}：{error}", target.display()))
+            })?;
+            if !target.is_file() {
+                return Err(CoreUpdateError::Io(format!(
+                    "当前内核不是普通文件：{}",
+                    target.display()
+                )));
+            }
+            let prepared = prepare_downloaded(&release, &target, &archive)?;
+            if super::workflow::is_cancelled(&cancelled) {
+                return Err(CoreUpdateError::Cancelled);
+            }
+            Ok(prepared)
+        })
+        .await
+        .map_err(|error| CoreUpdateError::Io(format!("候选内核任务异常结束：{error}")))?
     }
 
     async fn download(&self, asset: &MihomoReleaseAsset) -> CoreUpdateResult<Vec<u8>> {

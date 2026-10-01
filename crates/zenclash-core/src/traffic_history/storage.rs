@@ -11,14 +11,37 @@ use super::{
     TrafficHistoryQuery, TrafficHistoryResult, TrafficOverview, TrafficTotals, TrafficTrendPoint,
 };
 use crate::AppPreferencesStore;
+use crate::data_coordinator::{DataWriteAccess, DataWriteLease};
 
 const MAX_INSERT_BATCH: usize = 10_000;
+const MAX_HISTORY_ENTRIES: i64 = 1_000_000;
 const MAX_RANKINGS: u32 = 200;
 
 /// Cloneable handle to `ZenClash`'s native `SQLite` traffic database.
 #[derive(Clone, Debug)]
 pub struct TrafficHistoryStore {
     path: PathBuf,
+    write_access: DataWriteAccess,
+}
+
+struct HistoryConnection {
+    // Closing a WAL connection may write; release the lease afterwards.
+    connection: Connection,
+    _lease: DataWriteLease,
+}
+
+impl std::ops::Deref for HistoryConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        &self.connection
+    }
+}
+
+impl std::ops::DerefMut for HistoryConnection {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.connection
+    }
 }
 
 impl TrafficHistoryStore {
@@ -44,7 +67,9 @@ impl TrafficHistoryStore {
     /// Creates a store backed by an explicit `SQLite` file.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        let path = path.into();
+        let write_access = DataWriteAccess::new(&path);
+        Self { path, write_access }
     }
 
     /// Returns the database file used by this store.
@@ -53,7 +78,10 @@ impl TrafficHistoryStore {
         &self.path
     }
 
-    /// Persists a bounded batch and deletes records older than `cutoff_ms` atomically.
+    /// Persists a bounded batch and applies time and total-row retention atomically.
+    ///
+    /// At most one million samples are retained. The oldest observation times
+    /// are evicted first, with insertion order breaking equal-timestamp ties.
     ///
     /// # Errors
     ///
@@ -75,6 +103,14 @@ impl TrafficHistoryStore {
         transaction.execute(
             "DELETE FROM traffic_history WHERE timestamp_ms < ?1",
             [to_sql_integer(cutoff_ms, "清理时间")?],
+        )?;
+        transaction.execute(
+            "DELETE FROM traffic_history WHERE id IN (
+                 SELECT id FROM traffic_history
+                 ORDER BY timestamp_ms ASC, id ASC
+                 LIMIT MAX(0, (SELECT COUNT(*) FROM traffic_history) - ?1)
+             )",
+            [MAX_HISTORY_ENTRIES],
         )?;
         transaction.commit()?;
         Ok(())
@@ -170,7 +206,8 @@ impl TrafficHistoryStore {
         Ok(())
     }
 
-    fn open(&self) -> TrafficHistoryResult<Connection> {
+    fn open(&self) -> TrafficHistoryResult<HistoryConnection> {
+        let lease = self.write_access.acquire();
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -204,7 +241,10 @@ impl TrafficHistoryStore {
              CREATE INDEX IF NOT EXISTS traffic_history_process
                  ON traffic_history(process, timestamp_ms);",
         )?;
-        Ok(connection)
+        Ok(HistoryConnection {
+            connection,
+            _lease: lease,
+        })
     }
 }
 

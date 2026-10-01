@@ -249,19 +249,16 @@ impl ZenClashApp {
 
     fn start_profile_selection(&mut self, id: String, cx: &mut Context<Self>) {
         let controlled = self.controlled_config_store.clone();
-        let core_runtime = crate::pages::runtime::profiles::workflow::CoreProfileRuntime::new(
-            self.core_session.clone(),
-        );
+        let profile_service = self.profile_service.clone();
         let task = self.runtime.spawn(async move {
-            let store =
-                zenclash_core::ProfileStore::discover().map_err(|error| error.to_string())?;
-            crate::pages::runtime::profiles::workflow::activate_existing(
-                store,
-                controlled,
-                core_runtime,
-                id,
-            )
-            .await
+            let store = tokio::task::spawn_blocking(zenclash_core::ProfileStore::discover)
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?;
+            profile_service
+                .activate(store, controlled, id)
+                .await
+                .map_err(|error| error.to_string())
         });
         cx.spawn(async move |this, cx| {
             let result = task
@@ -280,11 +277,7 @@ impl ZenClashApp {
                 match result {
                     Ok(outcome) => {
                         this.runtime_page.update(cx, |runtime_page, cx| {
-                            runtime_page.profile_activated_from_tray(
-                                outcome.path,
-                                &outcome.name,
-                                cx,
-                            );
+                            runtime_page.profile_activated_from_tray(outcome, cx);
                         });
                     }
                     Err(error) => {

@@ -92,6 +92,19 @@ app:
   description:
     zh-CN: Mihomo 客户端
     en: Mihomo Client
+  window:
+    minimize:
+      zh-CN: 最小化窗口
+      en: Minimize window
+    maximize:
+      zh-CN: 最大化窗口
+      en: Maximize window
+    restore:
+      zh-CN: 还原窗口
+      en: Restore window
+    close:
+      zh-CN: 关闭窗口
+      en: Close window
   menu:
     title:
       zh-CN: ZenClash
@@ -736,6 +749,16 @@ home:
       en: Now
 
 profiles:
+  recovery:
+    title:
+      zh-CN: 需要确认内核运行配置
+      en: Runtime configuration needs confirmation
+    description:
+      zh-CN: 上次应用的结果无法确认。重新应用已记录的订阅可确认当前内核运行配置；操作将使用该订阅现在保存的内容。
+      en: The last application result could not be confirmed. Reapply a recorded profile to confirm the current runtime configuration using its currently saved contents.
+    reapply:
+      zh-CN: 重新应用 %{name}
+      en: Reapply %{name}
   metrics:
     proxies:
       zh-CN: 代理对象
@@ -765,6 +788,9 @@ profiles:
     request_settings:
       zh-CN: 请求设置
       en: Request Settings
+    delete:
+      zh-CN: 删除配置「%{name}」
+      en: 'Delete profile "%{name}"'
     update:
       zh-CN: 更新
       en: Update
@@ -1189,6 +1215,9 @@ proxies:
     summary:
       zh-CN: 第 %{current} / %{total} 页 · 显示 %{first}–%{last}，共 %{count} 个节点
       en: "Page %{current} of %{total} · Showing %{first}–%{last} of %{count} nodes"
+    groups_summary:
+      zh-CN: 第 %{current} / %{total} 页 · 显示 %{first}–%{last}，共 %{count} 个组
+      en: "Page %{current} of %{total} · Showing %{first}–%{last} of %{count} groups"
   notices:
     restored_auto:
       zh-CN: 已恢复自动选择，并按 Mihomo 回读更新当前节点
@@ -1338,6 +1367,12 @@ logs:
     preferences_task:
       zh-CN: 日志设置保存任务异常结束：%{error}
       en: "The log settings task ended unexpectedly: %{error}"
+    entry_too_large:
+      zh-CN: 日志条目超过 64 KiB，已丢弃该条目
+      en: A log entry exceeded 64 KiB and was discarded
+    presentation_task:
+      zh-CN: "日志筛选任务异常结束：%{error}"
+      en: "The log search task ended unexpectedly: %{error}"
     export_dialog:
       zh-CN: 无法打开日志保存对话框：%{error}
       en: "Could not open the log save dialog: %{error}"
@@ -1505,6 +1540,12 @@ system_proxy:
       zh-CN: 系统代理设置已保存，并通过原生状态回读
       en: System proxy settings saved and verified against native state
   errors:
+    snapshot_native:
+      zh-CN: 恢复原生系统代理快照失败（%{operation}）：%{error}
+      en: "Failed to restore the native system proxy snapshot (%{operation}): %{error}"
+    snapshot_service:
+      zh-CN: 无法唯一定位需要恢复的原生网络服务
+      en: The native network service to restore could not be uniquely identified
     pending_recovery:
       zh-CN: 上次系统代理操作尚未安全恢复，请先重试释放
       en: The previous system proxy operation still needs recovery; retry releasing it first
@@ -2432,6 +2473,12 @@ traffic:
       zh-CN: 本地流量历史已清空
       en: Local traffic history cleared
   errors:
+    sampler_task:
+      zh-CN: 流量采样任务异常结束，无法确认待写记录：%{error}
+      en: "Traffic sampling ended unexpectedly; pending records cannot be confirmed: %{error}"
+    final_flush:
+      zh-CN: 退出前保存流量历史失败，待写记录已保留：%{error}
+      en: "Could not save traffic history before quitting; pending records were retained: %{error}"
     database_open:
       zh-CN: 无法打开流量历史数据库；请检查应用数据目录权限
       en: Could not open the traffic history database; check the app data directory permissions
@@ -2838,6 +2885,15 @@ core_page:
       zh-CN: Mihomo %{version} 已通过 SHA-256、候选程序和 /version 三重验证并启用；Unix TUN 权限需重新核对
       en: Mihomo %{version} passed SHA-256, candidate executable, and /version verification and is now active; recheck Unix TUN permissions
   errors:
+    release_previous_stopped:
+      zh-CN: "%{error}；旧内核保持停止"
+      en: "%{error}; the previous core remains stopped."
+    release_previous_restored_stopped:
+      zh-CN: "%{error}；旧内核已恢复并保持停止%{cleanup}"
+      en: "%{error}; the previous core was restored and remains stopped%{cleanup}"
+    release_cancelled:
+      zh-CN: 内核升级已因退出应用而取消。
+      en: Core upgrade cancelled because the application is closing.
     external_restart:
       zh-CN: 当前连接的是外部内核，ZenClash 无法重启该进程
       en: The active core is external; ZenClash cannot restart the process
@@ -3080,6 +3136,9 @@ overrides:
       zh-CN: 最终
       en: Effective
   notices:
+    saved_unapplied:
+      zh-CN: 覆写已保存；当前没有已应用的配置，暂未应用到内核。
+      en: Overrides saved. No configuration is currently applied, so the core was not updated.
     preview:
       zh-CN: 已生成原始配置与最终运行配置预览
       en: Generated source and effective runtime configuration previews
@@ -3291,6 +3350,12 @@ backup:
     no_runtime_profile:
       zh-CN: "%{reason}；原磁盘数据已恢复，但没有旧配置可恢复内核运行状态"
       en: "%{reason}; original disk data was restored, but no previous profile was available to restore the core runtime"
+    no_runtime_snapshot:
+      zh-CN: 缺少上一次已应用配置的精确缓存，无法确认内核运行状态。
+      en: The previous applied configuration has no exact cache; the runtime state cannot be confirmed.
+    exact_runtime_restore_failed:
+      zh-CN: "精确运行配置恢复失败：%{error}；启动缓存恢复：%{cache}"
+      en: "Failed to restore the exact runtime configuration: %{error}; startup cache recovery: %{cache}"
     override_read:
       zh-CN: "%{reason}；原磁盘数据已恢复，但读取原 YAML 覆写失败：%{error}"
       en: "%{reason}; original disk data was restored, but the previous YAML overrides could not be read: %{error}"
@@ -3446,6 +3511,9 @@ rules:
       zh-CN: 没有匹配的规则
       en: No matching rules
   row:
+    enabled_named:
+      zh-CN: "启用规则 #%{index}「%{payload}」"
+      en: 'Enable rule #%{index}: %{payload}'
     index:
       zh-CN: "规则 #%{index}"
       en: "Rule #%{index}"
@@ -3464,6 +3532,12 @@ rules:
     enable:
       zh-CN: 启用规则
       en: Enable Rule
+
+mode:
+  errors:
+    override_conflict:
+      zh-CN: 无法切换到 %{requested} 模式：已启用的 YAML 覆写固定了 %{effective} 模式。请先修改或停用该覆写。
+      en: "Couldn’t switch to %{requested}: an enabled YAML override fixes the mode to %{effective}. Edit or disable that override first."
 
 outbound_mode:
   rule:

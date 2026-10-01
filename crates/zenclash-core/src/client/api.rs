@@ -370,9 +370,21 @@ impl MihomoClient {
         force: bool,
     ) -> MihomoResult<()> {
         let payload = self.normalize_config_payload(payload.into())?;
-        let _mutation_guard = self.mutation_gate.lock().await;
-        self.validate_config_payload_unlocked(&payload).await?;
-        let response = self
+        self.reload_exact_payload(payload, force).await
+    }
+
+    pub(crate) async fn reload_exact_payload(
+        &self,
+        payload: String,
+        force: bool,
+    ) -> MihomoResult<()> {
+        let write_lease = self.acquire_write_lease().await?;
+        let client = write_lease
+            .as_ref()
+            .map_or_else(|| self.clone(), |lease| self.with_write_lease(lease));
+        let _mutation_guard = client.mutation_gate.lock().await;
+        client.validate_config_payload_unlocked(&payload).await?;
+        let response = client
             .request(Method::PUT, "/configs")?
             .query(&[("force", force)])
             .json(&serde_json::json!({ "payload": payload }))
@@ -383,8 +395,12 @@ impl MihomoClient {
     }
 
     pub(crate) async fn validate_config_payload(&self, payload: &str) -> MihomoResult<()> {
-        let _mutation_guard = self.mutation_gate.lock().await;
-        self.validate_config_payload_unlocked(payload).await
+        let write_lease = self.acquire_write_lease().await?;
+        let client = write_lease
+            .as_ref()
+            .map_or_else(|| self.clone(), |lease| self.with_write_lease(lease));
+        let _mutation_guard = client.mutation_gate.lock().await;
+        client.validate_config_payload_unlocked(payload).await
     }
 
     async fn validate_config_payload_unlocked(&self, payload: &str) -> MihomoResult<()> {
@@ -398,13 +414,19 @@ impl MihomoClient {
             )));
         }
         if let Some(validator) = self.config_validator.clone() {
-            let validation_payload = payload.to_owned();
-            tokio::task::spawn_blocking(move || validator.validate_payload(&validation_payload))
+            let write_lease = validator
+                .acquire_write_lease()
                 .await
-                .map_err(|error| {
-                    MihomoError::Process(format!("内核配置预检任务异常结束：{error}"))
-                })?
-                .map_err(|error| MihomoError::Process(error.to_string()))?;
+                .map_err(MihomoError::Process)?;
+            let validator = validator.with_write_lease(&write_lease);
+            let validation_payload = payload.to_owned();
+            tokio::task::spawn_blocking(move || {
+                let _write_lease = write_lease;
+                validator.validate_payload(&validation_payload)
+            })
+            .await
+            .map_err(|error| MihomoError::Process(format!("内核配置预检任务异常结束：{error}")))?
+            .map_err(|error| MihomoError::Process(error.to_string()))?;
         }
         Ok(())
     }
@@ -491,7 +513,13 @@ impl MihomoClient {
     ///
     /// Returns transport or API-status errors reported by Mihomo.
     pub async fn update_geodata(&self) -> MihomoResult<()> {
-        self.send_long_operation(Method::POST, "/configs/geo").await
+        let write_lease = self.acquire_write_lease().await?;
+        let client = write_lease
+            .as_ref()
+            .map_or_else(|| self.clone(), |lease| self.with_write_lease(lease));
+        client
+            .send_long_operation(Method::POST, "/configs/geo")
+            .await
     }
 
     /// Asks Mihomo to refresh the configured external Web UI archive.

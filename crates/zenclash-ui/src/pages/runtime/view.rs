@@ -125,13 +125,15 @@ impl RuntimePage {
         if self.page == Page::Home {
             return self.render_home(theme, cx);
         }
-        if matches!(self.data, RuntimeData::Empty) && self.page == Page::Settings {
-            return self.render_offline_settings(theme, cx).into_any_element();
-        }
         if matches!(self.data, RuntimeData::Empty)
             && !matches!(
                 self.page,
-                Page::Logs | Page::Mihomo | Page::Profiles | Page::Override | Page::Traffic
+                Page::Logs
+                    | Page::Mihomo
+                    | Page::Profiles
+                    | Page::Override
+                    | Page::Traffic
+                    | Page::Settings
             )
         {
             return empty_state(

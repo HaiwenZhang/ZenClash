@@ -30,6 +30,54 @@ impl RuntimePage {
         card
     }
 
+    pub(super) fn render_profile_recovery(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        let mut card = setting_card(zenclash_i18n::text("profiles.recovery.title"), theme).child(
+            div()
+                .px_4()
+                .py_3()
+                .text_sm()
+                .child(zenclash_i18n::text("profiles.recovery.description")),
+        );
+        if let Some(recovery) = &self.profiles.recovery {
+            let known = recovery.last_known_good.as_ref().and_then(|version| {
+                self.profiles
+                    .catalog
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == version.profile_id)
+            });
+            let target = known.or_else(|| {
+                self.profiles
+                    .catalog
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == recovery.attempted.profile_id)
+            });
+            if let Some(profile) = target {
+                let id = profile.id.clone();
+                card = card.child(
+                    h_flex().px_4().pb_3().child(
+                        Button::new("reapply-profile-recovery")
+                            .label(zenclash_i18n::text_with(
+                                "profiles.recovery.reapply",
+                                &[("name", profile.name.clone())],
+                            ))
+                            .outline()
+                            .disabled(self.core_busy())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.activate_managed_profile(id.clone(), cx)
+                            })),
+                    ),
+                );
+            }
+        }
+        card
+    }
+
     fn render_managed_profile(
         &self,
         profile: &ProfileRecord,
@@ -142,6 +190,10 @@ impl RuntimePage {
             )
             .child(
                 Button::new(format!("delete-profile:{}", profile.id))
+                    .accessibility_label(zenclash_i18n::text_with(
+                        "profiles.actions.delete",
+                        &[("name", profile.name.clone())],
+                    ))
                     .icon(IconName::Delete)
                     .small()
                     .ghost()
@@ -169,6 +221,7 @@ impl RuntimePage {
             .gap_3()
             .child(
                 Switch::new(format!("auto-update-profile:{}", profile.id))
+                    .accessibility_label(zenclash_i18n::text("profiles.catalog.auto_update"))
                     .checked(auto_update)
                     .disabled(self.core_busy())
                     .on_click(cx.listener(move |this, enabled, _, cx| {

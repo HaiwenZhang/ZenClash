@@ -240,3 +240,78 @@ fn sqlite_store_rejects_unbounded_trend_queries() {
     ));
     cleanup_database(&path);
 }
+
+#[test]
+fn sqlite_store_evicts_oldest_samples_at_the_global_budget() {
+    let path = test_database("global-budget");
+    let store = TrafficHistoryStore::new(&path);
+    store.insert_and_cleanup(&[], 0).unwrap();
+    let database = rusqlite::Connection::open(&path).unwrap();
+    // An existing database may already exceed the new budget. Insert out of
+    // timestamp order so eviction must use observation time, not insertion id.
+    database
+        .execute_batch(
+            "WITH RECURSIVE samples(n) AS (
+             SELECT 0 UNION ALL SELECT n + 1 FROM samples WHERE n < 1000001
+         ) INSERT INTO traffic_history
+             (timestamp_ms, source_ip, host, outbound, process, upload, download)
+           SELECT 2000000 - n, 'fixture', 'fixture', 'DIRECT', 'fixture', 1, 0
+           FROM samples;",
+        )
+        .unwrap();
+    store
+        .insert_and_cleanup(
+            &[entry(
+                2_000_001, "fixture", "fixture", "DIRECT", "fixture", 1, 0,
+            )],
+            0,
+        )
+        .unwrap();
+    let query = TrafficHistoryQuery {
+        dimension: TrafficDimension::Host,
+        start_ms: 0,
+        end_ms: 2_000_002,
+        bucket_ms: 2_000_003,
+    };
+    assert_eq!(store.overview(&query).unwrap().totals.samples, 1_000_000);
+    let range = database
+        .query_row(
+            "SELECT MIN(timestamp_ms), MAX(timestamp_ms) FROM traffic_history",
+            [],
+            |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)),
+        )
+        .unwrap();
+    assert_eq!(range, (1_000_002, 2_000_001));
+
+    // An older late arrival must not displace a more recent observation.
+    store
+        .insert_and_cleanup(
+            &[entry(
+                999_000, "fixture", "fixture", "DIRECT", "fixture", 3, 0,
+            )],
+            0,
+        )
+        .unwrap();
+    assert_eq!(store.overview(&query).unwrap().totals.upload, 1_000_000);
+    assert!(
+        store
+            .insert_and_cleanup(
+                &[entry(
+                    2_000_002,
+                    "fixture",
+                    "fixture",
+                    "DIRECT",
+                    "fixture",
+                    u64::MAX,
+                    0
+                )],
+                2_000_000
+            )
+            .is_err()
+    );
+    assert_eq!(store.overview(&query).unwrap().totals.samples, 1_000_000);
+    store.insert_and_cleanup(&[], 2_000_000).unwrap();
+    assert_eq!(store.overview(&query).unwrap().totals.samples, 2);
+    drop(database);
+    cleanup_database(&path);
+}

@@ -198,11 +198,11 @@ impl RuntimePage {
     }
 
     fn apply_overrides(&mut self, cx: &mut Context<Self>) {
-        let Some(profile) = self.profile_path.clone() else {
+        if self.profile_path.is_none() {
             self.error = Some(zenclash_i18n::text("overrides.errors.base_missing"));
             cx.notify();
             return;
-        };
+        }
         let overrides = self.enabled_override_paths();
         let Some(token) = self.begin_mutation(Page::Override) else {
             return;
@@ -210,12 +210,13 @@ impl RuntimePage {
         let count = overrides.len();
         let client = self.client.clone();
         let controlled = self.controlled_config_store.clone();
-        let core_runtime =
-            super::profiles::workflow::CoreProfileRuntime::new(self.core_session.clone());
+        let core_runtime = self.profile_service.clone();
         let task = self.runtime.spawn(async move {
-            super::profiles::workflow::reload_effective(controlled, &core_runtime, &profile)
-                .await?;
-            load_page(client, Page::Override).await
+            let outcome =
+                super::profiles::workflow::reload_effective(controlled, &core_runtime).await?;
+            load_page(client, Page::Override)
+                .await
+                .map(|data| (outcome.generation, data))
         });
         cx.spawn(async move |this, cx| {
             let result = match task.await {
@@ -228,7 +229,12 @@ impl RuntimePage {
             let _ = this.update(cx, |this, cx| {
                 this.finish_mutation(token);
                 match result {
-                    Ok(data) => {
+                    Ok((runtime_version, data)) => {
+                        if !this.profile_service.is_current(runtime_version) {
+                            this.invalidate_config_inputs(cx);
+                            this.refresh(cx);
+                            return;
+                        }
                         if this.replace_page_data(token, data, cx) {
                             this.notice = Some(zenclash_i18n::text_with(
                                 "overrides.notices.applied",

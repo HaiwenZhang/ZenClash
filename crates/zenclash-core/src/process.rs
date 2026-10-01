@@ -69,6 +69,8 @@ impl MihomoProcess {
     /// Returns an error when the data directory, child process, or collector
     /// threads cannot be created. A partially started child is terminated.
     pub fn spawn(config: MihomoLaunchConfig) -> MihomoResult<Arc<Self>> {
+        let _write_lease =
+            crate::data_coordinator::DataWriteLease::shared(launch_write_scopes(&config));
         let logs = Arc::new(RwLock::new(VecDeque::new()));
         let child = spawn_child(&config, logs.clone())?;
 
@@ -91,11 +93,29 @@ impl MihomoProcess {
     /// and its output collectors cannot be started. After a spawn failure the
     /// process remains stopped so callers can report and retry safely.
     pub fn restart(&self) -> MihomoResult<()> {
-        self.config.validate_config().map_err(|error| {
-            MihomoError::Process(format!("重启前配置预检失败，当前内核保持运行：{error}"))
-        })?;
+        let lease = crate::data_coordinator::DataWriteLease::shared(self.write_scopes());
+        self.restart_with_write_lease(&lease, None)
+    }
+
+    fn restart_with_write_lease(
+        &self,
+        lease: &crate::data_coordinator::DataWriteLease,
+        cancelled: Option<&AtomicBool>,
+    ) -> MihomoResult<()> {
+        self.config_validator()
+            .with_write_lease(lease)
+            .validate_file(&self.config.config_file)
+            .map_err(|error| {
+                MihomoError::Process(format!("重启前配置预检失败，当前内核保持运行：{error}"))
+            })?;
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Err(MihomoError::Process("内核重启在配置预检后已取消".into()));
+        }
         let mut child_slot = self.child.lock();
         stop_child(&mut child_slot)?;
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Err(MihomoError::Process("内核重启在创建子进程前已取消".into()));
+        }
         let child = spawn_child(&self.config, self.logs.clone())?;
         *self.last_exit_reason.write() = None;
         *child_slot = Some(child);
@@ -120,6 +140,19 @@ impl MihomoProcess {
         timeout: Duration,
         cancelled: Option<Arc<AtomicBool>>,
     ) -> MihomoResult<()> {
+        let lease = crate::data_coordinator::DataWriteLease::shared_async(self.write_scopes())
+            .await
+            .map_err(|error| MihomoError::Process(error.to_string()))?;
+        self.restart_and_wait_until_with_lease(timeout, cancelled, &lease)
+            .await
+    }
+
+    pub(crate) async fn restart_and_wait_until_with_lease(
+        self: &Arc<Self>,
+        timeout: Duration,
+        cancelled: Option<Arc<AtomicBool>>,
+        lease: &crate::data_coordinator::DataWriteLease,
+    ) -> MihomoResult<()> {
         if cancelled
             .as_ref()
             .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
@@ -129,11 +162,15 @@ impl MihomoProcess {
             ));
         }
         let process = self.clone();
-        tokio::task::spawn_blocking(move || process.restart())
-            .await
-            .map_err(|error| {
-                MihomoError::Process(format!("内核重启后台任务异常结束：{error}"))
-            })??;
+        let access =
+            crate::data_coordinator::DataWriteAccess::new(&self.config.home_dir).authorized(lease);
+        let write_lease = access.acquire();
+        let worker_cancelled = cancelled.clone();
+        tokio::task::spawn_blocking(move || {
+            process.restart_with_write_lease(&write_lease, worker_cancelled.as_deref())
+        })
+        .await
+        .map_err(|error| MihomoError::Process(format!("内核重启后台任务异常结束：{error}")))??;
         let ready = self.wait_until_ready_until(timeout, cancelled).await;
         if let Err(error) = ready {
             let stop = self.stop_async().await;
@@ -232,6 +269,10 @@ impl MihomoProcess {
         )
     }
 
+    pub(crate) fn write_scopes(&self) -> Vec<PathBuf> {
+        launch_write_scopes(&self.config)
+    }
+
     /// Returns immutable launch metadata without waiting for process transitions.
     #[must_use]
     pub const fn launch_config(&self) -> &MihomoLaunchConfig {
@@ -315,6 +356,24 @@ impl MihomoProcess {
             .await
             .map_err(|error| MihomoError::Process(format!("内核停止后台任务异常结束：{error}")))?
     }
+}
+
+fn launch_write_scopes(config: &MihomoLaunchConfig) -> Vec<PathBuf> {
+    let mut scopes = vec![config.home_dir.clone(), config.config_file.clone()];
+    scopes.push(
+        config
+            .binary
+            .parent()
+            .map_or_else(|| config.binary.clone(), std::path::Path::to_path_buf),
+    );
+    if let Ok(binary) = std::fs::canonicalize(&config.binary)
+        && let Some(parent) = binary.parent()
+    {
+        // Release staging and replacement use the executable's physical parent,
+        // which can differ from the parent of its discovered symlink.
+        scopes.push(parent.to_path_buf());
+    }
+    scopes
 }
 
 fn controller_listener_error(logs: &VecDeque<String>) -> Option<String> {

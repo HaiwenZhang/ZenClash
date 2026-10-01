@@ -5,6 +5,8 @@ mod service;
 mod transaction;
 mod workflow;
 
+pub(crate) use workflow::InstalledCore;
+
 #[cfg(test)]
 mod tests;
 
@@ -17,6 +19,9 @@ pub type CoreUpdateResult<T> = Result<T, CoreUpdateError>;
 /// Failure while discovering, downloading, validating, or replacing a core.
 #[derive(Debug, Error)]
 pub enum CoreUpdateError {
+    /// Application exit cancelled preparation or activation without restarting a child.
+    #[error("{}", zenclash_i18n::text("core_page.errors.release_cancelled"))]
+    Cancelled,
     /// GitHub or release-asset HTTP request failed.
     #[error("内核更新网络请求失败：{0}")]
     Http(#[from] reqwest::Error),

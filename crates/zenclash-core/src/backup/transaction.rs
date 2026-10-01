@@ -6,7 +6,7 @@ use std::{
 
 use super::{BackupError, BackupRestoreTransaction, BackupResult, PreparedBackupRestore};
 
-const LIVE_ITEMS: [&str; 4] = [
+pub(super) const LIVE_ITEMS: [&str; 4] = [
     "preferences.json",
     "controlled-config",
     "profiles",
@@ -14,9 +14,35 @@ const LIVE_ITEMS: [&str; 4] = [
 ];
 static DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+pub(super) fn write_scopes(root: &Path) -> Vec<PathBuf> {
+    LIVE_ITEMS
+        .into_iter()
+        .chain(["profiles/files", "profiles/staging", "yaml-overrides/files"])
+        .map(|item| root.join(item))
+        .collect()
+}
+
 pub(super) fn activate(
     mut prepared: PreparedBackupRestore,
+    session: Option<&crate::CoreSession>,
 ) -> BackupResult<BackupRestoreTransaction> {
+    let mut runtime_scopes = session.map_or_else(Vec::new, crate::CoreSession::write_scopes);
+    runtime_scopes.push(prepared.data_root.clone());
+    // Rollback can restore an existing managed-directory symlink. Reserve its
+    // current physical destination too, so subsequent runtime reconciliation
+    // stays under the same exclusive authority.
+    runtime_scopes.extend(write_scopes(&prepared.data_root));
+    let lease = crate::data_coordinator::DataWriteLease::exclusive(runtime_scopes);
+    let previous_runtime = session
+        .map(|session| {
+            let controlled =
+                crate::ControlledConfigStore::new(prepared.data_root.join("controlled-config"))
+                    .with_write_lease(&lease);
+            session
+                .capture_restore_snapshot(&controlled)
+                .map_err(|error| BackupError::Transaction(error.to_string()))
+        })
+        .transpose()?;
     let parent = prepared
         .data_root
         .parent()
@@ -30,14 +56,28 @@ pub(super) fn activate(
         let staged = prepared.staging_root.join(item);
         let live = prepared.data_root.join(item);
         let previous = rollback_root.join(item);
-        if live.exists() {
+        let exists = match fs::symlink_metadata(&live) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(activation_failure(
+                    &error,
+                    &prepared.data_root,
+                    &rollback_root,
+                    &mut installed,
+                    &mut preserved,
+                    remove_empty_data_root,
+                ));
+            }
+        };
+        if exists {
             fs::rename(&live, &previous).map_err(|error| {
                 activation_failure(
                     &error,
                     &prepared.data_root,
                     &rollback_root,
-                    &installed,
-                    &preserved,
+                    &mut installed,
+                    &mut preserved,
                     remove_empty_data_root,
                 )
             })?;
@@ -48,8 +88,8 @@ pub(super) fn activate(
                 &error,
                 &prepared.data_root,
                 &rollback_root,
-                &installed,
-                &preserved,
+                &mut installed,
+                &mut preserved,
                 remove_empty_data_root,
             ));
         }
@@ -60,8 +100,8 @@ pub(super) fn activate(
             &error,
             &prepared.data_root,
             &rollback_root,
-            &installed,
-            &preserved,
+            &mut installed,
+            &mut preserved,
             remove_empty_data_root,
         ));
     }
@@ -70,7 +110,11 @@ pub(super) fn activate(
         data_root: prepared.data_root.clone(),
         rollback_root,
         remove_empty_data_root,
+        installed,
+        preserved,
         active: true,
+        previous_runtime,
+        lease,
     })
 }
 
@@ -78,8 +122,8 @@ pub(super) fn rollback(transaction: &mut BackupRestoreTransaction) -> BackupResu
     restore_previous(
         &transaction.data_root,
         &transaction.rollback_root,
-        &LIVE_ITEMS,
-        &LIVE_ITEMS,
+        &mut transaction.installed,
+        &mut transaction.preserved,
         transaction.remove_empty_data_root,
     )
 }
@@ -104,8 +148,8 @@ fn activation_failure(
     error: &std::io::Error,
     data_root: &Path,
     rollback_root: &Path,
-    installed: &[&str],
-    preserved: &[&str],
+    installed: &mut Vec<&'static str>,
+    preserved: &mut Vec<&'static str>,
     remove_empty_data_root: bool,
 ) -> BackupError {
     match restore_previous(
@@ -125,18 +169,19 @@ fn activation_failure(
 fn restore_previous(
     data_root: &Path,
     rollback_root: &Path,
-    installed: &[&str],
-    preserved: &[&str],
+    installed: &mut Vec<&'static str>,
+    preserved: &mut Vec<&'static str>,
     remove_empty_data_root: bool,
 ) -> BackupResult<()> {
-    for item in installed.iter().rev() {
+    while let Some(item) = installed.last() {
         remove_path(&data_root.join(item))?;
+        installed.pop();
     }
-    for item in preserved.iter().rev() {
-        let previous = rollback_root.join(item);
-        if previous.exists() {
-            fs::rename(previous, data_root.join(item))?;
-        }
+    // Record each successful move before proceeding. Drop may retry after a
+    // later move or directory cleanup fails, and must preserve restored items.
+    while let Some(item) = preserved.last() {
+        fs::rename(rollback_root.join(item), data_root.join(item))?;
+        preserved.pop();
     }
     if rollback_root.exists() {
         fs::remove_dir_all(rollback_root)?;

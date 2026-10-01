@@ -4,9 +4,12 @@ use super::{
     ActiveTheme, App, Context, Focusable, InteractiveElement, IntoElement, Page, ParentElement,
     Render, Sidebar, Styled, TitleBar, Window, ZenClashApp, div, h_flex, v_flex,
 };
-use gpui_kit::component::{Icon, IconName, Sizable as _};
+use gpui_kit::component::{
+    IconName,
+    button::{Button, ButtonCustomVariant, ButtonVariants as _},
+};
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{ClickEvent, MouseButton, Pixels, RenderOnce, StatefulInteractiveElement as _, px};
+use gpui_kit::{ClickEvent, MouseButton, Pixels, RenderOnce, px};
 
 const MAIN_WINDOW_TITLE_BAR_SELECTOR: &str = "main-window-title-bar";
 const MAIN_WINDOW_DRAG_SELECTOR: &str = "main-window-drag-area";
@@ -51,6 +54,15 @@ impl WindowsWindowControl {
     fn is_close(self) -> bool {
         self == Self::Close
     }
+
+    fn label(self, is_maximized: bool) -> String {
+        zenclash_i18n::text(match self {
+            Self::Minimize => "app.window.minimize",
+            Self::Zoom if is_maximized => "app.window.restore",
+            Self::Zoom => "app.window.maximize",
+            Self::Close => "app.window.close",
+        })
+    }
 }
 
 #[derive(IntoElement)]
@@ -89,8 +101,18 @@ impl RenderOnce for WindowsWindowControls {
                 };
                 let on_close_window = self.on_close_window.clone();
 
-                div()
-                    .id(control.selector())
+                Button::new(control.selector())
+                    .icon(control.icon(is_maximized))
+                    .accessibility_label(control.label(is_maximized))
+                    .tooltip(control.label(is_maximized))
+                    .custom(
+                        ButtonCustomVariant::new(cx)
+                            .foreground(hover_foreground)
+                            .hover(hover_background)
+                            .active(active_background),
+                    )
+                    .rounded_none()
+                    .p_0()
                     .flex()
                     .w(WINDOWS_TITLE_BAR_HEIGHT)
                     .h_full()
@@ -100,8 +122,6 @@ impl RenderOnce for WindowsWindowControls {
                     .items_center()
                     .occlude()
                     .text_color(cx.theme().foreground)
-                    .hover(|style| style.bg(hover_background).text_color(hover_foreground))
-                    .active(|style| style.bg(active_background).text_color(hover_foreground))
                     .on_mouse_down(MouseButton::Left, |_, window, cx| {
                         window.prevent_default();
                         cx.stop_propagation();
@@ -122,7 +142,6 @@ impl RenderOnce for WindowsWindowControls {
                             }
                         }
                     })
-                    .child(Icon::new(control.icon(is_maximized)).small())
             }))
     }
 }
@@ -252,6 +271,76 @@ mod tests {
         main_window_title_bar, needs_client_window_controls, needs_native_window_drag,
         uses_custom_title_bar,
     };
+
+    #[gpui_kit::test]
+    fn caption_controls_have_names_and_close_through_keyboard_and_pointer(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::component::Root;
+        use gpui_kit::test::TestWindowExt;
+        use gpui_kit::{
+            AppContext, Context, FocusHandle, InteractiveElement, ParentElement, Render, Styled,
+            div, px, size,
+        };
+        use std::{cell::Cell, rc::Rc};
+
+        struct Caption {
+            focus: FocusHandle,
+            closes: Rc<Cell<usize>>,
+        }
+        impl Render for Caption {
+            fn render(
+                &mut self,
+                _: &mut gpui_kit::Window,
+                _: &mut Context<Self>,
+            ) -> impl IntoElement {
+                let closes = self.closes.clone();
+                div()
+                    .size_full()
+                    .track_focus(&self.focus)
+                    .child(super::WindowsWindowControls {
+                        on_close_window: Rc::new(move |_, _, _| closes.set(closes.get() + 1)),
+                    })
+            }
+        }
+        cx.update(gpui_kit::init);
+        let closes = Rc::new(Cell::new(0));
+        let mut view = None;
+        let window = cx.open_window(size(px(400.), px(100.)), |window, cx| {
+            let caption = cx.new(|cx| Caption {
+                focus: cx.focus_handle(),
+                closes: closes.clone(),
+            });
+            view = Some(caption.clone());
+            Root::new(caption, window, cx)
+        });
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            for control in WINDOWS_WINDOW_CONTROLS {
+                let target = window.find(control.selector());
+                assert_eq!(target.role(), Some(gpui_kit::Role::Button));
+                assert_eq!(target.label(), Some(control.label(false).as_str()));
+            }
+            let focus = view.as_ref().unwrap().read(cx).focus.clone();
+            window.focus(&focus, cx);
+            for _ in 0..5 {
+                if window.find(MAIN_WINDOW_CLOSE_SELECTOR).focused() == Some(true) {
+                    break;
+                }
+                window.press("tab", cx);
+            }
+            assert_eq!(
+                window.find(MAIN_WINDOW_CLOSE_SELECTOR).focused(),
+                Some(true)
+            );
+            window.press("enter", cx);
+            assert_eq!(closes.get(), 1);
+            window.click(MAIN_WINDOW_CLOSE_SELECTOR, cx);
+            assert_eq!(closes.get(), 2);
+            window.remove_window();
+        })
+        .unwrap();
+    }
 
     #[test]
     fn custom_title_bar_policy_covers_windows_and_linux_only() {

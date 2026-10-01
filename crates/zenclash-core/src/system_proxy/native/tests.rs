@@ -10,10 +10,16 @@ use super::*;
 
 #[derive(Clone, Copy, Debug)]
 enum Fault {
+    Pass,
     PartialWrite,
     HttpOnly,
     Readback,
     Reject,
+    CorruptInactiveUrl,
+    ExternalHttps,
+    ExternalCachedHttps,
+    ExternalCachedPac,
+    PartialHostWrite,
 }
 
 #[derive(Debug)]
@@ -52,6 +58,7 @@ impl FixtureBackend {
         if matches!(fault, Some(Fault::Reject)) {
             return Err(MihomoError::Process("fixture write rejected".into()));
         }
+        let previous = state.services.get(service).cloned();
         update(
             state
                 .services
@@ -64,12 +71,50 @@ impl FixtureBackend {
         if matches!(fault, Some(Fault::HttpOnly)) {
             state.services.get_mut(service).unwrap().secure_enabled = false;
         }
+        if matches!(fault, Some(Fault::CorruptInactiveUrl)) {
+            state.services.get_mut(service).unwrap().auto_url = "http://corrupted.test/pac".into();
+        }
+        if matches!(fault, Some(Fault::ExternalHttps)) {
+            let actual = state.services.get_mut(service).unwrap();
+            actual.secure_enabled = true;
+            actual.secure_server = "new.external.test".into();
+            actual.secure_port = 8443;
+        }
+        if matches!(fault, Some(Fault::ExternalCachedHttps)) {
+            let actual = state.services.get_mut(service).unwrap();
+            actual.secure_enabled = false;
+            actual.secure_server = "new.cached.external.test".into();
+            actual.secure_port = 8443;
+        }
+        if matches!(fault, Some(Fault::ExternalCachedPac)) {
+            state.services.get_mut(service).unwrap().auto_url =
+                "http://new.cached.external.test/config.pac".into();
+        }
+        if matches!(fault, Some(Fault::PartialHostWrite)) {
+            let actual = state.services.get_mut(service).unwrap();
+            let host = actual.server.clone();
+            *actual = previous.unwrap();
+            actual.server = host;
+            actual.enabled = false;
+            actual.secure_enabled = false;
+            actual.auto_enabled = false;
+        }
         state.fail_read = matches!(fault, Some(Fault::Readback));
         if let Some(path) = state.break_preferences.take() {
             std::fs::remove_file(&path).unwrap();
             std::fs::create_dir(&path).unwrap();
         }
-        if matches!(fault, Some(Fault::PartialWrite | Fault::HttpOnly)) {
+        if matches!(
+            fault,
+            Some(
+                Fault::PartialWrite
+                    | Fault::HttpOnly
+                    | Fault::ExternalHttps
+                    | Fault::ExternalCachedHttps
+                    | Fault::ExternalCachedPac
+                    | Fault::PartialHostWrite
+            )
+        ) {
             return Err(MihomoError::Process(
                 "fixture response failed after writing".into(),
             ));
@@ -79,6 +124,10 @@ impl FixtureBackend {
 }
 
 impl NativeProxyBackend for FixtureBackend {
+    fn restore_snapshot(&self, previous: &SystemProxyStatus) -> MihomoResult<()> {
+        self.write(&previous.service, |status| *status = previous.clone())
+    }
+
     fn detect_service(&self) -> MihomoResult<String> {
         Ok(self.0.lock().active.clone())
     }
@@ -449,6 +498,8 @@ fn partial_http_enable_is_recovered_without_clearing_an_external_https_proxy() {
             .faults
             .extend([Fault::HttpOnly, Fault::Reject, Fault::Reject]);
         assert!(fixture.session.set_enabled(true, 7890).is_err());
+        let known_observed = fixture.backend.status("Wi-Fi").unwrap();
+        let writes = fixture.backend.0.lock().writes.len();
         if external_https {
             let mut state = fixture.backend.0.lock();
             let actual = state.services.get_mut("Wi-Fi").unwrap();
@@ -463,6 +514,7 @@ fn partial_http_enable_is_recovered_without_clearing_an_external_https_proxy() {
             assert_eq!(actual.secure_server, "external.test");
             assert!(actual.enabled);
             assert!(fixture.controller.recovery.lock().is_some());
+            assert_eq!(fixture.backend.0.lock().writes.len(), writes);
             fixture
                 .backend
                 .0
@@ -471,16 +523,30 @@ fn partial_http_enable_is_recovered_without_clearing_an_external_https_proxy() {
                 .get_mut("Wi-Fi")
                 .unwrap()
                 .secure_enabled = false;
+            assert!(fixture.session.release_owned().is_err());
+            let actual = fixture.backend.status("Wi-Fi").unwrap();
+            assert!(!actual.secure_enabled);
+            assert_eq!(actual.secure_server, "external.test");
+            assert_eq!(actual.secure_port, 8080);
+            assert!(fixture.controller.recovery.lock().is_some());
+            assert_eq!(fixture.backend.0.lock().writes.len(), writes);
+            fixture
+                .backend
+                .0
+                .lock()
+                .services
+                .insert("Wi-Fi".into(), known_observed);
             fixture.session.release_owned().unwrap();
         } else {
             result.unwrap();
         }
         assert!(!fixture.backend.status("Wi-Fi").unwrap().active());
+        assert!(fixture.controller.recovery.lock().is_none());
     }
 }
 
 #[test]
-fn failed_rollback_with_successful_disable_closes_both_listeners() {
+fn failed_rollback_with_successful_disable_retains_the_previous_listener_until_retry() {
     let fixture = Fixture::new();
     let old = fixture.start_pac();
     fixture
@@ -491,6 +557,10 @@ fn failed_rollback_with_successful_disable_closes_both_listeners() {
         .extend([Fault::PartialWrite, Fault::Reject]);
     assert!(fixture.change_pac().is_err());
     assert!(!fixture.backend.status("Wi-Fi").unwrap().active());
+    assert!(fixture.controller.recovery.lock().is_some());
+    assert!(read_pac(&old).contains("127.0.0.1:7890"));
+    fixture.session.release_owned().unwrap();
+    assert!(fixture.controller.recovery.lock().is_none());
     assert!(fixture.controller.pac_status().is_none());
     assert!(TcpStream::connect(old.address).is_err());
 }
@@ -520,4 +590,304 @@ fn release_does_not_reenable_a_proxy_when_ownership_persistence_fails() {
         assert!(!fixture.backend.status("Wi-Fi").unwrap().active());
         assert!(TcpStream::connect(old.address).is_err());
     }
+}
+
+fn external_snapshot(enabled: bool, secure_enabled: bool, auto_enabled: bool) -> SystemProxyStatus {
+    SystemProxyStatus {
+        service: "Wi-Fi".into(),
+        enabled,
+        server: "http.original.test".into(),
+        port: 8080,
+        secure_enabled,
+        secure_server: "https.original.test".into(),
+        secure_port: 8443,
+        bypass: vec!["localhost".into(), "*.original.test".into()],
+        auto_enabled,
+        auto_url: "http://pac.original.test/config.pac".into(),
+    }
+}
+
+#[test]
+fn failed_write_restores_every_captured_protocol_flag_endpoint_and_bypass() {
+    for (http, https, pac) in [
+        (true, true, false),
+        (true, false, false),
+        (false, true, false),
+        (false, false, false),
+        (true, true, true),
+        (true, false, true),
+        (false, true, true),
+        (false, false, true),
+    ] {
+        let fixture = Fixture::new();
+        let before = external_snapshot(http, https, pac);
+        {
+            let mut state = fixture.backend.0.lock();
+            state.services.insert("Wi-Fi".into(), before.clone());
+            state.faults.push_back(Fault::PartialWrite);
+        }
+
+        assert!(fixture.session.set_enabled(true, 7890).is_err());
+
+        assert_eq!(fixture.backend.status("Wi-Fi").unwrap(), before);
+        assert!(fixture.controller.recovery.lock().is_none());
+        assert!(!fixture.store.load().unwrap().system_proxy_enabled);
+    }
+}
+
+#[test]
+fn failed_write_initial_rollback_preserves_a_new_external_active_protocol() {
+    for fault in [
+        Fault::ExternalHttps,
+        Fault::ExternalCachedHttps,
+        Fault::ExternalCachedPac,
+    ] {
+        let fixture = Fixture::new();
+        fixture.backend.0.lock().faults.push_back(fault);
+
+        assert!(fixture.session.set_enabled(true, 7890).is_err());
+
+        let actual = fixture.backend.status("Wi-Fi").unwrap();
+        assert!(actual.enabled);
+        assert_eq!((actual.server.as_str(), actual.port), ("127.0.0.1", 7890));
+        match fault {
+            Fault::ExternalHttps => {
+                assert!(actual.secure_enabled);
+                assert_eq!(
+                    (actual.secure_server.as_str(), actual.secure_port),
+                    ("new.external.test", 8443)
+                );
+            }
+            Fault::ExternalCachedHttps => {
+                assert!(!actual.secure_enabled);
+                assert_eq!(
+                    (actual.secure_server.as_str(), actual.secure_port),
+                    ("new.cached.external.test", 8443)
+                );
+            }
+            Fault::ExternalCachedPac => {
+                assert!(!actual.auto_enabled);
+                assert_eq!(
+                    actual.auto_url,
+                    "http://new.cached.external.test/config.pac"
+                );
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(fixture.backend.0.lock().writes, ["Wi-Fi"]);
+        assert!(fixture.controller.recovery.lock().is_some());
+        assert!(fixture.session.release_owned().is_err());
+        assert_eq!(fixture.backend.status("Wi-Fi").unwrap(), actual);
+        assert_eq!(fixture.backend.0.lock().writes, ["Wi-Fi"]);
+    }
+}
+
+#[test]
+fn failed_inactive_host_only_write_restores_the_captured_snapshot() {
+    let fixture = Fixture::new();
+    let before = external_snapshot(true, true, false);
+    {
+        let mut state = fixture.backend.0.lock();
+        state.services.insert("Wi-Fi".into(), before.clone());
+        state.faults.push_back(Fault::PartialHostWrite);
+    }
+
+    assert!(fixture.session.set_enabled(true, 7890).is_err());
+
+    assert_eq!(fixture.backend.status("Wi-Fi").unwrap(), before);
+    assert!(fixture.controller.recovery.lock().is_none());
+}
+
+#[test]
+fn failed_restore_retains_the_original_snapshot_after_a_successful_safety_disable() {
+    let fixture = Fixture::new();
+    let before = external_snapshot(true, false, true);
+    {
+        let mut state = fixture.backend.0.lock();
+        state.services.insert("Wi-Fi".into(), before.clone());
+        state.faults.extend([Fault::PartialWrite, Fault::Reject]);
+    }
+    assert!(fixture.session.set_enabled(true, 7890).is_err());
+    assert!(!fixture.backend.status("Wi-Fi").unwrap().active());
+    assert!(fixture.controller.recovery.lock().is_some());
+
+    // No persisted ZenClash claim exists: retry restores the captured external
+    // proxy instead of treating safety-disable as the final recovered state.
+    assert!(!fixture.session.release_owned().unwrap());
+
+    assert_eq!(fixture.backend.status("Wi-Fi").unwrap(), before);
+    assert!(fixture.controller.recovery.lock().is_none());
+}
+
+#[test]
+fn failed_restore_retry_preserves_a_new_external_proxy_and_remains_recoverable() {
+    let fixture = Fixture::new();
+    let before = external_snapshot(true, true, false);
+    {
+        let mut state = fixture.backend.0.lock();
+        state.services.insert("Wi-Fi".into(), before.clone());
+        state
+            .faults
+            .extend([Fault::PartialWrite, Fault::Reject, Fault::Reject]);
+    }
+    assert!(fixture.session.set_enabled(true, 7890).is_err());
+    let external = SystemProxyStatus {
+        server: "new.external.test".into(),
+        secure_server: "new.external.test".into(),
+        ..before.clone()
+    };
+    fixture
+        .backend
+        .0
+        .lock()
+        .services
+        .insert("Wi-Fi".into(), external.clone());
+
+    assert!(fixture.session.release_owned().is_err());
+
+    assert_eq!(fixture.backend.status("Wi-Fi").unwrap(), external);
+    assert!(fixture.controller.recovery.lock().is_some());
+}
+
+#[test]
+fn failed_restore_retry_preserves_a_later_external_disable_or_bypass_change() {
+    for disable in [false, true] {
+        let fixture = Fixture::new();
+        {
+            let mut state = fixture.backend.0.lock();
+            state
+                .services
+                .insert("Wi-Fi".into(), external_snapshot(true, true, false));
+            state
+                .faults
+                .extend([Fault::PartialWrite, Fault::Reject, Fault::Reject]);
+        }
+        assert!(fixture.session.set_enabled(true, 7890).is_err());
+        let external = {
+            let mut state = fixture.backend.0.lock();
+            let actual = state.services.get_mut("Wi-Fi").unwrap();
+            if disable {
+                actual.enabled = false;
+                actual.secure_enabled = false;
+            } else {
+                actual.bypass = vec!["changed.external.test".into()];
+            }
+            actual.clone()
+        };
+        let writes = fixture.backend.0.lock().writes.len();
+
+        assert!(fixture.session.release_owned().is_err());
+
+        assert_eq!(fixture.backend.status("Wi-Fi").unwrap(), external);
+        assert_eq!(fixture.backend.0.lock().writes.len(), writes);
+        assert!(fixture.controller.recovery.lock().is_some());
+    }
+}
+
+#[test]
+fn failed_restore_retry_preserves_external_changes_to_inactive_cached_fields() {
+    for change_https in [true, false] {
+        let fixture = Fixture::new();
+        {
+            let mut state = fixture.backend.0.lock();
+            state
+                .services
+                .insert("Wi-Fi".into(), external_snapshot(true, true, false));
+            state
+                .faults
+                .extend([Fault::PartialWrite, Fault::Reject, Fault::Reject]);
+        }
+        assert!(fixture.session.set_enabled(true, 7890).is_err());
+        let external = {
+            let mut state = fixture.backend.0.lock();
+            let actual = state.services.get_mut("Wi-Fi").unwrap();
+            assert!(actual.enabled);
+            if change_https {
+                actual.secure_enabled = false;
+                actual.secure_server = "new.cached.external.test".into();
+                actual.secure_port = 8443;
+            } else {
+                assert!(!actual.auto_enabled);
+                actual.auto_url = "http://new.cached.external.test/config.pac".into();
+            }
+            actual.clone()
+        };
+        let writes = fixture.backend.0.lock().writes.len();
+
+        assert!(fixture.session.release_owned().is_err());
+
+        assert_eq!(fixture.backend.status("Wi-Fi").unwrap(), external);
+        assert_eq!(fixture.backend.0.lock().writes.len(), writes);
+        assert!(fixture.controller.recovery.lock().is_some());
+    }
+}
+
+#[test]
+fn a_successful_restore_call_with_incorrect_disabled_values_remains_retryable() {
+    let fixture = Fixture::new();
+    let before = external_snapshot(false, false, false);
+    {
+        let mut state = fixture.backend.0.lock();
+        state.services.insert("Wi-Fi".into(), before.clone());
+        state
+            .faults
+            .extend([Fault::PartialWrite, Fault::CorruptInactiveUrl]);
+    }
+    assert!(fixture.session.set_enabled(true, 7890).is_err());
+    assert_ne!(fixture.backend.status("Wi-Fi").unwrap(), before);
+    assert!(fixture.controller.recovery.lock().is_some());
+
+    assert!(!fixture.session.release_owned().unwrap());
+
+    assert_eq!(fixture.backend.status("Wi-Fi").unwrap(), before);
+    assert!(fixture.controller.recovery.lock().is_none());
+}
+
+#[test]
+fn a_failed_restore_readback_reapplies_even_equal_stored_values_before_clearing_recovery() {
+    let fixture = Fixture::new();
+    let before = external_snapshot(true, false, false);
+    {
+        let mut state = fixture.backend.0.lock();
+        state.services.insert("Wi-Fi".into(), before.clone());
+        state.faults.extend([Fault::PartialWrite, Fault::Readback]);
+    }
+    assert!(fixture.session.set_enabled(true, 7890).is_err());
+    assert_eq!(fixture.backend.status("Wi-Fi").unwrap(), before);
+    assert!(fixture.controller.recovery.lock().is_some());
+    let writes = fixture.backend.0.lock().writes.len();
+
+    assert!(!fixture.session.release_owned().unwrap());
+
+    assert!(fixture.backend.0.lock().writes.len() > writes);
+    assert_eq!(fixture.backend.status("Wi-Fi").unwrap(), before);
+    assert!(fixture.controller.recovery.lock().is_none());
+}
+
+#[test]
+fn a_failed_migration_restores_both_services_and_keeps_the_old_owned_pac_alive() {
+    let fixture = Fixture::new();
+    let old = fixture.start_pac();
+    let preferences = fixture.store.load().unwrap();
+    let old_service = fixture.backend.status("Wi-Fi").unwrap();
+    let external = SystemProxyStatus {
+        service: "Ethernet".into(),
+        ..external_snapshot(true, false, true)
+    };
+    {
+        let mut state = fixture.backend.0.lock();
+        state.active = "Ethernet".into();
+        state.services.insert("Ethernet".into(), external.clone());
+        state.faults.extend([Fault::Pass, Fault::PartialWrite]);
+    }
+
+    assert!(fixture.session.set_enabled(true, 7890).is_err());
+
+    assert_eq!(fixture.backend.status("Wi-Fi").unwrap(), old_service);
+    assert_eq!(fixture.backend.status("Ethernet").unwrap(), external);
+    assert_eq!(fixture.store.load().unwrap(), preferences);
+    assert!(read_pac(&old).contains("127.0.0.1:7890"));
+    assert!(fixture.session.release_owned().unwrap());
+    assert!(!fixture.backend.status("Wi-Fi").unwrap().active());
+    assert_eq!(fixture.backend.status("Ethernet").unwrap(), external);
 }

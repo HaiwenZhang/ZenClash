@@ -127,12 +127,17 @@ impl CoreUpdateTransaction {
     ///
     /// Returns an error when the active candidate cannot be moved aside or the
     /// backup cannot be restored atomically.
-    pub fn rollback(mut self) -> CoreUpdateResult<()> {
+    pub fn rollback(self) -> CoreUpdateResult<()> {
+        self.rollback_with_status().0
+    }
+
+    pub(crate) fn rollback_with_status(mut self) -> (CoreUpdateResult<()>, bool) {
         let result = restore_backup(&self.target, &self.backup);
-        if self.target.is_file() && !self.backup.exists() {
+        let restored = self.target.is_file() && !self.backup.exists();
+        if restored {
             self.active = false;
         }
-        result
+        (result, restored)
     }
 
     pub(super) fn preserve_for_manual_recovery(mut self) -> PathBuf {

@@ -86,7 +86,7 @@ impl ProxyOperations {
     pub async fn catalog(&self, visibility: ProxyVisibility) -> MihomoResult<ProxyCatalog> {
         let mut catalog = self.client.proxy_catalog().await?;
         if visibility == ProxyVisibility::VisibleOnly {
-            catalog.groups.retain(|group| !group.hidden);
+            catalog.hide_hidden_groups();
         }
         Ok(catalog)
     }
@@ -137,7 +137,7 @@ impl ProxyOperations {
         let previous_member = if connection_policy == ConnectionPolicy::RebuildAffected {
             match self.client.proxy_catalog().await {
                 Ok(catalog) => catalog
-                    .groups
+                    .groups()
                     .iter()
                     .find(|candidate| candidate.name == group)
                     .map(|candidate| candidate.now.clone())
@@ -281,7 +281,7 @@ impl ProxyOperations {
         };
         let actual = catalog.as_ref().and_then(|catalog| {
             catalog
-                .groups
+                .groups()
                 .iter()
                 .find(|candidate| candidate.name == group)
                 .map(|candidate| candidate.now.clone())
@@ -480,8 +480,8 @@ mod tests {
         let request = server.join().unwrap();
 
         assert!(request.starts_with("GET /proxies "));
-        assert_eq!(catalog.groups.len(), 1);
-        assert_eq!(catalog.groups[0].name, "Proxy");
+        assert_eq!(catalog.groups().len(), 1);
+        assert_eq!(catalog.groups()[0].name, "Proxy");
     }
 
     #[tokio::test]
@@ -506,8 +506,8 @@ mod tests {
             .unwrap();
         server.join().unwrap();
 
-        assert_eq!(catalog.groups.len(), 2);
-        assert!(catalog.groups.iter().any(|group| group.hidden));
+        assert_eq!(catalog.groups().len(), 2);
+        assert!(catalog.groups().iter().any(|group| group.hidden));
     }
 
     #[tokio::test]
@@ -541,7 +541,7 @@ mod tests {
         assert!(requests[1].starts_with("GET /proxies "));
         assert_eq!(outcome.actual.as_deref(), Some("HK 01"));
         assert_eq!(
-            outcome.catalog.unwrap().groups[0].behavior,
+            outcome.catalog.unwrap().groups()[0].behavior,
             crate::ProxyGroupBehavior::Automatic { fixed: false }
         );
     }
@@ -579,7 +579,7 @@ mod tests {
         assert!(requests[1].starts_with("GET /proxies "));
         assert_eq!(outcome.delays.get("HK 01"), Some(&42));
         assert_eq!(
-            outcome.selection.catalog.unwrap().groups[0].behavior,
+            outcome.selection.catalog.unwrap().groups()[0].behavior,
             crate::ProxyGroupBehavior::Automatic { fixed: false }
         );
     }

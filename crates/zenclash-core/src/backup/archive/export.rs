@@ -25,7 +25,10 @@ pub(in crate::backup) fn export(
     manager: &BackupManager,
     destination: &Path,
 ) -> BackupResult<BackupExportSummary> {
-    let files = collect_snapshot(manager)?;
+    let mut scopes = vec![manager.data_root().to_path_buf(), destination.to_path_buf()];
+    scopes.extend(super::super::transaction::write_scopes(manager.data_root()));
+    let lease = crate::data_coordinator::DataWriteLease::shared(scopes);
+    let files = collect_snapshot(manager, &lease)?;
     let payload_bytes = files.iter().try_fold(0_u64, |total, file| {
         total
             .checked_add(file.bytes.len() as u64)
@@ -71,15 +74,19 @@ pub(in crate::backup) fn export(
     })
 }
 
-fn collect_snapshot(manager: &BackupManager) -> BackupResult<Vec<SnapshotFile>> {
+fn collect_snapshot(
+    manager: &BackupManager,
+    lease: &crate::data_coordinator::DataWriteLease,
+) -> BackupResult<Vec<SnapshotFile>> {
     let preferences =
         AppPreferencesStore::new(manager.data_root().join(PREFERENCES_PATH)).load()?;
     let controlled =
         ControlledConfigStore::new(manager.data_root().join("controlled-config")).load()?;
-    let profiles = ProfileStore::new(manager.data_root().join("profiles"))?;
+    let profiles = ProfileStore::open(manager.data_root().join("profiles"), Some(lease))?;
     let catalog = profiles.load()?;
     validate_catalog_metadata(&catalog)?;
-    let overrides = YamlOverrideStore::new(manager.data_root().join("yaml-overrides"))?;
+    let overrides =
+        YamlOverrideStore::open(manager.data_root().join("yaml-overrides"), Some(lease))?;
     let override_catalog = overrides.load()?;
 
     let mut files = vec![

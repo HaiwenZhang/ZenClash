@@ -240,7 +240,7 @@ async fn verify_real_proxy_operations(client: &MihomoClient, profile: &Path, hom
         .as_ref()
         .and_then(|catalog| {
             catalog
-                .groups
+                .groups()
                 .iter()
                 .find(|group| group.name == "Automatic Test")
         })
@@ -259,7 +259,7 @@ async fn verify_real_proxy_operations(client: &MihomoClient, profile: &Path, hom
         .as_ref()
         .and_then(|catalog| {
             catalog
-                .groups
+                .groups()
                 .iter()
                 .find(|group| group.name == "Automatic Test")
         })
@@ -273,7 +273,7 @@ async fn verify_real_proxy_operations(client: &MihomoClient, profile: &Path, hom
             .catalog(ProxyVisibility::VisibleOnly)
             .await
             .expect("read real visible proxy catalog")
-            .groups
+            .groups()
             .iter()
             .all(|group| !group.hidden)
     );
@@ -1045,7 +1045,7 @@ async fn verify_catalog_apis(client: &MihomoClient) {
         catalog.proxy_count > 0,
         "Mihomo did not expose built-in proxies"
     );
-    if let Some(group) = catalog.groups.first() {
+    if let Some(group) = catalog.groups().first() {
         assert!(!group.now.is_empty());
         client
             .change_proxy(&group.name, &group.now)

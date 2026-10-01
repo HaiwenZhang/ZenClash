@@ -27,6 +27,7 @@ impl ProfileStore {
         }
         validate_clash_yaml(new_payload)?;
 
+        let _write_lease = self.write_access.acquire();
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
         let index = catalog
@@ -48,14 +49,13 @@ impl ProfileStore {
         catalog.profiles[index].updated_at = super::unix_timestamp();
         catalog.profiles[index].size_bytes = applied_payload.len() as u64;
         let record = catalog.profiles[index].clone();
-        if let Err(error) = self.save_unlocked(&catalog) {
-            return match atomic_write(&path, &previous_payload) {
-                Ok(()) => Err(error),
-                Err(rollback) => Err(ProfileStoreError::Transaction(format!(
-                    "保存配置索引失败：{error}；恢复编辑前文件失败：{rollback}"
-                ))),
-            };
-        }
+        self.save_catalog_or_restore_payload_unlocked(
+            &catalog,
+            &path,
+            &previous_payload,
+            "保存配置索引失败",
+            "恢复编辑前文件失败",
+        )?;
         Ok(ProfileUpdate {
             record,
             previous_record,

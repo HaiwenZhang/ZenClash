@@ -148,6 +148,7 @@ impl RenderOnce for SidebarNavigation {
                 let active = page == self.current_page;
 
                 Button::new(page.route())
+                    .accessibility_label(page.label())
                     .icon(sidebar_icon(page).size(rems(1.25)))
                     .w_full()
                     .h(rems(3.))
@@ -232,6 +233,7 @@ impl RenderOnce for Sidebar {
                     .when(self.collapsed, |this| this.justify_center())
                     .child(
                         Button::new("toggle-sidebar")
+                            .accessibility_label(toggle_label.clone())
                             .icon(toggle_icon)
                             .small()
                             .ghost()
@@ -298,6 +300,74 @@ mod tests {
     };
 
     use super::{OutboundMode, Sidebar, sidebar_icon_path};
+
+    #[gpui_kit::test]
+    fn collapsed_navigation_keeps_accessible_names_and_keyboard_navigation(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::component::{Collapsible as _, Root};
+        use gpui_kit::test::TestWindowExt;
+        use gpui_kit::{
+            AppContext, Context, FocusHandle, InteractiveElement, IntoElement, ParentElement,
+            Render, Styled, div, px, size,
+        };
+        struct Navigation {
+            focus: FocusHandle,
+            navigated: bool,
+        }
+        impl Render for Navigation {
+            fn render(
+                &mut self,
+                _: &mut gpui_kit::Window,
+                cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .track_focus(&self.focus)
+                    .on_action(cx.listener(|this, _: &crate::app::NavigateRules, _, cx| {
+                        this.navigated = true;
+                        cx.notify();
+                    }))
+                    .child(
+                        super::SidebarNavigation::new(Page::Home, [Page::Home, Page::Rules])
+                            .collapsed(true),
+                    )
+            }
+        }
+        cx.update(gpui_kit::init);
+        let mut view = None;
+        let handle = cx.open_window(size(px(200.), px(200.)), |window, cx| {
+            let navigation = cx.new(|cx| Navigation {
+                focus: cx.focus_handle(),
+                navigated: false,
+            });
+            view = Some(navigation.clone());
+            Root::new(navigation, window, cx)
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            let view = view.as_ref().unwrap();
+            window.render_frame(cx);
+            assert_eq!(
+                window.find(Page::Rules.route()).label(),
+                Some(Page::Rules.label().as_str())
+            );
+            let focus = view.read(cx).focus.clone();
+            window.focus(&focus, cx);
+            for _ in 0..4 {
+                if window.find(Page::Rules.route()).focused() == Some(true) {
+                    break;
+                }
+                window.press("tab", cx);
+            }
+            assert_eq!(window.find(Page::Rules.route()).focused(), Some(true));
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(cx.update(|cx| view.as_ref().unwrap().read(cx).navigated));
+        cx.update_window(handle.into(), |_, window, _| window.remove_window())
+            .unwrap();
+    }
 
     #[test]
     fn sidebar_defaults_to_expanded_and_accepts_collapsed_state() {

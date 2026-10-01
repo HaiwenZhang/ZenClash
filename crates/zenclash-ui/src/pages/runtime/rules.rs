@@ -392,6 +392,13 @@ impl RuntimePage {
         if let (Some(index), Some(_)) = (runtime_index, stats) {
             row = row.child(
                 Switch::new(("rule-enabled", index))
+                    .accessibility_label(zenclash_i18n::text_with(
+                        "rules.row.enabled_named",
+                        &[
+                            ("index", index.to_string()),
+                            ("payload", rule.payload.clone()),
+                        ],
+                    ))
                     .small()
                     .checked(enabled)
                     .disabled(

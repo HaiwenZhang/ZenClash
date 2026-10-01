@@ -21,6 +21,7 @@ impl ProfileStore {
     /// Returns an error when the profile does not exist or the catalog cannot
     /// be persisted atomically.
     pub fn activate_reversible(&self, id: &str) -> ProfileStoreResult<ProfileActivation> {
+        let _write_lease = self.write_access.acquire();
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
         let profile = catalog
@@ -49,6 +50,7 @@ impl ProfileStore {
     /// Returns an error when the active profile has changed or the previous
     /// catalog state cannot be persisted.
     pub fn rollback_activation(&self, activation: ProfileActivation) -> ProfileStoreResult<()> {
+        let _write_lease = self.write_access.acquire();
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
         if catalog.active.as_deref() != Some(activation.activated_id.as_str()) {
@@ -68,6 +70,7 @@ impl ProfileStore {
     /// Returns an error when the profile is active or missing, or when the
     /// file/index transaction cannot be completed.
     pub fn delete(&self, id: &str) -> ProfileStoreResult<()> {
+        let _write_lease = self.write_access.acquire();
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
         if catalog.active.as_deref() == Some(id) {

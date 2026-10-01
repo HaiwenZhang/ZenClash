@@ -17,9 +17,7 @@ impl RuntimePage {
             return;
         };
         let controlled = self.controlled_config_store.clone();
-        let profile = self.profile_path.clone();
-        let core_runtime =
-            super::super::profiles::workflow::CoreProfileRuntime::new(self.core_session.clone());
+        let core_runtime = self.profile_service.clone();
         let core_name = self.core_kind.display_name();
         let task = self.runtime.spawn(async move {
             let import_store = store.clone();
@@ -42,14 +40,10 @@ impl RuntimePage {
                     )
                 })?
                 .map_err(|error| error.to_string())?;
-            if let Some(profile) = profile
-                && let Err(error) = super::super::profiles::workflow::reload_effective(
-                    controlled,
-                    &core_runtime,
-                    &profile,
-                )
-                .await
-            {
+            let reapplication = core_runtime
+                .reapply_with_overrides(controlled, store.enabled_paths(&catalog))
+                .await;
+            if let Err(error) = reapplication {
                 let cleanup_store = store.clone();
                 let ids = imported
                     .iter()
@@ -85,7 +79,7 @@ impl RuntimePage {
                     )),
                 };
             }
-            Ok::<_, String>((catalog, imported.len()))
+            reapplication.map(|applied| (catalog, imported.len(), applied))
         });
         cx.spawn(async move |this, cx| {
             let result = task
@@ -100,15 +94,19 @@ impl RuntimePage {
             let _ = this.update(cx, |this, cx| {
                 this.finish_mutation(token);
                 match result {
-                    Ok((catalog, count)) => {
+                    Ok((catalog, count, applied)) => {
                         this.overrides.catalog = catalog;
                         this.overrides.invalidate_preview();
                         this.invalidate_config_inputs(cx);
                         if this.is_page_task_current(token) {
-                            this.notice = Some(zenclash_i18n::text_with(
-                                "overrides.notices.imported",
-                                &[("count", count.to_string())],
-                            ));
+                            this.notice = Some(if applied.is_some() {
+                                zenclash_i18n::text_with(
+                                    "overrides.notices.imported",
+                                    &[("count", count.to_string())],
+                                )
+                            } else {
+                                zenclash_i18n::text("overrides.notices.saved_unapplied")
+                            });
                         }
                     }
                     Err(error) => this.set_page_error(token, error),
@@ -231,10 +229,8 @@ impl RuntimePage {
         let Some(token) = self.begin_mutation(Page::Override) else {
             return;
         };
-        let profile = self.profile_path.clone();
         let controlled = self.controlled_config_store.clone();
-        let core_runtime =
-            super::super::profiles::workflow::CoreProfileRuntime::new(self.core_session.clone());
+        let core_runtime = self.profile_service.clone();
         let core_name = self.core_kind.display_name();
         let next_for_task = next.clone();
         let task = self.runtime.spawn(async move {
@@ -252,14 +248,10 @@ impl RuntimePage {
                 )
             })?
             .map_err(|error| error.to_string())?;
-            if let Some(profile) = profile
-                && let Err(error) = super::super::profiles::workflow::reload_effective(
-                    controlled,
-                    &core_runtime,
-                    &profile,
-                )
-                .await
-            {
+            let reapplication = core_runtime
+                .reapply_with_overrides(controlled, store.enabled_paths(&next_for_task))
+                .await;
+            if let Err(error) = reapplication {
                 let rollback_store = store.clone();
                 let expected = next_for_task.clone();
                 let rollback = before.clone();
@@ -290,7 +282,7 @@ impl RuntimePage {
                     )),
                 };
             }
-            Ok::<_, String>(())
+            reapplication
         });
         cx.spawn(async move |this, cx| {
             let result = task
@@ -305,12 +297,16 @@ impl RuntimePage {
             let _ = this.update(cx, |this, cx| {
                 this.finish_mutation(token);
                 match result {
-                    Ok(()) => {
+                    Ok(applied) => {
                         this.overrides.catalog = next;
                         this.overrides.invalidate_preview();
                         this.invalidate_config_inputs(cx);
                         if this.is_page_task_current(token) {
-                            this.notice = Some(success);
+                            this.notice = Some(if applied.is_some() {
+                                success
+                            } else {
+                                zenclash_i18n::text("overrides.notices.saved_unapplied")
+                            });
                         }
                     }
                     Err(error) => this.set_page_error(token, error),

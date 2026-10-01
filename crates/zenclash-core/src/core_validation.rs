@@ -73,21 +73,43 @@ pub struct CoreConfigValidator {
     kind: CoreKind,
     binary: PathBuf,
     home_dir: PathBuf,
+    write_access: crate::data_coordinator::DataWriteAccess,
 }
 
 impl CoreConfigValidator {
     /// Creates a validator for the same inputs used by a managed core process.
     #[must_use]
     pub fn new(kind: CoreKind, binary: impl Into<PathBuf>, home_dir: impl Into<PathBuf>) -> Self {
+        let home_dir = home_dir.into();
         Self {
             kind,
             binary: binary.into(),
-            home_dir: home_dir.into(),
+            write_access: crate::data_coordinator::DataWriteAccess::new(&home_dir),
+            home_dir,
         }
     }
 
     pub(crate) const fn kind(&self) -> CoreKind {
         self.kind
+    }
+
+    pub(crate) fn write_scopes(&self) -> Vec<PathBuf> {
+        vec![self.home_dir.clone(), self.binary.clone()]
+    }
+
+    pub(crate) fn with_write_lease(&self, lease: &crate::data_coordinator::DataWriteLease) -> Self {
+        Self {
+            write_access: self.write_access.authorized(lease),
+            ..self.clone()
+        }
+    }
+
+    pub(crate) async fn acquire_write_lease(
+        &self,
+    ) -> Result<crate::data_coordinator::DataWriteLease, String> {
+        self.write_access
+            .acquire_paths_async(self.write_scopes())
+            .await
     }
 
     /// Runs the selected core with `-t -d <home> -f <config>`.
@@ -101,10 +123,23 @@ impl CoreConfigValidator {
     /// Returns an error when the input is missing, the validation process
     /// cannot run, times out, or the selected core rejects the configuration.
     pub fn validate_file(&self, config: impl AsRef<Path>) -> Result<(), CoreConfigValidationError> {
+        let config = config.as_ref();
+        let mut scopes = self.write_scopes();
+        scopes.push(config.to_path_buf());
+        let _write_lease = self.write_access.acquire_paths(scopes).map_err(|message| {
+            CoreConfigValidationError::Command {
+                kind: self.kind,
+                path: config.to_path_buf(),
+                message,
+            }
+        })?;
+        self.validate_file_while_leased(config)
+    }
+
+    fn validate_file_while_leased(&self, config: &Path) -> Result<(), CoreConfigValidationError> {
         if !self.kind.capabilities().config_validation {
             return Ok(());
         }
-        let config = config.as_ref();
         if !config.is_file() {
             return Err(CoreConfigValidationError::InvalidConfig(
                 config.to_path_buf(),
@@ -153,6 +188,14 @@ impl CoreConfigValidator {
     ///
     /// Returns YAML, filesystem, command, timeout, or core-rejection errors.
     pub fn validate_payload(&self, payload: &str) -> Result<(), CoreConfigValidationError> {
+        let _write_lease = self
+            .write_access
+            .acquire_paths(self.write_scopes())
+            .map_err(|message| CoreConfigValidationError::Command {
+                kind: self.kind,
+                path: self.home_dir.clone(),
+                message,
+            })?;
         if !self.kind.capabilities().config_validation {
             return Ok(());
         }
@@ -172,7 +215,7 @@ impl CoreConfigValidator {
             }
         })?;
         let temporary = TemporaryConfig(path.clone());
-        let validation = self.validate_file(&path);
+        let validation = self.validate_file_while_leased(&path);
         drop(temporary);
         validation
     }

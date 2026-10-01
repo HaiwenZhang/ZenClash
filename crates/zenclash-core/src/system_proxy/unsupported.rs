@@ -24,3 +24,9 @@ pub(super) fn set_enabled(
 pub(super) fn set_pac_enabled(_service: &str, _enabled: bool, _url: &str) -> MihomoResult<()> {
     Err(MihomoError::Process("当前平台尚未实现 PAC 系统代理".into()))
 }
+
+pub(super) fn restore_snapshot(_previous: &SystemProxyStatus) -> MihomoResult<()> {
+    Err(MihomoError::Process(zenclash_i18n::text(
+        "system_proxy.errors.verification",
+    )))
+}

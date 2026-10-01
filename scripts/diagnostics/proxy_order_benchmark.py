@@ -15,49 +15,47 @@ if not artifacts:
 core = max(artifacts, key=lambda path: path.stat().st_mtime)
 implementation = (root / "crates/zenclash-ui/src/pages/proxies/presentation.rs").read_text()
 source = r'''
-use zenclash_core::{ProxyGroup, ProxyNode, DelayHistory};
+use zenclash_core::{ProxyCatalog, ProxyGroup, ProxyNode, ProxyNodeId, DelayHistory};
 #[derive(Clone, Copy)] enum DelayTestFailure { Timeout, Failed }
-fn test_key(group: &str, proxy: &str) -> String { format!("{group}\0{proxy}") }
 mod measured {
 ''' + implementation + r'''
 }
 fn main() {
     use std::{collections::HashMap, hint::black_box, time::Instant};
     for count in [500, 5000, 20000] {
-        let group = ProxyGroup {
-            name: "test".into(),
-            all: (0..count).map(|index| ProxyNode {
-                name: format!("node-{index}"),
-                history: vec![DelayHistory { delay: ((index * 7919) % 999 + 1) as u32, ..Default::default() }],
-                ..Default::default()
-            }).collect(),
+        let catalog = ProxyCatalog::from_group_nodes(vec![(ProxyGroup {
+            name: "test".into(), ..Default::default()
+        }, (0..count).map(|index| ProxyNode {
+            name: format!("node-{index}"),
+            history: vec![DelayHistory { delay: ((index * 7919) % 999 + 1) as u32, ..Default::default() }],
             ..Default::default()
-        };
+        }).collect())], count);
+        let group = &catalog.groups()[0];
         let failures = HashMap::from([
-            (test_key("test", "node-0"), DelayTestFailure::Timeout),
-            (test_key("test", "node-1"), DelayTestFailure::Failed),
+            (group.all[0].clone(), DelayTestFailure::Timeout),
+            (group.all[1].clone(), DelayTestFailure::Failed),
         ]);
         let started = Instant::now();
         for _ in 0..500 {
-            black_box(measured::visible_node_indices(black_box(&group), true, true, &failures));
+            black_box(measured::visible_node_indices(black_box(&catalog), black_box(group), true, true, &failures));
         }
         let uncached = started.elapsed().as_secs_f64()*1e6/500.0;
         let orders = measured::GroupOrders::default();
-        let expected = measured::visible_node_indices(&group, true, true, &failures);
-        assert_eq!(&*orders.order(&group, true, true, &failures), expected);
+        let expected = measured::visible_node_indices(&catalog, group, true, true, &failures);
+        assert_eq!(&*orders.order(&catalog, group, true, true, &failures), expected);
         let started = Instant::now();
         for _ in 0..100000 {
-            black_box(orders.order(black_box(&group), true, true, &failures));
+            black_box(orders.order(black_box(&catalog), black_box(group), true, true, &failures));
         }
         let cached = started.elapsed().as_secs_f64()*1e6/100000.0;
         orders.invalidate("test");
-        assert_eq!(&*orders.order(&group, true, true, &failures), expected);
+        assert_eq!(&*orders.order(&catalog, group, true, true, &failures), expected);
         orders.clear();
         println!("nodes={count} uncached_mean_us={uncached:.2} cached_mean_us={cached:.4}");
         for rebuild in [true, false] {
             let orders = measured::GroupOrders::default();
-            let expected = measured::visible_node_indices(&group, false, false, &failures);
-            assert_eq!(&*orders.order(&group, false, false, &failures), expected);
+            let expected = measured::visible_node_indices(&catalog, group, false, false, &failures);
+            assert_eq!(&*orders.order(&catalog, group, false, false, &failures), expected);
             let started = Instant::now();
             for _ in 0..10000 {
                 if rebuild {
@@ -65,7 +63,7 @@ fn main() {
                 } else {
                     orders.invalidate_delays(black_box("test"));
                 }
-                black_box(orders.order(black_box(&group), false, false, &failures));
+                black_box(orders.order(black_box(&catalog), black_box(group), false, false, &failures));
             }
             let elapsed = started.elapsed().as_secs_f64()*1e6/10000.0;
             println!("nodes={count} delay_batch_rebuild={rebuild} order_mean_us={elapsed:.4}");

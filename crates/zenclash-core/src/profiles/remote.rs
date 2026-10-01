@@ -148,6 +148,7 @@ impl ProfileStore {
         applied_payload: Vec<u8>,
         subscription: SubscriptionMetadata,
     ) -> ProfileStoreResult<ProfileUpdate> {
+        let _write_lease = self.write_access.acquire();
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
         let index = remote_profile_index(&catalog, id)?;
@@ -180,14 +181,13 @@ impl ProfileStore {
             catalog.profiles[index].update_interval_minutes = interval;
         }
         let record = catalog.profiles[index].clone();
-        if let Err(error) = self.save_unlocked(&catalog) {
-            return match atomic_write(&path, &previous_payload) {
-                Ok(()) => Err(error),
-                Err(rollback) => Err(ProfileStoreError::Transaction(format!(
-                    "保存订阅索引失败：{error}；恢复上一版本配置失败：{rollback}"
-                ))),
-            };
-        }
+        self.save_catalog_or_restore_payload_unlocked(
+            &catalog,
+            &path,
+            &previous_payload,
+            "保存订阅索引失败",
+            "恢复上一版本配置失败",
+        )?;
         Ok(ProfileUpdate {
             record,
             previous_record,
@@ -202,6 +202,7 @@ impl ProfileStore {
     ///
     /// Returns an error for a stale update token or a failed rollback.
     pub fn rollback_update(&self, update: ProfileUpdate) -> ProfileStoreResult<ProfileRecord> {
+        let _write_lease = self.write_access.acquire();
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
         let index = catalog
@@ -225,14 +226,13 @@ impl ProfileStore {
         }
         atomic_write(&path, &update.previous_payload)?;
         catalog.profiles[index] = update.previous_record.clone();
-        if let Err(error) = self.save_unlocked(&catalog) {
-            return match atomic_write(&path, &current_payload) {
-                Ok(()) => Err(error),
-                Err(rollback) => Err(ProfileStoreError::Transaction(format!(
-                    "恢复订阅索引失败：{error}；重新应用当前配置失败：{rollback}"
-                ))),
-            };
-        }
+        self.save_catalog_or_restore_payload_unlocked(
+            &catalog,
+            &path,
+            &current_payload,
+            "恢复订阅索引失败",
+            "重新应用当前配置失败",
+        )?;
         Ok(update.previous_record)
     }
 }

@@ -77,6 +77,7 @@ pub struct RuntimePage {
     page: Page,
     core_kind: CoreKind,
     core_session: CoreSession,
+    profile_service: crate::ProfileService,
     client: MihomoClient,
     runtime: tokio::runtime::Handle,
     traffic_monitor: Arc<TrafficMonitor>,
@@ -138,6 +139,8 @@ pub struct RuntimePageServices {
     pub core_kind: CoreKind,
     /// Serialized runtime-core transition owner.
     pub core_session: CoreSession,
+    /// Shared profile business commands and typed recovery record.
+    pub profile_service: crate::ProfileService,
     /// Typed Mihomo controller client.
     pub client: MihomoClient,
     /// Tokio runtime used for controller and filesystem work.
@@ -175,6 +178,8 @@ pub struct RuntimePageServices {
 pub struct ProfileActivated {
     /// Managed YAML path accepted by Mihomo.
     pub path: PathBuf,
+    /// Accepted core generation carried by the originating transaction.
+    pub runtime_version: u64,
 }
 
 impl EventEmitter<ProfileActivated> for RuntimePage {}

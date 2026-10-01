@@ -154,6 +154,11 @@ impl PacServer {
         *retained = Some(replacement);
     }
 
+    pub(super) fn discard_retained(&self) {
+        let retained = self.inner.retained.lock().take();
+        drop(retained);
+    }
+
     pub(super) fn owns_url(&self, url: &str) -> bool {
         self.inner
             .running

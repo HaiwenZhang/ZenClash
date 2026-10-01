@@ -17,6 +17,9 @@ pub mod design;
 /// Navigable application pages and their live Mihomo views.
 pub mod pages;
 
+mod profile_service;
+pub use profile_service::ProfileService;
+
 #[cfg(test)]
 #[path = "../build_version.rs"]
 mod build_version;
