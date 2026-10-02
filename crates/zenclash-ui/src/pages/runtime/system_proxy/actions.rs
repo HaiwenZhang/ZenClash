@@ -329,9 +329,9 @@ impl RuntimePage {
                     cx.notify();
                 }
             });
-        }).detach();
+        })
+        .detach();
     }
-
 }
 
 fn unavailable_message(listener_error: Option<&str>) -> String {

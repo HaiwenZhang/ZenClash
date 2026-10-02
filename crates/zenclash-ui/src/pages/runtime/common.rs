@@ -1,8 +1,8 @@
 use super::{
-    App, Disableable, FluentBuilder, Icon, IconName, IntoElement, ParentElement, Styled, Switch,
-    Window, div, h_flex, px, v_flex,
+    App, Disableable, FluentBuilder, Icon, IconName, InteractiveElement, IntoElement,
+    ParentElement, Styled, Switch, Window, div, h_flex, px, v_flex,
 };
-use gpui_kit::SharedString;
+use gpui_kit::{SharedString, StatefulInteractiveElement};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ListPage {
@@ -63,6 +63,7 @@ pub(super) fn setting_card(
 ) -> gpui_kit::Div {
     let title = title.into();
     v_flex()
+        .min_w_0()
         .rounded(theme.radius_lg)
         .border_1()
         .border_color(theme.border)
@@ -76,10 +77,8 @@ pub(super) fn setting_card(
                 .gap_3()
                 .border_b_1()
                 .border_color(theme.border)
-                .bg(theme.muted.opacity(0.34))
                 .text_sm()
                 .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                .child(div().size(px(6.)).rounded_full().bg(theme.primary))
                 .child(title),
         )
 }
@@ -134,7 +133,11 @@ pub(super) fn info_row(
         .child(div().text_sm().child(label))
         .child(
             div()
+                .min_w_0()
+                .flex_1()
                 .max_w(px(620.))
+                .text_ellipsis()
+                .overflow_hidden()
                 .text_right()
                 .text_xs()
                 .font_family(theme.mono_font_family.clone())
@@ -185,6 +188,8 @@ where
         .border_color(theme.border)
         .child(
             v_flex()
+                .flex_1()
+                .min_w_0()
                 .gap_1()
                 .child(div().text_sm().child(label.clone()))
                 .child(
@@ -196,6 +201,7 @@ where
         )
         .child(
             Switch::new(id)
+                .flex_shrink_0()
                 .accessibility_label(label)
                 .checked(checked)
                 .disabled(disabled)
@@ -238,10 +244,20 @@ pub(super) fn metric(
                 .text_size(px(10.))
                 .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .text_color(theme.muted_foreground)
-                .child(label),
+                .child(label.clone()),
         )
         .child(
             div()
+                .id(label)
+                .min_w_0()
+                .max_w_full()
+                .truncate()
+                .tooltip({
+                    let value = value.clone();
+                    move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(value.clone()).build(window, cx)
+                    }
+                })
                 .font_family(theme.mono_font_family.clone())
                 .text_lg()
                 .font_weight(gpui_kit::FontWeight::BOLD)

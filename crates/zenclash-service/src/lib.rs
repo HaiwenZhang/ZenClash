@@ -14,16 +14,26 @@ mod kernel_transport;
 #[cfg(feature = "server")]
 mod maintenance_journal;
 mod metadata;
+#[cfg(feature = "server")]
+mod package_maintenance;
 mod platform;
 mod protocol;
 #[cfg(feature = "server")]
+mod provider_readback;
+#[cfg(feature = "server")]
 mod runtime;
+#[cfg(feature = "server")]
+mod runtime_manifest;
 #[cfg(feature = "server")]
 mod server;
 
 /// Runs the installed native service until its manager requests shutdown.
 ///
 /// This blocking entry point is used by the service binary, never the GUI.
+///
+/// # Errors
+/// Reports native registration or dispatch failures, untrusted installation
+/// state, runtime recovery failures and an unsuccessful final kernel cleanup.
 #[cfg(feature = "server")]
 pub fn run_service() -> std::io::Result<()> {
     #[cfg(windows)]
@@ -60,15 +70,21 @@ pub use client::{ServiceClient, ServiceClientError, ServiceLogs, ServiceSubscrip
 pub use frame::{FrameError, MAX_FRAME_BYTES, read_frame, write_frame};
 #[cfg(feature = "server")]
 pub use installer::run_maintenance;
-pub use installer::{MaintenanceAction, maintain_service};
+pub use installer::{
+    MaintenanceAction, MaintenanceError, MaintenancePending, ServiceHealth, ServiceHealthKind,
+    maintain_service, service_health,
+};
 pub use metadata::{
     InstalledMetadata, METADATA_SCHEMA_VERSION, MetadataError, read_metadata, write_metadata_atomic,
 };
+#[cfg(feature = "server")]
+pub use package_maintenance::run_package_uninstall;
 pub use protocol::{
-    ApiResponse as ServiceApiResponse, RuntimeStatus as ServiceRuntimeStatus, ServiceErrorCode,
+    ApiResponse as ServiceApiResponse, PreparedRuntimePatch as ServicePreparedRuntimePatch,
     RuntimeCandidate as ServiceRuntimeCandidate,
     RuntimeCandidateKind as ServiceRuntimeCandidateKind,
-    RuntimeCandidatePhase as ServiceRuntimeCandidatePhase,
-    StreamKind as ServiceStream,
+    RuntimeCandidatePhase as ServiceRuntimeCandidatePhase, RuntimeStatus as ServiceRuntimeStatus,
+    ServiceErrorCode, StreamKind as ServiceStream,
 };
 pub use protocol::{PROTOCOL_VERSION, ProtocolInfo, SessionProof, SessionToken};
+pub use protocol::{ProviderCacheChunk, ProviderCacheRead, ProviderCacheToken, ProviderKind};

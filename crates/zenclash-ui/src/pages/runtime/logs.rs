@@ -8,15 +8,15 @@ use std::{
 
 use super::{
     AppContext, Button, ClipboardItem, Context, Disableable, Entity, FluentBuilder, IconName,
-    Input, InputEvent, InputState, InteractiveElement, IntoElement, LogTimeSource, MihomoLogLevel,
-    Page, ParentElement, RuntimePage, Selectable, Sizable, Styled, Subscription, Window,
-    compact_text, contains_ascii_case_insensitive, div, empty_state, format_bytes,
-    format_log_entries, format_log_entries_support_safe, h_flex, info_row, list_page, metric,
-    pagination_summary, px, setting_card, v_flex,
+    Input, InputEvent, InputState, IntoElement, LogTimeSource, MihomoLogLevel, Page, ParentElement,
+    RuntimePage, Selectable, Sizable, Styled, Subscription, Window, compact_text,
+    contains_ascii_case_insensitive, div, empty_state, format_bytes, format_log_entries,
+    format_log_entries_support_safe, h_flex, info_row, list_page, pagination_summary, v_flex,
 };
 
 const LOGS_PER_PAGE: usize = 100;
 const LOG_HEALTH_REFRESH: Duration = Duration::from_secs(1);
+mod dashboard;
 
 pub(super) struct LogUiState {
     pub(super) filter: Entity<InputState>,
@@ -31,6 +31,8 @@ pub(super) struct LogUiState {
     persistence: zenclash_core::LogPersistenceStatus,
     copying: bool,
     exporting: bool,
+    level_filter: Option<String>,
+    selected: Option<(Arc<zenclash_core::LogEntry>, LogRow)>,
 }
 
 #[derive(Clone, Default)]
@@ -40,6 +42,8 @@ struct LogPresentation {
     entries: Vec<Arc<zenclash_core::LogEntry>>,
     rows: Vec<LogRow>,
     matches: Vec<usize>,
+    level_counts: Vec<(String, u64)>,
+    level_filter: Option<String>,
 }
 
 #[derive(Clone)]
@@ -89,6 +93,11 @@ impl LogPresentation {
                 .map(|entry| LogRow::from(entry.as_ref()))
                 .collect();
             self.revision = Some(revision);
+            let mut counts = std::collections::BTreeMap::<String, u64>::new();
+            for entry in &self.entries {
+                *counts.entry(normalized_level(&entry.level)).or_default() += 1;
+            }
+            self.level_counts = counts.into_iter().collect();
         }
         if changed || self.query != query {
             self.query = query;
@@ -98,9 +107,31 @@ impl LogPresentation {
                 .enumerate()
                 .rev()
                 .filter(|(_, entry)| log_matches(entry, &self.query))
+                .filter(|(_, entry)| {
+                    self.level_filter
+                        .as_ref()
+                        .is_none_or(|level| normalized_level(&entry.level) == *level)
+                })
                 .map(|(index, _)| index)
                 .collect();
         }
+    }
+
+    fn set_level_filter(&mut self, level: Option<String>) {
+        self.level_filter = level;
+        self.matches = self
+            .entries
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, entry)| log_matches(entry, &self.query))
+            .filter(|(_, entry)| {
+                self.level_filter
+                    .as_ref()
+                    .is_none_or(|level| normalized_level(&entry.level) == *level)
+            })
+            .map(|(index, _)| index)
+            .collect();
     }
 }
 
@@ -136,11 +167,26 @@ impl LogProjectionWorker {
         self.generation.load(Ordering::Acquire) == generation
     }
 
+    #[cfg(test)]
     fn start(
         &mut self,
         runtime: &tokio::runtime::Handle,
         previous: Arc<LogPresentation>,
         query: String,
+        source: impl FnOnce() -> LogSnapshot + Send + 'static,
+    ) -> (
+        u64,
+        tokio::task::JoinHandle<Result<Option<PreparedLogView>, String>>,
+    ) {
+        self.start_filtered(runtime, previous, query, None, source)
+    }
+
+    fn start_filtered(
+        &mut self,
+        runtime: &tokio::runtime::Handle,
+        previous: Arc<LogPresentation>,
+        query: String,
+        level_filter: Option<String>,
         source: impl FnOnce() -> LogSnapshot + Send + 'static,
     ) -> (
         u64,
@@ -162,16 +208,21 @@ impl LogProjectionWorker {
                 if current.load(Ordering::Acquire) != generation {
                     return None;
                 }
-                let presentation =
-                    if previous.revision == Some(snapshot.revision) && previous.query == query {
-                        previous
-                    } else {
-                        let mut presentation = previous.as_ref().clone();
-                        presentation.refresh(snapshot.revision, query, || {
-                            snapshot.entries.unwrap_or_default()
-                        });
-                        Arc::new(presentation)
-                    };
+                let presentation = if previous.revision == Some(snapshot.revision)
+                    && previous.query == query
+                    && previous.level_filter == level_filter
+                {
+                    previous
+                } else {
+                    let mut presentation = previous.as_ref().clone();
+                    presentation.refresh(snapshot.revision, query, || {
+                        snapshot.entries.unwrap_or_default()
+                    });
+                    if presentation.level_filter != level_filter {
+                        presentation.set_level_filter(level_filter);
+                    }
+                    Arc::new(presentation)
+                };
                 (current.load(Ordering::Acquire) == generation).then_some(PreparedLogView {
                     presentation,
                     connected: snapshot.connected,
@@ -205,6 +256,7 @@ impl LogUiState {
         self.last_refresh = None;
         self.level = None;
         self.persistence = zenclash_core::LogPersistenceStatus::default();
+        self.selected = None;
     }
 
     pub(super) fn new(window: &mut Window, cx: &mut Context<RuntimePage>) -> (Self, Subscription) {
@@ -235,6 +287,8 @@ impl LogUiState {
                 persistence: zenclash_core::LogPersistenceStatus::default(),
                 copying: false,
                 exporting: false,
+                level_filter: None,
+                selected: None,
             },
             subscription,
         )
@@ -250,6 +304,7 @@ impl RuntimePage {
         let revision = self.log_monitor.revision();
         if previous.revision == Some(revision)
             && previous.query == self.logs.query
+            && previous.level_filter == self.logs.level_filter
             && self
                 .logs
                 .last_refresh
@@ -259,10 +314,11 @@ impl RuntimePage {
         }
         let previous_revision = previous.revision;
         let monitor = self.log_monitor.clone();
-        let (generation, task) = self.logs.worker.start(
+        let (generation, task) = self.logs.worker.start_filtered(
             &self.runtime,
             previous,
             self.logs.query.clone(),
+            self.logs.level_filter.clone(),
             move || {
                 let revision = monitor.revision();
                 LogSnapshot {
@@ -329,134 +385,7 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let query = &self.logs.presentation.query;
-        let all_entries = &self.logs.presentation.entries;
-        let ready = self.logs.presentation.revision.is_some();
-        let connected = ready.then_some(self.logs.connected);
-        let persistence = &self.logs.persistence;
-        let filtered_count = self.logs.presentation.matches.len();
-        let page = list_page(filtered_count, self.logs.page, LOGS_PER_PAGE);
-        let entries = self.logs.presentation.matches[page.start..page.end]
-            .iter()
-            .map(|&index| {
-                (
-                    &self.logs.presentation.rows[index],
-                    all_entries[index].as_ref(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let previous_page = page.index.saturating_sub(1);
-        let next_page = page.index + 1;
-        v_flex()
-            .gap_3()
-            .child(render_log_header(
-                all_entries.len(),
-                filtered_count,
-                query.is_empty(),
-                connected,
-                persistence,
-                theme,
-            ))
-            .child(self.render_log_persistence(theme, cx))
-            .when(
-                ready && self.logs.query != self.logs.presentation.query,
-                |this| {
-                    this.child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(zenclash_i18n::text("runtime.empty.loading")),
-                    )
-                },
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(div().flex_1().child(Input::new(&self.logs.filter).small()))
-                    .child(
-                        Button::new("export-logs")
-                            .icon(crate::assets::AppIcon::SquareArrowRightExit)
-                            .label(zenclash_i18n::text("logs.actions.export"))
-                            .small()
-                            .outline()
-                            .loading(self.logs.exporting)
-                            .disabled(all_entries.is_empty() || self.logs.exporting)
-                            .on_click(cx.listener(|this, _, _, cx| this.choose_log_export(cx))),
-                    )
-                    .child(
-                        Button::new("copy-support-safe-logs")
-                            .icon(IconName::Copy)
-                            .label(zenclash_i18n::text("logs.actions.copy_safe"))
-                            .small()
-                            .outline()
-                            .loading(self.logs.copying)
-                            .disabled(all_entries.is_empty() || self.logs.copying)
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.copy_support_safe_logs(cx)),
-                            ),
-                    )
-                    .child(
-                        Button::new("clear-logs")
-                            .icon(IconName::Globe)
-                            .label(zenclash_i18n::text("logs.actions.clear"))
-                            .small()
-                            .outline()
-                            .disabled(all_entries.is_empty())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.log_monitor.clear();
-                                this.logs.page = 0;
-                                this.notice = Some(zenclash_i18n::text("logs.notices.cleared"));
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(Self::render_log_entries(
-                &entries,
-                all_entries.is_empty(),
-                !ready,
-                page.start,
-                theme,
-            ))
-            .when(page.count > 1, |this| {
-                this.child(
-                    h_flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(pagination_summary(page, filtered_count)),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .child(
-                                    Button::new("previous-logs-page")
-                                        .icon(IconName::ChevronLeft)
-                                        .label(zenclash_i18n::text("common.actions.previous_page"))
-                                        .small()
-                                        .outline()
-                                        .disabled(page.index == 0)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.set_logs_page(previous_page, cx);
-                                        })),
-                                )
-                                .child(
-                                    Button::new("next-logs-page")
-                                        .icon(IconName::ChevronRight)
-                                        .label(zenclash_i18n::text("common.actions.next_page"))
-                                        .small()
-                                        .outline()
-                                        .disabled(page.index + 1 >= page.count)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.set_logs_page(next_page, cx);
-                                        })),
-                                ),
-                        ),
-                )
-            })
-            .into_any_element()
+        self.log_dashboard(theme, cx)
     }
 
     fn set_logs_page(&mut self, page: usize, cx: &mut Context<Self>) {
@@ -464,125 +393,206 @@ impl RuntimePage {
         cx.notify();
     }
 
+    pub(super) fn render_log_preferences_controls(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        use gpui_kit::component::{
+            menu::{DropdownMenu, PopupMenuItem},
+            switch::Switch,
+        };
+        let owner = cx.entity().downgrade();
+        let disabled = self.preferences_store.is_none()
+            || self.mutation_busy(crate::pages::runtime::busy::MutationDomain::Logs);
+        v_flex()
+            .gap_3()
+            .child(
+                h_flex()
+                    .gap_3()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(zenclash_i18n::text("logs.persistence.enabled.title")),
+                    )
+                    .child(
+                        Switch::new("settings-log-file-enabled")
+                            .accessibility_label(zenclash_i18n::text(
+                                "logs.persistence.enabled.title",
+                            ))
+                            .checked(self.preferences.log_file_enabled)
+                            .disabled(disabled)
+                            .on_click(cx.listener(|this, checked, _, cx| {
+                                this.set_log_file_enabled(*checked, cx)
+                            })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_3()
+                    .flex_wrap()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(zenclash_i18n::text("logs.persistence.limit")),
+                    )
+                    .child(
+                        Button::new("settings-log-file-limit")
+                            .label(format!("{} MiB", self.preferences.log_file_max_mebibytes))
+                            .small()
+                            .outline()
+                            .disabled(disabled || !self.preferences.log_file_enabled)
+                            .dropdown_caret(true)
+                            .dropdown_menu(move |mut menu, _, _| {
+                                for mebibytes in [5_u16, 10, 25, 50] {
+                                    let owner = owner.clone();
+                                    menu = menu.item(
+                                        PopupMenuItem::new(format!("{mebibytes} MiB")).on_click(
+                                            move |_, _, cx| {
+                                                let _ = owner.update(cx, |page, cx| {
+                                                    page.set_log_file_limit(mebibytes, cx)
+                                                });
+                                            },
+                                        ),
+                                    );
+                                }
+                                menu
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(zenclash_i18n::text("logs.persistence.enabled.description")),
+            )
+    }
+
     fn render_log_persistence(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
+        use gpui_kit::component::{
+            menu::{DropdownMenu, PopupMenuItem},
+            switch::Switch,
+        };
         let status = &self.logs.persistence;
         let ready = self.logs.presentation.revision.is_some();
-        let path = status.path.as_deref().map_or_else(
-            || {
-                if ready {
-                    zenclash_i18n::text("logs.persistence.data_directory_unavailable")
-                } else {
-                    zenclash_i18n::text("runtime.empty.loading")
-                }
-            },
-            |path| path.display().to_string(),
-        );
         let state = status.last_error.clone().unwrap_or_else(|| {
-            if !ready {
-                zenclash_i18n::text("runtime.empty.loading")
+            zenclash_i18n::text(if !ready {
+                "runtime.empty.loading"
             } else if status.enabled {
-                zenclash_i18n::text("logs.persistence.writing")
+                "logs.persistence.writing"
             } else {
-                zenclash_i18n::text("logs.persistence.paused")
-            }
+                "logs.persistence.paused"
+            })
         });
-
-        setting_card(zenclash_i18n::text("logs.persistence.title"), theme)
-            .child(crate::pages::runtime::common::setting_switch_disabled(
-                zenclash_i18n::text("logs.persistence.enabled.title"),
-                zenclash_i18n::text("logs.persistence.enabled.description"),
-                self.preferences.log_file_enabled,
-                "logs-file-enabled",
-                theme,
-                self.mutation_busy(crate::pages::runtime::busy::MutationDomain::Logs),
-                cx.listener(|this, checked, _, cx| {
-                    this.set_log_file_enabled(*checked, cx);
-                }),
-            ))
-            .child(info_row(
-                zenclash_i18n::text("logs.persistence.file"),
-                &path,
-                theme,
-            ))
-            .child(info_row(
-                zenclash_i18n::text("logs.persistence.state"),
-                state,
-                theme,
-            ))
-            .child(info_row(
-                zenclash_i18n::text("logs.persistence.capture"),
+        let owner = cx.entity().downgrade();
+        let busy = self.mutation_busy(crate::pages::runtime::busy::MutationDomain::Logs);
+        v_flex()
+            .gap_3()
+            .p_4()
+            .border_1()
+            .border_color(theme.border)
+            .rounded(theme.radius)
+            .bg(theme.group_box)
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child(zenclash_i18n::text("logs.persistence.title")),
+                    )
+                    .child(
+                        Switch::new("logs-file-enabled")
+                            .accessibility_label(zenclash_i18n::text(
+                                "logs.persistence.enabled.title",
+                            ))
+                            .small()
+                            .checked(self.preferences.log_file_enabled)
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, checked, _, cx| {
+                                this.set_log_file_enabled(*checked, cx)
+                            })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_3()
+                    .text_xs()
+                    .child(
+                        div()
+                            .w_20()
+                            .text_color(theme.muted_foreground)
+                            .child(zenclash_i18n::text("logs.persistence.state")),
+                    )
+                    .child(div().flex_1().min_w_0().child(state)),
+            )
+            .child(
+                h_flex()
+                    .gap_3()
+                    .text_xs()
+                    .child(
+                        div()
+                            .w_20()
+                            .text_color(theme.muted_foreground)
+                            .child(zenclash_i18n::text("logs.persistence.usage")),
+                    )
+                    .child(div().flex_1().child(if ready {
+                        format_log_disk_usage(status)
+                    } else {
+                        zenclash_i18n::text("runtime.empty.loading")
+                    })),
+            )
+            .child(
+                h_flex()
+                    .gap_3()
+                    .text_xs()
+                    .child(
+                        div()
+                            .w_20()
+                            .text_color(theme.muted_foreground)
+                            .child(zenclash_i18n::text("logs.persistence.dropped")),
+                    )
+                    .child(div().flex_1().child(status.dropped_entries.to_string())),
+            )
+            .child(
+                Button::new("log-file-limit")
+                    .label(format!(
+                        "{} · {} MiB",
+                        zenclash_i18n::text("logs.persistence.limit"),
+                        self.preferences.log_file_max_mebibytes
+                    ))
+                    .small()
+                    .outline()
+                    .disabled(busy || !self.preferences.log_file_enabled)
+                    .dropdown_caret(true)
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for mebibytes in [5_u16, 10, 25, 50] {
+                            let owner = owner.clone();
+                            menu =
+                                menu.item(PopupMenuItem::new(format!("{mebibytes} MiB")).on_click(
+                                    move |_, _, cx| {
+                                        let _ = owner.update(cx, |page, cx| {
+                                            page.set_log_file_limit(mebibytes, cx)
+                                        });
+                                    },
+                                ));
+                        }
+                        menu
+                    }),
+            )
+            .child(div().text_xs().text_color(theme.muted_foreground).child(
                 self.logs.level.map_or_else(
                     || zenclash_i18n::text("runtime.empty.loading"),
                     log_level_description,
                 ),
-                theme,
             ))
-            .child(info_row(
-                zenclash_i18n::text("logs.persistence.usage"),
-                if ready {
-                    format_log_disk_usage(status)
-                } else {
-                    zenclash_i18n::text("runtime.empty.loading")
-                },
-                theme,
-            ))
-            .when(status.dropped_entries > 0, |card| {
-                card.child(info_row(
-                    zenclash_i18n::text("logs.persistence.dropped"),
-                    zenclash_i18n::text_with(
-                        "logs.persistence.dropped_count",
-                        &[("count", status.dropped_entries.to_string())],
-                    ),
-                    theme,
-                ))
-            })
-            .child(
-                h_flex()
-                    .min_h(px(58.))
-                    .px_4()
-                    .gap_3()
-                    .justify_between()
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .child(zenclash_i18n::text("logs.persistence.limit")),
-                            )
-                            .child(
-                                div().text_xs().text_color(theme.muted_foreground).child(
-                                    zenclash_i18n::text("logs.persistence.limit_description"),
-                                ),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .children([5_u16, 10, 25, 50].into_iter().enumerate().map(
-                                |(index, mebibytes)| {
-                                    Button::new(("log-file-limit", index))
-                                    .label(format!("{mebibytes} MiB"))
-                                    .small()
-                                    .outline()
-                                    .selected(self.preferences.log_file_max_mebibytes == mebibytes)
-                                    .disabled(
-                                        !self.preferences.log_file_enabled
-                                            || self.mutation_busy(
-                                                crate::pages::runtime::busy::MutationDomain::Logs,
-                                            ),
-                                    )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.set_log_file_limit(mebibytes, cx);
-                                    }))
-                                },
-                            )),
-                    ),
-            )
     }
 
     fn set_log_file_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -614,16 +624,18 @@ impl RuntimePage {
         success: String,
         cx: &mut Context<Self>,
     ) {
+        if !matches!(self.page, Page::Logs | Page::Settings) {
+            return;
+        }
         let Some(store) = self.preferences_store.clone() else {
             self.error = Some(zenclash_i18n::text("logs.errors.preferences_unavailable"));
             cx.notify();
             return;
         };
         let log_path = store.log_file_path();
-        let Some(token) = self.begin_scoped_mutation(
-            Page::Logs,
-            crate::pages::runtime::busy::MutationDomain::Logs,
-        ) else {
+        let Some(token) = self
+            .begin_scoped_mutation(self.page, crate::pages::runtime::busy::MutationDomain::Logs)
+        else {
             return;
         };
         let task = self.runtime.spawn_blocking(move || {
@@ -677,82 +689,6 @@ impl RuntimePage {
         })
         .detach();
         cx.notify();
-    }
-
-    fn render_log_entries(
-        entries: &[(&LogRow, &zenclash_core::LogEntry)],
-        all_empty: bool,
-        loading: bool,
-        page_start: usize,
-        theme: &gpui_kit::component::Theme,
-    ) -> gpui_kit::Div {
-        v_flex()
-            .rounded(theme.radius)
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.secondary)
-            .when(entries.is_empty(), |this| {
-                this.child(empty_state(
-                    if loading {
-                        zenclash_i18n::text("runtime.empty.loading")
-                    } else if all_empty {
-                        zenclash_i18n::text("logs.empty.waiting")
-                    } else {
-                        zenclash_i18n::text("logs.empty.filtered")
-                    },
-                    theme,
-                ))
-            })
-            .children(entries.iter().enumerate().map(|(offset, (row, entry))| {
-                let index = page_start + offset;
-                let color = match entry.level.as_str() {
-                    "error" => theme.danger,
-                    "warning" | "warn" => theme.warning,
-                    "debug" => theme.muted_foreground,
-                    _ => theme.success,
-                };
-                let time_source = match row.time_source {
-                    LogTimeSource::Core => zenclash_i18n::text("logs.time.core"),
-                    LogTimeSource::LocalReceive => zenclash_i18n::text("logs.time.local_receive"),
-                };
-                let fields = row.fields.clone();
-                h_flex()
-                    .id(("log-row", index))
-                    .items_start()
-                    .gap_3()
-                    .px_4()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(
-                        div()
-                            .w(px(62.))
-                            .text_xs()
-                            .text_color(color)
-                            .child(row.level.clone()),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .gap_1()
-                            .child(div().text_xs().child(row.payload.clone()))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(format!("{} · {time_source}", row.time)),
-                            )
-                            .when_some(fields, |this, fields| {
-                                this.child(
-                                    div()
-                                        .text_xs()
-                                        .font_family(theme.mono_font_family.clone())
-                                        .text_color(theme.muted_foreground)
-                                        .child(fields),
-                                )
-                            }),
-                    )
-            }))
     }
 
     fn copy_support_safe_logs(&mut self, cx: &mut Context<Self>) {
@@ -948,64 +884,47 @@ fn render_log_header(
     filtered_entries: usize,
     query_is_empty: bool,
     connected: Option<bool>,
-    persistence: &zenclash_core::LogPersistenceStatus,
+    _persistence: &zenclash_core::LogPersistenceStatus,
     theme: &gpui_kit::component::Theme,
 ) -> gpui_kit::Div {
-    let disk_color = if persistence.last_error.is_some() {
-        theme.danger
-    } else if persistence.enabled {
-        theme.success
-    } else {
-        theme.muted_foreground
+    let color = match connected {
+        Some(true) => theme.success,
+        Some(false) => theme.warning,
+        None => theme.muted_foreground,
     };
     h_flex()
-        .justify_between()
-        .child(metric(
-            if query_is_empty {
-                zenclash_i18n::text("logs.metrics.entries")
+        .gap_4()
+        .flex_wrap()
+        .p_4()
+        .border_1()
+        .border_color(theme.border)
+        .rounded(theme.radius)
+        .bg(theme.group_box)
+        .child(
+            h_flex()
+                .gap_2()
+                .text_sm()
+                .text_color(color)
+                .child(div().size_2().rounded_full().bg(color))
+                .child(zenclash_i18n::text(match connected {
+                    Some(true) => "logs.stream.connected",
+                    Some(false) => "logs.stream.reconnecting",
+                    None => "runtime.empty.loading",
+                })),
+        )
+        .child(div().text_sm().child(format!(
+            "{}   {}",
+            zenclash_i18n::text(if query_is_empty {
+                "logs.metrics.entries"
             } else {
-                zenclash_i18n::text("logs.metrics.filtered")
-            },
+                "logs.metrics.filtered"
+            }),
             if query_is_empty {
                 total_entries.to_string()
             } else {
                 format!("{filtered_entries} / {total_entries}")
-            },
-            theme.primary,
-            theme,
-        ))
-        .child(metric(
-            zenclash_i18n::text("logs.metrics.disk_usage"),
-            if connected.is_none() {
-                zenclash_i18n::text("runtime.empty.loading")
-            } else if persistence.enabled {
-                format_log_disk_usage(persistence)
-            } else {
-                zenclash_i18n::text("logs.metrics.disabled")
-            },
-            disk_color,
-            theme,
-        ))
-        .child(
-            h_flex()
-                .gap_2()
-                .text_xs()
-                .text_color(match connected {
-                    Some(true) => theme.success,
-                    Some(false) => theme.danger,
-                    None => theme.muted_foreground,
-                })
-                .child(div().size_2().rounded_full().bg(match connected {
-                    Some(true) => theme.success,
-                    Some(false) => theme.danger,
-                    None => theme.muted_foreground,
-                }))
-                .child(match connected {
-                    Some(true) => zenclash_i18n::text("logs.stream.connected"),
-                    Some(false) => zenclash_i18n::text("logs.stream.reconnecting"),
-                    None => zenclash_i18n::text("runtime.empty.loading"),
-                }),
-        )
+            }
+        )))
 }
 
 fn format_log_disk_usage(persistence: &zenclash_core::LogPersistenceStatus) -> String {
@@ -1017,6 +936,14 @@ fn format_log_disk_usage(persistence: &zenclash_core::LogPersistenceStatus) -> S
         format_bytes(persistence.size_bytes),
         format_bytes(persistence.max_bytes)
     )
+}
+
+fn normalized_level(level: &str) -> String {
+    if level.eq_ignore_ascii_case("warn") {
+        "WARNING".into()
+    } else {
+        level.to_uppercase()
+    }
 }
 
 fn log_level_description(level: MihomoLogLevel) -> String {
@@ -1065,8 +992,357 @@ fn json_value_matches(value: &serde_json::Value, query: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::pages::runtime) mod tests {
     use super::*;
+    use gpui_kit::test::TestWindowExt;
+
+    #[gpui_kit::test]
+    fn settings_log_preferences_save_updates_owner_and_preserves_other_preferences(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        log_preferences_from_settings(cx, false);
+    }
+
+    #[gpui_kit::test]
+    fn settings_log_preferences_save_failure_preserves_owner_and_releases_busy_state(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        log_preferences_from_settings(cx, true);
+    }
+
+    #[gpui_kit::test]
+    fn settings_clear_history_removes_real_records_and_resets_confirmation(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        clear_history_from_settings(cx, false);
+    }
+
+    #[gpui_kit::test]
+    fn settings_clear_history_failure_keeps_totals_and_releases_busy_state(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        clear_history_from_settings(cx, true);
+    }
+
+    fn clear_history_from_settings(cx: &mut gpui_kit::TestAppContext, fail: bool) {
+        use crate::pages::runtime::busy::MutationDomain;
+        use zenclash_core::{
+            AppPreferences, AppPreferencesStore, TrafficDimension, TrafficHistoryEntry,
+            TrafficHistoryQuery, TrafficHistoryStore,
+        };
+        let directory = settings_test_directory("clear");
+        let history = TrafficHistoryStore::new(directory.join("history.sqlite"));
+        history
+            .insert_and_cleanup(
+                &[TrafficHistoryEntry {
+                    timestamp_ms: 1000,
+                    source_ip: "127.0.0.1".into(),
+                    host: "example.test".into(),
+                    outbound: "DIRECT".into(),
+                    process: "test".into(),
+                    upload: 10,
+                    download: 20,
+                }],
+                0,
+            )
+            .unwrap();
+        let query = TrafficHistoryQuery {
+            dimension: TrafficDimension::Host,
+            start_ms: 0,
+            end_ms: 2000,
+            bucket_ms: 1000,
+        };
+        let overview = history.overview(&query).unwrap();
+        assert_eq!(overview.totals.total, 30);
+        let store = AppPreferencesStore::new(directory.join("preferences.json"));
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let services = log_test_services(&runtime, &directory, &store, AppPreferences::default());
+        let status = services.operational_status.clone();
+        cx.executor().allow_parking();
+        cx.update(gpui_kit::init);
+        let mut owner = None;
+        let window = cx.open_window(
+            gpui_kit::size(gpui_kit::px(1200.), gpui_kit::px(2600.)),
+            |window, cx| {
+                let page = cx.new(|cx| RuntimePage::new(Page::Settings, services, window, cx));
+                owner = Some(page.clone());
+                gpui_kit::component::Root::new(page, window, cx)
+            },
+        );
+        let page = owner.unwrap();
+        cx.foreground_executor().clone().block_test(async {
+            settle_log_preferences(cx, &runtime, &page, |page| !page.persistent_loading).await;
+            if fail {
+                std::fs::remove_file(history.path()).unwrap();
+                std::fs::create_dir(history.path()).unwrap();
+            }
+            cx.update(|cx| {
+                page.update(cx, |page, _| {
+                    page.error = None;
+                    page.traffic_history_store = Some(history.clone());
+                    page.traffic_history.overview = overview;
+                    page.traffic_history.clear_confirmation = true;
+                })
+            });
+            cx.update_window(window.into(), |_, window, cx| {
+                window.render_frame(cx);
+                window.click("confirm-clear-traffic", cx);
+            })
+            .unwrap();
+            assert!(cx.update(|cx| page.read(cx).mutation_busy(MutationDomain::TrafficHistory)));
+            settle_log_preferences(cx, &runtime, &page, |page| {
+                !page.mutation_busy(MutationDomain::TrafficHistory)
+            })
+            .await;
+        });
+        cx.update(|cx| {
+            let current = page.read(cx);
+            assert_eq!(current.page, Page::Settings);
+            assert!(!current.traffic_history.clear_confirmation);
+            assert!(!current.mutation_busy(MutationDomain::TrafficHistory));
+            if fail {
+                assert!(current.error.is_some());
+                assert_eq!(current.traffic_history.overview.totals.total, 30);
+            } else {
+                assert!(current.error.is_none());
+                assert_eq!(current.traffic_history.overview.totals.total, 0);
+                assert_eq!(history.overview(&query).unwrap().totals.samples, 0);
+            }
+        });
+        cx.update_window(window.into(), |_, window, _| window.remove_window())
+            .unwrap();
+        status.stop();
+        runtime.shutdown_timeout(Duration::from_secs(1));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    pub(in crate::pages::runtime) fn settings_test_directory(name: &str) -> std::path::PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "zenclash-settings-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    pub(in crate::pages::runtime) fn log_test_services(
+        runtime: &tokio::runtime::Runtime,
+        directory: &std::path::Path,
+        store: &zenclash_core::AppPreferencesStore,
+        preferences: zenclash_core::AppPreferences,
+    ) -> crate::pages::runtime::RuntimePageServices {
+        use crate::pages::runtime::RuntimePageServices;
+        use zenclash_core::{
+            ControlledConfigStore, CoreKind, CoreSession, MihomoClient, MihomoEndpoint,
+            OperationalStatus, TrafficCaptureSession, TrafficMonitor,
+        };
+        let endpoint = MihomoEndpoint::new("http://127.0.0.1:1", "");
+        let client = MihomoClient::new(endpoint.clone()).unwrap();
+        let core =
+            CoreSession::open_with_config(CoreKind::Mihomo, client.clone(), None, Vec::new())
+                .unwrap();
+        let traffic = TrafficMonitor::start(runtime.handle(), endpoint.clone());
+        let logs =
+            zenclash_core::LogMonitor::start(runtime.handle(), endpoint, MihomoLogLevel::Info);
+        let status = OperationalStatus::start(
+            runtime.handle(),
+            core.clone(),
+            None,
+            traffic.clone(),
+            logs.clone(),
+        );
+        let controlled = ControlledConfigStore::new(directory.join("controlled"));
+        RuntimePageServices {
+            profile_store: None,
+            override_store: None,
+            core_kind: CoreKind::Mihomo,
+            core_session: core.clone(),
+            profile_service: crate::ProfileService::new(core.clone(), None),
+            client,
+            runtime: runtime.handle().clone(),
+            traffic_monitor: traffic,
+            log_monitor: logs.clone(),
+            operational_status: status.clone(),
+            traffic_capture: TrafficCaptureSession::new(core, controlled.clone(), None, None),
+            profile_path: None,
+            controlled_config_store: controlled,
+            preferences_store: Some(store.clone()),
+            preferences,
+            system_proxy_session: None,
+            traffic_history_store: None,
+            startup_notice: None,
+            startup_error: None,
+        }
+    }
+
+    pub(in crate::pages::runtime) async fn settle_log_preferences(
+        cx: &mut gpui_kit::TestAppContext,
+        runtime: &tokio::runtime::Runtime,
+        page: &Entity<RuntimePage>,
+        predicate: impl Fn(&RuntimePage) -> bool,
+    ) {
+        for _ in 0..1000 {
+            if cx.update(|cx| predicate(page.read(cx))) {
+                return;
+            }
+            runtime
+                .spawn(async {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                })
+                .await
+                .unwrap();
+        }
+        panic!("log preference operation did not settle");
+    }
+
+    fn log_preferences_from_settings(cx: &mut gpui_kit::TestAppContext, fail: bool) {
+        use crate::pages::runtime::busy::MutationDomain;
+        use zenclash_core::{AppPreferences, AppPreferencesStore, AppearancePreference};
+        let directory = settings_test_directory("log");
+        let preference_path = directory.join("preferences.json");
+        if fail {
+            std::fs::create_dir(&preference_path).unwrap();
+        }
+        let store = AppPreferencesStore::new(preference_path);
+        let preferences = AppPreferences {
+            appearance: AppearancePreference::Dark,
+            log_file_enabled: false,
+            ..Default::default()
+        };
+        if !fail {
+            store.update(|saved| *saved = preferences.clone()).unwrap();
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let services = log_test_services(&runtime, &directory, &store, preferences);
+        let logs = services.log_monitor.clone();
+        let status = services.operational_status.clone();
+        cx.executor().allow_parking();
+        cx.update(gpui_kit::init);
+        let mut owner = None;
+        let window = cx.open_window(
+            gpui_kit::size(gpui_kit::px(1200.), gpui_kit::px(2600.)),
+            |window, cx| {
+                let page = cx.new(|cx| RuntimePage::new(Page::Settings, services, window, cx));
+                owner = Some(page.clone());
+                gpui_kit::component::Root::new(page, window, cx)
+            },
+        );
+        let page = owner.unwrap();
+        cx.foreground_executor().clone().block_test(async {
+            settle_log_preferences(cx, &runtime, &page, |page| !page.persistent_loading).await;
+            cx.update(|cx| {
+                page.update(cx, |page, _| {
+                    page.error = None;
+                })
+            });
+            cx.update_window(window.into(), |_, window, cx| {
+                window.render_frame(cx);
+                window.click("settings-log-file-enabled", cx);
+            })
+            .unwrap();
+            assert!(cx.update(|cx| page.read(cx).mutation_busy(MutationDomain::Logs)));
+            settle_log_preferences(cx, &runtime, &page, |page| {
+                !page.mutation_busy(MutationDomain::Logs)
+            })
+            .await;
+        });
+        cx.update(|cx| {
+            let current = page.read(cx);
+            assert!(!current.mutation_busy(MutationDomain::Logs));
+            assert_eq!(current.page, Page::Settings);
+            assert_eq!(current.preferences.appearance, AppearancePreference::Dark);
+            assert_eq!(current.preferences.log_file_enabled, !fail);
+            if fail {
+                assert!(current.error.is_some());
+                assert!(!logs.persistence_status().enabled);
+            } else {
+                assert!(current.error.is_none());
+                assert!(store.load().unwrap().log_file_enabled);
+                assert!(logs.persistence_status().enabled);
+            }
+        });
+        cx.update_window(window.into(), |_, window, _| window.remove_window())
+            .unwrap();
+        status.stop();
+        runtime.shutdown_timeout(Duration::from_secs(1));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn level_filter_combines_with_search_and_counts_the_whole_buffer() {
+        let warning = Arc::new(zenclash_core::LogEntry {
+            level: "warn".into(),
+            payload: "network timeout".into(),
+            ..Default::default()
+        });
+        let info = Arc::new(zenclash_core::LogEntry {
+            level: "INFO".into(),
+            payload: "network connected".into(),
+            ..Default::default()
+        });
+        let mut presentation = LogPresentation::default();
+        presentation.refresh(1, "network".into(), || vec![warning, info]);
+        presentation.set_level_filter(Some("WARNING".into()));
+        assert_eq!(presentation.matches, [0]);
+        assert_eq!(
+            presentation.level_counts,
+            [("INFO".into(), 1), ("WARNING".into(), 1)]
+        );
+        presentation.refresh(1, "connected".into(), || {
+            panic!("search fetched another snapshot")
+        });
+        assert!(presentation.matches.is_empty());
+        presentation.set_level_filter(None);
+        assert_eq!(presentation.matches, [1]);
+    }
+
+    #[tokio::test]
+    async fn changing_only_level_filter_reuses_snapshot_and_updates_visible_entries() {
+        let mut worker = LogProjectionWorker::default();
+        let (_, task) = worker.start(
+            &tokio::runtime::Handle::current(),
+            Arc::default(),
+            String::new(),
+            || {
+                snapshot(
+                    1,
+                    Some(vec![
+                        Arc::new(zenclash_core::LogEntry {
+                            level: "debug".into(),
+                            ..Default::default()
+                        }),
+                        Arc::new(zenclash_core::LogEntry {
+                            level: "info".into(),
+                            ..Default::default()
+                        }),
+                    ]),
+                )
+            },
+        );
+        let previous = task.await.unwrap().unwrap().unwrap().presentation;
+        let (_, task) = worker.start_filtered(
+            &tokio::runtime::Handle::current(),
+            previous,
+            String::new(),
+            Some("DEBUG".into()),
+            || snapshot(1, None),
+        );
+        let filtered = task.await.unwrap().unwrap().unwrap().presentation;
+        assert_eq!(filtered.matches, [0]);
+        assert_eq!(filtered.entries.len(), 2);
+    }
 
     fn log_fixture(payload: &str) -> Arc<zenclash_core::LogEntry> {
         Arc::new(zenclash_core::LogEntry {

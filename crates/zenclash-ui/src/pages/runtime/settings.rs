@@ -5,6 +5,31 @@ use super::{
     info_row, json, px, setting_card, setting_switch, v_flex,
 };
 use crate::components::sidebar::dispatch_navigate;
+use gpui_kit::component::{button::ButtonVariants, scroll::ScrollableElement};
+use gpui_kit::{InteractiveElement, ScrollAnchor, ScrollHandle, StatefulInteractiveElement};
+
+pub(super) struct SettingsNavigationState {
+    pub(super) scroll: ScrollHandle,
+    appearance: ScrollAnchor,
+    startup: ScrollAnchor,
+    records: ScrollAnchor,
+    backup: ScrollAnchor,
+    selected: usize,
+}
+
+impl Default for SettingsNavigationState {
+    fn default() -> Self {
+        let scroll = ScrollHandle::default();
+        Self {
+            appearance: ScrollAnchor::for_handle(scroll.clone()),
+            startup: ScrollAnchor::for_handle(scroll.clone()),
+            records: ScrollAnchor::for_handle(scroll.clone()),
+            backup: ScrollAnchor::for_handle(scroll.clone()),
+            scroll,
+            selected: 0,
+        }
+    }
+}
 
 mod app_update;
 pub(super) mod backup;
@@ -31,12 +56,11 @@ impl RuntimePage {
             ),
             _ => (None, None, None),
         };
-        v_flex()
+        let primary = v_flex()
+            .w(gpui_kit::rems(30.))
+            .flex_grow(1.)
+            .min_w_0()
             .gap_4()
-            .child(self.render_version_info(theme))
-            .child(self.render_advanced_tools(theme))
-            .child(self.render_core_management(theme, cx))
-            .child(self.render_app_update(theme, cx))
             .when(config.is_none(), |this| {
                 this.child(super::message_banner(
                     zenclash_i18n::text("runtime.empty.unavailable"),
@@ -55,8 +79,111 @@ impl RuntimePage {
                     theme,
                 ))
             })
-            .child(self.render_backup_card(theme, cx))
+            .child(self.render_core_management(theme, cx))
+            .child(
+                div()
+                    .id("settings-backup-card")
+                    .anchor_scroll(Some(self.settings_navigation.backup.clone()))
+                    .child(self.render_backup_card(theme, cx)),
+            );
+        let inspector = v_flex()
+            .w(gpui_kit::rems(22.))
+            .max_w_full()
+            .min_w_0()
+            .gap_4()
+            .child(self.render_version_info(theme))
+            .child(self.render_advanced_tools(theme))
+            .child(self.render_app_update(theme, cx));
+        h_flex()
+            .w_full()
+            .flex_wrap()
+            .items_start()
+            .gap_4()
+            .child(primary)
+            .child(inspector)
             .into_any_element()
+    }
+
+    pub(super) fn render_settings_navigation(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let sections = [
+            ("settings.design.general", None),
+            (
+                "settings.design.appearance",
+                Some(self.settings_navigation.appearance.clone()),
+            ),
+            (
+                "settings.design.startup",
+                Some(self.settings_navigation.startup.clone()),
+            ),
+            (
+                "settings.design.records",
+                Some(self.settings_navigation.records.clone()),
+            ),
+            (
+                "backup.local.title",
+                Some(self.settings_navigation.backup.clone()),
+            ),
+        ];
+        v_flex()
+            .id("settings-navigation-scroll")
+            .w(gpui_kit::rems(12.))
+            .h_full()
+            .min_h_0()
+            .overflow_y_scrollbar()
+            .max_w_full()
+            .flex_shrink_0()
+            .gap_1()
+            .p_2()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.group_box)
+            .children(
+                sections
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (label, anchor))| {
+                        Button::new(("settings-section", index))
+                            .label(zenclash_i18n::text(label))
+                            .small()
+                            .ghost()
+                            .w_full()
+                            .selected(self.settings_navigation.selected == index)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.settings_navigation.selected = index;
+                                if let Some(anchor) = &anchor {
+                                    anchor.scroll_to(window, cx);
+                                } else {
+                                    this.settings_navigation.scroll.set_offset(gpui_kit::point(
+                                        gpui_kit::px(0.),
+                                        gpui_kit::px(0.),
+                                    ));
+                                }
+                                cx.notify();
+                            }))
+                    }),
+            )
+            .child(div().my_2().border_t_1().border_color(theme.border))
+            .children(
+                PROXY_TOOL_PAGES
+                    .into_iter()
+                    .chain(CONFIGURATION_TOOL_PAGES)
+                    .chain(DIAGNOSTIC_TOOL_PAGES)
+                    .map(|page| {
+                        Button::new((gpui_kit::ElementId::from("settings-tool"), page.route()))
+                            .icon(page.icon())
+                            .label(page.label())
+                            .small()
+                            .ghost()
+                            .w_full()
+                            .justify_start()
+                            .on_click(move |_, window, cx| dispatch_navigate(page, window, cx))
+                    }),
+            )
     }
 
     fn render_version_info(&self, theme: &gpui_kit::component::Theme) -> impl IntoElement {
@@ -135,7 +262,14 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        setting_card(zenclash_i18n::text("settings.application.title"), theme)
+        let appearance = setting_card(zenclash_i18n::text("settings.design.appearance"), theme)
+            .id("settings-appearance-card")
+            .anchor_scroll(Some(self.settings_navigation.appearance.clone()))
+            .child(theme_setting(theme, self.preferences.appearance))
+            .child(self.language_setting(theme, cx));
+        let startup = setting_card(zenclash_i18n::text("settings.design.startup"), theme)
+            .id("settings-startup-card")
+            .anchor_scroll(Some(self.settings_navigation.startup.clone()))
             .child(info_row(
                 zenclash_i18n::text("settings.application.controller"),
                 self.client.endpoint().map_or_else(
@@ -195,10 +329,18 @@ impl RuntimePage {
                     }),
                 ))
             })
-            .child(self.language_setting(theme, cx))
-            .child(theme_setting(theme))
-            .child(tray_setting(theme))
+            .child(tray_setting(theme));
+        let records = setting_card(zenclash_i18n::text("settings.design.records"), theme)
+            .id("settings-records-card")
+            .anchor_scroll(Some(self.settings_navigation.records.clone()))
             .child(self.traffic_history_setting(theme, cx))
+            .child(div().p_4().child(self.render_clear_history_control(cx)))
+            .child(self.render_log_preferences_controls(theme, cx));
+        v_flex()
+            .gap_4()
+            .child(appearance)
+            .child(startup)
+            .child(records)
     }
 
     fn language_setting(
@@ -593,9 +735,14 @@ fn advanced_tool_button(page: Page) -> Button {
         .on_click(move |_, window, cx| dispatch_navigate(page, window, cx))
 }
 
-fn theme_setting(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
+fn theme_setting(
+    theme: &gpui_kit::component::Theme,
+    appearance: zenclash_core::AppearancePreference,
+) -> gpui_kit::Div {
     h_flex()
         .min_h(px(58.))
+        .flex_wrap()
+        .py_3()
         .px_4()
         .gap_3()
         .justify_between()
@@ -619,34 +766,86 @@ fn theme_setting(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
         .child(
             h_flex()
                 .gap_2()
+                .flex_wrap()
                 .child(
                     Button::new("theme-system")
-                        .icon(IconName::Globe)
-                        .label(zenclash_i18n::text("settings.appearance.system"))
-                        .small()
+                        .selected(appearance == zenclash_core::AppearancePreference::System)
+                        .accessibility_label(zenclash_i18n::text("settings.appearance.system"))
+                        .outline()
+                        .h_24()
+                        .w_24()
+                        .child(theme_preview(
+                            IconName::Globe,
+                            "settings.appearance.system",
+                            theme,
+                        ))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(SetSystemTheme), cx);
                         }),
                 )
                 .child(
                     Button::new("theme-light")
-                        .icon(IconName::Sun)
-                        .label(zenclash_i18n::text("settings.appearance.light"))
-                        .small()
+                        .selected(appearance == zenclash_core::AppearancePreference::Light)
+                        .accessibility_label(zenclash_i18n::text("settings.appearance.light"))
+                        .outline()
+                        .h_24()
+                        .w_24()
+                        .child(theme_preview(
+                            IconName::Sun,
+                            "settings.appearance.light",
+                            theme,
+                        ))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(SetLightTheme), cx);
                         }),
                 )
                 .child(
                     Button::new("theme-dark")
-                        .icon(IconName::Moon)
-                        .label(zenclash_i18n::text("settings.appearance.dark"))
-                        .small()
+                        .selected(appearance == zenclash_core::AppearancePreference::Dark)
+                        .accessibility_label(zenclash_i18n::text("settings.appearance.dark"))
+                        .outline()
+                        .h_24()
+                        .w_24()
+                        .child(theme_preview(
+                            IconName::Moon,
+                            "settings.appearance.dark",
+                            theme,
+                        ))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(SetDarkTheme), cx);
                         }),
                 ),
         )
+}
+
+fn theme_preview(icon: IconName, label: &str, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
+    let background = match icon {
+        IconName::Moon => crate::design::color(crate::design::DEEP_INK),
+        IconName::Sun => crate::design::color(crate::design::LIGHT_PANEL),
+        _ => theme.background,
+    };
+    v_flex()
+        .gap_2()
+        .items_center()
+        .child(
+            h_flex()
+                .w_16()
+                .h_10()
+                .rounded(theme.radius)
+                .border_1()
+                .border_color(theme.border)
+                .bg(background)
+                .overflow_hidden()
+                .child(div().w_3().h_full().bg(theme.primary.opacity(0.25)))
+                .child(
+                    div().flex_1().flex().justify_center().child(
+                        gpui_kit::component::Icon::new(icon)
+                            .size_4()
+                            .text_color(theme.primary),
+                    ),
+                ),
+        )
+        .child(div().text_xs().child(zenclash_i18n::text(label)))
 }
 
 fn tray_setting(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {

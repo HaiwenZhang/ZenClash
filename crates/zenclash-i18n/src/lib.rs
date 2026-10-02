@@ -92,6 +92,40 @@ mod tests {
     }
 
     #[test]
+    fn desktop_dashboard_labels_resolve_in_both_locales() {
+        for (key, chinese, english) in [
+            ("runtime.design.workspace", "工作台", "Workspace"),
+            (
+                "runtime.charts.top_five",
+                "当前快照 · 前 5 类",
+                "Current snapshot · top 5",
+            ),
+            (
+                "tun.runtime.title",
+                "TUN 运行时验证",
+                "TUN Runtime Verification",
+            ),
+            (
+                "connections.details.title",
+                "连接详情",
+                "Connection details",
+            ),
+            ("rules.charts.hits", "命中策略", "Matched policies"),
+            ("logs.actions.inspect", "查看日志详情", "Inspect log"),
+            ("logs.levels.all", "全部", "All"),
+            ("profiles.design.remaining", "剩余", "Remaining"),
+            (
+                "proxies.design.latency_history",
+                "延迟历史",
+                "Latency history",
+            ),
+        ] {
+            assert_eq!(text_for(ZH_CN, key), chinese);
+            assert_eq!(text_for(EN, key), english);
+        }
+    }
+
+    #[test]
     fn every_translation_leaf_contains_chinese_and_english() {
         let document: Value = serde_yaml::from_str(include_str!("../locales/app.yml"))
             .expect("translation YAML should parse");

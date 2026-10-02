@@ -128,7 +128,9 @@ impl Kernel {
 
     pub(crate) fn snapshot(&mut self) -> io::Result<RuntimeStatus> {
         #[cfg(test)]
-        if let Some(status) = &self.fixture_status { return Ok(status.clone()); }
+        if let Some(status) = &self.fixture_status {
+            return Ok(status.clone());
+        }
         if let Some(child) = &mut self.child
             && let Some(status) = child.try_wait()?
         {
@@ -402,21 +404,53 @@ impl Kernel {
     }
 
     pub(crate) async fn runtime_config(&self) -> Result<serde_json::Value, ServiceErrorCode> {
-        let response = self.client.request("GET", "/configs", None, Duration::from_secs(5)).await.map_err(|error| controller_error(error, false))?;
-        if !(200..300).contains(&response.status) { return Err(ServiceErrorCode::KernelFailed); }
+        let response = self
+            .client
+            .request("GET", "/configs", None, Duration::from_secs(5))
+            .await
+            .map_err(|error| controller_error(error, false))?;
+        if !(200..300).contains(&response.status) {
+            return Err(ServiceErrorCode::KernelFailed);
+        }
         serde_json::from_slice(&response.body).map_err(|_| ServiceErrorCode::KernelFailed)
     }
 
-    pub(crate) async fn patch_runtime(&self, patch: &serde_json::Value) -> Result<(), ServiceErrorCode> {
-        crate::api::canonical_runtime_patch(patch)?;
-        let response = self.client.request("PATCH", "/configs", Some(patch), Duration::from_secs(5)).await.map_err(|error| controller_error(error, true))?;
-        if !(200..300).contains(&response.status) { return Err(ServiceErrorCode::OutcomeUnknown); }
+    pub(crate) async fn patch_runtime(
+        &self,
+        patch: &serde_json::Value,
+    ) -> Result<(), ServiceErrorCode> {
+        crate::api::canonical_kernel_runtime_patch(patch)?;
+        let response = self
+            .client
+            .request("PATCH", "/configs", Some(patch), Duration::from_secs(5))
+            .await
+            .map_err(|error| controller_error(error, true))?;
+        if !(200..300).contains(&response.status) {
+            return Err(ServiceErrorCode::OutcomeUnknown);
+        }
         Ok(())
     }
 
     #[cfg(test)]
     pub(crate) fn fixture(streams: Vec<tokio::io::DuplexStream>, pid: u32) -> Self {
-        Self { child: None, pid, client: NativeController::fixture(streams, pid), secret: "fixture-secret".into(), controller: PathBuf::new(), logs: Arc::new(Mutex::new(LogBuffer::default())), readers: Vec::new(), exit_reason: None, fixture_status: Some(RuntimeStatus { candidate: None, applied_revision: None, committed_revision: None, running: true, pid: Some(pid), exit_reason: None }) }
+        Self {
+            child: None,
+            pid,
+            client: NativeController::fixture(streams, pid),
+            secret: "fixture-secret".into(),
+            controller: PathBuf::new(),
+            logs: Arc::new(Mutex::new(LogBuffer::default())),
+            readers: Vec::new(),
+            exit_reason: None,
+            fixture_status: Some(RuntimeStatus {
+                candidate: None,
+                applied_revision: None,
+                committed_revision: None,
+                running: true,
+                pid: Some(pid),
+                exit_reason: None,
+            }),
+        }
     }
 
     #[cfg(test)]

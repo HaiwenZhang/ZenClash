@@ -11,6 +11,8 @@ pub(super) struct RuleProjection {
     pub(super) snapshot: Arc<RuleCatalog>,
     pub(super) query: String,
     pub(super) indices: Vec<usize>,
+    pub(super) kinds: Vec<(String, u64)>,
+    pub(super) hits: Vec<(String, u64)>,
 }
 
 #[derive(Default)]
@@ -52,6 +54,8 @@ impl ProjectionWorker {
             tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 let mut indices = Vec::new();
+                let mut kinds = std::collections::BTreeMap::<String, u64>::new();
+                let mut hits = std::collections::BTreeMap::<String, u64>::new();
                 for (index, rule) in snapshot.rules.iter().enumerate() {
                     if index % 256 == 0 && current.load(Ordering::Acquire) != generation {
                         return None;
@@ -59,11 +63,18 @@ impl ProjectionWorker {
                     if rule_matches(rule, &query) {
                         indices.push(index);
                     }
+                    *kinds.entry(rule.kind.clone()).or_default() += 1;
+                    if let Some(stats) = &rule.extra {
+                        let total = hits.entry(rule.proxy.clone()).or_default();
+                        *total = total.saturating_add(stats.hit_count);
+                    }
                 }
                 (current.load(Ordering::Acquire) == generation).then_some(RuleProjection {
                     snapshot,
                     query,
                     indices,
+                    kinds: ranked(kinds),
+                    hits: ranked(hits),
                 })
             })
             .await
@@ -72,6 +83,13 @@ impl ProjectionWorker {
         self.task.replace(&task);
         (generation, task)
     }
+}
+
+fn ranked(values: std::collections::BTreeMap<String, u64>) -> Vec<(String, u64)> {
+    let mut values = values.into_iter().collect::<Vec<_>>();
+    values.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    values.truncate(5);
+    values
 }
 
 impl Drop for ProjectionWorker {
@@ -83,6 +101,37 @@ impl Drop for ProjectionWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn distribution_uses_full_catalog_and_only_returned_hit_counters() {
+        let source = Arc::new(RuleCatalog {
+            rules: vec![
+                zenclash_core::Rule {
+                    kind: "DomainSuffix".into(),
+                    payload: "match.example".into(),
+                    proxy: "DIRECT".into(),
+                    extra: Some(zenclash_core::RuleRuntimeStats {
+                        hit_count: 9,
+                        miss_count: 500,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                zenclash_core::Rule {
+                    kind: "DomainSuffix".into(),
+                    payload: "other.example".into(),
+                    proxy: "REJECT".into(),
+                    ..Default::default()
+                },
+            ],
+        });
+        let mut worker = ProjectionWorker::default();
+        let (_, task) = worker.start(&tokio::runtime::Handle::current(), source, "match".into());
+        let projection = task.await.unwrap().unwrap().unwrap();
+        assert_eq!(projection.indices, [0]);
+        assert_eq!(projection.kinds, [("DomainSuffix".into(), 2)]);
+        assert_eq!(projection.hits, [("DIRECT".into(), 9)]);
+    }
 
     fn snapshot(value: &str) -> Arc<RuleCatalog> {
         Arc::new(RuleCatalog {

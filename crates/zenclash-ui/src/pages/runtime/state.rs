@@ -1,6 +1,7 @@
 use super::{
-    AutostartStatus, ConnectionsSnapshot, Observation, Page, ProviderCatalog, RuleCatalog,
-    RuntimeConfig, SystemNetworkSnapshot, SystemProxyStatus, CoreTunPermissionStatus, VersionInfo,
+    AutostartStatus, ConnectionsSnapshot, CoreTunPermissionStatus, Observation, Page,
+    ProviderCatalog, RuleCatalog, RuntimeConfig, SystemNetworkSnapshot, SystemProxyStatus,
+    VersionInfo,
 };
 use std::path::{Path, PathBuf};
 use zenclash_core::ProxyCatalog;

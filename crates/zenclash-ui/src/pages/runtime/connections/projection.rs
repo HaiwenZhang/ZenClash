@@ -10,6 +10,10 @@ pub(super) struct ConnectionProjection {
     pub(super) snapshot: Arc<ConnectionsSnapshot>,
     pub(super) query: String,
     pub(super) order: Vec<usize>,
+    pub(super) processes: Vec<(String, u64)>,
+    pub(super) protocols: Vec<(String, u64)>,
+    pub(super) by_id: std::collections::HashMap<String, usize>,
+    pub(super) durations: Vec<String>,
 }
 
 #[derive(Default)]
@@ -57,10 +61,27 @@ impl ProjectionWorker {
                     return None;
                 }
                 let order = present_connections(&snapshot.connections, &query, transport, sort);
+                let (processes, protocols) = distributions(&snapshot.connections);
+                let by_id = snapshot
+                    .connections
+                    .iter()
+                    .enumerate()
+                    .map(|(index, connection)| (connection.id.clone(), index))
+                    .collect();
+                let now = chrono::Utc::now();
+                let durations = snapshot
+                    .connections
+                    .iter()
+                    .map(|connection| connection_duration(&connection.start, now))
+                    .collect();
                 (current.load(Ordering::Acquire) == generation).then_some(ConnectionProjection {
                     snapshot,
                     query,
                     order,
+                    processes,
+                    protocols,
+                    by_id,
+                    durations,
                 })
             })
             .await
@@ -69,6 +90,42 @@ impl ProjectionWorker {
         self.task.replace(&task);
         (generation, task)
     }
+}
+
+type CountGroups = Vec<(String, u64)>;
+
+fn connection_duration(start: &str, now: chrono::DateTime<chrono::Utc>) -> String {
+    let Ok(start) = chrono::DateTime::parse_from_rfc3339(start) else {
+        return "—".into();
+    };
+    let seconds = now.signed_duration_since(start).num_seconds().max(0);
+    if seconds >= 3600 {
+        format!(
+            "{:02}:{:02}:{:02}",
+            seconds / 3600,
+            seconds % 3600 / 60,
+            seconds % 60
+        )
+    } else {
+        format!("{:02}:{:02}", seconds / 60, seconds % 60)
+    }
+}
+
+fn distributions(connections: &[zenclash_core::Connection]) -> (CountGroups, CountGroups) {
+    let mut processes = std::collections::BTreeMap::<String, u64>::new();
+    let mut protocols = std::collections::BTreeMap::<String, u64>::new();
+    for connection in connections {
+        *processes
+            .entry(connection.metadata.process.clone())
+            .or_default() += 1;
+        *protocols
+            .entry(connection.metadata.network.to_uppercase())
+            .or_default() += 1;
+    }
+    let mut processes = processes.into_iter().collect::<Vec<_>>();
+    processes.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    processes.truncate(5);
+    (processes, protocols.into_iter().collect())
 }
 
 impl Drop for ProjectionWorker {
@@ -81,6 +138,28 @@ impl Drop for ProjectionWorker {
 mod tests {
     use super::*;
     use zenclash_core::{Connection, ConnectionsSnapshot};
+
+    #[test]
+    fn connection_duration_handles_clock_skew_and_invalid_start_time() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-01T12:10:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(connection_duration("2026-10-01T12:07:42Z", now), "02:18");
+        assert_eq!(connection_duration("2026-10-01T12:11:00Z", now), "00:00");
+        assert_eq!(connection_duration("unavailable", now), "—");
+    }
+
+    #[test]
+    fn snapshot_distributions_count_real_processes_and_normalize_protocols() {
+        let mut browser = Connection::default();
+        browser.metadata.process = "browser.exe".into();
+        browser.metadata.network = "tcp".into();
+        let mut unknown = Connection::default();
+        unknown.metadata.network = "UDP".into();
+        let (processes, protocols) = distributions(&[browser.clone(), browser, unknown]);
+        assert_eq!(processes, [("browser.exe".into(), 2), (String::new(), 1)]);
+        assert_eq!(protocols, [("TCP".into(), 2), ("UDP".into(), 1)]);
+    }
 
     fn snapshot(host: &str) -> Arc<ConnectionsSnapshot> {
         let mut connection = Connection::default();

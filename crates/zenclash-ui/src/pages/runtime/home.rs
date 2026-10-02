@@ -3,8 +3,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::{
-    Disableable, Icon, IconName, Selectable, Sizable,
+    Colorize, Disableable, Icon, IconName, Selectable, Sizable,
     button::{Button, ButtonVariants},
     chart::AreaChart,
     h_flex,
@@ -13,7 +14,10 @@ use gpui_kit::component::{
     switch::Switch,
     v_flex,
 };
-use gpui_kit::{IntoElement, ParentElement, SharedString, Styled, div, px, rems};
+use gpui_kit::{
+    InteractiveElement, IntoElement, ParentElement, SharedString, StatefulInteractiveElement,
+    Styled, div, px, rems,
+};
 use zenclash_core::{
     CapabilityState, CaptureOutcome, CapturePlan, CaptureStatus, ConnectionPolicy, Observation,
     OperationalSnapshot, ProcessRecoveryStatus, ProcessStatus, ProxyCatalog, ProxyGroup,
@@ -23,8 +27,8 @@ use zenclash_core::{
 
 use crate::{
     app::{
-        NavigateProfiles, NavigateProxies, NavigateSystemProxy, NavigateTraffic, SetDirectMode,
-        SetGlobalMode, SetRuleMode,
+        NavigateProfiles, NavigateProxies, NavigateSystemProxy, SetDirectMode, SetGlobalMode,
+        SetRuleMode,
     },
     components::sidebar::OutboundMode,
 };
@@ -33,6 +37,13 @@ use super::{
     Context, FluentBuilder, Page, ProxySelectionChanged, RuntimeData, RuntimePage, format_bytes,
     format_profile_age, message_banner, normalized_fraction,
 };
+
+mod dashboard;
+mod flow;
+mod history;
+mod traffic;
+
+const HOME_PROFILE_PICKER_LIMIT: usize = 20;
 
 const LIVE_TRAFFIC_TICK_MARGIN: usize = 6;
 const MIN_TRAFFIC_CHART_CEILING: u64 = 1_024;
@@ -45,6 +56,11 @@ pub(super) struct HomeUiState {
     capture_transition: Option<CaptureTransition>,
     pub(super) action_error: Option<String>,
     mode_transition: Option<ModeTransition>,
+    projection: Option<dashboard::HomeProxyProjection>,
+    chart: traffic::HomeChartState,
+    generation: u64,
+    flow: flow::HomeFlowState,
+    history: history::HomeHistoryState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,19 +90,15 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let fallback_config = RuntimeConfig::default();
-        let fallback_proxies = ProxyCatalog::default();
-        let (config, proxies) = match &self.data {
-            RuntimeData::Dashboard { config, proxies } => (
-                config.value().unwrap_or(&fallback_config),
-                proxies.value().unwrap_or(&fallback_proxies),
-            ),
-            _ => (&fallback_config, &fallback_proxies),
+        let config = match &self.data {
+            RuntimeData::Dashboard { config, .. } => config.value().unwrap_or(&fallback_config),
+            _ => &fallback_config,
         };
         let operational = self.operational_status.snapshot();
 
         v_flex()
             .gap_4()
-            .child(self.render_home_controls(config, &operational.capture, theme, cx))
+            .child(self.render_home_metrics(&operational.streams, theme))
             .when_some(
                 self.app_update
                     .status
@@ -127,16 +139,51 @@ impl RuntimePage {
                     )
                 },
             )
-            .child(self.render_home_evidence(&operational, theme))
             .child(
                 h_flex()
                     .items_start()
-                    .gap_4()
                     .flex_wrap()
-                    .child(self.render_home_profile(theme, cx))
-                    .child(self.render_home_proxy(config, proxies, theme, cx)),
+                    .gap_4()
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex_basis(rems(38.))
+                            .min_w_0()
+                            .child(self.render_home_traffic(&operational.streams, theme, cx)),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .flex_basis(rems(22.))
+                            .min_w_0()
+                            .gap_4()
+                            .child(self.render_home_controls(
+                                config,
+                                &operational.capture,
+                                theme,
+                                cx,
+                            ))
+                            .child(self.render_home_proxy(theme, cx)),
+                    ),
             )
-            .child(self.render_home_traffic(&operational.streams, theme))
+            .child(
+                h_flex()
+                    .items_start()
+                    .flex_wrap()
+                    .gap_4()
+                    .child(self.render_home_process_flow(theme))
+                    .child(self.render_home_routes(theme))
+                    .child(self.render_home_node_delays(theme, cx)),
+            )
+            .child(
+                h_flex()
+                    .items_start()
+                    .flex_wrap()
+                    .gap_4()
+                    .child(self.render_home_profile(theme, cx))
+                    .child(self.render_home_recent_connections(theme)),
+            )
+            .child(self.render_home_evidence(&operational, theme))
             .into_any_element()
     }
 
@@ -145,10 +192,21 @@ impl RuntimePage {
         operational: &OperationalSnapshot,
         theme: &gpui_kit::component::Theme,
     ) -> gpui_kit::AnyElement {
-        let process = operational.process.value();
-        let controller = operational.controller.value();
-        let controller_ready = controller.is_some_and(|controller| controller.authenticated);
-        let path_ready = operational.path.value().is_some();
+        let process = operational
+            .process
+            .is_fresh()
+            .then(|| operational.process.value())
+            .flatten()
+            .filter(|process| process.generation == self.home.generation);
+        let controller_ready = operational.controller.is_fresh()
+            && operational.controller.value().is_some_and(|controller| {
+                controller.authenticated && controller.generation == self.home.generation
+            });
+        let path_ready = operational.path.is_fresh()
+            && operational
+                .path
+                .value()
+                .is_some_and(|path| path.generation == self.home.generation);
         let (process_text, process_color) = process_evidence(process, theme);
         v_flex()
             .gap_2()
@@ -218,7 +276,7 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let active = self.profiles.catalog.active_profile();
+        let active = self.profiles.active_profile();
         let name = active.map_or_else(
             || zenclash_i18n::text("home.profile.none"),
             |profile| profile.name.clone(),
@@ -242,13 +300,19 @@ impl RuntimePage {
                 subscription_usage,
             );
         let active_id = self.profiles.catalog.active.clone();
-        let profiles = self
+        let mut profiles = self
             .profiles
             .catalog
             .profiles
             .iter()
+            .take(HOME_PROFILE_PICKER_LIMIT)
             .map(|profile| (profile.id.clone(), profile.name.clone()))
             .collect::<Vec<_>>();
+        if let Some(active) = active
+            && !profiles.iter().any(|(id, _)| id == &active.id)
+        {
+            profiles.push((active.id.clone(), active.name.clone()));
+        }
         let can_switch = self.profiles.store.is_some() && !profiles.is_empty();
         let runtime_page = cx.entity().downgrade();
         let profile_switch_tooltip =
@@ -285,7 +349,11 @@ impl RuntimePage {
                             }),
                     );
                 }
-                menu
+                menu.item(
+                    PopupMenuItem::new(zenclash_i18n::text("home.profile.all")).on_click(
+                        |_, window, cx| window.dispatch_action(Box::new(NavigateProfiles), cx),
+                    ),
+                )
             });
 
         home_card(
@@ -293,6 +361,8 @@ impl RuntimePage {
             IconName::FolderOpen,
             theme,
         )
+        .flex_basis(rems(30.))
+        .min_w_0()
         .min_h(rems(11.5))
         .child(
             v_flex()
@@ -339,7 +409,7 @@ impl RuntimePage {
                     h_flex().justify_end().child(
                         Button::new("home-open-profiles")
                             .icon(IconName::ArrowRight)
-                            .label(zenclash_i18n::text("home.profile.details"))
+                            .label(zenclash_i18n::text("home.profile.all"))
                             .small()
                             .outline()
                             .on_click(|_, window, cx| {
@@ -353,82 +423,29 @@ impl RuntimePage {
 
     fn render_home_proxy(
         &self,
-        config: &RuntimeConfig,
-        proxies: &ProxyCatalog,
         theme: &gpui_kit::component::Theme,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let selection = current_proxy_summary(config, proxies);
+        let selection = self
+            .home_proxy_projection()
+            .map(|projection| projection.current.clone())
+            .unwrap_or_else(|| {
+                current_proxy_summary(&RuntimeConfig::default(), &ProxyCatalog::default())
+            });
         let latency_color = match selection.delay {
             Some(1..=499) => theme.success,
             Some(500..) => theme.warning,
             Some(0) => theme.danger,
             None => theme.muted_foreground,
         };
-        let latency = selection.delay.map_or_else(
-            || zenclash_i18n::text("home.proxy.untested"),
-            |delay| format!("{delay} ms"),
-        );
-        let group = current_proxy_group(config, proxies).cloned();
-        let group_name = group.as_ref().map(|group| group.name.clone());
-        let active_node = group.as_ref().map(|group| group.now.clone());
-        let can_switch = group.as_ref().is_some_and(home_group_can_switch);
-        let nodes = group.as_ref().map_or_else(Vec::new, |group| {
-            group
-                .all
-                .iter()
-                .map(|id| id.controller_name().to_owned())
-                .collect::<Vec<_>>()
-        });
-        let can_switch = can_switch && !nodes.is_empty();
-        let runtime_page = cx.entity().downgrade();
-        let node_switch_tooltip = zenclash_i18n::text_with(
-            "home.proxy.switch_current",
-            &[("name", selection.node.clone())],
-        );
-        let node_picker = Button::new("home-proxy-picker")
-            .label(selection.node)
+        let (latency, _) = dashboard::latency_presentation(selection.delay);
+        let node_picker = div()
             .flex_1()
             .min_w_0()
-            .overflow_hidden()
-            .outline()
-            .dropdown_caret(true)
-            .tooltip(node_switch_tooltip)
-            .loading(self.home.proxy_switching.is_some())
-            .disabled(
-                self.home.profile_switching.is_some()
-                    || self.home.proxy_switching.is_some()
-                    || !can_switch,
-            )
-            .dropdown_menu(move |mut menu, _, _| {
-                menu = menu
-                    .min_w(px(240.))
-                    .max_w(px(480.))
-                    .max_h(px(360.))
-                    .scrollable(true);
-                let Some(group) = group_name.as_ref() else {
-                    return menu;
-                };
-                for node in &nodes {
-                    let is_active = active_node.as_deref() == Some(node.as_str());
-                    let runtime_page = runtime_page.clone();
-                    let group = group.clone();
-                    let node = node.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(node.clone())
-                            .checked(is_active)
-                            .disabled(is_active)
-                            .on_click(move |_, _, cx| {
-                                let group = group.clone();
-                                let node = node.clone();
-                                let _ = runtime_page.update(cx, |page, cx| {
-                                    page.change_home_proxy(group, node, cx);
-                                });
-                            }),
-                    );
-                }
-                menu
-            });
+            .text_lg()
+            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+            .truncate()
+            .child(selection.node);
 
         home_card(
             zenclash_i18n::text("home.proxy.title"),
@@ -494,6 +511,7 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let transition = self.home.capture_transition.as_ref();
+        let service_pending = self.profile_service.pending_finalization().is_some();
         let effective_capture = transition
             .and_then(|transition| transition.confirmed.as_ref())
             .unwrap_or(capture);
@@ -553,10 +571,8 @@ impl RuntimePage {
         )
         .w_full()
         .child(
-            h_flex()
-                .items_start()
-                .flex_wrap()
-                .gap_5()
+            v_flex()
+                .gap_4()
                 .p_4()
                 .when_some(self.home.action_error.clone(), |this, error| {
                     this.child(
@@ -565,9 +581,30 @@ impl RuntimePage {
                             .child(message_banner(error, theme.danger, theme)),
                     )
                 })
+                .children(
+                    home_service_feedback(
+                        self.profile_service
+                            .service_state()
+                            .map(|state| state.phase()),
+                        service_pending,
+                        self.profile_service.service_tun_warning(),
+                        theme,
+                    )
+                    .map(|feedback| {
+                        feedback.child(
+                            Button::new("home-service-details")
+                                .label(zenclash_i18n::text("navigation.tun.label"))
+                                .small()
+                                .outline()
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(crate::app::NavigateTun), cx);
+                                }),
+                        )
+                    }),
+                )
                 .child(
                     v_flex()
-                        .min_w(rems(18.))
+                        .min_w_0()
                         .flex_1()
                         .gap_3()
                         .child(
@@ -600,13 +637,14 @@ impl RuntimePage {
                                     Switch::new("home-system-proxy")
                                         .checked(capture_presentation.system_proxy_enabled)
                                         .disabled(capture_presentation.pending)
-                                        .on_click(cx.listener(|this, checked, _, cx| {
+                                        .on_click(cx.listener(|this, checked, window, cx| {
                                             this.apply_home_capture_plan(
                                                 if *checked {
                                                     CapturePlan::SystemProxy
                                                 } else {
                                                     CapturePlan::Off
                                                 },
+                                                window,
                                                 cx,
                                             );
                                         })),
@@ -635,14 +673,24 @@ impl RuntimePage {
                                 .child(
                                     Switch::new("home-tun")
                                         .checked(capture_presentation.tun_enabled)
-                                        .disabled(capture_presentation.pending || !tun_supported)
-                                        .on_click(cx.listener(|this, checked, _, cx| {
+                                        .disabled(
+                                            capture_presentation.pending
+                                                || !tun_supported
+                                                || service_pending
+                                                || self.core_busy()
+                                                || self
+                                                    .profile_service
+                                                    .service_state()
+                                                    .is_some_and(|state| state.is_busy()),
+                                        )
+                                        .on_click(cx.listener(|this, checked, window, cx| {
                                             this.apply_home_capture_plan(
                                                 if *checked {
                                                     CapturePlan::Tun
                                                 } else {
                                                     CapturePlan::Off
                                                 },
+                                                window,
                                                 cx,
                                             );
                                         })),
@@ -674,7 +722,7 @@ impl RuntimePage {
                 )
                 .child(
                     v_flex()
-                        .min_w(rems(18.))
+                        .min_w_0()
                         .flex_1()
                         .gap_3()
                         .child(
@@ -731,28 +779,48 @@ impl RuntimePage {
         &self,
         streams: &StreamStatuses,
         theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let traffic = self.traffic_monitor.snapshot();
-        let (traffic_status, status_color) = stream_status_text(&streams.traffic, theme);
-        let (connections_status, connections_color) =
-            stream_status_text(&streams.connections, theme);
-        let connections = streams.connections.value();
-        let samples = self.traffic_monitor.samples();
-        let points = traffic_chart_points(&samples);
+        let unknown_stream = Observation::<StreamStatus>::Loading;
+        let traffic_stream = if streams
+            .traffic
+            .value()
+            .is_some_and(|status| status.generation != self.home.generation)
+        {
+            &unknown_stream
+        } else {
+            &streams.traffic
+        };
+        let connections_stream = if streams
+            .connections
+            .value()
+            .is_some_and(|status| status.generation != self.home.generation)
+        {
+            &unknown_stream
+        } else {
+            &streams.connections
+        };
+        let (traffic_status, status_color) = stream_status_text(traffic_stream, theme);
+        let (connections_status, connections_color) = stream_status_text(connections_stream, theme);
+        let (points, observed_seconds) = self.home.chart.points(self.home.generation);
+        let ceiling = points
+            .first()
+            .map_or(MIN_TRAFFIC_CHART_CEILING as f64, |point| point.ceiling);
         let chart = AreaChart::new(points)
             .x(|point| point.label.clone())
             .y(|point| point.download)
-            .stroke(theme.chart_1)
-            .fill(theme.chart_1.opacity(0.18))
-            .linear()
+            .name(zenclash_i18n::text("home.traffic.download"))
+            .stroke(theme.info)
+            .fill(theme.info.opacity(0.18))
+            .natural()
             .y(|point| point.upload)
-            .stroke(theme.chart_2)
-            .fill(theme.chart_2.opacity(0.14))
-            .linear()
-            .y(|point| point.ceiling)
-            .stroke(theme.background.opacity(0.0))
-            .fill(theme.background.opacity(0.0))
-            .linear()
+            .name(zenclash_i18n::text("home.traffic.upload"))
+            .stroke(theme.info.darken(0.2))
+            .fill(theme.info.darken(0.2).opacity(0.14))
+            .natural()
+            .y_domain(0., ceiling)
+            .tooltip_value(|_, _, value| format_speed(value.max(0.) as u64).into())
             .tick_margin(LIVE_TRAFFIC_TICK_MARGIN);
 
         home_card(
@@ -768,47 +836,59 @@ impl RuntimePage {
                 .child(
                     h_flex()
                         .flex_wrap()
-                        .justify_between()
                         .gap_3()
-                        .child(
-                            h_flex()
-                                .gap_4()
-                                .child(status_label(traffic_status, status_color, theme))
-                                .child(status_label(
-                                    zenclash_i18n::text_with(
-                                        "home.traffic.connections_status",
-                                        &[("status", connections_status)],
-                                    ),
-                                    connections_color,
-                                    theme,
-                                ))
-                                .child(series_label(
-                                    zenclash_i18n::text("home.traffic.download"),
-                                    format_speed(traffic.download),
-                                    theme.chart_1,
-                                    theme,
-                                ))
-                                .child(series_label(
-                                    zenclash_i18n::text("home.traffic.upload"),
-                                    format_speed(traffic.upload),
-                                    theme.chart_2,
-                                    theme,
-                                )),
-                        )
-                        .child(
-                            Button::new("home-open-traffic")
-                                .icon(IconName::ArrowRight)
-                                .label(zenclash_i18n::text("home.traffic.details"))
-                                .small()
-                                .ghost()
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(Box::new(NavigateTraffic), cx);
-                                }),
-                        ),
+                        .justify_between()
+                        .child(div().text_xs().text_color(theme.muted_foreground).child(
+                            zenclash_i18n::text_with(
+                                "home.traffic.observed_duration",
+                                &[("seconds", observed_seconds.to_string())],
+                            ),
+                        ))
+                        .child(self.render_home_chart_controls(cx)),
+                )
+                .child(
+                    h_flex().flex_wrap().justify_between().gap_3().child(
+                        h_flex()
+                            .flex_wrap()
+                            .gap_4()
+                            .child(status_label(traffic_status, status_color, theme))
+                            .child(status_label(
+                                zenclash_i18n::text_with(
+                                    "home.traffic.connections_status",
+                                    &[("status", connections_status)],
+                                ),
+                                connections_color,
+                                theme,
+                            ))
+                            .child(series_label(
+                                zenclash_i18n::text("home.traffic.download"),
+                                if traffic.generation == self.home.generation
+                                    && traffic_stream.value().is_some()
+                                {
+                                    format_speed(traffic.download)
+                                } else {
+                                    zenclash_i18n::text("common.status.unknown")
+                                },
+                                theme.info,
+                                theme,
+                            ))
+                            .child(series_label(
+                                zenclash_i18n::text("home.traffic.upload"),
+                                if traffic.generation == self.home.generation
+                                    && traffic_stream.value().is_some()
+                                {
+                                    format_speed(traffic.upload)
+                                } else {
+                                    zenclash_i18n::text("common.status.unknown")
+                                },
+                                theme.info.darken(0.2),
+                                theme,
+                            )),
+                    ),
                 )
                 .child(
                     div()
-                        .h(rems(9.5))
+                        .h(rems(17.))
                         .w_full()
                         .rounded(theme.radius)
                         .border_1()
@@ -816,37 +896,6 @@ impl RuntimePage {
                         .bg(theme.background.opacity(0.36))
                         .p_3()
                         .child(chart),
-                )
-                .child(
-                    h_flex()
-                        .gap_5()
-                        .flex_wrap()
-                        .child(traffic_metric(
-                            zenclash_i18n::text("home.traffic.current_download"),
-                            format_speed(traffic.download),
-                            theme.chart_1,
-                            theme,
-                        ))
-                        .child(traffic_metric(
-                            zenclash_i18n::text("home.traffic.current_upload"),
-                            format_speed(traffic.upload),
-                            theme.chart_2,
-                            theme,
-                        ))
-                        .child(traffic_metric(
-                            zenclash_i18n::text("home.traffic.active_connections"),
-                            connections
-                                .map_or(0, |status| status.item_count)
-                                .to_string(),
-                            theme.foreground,
-                            theme,
-                        ))
-                        .child(traffic_metric(
-                            zenclash_i18n::text("home.traffic.core_memory"),
-                            format_bytes(connections.map_or(0, |status| status.memory)),
-                            theme.foreground,
-                            theme,
-                        )),
                 ),
         )
         .into_any_element()
@@ -895,6 +944,7 @@ impl RuntimePage {
                         cx.emit(ProxySelectionChanged);
                         if this.is_page_task_current(token) {
                             apply_home_proxy_selection(&mut this.data, &group, &proxy);
+                            this.prepare_home_projection();
                             this.notice = Some(zenclash_i18n::text_with(
                                 "home.proxy.switched",
                                 &[("name", proxy.clone())],
@@ -915,7 +965,12 @@ impl RuntimePage {
         cx.notify();
     }
 
-    fn apply_home_capture_plan(&mut self, plan: CapturePlan, cx: &mut Context<Self>) {
+    fn apply_home_capture_plan(
+        &mut self,
+        plan: CapturePlan,
+        window: &mut gpui_kit::Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.page != Page::Home
             || self
                 .home
@@ -923,6 +978,10 @@ impl RuntimePage {
                 .as_ref()
                 .is_some_and(|transition| transition.pending)
         {
+            return;
+        }
+        if plan == CapturePlan::Tun {
+            self.request_service_tun(window, cx);
             return;
         }
         let previous_transition = self.home.capture_transition.take();
@@ -1065,6 +1124,7 @@ struct TrafficChartPoint {
     ceiling: f64,
 }
 
+#[cfg(test)]
 fn traffic_chart_points(samples: &VecDeque<TrafficSample>) -> Vec<TrafficChartPoint> {
     let last_ix = samples.len().saturating_sub(1);
     let ceiling = traffic_chart_ceiling(samples);
@@ -1106,6 +1166,7 @@ fn chart_value(bytes_per_second: u64) -> f64 {
     f64::from(u32::try_from(bytes_per_second).unwrap_or(u32::MAX))
 }
 
+#[derive(Clone)]
 struct CurrentProxySummary {
     group: String,
     node: String,
@@ -1330,9 +1391,11 @@ fn process_evidence(
         {
             theme.success
         }
-        Some(ProcessRecoveryStatus::Recovering | ProcessRecoveryStatus::NetworkSuspended | ProcessRecoveryStatus::Unknown) => {
-            theme.warning
-        }
+        Some(
+            ProcessRecoveryStatus::Recovering
+            | ProcessRecoveryStatus::NetworkSuspended
+            | ProcessRecoveryStatus::Unknown,
+        ) => theme.warning,
         Some(
             ProcessRecoveryStatus::Stable
             | ProcessRecoveryStatus::Failed
@@ -1437,6 +1500,39 @@ fn home_card(
                         .child(title),
                 ),
         )
+}
+
+fn home_service_feedback(
+    phase: Option<zenclash_core::ServicePhase>,
+    pending_commit: bool,
+    warning: Option<String>,
+    theme: &gpui_kit::component::Theme,
+) -> Option<gpui_kit::Div> {
+    let pending = pending_commit || phase == Some(zenclash_core::ServicePhase::Unconfirmed);
+    if !pending && warning.is_none() {
+        return None;
+    }
+    let pending_message = zenclash_i18n::text("core_page.service.pending");
+    Some(
+        v_flex()
+            .gap_3()
+            .children(pending.then(|| {
+                div()
+                    .id("home-service-pending")
+                    .role(gpui_kit::Role::Status)
+                    .aria_label(pending_message.clone())
+                    .child(message_banner(pending_message, theme.warning, theme))
+                    .test_support()
+            }))
+            .children(warning.map(|warning| {
+                div()
+                    .id("home-service-warning")
+                    .role(gpui_kit::Role::Status)
+                    .aria_label(warning.clone())
+                    .child(message_banner(warning, theme.danger, theme))
+                    .test_support()
+            })),
+    )
 }
 
 fn mode_button<A>(
@@ -1569,34 +1665,6 @@ fn series_label(
         .into_any_element()
 }
 
-fn traffic_metric(
-    label: impl Into<SharedString>,
-    value: String,
-    color: gpui_kit::Hsla,
-    theme: &gpui_kit::component::Theme,
-) -> gpui_kit::AnyElement {
-    let label = label.into();
-    v_flex()
-        .min_w(rems(7.5))
-        .flex_1()
-        .gap_1()
-        .child(
-            div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(label),
-        )
-        .child(
-            div()
-                .font_family(theme.mono_font_family.clone())
-                .text_sm()
-                .font_weight(gpui_kit::FontWeight::BOLD)
-                .text_color(color)
-                .child(value),
-        )
-        .into_any_element()
-}
-
 #[cfg(test)]
 mod tests {
     use zenclash_core::{
@@ -1605,6 +1673,65 @@ mod tests {
     };
 
     use super::*;
+
+    struct ServiceFeedbackView {
+        phase: Option<zenclash_core::ServicePhase>,
+        warning: Option<String>,
+    }
+
+    impl gpui_kit::Render for ServiceFeedbackView {
+        fn render(&mut self, _: &mut gpui_kit::Window, cx: &mut Context<Self>) -> impl IntoElement {
+            use gpui_kit::component::ActiveTheme;
+            home_service_feedback(self.phase, false, self.warning.clone(), cx.theme())
+                .unwrap_or_else(div)
+        }
+    }
+
+    #[gpui_kit::test]
+    fn home_service_feedback_native_uncertainty_and_independent_warning_remain_visible(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::AppContext;
+        use gpui_kit::component::Root;
+        use gpui_kit::test::TestWindowExt;
+        cx.update(gpui_kit::init);
+        let mut view = None;
+        let window = cx.open_window(gpui_kit::size(px(900.), px(500.)), |window, cx| {
+            let entity = cx.new(|_| ServiceFeedbackView {
+                phase: Some(zenclash_core::ServicePhase::Unconfirmed),
+                warning: None,
+            });
+            view = Some(entity.clone());
+            Root::new(entity, window, cx)
+        });
+        let view = view.unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("home-service-pending").label(),
+                Some(zenclash_i18n::text("core_page.service.pending").as_str())
+            );
+            let warning = zenclash_i18n::text("core_page.service.failed");
+            view.update(cx, |view, cx| {
+                view.phase = Some(zenclash_core::ServicePhase::Completed);
+                view.warning = Some(warning.clone());
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("home-service-pending").is_none());
+            assert_eq!(
+                window.find("home-service-warning").label(),
+                Some(warning.as_str())
+            );
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("home-service-warning").label(),
+                Some(warning.as_str())
+            );
+            window.remove_window();
+        })
+        .unwrap();
+    }
 
     #[test]
     fn process_recovery_attempts_have_a_visible_non_color_label() {

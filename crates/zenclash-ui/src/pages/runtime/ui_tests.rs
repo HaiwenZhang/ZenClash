@@ -51,10 +51,22 @@ impl Fixture {
             .unwrap();
         let endpoint = zenclash_core::MihomoEndpoint::new("http://127.0.0.1:1", "");
         let client = MihomoClient::new(zenclash_core::MihomoEndpoint::new(controller, "")).unwrap();
-        let core = CoreSession::open_with_config(CoreKind::Mihomo, client, Some(profile.clone()), Vec::new()).unwrap();
+        let core = CoreSession::open_with_config(
+            CoreKind::Mihomo,
+            client,
+            Some(profile.clone()),
+            Vec::new(),
+        )
+        .unwrap();
         let traffic = TrafficMonitor::start(runtime.handle(), endpoint.clone());
         let logs = LogMonitor::start(runtime.handle(), endpoint, MihomoLogLevel::Info);
-        let status = OperationalStatus::start(runtime.handle(), core.clone(), None, traffic.clone(), logs.clone());
+        let status = OperationalStatus::start(
+            runtime.handle(),
+            core.clone(),
+            None,
+            traffic.clone(),
+            logs.clone(),
+        );
         Self {
             root,
             runtime: Some(runtime),
@@ -84,7 +96,12 @@ impl Fixture {
             traffic_monitor: self.traffic.clone(),
             log_monitor: self.logs.clone(),
             operational_status: self.status.clone(),
-            traffic_capture: TrafficCaptureSession::new(self.core.clone(), self.controlled.clone(), None, Some(self.profile.clone())),
+            traffic_capture: TrafficCaptureSession::new(
+                self.core.clone(),
+                self.controlled.clone(),
+                None,
+                Some(self.profile.clone()),
+            ),
             profile_path: Some(self.profile.clone()),
             controlled_config_store: self.controlled.clone(),
             preferences_store: None,
@@ -156,9 +173,16 @@ fn open(
 // Ordinary owned children exercise UI binding behavior, not Mihomo or TUN acceptance.
 fn owned_ui_children(fixture: &Fixture) -> [Arc<MihomoProcess>; 2] {
     let source = fixture.root.join("ui-owned-child.rs");
-    fs::write(&source, "fn main() { std::thread::sleep(std::time::Duration::from_secs(30)); }")
-        .unwrap();
-    let binary = fixture.root.join(if cfg!(windows) { "ui-owned-child.exe" } else { "ui-owned-child" });
+    fs::write(
+        &source,
+        "fn main() { std::thread::sleep(std::time::Duration::from_secs(30)); }",
+    )
+    .unwrap();
+    let binary = fixture.root.join(if cfg!(windows) {
+        "ui-owned-child.exe"
+    } else {
+        "ui-owned-child"
+    });
     let compilation = std::process::Command::new("rustc")
         .args(["--edition=2024", "--crate-name", "ui_owned_child"])
         .arg(source)
@@ -166,7 +190,11 @@ fn owned_ui_children(fixture: &Fixture) -> [Arc<MihomoProcess>; 2] {
         .arg(&binary)
         .output()
         .unwrap();
-    assert!(compilation.status.success(), "{}", String::from_utf8_lossy(&compilation.stderr));
+    assert!(
+        compilation.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compilation.stderr)
+    );
     std::array::from_fn(|index| {
         let directory = fixture.root.join(format!("owned-{index}"));
         fs::create_dir_all(&directory).unwrap();
@@ -181,8 +209,84 @@ fn owned_ui_children(fixture: &Fixture) -> [Arc<MihomoProcess>; 2] {
             home_dir: directory.join("home"),
             endpoint: zenclash_core::MihomoEndpoint::new("http://127.0.0.1:1", ""),
             controller_override: None,
-        }).unwrap()
+        })
+        .unwrap()
     })
+}
+
+#[gpui_kit::test]
+fn stopped_owner_completion_cannot_authorize_old_config_for_a_new_owner(cx: &mut TestAppContext) {
+    exercise_stop_completion(cx, true);
+}
+
+#[gpui_kit::test]
+fn stopping_an_owner_discards_its_previous_controller_config(cx: &mut TestAppContext) {
+    exercise_stop_completion(cx, false);
+}
+
+fn exercise_stop_completion(cx: &mut TestAppContext, replace_owner: bool) {
+    let fixture = Fixture::new();
+    let [previous, replacement] = owned_ui_children(&fixture);
+    let runtime = fixture.runtime.as_ref().unwrap();
+    runtime
+        .block_on(fixture.core.switch_to_process(previous.clone()))
+        .unwrap();
+    // This tall headless viewport exercises the production action, not native layout acceptance.
+    let (window, page) = open(cx, &fixture, Page::Settings);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    cx.update_window(window, |_, window, cx| {
+        page.update(cx, |page, cx| {
+            page.switch_to(Page::Mihomo, cx);
+            page.invalidate_page_load();
+            page.data = RuntimeData::Core {
+                version: VersionInfo::default(),
+                config: RuntimeConfig {
+                    mixed_port: 12345,
+                    ..Default::default()
+                },
+            };
+            page.data_runtime_version = fixture.core.generation();
+        });
+        window.render_frame(cx);
+        window.click("stop-mihomo-core", cx);
+    })
+    .unwrap();
+    // Do not pump the GUI while the real owned child is stopped and another owner is published.
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while previous.snapshot().pid.is_some() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        if replace_owner {
+            fixture
+                .core
+                .switch_to_process(replacement.clone())
+                .await
+                .unwrap();
+        }
+    });
+    fixture.settle(cx, &page, |page| !page.core_busy());
+    cx.update_window(window, |_, window, cx| {
+        assert!(
+            page.read(cx).config().is_none(),
+            "stopped controller data was republished as current"
+        );
+        if replace_owner {
+            assert_ne!(
+                page.read(cx).notice.as_deref(),
+                Some(zenclash_i18n::text("automatic.user_stopped").as_str())
+            );
+            assert_eq!(
+                page.read(cx).mihomo_binary().as_deref(),
+                Some(replacement.launch_config().binary.as_path())
+            );
+        }
+        window.remove_window();
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]
@@ -190,22 +294,448 @@ fn actual_owner_switch_updates_the_ui_binary_source_and_detach_clears_it(cx: &mu
     let fixture = Fixture::new();
     let [previous, replacement] = owned_ui_children(&fixture);
     let runtime = fixture.runtime.as_ref().unwrap();
-    runtime.block_on(fixture.core.switch_to_process(previous.clone())).unwrap();
+    runtime
+        .block_on(fixture.core.switch_to_process(previous.clone()))
+        .unwrap();
     let (window, page) = open(cx, &fixture, Page::Mihomo);
     fixture.settle(cx, &page, |page| !page.persistent_loading);
-    runtime.block_on(fixture.core.switch_to_process(replacement.clone())).unwrap();
+    cx.update_window(window, |_, _, cx| {
+        page.update(cx, |page, _| {
+            page.data = RuntimeData::Core {
+                version: VersionInfo::default(),
+                config: RuntimeConfig::default(),
+            };
+            page.data_runtime_version = fixture.core.generation();
+        });
+    })
+    .unwrap();
+    runtime
+        .block_on(fixture.core.switch_to_process(replacement.clone()))
+        .unwrap();
     assert!(previous.snapshot().pid.is_none());
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
-        assert_eq!(page.read(cx).mihomo_binary().as_deref(), Some(replacement.launch_config().binary.as_path()));
-    }).unwrap();
-    runtime.block_on(fixture.core.switch_to_direct(zenclash_core::MihomoEndpoint::default())).unwrap();
+        assert_eq!(
+            page.read(cx).mihomo_binary().as_deref(),
+            Some(replacement.launch_config().binary.as_path())
+        );
+        assert!(
+            page.read(cx).config().is_none(),
+            "old owner runtime config must not remain current"
+        );
+    })
+    .unwrap();
+    runtime
+        .block_on(
+            fixture
+                .core
+                .switch_to_direct(zenclash_core::MihomoEndpoint::default()),
+        )
+        .unwrap();
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
         assert!(page.read(cx).mihomo_binary().is_none());
         window.remove_window();
-    }).unwrap();
+    })
+    .unwrap();
     assert!(replacement.snapshot().pid.is_none());
+}
+
+fn open_service_tun(
+    cx: &mut TestAppContext,
+    fixture: &Fixture,
+) -> (AnyWindowHandle, Entity<RuntimePage>) {
+    open_service_page(cx, fixture, Page::Tun)
+}
+
+fn open_service_page(
+    cx: &mut TestAppContext,
+    fixture: &Fixture,
+    initial: Page,
+) -> (AnyWindowHandle, Entity<RuntimePage>) {
+    cx.executor().allow_parking();
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        // Match Kit's dialog fixtures: pointer clicks target a resting surface.
+        cx.set_reduce_motion(true);
+    });
+    let mut page = None;
+    let height = if initial == Page::Home { 2600. } else { 1000. };
+    let handle = cx.open_window(size(px(1200.), px(height)), |window, cx| {
+        let mut services = fixture.services();
+        let manager = zenclash_core::ServiceManager::new(
+            fixture.core.clone(),
+            services.traffic_capture.clone(),
+        );
+        services.profile_service = services.profile_service.with_service_manager(manager);
+        let view = cx.new(|cx| RuntimePage::new(initial, services, window, cx));
+        page = Some(view.clone());
+        Root::new(view, window, cx)
+    });
+    (handle.into(), page.unwrap())
+}
+
+#[gpui_kit::test]
+fn home_service_feedback_saved_commit_has_keyboard_details_without_resubmission(
+    cx: &mut TestAppContext,
+) {
+    let fixture = Fixture::new();
+    let version = fixture.core.generation();
+    let bytes = fs::read(&fixture.profile).unwrap();
+    let record = fixture
+        .profiles
+        .load()
+        .unwrap()
+        .active_profile()
+        .unwrap()
+        .clone();
+    let (window, page) = open_service_page(cx, &fixture, Page::Home);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    let navigations = std::rc::Rc::new(std::cell::Cell::new(0));
+    let received = navigations.clone();
+    let target = page.downgrade();
+    cx.update(|cx| {
+        cx.on_action(move |_: &crate::app::NavigateTun, cx| {
+            received.set(received.get() + 1);
+            let _ = target.update(cx, |page, cx| page.switch_to(Page::Tun, cx));
+        });
+    });
+    cx.update_window(window, |_, window, cx| {
+        page.update(cx, |page, cx| {
+            page.profile_service
+                .publish_test_outcome(
+                    zenclash_core::ProfileApplyOutcome::CommittedButRuntimeUnknown {
+                        source_version: (&record).into(),
+                        profile: record.clone(),
+                        path: fixture.profile.clone(),
+                        cause: zenclash_core::ProfileApplicationError::Task(
+                            "commit reply lost".into(),
+                        ),
+                        runtime_version: version,
+                    },
+                )
+                .unwrap();
+            page.synchronize_profile_recovery();
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert_eq!(
+            window.find("home-service-pending").label(),
+            Some(zenclash_i18n::text("core_page.service.pending").as_str())
+        );
+        window.click("home-tun", cx);
+        window.click("home-tun", cx);
+        assert!(page.read(cx).home.action_error.is_none());
+        assert_eq!(
+            page.read(cx)
+                .profile_service
+                .service_state()
+                .unwrap()
+                .phase(),
+            zenclash_core::ServicePhase::Idle
+        );
+        assert_eq!(
+            page.read(cx).profile_service.pending_finalization(),
+            Some(version)
+        );
+        let focus = page.read(cx).focus_handle.clone();
+        window.focus(&focus, cx);
+        for _ in 0..80 {
+            if window.find("home-service-details").focused() == Some(true) {
+                break;
+            }
+            window.press("tab", cx);
+        }
+        assert_eq!(window.find("home-service-details").focused(), Some(true));
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            navigations.get(),
+            1,
+            "details must dispatch the application navigation action"
+        );
+        assert_eq!(page.read(cx).page, Page::Tun);
+        window.find("confirm-service-tun");
+        page.update(cx, |page, cx| page.switch_to(Page::Home, cx));
+        window.render_frame(cx);
+        window.find("home-service-pending");
+        assert_eq!(
+            page.read(cx).profile_service.pending_finalization(),
+            Some(version)
+        );
+        assert_eq!(fixture.core.generation(), version);
+        assert_eq!(fs::read(&fixture.profile).unwrap(), bytes);
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn home_service_tun_immediate_rejection_survives_page_refresh(cx: &mut TestAppContext) {
+    use gpui_kit::component::WindowExt;
+    let fixture = Fixture::new();
+    let generation = fixture.core.generation();
+    let (window, page) = open_service_page(cx, &fixture, Page::Home);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("home-tun", cx);
+        assert!(!window.has_active_dialog(cx));
+        let expected = zenclash_i18n::text("core_page.service.unsupported");
+        assert_eq!(
+            page.read(cx).home.action_error.as_deref(),
+            Some(expected.as_str())
+        );
+        page.update(cx, |page, cx| page.refresh(cx));
+        window.render_frame(cx);
+        assert_eq!(
+            page.read(cx).home.action_error.as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(fixture.core.generation(), generation);
+        assert!(!page.read(cx).core_busy());
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn home_service_tun_consent_cancel_preserves_local_owner_and_configuration(
+    cx: &mut TestAppContext,
+) {
+    use gpui_kit::component::WindowExt;
+    let fixture = Fixture::new();
+    let [local, _unused] = owned_ui_children(&fixture);
+    fixture
+        .runtime
+        .as_ref()
+        .unwrap()
+        .block_on(fixture.core.switch_to_process(local.clone()))
+        .unwrap();
+    let generation = fixture.core.generation();
+    let pid = local.snapshot().pid;
+    let configuration = fs::read(&local.launch_config().config_file).unwrap();
+    let (window, page) = open_service_page(cx, &fixture, Page::Home);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let focus = page.read(cx).focus_handle.clone();
+        window.focus(&focus, cx);
+        for _ in 0..80 {
+            if window.find("home-tun").focused() == Some(true) {
+                break;
+            }
+            window.press("tab", cx);
+        }
+        assert_eq!(window.find("home-tun").focused(), Some(true));
+        page.update(cx, |page, _| {
+            page.home.action_error = Some(zenclash_i18n::text("core_page.service.unsupported"));
+        });
+        window.click("home-tun", cx);
+        assert!(page.read(cx).home.action_error.is_none());
+        assert!(
+            window.has_active_dialog(cx),
+            "the real Home switch must request service consent before touching the local core"
+        );
+        window.click("home-tun", cx);
+        assert!(window.has_active_dialog(cx));
+        window.press("escape", cx);
+        assert!(!window.has_active_dialog(cx));
+        assert_eq!(window.find("home-tun").focused(), Some(true));
+        window.press("space", cx);
+        assert!(window.has_active_dialog(cx));
+        window.press("escape", cx);
+        assert_eq!(window.find("home-tun").checked(), Some(false));
+        assert_eq!(fixture.core.generation(), generation);
+        assert_eq!(local.snapshot().pid, pid);
+        assert_eq!(
+            fs::read(&local.launch_config().config_file).unwrap(),
+            configuration
+        );
+        assert!(!page.read(cx).core_busy());
+        assert!(
+            !page
+                .read(cx)
+                .profile_service
+                .service_state()
+                .unwrap()
+                .is_busy()
+        );
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn home_service_tun_confirmation_rejects_replaced_owner_without_local_grant(
+    cx: &mut TestAppContext,
+) {
+    use gpui_kit::component::WindowExt;
+    let fixture = Fixture::new();
+    let [local, replacement] = owned_ui_children(&fixture);
+    let runtime = fixture.runtime.as_ref().unwrap();
+    runtime
+        .block_on(fixture.core.switch_to_process(local))
+        .unwrap();
+    let (window, page) = open_service_page(cx, &fixture, Page::Home);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("home-tun", cx);
+        assert!(window.has_active_dialog(cx));
+    })
+    .unwrap();
+    runtime
+        .block_on(fixture.core.switch_to_process(replacement.clone()))
+        .unwrap();
+    let generation = fixture.core.generation();
+    let pid = replacement.snapshot().pid;
+    let configuration = fs::read(&replacement.launch_config().config_file).unwrap();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(page.read(cx).core_session.generation(), generation);
+        assert_eq!(
+            page.read(cx).profile_service.session().generation(),
+            generation
+        );
+        assert!(!page.read(cx).persistent_loading);
+        assert!(!page.read(cx).core_busy());
+        window.click("ok", cx);
+        assert!(
+            !window.has_active_dialog(cx),
+            "the real confirm button must submit and close its dialog"
+        );
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| {
+        !page.core_busy() && page.home.action_error.is_some()
+    });
+    cx.update_window(window, |_, window, cx| {
+        assert_eq!(
+            page.read(cx).home.action_error.as_deref(),
+            Some(zenclash_i18n::text("core_page.service.stale").as_str())
+        );
+        assert_eq!(fixture.core.generation(), generation);
+        assert_eq!(replacement.snapshot().pid, pid);
+        assert_eq!(
+            fs::read(&replacement.launch_config().config_file).unwrap(),
+            configuration
+        );
+        assert!(!window.has_active_dialog(cx));
+        assert!(
+            page.read(cx)
+                .profile_service
+                .pending_finalization()
+                .is_none()
+        );
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn service_tun_consent_escape_keeps_the_real_local_owner_and_configuration(
+    cx: &mut TestAppContext,
+) {
+    use gpui_kit::component::WindowExt;
+    let fixture = Fixture::new();
+    let [local, _unused] = owned_ui_children(&fixture);
+    let runtime = fixture.runtime.as_ref().unwrap();
+    runtime
+        .block_on(fixture.core.switch_to_process(local.clone()))
+        .unwrap();
+    let generation = fixture.core.generation();
+    let configuration = fs::read(&local.launch_config().config_file).unwrap();
+    let pid = local.snapshot().pid.unwrap();
+    let (window, page) = open_service_tun(cx, &fixture);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let focus = page.read(cx).focus_handle.clone();
+        window.focus(&focus, cx);
+        for _ in 0..8 {
+            if window.find("enable-service-tun").focused() == Some(true) {
+                break;
+            }
+            window.press("tab", cx);
+        }
+        assert_eq!(window.find("enable-service-tun").focused(), Some(true));
+        window.click("enable-service-tun", cx);
+        assert!(window.has_active_dialog(cx));
+        window.press("escape", cx);
+        assert!(!window.has_active_dialog(cx));
+        assert_eq!(window.find("enable-service-tun").focused(), Some(true));
+        window.press("enter", cx);
+        assert!(
+            window.has_active_dialog(cx),
+            "keyboard activation must reach the same consent"
+        );
+        window.press("escape", cx);
+        assert!(!window.has_active_dialog(cx));
+        assert_eq!(local.snapshot().pid, Some(pid));
+        assert_eq!(fixture.core.generation(), generation);
+        assert_eq!(
+            fs::read(&local.launch_config().config_file).unwrap(),
+            configuration
+        );
+        assert!(
+            !page
+                .read(cx)
+                .profile_service
+                .service_state()
+                .unwrap()
+                .is_busy()
+        );
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn service_tun_confirmation_cannot_authorize_a_core_switched_while_dialog_open(
+    cx: &mut TestAppContext,
+) {
+    use gpui_kit::component::WindowExt;
+    let fixture = Fixture::new();
+    let [local, replacement] = owned_ui_children(&fixture);
+    let runtime = fixture.runtime.as_ref().unwrap();
+    runtime
+        .block_on(fixture.core.switch_to_process(local))
+        .unwrap();
+    let (window, page) = open_service_tun(cx, &fixture);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("enable-service-tun", cx);
+        assert!(window.has_active_dialog(cx));
+    })
+    .unwrap();
+    runtime
+        .block_on(fixture.core.switch_to_process(replacement.clone()))
+        .unwrap();
+    let generation = fixture.core.generation();
+    let replacement_pid = replacement.snapshot().pid.unwrap();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("ok", cx);
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| !page.core_busy() && page.error.is_some());
+    cx.update_window(window, |_, window, cx| {
+        assert_eq!(
+            page.read(cx).error.as_deref(),
+            Some(zenclash_i18n::text("core_page.service.stale").as_str())
+        );
+        assert_eq!(fixture.core.generation(), generation);
+        assert_eq!(replacement.snapshot().pid, Some(replacement_pid));
+        assert!(!window.has_active_dialog(cx));
+        window.remove_window();
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]
@@ -446,7 +976,21 @@ fn offline_settings_keep_local_controls_and_accessible_names(cx: &mut TestAppCon
             window.press("tab", cx);
             assert_ne!(window.find("settings-autostart").focused(), Some(true));
         }
+    })
+    .unwrap();
+    cx.simulate_window_resize(window, size(px(1200.), px(820.)));
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(!window.find("settings-traffic-history").visible());
+        window.click(("settings-section", 3usize), cx);
+        assert!(window.simulate_next_frame(cx) > 0);
+        window.render_frame(cx);
+        assert!(page.read(cx).settings_navigation.scroll.offset().y < px(0.));
+        assert!(window.find("settings-traffic-history").visible());
         window.click("settings-traffic-history", cx);
+        window.click(("settings-section", 0usize), cx);
+        window.render_frame(cx);
+        assert_eq!(page.read(cx).settings_navigation.scroll.offset().y, px(0.));
     })
     .unwrap();
     fixture.settle(cx, &page, |page| page.preferences.traffic_history_enabled);
@@ -456,6 +1000,27 @@ fn offline_settings_keep_local_controls_and_accessible_names(cx: &mut TestAppCon
             .unwrap()
             .traffic_history_enabled
     );
+    let navigation_target = page.downgrade();
+    cx.update(|cx| {
+        // The fixture hosts RuntimePage alone; install its application's navigation receiver.
+        cx.on_action(move |_: &crate::app::NavigateDns, cx| {
+            navigation_target
+                .update(cx, |page, cx| page.switch_to(Page::Dns, cx))
+                .unwrap();
+        });
+    });
+    cx.update_window(window, |_, window, cx| {
+        window.click(
+            (
+                gpui_kit::ElementId::from("settings-tool"),
+                Page::Dns.route(),
+            ),
+            cx,
+        );
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| page.read(cx).page), Page::Dns);
     cx.update_window(window, |_, window, _| window.remove_window())
         .unwrap();
 }
@@ -1639,6 +2204,11 @@ fn exercise_recovery_completion(cx: &mut TestAppContext, manual_reload: bool) {
             window.render_frame(cx);
             window.find("reapply-profile-recovery");
             if manual_reload {
+                window.scroll(
+                    "reapply-profile-recovery",
+                    gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-1000.))),
+                    cx,
+                );
                 window.click("reload-profile", cx);
             } else {
                 window.click("reapply-profile-recovery", cx);

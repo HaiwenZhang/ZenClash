@@ -29,7 +29,11 @@ pub enum FrameError {
 /// An oversized header is rejected before allocating or reading its body.
 /// After any error callers must discard the stream, because a partial frame
 /// may have been consumed.
-pub async fn read_frame<R: AsyncRead + Unpin, T: DeserializeOwned>(
+///
+/// # Errors
+/// Rejects an oversized header, invalid JSON, transport failure or an expired
+/// deadline. An error does not establish whether the peer received a request.
+pub async fn read_frame<R: AsyncRead + Unpin + Send, T: DeserializeOwned>(
     reader: &mut R,
     timeout: Duration,
 ) -> Result<T, FrameError> {
@@ -66,7 +70,11 @@ impl Write for BoundedBody {
 ///
 /// Serialization is bounded before any header is written. After a timeout or
 /// transport error callers must discard the partially written stream.
-pub async fn write_frame<W: AsyncWrite + Unpin, T: Serialize>(
+///
+/// # Errors
+/// Rejects over-budget or invalid JSON before writing a header; transport
+/// failures and deadlines may occur after a partial frame has been sent.
+pub async fn write_frame<W: AsyncWrite + Unpin + Send, T: Serialize + Sync>(
     writer: &mut W,
     value: &T,
     timeout: Duration,

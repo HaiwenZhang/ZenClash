@@ -79,7 +79,13 @@ async fn profile_mode_replaced_after_preflight(fail_cache_restore: bool) {
             .is_ok()
     });
     let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
-    let session = crate::CoreSession::open_with_config(CoreKind::Mihomo, client.clone(), Some(profile), vec![]).unwrap();
+    let session = crate::CoreSession::open_with_config(
+        CoreKind::Mihomo,
+        client.clone(),
+        Some(profile),
+        vec![],
+    )
+    .unwrap();
     let operation = {
         let session = session.clone();
         let store = store.clone();
@@ -154,7 +160,8 @@ async fn reload_rejects_a_binding_switched_while_waiting_for_store_mutation() {
             CoreKind::Mihomo,
             root.join("unused-kernel"),
             root.join("home"),
-        )).unwrap();
+        ))
+        .unwrap();
     let mutation = store.mutation_gate.lock().await;
     let mut operation = Box::pin(store.reload_profile(&client, &profile));
     assert!(
@@ -233,7 +240,13 @@ async fn cancelling_the_waiter_keeps_patch_cache_and_session_consistent_with_per
             .unwrap();
     });
     let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
-    let session = crate::CoreSession::open_with_config(CoreKind::Mihomo, client, Some(profile.clone()), vec![]).unwrap();
+    let session = crate::CoreSession::open_with_config(
+        CoreKind::Mihomo,
+        client,
+        Some(profile.clone()),
+        vec![],
+    )
+    .unwrap();
     let worker_session = session.clone();
     let worker_store = store.clone();
     let outer = tokio::spawn(async move {
@@ -275,7 +288,8 @@ async fn cancelling_the_waiter_keeps_patch_cache_and_session_consistent_with_per
             .unwrap()
             .contains("mode: global")
     );
-    assert_eq!(session.generation(), 1);
+    // Both the persisted application and confirmed shutdown advance the session.
+    assert_eq!(session.generation(), 2);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1003,6 +1017,153 @@ async fn mode_update_uses_partial_runtime_patch_and_persists_the_selection() {
         fs::read_to_string(store.runtime_path())
             .unwrap()
             .contains("mode: global")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn mode_fixture() -> (MihomoClient, thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let requests = thread::spawn(move || {
+        let mut requests = Vec::new();
+        for mode in [Some("rule"), None, Some("global")] {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(std::time::Instant::now() < deadline, "mode request missing");
+                        thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    Err(error) => panic!("controller accept: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .unwrap();
+            let mut reader = std::io::BufReader::new(&mut stream);
+            let mut first = String::new();
+            reader.read_line(&mut first).unwrap();
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            drop(reader);
+            if let Some(mode) = mode {
+                assert!(first.starts_with("GET /configs "));
+                let body = format!(r#"{{"mode":"{mode}"}}"#);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            } else {
+                assert!(first.starts_with("PATCH /configs "));
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                    serde_json::json!({"mode":"global"})
+                );
+                stream
+                    .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                    .unwrap();
+            }
+            requests.push(first.trim().to_owned());
+        }
+        requests
+    });
+    (
+        MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap(),
+        requests,
+    )
+}
+
+#[tokio::test]
+async fn partial_mode_retains_accepted_payload_when_profile_source_changes() {
+    let root = test_root("partial-mode-accepted-payload");
+    let profile = write_profile(&root);
+    let store = ControlledConfigStore::new(root.join("store"));
+    store.materialize(&profile).unwrap();
+    let accepted: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(store.runtime_path()).unwrap()).unwrap();
+    fs::write(&profile, "mixed-port: 3456\nrules: [MATCH,REJECT]\n").unwrap();
+    let (client, requests) = mode_fixture();
+    store
+        .apply_mode_update_with_overrides(&client, &profile, "global", vec![])
+        .await
+        .unwrap();
+    assert_eq!(
+        requests.join().unwrap(),
+        [
+            "GET /configs HTTP/1.1",
+            "PATCH /configs HTTP/1.1",
+            "GET /configs HTTP/1.1"
+        ]
+    );
+    let mut expected = accepted;
+    expected["mode"] = serde_yaml::Value::from("global");
+    let cached: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(store.runtime_path()).unwrap()).unwrap();
+    assert_eq!(
+        cached, expected,
+        "a partial mode update must not accept changed rules or ports"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn cancelling_partial_mode_waiter_keeps_durable_cache_in_completion_owner() {
+    let root = test_root("partial-mode-cancel-save");
+    let profile = write_profile(&root);
+    let mut store = ControlledConfigStore::new(root.join("store"));
+    store.materialize(&profile).unwrap();
+    let (gate, entered, release) = super::CommitGate::new();
+    store.commit_gate = Some(gate);
+    let (client, requests) = mode_fixture();
+    let worker = store.clone();
+    let outer = tokio::spawn(async move {
+        worker
+            .apply_mode_update_with_overrides(&client, profile, "global", vec![])
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), entered)
+        .await
+        .unwrap()
+        .unwrap();
+    outer.abort();
+    assert!(outer.await.unwrap_err().is_cancelled());
+    release.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let persisted = store.load_json().unwrap();
+            if persisted["mode"] == "global" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(requests.join().unwrap().len(), 3);
+    let cache: serde_yaml::Value =
+        serde_yaml::from_slice(&fs::read(store.runtime_path()).unwrap()).unwrap();
+    assert_eq!(
+        cache["mode"].as_str(),
+        Some("global"),
+        "saved mode lost its accepted startup payload when only the waiter was cancelled"
     );
     fs::remove_dir_all(root).unwrap();
 }

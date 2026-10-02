@@ -269,9 +269,13 @@ impl RuntimePage {
             .child(self.render_clear_history_control(cx))
     }
 
-    fn render_clear_history_control(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+    pub(in crate::pages::runtime) fn render_clear_history_control(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
         h_flex()
             .gap_2()
+            .flex_wrap()
             .when(self.traffic_history.clear_confirmation, |this| {
                 this.child(
                     Button::new("cancel-clear-traffic")
@@ -284,6 +288,12 @@ impl RuntimePage {
                 )
                 .child(
                     Button::new("confirm-clear-traffic")
+                        .loading(self.mutation_busy(
+                            crate::pages::runtime::busy::MutationDomain::TrafficHistory,
+                        ))
+                        .disabled(self.mutation_busy(
+                            crate::pages::runtime::busy::MutationDomain::TrafficHistory,
+                        ))
                         .icon(IconName::Globe)
                         .label(zenclash_i18n::text("traffic.actions.confirm_clear"))
                         .small()

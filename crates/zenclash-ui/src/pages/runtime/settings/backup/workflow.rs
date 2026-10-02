@@ -470,7 +470,9 @@ mod tests {
         });
         let client =
             MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
-        let session = CoreSession::open_with_config(CoreKind::Mihomo, client, Some(previous), Vec::new()).unwrap();
+        let session =
+            CoreSession::open_with_config(CoreKind::Mihomo, client, Some(previous), Vec::new())
+                .unwrap();
         let runtime = CoreProfileRuntime::new(session.clone(), None);
         let archive = root.join("backup.zip");
         BackupManager::new(&source).export_to(&archive).unwrap();
@@ -615,7 +617,13 @@ mod tests {
         });
         let client =
             MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
-        let session = CoreSession::open_with_config(CoreKind::Mihomo, client, Some(previous.clone()), Vec::new()).unwrap();
+        let session = CoreSession::open_with_config(
+            CoreKind::Mihomo,
+            client,
+            Some(previous.clone()),
+            Vec::new(),
+        )
+        .unwrap();
         let runtime = CoreProfileRuntime::new(session.clone(), None);
         let archive = root.join("backup.zip");
         BackupManager::new(&source).export_to(&archive).unwrap();
@@ -700,7 +708,13 @@ mod tests {
         });
         let client =
             MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
-        let session = CoreSession::open_with_config(CoreKind::Mihomo, client, Some(profile.clone()), Vec::new()).unwrap();
+        let session = CoreSession::open_with_config(
+            CoreKind::Mihomo,
+            client,
+            Some(profile.clone()),
+            Vec::new(),
+        )
+        .unwrap();
         let runtime = CoreProfileRuntime::new(session.clone(), None);
         let archive = root.join("backup.zip");
         BackupManager::new(&source).export_to(&archive).unwrap();

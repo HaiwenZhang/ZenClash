@@ -23,7 +23,7 @@ mod resources;
 #[cfg(test)]
 mod tests;
 
-pub use discovery::MihomoLaunchConfig;
+pub use discovery::{MihomoLaunchConfig, MihomoRuntimeResources};
 pub use resources::bundled_recovery_profile;
 
 const MAX_LOG_LINES: usize = 1_000;

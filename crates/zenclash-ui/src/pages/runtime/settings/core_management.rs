@@ -364,12 +364,17 @@ impl RuntimePage {
     }
 
     fn runtime_core_available(&self) -> bool {
-        self.operational_status
-            .snapshot()
-            .process
-            .value()
-            .is_some_and(|process| process.running)
-            || matches!(
+        let operational = self.operational_status.snapshot();
+        if operational.process.is_fresh()
+            && let Some(process) = operational.process.value()
+            && process.generation == self.core_session.generation()
+        {
+            return process.running;
+        }
+        self.core_session.runtime_descriptor().backend()
+            == zenclash_core::CoreRuntimeBackend::Direct
+            && self.data_runtime_version == self.core_session.generation()
+            && matches!(
                 self.data,
                 RuntimeData::Settings {
                     config: Some(_),

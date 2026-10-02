@@ -5,6 +5,9 @@ impl CoreSession {
     pub fn request_shutdown(&self) {
         self.shutdown_requested.store(true, Ordering::Release);
         self.client.close_runtime_admission();
+        let mut lifecycle = self.lifecycle.write();
+        lifecycle.stop_requested = true;
+        lifecycle.phase = CoreLifecyclePhase::ShuttingDown;
     }
 
     pub(crate) fn is_shutting_down(&self) -> bool {
@@ -24,16 +27,22 @@ impl CoreSession {
         tokio::spawn(async move {
             let client = session.client.pin_binding()?;
             {
+                let _lease = session.acquire_process_write_lease(&client).await?;
                 let _transition = session.transition.lock().await;
                 client.ensure_binding_current()?;
                 session.ensure_not_shutting_down()?;
-                if client.owned_core().is_none()
-                    || session.lifecycle.read().phase == CoreLifecyclePhase::Stopped
-                {
+                if client.owned_core().is_none() || session.lifecycle.read().stop_requested {
                     return Ok(false);
                 }
-                session.network_suspended.store(true, Ordering::Release);
-                session.lifecycle.write().phase = CoreLifecyclePhase::NetworkSuspended;
+                let _mutation = client.lock_runtime_binding().await?;
+                session
+                    .admit_network_suspension(async {
+                        if let Some(runtime) = client.runtime_session() {
+                            runtime.confirm_finalizing_before_stop().await?;
+                        }
+                        Ok(())
+                    })
+                    .await?;
             }
             // Capture may itself acquire Transition. Recheck the same pin afterward.
             let released = CoreRecoveryCapture::release_owned(&capture).await;
@@ -65,6 +74,17 @@ impl CoreSession {
         .map_err(|error| ControlledConfigError::Task(error.to_string()))?
     }
 
+    pub(super) async fn admit_network_suspension(
+        &self,
+        confirmation: impl std::future::Future<Output = crate::MihomoResult<()>>,
+    ) -> Result<(), CoreSessionError> {
+        confirmation.await?;
+        self.ensure_not_shutting_down()?;
+        self.network_suspended.store(true, Ordering::Release);
+        self.lifecycle.write().phase = CoreLifecyclePhase::NetworkSuspended;
+        Ok(())
+    }
+
     /// Resumes the accepted runtime after link loss and restores capture intent.
     ///
     /// # Errors
@@ -84,6 +104,7 @@ impl CoreSession {
                 session.ensure_not_shutting_down()?;
                 if !session.network_suspended.load(Ordering::Acquire)
                     || client.owned_core().is_none()
+                    || session.lifecycle.read().stop_requested
                 {
                     return Ok(false);
                 }

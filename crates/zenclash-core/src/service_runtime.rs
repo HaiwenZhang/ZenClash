@@ -18,7 +18,7 @@ const MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
 const MAX_ASSETS: usize = 256;
 const MAX_CONFIG_BYTES: usize = 4 * 1024 * 1024;
 const CHUNK_BYTES: usize = 256 * 1024;
-const GEODATA: [&str; 4] = ["GeoIP.dat", "geosite.dat", "country.mmdb", "ASN.mmdb"];
+const GEODATA: [&str; 3] = ["GeoIP.dat", "geosite.dat", "ASN.mmdb"];
 
 #[derive(Clone)]
 struct RuntimeAsset {
@@ -64,6 +64,26 @@ impl ServiceRuntimeBundle {
     #[must_use]
     pub fn yaml(&self) -> &str {
         &self.yaml
+    }
+
+    pub(crate) fn with_delta(&self, delta: &serde_json::Value) -> MihomoResult<Self> {
+        if !delta.is_object() {
+            return Err(invalid("Service runtime delta must be an object"));
+        }
+        let mut value: Value = serde_yaml::from_str(&self.yaml)
+            .map_err(|_| invalid("Invalid accepted service runtime YAML"))?;
+        let patch =
+            serde_yaml::to_value(delta).map_err(|_| invalid("Invalid service runtime delta"))?;
+        crate::profile::merge_yaml(&mut value, patch);
+        let yaml = serde_yaml::to_string(&value)
+            .map_err(|_| invalid("Invalid patched service runtime YAML"))?;
+        if yaml.len() > MAX_CONFIG_BYTES {
+            return Err(invalid("Service runtime YAML exceeds its byte budget"));
+        }
+        Ok(Self {
+            yaml,
+            assets: self.assets.clone(),
+        })
     }
 
     /// Uploads this exact snapshot; it never rereads a mutable source file.
@@ -177,6 +197,11 @@ fn prepare_bundle(payload: &str, source_home: &Path) -> MihomoResult<ServiceRunt
             Err(_) => return Err(invalid("Cannot read named GeoData resource")),
         }
     }
+    if let Some(source) = mmdb_source(source_home)? {
+        let bytes =
+            read_asset(&source).map_err(|_| invalid("Cannot read named GeoData resource"))?;
+        builder.insert("assets/geodata/country.mmdb".into(), bytes)?;
+    }
     let yaml =
         serde_yaml::to_string(&value).map_err(|_| invalid("Cannot encode service runtime YAML"))?;
     if yaml.len() > MAX_CONFIG_BYTES {
@@ -186,6 +211,43 @@ fn prepare_bundle(payload: &str, source_home: &Path) -> MihomoResult<ServiceRunt
         yaml,
         assets: builder.assets,
     })
+}
+
+fn mmdb_source(home: &Path) -> MihomoResult<Option<PathBuf>> {
+    let entries = match std::fs::read_dir(home) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(invalid("Cannot inspect named GeoData resources")),
+    };
+    // Mihomo v1.19.30 Path.MMDB takes the first sorted, case-insensitive alias
+    // from os.ReadDir. Only the selected bytes are uploaded under a fixed name.
+    let mut first = None;
+    for entry in entries {
+        let entry = entry.map_err(|_| invalid("Cannot inspect named GeoData resources"))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !["country.mmdb", "geoip.db", "geoip.metadb"]
+            .iter()
+            .any(|alias| name.eq_ignore_ascii_case(alias))
+        {
+            continue;
+        }
+        if entry
+            .file_type()
+            .map_err(|_| invalid("Cannot inspect named GeoData resource"))?
+            .is_dir()
+        {
+            continue;
+        }
+        if first.as_ref().is_none_or(|previous: &PathBuf| {
+            entry.file_name() < previous.file_name().unwrap_or_default()
+        }) {
+            first = Some(entry.path());
+        }
+    }
+    Ok(first)
 }
 
 impl BundleBuilder<'_> {
@@ -322,6 +384,58 @@ fn invalid(message: &str) -> MihomoError {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn startup_geodata_preserves_packaged_metadb_bytes_without_rewriting_source() {
+        let home = TestHome::new();
+        let bytes = b"packaged maxmind data";
+        std::fs::write(home.0.join("geoip.metadb"), bytes).unwrap();
+        let bundle = ServiceRuntimeBundle::prepare("mode: rule\n", home.0.clone())
+            .await
+            .unwrap();
+        let mmdb = bundle
+            .assets
+            .iter()
+            .find(|asset| asset.path == "assets/geodata/country.mmdb")
+            .unwrap();
+        assert_eq!(mmdb.bytes.as_ref(), bytes);
+        assert_eq!(std::fs::read(home.0.join("geoip.metadb")).unwrap(), bytes);
+        assert!(!home.0.join("country.mmdb").exists());
+    }
+
+    #[tokio::test]
+    async fn startup_geodata_uses_mihomo_sorted_case_insensitive_mmdb_priority() {
+        let home = TestHome::new();
+        std::fs::write(home.0.join("Country.mmdb"), b"first sorted alias").unwrap();
+        std::fs::write(home.0.join("geoip.db"), b"second alias").unwrap();
+        std::fs::write(home.0.join("geoip.metadb"), b"packaged alias").unwrap();
+        let bundle = ServiceRuntimeBundle::prepare("mode: rule\n", home.0.clone())
+            .await
+            .unwrap();
+        let mmdb = bundle
+            .assets
+            .iter()
+            .find(|asset| asset.path == "assets/geodata/country.mmdb")
+            .unwrap();
+        assert_eq!(mmdb.bytes.as_ref(), b"first sorted alias");
+    }
+
+    #[tokio::test]
+    async fn startup_geodata_skips_alias_directories_and_selects_existing_db() {
+        let home = TestHome::new();
+        std::fs::create_dir(home.0.join("Country.mmdb")).unwrap();
+        std::fs::write(home.0.join("geoip.db"), b"selected db").unwrap();
+        std::fs::write(home.0.join("geoip.metadb"), b"later alias").unwrap();
+        let bundle = ServiceRuntimeBundle::prepare("mode: rule\n", home.0.clone())
+            .await
+            .unwrap();
+        let mmdb = bundle
+            .assets
+            .iter()
+            .find(|asset| asset.path == "assets/geodata/country.mmdb")
+            .unwrap();
+        assert_eq!(mmdb.bytes.as_ref(), b"selected db");
+    }
+
     struct TestHome(PathBuf);
     impl TestHome {
         fn new() -> Self {
@@ -445,5 +559,19 @@ mod tests {
         );
         assert_eq!(value["proxies"][2]["ca"].as_str(), Some("inline-ca"));
         assert!(bundle.assets.is_empty());
+    }
+    #[tokio::test]
+    async fn accepted_delta_shares_asset_bytes_after_source_deletion() {
+        let home = TestHome::new();
+        std::fs::write(home.0.join("provider.yaml"), "payload: [example.org]\n").unwrap();
+        let bundle=ServiceRuntimeBundle::prepare("mode: rule\nrule-providers:\n  rules:\n    type: file\n    behavior: domain\n    path: provider.yaml\n",home.0.clone()).await.unwrap();
+        std::fs::remove_file(home.0.join("provider.yaml")).unwrap();
+        let next = bundle
+            .with_delta(&serde_json::json!({"mode":"global"}))
+            .unwrap();
+        assert!(next.yaml().contains("mode: global"));
+        assert_eq!(bundle.assets.len(), 1);
+        assert!(Arc::ptr_eq(&bundle.assets[0].bytes, &next.assets[0].bytes));
+        assert_eq!(bundle.assets[0].path, next.assets[0].path);
     }
 }

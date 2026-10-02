@@ -36,6 +36,15 @@ pub struct ProxiesPage {
     expanded: HashSet<String>,
     proxy_pages: HashMap<String, usize>,
     group_orders: presentation::GroupOrders,
+    search_input: Option<gpui_kit::Entity<gpui_kit::component::input::InputState>>,
+    search_subscription: Option<gpui_kit::Subscription>,
+    search_query: String,
+    search_generation: u64,
+    search_epoch: Arc<std::sync::atomic::AtomicU64>,
+    search_gate: Arc<tokio::sync::Mutex<()>>,
+    search_projection: Option<presentation::SearchProjection>,
+    search_index: Option<std::sync::Arc<presentation::SearchIndex>>,
+    search_task: Option<tokio::task::AbortHandle>,
     testing: HashMap<String, HashSet<ProxyNodeId>>,
     active_testing_groups: HashMap<String, usize>,
     group_progress: HashMap<String, (usize, usize)>,
@@ -74,6 +83,15 @@ impl ProxiesPage {
             expanded: HashSet::new(),
             proxy_pages: HashMap::new(),
             group_orders: presentation::GroupOrders::default(),
+            search_input: None,
+            search_subscription: None,
+            search_query: String::new(),
+            search_generation: 0,
+            search_epoch: Arc::default(),
+            search_gate: Arc::default(),
+            search_projection: None,
+            search_index: None,
+            search_task: None,
             testing: HashMap::new(),
             active_testing_groups: HashMap::new(),
             group_progress: HashMap::new(),
@@ -255,6 +273,16 @@ fn toggle_expanded_group(expanded: &mut HashSet<String>, name: &str) {
     expanded.insert(name.to_owned());
 }
 
+impl Drop for ProxiesPage {
+    fn drop(&mut self) {
+        self.search_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if let Some(task) = self.search_task.take() {
+            task.abort();
+        }
+    }
+}
+
 impl Focusable for ProxiesPage {
     fn focus_handle(&self, _: &App) -> gpui_kit::FocusHandle {
         self.focus_handle.clone()
@@ -262,7 +290,8 @@ impl Focusable for ProxiesPage {
 }
 
 impl Render for ProxiesPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_search_input(window, cx);
         let theme = cx.theme().clone();
         let catalog = self.catalog.as_ref();
         let error = self.error.clone();
@@ -344,20 +373,7 @@ impl Render for ProxiesPage {
                                     .child(message),
                             )
                         } else {
-                            this.children(
-                                self.visible_group_indices[groups.start..groups.end]
-                                    .iter()
-                                    .map(|&index| {
-                                        let group = &catalog.groups()[index];
-                                        self.render_group(
-                                            catalog,
-                                            group,
-                                            self.active_testing_groups.contains_key(&group.name),
-                                            &theme,
-                                            cx,
-                                        )
-                                    }),
-                            )
+                            this.child(self.render_workspace(catalog, groups, &theme, cx))
                         }
                     }),
             )
@@ -509,15 +525,162 @@ mod tests {
     use gpui_kit::{AnyWindowHandle, AppContext, Entity, TestAppContext, size};
 
     #[gpui_kit::test]
+    fn refreshed_healthy_catalog_restores_a_previously_failed_search_result(
+        cx: &mut TestAppContext,
+    ) {
+        cx.foreground_executor().clone().block_test(async {
+            cx.executor().allow_parking();
+            let healthy = ProxyCatalog::from_group_nodes(
+                vec![(
+                    ProxyGroup {
+                        name: "Proxy".into(),
+                        ..Default::default()
+                    },
+                    vec![ProxyNode {
+                        name: "Tokyo".into(),
+                        history: vec![DelayHistory {
+                            delay: 10,
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }],
+                )],
+                1,
+            );
+            let (_window, page, runtime) = open_catalog(cx, healthy.clone());
+            page.update(cx, |page, cx| {
+                let node = page.catalog.as_ref().unwrap().groups()[0].all[0].clone();
+                page.record_node_delay(&node, 0, 0, Some(DelayTestFailure::Timeout));
+                page.search_query = "tokyo".into();
+                page.hide_unavailable = true;
+                page.install_catalog(healthy, "rule".into(), vec![0]);
+                page.prepare_search(cx);
+            });
+            for _ in 0..200 {
+                if cx.update(|cx| page.read(cx).search_projection.is_some()) {
+                    break;
+                }
+                runtime
+                    .spawn(async {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    })
+                    .await
+                    .unwrap();
+            }
+            cx.update(|cx| {
+                let state = page.read(cx);
+                assert!(state.test_failures.is_empty());
+                assert!(state.search_projection.is_some());
+                let catalog = state.catalog.as_ref().unwrap();
+                assert_eq!(&*state.displayed_nodes(catalog, &catalog.groups()[0]), &[0]);
+            });
+            page.update(cx, |page, _| page.suspend());
+        });
+    }
+
+    #[gpui_kit::test]
+    fn local_search_filters_nodes_and_clearing_restores_the_full_list(cx: &mut TestAppContext) {
+        cx.foreground_executor().clone().block_test(async {
+            cx.executor().allow_parking();
+            let catalog = ProxyCatalog::from_group_nodes(
+                vec![(
+                    ProxyGroup {
+                        name: "Proxy".into(),
+                        ..Default::default()
+                    },
+                    ["Tokyo", "London"]
+                        .into_iter()
+                        .map(|name| ProxyNode {
+                            name: name.into(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                )],
+                2,
+            );
+            let (window, page, runtime) = open_catalog(cx, catalog);
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.click("proxy-node-search", cx);
+                window.input("TOKYO", cx);
+                assert_eq!(
+                    Arc::strong_count(page.read(cx).catalog.as_ref().unwrap()),
+                    1
+                );
+            })
+            .unwrap();
+            for _ in 0..200 {
+                if cx.update(|cx| page.read(cx).search_projection.is_some()) {
+                    break;
+                }
+                runtime
+                    .spawn(async {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    })
+                    .await
+                    .unwrap();
+            }
+            cx.update(|cx| {
+                let state = page.read(cx);
+                assert_eq!(state.search_query, "tokyo");
+                assert!(state.search_projection.is_some());
+                let catalog = state.catalog.as_ref().unwrap();
+                assert_eq!(&*state.displayed_nodes(catalog, &catalog.groups()[0]), &[0]);
+            });
+            cx.update_window(window, |_, window, cx| {
+                window.press("secondary-a", cx);
+                window.press("backspace", cx);
+            })
+            .unwrap();
+            cx.update(|cx| {
+                let state = page.read(cx);
+                assert!(state.search_query.is_empty());
+                let catalog = state.catalog.as_ref().unwrap();
+                assert_eq!(
+                    &*state.displayed_nodes(catalog, &catalog.groups()[0]),
+                    &[0, 1]
+                );
+            });
+            page.update(cx, |page, _| page.suspend());
+        });
+    }
+
+    #[gpui_kit::test]
     fn identical_node_labels_keep_independent_keyboard_selection_and_delay_controls(
         cx: &mut TestAppContext,
+    ) {
+        assert_provider_node_keyboard_controls(cx, size(px(1200.), px(1000.)), "HK");
+    }
+
+    #[gpui_kit::test]
+    fn narrow_window_keeps_long_node_labels_and_keyboard_switch_controls_inside_the_viewport(
+        cx: &mut TestAppContext,
+    ) {
+        assert_provider_node_keyboard_controls(
+            cx,
+            size(px(900.), px(700.)),
+            "Hong-Kong-Premium-High-Speed-Shadowsocks-Subscription-Node-With-A-Very-Long-English-Display-Name",
+        );
+    }
+
+    fn assert_provider_node_keyboard_controls(
+        cx: &mut TestAppContext,
+        dimensions: gpui_kit::Size<gpui_kit::Pixels>,
+        node_label: &'static str,
     ) {
         cx.foreground_executor().clone().block_test(async {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
             cx.executor().allow_parking();
-            let catalog_json = r#"{"proxies":{"a":{"name":"HK","provider-name":"Airport A","history":[{"delay":100}]},"b":{"name":"HK","provider-name":"Airport B","history":[{"delay":77}]},"Proxy":{"type":"Selector","now":"a","all":["a","b"],"test-url":"http://127.0.0.1/"}}}"#;
-            let (window, page, runtime) = open_catalog(cx, ProxyCatalog::default());
+            let catalog_json = serde_json::json!({"proxies": {
+                "a": {"name": node_label, "provider-name": "Airport A", "history": [{"delay":100}]},
+                "b": {"name": node_label, "provider-name": "Airport B", "history": [{"delay":77}]},
+                "Proxy": {"type":"Selector", "now":"a", "all":["a","b"], "test-url":"http://127.0.0.1/"}
+            }}).to_string();
+            let (window, page, runtime) = open_catalog_at(cx, ProxyCatalog::default(), dimensions);
+            // These ASCII fixture labels contain only letters and hyphens; Mihomo's
+            // client encodes every non-alphanumeric path byte, including '-'.
+            let encoded_node_label = node_label.replace('-', "%2D");
             let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
             let address = listener.local_addr().unwrap();
             listener.set_nonblocking(true).unwrap();
@@ -552,11 +715,11 @@ mod tests {
                     } else if headers.starts_with("GET /proxies/Proxy ") {
                         serde_json::json!({"now": selected}).to_string()
                     } else {
-                        let delay = if headers.starts_with("GET /providers/proxies/Airport%20A/HK/healthcheck?") {
+                        let delay = if headers.starts_with(&format!("GET /providers/proxies/Airport%20A/{encoded_node_label}/healthcheck?")) {
                             measured.push("Airport A");
                             42
                         } else {
-                            assert!(headers.starts_with("GET /providers/proxies/Airport%20B/HK/healthcheck?"), "{headers}");
+                            assert!(headers.starts_with(&format!("GET /providers/proxies/Airport%20B/{encoded_node_label}/healthcheck?")), "{headers}");
                             measured.push("Airport B");
                             77
                         };
@@ -604,12 +767,17 @@ mod tests {
                             // must fail on the selected/requested node, not a missing ID.
                             let group =
                                 gpui_kit::ElementId::from((gpui_kit::ElementId::from(action), "Proxy"));
-                            gpui_kit::ElementId::from((group, "HK"))
+                            gpui_kit::ElementId::from((group, node_label))
                         }
                     };
                     let select_b = control(window, "select-proxy", "b", "Airport B");
                     let test_a = control(window, "test-proxy", "a", "Airport A");
                     let test_b = control(window, "test-proxy", "b", "Airport B");
+                    for target in [&select_b, &test_a, &test_b] {
+                        let bounds = window.find(target.clone()).bounds();
+                        assert!(bounds.right() <= dimensions.width, "control extends beyond the window: {bounds:?}");
+                        assert!(bounds.bottom() <= dimensions.height, "control is vertically clipped: {bounds:?}");
+                    }
                     for _ in 0..40 {
                         if window.find(select_b.clone()).focused() == Some(true) {
                             break;
@@ -808,13 +976,25 @@ mod tests {
         Entity<ProxiesPage>,
         tokio::runtime::Runtime,
     ) {
+        open_catalog_at(cx, catalog, size(px(1200.), px(1000.)))
+    }
+
+    fn open_catalog_at(
+        cx: &mut TestAppContext,
+        catalog: ProxyCatalog,
+        dimensions: gpui_kit::Size<gpui_kit::Pixels>,
+    ) -> (
+        AnyWindowHandle,
+        Entity<ProxiesPage>,
+        tokio::runtime::Runtime,
+    ) {
         cx.update(gpui_kit::init);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let client =
             MihomoClient::new(zenclash_core::MihomoEndpoint::new("http://127.0.0.1:1", ""))
                 .unwrap();
         let mut page = None;
-        let window = cx.open_window(size(px(1200.), px(1000.)), |window, cx| {
+        let window = cx.open_window(dimensions, |window, cx| {
             let view = cx.new(|cx| {
                 let mut page = ProxiesPage::new(client, runtime.handle().clone(), cx);
                 let indices = presentation::visible_group_indices(&catalog, "rule", false);
@@ -1227,6 +1407,7 @@ mod tests {
             });
             window.render_frame(cx);
             for group in ["Proxy", "Proxy Auto"] {
+                window.click((gpui_kit::ElementId::from("toggle-group"), group), cx);
                 assert_eq!(
                     window
                         .find((gpui_kit::ElementId::from("test-group"), group))
@@ -1246,6 +1427,7 @@ mod tests {
                     cx.notify();
                 });
                 window.render_frame(cx);
+                window.click((gpui_kit::ElementId::from("toggle-group"), group), cx);
                 assert_eq!(
                     window
                         .find((gpui_kit::ElementId::from("test-group"), group))
@@ -1253,6 +1435,10 @@ mod tests {
                     Some(zenclash_i18n::text(expected).as_str())
                 );
                 if group == "Proxy" {
+                    window.click(
+                        (gpui_kit::ElementId::from("toggle-group"), "Proxy Auto"),
+                        cx,
+                    );
                     assert_eq!(
                         window
                             .find((gpui_kit::ElementId::from("test-group"), "Proxy Auto"))

@@ -9,6 +9,120 @@ use futures_util::{StreamExt, stream};
 const MAX_DELAY_TEST_CONCURRENCY: usize = 16;
 
 impl ProxiesPage {
+    pub(super) fn ensure_search_input(
+        &mut self,
+        window: &mut gpui_kit::Window,
+        cx: &mut Context<Self>,
+    ) {
+        use gpui_kit::AppContext;
+        use gpui_kit::component::input::{InputEvent, InputState};
+        if self.search_input.is_some() {
+            return;
+        }
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(zenclash_i18n::text("proxies.design.search"))
+        });
+        self.search_subscription =
+            Some(cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let query = input.read(cx).value().trim().to_lowercase();
+                    if this.search_query != query {
+                        this.search_query = query;
+                        this.proxy_pages.clear();
+                        this.prepare_search(cx);
+                        cx.notify();
+                    }
+                }
+            }));
+        self.search_input = Some(input);
+    }
+
+    pub(super) fn prepare_search(&mut self, cx: &mut Context<Self>) {
+        self.cancel_search();
+        let generation = self.search_generation;
+        if self.search_query.is_empty() {
+            return;
+        }
+        let Some(index) = self.search_index.clone() else {
+            return;
+        };
+        let query = self.search_query.clone();
+        let sort = self.sort_by_latency;
+        let hide = self.hide_unavailable;
+        let epoch = self.search_epoch.clone();
+        let gate = self.search_gate.clone();
+        let task = self.runtime.spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            let guard = gate.lock_owned().await;
+            if epoch.load(std::sync::atomic::Ordering::Acquire) != generation {
+                return None;
+            }
+            tokio::task::spawn_blocking(move || {
+                // Keep the gate until CPU work exits, even if the async parent is aborted.
+                let _guard = guard;
+                index.orders_cancellable(&query, sort, hide, || {
+                    epoch.load(std::sync::atomic::Ordering::Acquire) == generation
+                })
+            })
+            .await
+            .ok()
+            .flatten()
+        });
+        self.search_task = Some(task.abort_handle());
+        self.presentation_tasks.track(&task);
+        cx.spawn(async move |this, cx| {
+            let Ok(Some(orders)) = task.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if generation != this.search_generation {
+                    return;
+                }
+                this.search_projection = Some(super::presentation::SearchProjection {
+                    orders: orders
+                        .into_iter()
+                        .map(|(name, indices)| (name, indices.into()))
+                        .collect(),
+                });
+                this.search_task = None;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn cancel_search(&mut self) {
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self.search_epoch
+            .store(self.search_generation, std::sync::atomic::Ordering::Release);
+        if let Some(task) = self.search_task.take() {
+            task.abort();
+        }
+        self.search_projection = None;
+    }
+
+    pub(super) fn displayed_nodes(
+        &self,
+        catalog: &super::ProxyCatalog,
+        group: &super::ProxyGroup,
+    ) -> std::rc::Rc<[usize]> {
+        if !self.search_query.is_empty() {
+            return self
+                .search_projection
+                .as_ref()
+                .and_then(|projection| projection.orders.get(&group.name))
+                .cloned()
+                .unwrap_or_default();
+        }
+        self.group_orders.order(
+            catalog,
+            group,
+            self.sort_by_latency,
+            self.hide_unavailable,
+            &self.test_failures,
+        )
+    }
+
     pub(super) fn refresh(&mut self, cx: &mut Context<Self>) {
         self.start_refresh(false, cx);
     }
@@ -78,11 +192,11 @@ impl ProxiesPage {
                             this.expanded.insert(group.name.clone());
                         }
                         this.install_catalog(catalog, mode, indices);
-                        this.test_failures.clear();
                         this.error = None;
                     }
                     Err(error) => this.error = Some(error),
                 }
+                this.prepare_search(cx);
                 cx.notify();
             });
         })
@@ -101,6 +215,13 @@ impl ProxiesPage {
         }
         self.set_group_indices(indices);
         self.group_orders.clear();
+        self.cancel_search();
+        self.test_failures.clear();
+        self.group_orders.prepare_current(&catalog);
+        self.search_index = Some(std::sync::Arc::new(super::presentation::SearchIndex::new(
+            &catalog,
+            &self.test_failures,
+        )));
         self.catalog = Some(std::sync::Arc::new(catalog));
         self.outbound_mode = mode;
     }
@@ -134,12 +255,15 @@ impl ProxiesPage {
     /// Invalidates in-flight presentation work and releases the inactive catalog.
     pub(crate) fn suspend(&mut self) {
         self.presentation_tasks.cancel();
+        self.cancel_search();
         self.group_progress.clear();
+        self.search_index = None;
         self.catalog_generation = self.catalog_generation.wrapping_add(1);
         self.delay_generation = self.delay_generation.wrapping_add(1);
         self.switching.clear();
         self.group_orders.clear();
         self.catalog = None;
+        self.group_orders.release_current();
         self.visible_group_indices = Vec::new();
         self.group_page_index = 0;
         self.expanded.clear();
@@ -262,6 +386,9 @@ impl ProxiesPage {
                             &request.group,
                             &request.proxy,
                         );
+                        if let Some(catalog) = this.catalog.as_deref() {
+                            this.group_orders.update_current(catalog, &request.group);
+                        }
                         this.error = None;
                         this.notice = warning;
                         this.reconcile_proxy_selection(request.token, request.group.clone(), cx);
@@ -304,6 +431,9 @@ impl ProxiesPage {
                 match result {
                     Ok(actual) if !actual.is_empty() => {
                         apply_optimistic_selection(&mut this.catalog, &group, &actual);
+                        if let Some(catalog) = this.catalog.as_deref() {
+                            this.group_orders.update_current(catalog, &group);
+                        }
                         cx.notify();
                     }
                     Ok(_) => {}
@@ -366,6 +496,7 @@ impl ProxiesPage {
                     }
                     Err(error) => this.error = Some(error),
                 }
+                this.prepare_search(cx);
                 cx.notify();
             });
         })
@@ -439,6 +570,7 @@ impl ProxiesPage {
                     }
                     Err(error) => this.error = Some(error),
                 }
+                this.prepare_search(cx);
                 cx.notify();
             });
         })
@@ -512,6 +644,7 @@ impl ProxiesPage {
                         this.error = Some(error);
                     }
                 }
+                this.prepare_search(cx);
                 cx.notify();
             });
         })
@@ -660,6 +793,9 @@ impl ProxiesPage {
                             &[("count", failures.to_string()), ("error", error.clone())],
                         ));
                     }
+                    if !this.search_query.is_empty() {
+                        this.prepare_search(cx);
+                    }
                     cx.notify();
                     true
                 });
@@ -673,6 +809,9 @@ impl ProxiesPage {
                     return;
                 }
                 this.group_progress.remove(&group_name);
+                if !this.search_query.is_empty() {
+                    this.prepare_search(cx);
+                }
                 if let Err(error) = result {
                     this.error = Some(error.to_string());
                 }
@@ -715,6 +854,9 @@ impl ProxiesPage {
             return;
         };
         append_delay(node, delay, mean_delay);
+        if let Some(index) = &self.search_index {
+            index.update(id, node, failure.is_some());
+        }
         if let Some(failure) = failure {
             self.test_failures.insert(id.clone(), failure);
         } else {
@@ -733,6 +875,7 @@ impl ProxiesPage {
 
     fn begin_catalog_operation(&mut self) -> CatalogTaskToken {
         self.presentation_tasks.cancel();
+        self.cancel_search();
         self.group_progress.clear();
         let token = self.next_catalog_task();
         self.delay_generation = self.delay_generation.wrapping_add(1);

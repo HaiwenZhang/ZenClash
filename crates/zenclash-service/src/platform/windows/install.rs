@@ -4,11 +4,10 @@ use std::{
     io,
     os::windows::fs::{MetadataExt, OpenOptionsExt},
     path::Path,
-    time::{Duration, Instant},
 };
 
 use windows_sys::Win32::{
-    Foundation::{WAIT_FAILED, WAIT_OBJECT_0},
+    Foundation::{ERROR_CANCELLED, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT},
     Storage::FileSystem::{
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
     },
@@ -64,33 +63,33 @@ pub(crate) fn request_maintenance(
     info.lpParameters = command.as_ptr();
     info.nShow = SW_HIDE;
     if unsafe { ShellExecuteExW(&mut info) } == 0 {
-        return Err(io::Error::last_os_error());
+        return Err(authorization_launch_error(io::Error::last_os_error()));
     }
     if info.hProcess.is_null() {
-        return Err(io::Error::other(
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
             "elevated installer process handle unavailable",
         ));
     }
     let process = Handle(info.hProcess);
-    let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let wait = unsafe { WaitForSingleObject(process.0, 200) };
         if wait == WAIT_OBJECT_0 {
             break;
         }
-        if wait == WAIT_FAILED {
-            return Err(io::Error::last_os_error());
-        }
-        if Instant::now() >= deadline {
+        if wait == WAIT_FAILED || wait != WAIT_TIMEOUT {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "elevated maintenance is still running; outcome is unconfirmed and requires service state readback",
+                "elevated maintenance process outcome could not be observed",
             ));
         }
     }
     let mut exit_code = 0;
     if unsafe { GetExitCodeProcess(process.0, &mut exit_code) } == 0 {
-        return Err(io::Error::last_os_error());
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "elevated maintenance exit status could not be observed",
+        ));
     }
     if exit_code != 0 {
         return Err(io::Error::other(format!(
@@ -98,6 +97,14 @@ pub(crate) fn request_maintenance(
         )));
     }
     Ok(())
+}
+
+fn authorization_launch_error(error: io::Error) -> io::Error {
+    if error.raw_os_error() == Some(ERROR_CANCELLED as i32) {
+        crate::installer::authorization_cancelled()
+    } else {
+        error
+    }
 }
 
 pub(super) fn quote_argument(value: &std::ffi::OsStr) -> io::Result<String> {
@@ -138,6 +145,18 @@ pub(super) fn quote_argument(value: &std::ffi::OsStr) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maintenance_uac_cancellation_is_distinct_from_failed_authorization() {
+        assert_eq!(
+            authorization_launch_error(io::Error::from_raw_os_error(1223)).kind(),
+            io::ErrorKind::Interrupted,
+        );
+        assert_ne!(
+            authorization_launch_error(io::Error::from_raw_os_error(5)).kind(),
+            io::ErrorKind::Interrupted,
+        );
+    }
 
     #[test]
     fn maintenance_argument_quotes_embedded_quotes_and_trailing_slashes() {

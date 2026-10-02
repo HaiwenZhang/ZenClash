@@ -154,24 +154,26 @@ async fn load_network(client: MihomoClient) -> Result<RuntimeData, String> {
     Ok(RuntimeData::Network { config, system })
 }
 
-async fn load_tun(
-    client: MihomoClient,
-    core: Option<CoreSession>,
-) -> Result<RuntimeData, String> {
+async fn load_tun(client: MihomoClient, core: Option<CoreSession>) -> Result<RuntimeData, String> {
     let permission_task = async {
         match core {
-            Some(core) => core.tun_permission_status().await.map_err(|error| error.to_string()),
+            Some(core) => core
+                .tun_permission_status()
+                .await
+                .map_err(|error| error.to_string()),
             None => Ok(Observation::Loading),
         }
     };
     let (config, permissions) = tokio::join!(client.runtime_config(), permission_task);
     let config = config.map_err(|error| error.to_string())?;
-    let permissions = permissions.unwrap_or_else(|error| Observation::record(
-        &Observation::Loading,
-        Err::<zenclash_core::CoreTunPermissionStatus, _>(error),
-        now_ms(),
-        RecoveryAction::Retry,
-    ));
+    let permissions = permissions.unwrap_or_else(|error| {
+        Observation::record(
+            &Observation::Loading,
+            Err::<zenclash_core::CoreTunPermissionStatus, _>(error),
+            now_ms(),
+            RecoveryAction::Retry,
+        )
+    });
     Ok(RuntimeData::Tun {
         config,
         permissions,

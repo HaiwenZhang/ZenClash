@@ -211,6 +211,43 @@ impl Focusable for ZenClashApp {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum ControllerIndicator {
+    Connected,
+    #[default]
+    Loading,
+    Stale,
+    Unavailable,
+}
+
+impl ControllerIndicator {
+    pub(super) fn from_observation(
+        observation: &zenclash_core::Observation<zenclash_core::ControllerStatus>,
+        generation: u64,
+    ) -> Self {
+        match observation {
+            zenclash_core::Observation::Fresh { value, .. }
+                if value.authenticated && value.generation == generation =>
+            {
+                Self::Connected
+            }
+            zenclash_core::Observation::Loading => Self::Loading,
+            zenclash_core::Observation::Stale { .. } => Self::Stale,
+            zenclash_core::Observation::Fresh { value, .. } if value.authenticated => Self::Stale,
+            _ => Self::Unavailable,
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Connected => "app.status.controller_connected",
+            Self::Loading => "app.status.controller_loading",
+            Self::Stale => "app.status.controller_stale",
+            Self::Unavailable => "app.status.controller_unavailable",
+        }
+    }
+}
+
 impl Render for ZenClashApp {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
@@ -218,6 +255,8 @@ impl Render for ZenClashApp {
             Page::Proxies => self.proxies_page.clone().into_any_element(),
             _ => self.runtime_page.clone().into_any_element(),
         };
+        let connected = self.controller_indicator == ControllerIndicator::Connected;
+        let status_key = self.controller_indicator.key();
 
         v_flex()
             .id("zenclash-app")
@@ -264,8 +303,33 @@ impl Render for ZenClashApp {
                     .flex_1()
                     .min_h_0()
                     .w_full()
+                    .items_stretch()
                     .child(Sidebar::new(self.current_page).collapsed(self.sidebar_collapsed))
                     .child(div().flex_1().h_full().min_w_0().child(content)),
+            )
+            .child(
+                h_flex()
+                    .id("main-window-status-bar")
+                    .min_h_6()
+                    .flex_shrink_0()
+                    .px_4()
+                    .gap_3()
+                    .justify_between()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(div().size_2().rounded_full().bg(if connected {
+                                theme.success
+                            } else {
+                                theme.muted_foreground
+                            }))
+                            .child(zenclash_i18n::text(status_key)),
+                    )
+                    .child(format!("ZenClash {}", env!("ZENCLASH_BUILD_VERSION"))),
             )
     }
 }
@@ -280,6 +344,48 @@ mod tests {
         main_window_title_bar, needs_client_window_controls, needs_native_window_drag,
         uses_custom_title_bar,
     };
+
+    #[test]
+    fn controller_indicator_rejects_old_generations_and_retained_successes() {
+        use super::ControllerIndicator;
+        use zenclash_core::{
+            ControllerCompatibility, ControllerStatus, Observation, OperationalFailure, VersionInfo,
+        };
+        let value = ControllerStatus {
+            version: VersionInfo::default(),
+            authenticated: true,
+            compatibility: ControllerCompatibility::Compatible,
+            generation: 7,
+        };
+        let fresh = Observation::Fresh {
+            value: value.clone(),
+            observed_at_ms: 100,
+        };
+        assert_eq!(
+            ControllerIndicator::from_observation(&fresh, 7),
+            ControllerIndicator::Connected
+        );
+        assert_eq!(
+            ControllerIndicator::from_observation(&fresh, 8),
+            ControllerIndicator::Stale
+        );
+        let stale = Observation::Stale {
+            value,
+            observed_at_ms: 100,
+            failure: OperationalFailure {
+                message: "controller disconnected".into(),
+                occurred_at_ms: 200,
+            },
+        };
+        assert_eq!(
+            ControllerIndicator::from_observation(&stale, 7),
+            ControllerIndicator::Stale
+        );
+        assert_eq!(
+            ControllerIndicator::from_observation(&Observation::Loading, 7),
+            ControllerIndicator::Loading
+        );
+    }
 
     #[gpui_kit::test]
     fn caption_controls_have_names_and_close_through_keyboard_and_pointer(

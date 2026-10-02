@@ -49,14 +49,11 @@ impl Fixture {
             .unwrap();
         let client = MihomoClient::from_process(process.clone())
             .unwrap()
-            .with_config_validator(process.config_validator()).unwrap();
+            .with_config_validator(process.config_validator())
+            .unwrap();
         let session = CoreSession::open(CoreKind::Mihomo, client).unwrap();
-        let capture = TrafficCaptureSession::new(
-            session.clone(),
-            store.clone(),
-            None,
-            Some(source.clone()),
-        );
+        let capture =
+            TrafficCaptureSession::new(session.clone(), store.clone(), None, Some(source.clone()));
         assert!(session.start_supervisor(&tokio::runtime::Handle::current()));
         Self {
             root,

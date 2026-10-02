@@ -19,6 +19,18 @@ fn main() -> std::process::ExitCode {
                 std::process::ExitCode::FAILURE
             }
         }
+    } else if arguments
+        .iter()
+        .map(|argument| argument.as_os_str())
+        .eq([std::ffi::OsStr::new("--package-uninstall")])
+    {
+        match zenclash_service::run_package_uninstall() {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("package service removal failed: {error}");
+                std::process::ExitCode::FAILURE
+            }
+        }
     } else {
         match zenclash_service::run_maintenance(&arguments) {
             Ok(()) => std::process::ExitCode::SUCCESS,

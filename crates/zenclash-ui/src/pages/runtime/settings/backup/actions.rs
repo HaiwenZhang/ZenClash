@@ -54,6 +54,7 @@ impl RuntimePage {
                         match refresh {
                             Ok(refresh) => {
                                 let snapshot = refresh.snapshot;
+                                this.profiles.forms.catalog_view.prepare(&snapshot.profiles);
                                 this.profiles.catalog = snapshot.profiles;
                                 this.profiles.generation = this.profiles.generation.wrapping_add(1);
                                 this.controlled_config = snapshot.controlled_config;
@@ -287,6 +288,7 @@ impl RuntimePage {
     ) {
         self.profiles.store = Some(outcome.profile_store);
         self.profiles.generation = self.profiles.generation.wrapping_add(1);
+        self.profiles.forms.catalog_view.prepare(&outcome.catalog);
         self.profiles.catalog = outcome.catalog;
         self.controlled_config_store = outcome.controlled_store;
         self.controlled_config_generation = self.controlled_config_generation.wrapping_add(1);

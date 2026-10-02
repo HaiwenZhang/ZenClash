@@ -8,10 +8,12 @@ use std::{
 
 use parking_lot::Mutex;
 use zenclash_core::{
-    ControlledConfigStore, CoreApplyOutcome, CoreCommittedProfileSnapshot, CoreKind,
-    CoreRestoreSnapshot, CoreSession, CoreSessionError, EffectiveConfigIntent, MihomoClient,
-    ProfileApplication, ProfileApplyOutcome, ProfileChange, ProfileRecovery, ProfileStore,
-    RemoteProfileOptions, YamlOverrideStore,
+    ControlledConfigStore, CoreApplyOutcome, CoreCommittedProfileSnapshot,
+    CoreInitializationOutcome, CoreKind, CoreRestoreSnapshot, CoreSession, CoreSessionError,
+    EffectiveConfigIntent, MihomoClient, ProfileApplication, ProfileApplyOutcome, ProfileChange,
+    ProfileRecovery, ProfileStore, RemoteProfileOptions, ServiceHealthKind, ServiceManager,
+    ServiceManagerError, ServiceManagerSnapshot, ServiceTunOutcome, ServiceTunRequest,
+    YamlOverrideStore,
 };
 
 /// Shared application-level profile workflow and typed recovery context.
@@ -23,6 +25,7 @@ pub struct ProfileService {
     session: CoreSession,
     overrides: Option<YamlOverrideStore>,
     failure: Arc<Mutex<ProfileRecoveryState>>,
+    service_manager: Option<ServiceManager>,
 }
 
 #[derive(Default)]
@@ -30,6 +33,8 @@ struct ProfileRecoveryState {
     runtime_result_version: Option<u64>,
     latest_failure: Option<Arc<ProfileApplyOutcome>>,
     unresolved: Option<Arc<ProfileApplyOutcome>>,
+    service_tun_pending: Option<u64>,
+    service_tun_warning: Option<String>,
 }
 
 impl ProfileRecoveryState {
@@ -47,6 +52,8 @@ impl ProfileRecoveryState {
     fn clear_failure(&mut self) {
         self.unresolved = None;
         self.latest_failure = None;
+        self.service_tun_pending = None;
+        self.service_tun_warning = None;
     }
 
     fn pending_finalization(&self) -> Option<u64> {
@@ -54,7 +61,7 @@ impl ProfileRecoveryState {
             Some(ProfileApplyOutcome::CommittedButRuntimeUnknown {
                 runtime_version, ..
             }) => Some(*runtime_version),
-            _ => None,
+            _ => self.service_tun_pending,
         }
     }
 
@@ -62,7 +69,9 @@ impl ProfileRecoveryState {
         if self.pending_finalization() != Some(version) {
             return false;
         }
-        self.clear_failure();
+        self.unresolved = None;
+        self.latest_failure = None;
+        self.service_tun_pending = None;
         true
     }
 }
@@ -139,7 +148,60 @@ impl ProfileService {
             session,
             overrides,
             failure: Arc::new(Mutex::new(ProfileRecoveryState::default())),
+            service_manager: None,
         }
+    }
+
+    pub(crate) fn with_service_manager(mut self, manager: ServiceManager) -> Self {
+        self.service_manager = Some(manager);
+        self
+    }
+
+    pub(crate) fn service_state(&self) -> Option<ServiceManagerSnapshot> {
+        self.service_manager.as_ref().map(ServiceManager::snapshot)
+    }
+
+    pub(crate) fn service_updates(
+        &self,
+    ) -> Option<tokio::sync::watch::Receiver<ServiceManagerSnapshot>> {
+        self.service_manager.as_ref().map(ServiceManager::subscribe)
+    }
+
+    pub(crate) fn request_service_tun(&self) -> Result<ServiceTunRequest, String> {
+        self.service_manager
+            .as_ref()
+            .ok_or_else(|| zenclash_i18n::text("core_page.service.unknown"))?
+            .request_enable_tun()
+            .map_err(service_failure_message)
+    }
+
+    pub(crate) async fn enable_service_tun(
+        &self,
+        request: ServiceTunRequest,
+    ) -> Result<ServiceTunOutcome, String> {
+        let manager = self
+            .service_manager
+            .clone()
+            .ok_or_else(|| zenclash_i18n::text("core_page.service.unknown"))?;
+        let profiles = self.clone();
+        // Navigation can discard its waiter, but not acceptance of a durable
+        // core receipt in the shared profile recovery record.
+        tokio::spawn(async move {
+            let outcome = manager
+                .enable_tun(request)
+                .await
+                .map_err(service_failure_message)?;
+            if let Some(core) = outcome.core() {
+                profiles.record_service_tun(
+                    core,
+                    outcome.commit_pending(),
+                    outcome.recovery_warning(),
+                );
+            }
+            Ok(outcome)
+        })
+        .await
+        .map_err(|_| zenclash_i18n::text("core_page.service.pending"))?
     }
 
     pub(crate) fn session(&self) -> &CoreSession {
@@ -165,6 +227,10 @@ impl ProfileService {
 
     pub(crate) fn pending_finalization(&self) -> Option<u64> {
         self.failure.lock().pending_finalization()
+    }
+
+    pub(crate) fn service_tun_warning(&self) -> Option<String> {
+        self.failure.lock().service_tun_warning.clone()
     }
 
     pub(crate) async fn confirm_service_runtime(&self, version: u64) -> Result<(), String> {
@@ -470,6 +536,37 @@ impl ProfileService {
         }
     }
 
+    pub(crate) fn record_service_initialization(&self, outcome: &CoreInitializationOutcome) {
+        self.record_initialization_facts(outcome.saved(), outcome.commit_pending());
+    }
+
+    fn record_initialization_facts(&self, saved: Option<&CoreApplyOutcome>, commit_pending: bool) {
+        if let Some(saved) = saved {
+            // Pending acknowledgement is a distinct fact; a saved startup has
+            // already accepted its source and cannot offer old-source rollback.
+            self.record_service_tun(saved, commit_pending, None);
+        }
+    }
+
+    fn record_service_tun(
+        &self,
+        outcome: &CoreApplyOutcome,
+        commit_pending: bool,
+        recovery_warning: Option<&str>,
+    ) {
+        if self.session.generation() != outcome.generation {
+            return;
+        }
+        let mut state = self.failure.lock();
+        if state.accept_version(outcome.generation) {
+            state.clear_failure();
+            if commit_pending {
+                state.service_tun_pending = Some(outcome.generation);
+            }
+            state.service_tun_warning = recovery_warning.map(str::to_owned);
+        }
+    }
+
     pub(crate) fn pending_backup_restore(&self) -> Option<u64> {
         self.session.pending_backup_restore()
     }
@@ -507,6 +604,36 @@ impl ProfileService {
         self.record_accepted_runtime(&outcome);
         Ok(outcome)
     }
+}
+
+fn service_failure_message(error: ServiceManagerError) -> String {
+    if error.is_authorization_cancelled() {
+        return zenclash_i18n::text("core_page.service.cancelled");
+    }
+    if error.is_native_outcome_unconfirmed() {
+        return zenclash_i18n::text("core_page.service.pending");
+    }
+    let key = match error {
+        ServiceManagerError::Busy => "core_page.service.busy",
+        ServiceManagerError::Stale | ServiceManagerError::Closed => "core_page.service.stale",
+        ServiceManagerError::Unsupported => "core_page.service.unsupported",
+        ServiceManagerError::ConsentRequired => "core_page.service.install_description",
+        ServiceManagerError::Sources(_) => "core_page.service.bundle_missing",
+        ServiceManagerError::Health(kind) => match kind {
+            ServiceHealthKind::Missing => "core_page.service.missing",
+            ServiceHealthKind::Ready | ServiceHealthKind::Unknown => "core_page.service.unknown",
+            ServiceHealthKind::Stopped => "core_page.service.stopped",
+            ServiceHealthKind::RepairRequired => "core_page.service.repair_required",
+            ServiceHealthKind::MaintenancePending => "core_page.service.pending",
+            ServiceHealthKind::Unauthorized => "core_page.service.unauthorized",
+            ServiceHealthKind::Incompatible => "core_page.service.incompatible",
+            ServiceHealthKind::UnrecognizedInstallation => "core_page.service.unrecognized",
+        },
+        ServiceManagerError::Runtime(error) => return error.to_string(),
+        ServiceManagerError::Maintenance(_) => "core_page.service.failed",
+        _ => "core_page.service.unknown",
+    };
+    zenclash_i18n::text(key)
 }
 
 fn failure_message(
@@ -584,7 +711,9 @@ mod tests {
         let client =
             MihomoClient::new(zenclash_core::MihomoEndpoint::new("http://127.0.0.1:1", ""))
                 .unwrap();
-        let session = CoreSession::open_with_config(CoreKind::Mihomo, client, Some(path.clone()), Vec::new()).unwrap();
+        let session =
+            CoreSession::open_with_config(CoreKind::Mihomo, client, Some(path.clone()), Vec::new())
+                .unwrap();
         let outcome = Arc::new(ProfileApplyOutcome::CommittedButRuntimeUnknown {
             source_version: (&profile).into(),
             profile,
@@ -644,6 +773,137 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn saved_service_tun_uncertainty_keeps_confirmation_without_source_rollback() {
+        let (root, store, service, _) = committed_fixture();
+        let path = store.active_path().unwrap().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let generation = service.session.generation();
+        service.record_service_tun(
+            &CoreApplyOutcome {
+                kind: zenclash_core::CoreApplyKind::Restarted,
+                generation,
+            },
+            true,
+            None,
+        );
+        assert_eq!(service.pending_finalization(), Some(generation));
+        assert!(service.latest_recovery().is_none());
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_saved_pending_receipt_is_confirmed_through_the_same_owner() {
+        let (root, _, service, _) = committed_fixture();
+        let generation = service.session.generation();
+        let saved = CoreApplyOutcome {
+            kind: zenclash_core::CoreApplyKind::Restarted,
+            generation,
+        };
+        service.record_initialization_facts(Some(&saved), true);
+        assert_eq!(service.pending_finalization(), Some(generation));
+        // Direct is deliberately not a native Service fixture: confirmation must
+        // reject it rather than pretend this UI record can confirm Commit alone.
+        assert!(service.confirm_service_runtime(generation).await.is_err());
+        assert_eq!(service.pending_finalization(), Some(generation));
+        assert!(service.latest_recovery().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_unsaved_or_stale_initialization_cannot_publish_a_receipt() {
+        let (root, _, service, _) = committed_fixture();
+        service.record_initialization_facts(None, true);
+        assert!(service.pending_finalization().is_none());
+        let saved = CoreApplyOutcome {
+            kind: zenclash_core::CoreApplyKind::Restarted,
+            generation: service.session.generation() + 1,
+        };
+        service.record_initialization_facts(Some(&saved), true);
+        assert!(service.pending_finalization().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn saved_capture_readback_failure_is_not_a_commit_to_confirm() {
+        let (root, store, service, _) = committed_fixture();
+        let path = store.active_path().unwrap().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let generation = service.session.generation();
+        let warning = "capture readback failed after successful commit";
+        service.record_service_tun(
+            &CoreApplyOutcome {
+                kind: zenclash_core::CoreApplyKind::Patched,
+                generation,
+            },
+            false,
+            Some(warning),
+        );
+        assert!(service.pending_finalization().is_none());
+        assert!(service.confirm_service_runtime(generation).await.is_err());
+        assert_eq!(service.service_tun_warning().as_deref(), Some(warning));
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn commit_confirmation_does_not_clear_independent_cleanup_warning() {
+        let (root, _, service, _) = committed_fixture();
+        let generation = service.session.generation();
+        let warning = zenclash_i18n::text("core_page.service.cleanup_unconfirmed");
+        service.record_service_tun(
+            &CoreApplyOutcome {
+                kind: zenclash_core::CoreApplyKind::Patched,
+                generation,
+            },
+            true,
+            Some(&warning),
+        );
+        assert!(service.failure.lock().confirm_pending(generation));
+        assert!(service.pending_finalization().is_none());
+        assert_eq!(service.service_tun_warning(), Some(warning));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn late_service_tun_receipt_cannot_clear_a_new_binding_pending_commit() {
+        let (root, _, service, outcome) = committed_fixture();
+        let old_generation = service.session.generation();
+        service
+            .session
+            .switch_to_direct(zenclash_core::MihomoEndpoint::new("http://127.0.0.1:2", ""))
+            .await
+            .unwrap();
+        let ProfileApplyOutcome::CommittedButRuntimeUnknown {
+            profile,
+            path,
+            source_version,
+            ..
+        } = outcome.as_ref()
+        else {
+            unreachable!()
+        };
+        let current_generation = service.session.generation();
+        service.record_outcome(&Arc::new(ProfileApplyOutcome::CommittedButRuntimeUnknown {
+            profile: profile.clone(),
+            path: path.clone(),
+            source_version: source_version.clone(),
+            cause: zenclash_core::ProfileApplicationError::Task("new commit reply lost".into()),
+            runtime_version: current_generation,
+        }));
+        service.record_service_tun(
+            &CoreApplyOutcome {
+                kind: zenclash_core::CoreApplyKind::Restarted,
+                generation: old_generation,
+            },
+            true,
+            None,
+        );
+        assert_eq!(service.pending_finalization(), Some(current_generation));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn a_successful_mode_change_does_not_make_the_saved_commit_unconfirmable() {
         let (root, _, service, outcome) = committed_fixture();
@@ -697,7 +957,7 @@ mod tests {
                 "profiles.recovery.confirm_failed",
                 &[(
                     "error",
-                    zenclash_core::MihomoError::StaleTransport.to_string()
+                    zenclash_core::MihomoError::StaleBinding.to_string()
                 )]
             ),
             "confirmation must reach the client instead of rejecting an unrelated mode generation"
@@ -792,7 +1052,8 @@ mod tests {
         ))
         .unwrap();
         let session =
-            CoreSession::open_with_config(CoreKind::Mihomo, client, Some(path), Vec::new()).unwrap();
+            CoreSession::open_with_config(CoreKind::Mihomo, client, Some(path), Vec::new())
+                .unwrap();
         let service = ProfileService::new(session.clone(), Some(overrides));
         // Execute a real first transition, then pause its service continuation at the
         // await boundary while another entry point completes and publishes its result.
@@ -908,7 +1169,8 @@ mod tests {
         ))
         .unwrap();
         let session =
-            CoreSession::open_with_config(CoreKind::Mihomo, client, Some(path), Vec::new()).unwrap();
+            CoreSession::open_with_config(CoreKind::Mihomo, client, Some(path), Vec::new())
+                .unwrap();
         let service = ProfileService::new(session.clone(), Some(overrides));
         let other_entry_point = service.clone();
         let failure = service

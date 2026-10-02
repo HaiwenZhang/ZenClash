@@ -6,8 +6,15 @@ mod app_update;
 mod autostart;
 mod backup;
 mod client;
+mod service_manager;
 mod service_runtime;
 mod service_runtime_session;
+
+pub use service_manager::{
+    ServiceHealthKind, ServiceManager, ServiceManagerError, ServiceManagerSnapshot,
+    ServiceOperation, ServicePhase, ServiceTunRequest, startup_service_health,
+    verify_ordinary_local_executable,
+};
 
 pub use service_runtime::ServiceRuntimeBundle;
 mod config_diff;
@@ -55,7 +62,7 @@ pub use backup::{
     BackupDataSnapshot, BackupError, BackupExportSummary, BackupManager, BackupRestoreTransaction,
     BackupResult, PreparedBackupRestore,
 };
-pub use client::{MihomoClient, MihomoError, MihomoResult, VersionInfo};
+pub use client::{MihomoClient, MihomoError, MihomoResult, ServiceStartupRejection, VersionInfo};
 pub use config_diff::{
     ConfigDiffEntry, ConfigDiffError, ConfigDiffKind, ConfigDiffReport, diff_yaml_configs,
 };
@@ -64,12 +71,12 @@ pub use controlled_config::{
     ListenerPortFallback,
 };
 pub use core_backend::{CoreCapabilities, CoreKind, ParseCoreKindError};
-pub use owned_core::{CoreRuntimeBackend, CoreRuntimeDescriptor, CoreTunPermissionStatus};
 pub use core_installation::{CoreBinaryError, CoreBinaryInfo, validate_core_binary};
 pub use core_session::{
     CoreApplyKind, CoreApplyOutcome, CoreBackupAdmission, CoreCommittedProfileSnapshot,
-    CoreInstallOutcome, CoreLifecyclePhase, CoreLifecycleSnapshot, CoreMaintenanceIntent,
-    CoreRestoreSnapshot, CoreSession, CoreSessionError, CoreSessionSnapshot, EffectiveConfigIntent,
+    CoreInitializationOutcome, CoreInstallOutcome, CoreLifecyclePhase, CoreLifecycleSnapshot,
+    CoreMaintenanceIntent, CoreRestoreSnapshot, CoreSession, CoreSessionError, CoreSessionSnapshot,
+    EffectiveConfigIntent,
 };
 pub use core_update::{
     CoreUpdateError, CoreUpdateResult, CoreUpdateTransaction, MihomoRelease, MihomoReleaseAsset,
@@ -105,12 +112,14 @@ pub use operational_status::{
     OperationalStatusStream, PathStatus, ProcessRecoveryStatus, ProcessStatus, RecoveryAction,
     StreamStatus, StreamStatuses, TunCaptureStatus,
 };
+pub use owned_core::{CoreRuntimeBackend, CoreRuntimeDescriptor, CoreTunPermissionStatus};
 pub use preferences::{
     AppPreferences, AppPreferencesError, AppPreferencesResult, AppPreferencesStore,
     AppearancePreference, CoreBinaryPreferences, LanguagePreference, NetworkProbeRoutePreference,
 };
 pub use process::{
-    MihomoLaunchConfig, MihomoProcess, MihomoProcessSnapshot, bundled_recovery_profile,
+    MihomoLaunchConfig, MihomoProcess, MihomoProcessSnapshot, MihomoRuntimeResources,
+    bundled_recovery_profile,
 };
 pub use profile::merge_profile_overrides;
 pub use profiles::{
@@ -150,8 +159,8 @@ pub use traffic::{
     LIVE_TRAFFIC_SAMPLE_COUNT, TrafficMonitor, TrafficSample, TrafficSnapshot, format_speed,
 };
 pub use traffic_capture::{
-    CaptureOutcome, CapturePlan, ObservedCapturePlan, TrafficCaptureError, TrafficCaptureSession,
-    TrafficCaptureSnapshot,
+    CaptureOutcome, CapturePlan, ObservedCapturePlan, ServiceTunOutcome, TrafficCaptureError,
+    TrafficCaptureSession, TrafficCaptureSnapshot,
 };
 pub use traffic_history::{
     DEFAULT_TRAFFIC_RETENTION_DAYS, TrafficAggregate, TrafficDeltaLogger, TrafficDimension,

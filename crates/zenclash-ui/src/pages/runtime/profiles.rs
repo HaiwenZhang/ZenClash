@@ -18,11 +18,16 @@ pub(super) struct ProfileLibrary {
 }
 
 impl ProfileLibrary {
+    pub(super) fn active_profile(&self) -> Option<&zenclash_core::ProfileRecord> {
+        self.forms.catalog_view.active_profile(&self.catalog)
+    }
+
     pub(super) fn new(
         store: Option<ProfileStore>,
         catalog: ProfileCatalog,
-        forms: ProfileFormState,
+        mut forms: ProfileFormState,
     ) -> Self {
+        forms.catalog_view.prepare(&catalog);
         Self {
             store,
             catalog,
@@ -43,6 +48,7 @@ impl ProfileLibrary {
         if generation != self.generation {
             return false;
         }
+        self.forms.catalog_view.prepare(&catalog);
         self.catalog = catalog;
         true
     }

@@ -7,6 +7,10 @@ enum RuntimeSwitch {
 }
 
 impl CoreSession {
+    pub(crate) fn capture_publication_gate(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.capture_publication_gate.clone()
+    }
+
     /// Reads prepared runtime identity without cloning the process owner or performing I/O.
     #[must_use]
     pub fn runtime_descriptor(&self) -> crate::CoreRuntimeDescriptor {
@@ -72,6 +76,7 @@ impl CoreSession {
         let session = self.clone();
         // Completion owns admission even when a caller drops its future during retirement.
         tokio::spawn(async move {
+            let _capture = session.capture_publication_gate().lock_owned().await;
             let client = session.client.pin_binding()?;
             let mut scopes = client.write_scopes();
             if let RuntimeSwitch::Local(process) = &target {
@@ -95,7 +100,10 @@ impl CoreSession {
                 session.network_suspended.store(false, Ordering::Release);
                 let mut lifecycle = session.lifecycle.write();
                 *lifecycle = CoreLifecycleSnapshot::new(session.is_managed());
-                if result.is_err() {
+                if session.is_shutting_down() {
+                    lifecycle.stop_requested = true;
+                    lifecycle.phase = CoreLifecyclePhase::ShuttingDown;
+                } else if result.is_err() {
                     lifecycle.phase = CoreLifecyclePhase::Unknown;
                 }
                 drop(lifecycle);

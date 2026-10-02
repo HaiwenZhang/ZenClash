@@ -27,7 +27,6 @@ pub(crate) use scm::{
 };
 #[cfg(feature = "server")]
 pub(crate) use security::create_private_directory;
-#[cfg(feature = "server")]
 pub(crate) use security::{service_root, validate_protected_path};
 #[cfg(feature = "server")]
 pub(crate) use transport::Listener;

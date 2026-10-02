@@ -152,13 +152,16 @@ impl RuntimePage {
     }
 
     pub(super) fn clear_traffic_history(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.page, Page::Traffic | Page::Settings) {
+            return;
+        }
         let Some(store) = self.traffic_history_store.clone() else {
             self.error = Some(zenclash_i18n::text("traffic.errors.database_unavailable"));
             cx.notify();
             return;
         };
         let Some(token) = self.begin_scoped_mutation(
-            Page::Traffic,
+            self.page,
             crate::pages::runtime::busy::MutationDomain::TrafficHistory,
         ) else {
             return;

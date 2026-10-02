@@ -12,6 +12,8 @@ control_copy="${test_root}/control"
 service_copy="${test_root}/zenclash-service"
 unit_copy="${test_root}/zenclash-service.service"
 policy_copy="${test_root}/org.zenclash.service.policy"
+library_copy="${test_root}/package-service.sh"
+prerm_copy="${test_root}/prerm"
 
 cleanup() {
   rm -rf "${test_root}"
@@ -65,6 +67,9 @@ case "${1:-}" in
     cp "${3}/usr/lib/zenclash/zenclash-service" "${MOCK_SERVICE_COPY}"
     cp "${3}/usr/lib/systemd/system/zenclash-service.service" "${MOCK_UNIT_COPY}"
     cp "${3}/usr/share/polkit-1/actions/org.zenclash.service.policy" "${MOCK_POLICY_COPY}"
+    cp "${3}/usr/lib/zenclash/package-service.sh" "${MOCK_LIBRARY_COPY}"
+    [[ -x "${3}/DEBIAN/prerm" && -x "${3}/DEBIAN/postinst" && -x "${3}/DEBIAN/postrm" ]]
+    cp "${3}/DEBIAN/prerm" "${MOCK_PRERM_COPY}"
     : >"${package_path}"
     ;;
   --info)
@@ -79,6 +84,7 @@ case "${1:-}" in
     printf '%s\n' '-rw-r--r-- root/root 1 ./usr/lib/zenclash/recovery.yaml'
     printf '%s\n' '-rw-r--r-- root/root 1 ./usr/share/doc/zenclash/LICENSE'
     printf '%s\n' '-rwxr-xr-x root/root 1 ./usr/lib/zenclash/zenclash-service'
+    printf '%s\n' '-rw-r--r-- root/root 1 ./usr/lib/zenclash/package-service.sh'
     printf '%s\n' '-rw-r--r-- root/root 1 ./usr/lib/systemd/system/zenclash-service.service'
     printf '%s\n' '-rw-r--r-- root/root 1 ./usr/share/polkit-1/actions/org.zenclash.service.policy'
     ;;
@@ -122,6 +128,8 @@ PATH="${mock_bin}:${PATH}" \
   MOCK_SERVICE_COPY="${service_copy}" \
   MOCK_UNIT_COPY="${unit_copy}" \
   MOCK_POLICY_COPY="${policy_copy}" \
+  MOCK_LIBRARY_COPY="${library_copy}" \
+  MOCK_PRERM_COPY="${prerm_copy}" \
   MOCK_TARGET_DIR="${mock_target}" \
   CARGO_TARGET_DIR="${mock_target}" \
   ZENCLASH_MIHOMO_BINARY="${test_root}/mihomo" \
@@ -138,6 +146,30 @@ grep -Fxq \
 cmp "${mock_target}/release/zenclash-service" "${service_copy}"
 cmp "${project_root}/platforms/linux/zenclash-service.service" "${unit_copy}"
 cmp "${project_root}/platforms/linux/org.zenclash.service.policy" "${policy_copy}"
+cmp "${project_root}/platforms/linux/package-service.sh" "${library_copy}"
+
+export MOCK_SCRIPT_LIBRARY="${test_root}/script-library.sh"
+export MOCK_LIBRARY_COPY="${library_copy}"
+export MOCK_REMOVAL_LOG="${test_root}/removal.log"
+cat >"${MOCK_SCRIPT_LIBRARY}" <<'EOF'
+. "${MOCK_LIBRARY_COPY}"
+zenclash_remove_service() {
+  printf 'remove\n' >>"${MOCK_REMOVAL_LOG}"
+  return "${MOCK_REMOVAL_EXIT:-0}"
+}
+EOF
+sed 's|^\. /usr/lib/zenclash/package-service.sh$|. "${MOCK_SCRIPT_LIBRARY}"|' \
+  "${prerm_copy}" >"${test_root}/fixture-prerm"
+sh "${test_root}/fixture-prerm" upgrade 9.8.8
+[[ ! -e "${MOCK_REMOVAL_LOG}" ]]
+sh "${test_root}/fixture-prerm" remove
+[[ "$(wc -l <"${MOCK_REMOVAL_LOG}")" -eq 1 ]]
+if MOCK_REMOVAL_EXIT=17 sh "${test_root}/fixture-prerm" remove; then
+  echo 'Debian prerm ignored failed service removal' >&2
+  exit 1
+else
+  [[ "$?" -eq 17 ]]
+fi
 
 rm -f "${mock_target}/release/zenclash-service" "${package_path}"
 if PATH="${mock_bin}:${PATH}" \

@@ -11,8 +11,9 @@ use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
 
 use crate::protocol::{
-    ApiRequest, ApiResponse, Request, Response, RuntimeStatus, ServiceErrorCode, SessionOperation,
-    StreamKind,
+    ApiRequest, ApiResponse, PreparedRuntimePatch, ProviderCacheChunk, ProviderCacheRead,
+    ProviderCacheToken, ProviderKind, Request, Response, RuntimeStatus, ServiceErrorCode,
+    SessionOperation, StreamKind,
 };
 use crate::{FrameError, PROTOCOL_VERSION, ProtocolInfo, SessionProof, read_frame, write_frame};
 
@@ -112,6 +113,9 @@ pub struct ServiceClient {
 
 impl ServiceClient {
     /// Verifies the service, negotiates its protocol and acquires ownership.
+    ///
+    /// # Errors
+    /// Returns native identity, connection, protocol, authorization or ownership errors.
     pub async fn connect() -> Result<Arc<Self>, ServiceClientError> {
         let mut stream = open_verified().await?;
         let Response::Acquired {
@@ -155,6 +159,9 @@ impl ServiceClient {
     }
 
     /// Checks verified service health without reserving the system runtime.
+    ///
+    /// # Errors
+    /// Returns native identity, connection or incompatible-protocol errors.
     pub async fn probe() -> Result<ProtocolInfo, ServiceClientError> {
         let mut stream = native_connect().await?;
         hello(&mut stream).await
@@ -180,6 +187,9 @@ impl ServiceClient {
     }
 
     /// Validates and stages runtime YAML; returns its service revision.
+    ///
+    /// # Errors
+    /// Returns session, configuration, staging-budget or native transport errors.
     pub async fn stage(&self, config: &str) -> Result<u64, ServiceClientError> {
         match self
             .request(SessionOperation::Stage {
@@ -193,6 +203,9 @@ impl ServiceClient {
     }
 
     /// Uploads one bounded chunk of a relative runtime asset.
+    ///
+    /// # Errors
+    /// Rejects oversized chunks, invalid paths or offsets, closed staging and transport failures.
     pub async fn upload_asset(
         &self,
         path: &str,
@@ -217,11 +230,17 @@ impl ServiceClient {
     }
 
     /// Starts the approved kernel with the exact staged revision.
+    ///
+    /// # Errors
+    /// Returns revision, approval, readiness, session or transport failures without retrying Start.
     pub async fn start(&self, revision: u64) -> Result<(), ServiceClientError> {
         expect_ok(self.request(SessionOperation::Start { revision }).await?)
     }
 
     /// Validates a complete staged configuration with the approved real kernel.
+    ///
+    /// # Errors
+    /// Returns revision, resource-budget, kernel validation or transport failures.
     pub async fn validate(&self, revision: u64) -> Result<(), ServiceClientError> {
         expect_ok(
             self.request(SessionOperation::Validate { revision })
@@ -230,6 +249,9 @@ impl ServiceClient {
     }
 
     /// Applies a staged revision while preserving the committed rollback revision.
+    ///
+    /// # Errors
+    /// Returns revision, kernel, session or transport errors; lost responses remain unconfirmed.
     pub async fn reload(&self, revision: u64, force: bool) -> Result<(), ServiceClientError> {
         expect_ok(
             self.request(SessionOperation::Reload { revision, force })
@@ -238,6 +260,9 @@ impl ServiceClient {
     }
 
     /// Commits the applied revision after the application's local transaction succeeds.
+    ///
+    /// # Errors
+    /// Rejects stale or unconfirmed revisions and propagates session or transport failures.
     pub async fn commit_runtime(&self, revision: u64) -> Result<(), ServiceClientError> {
         expect_ok(
             self.request(SessionOperation::CommitRuntime { revision })
@@ -247,34 +272,131 @@ impl ServiceClient {
 
     /// Prepares a bounded partial candidate from an accepted revision without changing the kernel.
     /// Repeating the same base and patch returns the retained candidate without resetting its phase.
-    pub async fn prepare_runtime_patch(&self, base_revision: u64, patch: &serde_json::Value) -> Result<u64, ServiceClientError> {
-        match self.request(SessionOperation::PrepareRuntimePatch { base_revision, patch: patch.clone() }).await? {
-            Response::Staged { revision } => Ok(revision),
+    ///
+    /// # Errors
+    /// Returns unsupported fields, stale base, budget, kernel observation or transport errors.
+    pub async fn prepare_runtime_patch(
+        &self,
+        base_revision: u64,
+        patch: &serde_json::Value,
+    ) -> Result<PreparedRuntimePatch, ServiceClientError> {
+        match self
+            .request(SessionOperation::PrepareRuntimePatch {
+                base_revision,
+                patch: patch.clone(),
+            })
+            .await?
+        {
+            Response::RuntimePatchPrepared { prepared } => Ok(prepared),
             _ => Err(ServiceClientError::UnexpectedResponse),
         }
     }
 
     /// Applies only the candidate's managed fields and verifies their same-kernel readback.
     /// An uncertain candidate is observed without blindly resending its PATCH.
+    ///
+    /// # Errors
+    /// Returns stale candidate, policy, kernel, unknown-outcome or transport errors.
     pub async fn apply_runtime_patch(&self, revision: u64) -> Result<(), ServiceClientError> {
-        expect_ok(self.request(SessionOperation::ApplyRuntimePatch { revision }).await?)
+        expect_ok(
+            self.request(SessionOperation::ApplyRuntimePatch { revision })
+                .await?,
+        )
     }
 
-    /// Restores the held old fields of an unsaved partial candidate, retaining its token for retries.
+    /// Restores the held old fields of an unsaved partial candidate.
+    /// A confirmed stopped kernel permits discarding only its candidate configuration.
+    /// Failed cleanup retains the candidate for a later explicit recovery.
     /// Application code must never call this after business persistence has succeeded.
+    ///
+    /// # Errors
+    /// Returns stale candidate, cleanup, kernel, unknown-outcome or transport errors.
     pub async fn restore_runtime_patch(&self, revision: u64) -> Result<(), ServiceClientError> {
-        expect_ok(self.request(SessionOperation::RestoreRuntimePatch { revision }).await?)
+        expect_ok(
+            self.request(SessionOperation::RestoreRuntimePatch { revision })
+                .await?,
+        )
     }
 
     /// Stops and waits for the service-managed kernel while retaining ownership.
+    ///
+    /// # Errors
+    /// Returns session, native stop or transport errors; a lost response does not prove exit.
     pub async fn stop(&self) -> Result<(), ServiceClientError> {
         expect_ok(self.request(SessionOperation::Stop {}).await?)
+    }
+
+    /// Begins a declared HTTP cache snapshot after the kernel has been confirmed stopped.
+    /// This request does not stop the kernel or open arbitrary filesystem paths.
+    ///
+    /// # Errors
+    /// Rejects running, stale, uncommitted or candidate-bearing runtimes, invalid providers,
+    /// exhausted readback budgets, and session or transport failures.
+    pub async fn begin_provider_cache_read(
+        &self,
+        revision: u64,
+        kind: ProviderKind,
+        name: &str,
+    ) -> Result<ProviderCacheRead, ServiceClientError> {
+        match self
+            .request(SessionOperation::BeginProviderCacheRead {
+                revision,
+                kind,
+                name: name.to_owned(),
+            })
+            .await?
+        {
+            Response::ProviderCacheRead { snapshot } => Ok(snapshot),
+            _ => Err(ServiceClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Reads the next 256 KiB page before the snapshot's absolute deadline.
+    ///
+    /// # Errors
+    /// Rejects stale tokens, out-of-order offsets, expired snapshots, changed runtimes,
+    /// and session or transport failures. Failed pages are not retried automatically.
+    pub async fn read_provider_cache(
+        &self,
+        token: &ProviderCacheToken,
+        offset: u64,
+    ) -> Result<ProviderCacheChunk, ServiceClientError> {
+        match self
+            .request(SessionOperation::ReadProviderCache {
+                token: token.clone(),
+                offset,
+            })
+            .await?
+        {
+            Response::ProviderCacheChunk { chunk } => Ok(chunk),
+            _ => Err(ServiceClientError::UnexpectedResponse),
+        }
+    }
+
+    /// Finishes or cancels the retained snapshot without resetting cumulative wave budgets.
+    /// Dropped waiters release server memory at its absolute deadline or owner cleanup.
+    ///
+    /// # Errors
+    /// Rejects stale tokens and propagates session or transport errors.
+    pub async fn finish_provider_cache_read(
+        &self,
+        token: &ProviderCacheToken,
+    ) -> Result<(), ServiceClientError> {
+        expect_ok(
+            self.request(SessionOperation::FinishProviderCacheRead {
+                token: token.clone(),
+            })
+            .await?,
+        )
     }
 
     /// Stops the kernel, clears staged data, and releases ownership.
     ///
     /// New work and heartbeat stop immediately, including when release fails.
     /// The service's lease cleanup remains the bounded fallback on disconnect.
+    ///
+    /// # Errors
+    /// Returns confirmed-stop, private cleanup or transport failures while closing new admission.
     pub async fn release(&self) -> Result<(), ServiceClientError> {
         self.closing.store(true, Ordering::Release);
         if let Some(task) = self
@@ -290,6 +412,9 @@ impl ServiceClient {
     }
 
     /// Refreshes runtime observations and the lease, then caches the result.
+    ///
+    /// # Errors
+    /// Returns session, kernel observation or transport errors and clears the cached observation.
     pub async fn status(&self) -> Result<RuntimeStatus, ServiceClientError> {
         let response = self.request(SessionOperation::Status {}).await;
         let snapshot = match response {
@@ -313,6 +438,9 @@ impl ServiceClient {
     }
 
     /// Reads bounded recent kernel output from a service cursor.
+    ///
+    /// # Errors
+    /// Returns session, response-shape or transport errors.
     pub async fn logs(&self, cursor: u64) -> Result<ServiceLogs, ServiceClientError> {
         match self.request(SessionOperation::Logs { cursor }).await? {
             Response::Logs { cursor, lines } => Ok(ServiceLogs { cursor, lines }),
@@ -321,6 +449,9 @@ impl ServiceClient {
     }
 
     /// Forwards a named kernel API request through service-side policy checks.
+    ///
+    /// # Errors
+    /// Rejects requests outside the fixed policy and propagates kernel or transport failures.
     pub async fn api(
         &self,
         method: &str,
@@ -343,6 +474,9 @@ impl ServiceClient {
     }
 
     /// Subscribes on a separate verified connection with shared request ordering.
+    ///
+    /// # Errors
+    /// Returns closing-session, native identity, stream admission or transport errors.
     pub async fn subscribe(
         &self,
         kind: StreamKind,
@@ -391,6 +525,9 @@ impl ServiceSubscription {
     /// heartbeat owns that lease. Once a frame starts its body has a deadline.
     /// A cancelled or failed read discards the transport to prevent reuse of a
     /// partially consumed frame.
+    ///
+    /// # Errors
+    /// Returns framing, stream policy or native transport errors and discards the connection.
     pub async fn next(&mut self) -> Result<Option<Value>, ServiceClientError> {
         let Some(mut stream) = self.stream.take() else {
             return Ok(None);

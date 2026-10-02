@@ -93,6 +93,14 @@ This affects only `/Applications/ZenClash.app`; it does not disable Gatekeeper g
 
 ZenClash requests macOS administrator authorization only after you explicitly enable TUN. Creating the TUN network interface and routes requires elevated privileges, so a password or Touch ID prompt is expected. Confirm that the request came from the ZenClash copy you just installed before approving it.
 
+### Service mode under development
+
+Service mode is under development; this work does not establish that the current public Release fully supports it. The planned `zenclash-service` is a separate background service/helper running in a different process from the GUI. The GUI keeps ordinary user privileges; administrator authorization is requested when you first explicitly choose to install the service.
+
+If you have installed a LaunchDaemon using a development build, disabling TUN, quitting the GUI, or deleting `ZenClash.app` does not uninstall that service. The app removal steps later in this guide are not a LaunchDaemon removal procedure either.
+
+Verification of the effective launchd registration's ownership, the complete repair/removal workflow, and native macOS acceptance testing remain unfinished. See the [TUN service development plan](../development/tun-service-plan.md) and [three-platform native validation guide](../development/tun-service-native-validation.md) for scope and acceptance requirements. The validation guide does not mean those tests have passed.
+
 ## Update
 
 ZenClash only notifies you about a new version and opens the official Release page; it never installs app updates silently. To update:

@@ -4,7 +4,12 @@ use super::{
     info_row, json, message_banner, setting_card, setting_switch, v_flex,
 };
 use gpui_kit::component::input::Textarea;
-use zenclash_core::{CapabilityState, CaptureOutcome, CapturePlan, CoreTunPermissionStatus, Observation};
+use zenclash_core::{
+    CapabilityState, CaptureOutcome, CapturePlan, CoreTunPermissionStatus, Observation,
+    ServiceHealthKind, ServicePhase,
+};
+
+mod service;
 
 impl RuntimePage {
     pub(super) fn render_tun(
@@ -14,11 +19,61 @@ impl RuntimePage {
     ) -> gpui_kit::AnyElement {
         v_flex()
             .gap_4()
+            .children(self.render_service_status(theme, cx))
             .child(self.render_tun_permissions(theme, cx))
             .child(self.render_tun_runtime(theme))
             .child(self.render_tun_switches(theme, cx))
             .child(self.render_tun_routes(theme, cx))
             .into_any_element()
+    }
+
+    pub(super) fn render_service_status(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::Div> {
+        let state = self.profile_service.service_state()?;
+        let status = if self.profile_service.pending_finalization().is_some() {
+            "core_page.service.pending"
+        } else {
+            match state.phase() {
+                ServicePhase::Checking => "core_page.service.checking",
+                ServicePhase::Authorizing => "core_page.service.authorizing",
+                ServicePhase::Unconfirmed => "core_page.service.pending",
+                ServicePhase::Switching => "core_page.service.switching",
+                ServicePhase::Enabling => "core_page.service.enabling",
+                ServicePhase::Restoring => "core_page.service.restoring",
+                ServicePhase::Cancelled => "core_page.service.cancelled",
+                ServicePhase::Failed => "core_page.service.failed",
+                _ => match state.health().map(|health| health.kind()) {
+                    Some(ServiceHealthKind::Ready) => "core_page.service.ready",
+                    Some(ServiceHealthKind::Missing) => "core_page.service.missing",
+                    Some(ServiceHealthKind::Stopped) => "core_page.service.stopped",
+                    Some(ServiceHealthKind::RepairRequired) => "core_page.service.repair_required",
+                    Some(ServiceHealthKind::MaintenancePending) => "core_page.service.pending",
+                    Some(ServiceHealthKind::Unauthorized) => "core_page.service.unauthorized",
+                    Some(ServiceHealthKind::Incompatible) => "core_page.service.incompatible",
+                    Some(ServiceHealthKind::UnrecognizedInstallation) => {
+                        "core_page.service.unrecognized"
+                    }
+                    Some(ServiceHealthKind::Unknown) | None => "core_page.service.unknown",
+                },
+            }
+        };
+        Some(
+            setting_card(zenclash_i18n::text("core_page.service.title"), theme)
+                .child(info_row(
+                    zenclash_i18n::text("tun.permissions.status"),
+                    zenclash_i18n::text(status),
+                    theme,
+                ))
+                .children(
+                    self.profile_service
+                        .service_tun_warning()
+                        .map(|warning| message_banner(warning, theme.danger, theme)),
+                )
+                .child(self.render_service_tun_actions(&state, cx)),
+        )
     }
 
     fn render_tun_runtime(&self, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
@@ -72,32 +127,61 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
         let permissions = match &self.data {
-            RuntimeData::Tun { permissions, .. } => Some(permissions),
+            RuntimeData::Tun { permissions, .. }
+                if self.data_runtime_version == self.core_session.generation() =>
+            {
+                Some(permissions)
+            }
             _ => None,
         };
         // Only current evidence can authorize an action; a retained stale value cannot.
-        let current = permissions.filter(|observation| observation.is_fresh()).and_then(Observation::value);
-        let (granted, can_request) = current.map_or((false, false), |status| (status.granted(), status.can_request()));
+        let current = permissions
+            .filter(|observation| observation.is_fresh())
+            .and_then(Observation::value);
+        let (granted, can_request) = current.map_or((false, false), |status| {
+            (status.granted(), status.can_request())
+        });
         let mut card = setting_card(zenclash_i18n::text("tun.permissions.title"), theme);
         if let Some(status) = current {
             card = card.child(info_row(
                 zenclash_i18n::text("tun.permissions.status"),
-                zenclash_i18n::text(if granted { "tun.permissions.ready" } else if can_request { "tun.permissions.install" } else { "tun.permissions.unavailable" }),
+                zenclash_i18n::text(if granted {
+                    "tun.permissions.ready"
+                } else if can_request {
+                    "tun.permissions.install"
+                } else {
+                    "tun.permissions.unavailable"
+                }),
                 theme,
             ));
             match status {
                 CoreTunPermissionStatus::Local(status) => {
-                    card = card.child(info_row(zenclash_i18n::text("tun.permissions.verification"), &status.detail, theme))
-                        .child(info_row(zenclash_i18n::text("tun.permissions.core"), status.binary.display().to_string(), theme));
+                    card = card
+                        .child(info_row(
+                            zenclash_i18n::text("tun.permissions.verification"),
+                            &status.detail,
+                            theme,
+                        ))
+                        .child(info_row(
+                            zenclash_i18n::text("tun.permissions.core"),
+                            status.binary.display().to_string(),
+                            theme,
+                        ));
                 }
                 CoreTunPermissionStatus::Service => {
-                    card = card.child(info_row(zenclash_i18n::text("tun.permissions.verification"), zenclash_i18n::text("tun.permissions.service_authority"), theme));
+                    card = card.child(info_row(
+                        zenclash_i18n::text("tun.permissions.verification"),
+                        zenclash_i18n::text("tun.permissions.service_authority"),
+                        theme,
+                    ));
                 }
                 _ => {}
             }
         } else {
             let message = match permissions {
-                Some(Observation::Failed { failure, .. } | Observation::Stale { failure, .. }) => failure.message.clone(),
+                Some(Observation::Failed { failure, .. } | Observation::Stale { failure, .. }) => {
+                    failure.message.clone()
+                }
                 _ => zenclash_i18n::text("tun.permissions.loading"),
             };
             card = card.child(message_banner(message, theme.warning, theme));
@@ -118,12 +202,18 @@ impl RuntimePage {
                     .primary()
                     .loading(self.core_busy())
                     .disabled(self.core_busy() || granted || !can_request)
-                    .on_click(cx.listener(|this, _, _, cx| this.grant_tun_permissions(cx))),
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.grant_tun_permissions(window, cx)),
+                    ),
             ),
         )
     }
 
-    fn grant_tun_permissions(&mut self, cx: &mut Context<Self>) {
+    fn grant_tun_permissions(&mut self, window: &mut gpui_kit::Window, cx: &mut Context<Self>) {
+        if self.profile_service.service_state().is_some() {
+            self.request_service_tun(window, cx);
+            return;
+        }
         self.apply_tun_plan(
             true,
             zenclash_i18n::text("tun.notices.permission_ready"),
@@ -147,8 +237,16 @@ impl RuntimePage {
                 self.controlled_bool("/tun/enable", tun.enable),
                 "tun-enable",
                 theme,
-                cx.listener(|this, checked, _, cx| {
-                    this.apply_tun_plan(*checked, zenclash_i18n::text("tun.notices.enabled"), cx);
+                cx.listener(|this, checked, window, cx| {
+                    if *checked && this.profile_service.service_state().is_some() {
+                        this.request_service_tun(window, cx);
+                    } else {
+                        this.apply_tun_plan(
+                            *checked,
+                            zenclash_i18n::text("tun.notices.enabled"),
+                            cx,
+                        );
+                    }
                 }),
             ))
             .child(info_row(

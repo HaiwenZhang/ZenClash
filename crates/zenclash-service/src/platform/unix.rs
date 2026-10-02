@@ -31,7 +31,6 @@ use macos as native;
 
 pub(crate) type LocalStream = UnixStream;
 
-#[cfg(feature = "server")]
 pub(crate) fn service_root() -> PathBuf {
     native::service_root().into()
 }
@@ -118,6 +117,11 @@ pub(crate) fn require_admin() -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(all(feature = "server", target_os = "macos"))]
+pub(crate) fn validate_service_registration() -> io::Result<()> {
+    native::validate_service_registration()
 }
 
 /// Checks every ancestor without following symlinks, including the leaf.

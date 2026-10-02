@@ -1,8 +1,7 @@
-use std::{fs, io, path::Path, process::Stdio, time::Duration};
+use std::{fs, io, path::Path, process::Stdio};
 
 use tokio::{net::UnixStream, process::Command};
 
-#[cfg(feature = "server")]
 pub(super) fn service_root() -> &'static str {
     "/var/lib/zenclash-service"
 }
@@ -81,13 +80,20 @@ pub(super) const BOOTSTRAP_SCRIPT: &str = concat!(
     "set -eu\n",
     "source=$1; expected=$2; shift 2\n",
     "umask 077\n",
+    "temporary=\n",
+    "trap 'status=$?; trap - EXIT; if [ -n \"$temporary\" ]; then if /bin/rm -f \"$temporary/helper\" && /bin/rmdir \"$temporary\"; then :; elif [ \"$status\" -eq 0 ]; then status=74; fi; fi; case \"$status\" in 126|127) status=125;; esac; exit \"$status\"' EXIT\n",
     "temporary=$(/usr/bin/mktemp -d /var/lib/.zenclash-bootstrap-XXXXXXXX)\n",
-    "trap '/bin/rm -f \"$temporary/helper\"; /bin/rmdir \"$temporary\"' EXIT\n",
     "[ -f \"$source\" ] && [ ! -L \"$source\" ] || exit 65\n",
     "/usr/bin/timeout --signal=KILL 15 /bin/dd if=\"$source\" of=\"$temporary/helper\" bs=65536 count=4097 2>/dev/null\n",
     "digest=$(/usr/bin/sha256sum \"$temporary/helper\")\n",
     "[ \"${digest%% *}\" = \"$expected\" ] || exit 65\n",
     "/bin/chmod 500 \"$temporary/helper\"\n",
+    "if [ -e /sys/fs/selinux/enforce ]; then\n",
+    "  mode=$(/bin/cat /sys/fs/selinux/enforce)\n",
+    "  case \"$mode\" in 0|1) ;; *) exit 65 ;; esac\n",
+    "  label=/usr/bin/chcon; [ -e \"$label\" ] || label=/bin/chcon\n",
+    "  /usr/bin/timeout --signal=KILL 30 \"$label\" --no-dereference --type=bin_t -- \"$temporary/helper\"\n",
+    "fi\n",
     "\"$temporary/helper\" \"$@\"\n"
 );
 
@@ -104,15 +110,17 @@ pub(super) async fn request_maintenance(arguments: &[std::ffi::OsString]) -> io:
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
+        .kill_on_drop(false)
         .spawn()?;
-    let status = tokio::time::timeout(Duration::from_secs(120), child.wait()).await??;
+    let status = child.wait().await.map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "authorized maintenance exit could not be observed",
+        )
+    })?;
     match status.code() {
         Some(0) => Ok(()),
-        Some(126) => Err(io::Error::new(
-            io::ErrorKind::Interrupted,
-            "authorization cancelled",
-        )),
+        Some(126) => Err(crate::installer::authorization_cancelled()),
         Some(127) => Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "Polkit authorization unavailable or denied; a graphical authentication agent is required",
@@ -129,6 +137,10 @@ const UNIT: &str = include_str!("../../../../../platforms/linux/zenclash-service
 #[cfg(feature = "server")]
 pub(super) fn register_service() -> io::Result<()> {
     super::require_admin()?;
+    // The root also stores secrets and writable runtime data: label executables only.
+    for name in ["zenclash-service", "mihomo"] {
+        super::super::selinux::ensure_executable_label(&Path::new(service_root()).join(name))?;
+    }
     super::validate_protected_path(Path::new("/etc/systemd/system"), true)?;
     let temp = Path::new("/etc/systemd/system/.zenclash-service.service.new");
     super::write_registration(temp, Path::new(UNIT_PATH), UNIT.as_bytes())?;

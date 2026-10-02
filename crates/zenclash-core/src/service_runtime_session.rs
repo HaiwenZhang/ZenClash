@@ -24,6 +24,13 @@ pub(crate) trait RuntimeTransport: Send + Sync + 'static {
     ) -> impl Future<Output = MihomoResult<zenclash_service::ServiceRuntimeStatus>> + Send;
     fn start(&self, revision: u64) -> impl Future<Output = MihomoResult<()>> + Send;
     fn release(&self) -> impl Future<Output = MihomoResult<()>> + Send;
+    fn prepare_patch(
+        &self,
+        base: u64,
+        patch: &serde_json::Value,
+    ) -> impl Future<Output = MihomoResult<zenclash_service::ServicePreparedRuntimePatch>> + Send;
+    fn apply_patch(&self, revision: u64) -> impl Future<Output = MihomoResult<()>> + Send;
+    fn restore_patch(&self, revision: u64) -> impl Future<Output = MihomoResult<()>> + Send;
 }
 
 impl RuntimeTransport for ServiceClient {
@@ -55,6 +62,19 @@ impl RuntimeTransport for ServiceClient {
     async fn release(&self) -> MihomoResult<()> {
         Ok(self.release().await?)
     }
+    async fn prepare_patch(
+        &self,
+        base: u64,
+        patch: &serde_json::Value,
+    ) -> MihomoResult<zenclash_service::ServicePreparedRuntimePatch> {
+        Ok(self.prepare_runtime_patch(base, patch).await?)
+    }
+    async fn apply_patch(&self, revision: u64) -> MihomoResult<()> {
+        Ok(self.apply_runtime_patch(revision).await?)
+    }
+    async fn restore_patch(&self, revision: u64) -> MihomoResult<()> {
+        Ok(self.restore_runtime_patch(revision).await?)
+    }
 }
 
 pub(crate) type ServiceRuntimeSession = RuntimeSession<ServiceClient>;
@@ -68,14 +88,22 @@ pub(crate) struct RuntimeSession<T: RuntimeTransport> {
 #[derive(Clone)]
 struct RuntimeRevision {
     revision: u64,
+    kind: RevisionKind,
     // Retain the exact resources until a successful commit retires this revision.
     _bundle: Arc<ServiceRuntimeBundle>,
+}
+
+#[derive(Clone)]
+enum RevisionKind {
+    Full,
+    Patch { base: u64, delta: serde_json::Value },
 }
 
 #[derive(Default)]
 struct RuntimeState {
     active: Option<RuntimeRevision>,
     candidate: Option<(RuntimeRevision, CandidatePhase)>,
+    pending_patch_base: Option<u64>,
     closing: bool,
     released: bool,
 }
@@ -128,12 +156,79 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
         self.prepare_locked(bundle, state).await
     }
 
+    pub(crate) async fn prepare_bundle(
+        self: &Arc<Self>,
+        bundle: Arc<ServiceRuntimeBundle>,
+    ) -> MihomoResult<PreparedRuntime<T>> {
+        let mut state = self.state.clone().lock_owned().await;
+        self.reconcile_locked(&mut state).await?;
+        if state.candidate.is_some() {
+            return Err(unknown());
+        }
+        self.prepare_locked(bundle, state).await
+    }
+
+    pub(crate) async fn prepare_patch(
+        self: &Arc<Self>,
+        patch: &serde_json::Value,
+    ) -> MihomoResult<PreparedRuntime<T>> {
+        let mut state = self.state.clone().lock_owned().await;
+        self.reconcile_locked(&mut state).await?;
+        if state.candidate.is_some() {
+            return Err(unknown());
+        }
+        let active = state
+            .active
+            .clone()
+            .ok_or_else(|| MihomoError::Process("No accepted service runtime snapshot".into()))?;
+        let base = active.revision;
+        // Reserve the session before sending: lost preparation acknowledgements must
+        // not allow Stage to erase an unaccounted native candidate.
+        state.pending_patch_base = Some(base);
+        let prepared = match self.client.prepare_patch(base, patch).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if !error.mutation_result_unknown() {
+                    state.pending_patch_base = None;
+                }
+                return Err(error);
+            }
+        };
+        state.pending_patch_base = None;
+        // No mutable source reads: preserve the exact accepted asset bytes.
+        let previous_bundle = active._bundle.clone();
+        state.candidate = Some((
+            RuntimeRevision {
+                revision: prepared.revision,
+                kind: RevisionKind::Patch {
+                    base,
+                    delta: prepared.effective_patch,
+                },
+                _bundle: previous_bundle.clone(),
+            },
+            CandidatePhase::Validated,
+        ));
+        let delta = match &state.candidate.as_ref().ok_or_else(unknown)?.0.kind {
+            RevisionKind::Patch { delta, .. } => delta,
+            RevisionKind::Full => return Err(unknown()),
+        };
+        let bundle = Arc::new(previous_bundle.with_delta(delta)?);
+        state.candidate.as_mut().ok_or_else(unknown)?.0._bundle = bundle;
+        Ok(PreparedRuntime {
+            owner: self.clone(),
+            state,
+            recovery_bundle: None,
+        })
+    }
+
     pub(crate) async fn prepare_recovery(
         self: &Arc<Self>,
         bundle: Arc<ServiceRuntimeBundle>,
     ) -> MihomoResult<PreparedRuntime<T>> {
         let state = self.state.clone().lock_owned().await;
-        if state.closing { return Err(unknown()); }
+        if state.closing {
+            return Err(unknown());
+        }
         // A saved transaction can only be finalized; restoring its old snapshot would undo durable data.
         if state
             .candidate
@@ -195,6 +290,7 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
         state.candidate = Some((
             RuntimeRevision {
                 revision,
+                kind: RevisionKind::Full,
                 _bundle: bundle,
             },
             CandidatePhase::Validated,
@@ -208,7 +304,7 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
 
     pub(crate) fn snapshot(&self) -> MihomoResult<Arc<ServiceRuntimeBundle>> {
         let state = self.state.try_lock().map_err(|_| unknown())?;
-        if state.closing || state.candidate.is_some() {
+        if state.closing || state.candidate.is_some() || state.pending_patch_base.is_some() {
             return Err(unknown());
         }
         state
@@ -224,17 +320,48 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
     }
 
     pub(crate) async fn stop_confirmed(&self) -> MihomoResult<()> {
-        let state = self.state.lock().await;
+        let mut state = self.state.lock().await;
         if state.closing {
             return Err(unknown());
         }
+        self.confirm_finalizing_locked(&mut state).await?;
         self.confirm_stop().await
+    }
+
+    pub(crate) async fn confirm_finalizing_before_stop(&self) -> MihomoResult<()> {
+        let mut state = self.state.lock().await;
+        if state.closing {
+            return Err(unknown());
+        }
+        self.confirm_finalizing_locked(&mut state).await
+    }
+
+    async fn confirm_finalizing_locked(&self, state: &mut RuntimeState) -> MihomoResult<()> {
+        if matches!(state.candidate, Some((_, CandidatePhase::Finalizing))) {
+            self.reconcile_locked(state).await?;
+        }
+        Ok(())
     }
 
     async fn confirm_stop(&self) -> MihomoResult<()> {
         let stopped = self.client.stop().await;
         // Even a lost Stop acknowledgement is definitive only after native readback.
-        let status = self.client.status().await?;
+        let status = match self.client.status().await {
+            Ok(status) => status,
+            Err(error) => {
+                return Err(
+                    if stopped.is_ok()
+                        || stopped
+                            .as_ref()
+                            .is_err_and(|error| error.mutation_result_unknown())
+                    {
+                        unknown()
+                    } else {
+                        error
+                    },
+                );
+            }
+        };
         if !status.running && status.pid.is_none() {
             Ok(())
         } else {
@@ -248,13 +375,18 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
     ) -> MihomoResult<()> {
         let mut state = self.state.lock().await;
         self.reconcile_locked(&mut state).await?;
-        let active = state.active.clone().ok_or_else(unknown)?;
+        let active = state
+            .active
+            .clone()
+            .ok_or_else(|| MihomoError::Process("No accepted service runtime snapshot".into()))?;
         self.confirm_stop().await?;
         if cancelled.load(std::sync::atomic::Ordering::Acquire) {
             return Err(unknown());
         }
-        let started = self.client.start(active.revision).await;
-        let status = self.client.status().await?;
+        let _started = self.client.start(active.revision).await;
+        // Stop has already been confirmed; any later rejection cannot describe a
+        // definitive no-effect maintenance operation, even if Start was rejected.
+        let status = self.client.status().await.map_err(|_| unknown())?;
         if status.running
             && status.pid.is_some()
             && status.applied_revision == Some(active.revision)
@@ -262,7 +394,7 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
         {
             Ok(())
         } else {
-            started.and(Err(unknown()))
+            Err(unknown())
         }
     }
 
@@ -278,13 +410,16 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
         self.client.release().await?;
         state.active = None;
         state.candidate = None;
+        state.pending_patch_base = None;
         state.released = true;
         Ok(())
     }
 
     pub(crate) async fn restore_active(&self) -> MihomoResult<()> {
         let mut state = self.state.lock().await;
-        if state.closing { return Err(unknown()); }
+        if state.closing {
+            return Err(unknown());
+        }
         if state
             .candidate
             .as_ref()
@@ -292,28 +427,71 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
         {
             return Err(unknown());
         }
-        if let Some(active) = &state.active {
-            self.client.reload(active.revision, true).await?;
-            state.candidate = None;
-            Ok(())
-        } else {
+        self.restore_unsaved_locked(&mut state).await
+    }
+
+    async fn restore_unsaved_locked(&self, state: &mut RuntimeState) -> MihomoResult<()> {
+        let Some(active) = state.active.clone() else {
             self.client.stop().await?;
             state.candidate = None;
-            Err(MihomoError::Process(
+            return Err(MihomoError::Process(
                 "No accepted service runtime snapshot; owned kernel stopped".into(),
-            ))
+            ));
+        };
+        let had_pending_preparation = state.pending_patch_base.is_some();
+        self.reconcile_preparation(state).await?;
+        if had_pending_preparation && state.candidate.is_none() {
+            return Ok(());
         }
+        if let Some((candidate, phase)) = state.candidate.as_mut()
+            && let RevisionKind::Patch { base, .. } = candidate.kind
+        {
+            if base != active.revision {
+                return Err(unknown());
+            }
+            let status = self.client.status().await?;
+            if !status.running && status.pid.is_none() {
+                self.restore_stopped_patch(candidate.revision, base, &status)
+                    .await?;
+                state.candidate = None;
+                return Ok(());
+            }
+            if !status.running || status.pid.is_none() {
+                return Err(unknown());
+            }
+            if status.candidate.is_none()
+                && status.applied_revision == Some(base)
+                && status.committed_revision == Some(base)
+            {
+                state.candidate = None;
+                return Ok(());
+            }
+            *phase = CandidatePhase::Uncertain;
+            self.client.restore_patch(candidate.revision).await?;
+            self.client.commit(base).await?;
+        } else {
+            let mut recovery = active.clone();
+            recovery.kind = RevisionKind::Full;
+            state.candidate = Some((recovery, CandidatePhase::Uncertain));
+            self.client.reload(active.revision, true).await?;
+        }
+        state.candidate = None;
+        Ok(())
     }
 
     async fn reconcile_locked(&self, state: &mut RuntimeState) -> MihomoResult<()> {
         if state.closing {
             return Err(unknown());
         }
+        self.reconcile_preparation(state).await?;
         let Some((candidate, phase)) = state.candidate.as_ref() else {
             return Ok(());
         };
         match phase {
             CandidatePhase::Validated => {
+                if matches!(candidate.kind, RevisionKind::Patch { .. }) {
+                    return self.restore_unsaved_locked(state).await;
+                }
                 state.candidate = None;
                 Ok(())
             }
@@ -333,13 +511,89 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
         }
     }
 
+    async fn reconcile_preparation(&self, state: &mut RuntimeState) -> MihomoResult<()> {
+        let Some(base) = state.pending_patch_base else {
+            return Ok(());
+        };
+        let status = self.client.status().await?;
+        if state.active.as_ref().map(|active| active.revision) != Some(base) {
+            return Err(unknown());
+        }
+        if !status.running && status.pid.is_none() {
+            if let Some(candidate) = &status.candidate {
+                if candidate.phase != zenclash_service::ServiceRuntimeCandidatePhase::Prepared {
+                    return Err(unknown());
+                }
+                self.restore_stopped_patch(candidate.revision, base, &status)
+                    .await?;
+            } else if status.committed_revision != Some(base) || status.applied_revision.is_some() {
+                return Err(unknown());
+            }
+            state.pending_patch_base = None;
+            return Ok(());
+        }
+        if !status.running
+            || status.pid.is_none()
+            || status.applied_revision != Some(base)
+            || status.committed_revision != Some(base)
+        {
+            return Err(unknown());
+        }
+        if let Some(candidate) = status.candidate {
+            if candidate.kind != zenclash_service::ServiceRuntimeCandidateKind::Patch
+                || candidate.base_revision != Some(base)
+                || candidate.phase != zenclash_service::ServiceRuntimeCandidatePhase::Prepared
+            {
+                return Err(unknown());
+            }
+            self.client.restore_patch(candidate.revision).await?;
+            self.client.commit(base).await?;
+        }
+        state.pending_patch_base = None;
+        Ok(())
+    }
+
+    async fn restore_stopped_patch(
+        &self,
+        revision: u64,
+        base: u64,
+        status: &zenclash_service::ServiceRuntimeStatus,
+    ) -> MihomoResult<()> {
+        if status.running
+            || status.pid.is_some()
+            || status.applied_revision.is_some()
+            || status.committed_revision != Some(base)
+        {
+            return Err(unknown());
+        }
+        if let Some(candidate) = &status.candidate {
+            if candidate.revision != revision
+                || candidate.kind != zenclash_service::ServiceRuntimeCandidateKind::Patch
+                || candidate.base_revision != Some(base)
+            {
+                return Err(unknown());
+            }
+            let restored = self.client.restore_patch(revision).await;
+            let fresh = self.client.status().await?;
+            if fresh.running
+                || fresh.pid.is_some()
+                || fresh.applied_revision.is_some()
+                || fresh.committed_revision != Some(base)
+                || fresh.candidate.is_some()
+            {
+                return Err(restored.err().unwrap_or_else(unknown));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn adopt(
         &self,
         bundle: ServiceRuntimeBundle,
         revision: u64,
     ) -> MihomoResult<()> {
         let mut state = self.state.lock().await;
-        if state.closing || state.candidate.is_some() {
+        if state.closing || state.candidate.is_some() || state.pending_patch_base.is_some() {
             return Err(unknown());
         }
         let (applied, committed) = self.client.revisions().await?;
@@ -348,6 +602,7 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
         }
         state.active = Some(RuntimeRevision {
             revision,
+            kind: RevisionKind::Full,
             _bundle: Arc::new(bundle),
         });
         Ok(())
@@ -355,6 +610,12 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
 }
 
 impl<T: RuntimeTransport> PreparedRuntime<T> {
+    pub(crate) fn effective_delta(&self) -> Option<&serde_json::Value> {
+        match &self.state.candidate.as_ref()?.0.kind {
+            RevisionKind::Full => None,
+            RevisionKind::Patch { delta, .. } => Some(delta),
+        }
+    }
     pub(crate) async fn apply(mut self, force: bool) -> MihomoResult<AppliedRuntime<T>> {
         if let Some(bundle) = self.recovery_bundle.take() {
             let Some(active) = self.state.active.clone() else {
@@ -364,9 +625,8 @@ impl<T: RuntimeTransport> PreparedRuntime<T> {
                     "No accepted service runtime snapshot; owned kernel stopped".into(),
                 ));
             };
-            // Recover the validated active revision before Stage can retire an unsaved candidate.
-            self.state.candidate = Some((active.clone(), CandidatePhase::Uncertain));
-            self.owner.client.reload(active.revision, true).await?;
+            // Restore the exact unsaved candidate before Stage can retire resources.
+            self.owner.restore_unsaved_locked(&mut self.state).await?;
             if Arc::ptr_eq(&active._bundle, &bundle) {
                 self.state.candidate = Some((active, CandidatePhase::Applied));
                 return Ok(AppliedRuntime {
@@ -380,19 +640,52 @@ impl<T: RuntimeTransport> PreparedRuntime<T> {
             self.state.candidate = Some((
                 RuntimeRevision {
                     revision,
+                    kind: RevisionKind::Full,
                     _bundle: bundle,
                 },
                 CandidatePhase::Validated,
             ));
         }
+        let initial = self.state.active.is_none();
         let Some((candidate, phase)) = self.state.candidate.as_mut() else {
             return Err(unknown());
         };
         // Cancellation or lost response must not permit a new Stage to erase recovery resources.
         *phase = CandidatePhase::Uncertain;
-        if let Err(error) = self.owner.client.reload(candidate.revision, force).await {
+        let applied = match &candidate.kind {
+            RevisionKind::Full if initial => {
+                let started = self.owner.client.start(candidate.revision).await;
+                match self.owner.client.status().await {
+                    Ok(status)
+                        if status.running
+                            && status.pid.is_some()
+                            && status.applied_revision == Some(candidate.revision) =>
+                    {
+                        Ok(())
+                    }
+                    Ok(status)
+                        if !status.running
+                            && status.pid.is_none()
+                            && started
+                                .as_ref()
+                                .is_err_and(|error| !error.mutation_result_unknown()) =>
+                    {
+                        started
+                    }
+                    _ => Err(unknown()),
+                }
+            }
+            RevisionKind::Full => self.owner.client.reload(candidate.revision, force).await,
+            RevisionKind::Patch { .. } => self.owner.client.apply_patch(candidate.revision).await,
+        };
+        if let Err(error) = applied {
             if !error.mutation_result_unknown() {
-                self.state.candidate = None;
+                if matches!(candidate.kind, RevisionKind::Patch { .. }) {
+                    // A definite application rejection retains the prepared server candidate.
+                    *phase = CandidatePhase::Validated;
+                } else {
+                    self.state.candidate = None;
+                }
             }
             return Err(error);
         }
@@ -421,17 +714,7 @@ impl<T: RuntimeTransport> AppliedRuntime<T> {
         if let Some((_, phase)) = self.state.candidate.as_mut() {
             *phase = CandidatePhase::Uncertain;
         }
-        if let Some(active) = &self.state.active {
-            self.owner.client.reload(active.revision, true).await?;
-            self.state.candidate = None;
-            Ok(())
-        } else {
-            self.owner.client.stop().await?;
-            self.state.candidate = None;
-            Err(MihomoError::Process(
-                "No accepted service runtime snapshot; owned kernel stopped".into(),
-            ))
-        }
+        self.owner.restore_unsaved_locked(&mut self.state).await
     }
 }
 
@@ -459,11 +742,19 @@ mod tests {
         lose_commit_before_apply: AtomicBool,
         lose_reload_ack: AtomicBool,
         lose_status_ack: AtomicBool,
+        reject_status: Mutex<Option<zenclash_service::ServiceErrorCode>>,
+        reject_stop: Mutex<Option<zenclash_service::ServiceErrorCode>>,
+        reject_start: Mutex<Option<zenclash_service::ServiceErrorCode>>,
         calls: Mutex<Vec<String>>,
         running: AtomicBool,
         lose_stop_ack: AtomicBool,
         stop_has_no_effect: AtomicBool,
         lose_start_ack: AtomicBool,
+        patch_candidate: Mutex<Option<zenclash_service::ServiceRuntimeCandidate>>,
+        prepare_delta: Mutex<Option<serde_json::Value>>,
+        lose_prepare_ack: AtomicBool,
+        reject_apply_patch: Mutex<Option<zenclash_service::ServiceErrorCode>>,
+        lose_restore_ack: AtomicBool,
     }
 
     impl RuntimeTransport for Service {
@@ -493,6 +784,7 @@ mod tests {
                 return Err(unknown());
             }
             self.committed.store(revision, Ordering::SeqCst);
+            *self.patch_candidate.lock() = None;
             if self.lose_commit_ack.swap(false, Ordering::SeqCst) {
                 return Err(MihomoError::Service(
                     zenclash_service::ServiceClientError::Rejected(
@@ -515,6 +807,11 @@ mod tests {
         }
         async fn stop(&self) -> MihomoResult<()> {
             self.calls.lock().push("stop".into());
+            if let Some(code) = self.reject_stop.lock().take() {
+                return Err(MihomoError::Service(
+                    zenclash_service::ServiceClientError::Rejected(code),
+                ));
+            }
             if !self.stop_has_no_effect.load(Ordering::SeqCst) {
                 self.applied.store(0, Ordering::SeqCst);
                 self.running.store(false, Ordering::SeqCst);
@@ -526,6 +823,11 @@ mod tests {
             }
         }
         async fn status(&self) -> MihomoResult<zenclash_service::ServiceRuntimeStatus> {
+            if let Some(code) = self.reject_status.lock().take() {
+                return Err(MihomoError::Service(
+                    zenclash_service::ServiceClientError::Rejected(code),
+                ));
+            }
             let (applied_revision, committed_revision) = self.revisions().await?;
             let running = self.running.load(Ordering::SeqCst);
             Ok(zenclash_service::ServiceRuntimeStatus {
@@ -534,11 +836,16 @@ mod tests {
                 running,
                 pid: running.then_some(123),
                 exit_reason: None,
-                candidate: None,
+                candidate: self.patch_candidate.lock().clone(),
             })
         }
         async fn start(&self, revision: u64) -> MihomoResult<()> {
             self.calls.lock().push(format!("start:{revision}"));
+            if let Some(code) = self.reject_start.lock().take() {
+                return Err(MihomoError::Service(
+                    zenclash_service::ServiceClientError::Rejected(code),
+                ));
+            }
             assert!(!self.running.swap(true, Ordering::SeqCst), "double start");
             self.applied.store(revision, Ordering::SeqCst);
             if self.lose_start_ack.swap(false, Ordering::SeqCst) {
@@ -550,6 +857,69 @@ mod tests {
         async fn release(&self) -> MihomoResult<()> {
             self.calls.lock().push("release".into());
             self.stop().await
+        }
+        async fn prepare_patch(
+            &self,
+            base: u64,
+            patch: &serde_json::Value,
+        ) -> MihomoResult<zenclash_service::ServicePreparedRuntimePatch> {
+            self.calls
+                .lock()
+                .push(format!("prepare-patch:{base}:{patch}"));
+            let revision = self.next.fetch_add(1, Ordering::SeqCst) + 1;
+            *self.patch_candidate.lock() = Some(zenclash_service::ServiceRuntimeCandidate {
+                revision,
+                base_revision: Some(base),
+                kind: zenclash_service::ServiceRuntimeCandidateKind::Patch,
+                phase: zenclash_service::ServiceRuntimeCandidatePhase::Prepared,
+            });
+            if self.lose_prepare_ack.swap(false, Ordering::SeqCst) {
+                return Err(unknown());
+            }
+            Ok(zenclash_service::ServicePreparedRuntimePatch {
+                revision,
+                effective_patch: self
+                    .prepare_delta
+                    .lock()
+                    .take()
+                    .unwrap_or_else(|| patch.clone()),
+            })
+        }
+        async fn apply_patch(&self, revision: u64) -> MihomoResult<()> {
+            self.calls.lock().push(format!("apply-patch:{revision}"));
+            if let Some(code) = self.reject_apply_patch.lock().take() {
+                return Err(MihomoError::Service(
+                    zenclash_service::ServiceClientError::Rejected(code),
+                ));
+            }
+            self.applied.store(revision, Ordering::SeqCst);
+            self.patch_candidate.lock().as_mut().unwrap().phase =
+                zenclash_service::ServiceRuntimeCandidatePhase::Applied;
+            if self.lose_reload_ack.swap(false, Ordering::SeqCst) {
+                Err(unknown())
+            } else {
+                Ok(())
+            }
+        }
+        async fn restore_patch(&self, revision: u64) -> MihomoResult<()> {
+            self.calls.lock().push(format!("restore-patch:{revision}"));
+            let mut candidate = self.patch_candidate.lock();
+            if !self.running.load(Ordering::SeqCst) {
+                if candidate.as_ref().map(|candidate| candidate.revision) != Some(revision) {
+                    return Err(unknown());
+                }
+                *candidate = None;
+                return if self.lose_restore_ack.swap(false, Ordering::SeqCst) {
+                    Err(unknown())
+                } else {
+                    Ok(())
+                };
+            }
+            let candidate = candidate.as_mut().ok_or_else(unknown)?;
+            self.applied
+                .store(candidate.base_revision.unwrap(), Ordering::SeqCst);
+            candidate.phase = zenclash_service::ServiceRuntimeCandidatePhase::Prepared;
+            Ok(())
         }
     }
 
@@ -577,6 +947,160 @@ mod tests {
             .await
             .unwrap();
         (service, owner)
+    }
+
+    #[tokio::test]
+    async fn restart_start_policy_rejection_after_stop_is_an_unknown_mutation() {
+        let (service, owner) = accepted_owner().await;
+        *service.reject_start.lock() = Some(zenclash_service::ServiceErrorCode::KernelUnavailable);
+        service.calls.lock().clear();
+        let error = owner
+            .restart_accepted(&AtomicBool::new(false))
+            .await
+            .unwrap_err();
+        assert!(!service.running.load(Ordering::SeqCst));
+        assert_eq!(
+            *service.calls.lock(),
+            ["stop", "status", "start:1", "status"]
+        );
+        assert!(
+            error.mutation_result_unknown(),
+            "Start refusal cannot undo the successful Stop"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_without_an_accepted_runtime_is_rejected_before_any_mutation() {
+        let service = Arc::new(Service::default());
+        let owner = RuntimeSession::new(service.clone(), home());
+        let error = owner
+            .restart_accepted(&AtomicBool::new(false))
+            .await
+            .unwrap_err();
+        assert!(service.calls.lock().is_empty());
+        assert!(!error.mutation_result_unknown());
+    }
+
+    #[tokio::test]
+    async fn status_policy_rejection_after_stop_is_an_unknown_mutation() {
+        let (service, owner) = accepted_owner().await;
+        *service.reject_status.lock() = Some(zenclash_service::ServiceErrorCode::Expired);
+        let error = owner.stop_confirmed().await.unwrap_err();
+        assert!(!service.running.load(Ordering::SeqCst));
+        assert!(
+            error.mutation_result_unknown(),
+            "Stop already changed the child before Status failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_policy_rejection_before_effect_keeps_its_known_error() {
+        let (service, owner) = accepted_owner().await;
+        *service.reject_stop.lock() = Some(zenclash_service::ServiceErrorCode::Expired);
+        *service.reject_status.lock() = Some(zenclash_service::ServiceErrorCode::Expired);
+        let error = owner.stop_confirmed().await.unwrap_err();
+        assert!(service.running.load(Ordering::SeqCst));
+        assert!(!error.mutation_result_unknown());
+    }
+
+    #[tokio::test]
+    async fn uncertain_stop_is_not_reversed_after_a_fresh_stopped_status() {
+        let (service, owner) = accepted_owner().await;
+        service.lose_stop_ack.store(true, Ordering::SeqCst);
+        service.lose_status_ack.store(true, Ordering::SeqCst);
+        let result = owner
+            .stop_confirmed()
+            .await
+            .map_err(crate::CoreSessionError::from);
+        assert!(result.is_err());
+        let mut lifecycle = crate::CoreLifecycleSnapshot {
+            phase: crate::CoreLifecyclePhase::Stable,
+            stop_requested: false,
+            recovery_attempts: 0,
+            exit_reason: None,
+            last_error: None,
+        };
+        crate::core_session::record_maintenance_outcome(
+            &mut lifecycle,
+            crate::CoreMaintenanceIntent::Stop,
+            &result,
+        );
+        assert_eq!(lifecycle.phase, crate::CoreLifecyclePhase::Unknown);
+        service.calls.lock().clear();
+        let status = service.status().await.unwrap();
+        assert!(!status.running);
+        if crate::core_session::supervisor_observation(
+            &mut lifecycle,
+            Some((status.running, status.exit_reason)),
+            false,
+            false,
+            crate::CoreKind::Mihomo,
+            3,
+        )
+        .is_some_and(|(_, exhausted)| !exhausted)
+        {
+            owner
+                .restart_accepted(&AtomicBool::new(false))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            service
+                .calls
+                .lock()
+                .iter()
+                .filter(|call| call.starts_with("start:"))
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn stopped_owner_status_failure_never_authorizes_supervisor_start() {
+        let (service, owner) = accepted_owner().await;
+        owner.stop_confirmed().await.unwrap();
+        let mut lifecycle = crate::CoreLifecycleSnapshot {
+            phase: crate::CoreLifecyclePhase::Stopped,
+            stop_requested: true,
+            recovery_attempts: 0,
+            exit_reason: None,
+            last_error: None,
+        };
+        service.calls.lock().clear();
+        service.lose_status_ack.store(true, Ordering::SeqCst);
+        for _ in 0..2 {
+            let observed = service
+                .status()
+                .await
+                .ok()
+                .map(|status| (status.running, status.exit_reason));
+            if crate::core_session::supervisor_observation(
+                &mut lifecycle,
+                observed,
+                false,
+                false,
+                crate::CoreKind::Mihomo,
+                3,
+            )
+            .is_some_and(|(_, exhausted)| !exhausted)
+            {
+                owner
+                    .restart_accepted(&AtomicBool::new(false))
+                    .await
+                    .unwrap();
+            }
+        }
+        assert_eq!(
+            service
+                .calls
+                .lock()
+                .iter()
+                .filter(|call| call.starts_with("start:"))
+                .count(),
+            0
+        );
+        assert!(!service.running.load(Ordering::SeqCst));
+        assert_eq!(lifecycle.phase, crate::CoreLifecyclePhase::Stopped);
     }
 
     #[tokio::test]
@@ -742,7 +1266,7 @@ mod tests {
                 .calls
                 .lock()
                 .iter()
-                .filter(|call| call.starts_with("reload:"))
+                .filter(|call| call.starts_with("start:"))
                 .count(),
             1
         );
@@ -777,7 +1301,7 @@ mod tests {
         assert_eq!(
             calls
                 .iter()
-                .filter(|call| call.starts_with("reload:"))
+                .filter(|call| call.starts_with("start:"))
                 .count(),
             1
         );
@@ -1098,5 +1622,400 @@ mod tests {
             .unwrap();
         assert!(candidate.rollback().await.is_err());
         assert_eq!(service.applied.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
+    async fn partial_service_patch_shares_held_resources_and_uses_effective_delta() {
+        let home = home();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("provider.yaml"), "payload: [example.org]\n").unwrap();
+        let service = Arc::new(Service::default());
+        let owner = RuntimeSession::new(service.clone(), home.clone());
+        owner.prepare("mode: rule\ntun: {enable: true, mtu: 1400}\nrule-providers:\n  rules:\n    type: file\n    behavior: domain\n    path: provider.yaml\n").await.unwrap().apply(true).await.unwrap().commit().await.unwrap();
+        let before = owner.snapshot().unwrap();
+        std::fs::remove_dir_all(&home).unwrap();
+        *service.prepare_delta.lock() = Some(serde_json::json!({"tun":{"mtu":1500,"enable":true}}));
+        service.calls.lock().clear();
+        let prepared = owner
+            .prepare_patch(&serde_json::json!({"tun":{"mtu":1500}}))
+            .await
+            .unwrap();
+        assert_eq!(prepared.effective_delta().unwrap()["tun"]["enable"], true);
+        prepared.apply(false).await.unwrap().commit().await.unwrap();
+        let after = owner.snapshot().unwrap();
+        let before_value: serde_yaml::Value = serde_yaml::from_str(before.yaml()).unwrap();
+        let after_value: serde_yaml::Value = serde_yaml::from_str(after.yaml()).unwrap();
+        assert_eq!(
+            before_value["rule-providers"],
+            after_value["rule-providers"]
+        );
+        assert_eq!(after_value["tun"]["enable"], true);
+        assert_eq!(after_value["tun"]["mtu"], 1500);
+        assert_eq!(service.calls.lock().len(), 3);
+        assert!(
+            service
+                .calls
+                .lock()
+                .iter()
+                .all(|call| !call.starts_with("stage:")
+                    && !call.starts_with("reload:")
+                    && !call.starts_with("validate:"))
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_service_saved_commit_ack_loss_only_finalizes() {
+        let (service, owner) = accepted_owner().await;
+        service.calls.lock().clear();
+        let applied = owner
+            .prepare_patch(&serde_json::json!({"mode":"global"}))
+            .await
+            .unwrap()
+            .apply(false)
+            .await
+            .unwrap();
+        service
+            .lose_commit_before_apply
+            .store(true, Ordering::SeqCst);
+        assert!(
+            applied
+                .commit()
+                .await
+                .unwrap_err()
+                .mutation_result_unknown()
+        );
+        assert!(owner.restore_active().await.is_err());
+        owner.reconcile().await.unwrap();
+        assert!(owner.snapshot().unwrap().yaml().contains("mode: global"));
+        let calls = service.calls.lock().clone();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("apply-patch:"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("commit:"))
+                .count(),
+            2
+        );
+        assert!(!calls.iter().any(|call| call.starts_with("stage:")
+            || call.starts_with("restore-patch:")
+            || call.starts_with("reload:")));
+    }
+
+    #[tokio::test]
+    async fn partial_service_unsaved_rollback_is_inverse_not_reload_even_after_lost_commit() {
+        let (service, owner) = accepted_owner().await;
+        service.calls.lock().clear();
+        let applied = owner
+            .prepare_patch(&serde_json::json!({"mode":"global"}))
+            .await
+            .unwrap()
+            .apply(false)
+            .await
+            .unwrap();
+        service.lose_commit_ack.store(true, Ordering::SeqCst);
+        assert!(applied.rollback().await.is_err());
+        owner.restore_active().await.unwrap();
+        assert!(owner.snapshot().unwrap().yaml().contains("mode: rule"));
+        let calls = service.calls.lock().clone();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("restore-patch:"))
+                .count(),
+            1
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|call| call.starts_with("reload:") || call.starts_with("stage:"))
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_service_lost_apply_ack_never_resends_and_explicit_recovery_restores_base() {
+        let (service, owner) = accepted_owner().await;
+        service.calls.lock().clear();
+        service.lose_reload_ack.store(true, Ordering::SeqCst);
+        assert!(
+            owner
+                .prepare_patch(&serde_json::json!({"mode":"global"}))
+                .await
+                .unwrap()
+                .apply(false)
+                .await
+                .is_err()
+        );
+        assert!(owner.prepare("mode: direct\n").await.is_err());
+        owner.restore_active().await.unwrap();
+        assert_eq!(service.applied.load(Ordering::SeqCst), 1);
+        let calls = service.calls.lock().clone();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("apply-patch:"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("restore-patch:"))
+                .count(),
+            1
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|call| call.starts_with("stage:") || call.starts_with("reload:"))
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_service_lost_prepare_ack_uses_status_before_clearing_candidate() {
+        let (service, owner) = accepted_owner().await;
+        service.calls.lock().clear();
+        service.lose_prepare_ack.store(true, Ordering::SeqCst);
+        assert!(
+            owner
+                .prepare_patch(&serde_json::json!({"mode":"global"}))
+                .await
+                .is_err()
+        );
+        assert!(owner.snapshot().is_err());
+        owner.reconcile().await.unwrap();
+        assert!(owner.snapshot().unwrap().yaml().contains("mode: rule"));
+        let calls = service.calls.lock().clone();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("prepare-patch:"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("restore-patch:"))
+                .count(),
+            1
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|call| call.starts_with("apply-patch:") || call.starts_with("stage:"))
+        );
+    }
+    #[tokio::test]
+    async fn stopped_partial_prepared_candidate_can_restart_only_the_accepted_revision() {
+        let (service, owner) = accepted_owner().await;
+        let prepared = owner
+            .prepare_patch(&serde_json::json!({"mode":"global"}))
+            .await
+            .unwrap();
+        service.stop().await.unwrap();
+        *service.reject_apply_patch.lock() =
+            Some(zenclash_service::ServiceErrorCode::KernelUnavailable);
+        assert!(prepared.apply(false).await.is_err());
+        service.calls.lock().clear();
+        owner
+            .restart_accepted(&AtomicBool::new(false))
+            .await
+            .unwrap();
+        assert_eq!(service.applied.load(Ordering::SeqCst), 1);
+        assert!(owner.snapshot().unwrap().yaml().contains("mode: rule"));
+        let calls = service.calls.lock().clone();
+        assert!(!calls.iter().any(|call| call.starts_with("apply-patch:")
+            || call.starts_with("reload:")
+            || call.starts_with("stage:")
+            || call == "start:2"));
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.as_str() == "start:1")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn stopped_partial_unknown_preparation_can_restart_without_repreparing() {
+        let (service, owner) = accepted_owner().await;
+        service.lose_prepare_ack.store(true, Ordering::SeqCst);
+        assert!(
+            owner
+                .prepare_patch(&serde_json::json!({"mode":"global"}))
+                .await
+                .is_err()
+        );
+        service.stop().await.unwrap();
+        service.calls.lock().clear();
+        owner
+            .restart_accepted(&AtomicBool::new(false))
+            .await
+            .unwrap();
+        assert_eq!(service.applied.load(Ordering::SeqCst), 1);
+        assert!(owner.snapshot().unwrap().yaml().contains("mode: rule"));
+        let calls = service.calls.lock().clone();
+        assert!(!calls.iter().any(|call| call.starts_with("prepare-patch:")
+            || call.starts_with("apply-patch:")
+            || call.starts_with("stage:")));
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.as_str() == "start:1")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn stopped_partial_lost_restore_ack_is_confirmed_before_accepted_start() {
+        let (service, owner) = accepted_owner().await;
+        drop(
+            owner
+                .prepare_patch(&serde_json::json!({"mode":"global"}))
+                .await
+                .unwrap(),
+        );
+        service.stop().await.unwrap();
+        service.lose_restore_ack.store(true, Ordering::SeqCst);
+        service.calls.lock().clear();
+        owner
+            .restart_accepted(&AtomicBool::new(false))
+            .await
+            .unwrap();
+        assert_eq!(
+            *service.calls.lock(),
+            [
+                "status",
+                "restore-patch:2",
+                "status",
+                "stop",
+                "status",
+                "start:1",
+                "status"
+            ]
+        );
+        assert!(owner.snapshot().unwrap().yaml().contains("mode: rule"));
+    }
+
+    #[tokio::test]
+    async fn stopped_partial_saved_finalizing_receipt_never_restores_or_starts() {
+        let (service, owner) = accepted_owner().await;
+        service
+            .lose_commit_before_apply
+            .store(true, Ordering::SeqCst);
+        assert!(
+            owner
+                .prepare_patch(&serde_json::json!({"mode":"global"}))
+                .await
+                .unwrap()
+                .apply(false)
+                .await
+                .unwrap()
+                .commit()
+                .await
+                .is_err()
+        );
+        service.stop().await.unwrap();
+        service.calls.lock().clear();
+        assert!(
+            owner
+                .restart_accepted(&AtomicBool::new(false))
+                .await
+                .is_err()
+        );
+        assert!(owner.restore_active().await.is_err());
+        let calls = service.calls.lock().clone();
+        assert!(!calls.iter().any(|call| call.starts_with("restore-patch:")
+            || call.starts_with("start:")
+            || call.starts_with("commit:")));
+    }
+    #[tokio::test]
+    async fn initial_service_runtime_starts_validated_revision_before_commit() {
+        let service = Arc::new(Service::default());
+        let owner = RuntimeSession::new(service.clone(), home());
+        owner
+            .prepare("mode: rule\n")
+            .await
+            .unwrap()
+            .apply(false)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
+        assert_eq!(
+            *service.calls.lock(),
+            [
+                "stage:1:mode: rule\n",
+                "validate:1",
+                "start:1",
+                "status",
+                "commit:1"
+            ]
+        );
+        assert!(owner.snapshot().is_ok());
+    }
+
+    #[tokio::test]
+    async fn initial_service_lost_start_ack_uses_readback_without_repeat_start() {
+        let service = Arc::new(Service::default());
+        let owner = RuntimeSession::new(service.clone(), home());
+        service.lose_start_ack.store(true, Ordering::SeqCst);
+        owner
+            .prepare("mode: rule\n")
+            .await
+            .unwrap()
+            .apply(false)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
+        assert_eq!(
+            *service.calls.lock(),
+            [
+                "stage:1:mode: rule\n",
+                "validate:1",
+                "start:1",
+                "status",
+                "commit:1"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_service_unverified_start_retains_owner_for_shutdown() {
+        let service = Arc::new(Service::default());
+        let owner = RuntimeSession::new(service.clone(), home());
+        *service.reject_status.lock() = Some(zenclash_service::ServiceErrorCode::KernelUnavailable);
+        let result = owner
+            .prepare("mode: rule\n")
+            .await
+            .unwrap()
+            .apply(false)
+            .await;
+        assert!(
+            result.is_err(),
+            "unverified Start must not yield an applied receipt"
+        );
+        let error = result.err().unwrap();
+        assert!(error.mutation_result_unknown());
+        assert!(owner.snapshot().is_err());
+        owner.release_owned().await.unwrap();
+        let calls = service.calls.lock().clone();
+        assert!(calls.iter().any(|call| call == "release"));
+        assert!(
+            !calls
+                .iter()
+                .any(|call| call.starts_with("reload:") || call.starts_with("commit:"))
+        );
+        assert!(!service.running.load(Ordering::SeqCst));
     }
 }

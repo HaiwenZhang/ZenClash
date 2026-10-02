@@ -66,6 +66,7 @@ fi
 
 install -Dm755 "${cargo_output_root}/release/zenclash" "${payload_dir}/zenclash"
 install -Dm755 "${service_path}" "${payload_dir}/zenclash-service"
+install -Dm644 "${project_root}/platforms/linux/package-service.sh" "${payload_dir}/package-service.sh"
 install -Dm644 "${project_root}/platforms/linux/zenclash-service.service" "${payload_dir}/zenclash-service.service"
 install -Dm644 "${project_root}/platforms/linux/org.zenclash.service.policy" "${payload_dir}/org.zenclash.service.policy"
 install -Dm755 "${mihomo_path}" "${payload_dir}/mihomo"
@@ -97,6 +98,7 @@ grep -Eq '^/usr/lib/zenclash/geoip.metadb$' "${package_contents_path}"
 grep -Eq '^/usr/lib/zenclash/recovery.yaml$' "${package_contents_path}"
 grep -Eq '^/usr/share/licenses/zenclash/LICENSE$' "${package_contents_path}"
 grep -Eq '^/usr/lib/zenclash/zenclash-service$' "${package_contents_path}"
+grep -Eq '^/usr/lib/zenclash/package-service.sh$' "${package_contents_path}"
 grep -Eq '^/usr/lib/systemd/system/zenclash-service.service$' "${package_contents_path}"
 grep -Eq '^/usr/share/polkit-1/actions/org.zenclash.service.policy$' "${package_contents_path}"
 

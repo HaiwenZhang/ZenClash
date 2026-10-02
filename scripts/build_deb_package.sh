@@ -65,6 +65,8 @@ fi
 
 install -Dm755 "${cargo_output_root}/release/zenclash" "${package_root}/usr/bin/zenclash"
 install -Dm755 "${service_path}" "${package_root}/usr/lib/zenclash/zenclash-service"
+install -Dm644 "${project_root}/platforms/linux/package-service.sh" \
+  "${package_root}/usr/lib/zenclash/package-service.sh"
 install -Dm644 "${project_root}/platforms/linux/zenclash-service.service" \
   "${package_root}/usr/lib/systemd/system/zenclash-service.service"
 install -Dm644 "${project_root}/platforms/linux/org.zenclash.service.policy" \
@@ -81,6 +83,34 @@ install -Dm644 "${project_root}/platforms/linux/zenclash.desktop" \
 install -Dm644 "${project_root}/LICENSE" \
   "${package_root}/usr/share/doc/zenclash/LICENSE"
 mkdir -p "${package_root}/DEBIAN"
+cat >"${package_root}/DEBIAN/prerm" <<'EOF'
+#!/bin/sh
+set -e
+. /usr/lib/zenclash/package-service.sh
+zenclash_package_pre_remove "${1:-}"
+EOF
+cat >"${package_root}/DEBIAN/postinst" <<'EOF'
+#!/bin/sh
+set -e
+case "${1:-}" in
+  configure)
+    . /usr/lib/zenclash/package-service.sh
+    zenclash_package_reload_manager
+    ;;
+esac
+EOF
+cat >"${package_root}/DEBIAN/postrm" <<'EOF'
+#!/bin/sh
+set -e
+case "${1:-}" in
+  remove|purge)
+    if [ -d /run/systemd/system ]; then
+      /usr/bin/systemctl daemon-reload
+    fi
+    ;;
+esac
+EOF
+chmod 755 "${package_root}/DEBIAN/prerm" "${package_root}/DEBIAN/postinst" "${package_root}/DEBIAN/postrm"
 
 cat >"${package_root}/DEBIAN/control" <<EOF
 Package: zenclash
@@ -106,6 +136,7 @@ grep -Eq '[[:space:]]\./usr/lib/zenclash/geoip.metadb$' "${package_contents_path
 grep -Eq '[[:space:]]\./usr/lib/zenclash/recovery.yaml$' "${package_contents_path}"
 grep -Eq '[[:space:]]\./usr/share/doc/zenclash/LICENSE$' "${package_contents_path}"
 grep -Eq '[[:space:]]\./usr/lib/zenclash/zenclash-service$' "${package_contents_path}"
+grep -Eq '[[:space:]]\./usr/lib/zenclash/package-service.sh$' "${package_contents_path}"
 grep -Eq '[[:space:]]\./usr/lib/systemd/system/zenclash-service.service$' "${package_contents_path}"
 grep -Eq '[[:space:]]\./usr/share/polkit-1/actions/org.zenclash.service.policy$' "${package_contents_path}"
 

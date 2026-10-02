@@ -309,7 +309,38 @@ impl MihomoClient {
     ///
     /// Returns serialization, transport or API-status errors.
     pub async fn patch_configs<T: Serialize + Sync + ?Sized>(&self, body: &T) -> MihomoResult<()> {
-        self.patch_json("/configs", body).await
+        let client = self.pin_binding()?;
+        if client.runtime_session().is_some() {
+            let body = serde_json::to_value(body)
+                .map_err(|error| MihomoError::InvalidInput(error.to_string()))?;
+            let write_lease = client.acquire_write_lease().await?;
+            client.ensure_binding_current()?;
+            let client = match write_lease.as_ref() {
+                Some(lease) => client.with_write_lease(lease)?,
+                None => client,
+            };
+            let mutation_guard = client.mutation_gate.clone().lock_owned().await;
+            client.ensure_binding_current()?;
+            // Admission is bounded by the existing data and controller gates. A cancelled
+            // caller cannot abandon an applied standalone patch before its commit.
+            return tokio::spawn(async move {
+                let runtime = client.runtime_session().ok_or(MihomoError::StaleBinding)?;
+                let prepared = runtime.prepare_patch(&body).await?;
+                PreparedConfig {
+                    client,
+                    prepared: PreparedConfigKind::Service(prepared),
+                    mutation_guard,
+                    write_lease,
+                }
+                .apply(false)
+                .await?
+                .commit()
+                .await
+            })
+            .await
+            .map_err(|_| MihomoError::Process("Service partial completion failed".into()))?;
+        }
+        client.patch_json("/configs", body).await
     }
 
     /// Applies a JSON `/configs` patch and verifies that Mihomo reports the
@@ -414,6 +445,31 @@ impl MihomoClient {
             crate::core_session::RuntimeRestoreAuthority::Ordinary,
         )
         .await
+    }
+
+    pub(crate) async fn prepare_runtime_patch(
+        &self,
+        patch: &serde_json::Value,
+    ) -> MihomoResult<PreparedConfig> {
+        let client = self.pin_binding()?;
+        let write_lease = client.acquire_write_lease().await?;
+        client.ensure_binding_current()?;
+        let client = match write_lease.as_ref() {
+            Some(lease) => client.with_write_lease(lease)?,
+            None => client,
+        };
+        let mutation_guard = client.mutation_gate.clone().lock_owned().await;
+        client.ensure_binding_current()?;
+        let runtime = client.runtime_session().ok_or_else(|| {
+            MihomoError::InvalidInput("Service partial runtime is unavailable".into())
+        })?;
+        let prepared = runtime.prepare_patch(patch).await?;
+        Ok(PreparedConfig {
+            client,
+            prepared: PreparedConfigKind::Service(prepared),
+            mutation_guard,
+            write_lease,
+        })
     }
 
     pub(crate) async fn prepare_saved_runtime(
@@ -691,6 +747,12 @@ pub(crate) struct AppliedConfig {
 }
 
 impl PreparedConfig {
+    pub(crate) fn effective_delta(&self) -> Option<serde_json::Value> {
+        match &self.prepared {
+            PreparedConfigKind::Service(prepared) => prepared.effective_delta().cloned(),
+            PreparedConfigKind::Direct(_) => None,
+        }
+    }
     pub(crate) async fn apply(self, force: bool) -> MihomoResult<AppliedConfig> {
         let service = match self.prepared {
             PreparedConfigKind::Service(prepared) => Some(prepared.apply(force).await?),

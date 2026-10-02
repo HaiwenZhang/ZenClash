@@ -25,6 +25,14 @@ use windows_sys::Win32::{
     System::Com::CoTaskMemFree,
     UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath},
 };
+#[cfg(feature = "server")]
+use windows_sys::Win32::{
+    Security::{
+        Authorization::{GetSecurityInfo, SE_SERVICE},
+        IsValidAcl, IsValidSid,
+    },
+    System::Services::{SC_HANDLE, SERVICE_CHANGE_CONFIG},
+};
 
 use super::{denied, identity::sid_string, wide};
 
@@ -191,6 +199,85 @@ fn trusted_sid(sid: &str) -> bool {
     )
 }
 
+// Adapted from upstream check_service_registration/review_security (GPL-3.0).
+#[cfg(feature = "server")]
+pub(super) fn validate_service_registration(handle: SC_HANDLE) -> io::Result<()> {
+    let mut owner = ptr::null_mut();
+    let mut dacl = ptr::null_mut();
+    let mut raw = ptr::null_mut();
+    let status = unsafe {
+        GetSecurityInfo(
+            handle,
+            SE_SERVICE,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            ptr::null_mut(),
+            &mut dacl,
+            ptr::null_mut(),
+            &mut raw,
+        )
+    };
+    let _descriptor = Descriptor(raw);
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    if raw.is_null() {
+        return Err(denied("SCM security descriptor is missing"));
+    }
+    // SAFETY: These pointers are owned by the still-live Windows descriptor.
+    unsafe { review_service_security(owner, dacl) }
+}
+
+#[cfg(feature = "server")]
+unsafe fn review_service_security(
+    owner: windows_sys::Win32::Security::PSID,
+    dacl: *mut ACL,
+) -> io::Result<()> {
+    if owner.is_null()
+        || unsafe { IsValidSid(owner) } == 0
+        || !trusted_sid(&sid_string(owner)?)
+        || dacl.is_null()
+        || unsafe { IsValidAcl(dacl) } == 0
+    {
+        return Err(denied("SCM registration is not administrator protected"));
+    }
+    let dangerous =
+        SERVICE_CHANGE_CONFIG | DELETE | WRITE_DAC | WRITE_OWNER | GENERIC_WRITE | GENERIC_ALL;
+    for index in 0..u32::from(unsafe { (*dacl).AceCount }) {
+        let mut raw_ace = ptr::null_mut();
+        if unsafe { GetAce(dacl, index, &mut raw_ace) } == 0 || raw_ace.is_null() {
+            return Err(denied("SCM registration DACL is unreadable"));
+        }
+        let header = unsafe { &*raw_ace.cast::<ACE_HEADER>() };
+        if u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0 {
+            continue;
+        }
+        match header.AceType {
+            1 | 10 => continue,
+            // Callback allows share the SID layout; their condition may authorize access.
+            0 | 9 => {}
+            _ => return Err(denied("unsupported SCM registration ACE")),
+        }
+        if usize::from(header.AceSize) < std::mem::size_of::<ACCESS_ALLOWED_ACE>() {
+            return Err(denied("SCM registration ACE is truncated"));
+        }
+        let ace = unsafe { &*raw_ace.cast::<ACCESS_ALLOWED_ACE>() };
+        if ace.Mask & dangerous == 0 {
+            continue;
+        }
+        let sid: windows_sys::Win32::Security::PSID = ptr::addr_of!(ace.SidStart).cast_mut().cast();
+        let sid_offset = std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+        let sid_bytes = usize::from(header.AceSize) - sid_offset;
+        if sid_bytes < 8 || 8 + usize::from(unsafe { *sid.cast::<u8>().add(1) }) * 4 > sid_bytes {
+            return Err(denied("SCM registration ACE SID is truncated"));
+        }
+        if unsafe { IsValidSid(sid) } == 0 || !trusted_sid(&sid_string(sid)?) {
+            return Err(denied("unprivileged account can change SCM registration"));
+        }
+    }
+    Ok(())
+}
+
 // Creating sibling files/directories in shared ProgramData is permitted. Its
 // namespace must remain fixed: unprivileged accounts cannot rename an ancestor,
 // remove protected children, change the DACL, or replace its owner.
@@ -214,6 +301,77 @@ fn write_mask() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "server")]
+    fn review_sddl(sddl: &str) -> io::Result<()> {
+        use windows_sys::Win32::Security::{GetSecurityDescriptorDacl, GetSecurityDescriptorOwner};
+        let descriptor = Descriptor::from_sddl(sddl)?;
+        let mut owner = ptr::null_mut();
+        let mut dacl = ptr::null_mut();
+        let mut defaulted = 0;
+        let mut present = 0;
+        if unsafe { GetSecurityDescriptorOwner(descriptor.0, &mut owner, &mut defaulted) } == 0
+            || unsafe {
+                GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut dacl, &mut defaulted)
+            } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        unsafe { review_service_security(owner, dacl) }
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn registration_security_rejects_untrusted_owner_null_and_unsupported_acl() {
+        for sddl in [
+            "O:BUD:P(A;;GA;;;SY)",
+            "O:SYD:NO_ACCESS_CONTROL",
+            "O:SYD:P(OA;;0x2;;;BU)",
+        ] {
+            Descriptor::from_sddl(sddl).unwrap();
+            let calls = std::cell::Cell::new(0);
+            let result = review_sddl(sddl).map(|()| calls.set(calls.get() + 1));
+            assert!(result.is_err(), "untrusted SCM descriptor accepted: {sddl}");
+            assert_eq!(calls.get(), 0);
+        }
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn registration_security_rejects_each_unprivileged_mutation_right() {
+        for right in [
+            SERVICE_CHANGE_CONFIG,
+            DELETE,
+            WRITE_DAC,
+            WRITE_OWNER,
+            GENERIC_WRITE,
+            GENERIC_ALL,
+        ] {
+            let sddl = format!("O:SYD:P(A;;GA;;;SY)(A;;0x{right:08X};;;BU)");
+            let calls = std::cell::Cell::new(0);
+            let result = review_sddl(&sddl).map(|()| calls.set(calls.get() + 1));
+            assert!(result.is_err(), "SCM right 0x{right:X} accepted");
+            assert_eq!(calls.get(), 0);
+        }
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn registration_security_allows_trusted_and_readonly_or_empty_dacl() {
+        for sddl in [
+            "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GR;;;BU)",
+            "O:SYD:P",
+            "O:SYD:P(D;;GA;;;BU)(A;;GA;;;SY)",
+        ] {
+            review_sddl(sddl).unwrap();
+        }
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn registration_security_invalid_native_handle_is_not_approval() {
+        assert!(validate_service_registration(ptr::null_mut()).is_err());
+    }
 
     #[test]
     fn user_owned_file_is_rejected_even_without_reparse_points() {

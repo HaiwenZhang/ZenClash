@@ -30,7 +30,8 @@ async fn drives_the_supplied_profile_through_a_real_mihomo_process() {
     let process = start_mihomo(&inputs).await;
     let client = MihomoClient::from_process(process.clone())
         .expect("real client")
-        .with_config_validator(process.config_validator()).unwrap();
+        .with_config_validator(process.config_validator())
+        .unwrap();
     verify_real_operational_status(&client, process.clone()).await;
     let persistent_logs = LogMonitor::start(
         &tokio::runtime::Handle::current(),

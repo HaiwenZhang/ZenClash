@@ -271,7 +271,11 @@ fn ui_metadata_and_logs_remain_available_while_lifecycle_lock_is_held() {
         },
     };
     let process = std::sync::Arc::new(process);
-    let session = crate::CoreSession::open(CoreKind::Mihomo, MihomoClient::from_process(process.clone()).unwrap()).unwrap();
+    let session = crate::CoreSession::open(
+        CoreKind::Mihomo,
+        MihomoClient::from_process(process.clone()).unwrap(),
+    )
+    .unwrap();
     let transition = process.child.lock();
     let reader = process.clone();
     let (sender, receiver) = std::sync::mpsc::channel();

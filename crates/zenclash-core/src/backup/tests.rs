@@ -427,7 +427,8 @@ async fn runtime_restore_snapshot_is_captured_after_admission_and_replays_exact_
     });
     let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
     let session =
-        CoreSession::open_with_config(CoreKind::Mihomo, client, Some(previous), Vec::new()).unwrap();
+        CoreSession::open_with_config(CoreKind::Mihomo, client, Some(previous), Vec::new())
+            .unwrap();
     let apply_session = session.clone();
     let apply_controlled = controlled.clone();
     let apply_profile = candidate.clone();
@@ -658,7 +659,8 @@ async fn session_restore_authorizes_profile_application_in_an_external_runtime_h
     });
     let client = MihomoClient::new(endpoint)
         .unwrap()
-        .with_config_validator(CoreConfigValidator::new(CoreKind::Mihomo, binary, &home)).unwrap();
+        .with_config_validator(CoreConfigValidator::new(CoreKind::Mihomo, binary, &home))
+        .unwrap();
     let session = CoreSession::open(CoreKind::Mihomo, client.clone()).unwrap();
     let archive = root.join("backup.zip");
     BackupManager::new(&source).export_to(&archive).unwrap();

@@ -1,5 +1,17 @@
 //! Native transport and privilege boundaries selected at compile time.
 
+#[cfg(all(feature = "server", any(target_os = "macos", test)))]
+#[path = "unix/launchd_probe.rs"]
+mod launchd_probe;
+
+#[cfg(all(feature = "server", any(target_os = "macos", test)))]
+#[path = "unix/macos_registration.rs"]
+mod macos_registration;
+
+#[cfg(all(feature = "server", any(target_os = "linux", test)))]
+#[path = "unix/selinux.rs"]
+mod selinux;
+
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
@@ -10,7 +22,6 @@ mod unix;
 #[cfg(unix)]
 pub(crate) use unix::*;
 
-#[cfg(feature = "server")]
 pub(crate) fn root_directory() -> std::io::Result<std::path::PathBuf> {
     #[cfg(windows)]
     {

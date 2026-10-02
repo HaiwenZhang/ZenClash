@@ -3,13 +3,13 @@ use std::collections::HashSet;
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 
 use super::{
-    AppContext, Button, ButtonVariants, Context, Disableable, Entity, FluentBuilder, Icon,
-    IconName, Input, InputEvent, InputState, InteractiveElement, IntoElement, Page, ParentElement,
-    RuntimeData, RuntimePage, Sizable, Styled, Subscription, Window,
-    contains_ascii_case_insensitive, div, empty_state, format_bytes, h_flex, list_page,
-    message_banner, metric, pagination_summary, px, v_flex,
+    AppContext, Button, ButtonVariants, Context, Disableable, Entity, FluentBuilder, IconName,
+    Input, InputEvent, InputState, IntoElement, Page, ParentElement, RuntimeData, RuntimePage,
+    Sizable, Styled, Subscription, Window, contains_ascii_case_insensitive, div, empty_state,
+    format_bytes, h_flex, list_page, message_banner, metric, pagination_summary, v_flex,
 };
 
+mod dashboard;
 mod projection;
 
 const CONNECTIONS_PER_PAGE: usize = 100;
@@ -267,311 +267,12 @@ impl RuntimePage {
         cx.notify();
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "the connection page is a cohesive declarative GPUI element tree"
-    )]
     pub(super) fn render_connections(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let Some(projection) = &self.connections.projection else {
-            return v_flex()
-                .child(Input::new(&self.connections.filter).small())
-                .child(empty_state(
-                    zenclash_i18n::text(if self.connections.projecting {
-                        "connections.filtering"
-                    } else {
-                        "connections.empty.active"
-                    }),
-                    theme,
-                ))
-                .into_any_element();
-        };
-        let data = &projection.snapshot;
-        let total = data.connections.len();
-        let query = &projection.query;
-        let filtered = &projection.order;
-        let visible = filtered.len();
-        let page = list_page(visible, self.connections.page, CONNECTIONS_PER_PAGE);
-        let filtered = &filtered[page.start..page.end];
-        let previous_page = page.index.saturating_sub(1);
-        let next_page = page.index + 1;
-        v_flex()
-            .gap_4()
-            .when(
-                !self.core_kind.capabilities().udp_connection_tracking,
-                |this| {
-                    this.child(message_banner(
-                        zenclash_i18n::text_with(
-                            "connections.warnings.udp_tracking",
-                            &[("core", self.core_kind.display_name().to_owned())],
-                        ),
-                        theme.warning,
-                        theme,
-                    ))
-                },
-            )
-            .child(
-                h_flex()
-                    .gap_3()
-                    .flex_wrap()
-                    .child(metric(
-                        zenclash_i18n::text("connections.metrics.active"),
-                        total.to_string(),
-                        theme.primary,
-                        theme,
-                    ))
-                    .child(metric(
-                        zenclash_i18n::text("connections.metrics.upload"),
-                        format_bytes(data.upload_total),
-                        theme.success,
-                        theme,
-                    ))
-                    .child(metric(
-                        zenclash_i18n::text("connections.metrics.download"),
-                        format_bytes(data.download_total),
-                        theme.primary,
-                        theme,
-                    ))
-                    .child(metric(
-                        zenclash_i18n::text("connections.metrics.memory"),
-                        format_bytes(data.memory),
-                        theme.warning,
-                        theme,
-                    )),
-            )
-            .child(
-                h_flex()
-                    .justify_between()
-                    .child(div().text_sm().text_color(theme.muted_foreground).child(
-                        zenclash_i18n::text(if self.connections.projecting {
-                            "connections.filtering"
-                        } else {
-                            "connections.refresh_hint"
-                        }),
-                    ))
-                    .child(
-                        Button::new("close-all-connections")
-                            .icon(IconName::CircleX)
-                            .label(zenclash_i18n::text("connections.actions.close_all"))
-                            .danger()
-                            .small()
-                            .disabled(
-                                total == 0
-                                    || self.core_busy()
-                                    || !self.connections.closing.is_empty(),
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| this.close_all_connections(cx))),
-                    ),
-            )
-            .child(self.render_connection_options(cx))
-            .child(
-                h_flex()
-                    .gap_3()
-                    .items_center()
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(Input::new(&self.connections.filter).small()),
-                    )
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(
-                        if query.is_empty() {
-                            zenclash_i18n::text_with(
-                                "connections.count.active",
-                                &[("total", total.to_string())],
-                            )
-                        } else {
-                            zenclash_i18n::text_with(
-                                "common.count.visible_total",
-                                &[
-                                    ("visible", visible.to_string()),
-                                    ("total", total.to_string()),
-                                ],
-                            )
-                        },
-                    )),
-            )
-            .child(
-                v_flex()
-                    .rounded(theme.radius)
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.secondary)
-                    .when(filtered.is_empty(), |this| {
-                        this.child(empty_state(
-                            if total == 0 {
-                                zenclash_i18n::text("connections.empty.active")
-                            } else {
-                                zenclash_i18n::text("connections.empty.filtered")
-                            },
-                            theme,
-                        ))
-                    })
-                    .children(filtered.iter().map(|&index| {
-                        let connection = &data.connections[index];
-                        let id = connection.id.clone();
-                        let closing = self.connections.closing.contains(&id);
-                        let expanded = self.connections.expanded.as_deref() == Some(id.as_str());
-                        let host = if connection.metadata.host.is_empty() {
-                            connection.metadata.destination_ip.clone()
-                        } else {
-                            connection.metadata.host.clone()
-                        };
-                        let summary = connection_summary(connection);
-                        let detail_id = id.clone();
-                        v_flex()
-                            .id(connection_element_id("connection-row", &id))
-                            .border_b_1()
-                            .border_color(theme.border)
-                            .child(
-                                h_flex()
-                                    .min_h(px(58.))
-                                    .px_4()
-                                    .gap_3()
-                                    .items_center()
-                                    .child(Icon::new(IconName::ExternalLink).size_4())
-                                    .child(
-                                        v_flex()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .child(div().text_sm().child(format!(
-                                                "{}:{}",
-                                                host, connection.metadata.destination_port
-                                            )))
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(theme.muted_foreground)
-                                                    .child(summary),
-                                            ),
-                                    )
-                                    .child(
-                                        v_flex()
-                                            .items_end()
-                                            .text_xs()
-                                            .child(format!("↑ {}", format_bytes(connection.upload)))
-                                            .child(format!(
-                                                "↓ {}",
-                                                format_bytes(connection.download)
-                                            )),
-                                    )
-                                    .child(
-                                        Button::new(connection_element_id(
-                                            "connection-details",
-                                            &id,
-                                        ))
-                                        .icon(IconName::Eye)
-                                        .label(zenclash_i18n::text(if expanded {
-                                            "connections.actions.hide_details"
-                                        } else {
-                                            "connections.actions.show_details"
-                                        }))
-                                        .ghost()
-                                        .small()
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.toggle_connection_details(
-                                                    detail_id.clone(),
-                                                    cx,
-                                                );
-                                            }),
-                                        ),
-                                    )
-                                    .child(
-                                        Button::new(connection_element_id("close-connection", &id))
-                                            .icon(IconName::CircleX)
-                                            .label(zenclash_i18n::text("connections.actions.close"))
-                                            .ghost()
-                                            .small()
-                                            .disabled(self.core_busy() || closing)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.close_connection(id.clone(), cx);
-                                            })),
-                                    ),
-                            )
-                            .when(expanded, |this| {
-                                this.child(
-                                    v_flex()
-                                        .px_12()
-                                        .pb_4()
-                                        .gap_2()
-                                        .child(connection_detail(
-                                            zenclash_i18n::text("connections.details.source"),
-                                            format!(
-                                                "{}:{}",
-                                                connection.metadata.source_ip,
-                                                connection.metadata.source_port
-                                            ),
-                                            theme,
-                                        ))
-                                        .child(connection_detail(
-                                            zenclash_i18n::text("connections.details.destination"),
-                                            format!(
-                                                "{}:{}",
-                                                connection.metadata.destination_ip,
-                                                connection.metadata.destination_port
-                                            ),
-                                            theme,
-                                        ))
-                                        .child(connection_detail(
-                                            zenclash_i18n::text("connections.details.rule"),
-                                            format!(
-                                                "{} · {}",
-                                                connection.rule, connection.rule_payload
-                                            ),
-                                            theme,
-                                        ))
-                                        .child(connection_detail(
-                                            zenclash_i18n::text("connections.details.route"),
-                                            connection.chains.join(" → "),
-                                            theme,
-                                        )),
-                                )
-                            })
-                    })),
-            )
-            .when(page.count > 1, |this| {
-                this.child(
-                    h_flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(pagination_summary(page, visible)),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .child(
-                                    Button::new("previous-connections-page")
-                                        .icon(IconName::ChevronLeft)
-                                        .label(zenclash_i18n::text("common.actions.previous_page"))
-                                        .small()
-                                        .outline()
-                                        .disabled(page.index == 0)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.set_connections_page(previous_page, cx);
-                                        })),
-                                )
-                                .child(
-                                    Button::new("next-connections-page")
-                                        .icon(IconName::ChevronRight)
-                                        .label(zenclash_i18n::text("common.actions.next_page"))
-                                        .small()
-                                        .outline()
-                                        .disabled(page.index + 1 >= page.count)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.set_connections_page(next_page, cx);
-                                        })),
-                                ),
-                        ),
-                )
-            })
-            .into_any_element()
+        self.connection_dashboard(theme, cx)
     }
 }
 
@@ -721,16 +422,17 @@ fn connection_matches(connection: &zenclash_core::Connection, query: &str) -> bo
             .any(|chain| contains_ascii_case_insensitive(chain, query))
 }
 
+#[cfg(test)]
 fn connection_summary(connection: &zenclash_core::Connection) -> String {
     let mut parts = Vec::with_capacity(4);
-    if !connection.metadata.network.is_empty() {
-        parts.push(connection.metadata.network.clone());
-    }
-    if !connection.metadata.process.is_empty() {
-        parts.push(connection.metadata.process.clone());
-    }
-    if !connection.rule.is_empty() {
-        parts.push(connection.rule.clone());
+    for value in [
+        &connection.metadata.network,
+        &connection.metadata.process,
+        &connection.rule,
+    ] {
+        if !value.is_empty() {
+            parts.push(value.clone());
+        }
     }
     if !connection.chains.is_empty() {
         parts.push(connection.chains.join(" → "));

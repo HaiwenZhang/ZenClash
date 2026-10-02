@@ -179,7 +179,7 @@ impl RenderOnce for Sidebar {
         });
 
         GpuiSidebar::new("main-sidebar")
-            .w(rems(15.))
+            .w(rems(14.))
             .collapsible(true)
             .collapsed(self.collapsed)
             .header(
@@ -196,10 +196,6 @@ impl RenderOnce for Sidebar {
                                     div()
                                         .size(rems(3.))
                                         .flex_shrink_0()
-                                        .rounded(theme.radius_lg)
-                                        .bg(theme.sidebar_foreground.opacity(0.065))
-                                        .border_1()
-                                        .border_color(theme.sidebar_foreground.opacity(0.08))
                                         .flex()
                                         .items_center()
                                         .justify_center()
@@ -207,7 +203,7 @@ impl RenderOnce for Sidebar {
                                             Icon::empty()
                                                 .path(ZENCLASH_MARK_PATH)
                                                 .size(rems(1.8))
-                                                .text_color(theme.muted_foreground),
+                                                .text_color(theme.primary),
                                         ),
                                 )
                                 .child(

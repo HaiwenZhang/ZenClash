@@ -78,7 +78,7 @@ if [[ ! -f "${SERVICE_PATH}" || ! -s "${SERVICE_PATH}" || ! -x "${SERVICE_PATH}"
   echo "The service build did not produce an executable: ${SERVICE_PATH}" >&2
   exit 1
 fi
-if ! service_version="$("${SERVICE_PATH}" --version)" || [[ -z "${service_version}" ]]; then
+if ! service_version="$("${SERVICE_PATH}" --version)" || [[ -z "${service_version//[[:space:]]/}" ]]; then
   echo "The service executable failed its version check." >&2
   exit 1
 fi

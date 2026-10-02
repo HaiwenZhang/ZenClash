@@ -1,3 +1,4 @@
+use gpui_kit::AppContext;
 use zenclash_core::{CaptureOutcome, CapturePlan, ConnectionPolicy, ProxyOperations};
 
 use super::{
@@ -148,8 +149,55 @@ impl ZenClashApp {
     }
 
     fn start_tun_command(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        let service_request = if enabled && self.profile_service.service_state().is_some() {
+            match self.profile_service.request_service_tun() {
+                Ok(request) => Some(request),
+                Err(error) => {
+                    self.report_tray_error(error, cx);
+                    let _ = self.tun_commands.complete();
+                    self.refresh_tray_menu(cx);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(request) = &service_request
+            && request.needs_authorization_consent()
+            && self.profile_service.service_state().is_some_and(|state| {
+                state
+                    .health()
+                    .is_none_or(|health| health.kind() != zenclash_core::ServiceHealthKind::Ready)
+            })
+        {
+            // System authorization is an explicit window decision. Retain the
+            // tray click's original core intent through that decision.
+            let request = request.clone();
+            self.navigate(Page::Tun, cx);
+            self.show_main_window(cx);
+            let page = self.runtime_page.clone();
+            if let Err(error) = cx.update_window(self.main_window, move |_, window, cx| {
+                page.update(cx, |page, cx| {
+                    page.present_service_tun_request(request, window, cx)
+                });
+            }) {
+                self.report_tray_error(error.to_string(), cx);
+            }
+            let _ = self.tun_commands.complete();
+            self.refresh_tray_menu(cx);
+            return;
+        }
         let capture = self.traffic_capture.clone();
+        let profiles = self.profile_service.clone();
         let task = self.runtime.spawn(async move {
+            if let Some(request) = service_request {
+                return profiles.enable_service_tun(request).await.map(|outcome| {
+                    (
+                        outcome.capture().clone(),
+                        outcome.core().map(|core| core.generation),
+                    )
+                });
+            }
             capture
                 .apply(if enabled {
                     CapturePlan::Tun
@@ -157,6 +205,7 @@ impl ZenClashApp {
                     CapturePlan::Off
                 })
                 .await
+                .map(|outcome| (outcome, None))
                 .map_err(|error| error.to_string())
         });
         cx.spawn(async move |this, cx| {
@@ -166,17 +215,19 @@ impl ZenClashApp {
                     return;
                 }
                 match result {
-                    Ok(Ok(outcome)) => {
-                        if matches!(
-                            outcome,
-                            CaptureOutcome::RolledBack { .. }
-                                | CaptureOutcome::ReconcileNeeded { .. }
-                        ) {
-                            tracing::warn!(?outcome, "TUN tray command did not converge");
+                    Ok(Ok((outcome, generation))) => {
+                        if !generation
+                            .is_some_and(|generation| !this.profile_service.is_current(generation))
+                        {
+                            if let CaptureOutcome::RolledBack { failure, .. }
+                            | CaptureOutcome::ReconcileNeeded { failure, .. } = &outcome
+                            {
+                                this.report_tray_error(failure.clone(), cx);
+                            }
+                            this.runtime_page.update(cx, |runtime_page, cx| {
+                                runtime_page.reload_controlled_config(cx);
+                            });
                         }
-                        this.runtime_page.update(cx, |runtime_page, cx| {
-                            runtime_page.reload_controlled_config(cx);
-                        });
                     }
                     Ok(Err(error)) => this.report_tray_error(error, cx),
                     Err(error) => this.report_tray_error(error.to_string(), cx),

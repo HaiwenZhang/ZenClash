@@ -69,6 +69,7 @@ done <"${spec}"
 cp "${buildroot}/usr/lib/zenclash/zenclash-service" "${MOCK_CAPTURED}/zenclash-service"
 cp "${buildroot}/usr/lib/systemd/system/zenclash-service.service" "${MOCK_CAPTURED}/unit"
 cp "${buildroot}/usr/share/polkit-1/actions/org.zenclash.service.policy" "${MOCK_CAPTURED}/policy"
+cp "${buildroot}/usr/lib/zenclash/package-service.sh" "${MOCK_CAPTURED}/package-service.sh"
 find "${buildroot}" -type f | sed "s|^${buildroot}||" >"${topdir}/RPMS/x86_64/zenclash.rpm"
 EOF
 
@@ -97,6 +98,31 @@ package="${test_root}/dist/ZenClash-9.8.7-linux-x86_64.rpm"
 cmp "${CARGO_TARGET_DIR}/release/zenclash-service" "${MOCK_CAPTURED}/zenclash-service"
 cmp "${project_root}/platforms/linux/zenclash-service.service" "${MOCK_CAPTURED}/unit"
 cmp "${project_root}/platforms/linux/org.zenclash.service.policy" "${MOCK_CAPTURED}/policy"
+cmp "${project_root}/platforms/linux/package-service.sh" "${MOCK_CAPTURED}/package-service.sh"
+
+export MOCK_SCRIPT_LIBRARY="${test_root}/script-library.sh"
+export MOCK_REMOVAL_LOG="${test_root}/removal.log"
+cat >"${MOCK_SCRIPT_LIBRARY}" <<'EOF'
+. "${MOCK_CAPTURED}/package-service.sh"
+zenclash_remove_service() {
+  printf 'remove\n' >>"${MOCK_REMOVAL_LOG}"
+  return "${MOCK_REMOVAL_EXIT:-0}"
+}
+EOF
+awk '/^%preun$/{collect=1; next} /^%postun$/{exit} collect' \
+  "${project_root}/platforms/linux/zenclash.spec" \
+  | sed 's|^  \. /usr/lib/zenclash/package-service.sh$|  . "${MOCK_SCRIPT_LIBRARY}"|' \
+  >"${test_root}/fixture-preun"
+sh "${test_root}/fixture-preun" 1
+[[ ! -e "${MOCK_REMOVAL_LOG}" ]]
+sh "${test_root}/fixture-preun" 0
+[[ "$(wc -l <"${MOCK_REMOVAL_LOG}")" -eq 1 ]]
+if MOCK_REMOVAL_EXIT=17 sh "${test_root}/fixture-preun" 0; then
+  echo 'RPM preun ignored failed service removal' >&2
+  exit 1
+else
+  [[ "$?" -eq 17 ]]
+fi
 
 rm -f "${package}" "${CARGO_TARGET_DIR}/release/zenclash-service"
 if MOCK_MISSING_SERVICE=1 bash "${project_root}/scripts/build_rpm_package.sh" 9.8.7 "${test_root}/dist" >"${test_root}/missing.log" 2>&1; then

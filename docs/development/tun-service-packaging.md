@@ -2,6 +2,8 @@
 
 本文对应 [开发计划](tun-service-plan.md) P5，记录已接入的产物路径及验证边界；不代表发布包已经完成三平台 TUN 验收。
 
+正式产物的安装、升级、卸载与权限验证按 [三平台原生验收](tun-service-native-validation.md) 记录，区分受控打包行为与目标系统结果。
+
 ## Linux 产物
 
 [DEB 构建脚本](../../scripts/build_deb_package.sh) 和 [RPM 构建脚本](../../scripts/build_rpm_package.sh) 在构建 GUI 后单独执行：
@@ -20,13 +22,25 @@ cargo build --release --locked -p zenclash-service --features server --bin zencl
 
 unit 的 `ExecStart` 指向 `/var/lib/zenclash-service/zenclash-service run`。该保护目录中的服务与 Mihomo 副本由管理员授权的安装事务部署，并记录批准摘要。打包脚本不创建安装元数据、不启动服务，也不修改网络；仅安装 DEB/RPM 不足以完成首次 TUN 开启。
 
-应用内维护只管理自己的 `/etc/systemd/system/zenclash-service.service` 注册与保护目录数据，不删除上述包管理器文件。包升级、卸载时的真实运行服务协调尚待接入和验收；不能把现有 payload 测试视为升级/卸载已完成。
+应用内维护只管理自己的 `/etc/systemd/system/zenclash-service.service` 注册与保护目录数据，不删除上述包管理器文件。DEB/RPM 已接入下述升级与最终卸载策略；真实运行服务协调仍待目标系统验收，payload 测试不能证明原生升级/卸载完成。
+
+### 包升级与最终卸载（2026-10-02）
+
+包内增加 [package-service.sh](../../platforms/linux/package-service.sh)。DEB 的 `prerm remove` 和 RPM 的 `%preun` 最后一个实例卸载调用固定包内 helper 的 `--package-uninstall`；升级不执行卸载，也不自动替换管理员批准的副本或启动内核。包配置和文件移除后按需执行 `daemon-reload`，不主动启用服务。参数时机依据 [Debian 维护脚本约定](https://www.debian.org/doc/debian-policy/ch-maintainerscripts.html) 和 [RPM scriptlet 约定](https://rpm.org/docs/latest/manual/file_triggers.html)。
+
+新入口位于 [package_maintenance.rs](../../crates/zenclash-service/src/package_maintenance.rs)，先确认当前管理员权限，再用真实进程身份、受保护执行文件与固定句柄摘要委托既有卸载事务；不接收客户端路径或身份参数。确认服务及内核停止并注销后才清理固定私有产物。即使保护目录已不存在，也仍确认停止/注销，防止遗留已运行宿主。未知元数据、未完成维护记录和原生失败沿用现有恢复或拒绝语义；非零退出阻止继续移除包，不删除源 helper、包文件或用户配置。
+
+Windows 非提权进程下的入口权限行为有先失败再通过证据，未操作真实服务。共享脚本的 remove、重复调用、升级零卸载及失败传播测试通过；DEB/RPM 测试运行实际构建和暂存逻辑，并执行生成的卸载脚本，以受控 helper 回调验证升级零调用、最终卸载调用与退出码 17 传播。service all-targets/all-features check、默认客户端与服务端严格 clippy、脚本语法和差异检查通过，合并阶段服务完整测试 **179 项通过**；本批首次独立审查未发现功能性 bug 或重大漏洞。CI 和发布前 Linux 检查增加共享包策略测试。目标平台安装与原生卸载仍待验证，不能将这些结果报告为 P5 完成。
 
 ## Windows 产物
 
 [Windows 构建脚本](../../scripts/build_windows_installer.ps1) 额外使用 `server` feature 构建 `x86_64-pc-windows-msvc` 服务二进制。helper 暂存到应用根目录的 `zenclash-service.exe`，校验非空及 `--version` 的退出码和输出后才调用 Inno Setup。
 
 [安装包定义](../../platforms/windows/ZenClash.iss) 显式包含 helper，保留 `PrivilegesRequired=lowest`。安装包分发维护源程序；首次启用时另行请求 UAC，将批准的副本部署到保护目录。此阶段没有新增自动注册服务或执行 helper 的安装项。卸载 GUI 与已安装服务的协调尚待完成。
+
+固定 SCM 注册的路径、参数、服务类型、账户和 owner/DACL 门栓已通过源码、行为及独立首审验证，见 [移植记录](tun-service-upstream-migration.md#windows-scm-注册身份)。2026-10-02 实际 Windows release helper 构建成功，`--version` 输出 `zenclash-service 0.1.2` 且退出码为 0；当前没有 Inno Setup 编译器，这不是安装包验收。GUI 卸载不能直接调用要求保护路径的 `--package-uninstall`：仍需普通权限桥接固定 UAC 维护入口，并在提权 worker 中确认共享授权及实际 owner，避免停止其他账户或新会话的内核。共享服务的卸载策略待确认。
+
+当前源码的 Windows helper 已重新构建：`cargo build --release --locked -p zenclash-service --features server --bin zenclash-service` 退出 0。产物为 `target/release/zenclash-service.exe`，2,762,752 字节，SHA-256 为 `592613BBCD520601A2C7BB690031E455585CB85842B55474A05FA68E77D60132`；实际 `--version` 检查通过。此摘要仅标识本次本地产物，不是固定发布校验和；未执行安装、卸载或服务运行入口。
 
 ## macOS 产物
 
@@ -39,6 +53,7 @@ helper 按现有 Developer ID 或 ad-hoc 分支单独签名，再独立验证，
 ```sh
 bash scripts/tests/build_deb_package_test.sh
 bash scripts/tests/build_rpm_package_test.sh
+bash scripts/tests/package_service_test.sh
 bash scripts/tests/build_macos_app_test.sh
 pwsh -File scripts/tests/build_windows_installer_test.ps1
 ```
@@ -47,10 +62,10 @@ DEB 测试运行真实构建脚本，并检查传给 `dpkg-deb` 的暂存树包�
 
 这些测试证明构建与暂存行为，不证明原生 DEB/RPM 格式、签名、systemd/Polkit 授权或真实服务生命周期。CI 与发布前 Linux 检查运行两个入口；原生包安装、升级、卸载和首次 TUN 仍需目标发行版实机验收。
 
-macOS 测试直接执行原 App 构建逻辑，检查真实暂存文件、两种签名分支的调用顺序，以及 helper 缺失、空文件和版本失败时不得进入签名。Cargo、签名、架构探测及原生 plist 工具使用受控替身；这不证明 Mach-O 链接、有效签名、Gatekeeper 或 launchd 授权。
+macOS 测试直接执行原 App 构建逻辑，检查真实暂存文件、两种签名分支的调用顺序，以及 helper 缺失、空文件和版本失败时不得进入签名。新增批次还覆盖版本命令退出 0 但输出为空或仅含空白：实际空白输出先被错误接受，修后完整 fixture 通过，失败保留既有 App 标记和 helper 字节且不调用签名；语法与差异检查及独立首审 PASS（1/2）。Cargo、签名、架构探测及原生 plist 工具使用受控替身；这不证明 Mach-O 链接、有效签名、Gatekeeper 或 launchd 授权。
 
 Windows 测试执行原 PowerShell 构建脚本，使用普通原生可执行 fixture 验证实际暂存字节及版本命令；覆盖缺失、空文件、构建失败、版本非零退出和空输出。Cargo、图标检查及 ISCC 使用替身，不生成真实安装包，也不操作 SCM。CI 和发布前流程分别在对应平台运行这些入口；本机已验证暂存行为，真实平台产物仍待验收。
 
 ## 待接入
 
-三平台包升级/卸载与已安装服务的协调、旧 setuid 迁移，以及授权、签名、首次 TUN 和故障恢复的实机验收仍按 P5/P6 推进。
+Windows GUI 卸载与已安装服务的协调、macOS 维护入口、旧 setuid 迁移，以及三平台包管理、授权、签名、首次 TUN 和故障恢复的实机验收仍按 P5/P6 推进。Linux 本批只交付上述包级策略与失败阻断，不包含自动授权新版本内核副本。

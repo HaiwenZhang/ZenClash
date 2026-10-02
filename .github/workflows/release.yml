@@ -80,6 +80,9 @@ jobs:
       - name: Install Linux dependencies
         run: sudo scripts/install_linux_build_deps.sh
 
+      - name: Test package service removal policy
+        run: bash scripts/tests/package_service_test.sh
+
       - name: Test Debian packaging behavior
         run: bash scripts/tests/build_deb_package_test.sh
 
@@ -193,6 +196,10 @@ jobs:
       - name: Test Windows helper payload packaging behavior
         shell: pwsh
         run: scripts/tests/build_windows_installer_test.ps1
+
+      - name: Test authorization result classification
+        shell: pwsh
+        run: scripts/tests/service_authorization_test.ps1
 
       - name: Build Inno Setup installer
         shell: pwsh

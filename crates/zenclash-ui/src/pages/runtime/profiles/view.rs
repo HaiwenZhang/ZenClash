@@ -35,6 +35,23 @@ impl RuntimePage {
                             .gap_3()
                             .flex_wrap()
                             .child(metric(
+                                zenclash_i18n::text("profiles.current.title"),
+                                self.profiles
+                                    .forms
+                                    .catalog_view
+                                    .active_index()
+                                    .filter(|_| {
+                                        self.profiles
+                                            .forms
+                                            .catalog_view
+                                            .is_current(&self.profiles.catalog)
+                                    })
+                                    .and_then(|index| self.profiles.catalog.profiles.get(index))
+                                    .map_or_else(|| empty_dash(""), |profile| profile.name.clone()),
+                                theme.primary,
+                                theme,
+                            ))
+                            .child(metric(
                                 zenclash_i18n::text("profiles.metrics.proxies"),
                                 proxy_count
                                     .map_or_else(|| empty_dash(""), |count| count.to_string()),
@@ -100,12 +117,33 @@ impl RuntimePage {
                 self.profiles.recovery.is_some() || self.profiles.pending_finalization.is_some(),
                 |this| this.child(self.render_profile_recovery(theme, cx)),
             )
-            .child(self.render_managed_profiles(theme, cx))
+            .child(
+                h_flex()
+                    .gap_4()
+                    .items_start()
+                    .flex_wrap()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .flex_basis(gpui_kit::rems(36.))
+                            .min_w_0()
+                            .max_w_full()
+                            .gap_4()
+                            .child(self.render_managed_profiles(theme, cx))
+                            .when_some(config, |this, config| {
+                                this.child(self.render_current_profile(config, theme, cx))
+                            }),
+                    )
+                    .child(
+                        v_flex()
+                            .w(gpui_kit::rems(27.))
+                            .flex_shrink_0()
+                            .max_w_full()
+                            .child(self.render_profile_inspector(theme, cx)),
+                    ),
+            )
             .when(self.profiles.forms.editing_profile_id.is_some(), |this| {
                 this.child(self.render_remote_profile_editor(theme, cx))
-            })
-            .when_some(config, |this, config| {
-                this.child(self.render_current_profile(config, theme, cx))
             })
             .when(config.is_none(), |this| {
                 this.child(empty_state(

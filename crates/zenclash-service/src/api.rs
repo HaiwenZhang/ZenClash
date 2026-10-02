@@ -199,16 +199,9 @@ fn valid_runtime_patch(body: &Value) -> bool {
                 "port" | "socks-port" | "mixed-port" | "redir-port" | "tproxy-port" => value
                     .as_u64()
                     .is_some_and(|port| port <= u64::from(u16::MAX)),
-                "ipv6" | "allow-lan" | "tcp-concurrent" | "unified-delay" | "inbound-tfo"
-                | "inbound-mptcp" | "disable-keep-alive" => value.is_boolean(),
+                "ipv6" | "allow-lan" | "tcp-concurrent" => value.is_boolean(),
                 "bind-address" | "interface-name" => bounded_text(value, 256),
                 "find-process-mode" => matches!(value.as_str(), Some("always" | "strict" | "off")),
-                "keep-alive-interval" | "keep-alive-idle" => {
-                    value.as_u64().is_some_and(|value| value <= 86_400)
-                }
-                "routing-mark" => value
-                    .as_u64()
-                    .is_some_and(|value| value <= u64::from(u32::MAX)),
                 "tun" => valid_tun_patch(value),
                 _ => false,
             })
@@ -216,27 +209,111 @@ fn valid_runtime_patch(body: &Value) -> bool {
 }
 
 pub(crate) fn canonical_runtime_patch(body: &Value) -> Result<Value, ServiceErrorCode> {
-    if serde_json::to_vec(body).map_err(|_| ServiceErrorCode::InvalidRequest)?.len() > MAX_API_BODY_BYTES {
+    if serde_json::to_vec(body)
+        .map_err(|_| ServiceErrorCode::InvalidRequest)?
+        .len()
+        > MAX_API_BODY_BYTES
+    {
         return Err(ServiceErrorCode::BudgetExceeded);
     }
-    if !valid_runtime_patch(body) { return Err(ServiceErrorCode::InvalidConfiguration); }
+    if !valid_runtime_patch(body) {
+        return Err(ServiceErrorCode::InvalidConfiguration);
+    }
     fn sorted(value: &Value) -> Value {
         match value {
-            Value::Object(object) => Value::Object(object.iter().map(|(key, value)| (key.clone(), sorted(value))).collect::<BTreeMap<_, _>>().into_iter().collect()),
+            Value::Object(object) => Value::Object(
+                object
+                    .iter()
+                    .map(|(key, value)| (key.clone(), sorted(value)))
+                    .collect::<BTreeMap<_, _>>()
+                    .into_iter()
+                    .collect(),
+            ),
             Value::Array(values) => Value::Array(values.iter().map(sorted).collect()),
             _ => value.clone(),
         }
     }
-    Ok(sorted(body))
+    let mut body = sorted(body);
+    // v1.19.30 LC.Tun.Sort sorts this list before GET exposes it.
+    if let Some(values) = body
+        .get_mut("tun")
+        .and_then(|tun| tun.get_mut("dns-hijack"))
+        .and_then(Value::as_array_mut)
+    {
+        values.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+    }
+    Ok(body)
+}
+
+/// Private kernel messages may restore an observed zero MTU. Public Prepare
+/// always uses `canonical_runtime_patch` and retains its requested MTU range.
+pub(crate) fn canonical_kernel_runtime_patch(body: &Value) -> Result<Value, ServiceErrorCode> {
+    if body.get("tun").and_then(|tun| tun.get("mtu")) != Some(&Value::from(0)) {
+        return canonical_runtime_patch(body);
+    }
+    let mut checked = body.clone();
+    checked["tun"]["mtu"] = Value::from(576);
+    let mut checked = canonical_runtime_patch(&checked)?;
+    checked["tun"]["mtu"] = Value::from(0);
+    Ok(checked)
+}
+
+pub(crate) fn complete_runtime_patch(
+    requested: &Value,
+    actual: &Value,
+) -> Result<Value, ServiceErrorCode> {
+    let mut body = requested.clone();
+    if let Some(tun) = body.get_mut("tun").and_then(Value::as_object_mut) {
+        // tunSchema.Enable is not a pointer: omitting it would disable TUN.
+        // Require its fresh value even when the request explicitly changes it.
+        let enabled = actual
+            .get("tun")
+            .and_then(|tun| tun.get("enable"))
+            .and_then(Value::as_bool)
+            .ok_or(ServiceErrorCode::KernelFailed)?;
+        tun.entry("enable").or_insert(Value::Bool(enabled));
+    }
+    Ok(body)
 }
 
 pub(crate) fn affected_values(actual: &Value, patch: &Value) -> Result<Value, ServiceErrorCode> {
-    let object = patch.as_object().ok_or(ServiceErrorCode::InvalidConfiguration)?;
+    selected_values(actual, patch, false)
+}
+
+fn selected_values(actual: &Value, patch: &Value, tun: bool) -> Result<Value, ServiceErrorCode> {
+    let object = patch
+        .as_object()
+        .ok_or(ServiceErrorCode::InvalidConfiguration)?;
     let actual = actual.as_object().ok_or(ServiceErrorCode::KernelFailed)?;
     let mut selected = serde_json::Map::new();
     for (key, requested) in object {
-        let value = actual.get(key).ok_or(ServiceErrorCode::KernelFailed)?;
-        selected.insert(key.clone(), if requested.is_object() { affected_values(value, requested)? } else { value.clone() });
+        let mut value = match actual.get(key) {
+            Some(value) => value.clone(),
+            // Only these fixed v1.19.30 LC.Tun fields have known omitted zeros.
+            None if tun && matches!(key.as_str(), "gso" | "auto-redirect" | "strict-route") => {
+                Value::Bool(false)
+            }
+            None if tun && key == "mtu" => Value::from(0),
+            None => return Err(ServiceErrorCode::KernelFailed),
+        };
+        if tun && key == "dns-hijack" {
+            if value.is_null() {
+                value = Value::Array(Vec::new());
+            }
+            let values = value.as_array_mut().ok_or(ServiceErrorCode::KernelFailed)?;
+            if values.iter().any(|value| !value.is_string()) {
+                return Err(ServiceErrorCode::KernelFailed);
+            }
+            values.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+        }
+        selected.insert(
+            key.clone(),
+            if requested.is_object() {
+                selected_values(&value, requested, !tun && key == "tun")?
+            } else {
+                value
+            },
+        );
     }
     Ok(Value::Object(selected))
 }
@@ -355,12 +432,8 @@ mod tests {
             .is_ok()
         );
         assert!(
-            validate_request(&request(
-                "PATCH",
-                "/configs",
-                Some(serde_json::json!({"mode":"rule","tun":{"enable":false}}))
-            ))
-            .is_ok()
+            canonical_runtime_patch(&serde_json::json!({"mode":"rule","tun":{"enable":false}}))
+                .is_ok()
         );
     }
 
@@ -449,8 +522,36 @@ mod tests {
             serde_json::json!({"tun":{"certificate":"/etc/shadow"}}),
             serde_json::json!({"future-unknown-key":true}),
         ] {
-            assert!(validate_request(&request("PATCH", "/configs", Some(body))).is_err());
+            assert!(canonical_runtime_patch(&body).is_err());
         }
+    }
+
+    #[test]
+    fn readback_defaults_only_fixed_tun_omitted_fields() {
+        let actual = serde_json::json!({"tun":{"enable":false,"dns-hijack":null}});
+        assert_eq!(
+            affected_values(&actual, &serde_json::json!({"tun":{"gso":true,"auto-redirect":true,"strict-route":true,"mtu":1500,"dns-hijack":["any:53"]}})).unwrap(),
+            serde_json::json!({"tun":{"gso":false,"auto-redirect":false,"strict-route":false,"mtu":0,"dns-hijack":[]}})
+        );
+        for missing in [
+            "enable",
+            "auto-route",
+            "auto-detect-interface",
+            "future-key",
+        ] {
+            assert_eq!(
+                affected_values(
+                    &serde_json::json!({"tun":{}}),
+                    &serde_json::json!({"tun":{missing:true}})
+                ),
+                Err(ServiceErrorCode::KernelFailed),
+                "{missing} must not acquire an invented default"
+            );
+        }
+        assert_eq!(
+            affected_values(&serde_json::json!({}), &serde_json::json!({"ipv6":false})),
+            Err(ServiceErrorCode::KernelFailed)
+        );
     }
 
     #[test]

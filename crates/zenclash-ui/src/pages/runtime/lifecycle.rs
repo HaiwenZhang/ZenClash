@@ -510,6 +510,7 @@ impl RuntimePage {
             preferences_store,
             preferences,
             core_management: super::settings::CoreManagementUiState::default(),
+            settings_navigation: super::settings::SettingsNavigationState::default(),
             app_update: super::settings::AppUpdateUiState::default(),
             system_proxy_session,
             traffic_history_store,
@@ -529,6 +530,7 @@ impl RuntimePage {
             system_proxy_editor: None,
             core_releases: super::CoreReleaseState::default(),
             data: RuntimeData::Empty,
+            data_runtime_version: initial_runtime_version,
             home: super::home::HomeUiState::default(),
             traffic_history: super::traffic::TrafficHistoryUiState::default(),
             network_probe,
@@ -566,6 +568,23 @@ impl RuntimePage {
         );
         this.refresh(cx);
         this.refresh_app_update(cx);
+        if let Some(mut updates) = this.profile_service.service_updates() {
+            cx.spawn(async move |this, cx| {
+                while updates.changed().await.is_ok() {
+                    if this
+                        .update(cx, |this, cx| {
+                            if matches!(this.page, Page::Tun | Page::Home) {
+                                cx.notify();
+                            }
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         Self::start_operational_updates(
             this.operational_status.subscribe(),
             this.live_updates_enabled.subscribe(),
@@ -598,6 +617,10 @@ impl RuntimePage {
                         Ok(state) => {
                             this.profiles.store = state.profile_store;
                             if this.profiles.generation == 0 {
+                                this.profiles
+                                    .forms
+                                    .catalog_view
+                                    .prepare(&state.profile_catalog);
                                 this.profiles.catalog = state.profile_catalog;
                             }
                             this.overrides.store = state.override_store;
@@ -647,6 +670,7 @@ impl RuntimePage {
                 let capture = updates.borrow().capture.clone();
                 if this
                     .update(cx, |this, cx| {
+                        this.reconcile_home_generation();
                         this.reconcile_home_capture_transition(&capture);
                         if this.live_updates_enabled() && this.page == Page::Home {
                             cx.notify();
@@ -680,6 +704,9 @@ impl RuntimePage {
             self.overrides.invalidate_preview();
         }
         self.page = page;
+        if previous_page == Page::Home {
+            self.release_home_presentation();
+        }
         self.navigation_generation = self.navigation_generation.wrapping_add(1);
         self.data = RuntimeData::Empty;
         self.connections.release_presentation();
@@ -717,6 +744,7 @@ impl RuntimePage {
     }
 
     fn release_inactive_page_data(&mut self) {
+        self.release_home_presentation();
         self.logs.release_results();
         if self.page == Page::Network {
             self.cancel_network_probe();
@@ -745,6 +773,7 @@ impl RuntimePage {
     fn update_live_update_activity(&mut self, was_enabled: bool, cx: &mut Context<Self>) {
         let enabled = self.ui_visibility.updates_enabled();
         if !enabled {
+            self.release_home_presentation();
             if self.network_probe.loading {
                 self.cancel_network_probe();
             }
@@ -847,6 +876,9 @@ impl RuntimePage {
                                 !this.loading && !this.core_busy(),
                                 this.connections.closing.is_empty() && !this.connections.projecting,
                             );
+                            if this.page == Page::Home {
+                                this.update_home_traffic_presentation(cx);
+                            }
                             if actions.refresh_page {
                                 this.refresh(cx);
                             }
@@ -1239,7 +1271,13 @@ impl RuntimePage {
             self.provider_operations
                 .observe_catalog(super::ProviderKind::Rule, rules);
         }
-        self.data = data.retain_dashboard_successes(&self.data);
+        self.data = if self.data_runtime_version == self.core_session.generation() {
+            data.retain_dashboard_successes(&self.data)
+        } else {
+            data
+        };
+        self.data_runtime_version = self.core_session.generation();
+        self.prepare_home_projection();
         self.update_connection_presentation(cx);
         self.rules.confirmed_disabled.clear();
         self.update_rule_presentation(cx);
@@ -1254,7 +1292,10 @@ impl RuntimePage {
         }
     }
 
-    pub(super) const fn config(&self) -> Option<&RuntimeConfig> {
+    pub(super) fn config(&self) -> Option<&RuntimeConfig> {
+        if self.data_runtime_version != self.core_session.generation() {
+            return None;
+        }
         match &self.data {
             RuntimeData::Dashboard { config, .. } => config.value(),
             RuntimeData::Profile { config, .. } | RuntimeData::Settings { config, .. } => {
@@ -1271,7 +1312,10 @@ impl RuntimePage {
     }
 
     pub(super) fn mihomo_binary(&self) -> Option<std::path::PathBuf> {
-        self.core_session.runtime_descriptor().binary().map(std::path::Path::to_path_buf)
+        self.core_session
+            .runtime_descriptor()
+            .binary()
+            .map(std::path::Path::to_path_buf)
     }
 }
 

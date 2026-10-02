@@ -777,8 +777,13 @@ async fn refresh_status_with_tun_reader<F, R>(
                 }
             } else {
                 let mut value = ProcessStatus::from_snapshot(core_session, current);
-                if !current.managed { value.running = version.is_ok(); }
-                Observation::Fresh { value, observed_at_ms: now }
+                if !current.managed {
+                    value.running = version.is_ok();
+                }
+                Observation::Fresh {
+                    value,
+                    observed_at_ms: now,
+                }
             };
             if !same_generation(expected, current) {
                 reset_old_generation_streams(&mut next.streams, current.generation);

@@ -54,38 +54,44 @@ impl CoreSession {
     /// # Errors
     /// Rejects shutdown, stale binding, unavailable authority, or failed native authorization.
     pub async fn ensure_tun_permission(&self) -> Result<(), CoreSessionError> {
+        self.ensure_tun_permission_with(|binary| {
+            let manager = TunPermissionManager::new(binary)?;
+            let already_granted = manager.status()?.granted;
+            manager.request_grant()?;
+            Ok(already_granted)
+        })
+        .await
+    }
+
+    pub(super) async fn ensure_tun_permission_with(
+        &self,
+        grant: impl FnOnce(PathBuf) -> Result<bool, crate::TunPermissionError> + Send + 'static,
+    ) -> Result<(), CoreSessionError> {
         self.ensure_not_shutting_down()?;
+        let client = self.client.pin_binding()?;
+        let lease = self.acquire_process_write_lease(&client).await?;
+        let transition = self.transition.clone().lock_owned().await;
+        client.ensure_binding_current()?;
+        self.ensure_not_shutting_down()?;
+        let mutation = client.lock_runtime_binding().await?;
         let session = self.clone();
         tokio::spawn(async move {
-            let client = session.client.pin_binding()?;
-            let lease = session.acquire_process_write_lease(&client).await?;
-            let _transition = session.transition.clone().lock_owned().await;
-            session.ensure_not_shutting_down()?;
-            let _mutation = client.lock_runtime_binding().await?;
+            let _transition = transition;
+            let _mutation = mutation;
             match client.owned_core() {
                 Some(crate::owned_core::OwnedCore::Local(process)) => {
                     let binary = process.launch_config().binary.clone();
-                    let already_granted = tokio::task::spawn_blocking(move || {
-                        let manager = TunPermissionManager::new(binary)?;
-                        let already_granted = manager.status()?.granted;
-                        manager.request_grant()?;
-                        Ok::<_, crate::TunPermissionError>(already_granted)
-                    })
-                    .await
-                    .map_err(|error| MihomoError::Process(error.to_string()))?
-                    .map_err(|error| MihomoError::Process(error.to_string()))?;
+                    let already_granted = tokio::task::spawn_blocking(move || grant(binary))
+                        .await
+                        .map_err(|error| MihomoError::Process(error.to_string()))?
+                        .map_err(|error| MihomoError::Process(error.to_string()))?;
                     client.ensure_binding_current()?;
                     session.ensure_not_shutting_down()?;
                     #[cfg(unix)]
                     if !already_granted {
-                        process
-                            .restart_and_wait_until_with_lease(
-                                CORE_READY_TIMEOUT,
-                                Some(session.shutdown_requested.clone()),
-                                &lease,
-                            )
+                        session
+                            .restart_after_tun_grant(&process, &lease, CORE_READY_TIMEOUT)
                             .await?;
-                        session.next_generation();
                     }
                     #[cfg(not(unix))]
                     let _ = (already_granted, &lease);
@@ -105,6 +111,60 @@ impl CoreSession {
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))?
+    }
+
+    #[cfg(any(unix, test))]
+    pub(super) async fn restart_after_tun_grant(
+        &self,
+        process: &Arc<MihomoProcess>,
+        lease: &DataWriteLease,
+        timeout: Duration,
+    ) -> Result<(), CoreSessionError> {
+        if self.lifecycle.read().stop_requested {
+            return Ok(());
+        }
+        let before_process = process.clone();
+        let before = tokio::task::spawn_blocking(move || before_process.snapshot())
+            .await
+            .map_err(|error| MihomoError::Process(error.to_string()))?;
+        let result = process
+            .restart_and_wait_until_with_lease(
+                timeout,
+                Some(self.shutdown_requested.clone()),
+                lease,
+            )
+            .await;
+        let after_process = process.clone();
+        let after = match tokio::task::spawn_blocking(move || after_process.snapshot()).await {
+            Ok(after) => after,
+            Err(error) => {
+                self.next_generation();
+                let mut lifecycle = self.lifecycle.write();
+                lifecycle.phase = if self.is_shutting_down() {
+                    CoreLifecyclePhase::ShuttingDown
+                } else {
+                    CoreLifecyclePhase::Unknown
+                };
+                lifecycle.last_error = Some(error.to_string());
+                return Err(MihomoError::Process(error.to_string()).into());
+            }
+        };
+        if result.is_ok() {
+            self.next_generation();
+        } else if before.pid != after.pid
+            || before.running != after.running
+            || before.exit_reason != after.exit_reason
+        {
+            self.next_generation();
+            let mut lifecycle = self.lifecycle.write();
+            lifecycle.phase = if self.is_shutting_down() {
+                CoreLifecyclePhase::ShuttingDown
+            } else {
+                CoreLifecyclePhase::Unknown
+            };
+            lifecycle.last_error = result.as_ref().err().map(ToString::to_string);
+        }
+        result.map_err(CoreSessionError::from)
     }
 }
 

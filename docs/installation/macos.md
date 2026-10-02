@@ -93,6 +93,14 @@ open -a ZenClash
 
 只有在你明确启用 TUN 时，ZenClash 才会请求 macOS 管理员授权。TUN 需要创建网络接口和路由，因此出现系统密码或 Touch ID 提示属于预期行为。请确认请求来自你刚刚安装的 ZenClash，再批准授权。
 
+### 开发中的服务模式
+
+服务模式正在开发，不代表当前公开 Release 已完整支持。设计中的 `zenclash-service` 是独立后台服务/helper，与 GUI 属于不同进程；GUI 保持普通用户权限，首次明确选择安装服务时才请求管理员授权。
+
+若已在开发构建中安装 LaunchDaemon，关闭 TUN、退出 GUI 或删除 `ZenClash.app` 都不等同于卸载该服务。本文后面的应用卸载步骤也不是 LaunchDaemon 的卸载流程。
+
+服务模式的 launchd 有效注册归属校验、完整修复/卸载流程和 macOS 原生验收仍未完成。开发范围与验收要求见 [TUN 服务开发计划](../development/tun-service-plan.md) 和 [三平台原生验收入口](../development/tun-service-native-validation.md)；验收入口不代表已经通过验收。
+
 ## 更新
 
 ZenClash 只会通知有新版本并打开官方 Release 页面，不会静默安装应用更新。更新步骤如下：

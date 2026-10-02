@@ -1,6 +1,8 @@
 #[cfg(any(feature = "server", test))]
 use std::fs;
-use std::{io, mem, os::fd::AsRawFd, path::Path, process::Stdio, time::Duration};
+#[cfg(test)]
+use std::time::Duration;
+use std::{io, mem, os::fd::AsRawFd, path::Path, process::Stdio};
 
 use tokio::{net::UnixStream, process::Command};
 
@@ -71,7 +73,6 @@ pub(super) fn validate_acl(path: &Path) -> io::Result<()> {
     result
 }
 
-#[cfg(feature = "server")]
 pub(super) fn service_root() -> &'static str {
     "/Library/PrivilegedHelperTools/org.zenclash.service"
 }
@@ -217,7 +218,7 @@ pub(super) async fn request_maintenance(arguments: &[std::ffi::OsString]) -> io:
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(false)
         .spawn()?;
     let stderr = child
         .stderr
@@ -231,7 +232,12 @@ pub(super) async fn request_maintenance(arguments: &[std::ffi::OsString]) -> io:
         stderr.take(4096).read_to_end(&mut content).await?;
         Ok::<_, io::Error>(content)
     });
-    let status = tokio::time::timeout(Duration::from_secs(120), child.wait()).await??;
+    let status = child.wait().await.map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "authorized maintenance exit could not be observed",
+        )
+    })?;
     let diagnostic = diagnostics.await.map_err(io::Error::other)??;
     if status.success() {
         Ok(())
@@ -239,10 +245,7 @@ pub(super) async fn request_maintenance(arguments: &[std::ffi::OsString]) -> io:
         .windows(b"ZENCLASH_AUTHORIZATION_CANCELLED".len())
         .any(|part| part == b"ZENCLASH_AUTHORIZATION_CANCELLED")
     {
-        Err(io::Error::new(
-            io::ErrorKind::Interrupted,
-            "authorization cancelled",
-        ))
+        Err(crate::installer::authorization_cancelled())
     } else {
         Err(io::Error::other(
             "administrator-authorized service maintenance failed",
@@ -253,50 +256,72 @@ pub(super) async fn request_maintenance(arguments: &[std::ffi::OsString]) -> io:
 #[cfg(feature = "server")]
 const PLIST_PATH: &str = "/Library/LaunchDaemons/org.zenclash.service.plist";
 #[cfg(feature = "server")]
-const PLIST: &str = include_str!("../../../../../platforms/macos/org.zenclash.service.plist");
-#[cfg(feature = "server")]
 const LABEL: &str = "system/org.zenclash.service";
+
+#[cfg(feature = "server")]
+pub(super) fn validate_service_registration() -> io::Result<()> {
+    super::super::macos_registration::validate_registration(
+        Path::new(PLIST_PATH),
+        &super::validate_protected_path,
+    )
+}
 
 #[cfg(feature = "server")]
 pub(super) fn register_service() -> io::Result<()> {
     super::require_admin()?;
     super::validate_protected_path(Path::new("/Library/LaunchDaemons"), true)?;
-    super::write_registration(
-        Path::new("/Library/LaunchDaemons/.org.zenclash.service.plist.new"),
+    super::super::macos_registration::with_known_registration(
         Path::new(PLIST_PATH),
-        PLIST.as_bytes(),
+        &super::validate_protected_path,
+        || {
+            super::write_registration(
+                Path::new("/Library/LaunchDaemons/.org.zenclash.service.plist.new"),
+                Path::new(PLIST_PATH),
+                super::super::macos_registration::PLIST.as_bytes(),
+            )
+        },
     )
 }
 
 #[cfg(feature = "server")]
 pub(super) fn start_service() -> io::Result<()> {
-    super::require_admin()?;
-    if super::run_native_status("/bin/launchctl", &["print", LABEL])?.success() {
-        super::run_native("/bin/launchctl", &["kickstart", LABEL])
-    } else {
-        super::run_native("/bin/launchctl", &["bootstrap", "system", PLIST_PATH])
-    }
+    maintain_service(super::super::launchd_probe::MaintenanceAction::Start)
 }
 
 #[cfg(feature = "server")]
 pub(super) fn stop_service() -> io::Result<()> {
-    super::require_admin()?;
-    let loaded = super::run_native_status("/bin/launchctl", &["print", LABEL])?.success();
-    if loaded {
-        super::run_native("/bin/launchctl", &["bootout", LABEL])
-    } else {
-        Ok(())
-    }
+    maintain_service(super::super::launchd_probe::MaintenanceAction::Stop)
 }
 
 #[cfg(feature = "server")]
 pub(super) fn unregister_service() -> io::Result<()> {
-    stop_service()?;
-    if Path::new(PLIST_PATH).exists() {
-        super::validate_protected_path(Path::new(PLIST_PATH), false)?;
-        fs::remove_file(PLIST_PATH)?;
-    }
-    Ok(())
+    maintain_service(super::super::launchd_probe::MaintenanceAction::Unregister)
+}
+
+#[cfg(feature = "server")]
+fn maintain_service(action: super::super::launchd_probe::MaintenanceAction) -> io::Result<()> {
+    use super::super::launchd_probe::{MaintenanceEffect, probe_service};
+    super::require_admin()?;
+    super::super::macos_registration::maintain_registration(
+        Path::new(PLIST_PATH),
+        &super::validate_protected_path,
+        action,
+        || probe_service(LABEL),
+        |effect| match effect {
+            MaintenanceEffect::Kickstart => {
+                super::run_native("/bin/launchctl", &["kickstart", LABEL])
+            }
+            MaintenanceEffect::Bootstrap => {
+                super::run_native("/bin/launchctl", &["bootstrap", "system", PLIST_PATH])
+            }
+            MaintenanceEffect::Bootout => super::run_native("/bin/launchctl", &["bootout", LABEL]),
+            MaintenanceEffect::RemoveRegistration => match fs::remove_file(PLIST_PATH) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            },
+        },
+    )
 }
 
 #[cfg(test)]

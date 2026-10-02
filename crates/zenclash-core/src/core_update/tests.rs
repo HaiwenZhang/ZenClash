@@ -469,7 +469,23 @@ async fn release_precheck_uses_the_profile_committed_during_download() {
 }
 
 #[cfg(unix)]
+async fn wait_for_old_startup(home: &std::path::Path, pid: u32) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while std::fs::read_to_string(home.join("old-startup.pid"))
+            .ok()
+            .and_then(|published| published.trim().parse::<u32>().ok())
+            != Some(pid)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("old core did not publish its complete startup payload for the current PID");
+}
+
+#[cfg(unix)]
 async fn exercise_managed_install(case: ManagedInstallCase) {
+    let _ports = crate::core_session::fixed_listener_ports_guard().await;
     use crate::{
         ControlledConfigStore, CoreKind, CoreSession, CoreSessionError, EffectiveConfigIntent,
         MihomoClient, MihomoEndpoint, MihomoLaunchConfig, MihomoProcess,
@@ -486,7 +502,16 @@ async fn exercise_managed_install(case: ManagedInstallCase) {
     };
     std::fs::create_dir_all(&binary_directory).unwrap();
     let physical_target = binary_directory.join("mihomo");
-    let old = b"#!/bin/sh\nif [ \"$1\" = '-t' ]; then exit 0; fi\nprintf 'old\\n' >> \"$2/runs\"\ncat \"$4\" > \"$2/old-startup.yaml\"\nexec sleep 60\n";
+    let old = concat!(
+        "#!/bin/sh\nset -e\nif [ \"$1\" = '-t' ]; then exit 0; fi\n",
+        "printf 'old\\n' >> \"$2/runs\"\n",
+        "cat \"$4\" > \"$2/old-startup.$$.tmp\"\n",
+        "mv \"$2/old-startup.$$.tmp\" \"$2/old-startup.yaml\"\n",
+        "printf '%s\\n' \"$$\" > \"$2/old-startup-pid.$$.tmp\"\n",
+        "mv \"$2/old-startup-pid.$$.tmp\" \"$2/old-startup.pid\"\n",
+        "exec sleep 60\n",
+    )
+    .as_bytes();
     std::fs::write(&physical_target, old).unwrap();
     std::fs::set_permissions(&physical_target, std::fs::Permissions::from_mode(0o755)).unwrap();
     if physical_target != target {
@@ -619,14 +644,14 @@ async fn exercise_managed_install(case: ManagedInstallCase) {
         controller_override: None,
     })
     .unwrap();
-    let session = CoreSession::open_with_config(CoreKind::Mihomo, MihomoClient::from_process(process.clone()).unwrap(), Some(source_a), vec![]).unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !directory.join("data/old-startup.yaml").is_file() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
+    let session = CoreSession::open_with_config(
+        CoreKind::Mihomo,
+        MihomoClient::from_process(process.clone()).unwrap(),
+        Some(source_a),
+        vec![],
+    )
     .unwrap();
+    wait_for_old_startup(&directory.join("data"), process.snapshot().pid.unwrap()).await;
     if case == ManagedInstallCase::ReadyFailureStopped {
         session
             .maintain(crate::CoreMaintenanceIntent::Stop)
@@ -693,6 +718,9 @@ async fn exercise_managed_install(case: ManagedInstallCase) {
     };
     let snapshot = process.snapshot();
     let executable = std::fs::read(&target).unwrap();
+    if snapshot.running && executable == old {
+        wait_for_old_startup(&directory.join("data"), snapshot.pid.unwrap()).await;
+    }
     let payload = std::fs::read(store.runtime_path()).unwrap();
     let old_startup = std::fs::read(directory.join("data/old-startup.yaml")).unwrap();
     let runs = std::fs::read_to_string(directory.join("data/runs")).unwrap();
@@ -794,9 +822,14 @@ async fn external_and_experimental_sessions_reject_release_installation_before_d
         },
     };
     for kind in [CoreKind::Mihomo, CoreKind::Meow] {
-        let session = CoreSession::open(kind, MihomoClient::new(MihomoEndpoint::new("http://127.0.0.1:1", ""))
+        let session = CoreSession::open(
+            kind,
+            MihomoClient::new(MihomoEndpoint::new("http://127.0.0.1:1", ""))
                 .unwrap()
-                .with_core_kind(kind).unwrap()).unwrap();
+                .with_core_kind(kind)
+                .unwrap(),
+        )
+        .unwrap();
         assert!(matches!(
             session.install_release(&service, &release).await,
             Err(CoreSessionError::ExternalRestartUnsupported { .. })

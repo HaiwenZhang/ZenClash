@@ -12,12 +12,15 @@ use std::{
 
 use tracing_subscriber::{EnvFilter, filter::Directive};
 use zenclash_core::{
-    AppInstanceLock, AppPreferences, AppPreferencesStore, ControlledConfigStore, CoreKind,
-    CoreSession, EffectiveConfigIntent, LogMonitor, MihomoClient, MihomoEndpoint,
-    MihomoLaunchConfig, MihomoProcess, ProfileStore, TrafficHistoryStore, TrafficMonitor,
-    YamlOverrideStore, bundled_recovery_profile,
+    AppInstanceLock, AppPreferences, AppPreferencesStore, ControlledConfigStore,
+    CoreInitializationOutcome, CoreKind, CoreSession, EffectiveConfigIntent, LogMonitor,
+    MihomoClient, MihomoEndpoint, MihomoLaunchConfig, MihomoProcess, MihomoRuntimeResources,
+    ProfileStore, ServiceHealthKind, TrafficHistoryStore, TrafficMonitor, YamlOverrideStore,
+    bundled_recovery_profile,
 };
 use zenclash_ui::{app, assets::Assets};
+
+mod startup;
 
 const DEFAULT_TRACING_FILTER: &str = "zenclash=info,zenclash_core=info,zenclash_ui=info";
 const MANAGED_CONTROLLER_ATTEMPTS: usize = 3;
@@ -125,153 +128,111 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let controlled_config_store = ControlledConfigStore::discover()?;
     let mut recovery_notices = preferences_recovery_notice.into_iter().collect::<Vec<_>>();
     let profile_store = ProfileStore::discover()?;
-    if let Some(path) = profile_store.quarantine_invalid_index()? {
-        recovery_notices.push(zenclash_i18n::text_with(
-            "startup.quarantine.profile_index",
-            &[("path", path.display().to_string())],
-        ));
-    }
-    if let Some(path) = controlled_config_store.quarantine_invalid_patch()? {
-        recovery_notices.push(zenclash_i18n::text_with(
-            "startup.quarantine.controlled_config",
-            &[("path", path.display().to_string())],
-        ));
-    }
     let override_store = YamlOverrideStore::discover()?;
-    if let Some(path) = override_store.quarantine_invalid_manifest()? {
-        recovery_notices.push(zenclash_i18n::text_with(
-            "startup.quarantine.overrides",
-            &[("path", path.display().to_string())],
-        ));
-    }
-    let override_paths = override_store.load_enabled_paths()?;
-    let preferred_binary = preferences.core_binaries.path(requested_core);
-    let initial = bootstrap_core(
-        &runtime,
-        requested_core,
-        preferred_binary,
+    let external = std::env::var_os("ZENCLASH_CONTROLLER").is_some();
+    let managed_mihomo = !external && requested_core == CoreKind::Mihomo;
+    let layers = startup::prepare_configuration_layers(
+        managed_mihomo,
+        &profile_store,
         &controlled_config_store,
-        &override_paths,
-        None,
-        true,
-    );
-    let startup = match initial {
-        Ok(bootstrapped) => CoreStartupState {
-            kind: requested_core,
-            endpoint: bootstrapped.endpoint,
-            process: bootstrapped.process,
-            profile: bootstrapped.profile,
-            notice: bootstrapped.startup_notice,
-            error: None,
-        },
-        Err(initial_error) if environment_core.is_none() => {
-            match recover_core(
+        &override_store,
+    )
+    .map_err(|error| {
+        tracing::warn!(%error, "startup configuration layers could not be confirmed");
+        if managed_mihomo {
+            Box::new(std::io::Error::other(startup::blocked_message(
+                startup::StartupBlocked::ConfigurationUnknown,
+            ))) as Box<dyn std::error::Error>
+        } else {
+            error
+        }
+    })?;
+    recovery_notices.extend(layers.notices);
+    let configuration_unknown = layers.unknown;
+    let override_paths = layers.overrides;
+    let preferred_binary = preferences
+        .core_binaries
+        .path(requested_core)
+        .map(Path::to_path_buf);
+    let health = (!external && requested_core == CoreKind::Mihomo)
+        .then(|| runtime.block_on(zenclash_core::startup_service_health()));
+    let resources = if matches!(
+        health,
+        Some(ServiceHealthKind::Ready | ServiceHealthKind::Missing)
+    ) {
+        let root = project_root()?;
+        let selected = std::env::var_os("ZENCLASH_CONFIG")
+            .map(PathBuf::from)
+            .or(profile_store.active_path()?)
+            .or_else(|| {
+                let candidate = root.join("platforms/common/default.yaml");
+                candidate.is_file().then_some(candidate)
+            });
+        Some(runtime.block_on(MihomoRuntimeResources::prepare(root, selected))?)
+    } else {
+        None
+    };
+    let tun_enabled = if health == Some(ServiceHealthKind::Missing) && !configuration_unknown {
+        resources.as_ref().and_then(|resources| {
+            controlled_config_store
+                .effective_json_with_overrides(resources.config_file(), &override_paths)
+                .ok()
+                .and_then(|value| startup::effective_tun_enabled(&value))
+        })
+    } else {
+        None
+    };
+    let prepared = startup::route_startup(
+        requested_core,
+        external,
+        health,
+        tun_enabled,
+        || {
+            prepare_service_startup(
                 &runtime,
-                &preferences,
-                requested_core,
-                preferred_binary,
+                resources.as_ref(),
                 &controlled_config_store,
                 &override_paths,
-                &initial_error,
-            ) {
-                Ok(recovered) => {
-                    let source = recovered.binary.as_ref().map_or_else(
-                        || zenclash_i18n::text("startup.automatic_discovery"),
-                        |path| path.display().to_string(),
-                    );
-                    let mut notice = zenclash_i18n::text_with(
-                        "startup.core_recovered",
-                        &[
-                            ("requested", requested_core.to_string()),
-                            ("recovered", recovered.kind.to_string()),
-                            ("source", source),
-                            ("error", initial_error.to_string()),
-                        ],
-                    );
-                    if let Some(listener_notice) = recovered.startup_notice {
-                        notice.push_str(&zenclash_i18n::text("startup.separator"));
-                        notice.push_str(&listener_notice);
-                    }
-                    tracing::warn!(requested = %requested_core, fallback = %recovered.kind, %initial_error, "recovered with last usable core");
-                    CoreStartupState {
-                        kind: recovered.kind,
-                        endpoint: recovered.endpoint,
-                        process: recovered.process,
-                        profile: recovered.profile,
-                        notice: Some(notice),
-                        error: None,
-                    }
-                }
-                Err(recovery_error) => recover_safe_profile(
-                    &runtime,
-                    &preferences,
-                    requested_core,
-                    preferred_binary,
-                    &controlled_config_store,
-                    true,
-                    &recovery_error,
-                )
-                .unwrap_or_else(|error| offline_core_state(requested_core, &error)),
-            }
+            )
+        },
+        || {
+            prepare_legacy_startup(
+                &runtime,
+                &mut preferences,
+                requested_core,
+                preferred_binary.as_deref(),
+                environment_core.is_none(),
+                &controlled_config_store,
+                &override_paths,
+            )
+        },
+    )
+    .map_err(|failure| match failure {
+        startup::StartupFailure::Operation(error) => error,
+        startup::StartupFailure::Blocked(reason) => {
+            Box::new(std::io::Error::other(startup::blocked_message(reason)))
+                as Box<dyn std::error::Error>
         }
-        Err(error) => {
-            if std::env::var_os("ZENCLASH_CONFIG").is_none() {
-                recover_safe_profile(
-                    &runtime,
-                    &preferences,
-                    requested_core,
-                    preferred_binary,
-                    &controlled_config_store,
-                    false,
-                    &error,
-                )
-                .unwrap_or_else(|recovery| offline_core_state(requested_core, &recovery))
-            } else {
-                offline_core_state(requested_core, &error)
-            }
-        }
-    };
-    let mut startup = startup;
-    for notice in recovery_notices {
-        append_startup_notice(&mut startup.notice, notice);
-    }
-    let CoreStartupState {
+    })?;
+    let PreparedStartup {
         kind: core_kind,
-        endpoint,
-        process: mihomo_process,
+        client,
+        session: core_session,
         profile: profile_path,
-        notice: startup_notice,
+        mut notice,
         error: startup_error,
-    } = startup;
+        initialization,
+    } = prepared;
     remember_working_core(
         preferences_store.as_ref(),
         &mut preferences,
         core_kind,
-        mihomo_process.as_ref(),
+        core_session.runtime_descriptor().binary(),
     );
-    let client = match &mihomo_process {
-        Some(process) => MihomoClient::from_process(process.clone())?,
-        None => MihomoClient::new(endpoint)?.with_core_kind(core_kind)?,
-    };
-    let core_session = CoreSession::open_with_config(core_kind, client.clone(), profile_path.clone(), override_paths.clone())?;
-    if startup_error.is_none()
-        && mihomo_process.is_none()
-        && core_kind.capabilities().full_config_reload
-    {
-        if let Some(profile) = profile_path.as_ref()
-            && let Err(error) = runtime.block_on(core_session.apply(
-                &controlled_config_store,
-                EffectiveConfigIntent::ActivateProfile {
-                    profile: profile.clone(),
-                    overrides: override_paths,
-                },
-            ))
-        {
-            tracing::warn!(%error, core = %core_kind, "initial core configuration synchronization failed");
-        }
-    } else if !core_kind.capabilities().full_config_reload {
-        tracing::info!(core = %core_kind, "skipping unsupported full configuration hot reload");
+    for recovery_notice in recovery_notices {
+        append_startup_notice(&mut notice, recovery_notice);
     }
+    let startup_notice = notice;
     let traffic = TrafficMonitor::start_with_client(runtime.handle(), client.clone());
     let logs = LogMonitor::start_with_client(
         runtime.handle(),
@@ -292,7 +253,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     gpui_kit::application().with_assets(Assets).run(move |cx| {
         app::init(cx);
-        app::create_main_window(
+        app::create_main_window_with_service_startup(
             app::AppServices {
                 profile_store: Some(profile_store),
                 override_store: Some(override_store),
@@ -312,6 +273,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 startup_error,
                 restart_after_exit: app_restart_after_exit,
             },
+            initialization,
             cx,
         );
         cx.activate(true);
@@ -352,6 +314,217 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+struct PreparedStartup {
+    kind: CoreKind,
+    client: MihomoClient,
+    session: CoreSession,
+    profile: Option<PathBuf>,
+    notice: Option<String>,
+    error: Option<String>,
+    initialization: Option<CoreInitializationOutcome>,
+}
+
+fn prepare_legacy_startup(
+    runtime: &tokio::runtime::Runtime,
+    preferences: &mut AppPreferences,
+    requested_core: CoreKind,
+    preferred_binary: Option<&Path>,
+    allow_core_recovery: bool,
+    controlled_config_store: &ControlledConfigStore,
+    override_paths: &[PathBuf],
+) -> Result<PreparedStartup, Box<dyn std::error::Error>> {
+    let initial = bootstrap_core(
+        runtime,
+        requested_core,
+        preferred_binary,
+        controlled_config_store,
+        override_paths,
+        None,
+        true,
+    );
+    let startup = match initial {
+        Ok(bootstrapped) => CoreStartupState {
+            kind: requested_core,
+            endpoint: bootstrapped.endpoint,
+            process: bootstrapped.process,
+            profile: bootstrapped.profile,
+            notice: bootstrapped.startup_notice,
+            error: None,
+        },
+        Err(initial_error) if allow_core_recovery => {
+            match recover_core(
+                runtime,
+                preferences,
+                requested_core,
+                preferred_binary,
+                controlled_config_store,
+                override_paths,
+                &initial_error,
+            ) {
+                Ok(recovered) => {
+                    let source = recovered.binary.as_ref().map_or_else(
+                        || zenclash_i18n::text("startup.automatic_discovery"),
+                        |path| path.display().to_string(),
+                    );
+                    let mut notice = zenclash_i18n::text_with(
+                        "startup.core_recovered",
+                        &[
+                            ("requested", requested_core.to_string()),
+                            ("recovered", recovered.kind.to_string()),
+                            ("source", source),
+                            ("error", initial_error.to_string()),
+                        ],
+                    );
+                    if let Some(listener_notice) = recovered.startup_notice {
+                        notice.push_str(&zenclash_i18n::text("startup.separator"));
+                        notice.push_str(&listener_notice);
+                    }
+                    tracing::warn!(requested = %requested_core, fallback = %recovered.kind, %initial_error, "recovered with last usable core");
+                    CoreStartupState {
+                        kind: recovered.kind,
+                        endpoint: recovered.endpoint,
+                        process: recovered.process,
+                        profile: recovered.profile,
+                        notice: Some(notice),
+                        error: None,
+                    }
+                }
+                Err(recovery_error) => recover_safe_profile(
+                    runtime,
+                    preferences,
+                    requested_core,
+                    preferred_binary,
+                    controlled_config_store,
+                    true,
+                    &recovery_error,
+                )
+                .unwrap_or_else(|error| offline_core_state(requested_core, &error)),
+            }
+        }
+        Err(error) => {
+            if std::env::var_os("ZENCLASH_CONFIG").is_none() {
+                recover_safe_profile(
+                    runtime,
+                    preferences,
+                    requested_core,
+                    preferred_binary,
+                    controlled_config_store,
+                    false,
+                    &error,
+                )
+                .unwrap_or_else(|recovery| offline_core_state(requested_core, &recovery))
+            } else {
+                offline_core_state(requested_core, &error)
+            }
+        }
+    };
+    let CoreStartupState {
+        kind: core_kind,
+        endpoint,
+        process: mihomo_process,
+        profile: profile_path,
+        notice: startup_notice,
+        error: startup_error,
+    } = startup;
+    let client = match &mihomo_process {
+        Some(process) => MihomoClient::from_process(process.clone())?,
+        None => MihomoClient::new(endpoint)?.with_core_kind(core_kind)?,
+    };
+    let core_session = CoreSession::open_with_config(
+        core_kind,
+        client.clone(),
+        profile_path.clone(),
+        override_paths.to_vec(),
+    )?;
+    if startup_error.is_none()
+        && mihomo_process.is_none()
+        && core_kind.capabilities().full_config_reload
+    {
+        if let Some(profile) = profile_path.as_ref()
+            && let Err(error) = runtime.block_on(core_session.apply(
+                controlled_config_store,
+                EffectiveConfigIntent::ActivateProfile {
+                    profile: profile.clone(),
+                    overrides: override_paths.to_vec(),
+                },
+            ))
+        {
+            tracing::warn!(%error, core = %core_kind, "initial core configuration synchronization failed");
+        }
+    } else if !core_kind.capabilities().full_config_reload {
+        tracing::info!(core = %core_kind, "skipping unsupported full configuration hot reload");
+    }
+    // The shared binding now owns this bootstrap child.
+    drop(mihomo_process);
+    Ok(PreparedStartup {
+        kind: core_kind,
+        client,
+        session: core_session,
+        profile: profile_path,
+        notice: startup_notice,
+        error: startup_error,
+        initialization: None,
+    })
+}
+
+fn prepare_service_startup(
+    runtime: &tokio::runtime::Runtime,
+    resources: Option<&MihomoRuntimeResources>,
+    store: &ControlledConfigStore,
+    overrides: &[PathBuf],
+) -> Result<PreparedStartup, Box<dyn std::error::Error>> {
+    let resources = resources
+        .ok_or_else(|| std::io::Error::other(zenclash_i18n::text("core_page.service.unknown")))?;
+    let client = runtime
+        .block_on(MihomoClient::connect_service(
+            resources.home_dir().to_path_buf(),
+        ))
+        .map_err(|error| std::io::Error::other(startup::connection_message(&error)))?;
+    let session = CoreSession::open(CoreKind::Mihomo, client.clone())?;
+    let result = runtime.block_on(session.initialize_service_runtime(
+        store,
+        resources.config_file().to_path_buf(),
+        overrides.to_vec(),
+    ));
+    let (initialization, error) = match result {
+        Ok(outcome) => {
+            // A saved Commit awaiting acknowledgement has a shared, dynamic
+            // confirmation token; it must not become an immutable startup error.
+            let error = outcome
+                .failure()
+                .filter(|_| !outcome.commit_pending())
+                .map(ToString::to_string);
+            (Some(outcome), error)
+        }
+        Err(error) => (None, Some(error.to_string())),
+    };
+    let notice = initialization.as_ref().and_then(|outcome| {
+        let changes = outcome
+            .listener_fallbacks()
+            .iter()
+            .map(|fallback| {
+                format!(
+                    "{} {}→{}",
+                    fallback.listener, fallback.original, fallback.current
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("、");
+        (!changes.is_empty())
+            .then(|| zenclash_i18n::text_with("startup.listener_fallback", &[("changes", changes)]))
+    });
+    let profile = session.committed_profile_snapshot().profile_path;
+    // Even an uncertain Start is owned by this session and reaches both quit paths.
+    Ok(PreparedStartup {
+        kind: CoreKind::Mihomo,
+        client,
+        session,
+        profile,
+        notice,
+        error,
+        initialization,
+    })
+}
 fn spawn_restarted_process(executable: &Path) -> std::io::Result<()> {
     Command::new(executable).spawn()?;
     Ok(())
@@ -420,6 +593,8 @@ fn bootstrap_core(
         }
     };
     let profile_path = selected_profile.unwrap_or_else(|| discovered.config_file.clone());
+    zenclash_core::verify_ordinary_local_executable(&discovered.binary)
+        .map_err(std::io::Error::other)?;
     let (effective_path, listener_fallbacks) = if apply_persisted_layers {
         let effective_path = controlled_config_store
             .materialize_with_overrides_for_core(&profile_path, override_paths, core_kind)
@@ -740,12 +915,12 @@ fn remember_working_core(
     store: Option<&AppPreferencesStore>,
     current: &mut AppPreferences,
     kind: CoreKind,
-    process: Option<&Arc<MihomoProcess>>,
+    binary: Option<&Path>,
 ) {
-    let (Some(store), Some(process)) = (store, process) else {
+    let (Some(store), Some(binary)) = (store, binary) else {
         return;
     };
-    let binary = process.snapshot().binary;
+    let binary = binary.to_path_buf();
     match store.update(|preferences| {
         preferences.last_known_good_core = Some(kind);
         preferences.last_known_good_binary = Some(binary);

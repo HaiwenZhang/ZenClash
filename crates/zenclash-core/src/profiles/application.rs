@@ -1098,7 +1098,8 @@ mod tests {
                 .unwrap()
                 .contains("MATCH,REJECT")
         );
-        assert_eq!(session.generation(), 1);
+        // Shutdown waits for admitted persistence, then publishes its own transition.
+        assert_eq!(session.generation(), 2);
         assert_eq!(
             session.committed_profile_snapshot().profile_path.as_deref(),
             Some(fixture.store.profile_path(&fixture.candidate).as_path())
@@ -1633,7 +1634,8 @@ mod tests {
                 CoreKind::Mihomo,
                 validator,
                 fixture.root.join("validator-home"),
-            )).unwrap();
+            ))
+            .unwrap();
         let session = CoreSession::open(CoreKind::Mihomo, client).unwrap();
         let application =
             ProfileApplication::new(fixture.store.clone(), fixture.controlled.clone(), session);

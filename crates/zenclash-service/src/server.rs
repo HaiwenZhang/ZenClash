@@ -14,8 +14,11 @@ use tokio::{
 };
 
 use crate::kernel::Kernel;
-use crate::protocol::{Request, Response, RuntimeStatus, ServiceErrorCode, SessionOperation, RuntimeCandidate, RuntimeCandidateKind, RuntimeCandidatePhase};
-use crate::runtime::{StagedRuntime, ValidationConfig, RetiredRuntime};
+use crate::protocol::{
+    Request, Response, RuntimeCandidate, RuntimeCandidateKind, RuntimeCandidatePhase,
+    RuntimeStatus, ServiceErrorCode, SessionOperation,
+};
+use crate::runtime::{RetiredRuntime, StagedRuntime, ValidationConfig};
 use crate::session::{PeerIdentity, SessionAuthority, SessionError};
 use crate::{
     InstalledMetadata, PROTOCOL_VERSION, ProtocolInfo, read_frame, read_metadata, write_frame,
@@ -33,6 +36,7 @@ struct Stage {
 
 struct RuntimePatch {
     base_revision: u64,
+    requested: serde_json::Value,
     body: serde_json::Value,
     previous: serde_json::Value,
     phase: RuntimeCandidatePhase,
@@ -53,11 +57,78 @@ struct State {
     applied_revision: Option<u64>,
     runtime_unknown: bool,
     retired: Option<RetiredRuntime>,
+    readback: crate::provider_readback::ProviderReadback,
     #[cfg(test)]
     fixture_root: Option<Arc<crate::installer::OwnedTestRoot>>,
 }
 
 impl State {
+    fn readback_preflight(&mut self, revision: u64) -> Result<(), ServiceErrorCode> {
+        let snapshot = self.snapshot()?;
+        if snapshot.running || snapshot.pid.is_some() {
+            return Err(ServiceErrorCode::KernelUnavailable);
+        }
+        if self.runtime_unknown
+            || self.staged.is_some()
+            || snapshot.committed_revision != Some(revision)
+            || !self
+                .active
+                .as_ref()
+                .is_some_and(|stage| stage.revision == revision)
+        {
+            return Err(ServiceErrorCode::StaleRevision);
+        }
+        Ok(())
+    }
+
+    async fn begin_provider_cache_read(
+        &mut self,
+        revision: u64,
+        kind: crate::protocol::ProviderKind,
+        name: &str,
+    ) -> Result<Response, ServiceErrorCode> {
+        self.readback_preflight(revision)?;
+        let budget = self.readback.reserve(revision, Instant::now())?;
+        let source = self
+            .active
+            .as_ref()
+            .ok_or(ServiceErrorCode::StaleRevision)?
+            .runtime
+            .provider_cache_source(kind, name)
+            .map_err(|error| error.code())?;
+        let deadline = self.readback.deadline().ok_or(ServiceErrorCode::Internal)?;
+        let (result, scanned) =
+            tokio::task::spawn_blocking(move || source.snapshot(budget, deadline))
+                .await
+                .map_err(|_| ServiceErrorCode::Internal)?;
+        self.readback.charge(scanned, Instant::now())?;
+        if self.authority.expired_owner(Instant::now()).is_some()
+            || self
+                .authority
+                .owner()
+                .is_some_and(|peer| !crate::platform::peer_alive(peer))
+        {
+            self.readback.clear();
+            return Err(ServiceErrorCode::Expired);
+        }
+        self.readback_preflight(revision)?;
+        let snapshot = match result.map_err(|error| error.code())? {
+            None => crate::protocol::ProviderCacheRead::Absent,
+            Some(bytes) => {
+                // Compact YAML may expand; scan and transfer share one wave budget.
+                self.readback
+                    .charge(bytes.len().saturating_sub(scanned), Instant::now())?;
+                let prepared = self.readback.publish(revision, bytes, Instant::now())?;
+                crate::protocol::ProviderCacheRead::Ready {
+                    token: crate::protocol::ProviderCacheToken(prepared.token),
+                    len: prepared.len,
+                    sha256: prepared.sha256,
+                }
+            }
+        };
+        Ok(Response::ProviderCacheRead { snapshot })
+    }
+
     fn session_directory(&mut self) -> io::Result<PathBuf> {
         if let Some(directory) = &self.session_directory {
             return Ok(directory.clone());
@@ -118,6 +189,7 @@ impl State {
     }
 
     async fn release(&mut self) -> io::Result<()> {
+        self.readback.clear();
         self.stop().await?;
         self.kernel = None;
         self.cleanup_retired()?;
@@ -148,15 +220,21 @@ impl State {
     }
 
     fn cleanup_retired(&mut self) -> io::Result<()> {
+        let mut budget = crate::installer::RuntimeCleanupBudget::default();
         if let Some(retired) = &self.retired {
-            let retained: Vec<_> = self.active.iter().chain(self.staged.iter()).map(|stage| &stage.runtime).collect();
+            let retained: Vec<_> = self
+                .active
+                .iter()
+                .chain(self.staged.iter())
+                .map(|stage| &stage.runtime)
+                .collect();
             for directory in retired.directories(&retained) {
                 match std::fs::symlink_metadata(&directory) {
                     Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                     Err(error) => return Err(error),
                     Ok(_) => {}
                 }
-                self.remove_runtime(&directory)?;
+                self.remove_runtime_with_budget(&directory, &mut budget)?;
             }
             self.retired = None;
         }
@@ -180,13 +258,25 @@ impl State {
         snapshot.candidate = self.staged.as_ref().map(|stage| RuntimeCandidate {
             revision: stage.revision,
             base_revision: stage.patch.as_ref().map(|patch| patch.base_revision),
-            kind: if stage.patch.is_some() { RuntimeCandidateKind::Patch } else { RuntimeCandidateKind::Full },
-            phase: stage.patch.as_ref().map_or_else(|| {
-                if self.runtime_unknown { RuntimeCandidatePhase::Uncertain }
-                else if self.applied_revision == Some(stage.revision) { RuntimeCandidatePhase::Applied }
-                else if stage.validated { RuntimeCandidatePhase::Validated }
-                else { RuntimeCandidatePhase::Prepared }
-            }, |patch| patch.phase),
+            kind: if stage.patch.is_some() {
+                RuntimeCandidateKind::Patch
+            } else {
+                RuntimeCandidateKind::Full
+            },
+            phase: stage.patch.as_ref().map_or_else(
+                || {
+                    if self.runtime_unknown {
+                        RuntimeCandidatePhase::Uncertain
+                    } else if self.applied_revision == Some(stage.revision) {
+                        RuntimeCandidatePhase::Applied
+                    } else if stage.validated {
+                        RuntimeCandidatePhase::Validated
+                    } else {
+                        RuntimeCandidatePhase::Prepared
+                    }
+                },
+                |patch| patch.phase,
+            ),
         });
         Ok(snapshot)
     }
@@ -200,58 +290,177 @@ impl State {
     }
 
     fn remove_runtime(&self, directory: &std::path::Path) -> io::Result<()> {
+        self.remove_runtime_with_budget(
+            directory,
+            &mut crate::installer::RuntimeCleanupBudget::default(),
+        )
+    }
+
+    fn remove_runtime_with_budget(
+        &self,
+        directory: &std::path::Path,
+        budget: &mut crate::installer::RuntimeCleanupBudget,
+    ) -> io::Result<()> {
         #[cfg(test)]
         if let Some(root) = &self.fixture_root {
-            return root.remove(directory);
+            return root.remove_with_budget(directory, budget);
         }
         crate::platform::validate_protected_path(directory, true)?;
-        crate::installer::remove_private_runtime(directory, 0, &mut 0)
+        crate::installer::remove_private_runtime_with_budget(directory, 0, &mut 0, budget)
     }
 
     fn running_pid(&mut self) -> Result<u32, ServiceErrorCode> {
-        let snapshot = self.kernel.as_mut().ok_or(ServiceErrorCode::KernelUnavailable)?.snapshot().map_err(|_| ServiceErrorCode::KernelUnavailable)?;
-        if !snapshot.running { return Err(ServiceErrorCode::KernelUnavailable); }
+        let snapshot = self
+            .kernel
+            .as_mut()
+            .ok_or(ServiceErrorCode::KernelUnavailable)?
+            .snapshot()
+            .map_err(|_| ServiceErrorCode::KernelUnavailable)?;
+        if !snapshot.running {
+            return Err(ServiceErrorCode::KernelUnavailable);
+        }
         snapshot.pid.ok_or(ServiceErrorCode::KernelUnavailable)
     }
 
-    async fn prepare_patch(&mut self, base_revision: u64, body: serde_json::Value) -> Result<Response, ServiceErrorCode> {
-        let body = crate::api::canonical_runtime_patch(&body)?;
+    async fn prepare_patch(
+        &mut self,
+        base_revision: u64,
+        body: serde_json::Value,
+    ) -> Result<Response, ServiceErrorCode> {
+        let requested = crate::api::canonical_runtime_patch(&body)?;
         if let Some(candidate) = &self.staged {
-            if candidate.patch.as_ref().is_some_and(|patch| patch.base_revision == base_revision && patch.body == body) {
-                return Ok(Response::Staged { revision: candidate.revision });
+            if candidate.patch.as_ref().is_some_and(|patch| {
+                patch.base_revision == base_revision && patch.requested == requested
+            }) {
+                return Ok(Response::RuntimePatchPrepared {
+                    prepared: crate::protocol::PreparedRuntimePatch {
+                        revision: candidate.revision,
+                        effective_patch: candidate
+                            .patch
+                            .as_ref()
+                            .ok_or(ServiceErrorCode::Internal)?
+                            .body
+                            .clone(),
+                    },
+                });
             }
             return Err(ServiceErrorCode::InvalidRequest);
         }
-        if self.runtime_unknown { return Err(ServiceErrorCode::OutcomeUnknown); }
-        if self.applied_revision != Some(base_revision) || !self.active.as_ref().is_some_and(|active| active.revision == base_revision) {
+        if self.runtime_unknown {
+            return Err(ServiceErrorCode::OutcomeUnknown);
+        }
+        if self.applied_revision != Some(base_revision)
+            || !self
+                .active
+                .as_ref()
+                .is_some_and(|active| active.revision == base_revision)
+        {
             return Err(ServiceErrorCode::StaleRevision);
         }
-        self.cleanup_retired().map_err(|_| ServiceErrorCode::Internal)?;
+        self.cleanup_retired()
+            .map_err(|_| ServiceErrorCode::Internal)?;
         let pid = self.running_pid()?;
-        let actual = self.kernel.as_ref().ok_or(ServiceErrorCode::KernelUnavailable)?.runtime_config().await?;
-        if self.running_pid()? != pid { return Err(ServiceErrorCode::KernelUnavailable); }
+        let actual = self
+            .kernel
+            .as_ref()
+            .ok_or(ServiceErrorCode::KernelUnavailable)?
+            .runtime_config()
+            .await?;
+        if self.running_pid()? != pid {
+            return Err(ServiceErrorCode::KernelUnavailable);
+        }
+        let body = crate::api::complete_runtime_patch(&requested, &actual)?;
         let previous = crate::api::affected_values(&actual, &body)?;
-        let previous = crate::api::canonical_runtime_patch(&previous).map_err(|_| ServiceErrorCode::KernelFailed)?;
-        let revision = self.revision.checked_add(1).ok_or(ServiceErrorCode::Internal)?;
-        let session = self.session_directory().map_err(|_| ServiceErrorCode::Internal)?;
-        let configuration = session.join("configurations").join(format!("revision-{revision}"));
-        self.retired = Some(self.active.as_ref().ok_or(ServiceErrorCode::StaleRevision)?.runtime.retirement_for_configuration(configuration.clone()));
-        self.private_directory(&configuration).map_err(|_| ServiceErrorCode::Internal)?;
-        let runtime = self.active.as_ref().ok_or(ServiceErrorCode::StaleRevision)?.runtime.fork_patch(configuration, &body).map_err(|error| error.code())?;
+        let previous = crate::api::canonical_kernel_runtime_patch(&previous)
+            .map_err(|_| ServiceErrorCode::KernelFailed)?;
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(ServiceErrorCode::Internal)?;
+        let session = self
+            .session_directory()
+            .map_err(|_| ServiceErrorCode::Internal)?;
+        let configuration = session
+            .join("configurations")
+            .join(format!("revision-{revision}"));
+        self.retired = Some(
+            self.active
+                .as_ref()
+                .ok_or(ServiceErrorCode::StaleRevision)?
+                .runtime
+                .retirement_for_configuration(configuration.clone()),
+        );
+        self.private_directory(&configuration)
+            .map_err(|_| ServiceErrorCode::Internal)?;
+        let runtime = self
+            .active
+            .as_ref()
+            .ok_or(ServiceErrorCode::StaleRevision)?
+            .runtime
+            .fork_patch(configuration, &body)
+            .map_err(|error| error.code())?;
         self.retired = None;
-        self.staged = Some(Stage { revision, runtime, validated: true, patch: Some(RuntimePatch { base_revision, body, previous, phase: RuntimeCandidatePhase::Prepared, pid, restoring: false }) });
+        self.staged = Some(Stage {
+            revision,
+            runtime,
+            validated: true,
+            patch: Some(RuntimePatch {
+                base_revision,
+                requested,
+                body,
+                previous,
+                phase: RuntimeCandidatePhase::Prepared,
+                pid,
+                restoring: false,
+            }),
+        });
         self.revision = revision;
-        Ok(Response::Staged { revision })
+        Ok(Response::RuntimePatchPrepared {
+            prepared: crate::protocol::PreparedRuntimePatch {
+                revision,
+                effective_patch: self
+                    .staged
+                    .as_ref()
+                    .and_then(|stage| stage.patch.as_ref())
+                    .ok_or(ServiceErrorCode::Internal)?
+                    .body
+                    .clone(),
+            },
+        })
     }
 
     async fn reconcile_patch(&mut self, revision: u64) -> Result<(), ServiceErrorCode> {
-        let candidate = self.staged.as_ref().filter(|candidate| candidate.revision == revision).ok_or(ServiceErrorCode::StaleRevision)?;
-        let patch = candidate.patch.as_ref().ok_or(ServiceErrorCode::InvalidRequest)?;
-        let (body, previous, pid, base, restoring) = (patch.body.clone(), patch.previous.clone(), patch.pid, patch.base_revision, patch.restoring);
-        if self.running_pid().ok() != Some(pid) { return Err(ServiceErrorCode::OutcomeUnknown); }
-        let actual = self.kernel.as_ref().ok_or(ServiceErrorCode::OutcomeUnknown)?.runtime_config().await.map_err(|_| ServiceErrorCode::OutcomeUnknown)?;
-        if self.running_pid().ok() != Some(pid) { return Err(ServiceErrorCode::OutcomeUnknown); }
-        let selected = crate::api::affected_values(&actual, &body).map_err(|_| ServiceErrorCode::OutcomeUnknown)?;
+        let candidate = self
+            .staged
+            .as_ref()
+            .filter(|candidate| candidate.revision == revision)
+            .ok_or(ServiceErrorCode::StaleRevision)?;
+        let patch = candidate
+            .patch
+            .as_ref()
+            .ok_or(ServiceErrorCode::InvalidRequest)?;
+        let (body, previous, pid, base, restoring) = (
+            patch.body.clone(),
+            patch.previous.clone(),
+            patch.pid,
+            patch.base_revision,
+            patch.restoring,
+        );
+        if self.running_pid().ok() != Some(pid) {
+            return Err(ServiceErrorCode::OutcomeUnknown);
+        }
+        let actual = self
+            .kernel
+            .as_ref()
+            .ok_or(ServiceErrorCode::OutcomeUnknown)?
+            .runtime_config()
+            .await
+            .map_err(|_| ServiceErrorCode::OutcomeUnknown)?;
+        if self.running_pid().ok() != Some(pid) {
+            return Err(ServiceErrorCode::OutcomeUnknown);
+        }
+        let selected = crate::api::affected_values(&actual, &body)
+            .map_err(|_| ServiceErrorCode::OutcomeUnknown)?;
         let phase = if selected == previous && (restoring || body != previous) {
             RuntimeCandidatePhase::Prepared
         } else if selected == body {
@@ -259,53 +468,165 @@ impl State {
         } else {
             RuntimeCandidatePhase::Uncertain
         };
-        self.staged.as_mut().and_then(|stage| stage.patch.as_mut()).ok_or(ServiceErrorCode::StaleRevision)?.phase = phase;
+        self.staged
+            .as_mut()
+            .and_then(|stage| stage.patch.as_mut())
+            .ok_or(ServiceErrorCode::StaleRevision)?
+            .phase = phase;
         self.runtime_unknown = phase == RuntimeCandidatePhase::Uncertain;
         self.applied_revision = match phase {
             RuntimeCandidatePhase::Prepared => Some(base),
             RuntimeCandidatePhase::Applied => Some(revision),
             _ => None,
         };
-        if self.runtime_unknown { Err(ServiceErrorCode::OutcomeUnknown) } else { Ok(()) }
+        if self.runtime_unknown {
+            Err(ServiceErrorCode::OutcomeUnknown)
+        } else {
+            Ok(())
+        }
     }
 
-    async fn operate_patch(&mut self, revision: u64, restoring: bool) -> Result<Response, ServiceErrorCode> {
-        let candidate = self.staged.as_ref().filter(|candidate| candidate.revision == revision).ok_or(ServiceErrorCode::StaleRevision)?;
-        let patch = candidate.patch.as_ref().ok_or(ServiceErrorCode::InvalidRequest)?;
-        let (pid, mut phase, base, body) = (patch.pid, patch.phase, patch.base_revision, if restoring { patch.previous.clone() } else { patch.body.clone() });
-        if !self.active.as_ref().is_some_and(|active| active.revision == base) { return Err(ServiceErrorCode::StaleRevision); }
-        if self.running_pid().ok() != Some(pid) { return Err(if phase == RuntimeCandidatePhase::Uncertain { ServiceErrorCode::OutcomeUnknown } else { ServiceErrorCode::KernelUnavailable }); }
+    async fn operate_patch(
+        &mut self,
+        revision: u64,
+        restoring: bool,
+    ) -> Result<Response, ServiceErrorCode> {
+        let candidate = self
+            .staged
+            .as_ref()
+            .filter(|candidate| candidate.revision == revision)
+            .ok_or(ServiceErrorCode::StaleRevision)?;
+        let patch = candidate
+            .patch
+            .as_ref()
+            .ok_or(ServiceErrorCode::InvalidRequest)?;
+        let (pid, mut phase, base, body) = (
+            patch.pid,
+            patch.phase,
+            patch.base_revision,
+            if restoring {
+                patch.previous.clone()
+            } else {
+                patch.body.clone()
+            },
+        );
+        if !self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.revision == base)
+        {
+            return Err(ServiceErrorCode::StaleRevision);
+        }
+        if restoring {
+            let snapshot = self.snapshot()?;
+            if !snapshot.running && snapshot.pid.is_none() {
+                // Stop has been confirmed; no controller PATCH or base Commit is needed.
+                // Keep the candidate and its cleanup owner until deletion succeeds.
+                self.cleanup_retired()
+                    .map_err(|_| ServiceErrorCode::Internal)?;
+                let configuration = self
+                    .session_directory
+                    .as_ref()
+                    .ok_or(ServiceErrorCode::Internal)?
+                    .join("configurations")
+                    .join(format!("revision-{revision}"));
+                self.retired = Some(
+                    self.staged
+                        .as_ref()
+                        .ok_or(ServiceErrorCode::StaleRevision)?
+                        .runtime
+                        .retirement_for_configuration(configuration),
+                );
+                self.cleanup_retired()
+                    .map_err(|_| ServiceErrorCode::Internal)?;
+                self.staged = None;
+                self.applied_revision = None;
+                self.runtime_unknown = false;
+                return Ok(Response::Ok);
+            }
+        }
+        if self.running_pid().ok() != Some(pid) {
+            return Err(if phase == RuntimeCandidatePhase::Uncertain {
+                ServiceErrorCode::OutcomeUnknown
+            } else {
+                ServiceErrorCode::KernelUnavailable
+            });
+        }
         if phase == RuntimeCandidatePhase::Uncertain {
             self.reconcile_patch(revision).await?;
-            phase = self.staged.as_ref().and_then(|stage| stage.patch.as_ref()).ok_or(ServiceErrorCode::StaleRevision)?.phase;
+            phase = self
+                .staged
+                .as_ref()
+                .and_then(|stage| stage.patch.as_ref())
+                .ok_or(ServiceErrorCode::StaleRevision)?
+                .phase;
             match (restoring, phase) {
-                (false, RuntimeCandidatePhase::Applied) | (true, RuntimeCandidatePhase::Prepared) => return Ok(Response::Ok),
-                (true, RuntimeCandidatePhase::Applied) => {},
+                (false, RuntimeCandidatePhase::Applied)
+                | (true, RuntimeCandidatePhase::Prepared) => return Ok(Response::Ok),
+                (true, RuntimeCandidatePhase::Applied) => {}
                 // A confirmed old state permits an explicit later attempt,
                 // but never automatically resends an uncertain application.
                 _ => return Err(ServiceErrorCode::KernelFailed),
             }
         }
-        if (!restoring && phase == RuntimeCandidatePhase::Applied) || (restoring && phase == RuntimeCandidatePhase::Prepared) { return Ok(Response::Ok); }
-        self.staged.as_mut().and_then(|stage| stage.patch.as_mut()).ok_or(ServiceErrorCode::StaleRevision)?.restoring = restoring;
-        let result = self.kernel.as_ref().ok_or(ServiceErrorCode::KernelUnavailable)?.patch_runtime(&body).await;
+        if (!restoring && phase == RuntimeCandidatePhase::Applied)
+            || (restoring && phase == RuntimeCandidatePhase::Prepared)
+        {
+            return Ok(Response::Ok);
+        }
+        self.staged
+            .as_mut()
+            .and_then(|stage| stage.patch.as_mut())
+            .ok_or(ServiceErrorCode::StaleRevision)?
+            .restoring = restoring;
+        let result = self
+            .kernel
+            .as_ref()
+            .ok_or(ServiceErrorCode::KernelUnavailable)?
+            .patch_runtime(&body)
+            .await;
         if let Err(error) = &result
             && *error != ServiceErrorCode::OutcomeUnknown
-        { return result.map(|()| Response::Ok); }
+        {
+            return result.map(|()| Response::Ok);
+        }
         // Once any mutation might have been sent, failed GETs cannot turn it
         // into a prepared/zero-send candidate, including after stop or PID loss.
-        self.staged.as_mut().and_then(|stage| stage.patch.as_mut()).ok_or(ServiceErrorCode::StaleRevision)?.phase = RuntimeCandidatePhase::Uncertain;
+        self.staged
+            .as_mut()
+            .and_then(|stage| stage.patch.as_mut())
+            .ok_or(ServiceErrorCode::StaleRevision)?
+            .phase = RuntimeCandidatePhase::Uncertain;
         self.runtime_unknown = true;
         self.applied_revision = None;
         self.reconcile_patch(revision).await?;
-        let phase = self.staged.as_ref().and_then(|stage| stage.patch.as_ref()).ok_or(ServiceErrorCode::StaleRevision)?.phase;
+        let phase = self
+            .staged
+            .as_ref()
+            .and_then(|stage| stage.patch.as_ref())
+            .ok_or(ServiceErrorCode::StaleRevision)?
+            .phase;
         match (restoring, phase) {
-            (false, RuntimeCandidatePhase::Applied) | (true, RuntimeCandidatePhase::Prepared) => Ok(Response::Ok),
+            (false, RuntimeCandidatePhase::Applied) | (true, RuntimeCandidatePhase::Prepared) => {
+                Ok(Response::Ok)
+            }
             _ => Err(ServiceErrorCode::KernelFailed),
         }
     }
 
     async fn operate(&mut self, operation: SessionOperation) -> Result<Response, ServiceErrorCode> {
+        let revision = self.active.as_ref().map_or(0, |active| active.revision);
+        self.readback.expire(revision, Instant::now());
+        if !matches!(
+            &operation,
+            SessionOperation::BeginProviderCacheRead { .. }
+                | SessionOperation::ReadProviderCache { .. }
+                | SessionOperation::FinishProviderCacheRead { .. }
+                | SessionOperation::Status {}
+                | SessionOperation::Logs { .. }
+        ) {
+            self.readback.invalidate();
+        }
         if !matches!(
             &operation,
             SessionOperation::Status {} | SessionOperation::Stop {} | SessionOperation::Release {}
@@ -316,15 +637,55 @@ impl State {
             return Err(ServiceErrorCode::MaintenancePending);
         }
         match operation {
+            SessionOperation::BeginProviderCacheRead {
+                revision,
+                kind,
+                name,
+            } => self.begin_provider_cache_read(revision, kind, &name).await,
+            SessionOperation::ReadProviderCache { token, offset } => {
+                self.readback_preflight(revision)?;
+                let bytes = self
+                    .readback
+                    .read(revision, &token.0, offset, Instant::now())?;
+                Ok(Response::ProviderCacheChunk {
+                    chunk: crate::protocol::ProviderCacheChunk {
+                        offset,
+                        bytes,
+                        finished: self.readback.finished(),
+                    },
+                })
+            }
+            SessionOperation::FinishProviderCacheRead { token } => {
+                self.readback.finish(&token.0)?;
+                Ok(Response::Ok)
+            }
             SessionOperation::Status {} => {
-                if let Some(revision) = self.staged.as_ref().filter(|stage| stage.patch.as_ref().is_some_and(|patch| patch.phase == RuntimeCandidatePhase::Uncertain)).map(|stage| stage.revision) {
+                if let Some(revision) =
+                    self.staged
+                        .as_ref()
+                        .filter(|stage| {
+                            stage.patch.as_ref().is_some_and(|patch| {
+                                patch.phase == RuntimeCandidatePhase::Uncertain
+                            })
+                        })
+                        .map(|stage| stage.revision)
+                {
                     let _ = self.reconcile_patch(revision).await;
                 }
-                Ok(Response::Status { snapshot: self.snapshot()? })
-            },
-            SessionOperation::PrepareRuntimePatch { base_revision, patch } => self.prepare_patch(base_revision, patch).await,
-            SessionOperation::ApplyRuntimePatch { revision } => self.operate_patch(revision, false).await,
-            SessionOperation::RestoreRuntimePatch { revision } => self.operate_patch(revision, true).await,
+                Ok(Response::Status {
+                    snapshot: self.snapshot()?,
+                })
+            }
+            SessionOperation::PrepareRuntimePatch {
+                base_revision,
+                patch,
+            } => self.prepare_patch(base_revision, patch).await,
+            SessionOperation::ApplyRuntimePatch { revision } => {
+                self.operate_patch(revision, false).await
+            }
+            SessionOperation::RestoreRuntimePatch { revision } => {
+                self.operate_patch(revision, true).await
+            }
             SessionOperation::Release {} => {
                 self.release()
                     .await
@@ -339,7 +700,10 @@ impl State {
             }
             SessionOperation::Stage { config } => {
                 if self.runtime_unknown
-                    || self.staged.as_ref().is_some_and(|stage| stage.patch.is_some())
+                    || self
+                        .staged
+                        .as_ref()
+                        .is_some_and(|stage| stage.patch.is_some())
                     || self
                         .staged
                         .as_ref()
@@ -367,12 +731,15 @@ impl State {
                 let configuration = session
                     .join("configurations")
                     .join(format!("revision-{revision}"));
-                let runtime = StagedRuntime::new_with_configuration(
+                let mut runtime = StagedRuntime::new_with_configuration(
                     directory.clone(),
                     configuration.clone(),
                     &config,
                 )
                 .map_err(|error| error.code())?;
+                if let Some(active) = &self.active {
+                    runtime.inherit_resources(&active.runtime);
+                }
                 self.retired = Some(runtime.retirement_for_configuration(configuration.clone()));
                 self.private_directory(&directory)
                     .map_err(|_| ServiceErrorCode::Internal)?;
@@ -412,11 +779,17 @@ impl State {
                 Ok(Response::Ok)
             }
             SessionOperation::Start { revision } => {
+                if self
+                    .staged
+                    .as_ref()
+                    .is_some_and(|stage| stage.patch.is_some())
+                {
+                    return Err(ServiceErrorCode::InvalidRequest);
+                }
                 if self.snapshot()?.running {
                     return Err(ServiceErrorCode::InvalidRequest);
                 }
                 let selected = self.selected(revision)?;
-                if self.staged.as_ref().is_some_and(|stage| stage.revision == revision && stage.patch.is_some()) { return Err(ServiceErrorCode::InvalidRequest); }
                 if !selected.validated {
                     return Err(ServiceErrorCode::InvalidConfiguration);
                 }
@@ -449,6 +822,9 @@ impl State {
                 let kernel = Kernel::start(&binary, &config, &home, controller, secret)
                     .await
                     .map_err(|_| ServiceErrorCode::KernelFailed)?;
+                // A new confirmed writer lifecycle permits a new cache wave.
+                // Rejected or failed starts keep the previous cumulative budget.
+                self.readback.clear();
                 self.kernel = Some(kernel);
                 self.applied_revision = Some(revision);
                 self.runtime_unknown = false;
@@ -456,7 +832,9 @@ impl State {
             }
             SessionOperation::Validate { revision } => {
                 let selected = self.selected(revision)?;
-                if selected.patch.is_some() { return Err(ServiceErrorCode::InvalidRequest); }
+                if selected.patch.is_some() {
+                    return Err(ServiceErrorCode::InvalidRequest);
+                }
                 let home = self
                     .session_directory
                     .as_ref()
@@ -497,7 +875,13 @@ impl State {
                 Ok(Response::Ok)
             }
             SessionOperation::Reload { revision, force } => {
-                if self.staged.as_ref().is_some_and(|stage| stage.patch.is_some()) { return Err(ServiceErrorCode::InvalidRequest); }
+                if self
+                    .staged
+                    .as_ref()
+                    .is_some_and(|stage| stage.patch.is_some())
+                {
+                    return Err(ServiceErrorCode::InvalidRequest);
+                }
                 let selected = self.selected(revision)?;
                 if !selected.validated {
                     return Err(ServiceErrorCode::InvalidConfiguration);
@@ -524,7 +908,15 @@ impl State {
                     return Err(ServiceErrorCode::StaleRevision);
                 }
                 self.selected(revision)?;
-                if self.staged.as_ref().is_some_and(|stage| stage.revision == revision && stage.patch.as_ref().is_some_and(|patch| patch.phase != RuntimeCandidatePhase::Applied)) { return Err(ServiceErrorCode::StaleRevision); }
+                if self.staged.as_ref().is_some_and(|stage| {
+                    stage.revision == revision
+                        && stage
+                            .patch
+                            .as_ref()
+                            .is_some_and(|patch| patch.phase != RuntimeCandidatePhase::Applied)
+                }) {
+                    return Err(ServiceErrorCode::StaleRevision);
+                }
                 if self
                     .staged
                     .as_ref()
@@ -542,6 +934,7 @@ impl State {
                 // Cleanup cannot undo an already accepted business commit.
                 // A failed cleanup blocks further staging until retried.
                 let _ = self.cleanup_retired();
+                self.readback.expire(revision, Instant::now());
                 Ok(Response::Ok)
             }
             SessionOperation::Logs { cursor } => {
@@ -636,7 +1029,7 @@ fn session_error(error: SessionError) -> ServiceErrorCode {
     }
 }
 
-async fn connection<T: AsyncRead + AsyncWrite + Unpin>(
+async fn connection<T: AsyncRead + AsyncWrite + Unpin + Send>(
     mut stream: T,
     peer: PeerIdentity,
     shared_state: Arc<Mutex<State>>,
@@ -669,6 +1062,49 @@ async fn connection<T: AsyncRead + AsyncWrite + Unpin>(
         let request: Request = read_frame(&mut stream, FRAME_TIMEOUT)
             .await
             .map_err(io::Error::other)?;
+        if matches!(
+            &request,
+            Request::Session {
+                operation: SessionOperation::BeginProviderCacheRead { .. },
+                ..
+            }
+        ) {
+            let Request::Session {
+                proof,
+                sequence,
+                operation,
+            } = request
+            else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid readback request",
+                ));
+            };
+            // Queue cancellation has no effects. Once admitted, the owned completion
+            // retains the same state gate until its filesystem worker has released its pins.
+            let mut state = shared_state.clone().lock_owned().await;
+            let admitted = if state.closing {
+                Err(ServiceErrorCode::Expired)
+            } else if !state.authorized(&peer) || !crate::platform::peer_alive(&peer) {
+                Err(ServiceErrorCode::Unauthorized)
+            } else {
+                state
+                    .authority
+                    .admit(&peer, &proof, sequence, Instant::now())
+                    .map_err(session_error)
+            };
+            let result = match admitted {
+                Ok(()) => tokio::spawn(async move { state.operate(operation).await })
+                    .await
+                    .unwrap_or(Err(ServiceErrorCode::Internal)),
+                Err(code) => Err(code),
+            };
+            let response = result.unwrap_or_else(|code| Response::Error { code });
+            write_frame(&mut stream, &response, FRAME_TIMEOUT)
+                .await
+                .map_err(io::Error::other)?;
+            continue;
+        }
         let mut state = shared_state.lock().await;
         let mut subscription = None;
         let result = if state.closing {
@@ -774,7 +1210,7 @@ async fn connection<T: AsyncRead + AsyncWrite + Unpin>(
 
 async fn forward_events<T, S, V, F>(stream: &mut T, events: S, valid: V) -> io::Result<()>
 where
-    T: AsyncRead + AsyncWrite + Unpin,
+    T: AsyncRead + AsyncWrite + Unpin + Send,
     S: Stream<Item = io::Result<serde_json::Value>>,
     V: Fn() -> F,
     F: std::future::Future<Output = Result<(), ServiceErrorCode>>,
@@ -841,6 +1277,7 @@ pub(crate) async fn run(mut shutdown: watch::Receiver<bool>) -> io::Result<()> {
         applied_revision: None,
         runtime_unknown: false,
         retired: None,
+        readback: Default::default(),
         #[cfg(test)]
         fixture_root: None,
     }));
@@ -859,6 +1296,8 @@ pub(crate) async fn run(mut shutdown: watch::Receiver<bool>) -> io::Result<()> {
             }
             _ = heartbeat.tick() => {
                 let mut state = state.lock().await;
+                let revision = state.active.as_ref().map_or(0, |active| active.revision);
+                state.readback.expire(revision, Instant::now());
                 let stale = state.authority.expired_owner(Instant::now()).is_some()
                     || state.authority.owner().is_some_and(|peer| !crate::platform::peer_alive(peer));
                 if stale && let Err(error) = state.release().await { break Err(error); }
@@ -888,6 +1327,7 @@ pub(crate) async fn run(mut shutdown: watch::Receiver<bool>) -> io::Result<()> {
 }
 
 fn recover_stale_stages(root: &std::path::Path) -> io::Result<()> {
+    let mut budget = crate::installer::RuntimeCleanupBudget::default();
     crate::platform::validate_protected_path(root, true)?;
     for (count, entry) in std::fs::read_dir(root)?.enumerate() {
         if count >= 64 {
@@ -907,20 +1347,32 @@ fn recover_stale_stages(root: &std::path::Path) -> io::Result<()> {
         crate::platform::validate_protected_path(&entry.path(), true)?;
         // Only known private stage directories are recoverable. The native
         // service manager has already contained the previous host's children.
-        crate::installer::remove_private_runtime(&entry.path(), 0, &mut 0)?;
+        crate::installer::remove_private_runtime_with_budget(
+            &entry.path(),
+            0,
+            &mut 0,
+            &mut budget,
+        )?;
     }
     Ok(())
 }
 
 #[cfg(test)]
+#[path = "server_patch_tests.rs"]
+mod patch_tests;
+
+#[cfg(test)]
+#[path = "server_readback_tests.rs"]
+mod readback_tests;
+
+#[cfg(test)]
 mod tests {
-    mod patch_tests;
     use super::*;
     use futures_util::stream;
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    fn state_for_test(root: PathBuf) -> State {
+    pub(super) fn state_for_test(root: PathBuf) -> State {
         State {
             root,
             installation: InstalledMetadata::new(
@@ -939,8 +1391,75 @@ mod tests {
             applied_revision: Some(1),
             runtime_unknown: false,
             retired: None,
+            readback: Default::default(),
             fixture_root: None,
         }
+    }
+
+    #[tokio::test]
+    async fn staging_a_same_url_candidate_copies_cache_and_release_removes_both_groups() {
+        let fixture = Arc::new(crate::installer::OwnedTestRoot::create().unwrap());
+        let root = fixture.path().to_path_buf();
+        let session = root.join("session");
+        for path in [
+            &session,
+            &session.join("snapshots"),
+            &session.join("assets"),
+            &session.join("configurations"),
+            &session.join("snapshots/revision-1"),
+            &session.join("configurations/revision-1"),
+        ] {
+            fixture.create_directory(path).unwrap();
+        }
+        let yaml = "rule-providers:\n  r:\n    type: http\n    behavior: classical\n    url: https://example.invalid\n";
+        let runtime = StagedRuntime::new_with_configuration(
+            session.join("snapshots/revision-1"),
+            session.join("configurations/revision-1"),
+            yaml,
+        )
+        .unwrap();
+        let config = runtime.materialize("controller", "secret").unwrap();
+        let value: serde_yaml::Value =
+            serde_yaml::from_slice(&std::fs::read(config).unwrap()).unwrap();
+        let accepted_cache = PathBuf::from(value["rule-providers"]["r"]["path"].as_str().unwrap());
+        std::fs::write(&accepted_cache, b"accepted latest cache").unwrap();
+        let mut state = state_for_test(root.clone());
+        state.fixture_root = Some(fixture.clone());
+        state.session_directory = Some(session.clone());
+        state.active = Some(Stage {
+            revision: 1,
+            runtime,
+            validated: true,
+            patch: None,
+        });
+        let Response::Staged { revision } = state
+            .operate(SessionOperation::Stage {
+                config: yaml.into(),
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("expected a stage");
+        };
+        state
+            .validation_config(revision)
+            .unwrap()
+            .cleanup()
+            .unwrap();
+        let candidate = state.staged.as_ref().unwrap().runtime.prepared_directory();
+        let relative = accepted_cache
+            .strip_prefix(state.active.as_ref().unwrap().runtime.prepared_directory())
+            .unwrap();
+        assert_eq!(
+            std::fs::read(candidate.join(relative)).unwrap(),
+            b"accepted latest cache"
+        );
+        assert_eq!(
+            std::fs::read(accepted_cache).unwrap(),
+            b"accepted latest cache"
+        );
+        state.release().await.unwrap();
+        assert!(!session.exists());
     }
 
     #[tokio::test]
@@ -958,25 +1477,50 @@ mod tests {
         for revision in [1, 2] {
             let configuration = configurations.join(format!("revision-{revision}"));
             fixture.create_directory(&configuration).unwrap();
-            let mut runtime = StagedRuntime::new_with_configuration(input.clone(), configuration, "mode: rule\nclient-auth-cert: assets/cert.pem\n").unwrap();
+            let mut runtime = StagedRuntime::new_with_configuration(
+                input.clone(),
+                configuration,
+                "mode: rule\nclient-auth-cert: assets/cert.pem\n",
+            )
+            .unwrap();
             if revision == 1 {
-                runtime.upload("assets/cert.pem", 0, b"held certificate bytes", true).unwrap();
-                runtime.materialize("fixed-controller", "fixed-secret").unwrap();
+                runtime
+                    .upload("assets/cert.pem", 0, b"held certificate bytes", true)
+                    .unwrap();
+                runtime
+                    .materialize("fixed-controller", "fixed-secret")
+                    .unwrap();
             }
-            let stage = Stage { revision, runtime, validated: true, patch: None };
-            if revision == 1 { state.active = Some(stage); } else { state.staged = Some(stage); }
+            let stage = Stage {
+                revision,
+                runtime,
+                validated: true,
+                patch: None,
+            };
+            if revision == 1 {
+                state.active = Some(stage);
+            } else {
+                state.staged = Some(stage);
+            }
         }
         let asset = root.join("assets/revision-1/assets/cert.pem");
         assert_eq!(std::fs::read(&asset).unwrap(), b"held certificate bytes");
         state.applied_revision = Some(2);
-        assert!(matches!(state.operate(SessionOperation::CommitRuntime { revision: 2 }).await, Ok(Response::Ok)));
+        assert!(matches!(
+            state
+                .operate(SessionOperation::CommitRuntime { revision: 2 })
+                .await,
+            Ok(Response::Ok)
+        ));
         assert_eq!(std::fs::read(&asset).unwrap(), b"held certificate bytes");
         assert!(input.join("assets/cert.pem").is_file());
         assert!(!configurations.join("revision-1").exists());
         assert!(configurations.join("revision-2").is_dir());
         state.release().await.unwrap();
         drop(state);
-        for entry in std::fs::read_dir(&root).unwrap() { fixture.remove(&entry.unwrap().path()).unwrap(); }
+        for entry in std::fs::read_dir(&root).unwrap() {
+            fixture.remove(&entry.unwrap().path()).unwrap();
+        }
         std::fs::remove_dir(&root).unwrap();
     }
 
@@ -990,7 +1534,8 @@ mod tests {
             state.staged = Some(Stage {
                 revision: 2,
                 runtime: StagedRuntime::new(root.clone(), "mode: rule").unwrap(),
-                validated: true, patch: None,
+                validated: true,
+                patch: None,
             });
             if failed_start {
                 assert!(matches!(
@@ -1054,7 +1599,8 @@ mod tests {
             let stage = Stage {
                 revision,
                 runtime,
-                validated: true, patch: None,
+                validated: true,
+                patch: None,
             };
             if active {
                 state.active = Some(stage);
@@ -1098,7 +1644,8 @@ mod tests {
         state.staged = Some(Stage {
             revision: 2,
             runtime: StagedRuntime::new(root.clone(), "mode: rule").unwrap(),
-            validated: true, patch: None,
+            validated: true,
+            patch: None,
         });
         state.validation_config(2).unwrap().cleanup().unwrap();
         assert!(!root.join("runtime.yaml").exists());
@@ -1133,7 +1680,8 @@ mod tests {
         state.staged = Some(Stage {
             revision: 2,
             runtime: StagedRuntime::new(root.clone(), "mode: rule").unwrap(),
-            validated: true, patch: None,
+            validated: true,
+            patch: None,
         });
         assert!(matches!(
             state
@@ -1191,12 +1739,14 @@ mod tests {
         state.active = Some(Stage {
             revision: 1,
             runtime: StagedRuntime::new(root.join("old"), "mode: rule").unwrap(),
-            validated: true, patch: None,
+            validated: true,
+            patch: None,
         });
         state.staged = Some(Stage {
             revision: 2,
             runtime: StagedRuntime::new(root.join("new"), "mode: rule").unwrap(),
-            validated: true, patch: None,
+            validated: true,
+            patch: None,
         });
         state.applied_revision = Some(2);
         let result = state
@@ -1208,6 +1758,64 @@ mod tests {
         assert!(matches!(result, Ok(Response::Ok)));
         assert_eq!(observed.committed_revision, Some(2));
         assert!(state.retired.is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn runtime_cleanup_retains_shared_accepted_assets_and_failed_retired_owner() {
+        use std::{fs, os::windows::fs::OpenOptionsExt};
+        let fixture = Arc::new(crate::installer::OwnedTestRoot::create().unwrap());
+        let session = fixture.path().join("session");
+        let snapshots = session.join("snapshots/revision-1");
+        let assets = session.join("assets/revision-1");
+        let accepted = session.join("configurations/revision-2");
+        let retired = session.join("configurations/revision-1");
+        for directory in [&snapshots, &assets, &accepted, &retired] {
+            fixture.create_directory(directory).unwrap();
+        }
+        fs::write(snapshots.join("keep"), b"approved snapshot").unwrap();
+        fs::write(assets.join("keep"), b"accepted resource").unwrap();
+        let retired_file = retired.join("runtime.yaml");
+        fs::write(&retired_file, b"obsolete configuration").unwrap();
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1 | 2)
+            .open(&retired_file)
+            .unwrap();
+        let runtime = StagedRuntime::new_with_configuration(
+            snapshots.clone(),
+            accepted.clone(),
+            "mode: rule",
+        )
+        .unwrap();
+        let mut state = state_for_test(fixture.path().to_path_buf());
+        state.fixture_root = Some(fixture.clone());
+        state.retired = Some(runtime.retirement_for_configuration(retired.clone()));
+        state.active = Some(Stage {
+            revision: 2,
+            runtime,
+            validated: true,
+            patch: None,
+        });
+        assert_eq!(
+            state.cleanup_retired().unwrap_err().raw_os_error(),
+            Some(32)
+        );
+        assert!(state.retired.is_some());
+        assert_eq!(state.active.as_ref().unwrap().revision, 2);
+        assert_eq!(fs::read(assets.join("keep")).unwrap(), b"accepted resource");
+        assert_eq!(
+            fs::read(snapshots.join("keep")).unwrap(),
+            b"approved snapshot"
+        );
+        drop(held);
+        state.cleanup_retired().unwrap();
+        assert!(state.retired.is_none());
+        assert!(!retired.exists());
+        assert!(accepted.exists() && assets.exists() && snapshots.exists());
+        drop(state);
+        fixture.remove(&session).unwrap();
+        fs::remove_dir(fixture.path()).unwrap();
     }
 
     #[tokio::test]

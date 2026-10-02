@@ -11,7 +11,7 @@ use gpui_kit::{
 use gpui_kit::{Pixels, Size};
 use zenclash_core::{
     AppPreferences, AppPreferencesStore, AppearancePreference, ControlledConfigStore, CoreKind,
-    CoreSession, LogMonitor, MihomoClient, MihomoLogLevel, OperationalStatus,
+    CoreSession, LogMonitor, MihomoClient, MihomoLogLevel, OperationalStatus, ServiceManager,
     SystemProxyController, SystemProxySession, TrafficCaptureSession, TrafficHistoryStore,
     TrafficMonitor,
 };
@@ -26,7 +26,7 @@ mod traffic_history;
 mod tray;
 mod view;
 
-pub use bootstrap::{create_main_window, init};
+pub use bootstrap::{create_main_window, create_main_window_with_service_startup, init};
 use platform::{open_directory, tray_directories};
 pub use traffic_history::TrafficHistorySession;
 use tray::LatestCommandQueue;
@@ -132,6 +132,7 @@ pub struct ZenClashApp {
     tray_menu_requested: bool,
     system_proxy_commands: LatestCommandQueue<(bool, u16)>,
     operational_status: Arc<OperationalStatus>,
+    controller_indicator: view::ControllerIndicator,
     traffic_capture: TrafficCaptureSession,
     quit_state: system_proxy::QuitState,
     tun_commands: LatestCommandQueue<bool>,
@@ -182,7 +183,7 @@ pub struct AppServices {
     pub core_kind: CoreKind,
     /// Serialized runtime-core transition owner.
     pub core_session: CoreSession,
-    /// Typed external-controller client.
+    /// Typed client following the shared runtime binding.
     pub client: MihomoClient,
     /// Shared reconnecting traffic stream.
     pub traffic_monitor: Arc<TrafficMonitor>,
@@ -209,6 +210,7 @@ pub struct AppServices {
 impl ZenClashApp {
     fn new(
         services: AppServices,
+        initialization: Option<zenclash_core::CoreInitializationOutcome>,
         network_tray: Option<NetworkTrayIcon>,
         preferences_store: Option<AppPreferencesStore>,
         preferences: AppPreferences,
@@ -244,12 +246,32 @@ impl ZenClashApp {
         let system_proxy_session = preferences_store
             .clone()
             .map(|store| SystemProxySession::new(store, system_proxy_controller.clone()));
-        let traffic_capture = TrafficCaptureSession::new(core_session.clone(), controlled_config_store.clone(), system_proxy_session.clone(), profile_path.clone());
+        let traffic_capture = TrafficCaptureSession::new(
+            core_session.clone(),
+            controlled_config_store.clone(),
+            system_proxy_session.clone(),
+            profile_path.clone(),
+        );
         let _supervisor_started =
             core_session.start_supervisor_with_capture(&runtime, traffic_capture.clone());
-        let operational_status = OperationalStatus::start(&runtime, core_session.clone(), system_proxy_session.clone(), traffic_monitor.clone(), log_monitor.clone());
+        let operational_status = OperationalStatus::start(
+            &runtime,
+            core_session.clone(),
+            system_proxy_session.clone(),
+            traffic_monitor.clone(),
+            log_monitor.clone(),
+        );
+        let service_manager = ServiceManager::new(core_session.clone(), traffic_capture.clone());
+        let service_health = service_manager.clone();
+        runtime.spawn(async move {
+            let _ = service_health.refresh_health().await;
+        });
         let profile_service =
-            crate::ProfileService::new(core_session.clone(), override_store.clone());
+            crate::ProfileService::new(core_session.clone(), override_store.clone())
+                .with_service_manager(service_manager);
+        if let Some(initialization) = initialization.as_ref() {
+            profile_service.record_service_initialization(initialization);
+        }
         let runtime_page = cx.new(|cx| {
             RuntimePage::new(
                 Page::Home,
@@ -320,6 +342,7 @@ impl ZenClashApp {
             tray_menu_requested: false,
             system_proxy_commands: LatestCommandQueue::default(),
             operational_status,
+            controller_indicator: view::ControllerIndicator::default(),
             traffic_capture,
             quit_state: system_proxy::QuitState::default(),
             tun_commands: LatestCommandQueue::default(),
@@ -463,6 +486,7 @@ impl ZenClashApp {
         let mode = self.outbound_mode.clone();
         let mut traffic_updates = monitor.subscribe();
         let mut mode_updates = mode.subscribe();
+        let core = self.core_session.clone();
         let mut operational_updates = self.operational_status.subscribe();
         let mut observed_process_running = None;
         let mut initialize = true;
@@ -505,16 +529,32 @@ impl ZenClashApp {
                     mode_updates.borrow_and_update();
                 }
                 let traffic = traffic_changed.then(|| monitor.snapshot());
+                let controller_indicator = process_changed.then(|| {
+                    let snapshot = operational_updates.borrow();
+                    view::ControllerIndicator::from_observation(
+                        &snapshot.controller,
+                        core.generation(),
+                    )
+                });
                 let process_running = process_changed.then(|| {
-                    operational_updates
-                        .borrow_and_update()
+                    let snapshot = operational_updates.borrow_and_update();
+                    snapshot
                         .process
-                        .value()
+                        .is_fresh()
+                        .then(|| snapshot.process.value())
+                        .flatten()
+                        .filter(|process| process.generation == core.generation())
                         .map(|process| process.running)
                 });
                 if this
                     .update(cx, |this, cx| {
                         let mut refresh_tray = false;
+                        if let Some(indicator) = controller_indicator
+                            && indicator != this.controller_indicator
+                        {
+                            this.controller_indicator = indicator;
+                            cx.notify();
+                        }
                         if mode_changed {
                             let displayed = mode.displayed();
                             this.proxies_page.update(cx, |page, cx| {

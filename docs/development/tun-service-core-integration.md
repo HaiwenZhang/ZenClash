@@ -1,10 +1,10 @@
 # TUN 服务与 core 接入梳理
 
-- 日期：2026-10-01。
+- 修订日期：2026-10-02。
 - 对应计划：[三平台 TUN 服务开发计划](tun-service-plan.md) 的 P0、P3 与 P4 接入边界。
 - 实现方向：优先移植上游服务代码并适配本节契约，具体来源与批次见 [上游代码移植计划](tun-service-upstream-migration.md)。`CoreSession`、配置事务、捕获协调和 GPUI 保留现有责任；移植尚未完成。
-- 状态：共享 client transport、monitor、普通权限资源 bundle 与完整配置 revision 事务已有分阶段检查和行为证据。所有权、部分配置 revision 同步与 UI 消费接口正在继续迁移；最新阶段的验证范围见 [实施记录](tun-service-progress.md)，不把此前通过结果当作当前工作区或完整应用验收。
-- 当前验证环境：Windows。macOS、Linux 实机安装、授权、真实 Mihomo/TUN 与退出验收仍待执行。
+- 状态：共享传输、资源 bundle、完整配置事务、唯一 owner 生命周期和部分配置事务已有阶段验证。首次安装并开启的 Manager/页面/托盘批次与随后 main/UI 启动批次分别通过第二轮审查；启动首审 P1/P2 已修复。Windows 完整 core 534 项、Linux 完整 core 577 项通过，各 2 项忽略；Windows 完整 UI 库 294 项、binary 11 项通过。core/UI check、标准严格 clippy 和 Linux core 完整 CI lint 通过；UI 附加 lint 仍有五项问题。恢复界面、修复/卸载、高层缓存保存与三平台真实验收尚未完成。详细证据见 [实施记录](tun-service-progress.md)，阶段结果不代表完整应用验收。
+- 当前验证环境：Windows，以及 WSL Ubuntu 26.04 普通用户下的 Linux ELF 测试。两平台真实 Mihomo 普通生命周期分别 2 项通过；macOS 及三平台原生高权限服务、授权、TUN 与退出验收仍待执行。
 
 ## 1. 已有所有者与不能丢失的行为
 
@@ -22,9 +22,11 @@
 
 引用实现：[CoreSession](../../crates/zenclash-core/src/core_session.rs)、[本地进程](../../crates/zenclash-core/src/process.rs)、[客户端](../../crates/zenclash-core/src/client.rs)、[配置事务](../../crates/zenclash-core/src/controlled_config.rs)、[捕获协调](../../crates/zenclash-core/src/traffic_capture.rs)、[应用所有者](../../crates/zenclash-ui/src/app.rs)。
 
+当前实际 owner 由 [ControllerBinding](../../crates/zenclash-core/src/client/transport.rs) 随通信绑定一起发布，`CoreSession` 持业务准入、generation 与生命周期，应用级 `ServiceManager` 持维护命令及待开启意图。上表中的 `Option<Arc<MihomoProcess>>` 是接入前字段；当前 Session 和 UI 页面不另存一份可替代绑定的进程 owner。
+
 ## 2. 本地进程调用清单
 
-下表列生产路径；测试中的 fixture 构造不作为额外业务所有者。
+下表记录接入前的生产调用点与迁移要求，字段和函数描述属于规划基线。当前 `CoreSession` 旧进程字段及 UI 持久旧进程引用已移除，唯一 owner 阶段已有验证；表中的旧字段不能作为当前源码仍存在的证据。测试中的 fixture 构造不作为额外业务所有者，最新差异与未完成项见 [实施记录](tun-service-progress.md)。
 
 | 文件 | 函数或字段 | 现有进程调用和接入要求 |
 | --- | --- | --- |
@@ -54,6 +56,21 @@
 | [system_proxy/actions.rs](../../crates/zenclash-ui/src/pages/runtime/system_proxy/actions.rs) | listener 失败日志提取 | 使用 facade 有界日志快照，不能保留旧本地日志引用 |
 
 `MihomoProcess` 的生产类型引用集中在上述入口，以及 [core 的 re-export](../../crates/zenclash-core/src/lib.rs)。核心安装文件 [core_installation.rs](../../crates/zenclash-core/src/core_installation.rs) 的 `validate_core_binary` 是用户候选来源的检查，不是管理员批准副本的最终授权。
+
+### 当前生命周期调用点补充（2026-10-02）
+
+以下为排除测试后核对的当前入口，补充上面的历史基线；函数内的细分读写以源码为准。
+
+| 场景 | 当前入口与实际 owner |
+| --- | --- |
+| 启动及绑定 | [main.rs](../../crates/zenclash-ui/src/main.rs) 的普通 Local bootstrap 在构造前 spawn、等待就绪、失败 stop；[client/transport.rs](../../crates/zenclash-core/src/client/transport.rs) 随绑定发布实际 owner；正式 Mihomo 的服务优先路由见 §5.4 |
+| 绑定退休 | [client.rs](../../crates/zenclash-core/src/client.rs) 的退休 completion 在后台停止并释放 retired owner；生产切换由 [core_session/binding.rs](../../crates/zenclash-core/src/core_session/binding.rs) 的 `switch_runtime` 准入，不由页面持有旧进程 |
+| 配置及日常维护 | [core_session.rs](../../crates/zenclash-core/src/core_session.rs) 从 pinned binding 取得当前 Local 后，进入 [controlled_config.rs](../../crates/zenclash-core/src/controlled_config.rs) 的应用、重启和回滚；Stop/Restart 前后读取同代进程事实。公开本地更新 API 尚在，仓库内未找到绕 Session 的生产调用者 |
+| 内核更新 | `CoreSession::install_release` 调用 [core_update/workflow.rs](../../crates/zenclash-core/src/core_update/workflow.rs) 的停止、用户文件替换、重启和回滚；此入口不是服务保护副本升级实现 |
+| 首次服务交接 | [service_tun.rs](../../crates/zenclash-core/src/core_session/service_tun.rs) 在同一 Capture/Session 准入中停止 Local A，发布 Service；失败恢复仍使用被冻结的 A 描述与实际进程 |
+| 权限与授权后重启 | [permissions.rs](../../crates/zenclash-core/src/core_session/permissions.rs) 动态区分当前 Local 与 Service。Local 的旧 `request_grant` 及授权后 restart 仍在；首页统一服务接线见 §5.1，不能据 Session 准入就认定所有配置生命周期均已使用 ServiceManager |
+| 快照、页面与恢复 | [operational_status.rs](../../crates/zenclash-core/src/operational_status.rs) 后台转换当前 Session 进程事实；页面使用 `runtime_descriptor` 的内存元数据或当前 owner 的后台日志；[automatic.rs](../../crates/zenclash-core/src/core_session/automatic.rs) 的监督及源变化恢复继续使用同一 Session |
+| 退出 | `CoreSession::shutdown`、[app/system_proxy.rs](../../crates/zenclash-ui/src/app/system_proxy.rs) 显式退出、[app/bootstrap.rs](../../crates/zenclash-ui/src/app/bootstrap.rs) 原生 quit observer 和 main event-loop 返回后的收尾共同覆盖正常出口；[process.rs](../../crates/zenclash-core/src/process.rs) 的 Drop 只作底层兜底 |
 
 ## 3. 客户端、热载与流入口
 
@@ -133,11 +150,21 @@ UI 使用 `CoreSession::runtime_descriptor` 读取已准备的类型、执行方
 
 [traffic_capture.rs](../../crates/zenclash-core/src/traffic_capture.rs) 的 `ProductionCaptureBackend::ensure_tun_permission` 当前调用 `TunPermissionManager::request_grant`，Unix 新授权后重启本地内核；`set_tun` 通过 `CoreSession::apply` 持久化 TUN/DNS patch。这是服务工作流替换入口，不能保留隐式 setuid fallback。
 
-应用级 `ServiceOperation` 所有者记录待开启意图、业务 generation、操作阶段和当前未知结果。先读真实服务状态；未安装时交给 UI 的安装对话框确认，执行授权后回读，再调用 `switch_to_service`；最终仍经当前 capture coordinator 应用 TUN 和设备/路由事实。
+当前应用级 [ServiceManager](../../crates/zenclash-core/src/service_manager.rs) 记录待开启意图、binding/generation、操作阶段和未知结果。页面/托盘共用 `enable_tun`：后台检查服务状态，缺失时安装、停止时启动、健康时连接；授权后重新核对原意图，再进入 `TrafficCaptureSession::enable_service_tun` 的单一准入事务。首次服务使用 Stage→Validate→Start→新鲜状态回读→保存→Commit；已有服务内核仍沿用相应配置事务。对话框和收据分类修复已通过相关行为验证及第二轮独立审查，随后 Windows 完整 UI 库 294 项和 binary 11 项通过；UI CI 附加 lint 和真实设备/路由验收尚未完成。
+
+上述已审查批次覆盖 TUN 页面与托盘。P0 核对发现首页原来的 `home-tun` → `apply_home_capture_plan` 直接调用 `capture.apply(Tun)`，绕过 Manager，在 Local 分支可进入 Linux/macOS 旧 setuid 授权及重启；核对未执行授权。新的 [home.rs](../../crates/zenclash-ui/src/pages/runtime/home.rs) 已复用既有服务命令，同时使用首页已有 `action_error` 保留刷新后的失败提示。首页新增三项真实点击回归覆盖确认/取消与键盘、旧 binding 拒绝及即时错误刷新后保留，均有修前失败证据；相关 UI/ProfileService 整组 **7 项通过**，UI all-targets/all-features check 与 fmt 通过。该段记录首页首轮增量结果；随后 P2 修复、第二轮审查与导航尾修结果见下文。真实窗口及平台授权未验收，未标记整体完成。
+
+首页新批次首次审查发现 P2：`Unconfirmed` 的共用完成回调跳过错误展示，而首页没有 TUN 页的服务状态区域，造成操作结果未知时缺少可见提示。修复复用首页消息区域读取 Manager phase、ProfileService 待确认收据与 warning，详情按钮提供已有 TUN 页确认入口；保留业务收据及 generation，不新增提交所有者。真实 typed 保存收据的首页回归修前 **0 通过/1 失败**，修后反馈 **2 项通过**、完整 Windows UI **299 项通过**，UI all-targets/all-features check 与标准严格 lint 通过，第二轮最终审查 **PASS（2/2）**。第二项使用私有 prepared 事实渲染验证未知状态与 warning，不代表原生维护授权超时已执行；完整 CI 附加 lint 仍为原有五项问题。
+
+作者收尾另确认详情原先仅调用 `RuntimePage::switch_to`，没有同步 `ZenClashApp.current_page`。四行生产尾修已改用现有 `NavigateTun`，由应用 `on_navigate_tun` → `navigate` 同步外层选中页与 RuntimePage；Root 核对该既有调用链。尾修后 Home **5 项**、相关 service_tun **7 项**及 UI check、标准严格 lint、fmt/diff 通过；键盘测试证明真实导航 action 发出、TUN 页面可达及返回首页收据保留，fixture 不含完整应用侧栏。前述 299 项完整回归早于尾修，不替代最新全应用验收；没有新增第三轮同批子代理审查，真实侧栏与授权仍需实机验收。
 
 安装程序超时不能当作已取消：Windows 提权进程可能仍在运行。保持未知/等待回读状态，禁止并行重复安装或卸载。授权明确取消才结束意图并恢复原捕获模式。
 
 外部 controller 不接管；meow 不升级为 Mihomo 服务或伪装 TUN 能力。其他账户/实例的 `Occupied` 是独立状态，不应调用 Stop/Release 试图清除对方。
+
+2026-10-02 补充只读核对：正式 `ZenClashApp::new` 始终注入 Manager，TUN 页和托盘开启的 Manager 分支失败后返回，首页已统一；未找到正常主应用直接触发旧授权的调用者。但独立页面构造仍有无 Manager 的 `capture.apply(Tun)` fallback，公开 core 捕获/权限 API 也可到达 Unix `chown`/`chmod 4755`。该能力不能据 GUI 接线完成而标记为已退休。Local 权限分支还支持实验 meow，接口收尾应单独明确兼容行为，不能顺带收窄实验后端。
+
+启动拒绝 setid/file capabilities 与旧权限清理是两件事。现有服务安装复制批准的 bytes，不清除源内核权限；§7.1 所要求的所属文件识别、服务验证、停止旧内核和权限清理仍未实现。本轮未调用任何旧授权或修改权限。
 
 ### 5.2 内核更新需要两份产物事务
 
@@ -150,12 +177,58 @@ UI 使用 `CoreSession::runtime_descriptor` 读取已准备的类型、执行方
 ### 5.3 退出与恢复入口
 
 - [app/system_proxy.rs](../../crates/zenclash-ui/src/app/system_proxy.rs) 的 `begin_quit`：先 `request_shutdown`，再 capture release、history shutdown、core shutdown；失败保持窗口与 owned 状态，不能先结束 runtime。
+- [app/bootstrap.rs](../../crates/zenclash-ui/src/app/bootstrap.rs) 的 `on_app_quit` 在既有 Tokio runtime 依次等待 history 与 core shutdown；history 错误会记录但不跳过内核停止。它覆盖原生 quit 观察，与显式退出及 event-loop 返回后的再次收尾分别记录，不能据 callback 存在宣称原生 TUN 退出验收通过。
 - 同文件 `stop_core_after_capture_release`：捕获释放失败不进入成功退出；服务流程沿用这条顺序。
 - [main.rs](../../crates/zenclash-ui/src/main.rs) 的 GPUI event loop 返回后：Tokio runtime 上再次等待 core shutdown，即使历史持久化失败也停止 owned kernel；仅成功才启动重启后的 GUI。
 - [automatic.rs](../../crates/zenclash-core/src/core_session/automatic.rs)：网络 suspend/resume 与 source watcher 必须检查 shutdown/generation；服务模式也不得创建 late child。
 - 服务异常断线后：先观察会话/内核事实。租约负责有界回收，但不能拿它代替正常 Stop/Release 确认。未知状态不能静默切回本地 TUN，也不能产生两个恢复所有者。
 - 正常服务停止应覆盖 TUN disable/网络释放及真实 child reap；Windows Job 强制清理与 Unix cgroup/launchd 回收只证明异常路径的进程约束，真实网络恢复仍需原生验收。
 - 窗口隐藏到托盘不等于退出，不 release 会话，不丢弃维持业务的心跳。
+
+### 5.4 应用启动接入：生产接线与阶段回归已通过
+
+[main.rs](../../crates/zenclash-ui/src/main.rs) 已通过私有 [startup.rs](../../crates/zenclash-ui/src/startup.rs) 路由选择执行方式：显式外部控制器与实验后端沿用原入口；Mihomo 服务 Ready 时直接建立服务绑定，失败不进入 Local 自动恢复。服务缺失时，只有确认有效配置关闭 TUN 才允许普通 Local；保存了 TUN、配置事实不明、服务占用或状态未知时阻止 Local 自动启动。managed Mihomo 启动只读校验 profile、controlled config 和启用的 override 三层；坏字节保留供明确恢复，重复启动仍被阻止，不通过隔离损坏层后使用默认值决定启动。该批已通过阶段回归与第二轮审查，真实服务启动尚未验收。
+
+main/UI 接线复用以下 core 入口，不改变用户数据库、订阅 YAML 格式或依赖方向：
+
+- [MihomoRuntimeResources::prepare](../../crates/zenclash-core/src/process/discovery.rs) 在后台选择原配置/home 并准备普通权限 GeoData，不发现、复制、校验或启动 Local binary。
+- [CoreSession::initialize_service_runtime](../../crates/zenclash-core/src/core_session/service_startup.rs) 在已有已验证服务绑定的同一 session 上执行首次配置事务。`CoreInitializationOutcome` 分别保留 `saved`、`failure`、`commit_pending` 与 `listener_fallbacks`；保存完成后 Commit 确认失败不能丢失收据。取消外层等待不丢弃已准入任务，Start 未知时保留 owner 供 shutdown 收尾。
+- [MihomoClient::connect_service](../../crates/zenclash-core/src/client.rs) 建立经过身份校验的服务执行绑定；main 将初始化结果传给 App/ProfileService，启动和退出继续持有同一个 CoreSession。普通 Local 启动另检查执行文件，拒绝 Unix setuid/setgid 与 Linux file capabilities；WSL 普通用户下执行文件检查 4 项通过，包括实际权限位拒绝及 xattr 读取失败，不代表旧权限迁移已完成。
+
+main/UI 首审发现自动网络暂停 Stop 破坏 Finalizing 提交，以及自动隔离损坏层后第二次启动误判默认 TUN=false 两项问题。均取得实际先失败再通过的回归证据：同 owner 在暂停前确认 Finalizing，实际 Stop 再复核；确认失败不 Stop、不释放捕获、不改变 phase、generation 或停止意图，退出仍可 Release。损坏三层配置保留原字节，两次启动均阻止 Local。修后初始化 9 项、ProfileService 14 项、双语文案 4 项通过，第二轮审查结束。
+
+随后 Windows 完整 core **534 通过、0 失败、2 忽略**，完整 UI 库 **294 项**与 binary **11 项**通过；WSL 普通用户下 Linux 完整 core **577 通过、0 失败、2 忽略**、启动相关 **29 项**通过。core/UI check、标准严格 clippy、core 附加 lint 及 Linux core 完整 CI lint 通过。Linux 两项 Unix 更新回滚夹具的同步问题也已修复并通过独立首审，更新模块 19 通过/2 忽略。UI 完整 CI 附加 lint 在 proxy/logs/profile 文件仍有五项失败；可见恢复界面和原生高权限服务启动仍待完成。
+
+服务没有可用 owner 时，当前启动返回明确错误，尚未接通可见恢复界面；独立恢复窗口与完整离线主界面的选择待用户确认。以上传输夹具和普通文件测试不能作为真实服务、窗口交互或 TUN 验收，也不把此前 Local→Service 测试作为“重启即可直接使用服务”的证据。
+
+启动需先核对服务身份、协议、健康和授权内核版本，普通权限准备资源后直接建立 Service owner。服务缺失、损坏、占用或状态未知时准确反馈；不能先启动含 TUN 的本地配置，也不能静默依赖旧 setuid。后续在真实服务环境验收健康服务零本地 child、缺失/不兼容/占用、Start 响应丢失及启动与 shutdown 并发。
+
+### 5.5 修复与卸载接线：待确认方案
+
+底层维护授权和结果分类已有验证，Manager 的 Repair/Uninstall 命令类型不代表完整业务流程已实现。建议第一次 Local→Service 时只保存不可变本地启动描述，不永久保留旧进程 Arc；维护时先冻结最新 accepted bundle 和捕获意图，普通权限准备并校验关闭 TUN 的本地配置，再确认服务 B Stop/Release，创建并发布新的真实 Local owner，最后请求维护授权。全部阶段归同一个 capture 完成任务，shutdown 等待该任务；B 停止/释放未确认时不得拉起 Local 或执行维护。
+
+恢复资源只能来自已持有的 bundle，不能重新读取已被删除或改变的订阅/TLS 源。候选生成目录为 `ControlledConfigStore.root()/local-runtime/{slot0,slot1}`，保留原 home；GeoData 固定缓存名需有界原子替换及失败恢复。目录、写入范围与失败策略尚待确认，当前没有实施或新增持久化 schema，不能把提案记为完成。
+
+卸载授权取消后，保留服务安装和已恢复的 Local；修复取消只有在新鲜服务健康、同一意图且未退出时才尝试恢复捕获。维护结果未知禁止重发或自动启动服务。保存成功后的维护/清理错误保留保存收据；重新建立服务须新会话与新 revision，不能复用已 Release 的 owner。provider 最新缓存同步另在确认 Stop 后、Release 前接入，未接入时安全冷启动不能宣称缓存已保留。
+
+### 5.6 Managed Local 配置的 TUN 准入缺口
+
+2026-10-02 只读核对确认：启动入口拒绝含 TUN 的 Local 配置，并不覆盖启动后的配置生命周期。实际 owner 为 Local、后端为 Mihomo 时，完整应用、直接 PATCH 和缓存重启尚无统一 TUN 准入；最终有效配置启用 TUN 可进入这些执行路径。该结论是源码调用链证据，不证明普通权限成功创建网卡。本轮没有修改生产代码、运行新增回归或执行提权。
+
+| 入口 | 当前路径 |
+| --- | --- |
+| 订阅导入、激活、更新及编辑 | [ProfileApplication](../../crates/zenclash-core/src/profiles/application.rs) → [CoreSession](../../crates/zenclash-core/src/core_session.rs) → [ControlledConfig](../../crates/zenclash-core/src/controlled_config.rs) → Local 完整热载；传输结果未知时可转本地重启 |
+| 完整 apply 与 PATCH | Session 沿 pinned owner 应用；[client/api.rs](../../crates/zenclash-core/src/client/api.rs) 的直接 PATCH 发送前也缺少该门禁 |
+| 备份导入 | [backup/workflow.rs](../../crates/zenclash-ui/src/pages/runtime/settings/backup/workflow.rs) → ProfileService → 同一完整 apply；失败恢复依赖确切旧快照 |
+| 更新、监督及显式重启 | [core_update/workflow.rs](../../crates/zenclash-core/src/core_update/workflow.rs) 和 [process.rs](../../crates/zenclash-core/src/process.rs) 沿当前启动缓存恢复 |
+
+判断必须基于最终 effective 配置：源 profile → controlled patch → 有序 YAML overrides。源 `tun.enable=true` 可以被后层覆盖为 false，源 false 也可以被覆盖为 true；不能只检查订阅源。Mihomo normalizer 不关闭 TUN，`-t` 只验证配置，不能代替运行时服务准入。这些配置链未调用旧 `request_grant`；遗留公开 `TrafficCaptureSession::apply(Tun)` 的授权路径是另一项待迁移边界。
+
+建议复用一个 core 私有政策函数，只对实际 Local owner + Mihomo 生效：完整 payload 在验证、缓存和发送前检查最终 YAML；PATCH 在发送前检查启用请求；ControlledConfig 重启在最终合并后、写缓存前检查，Process 重启再检查真实启动缓存。现有单点不能同时覆盖 HTTP 与进程启动，不能仅按 endpoint 或 core kind 推断所有权。Service 保持受控 revision 事务，External 不获得本地控制能力，meow 保持实验后端边界。
+
+产品行为待确认：拒绝并提示用户显式开启服务，或将配置操作纳入获授权的服务交接事务。前者改变 Local 含 TUN 配置的应用结果；后者扩大配置操作的事务和交互范围。尚未实施，不自动改写源配置、不自动安装服务，也不依赖 OS 报错决定准入。
+
+后续行为回归应复用普通 HTTP/子进程 fixture：有效 false→true 时零发送、零重启，原 PID、缓存、持久化与 generation 保持；覆盖 override 正反覆盖、PATCH、备份、更新及自动恢复，并证明 Service/External/meow 不误拒。既有缓存回滚和确切备份恢复测试不能替代这些新增准入证据。
 
 ## 6. 行为测试与基线证据
 
@@ -249,5 +322,37 @@ CoreSession 的配置应用、模式修改、profile staging、精确恢复及�
 
 本次 Windows 调用点验证：`cargo test -p zenclash-core --lib --locked --quiet` 为 445 通过、0 失败、2 忽略；上述四项调度测试通过。`cargo check -p zenclash-core -p zenclash-ui --all-targets --locked` 和相同范围 strict Clippy `-- -D warnings` 通过。Clippy 初次发现两处新测试没有处理读取字节数，已修复并重新验证，不放宽 lint。此前 UI 私有 snapshot fixture 的合并检查阻断已由公开备份事务路径修复；本次合并检查包含独立备份重试 UI 阶段。
 
-此处只记录 binding 与调用点验证。CoreSession 现有独立 process 字段向唯一 ManagedCore owner 的迁移、retired Local 显式停止的追加行为验证、partial PATCH revision 及真实服务/TUN 验收仍按后续阶段处理，不能据本次 check 报告这些生命周期工作已经完成。
+此处只记录该阶段的 binding 与调用点验证。该次检查尚未包含 CoreSession 独立 process 字段向唯一 owner 的迁移、retired Local 显式停止的追加行为验证、partial PATCH revision 及真实服务/TUN 验收。
+
+### 唯一 owner 的生命周期阶段结果
+
+CoreSession 从 controller binding 取得当前 Local/Service owner，移除独立的旧 process 字段。Rust 调用接口改为 `CoreSession::open(kind, client)` 与 `open_with_config(kind, client, profile, overrides)`，均返回 `Result`；本机启动先用 `MihomoClient::from_process(actual_process)` 构造。外部控制器的 kind 必须在唯一且未使用的 client 上显式配置，`with_core_kind`、`with_config_validator` 同样返回 `Result`，共享后不同 kind 的 builder 请求明确拒绝。调用接口迁移不改变数据库、YAML 或磁盘数据格式。
+
+后端切换统一经过 CoreSession 的 `switch_to_process`、`switch_to_service`、`switch_to_direct`，底层 client switch 只在 crate 内使用。维护、退出、网络暂停恢复和监督器读取同代 owner；Service 重启指定已接受 revision，并持有其 immutable bundle，不能选择较新的未保存 candidate。Stop 回执丢失后必须通过原生 Status 确认 stopped，再发送 Start。Release 关闭新业务准入；未知停止或释放结果不能触发另一进程启动。
+
+`runtime_descriptor()` 仅读短 watch borrow 中的已准备元数据，不克隆实际进程 owner、不等待进程锁或执行 IPC。Local 提供真实 binary/config/home，Service 与外部不伪造本机路径。运行观察使用可选 running 与 Unknown，状态查询失败不会覆盖显式 Stopped、NetworkSuspended 或 ShuttingDown 意图。TUN 权限按当前 Local binary 或新鲜的认证 Service Status 后台观察；Service authority 只证明管理员 helper 权限，设备和路由仍独立核验。旧本机 setuid 来源不能被误用于 Service 保护副本。
+
+流量接管与 owner publication 已共享 CoreSession 的 capture gate。切换顺序为 Capture → Data → Transition → Mutation；退出先等待既有备份 admission，使用 Backup → Capture → Transition → Mutation。Capture 的内部配置应用与权限操作不再次获取 Capture 或 Backup，保留 Data → Transition → Mutation。监督器与网络恢复调用 capture release/reconcile 前先释放 Data/Transition；当前备份工作流不在持有这些锁时调用 capture，禁止后续新增反向锁序。
+
+行为测试已验证：Capture 排队时只等待 admission，取消排队不会启动后台 completion。取得 owned guard 后，native 写入、回读和必要回滚由一个 completion task 持有，外层等待被取消也不能提前退休当前 owner。该 gate 仅保证 A 的已准入接管操作收尾后才发布 B；B 的端口或后端不同后，仍需 P4 的高层切换事务在同一 capture admission 下 release/reapply 接管意图。不能把 publication gate 当作跨后端网络恢复已完成，也不能在持 gate 时重入普通 reconcile。
+
+生命周期快照用内存字段 `stop_requested` 独立保存显式停止意图。Status 失败可令观察为 Unknown，但不能清除该意图使监督器、网络恢复或权限授权重新启动内核。维护在确认已停止后重启失败会推进 generation 并报告准确未知状态；排队取消、停止前失败和确认零发送则不伪报内核运行事实已改变。未知 Stop 必须先用新鲜 Status 确认停止，不能盲发第二次 Start。
+
+本阶段 Windows core 完整回归 **483 通过、0 失败、2 忽略**；owner 生命周期 **18 项**、ServiceRuntimeSession **20 项**、capture 门栓 **15 项**通过。all-targets/all-features check、严格 clippy 和两轮独立审查完成。回归使用真实 Rust child、独立 HTTP readiness fixture 与可控服务传输，证明进程退休、请求顺序、取消和失败恢复；不证明 Mihomo、管理员授权、真实 TUN 或完整应用验收。Linux/macOS core 交叉编译分别被缺少 `x86_64-linux-gnu-gcc` 与 `cc` 阻断，尚无目标平台编译结果。
+
+### core 部分配置业务接入（阶段验证完成）
+
+新增部分候选沿用同一个 ServiceRuntimeSession 所有者；支持局部修改的字段经过 prepare/apply、业务保存及 commit，失败时执行逆 PATCH 和回读。候选从已接受 YAML 推导，并共享原资源字节；缓存与备份目标合并最终实际应用的 delta，不重新读取变化中的用户源。业务已保存但提交确认未知时仍保留已保存 delta；未保存的失败不得合并。固定版本不支持的字段继续走完整配置事务。
+
+三项实际失败的行为测试修复后通过：模式修改混入变化后的源配置、取消等待造成业务保存与启动缓存分离、备份重试覆盖后来保存的模式。生产 effective delta、保存收据和备份合并已接线；停止后未保存候选通过 Restore 清理，保存后 Finalizing 不倒退。该阶段完整 core 500 项、服务 182 项及 check/严格 clippy 通过，两轮独立审查结束；其详细证据见 [部分配置事务](tun-service-partial-config.md)。
+
+### 首次服务启动与捕获准入（阶段验证完成）
+
+`TrafficCaptureSession::enable_service_tun` 由应用级 ServiceManager 发起，同一个 completion 持有 Capture → Data → Transition → Mutation 的准入与必要恢复。首次 Full 事务使用 Stage → Validate → Start → 新鲜状态及配置回读 → 业务保存 → Commit；已有已接受内核的 Full 事务继续使用 Reload。Start 响应丢失只观察准确 revision 的状态，不盲目重复启动。
+
+本地 A 确认停止后，在 B Start 前发布同一个准备好的 ServiceRuntimeSession Arc，使退出能够看见并停止真实 owner。失败后必须先确认 B 停止/释放且恢复缓存，才允许恢复 A；B 结果未知时保留其绑定，禁止启动第二个内核。应用退出期间不恢复 A。
+
+待重试的备份目标在 A 停止前，以普通权限冻结其资源 bundle；资源与当前 held payload 相同则共享 Arc。只有真实保存成功才合并 delta 和发布 generation。保存后的 Commit 或旧 owner retirement 失败保留保存收据及当前绑定，显示准确的待确认状态；未保存的 typed error 不被后续清理错误覆盖。
+
+本阶段初次启动 3 项、捕获交接 3 项、备份目标 2 项及 retirement 2 项行为通过，其中初次启动和 retirement 有实际先失败再通过证据。完整 core **514 通过、0 失败、2 忽略**，all-targets/all-features check 与完整 CI 额外严格 lint 通过，首次独立审查通过。这些状态机、传输 fixture 和真实普通 Local 子进程证据，不替代管理员服务、真实 Mihomo、网卡和路由验收。
 

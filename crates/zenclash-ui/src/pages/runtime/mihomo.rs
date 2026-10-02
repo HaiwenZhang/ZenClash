@@ -20,24 +20,31 @@ impl RuntimePage {
         };
         let core = self.core_session.clone();
         let capture = self.traffic_capture.clone();
-        let data = self.data.clone();
+        let initial_version = core.generation();
         let task = self.runtime.spawn(async move {
             // Stop intent must suppress both crash recovery and network resume.
-            core.maintain(CoreMaintenanceIntent::Stop)
+            let version = core
+                .maintain(CoreMaintenanceIntent::Stop)
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| (initial_version, error.to_string()))?;
+            if core.generation() != version {
+                return Ok((version, RuntimeData::Empty));
+            }
             match capture
                 .release_owned()
                 .await
-                .map_err(|error| error.to_string())?
+                .map_err(|error| (version, error.to_string()))?
             {
-                zenclash_core::CaptureOutcome::ReconcileNeeded { failure, .. } => Err(failure),
-                _ => Ok(data),
+                zenclash_core::CaptureOutcome::ReconcileNeeded { failure, .. } => {
+                    Err((version, failure))
+                }
+                _ => Ok((version, RuntimeData::Empty)),
             }
         });
         Self::finish_core_maintenance(
             task,
             token,
+            initial_version,
             zenclash_i18n::text("automatic.user_stopped"),
             cx,
         );
@@ -55,23 +62,31 @@ impl RuntimePage {
         let client = self.client.clone();
         let core_session = self.core_session.clone();
         let capture = self.traffic_capture.clone();
+        let initial_version = core_session.generation();
         let task = self.runtime.spawn(async move {
-            core_session
+            let version = core_session
                 .maintain(CoreMaintenanceIntent::Restart)
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| (initial_version, error.to_string()))?;
+            if core_session.generation() != version {
+                return Ok((version, RuntimeData::Empty));
+            }
             if let zenclash_core::CaptureOutcome::ReconcileNeeded { failure, .. } = capture
                 .reconcile()
                 .await
-                .map_err(|error| error.to_string())?
+                .map_err(|error| (version, error.to_string()))?
             {
-                return Err(failure);
+                return Err((version, failure));
             }
-            load_page(client, Page::Mihomo).await
+            let data = load_page(client, Page::Mihomo)
+                .await
+                .map_err(|error| (version, error))?;
+            Ok((version, data))
         });
         Self::finish_core_maintenance(
             task,
             token,
+            initial_version,
             zenclash_i18n::text_with(
                 "core_page.notices.restarted",
                 &[("core", self.core_kind.display_name().to_owned())],
@@ -81,8 +96,9 @@ impl RuntimePage {
     }
 
     fn finish_core_maintenance(
-        task: tokio::task::JoinHandle<Result<RuntimeData, String>>,
+        task: tokio::task::JoinHandle<Result<(u64, RuntimeData), (u64, String)>>,
         token: super::PageTaskToken,
+        initial_version: u64,
         success: String,
         cx: &mut Context<Self>,
     ) {
@@ -90,21 +106,36 @@ impl RuntimePage {
             let result = task
                 .await
                 .map_err(|error| {
-                    zenclash_i18n::text_with(
-                        "core_page.errors.maintenance_task",
-                        &[("error", error.to_string())],
+                    (
+                        initial_version,
+                        zenclash_i18n::text_with(
+                            "core_page.errors.maintenance_task",
+                            &[("error", error.to_string())],
+                        ),
                     )
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.finish_mutation(token);
                 match result {
-                    Ok(data) => {
+                    Ok((version, data)) => {
+                        if !this.profile_service.is_current(version) {
+                            this.invalidate_page_load();
+                            this.refresh(cx);
+                            return;
+                        }
                         if this.replace_page_data(token, data, cx) {
                             this.notice = Some(success);
                         }
                     }
-                    Err(error) => this.set_page_error(token, error),
+                    Err((version, error)) => {
+                        if this.profile_service.is_current(version) {
+                            this.set_page_error(token, error);
+                        } else {
+                            this.invalidate_page_load();
+                            this.refresh(cx);
+                        }
+                    }
                 }
                 cx.notify();
             });
@@ -123,32 +154,22 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let (version, config, has_runtime_data) = match &self.data {
-            RuntimeData::Core { version, config } => (version.clone(), config.clone(), true),
+            RuntimeData::Core { version, config }
+                if self.data_runtime_version == self.core_session.generation() =>
+            {
+                (version.clone(), config.clone(), true)
+            }
             _ => (VersionInfo::default(), RuntimeConfig::default(), false),
         };
         let descriptor = self.core_session.runtime_descriptor();
         let managed_process = descriptor.backend() != CoreRuntimeBackend::Direct;
         let local_source = descriptor.backend() == CoreRuntimeBackend::Local;
         let operational = self.operational_status.snapshot();
-        let observed = match &operational.process {
-            Observation::Fresh { value, .. } if value.generation == self.core_session.generation() => Some(value),
-            _ => None,
-        };
-        let process_running = observed.map(|snapshot| snapshot.running);
-        let process_status = observed.map_or_else(
-            || zenclash_i18n::text(if managed_process { "core_page.status.unreadable" } else if has_runtime_data { "core_page.status.external_connected" } else { "core_page.status.external_unreachable" }),
-            |snapshot| {
-                if !snapshot.managed {
-                    zenclash_i18n::text(if has_runtime_data { "core_page.status.external_connected" } else { "core_page.status.external_unreachable" })
-                } else if snapshot.running {
-                    snapshot.pid.filter(|pid| *pid != 0).map_or_else(
-                        || zenclash_i18n::text("core_page.status.running_without_pid"),
-                        |pid| zenclash_i18n::text_with("core_page.status.running", &[("pid", pid.to_string())]),
-                    )
-                } else {
-                    zenclash_i18n::text("core_page.status.stopped")
-                }
-            },
+        let (process_status, process_running) = core_status_copy(
+            descriptor.backend(),
+            &operational.process,
+            self.core_session.generation(),
+            has_runtime_data,
         );
 
         v_flex()
@@ -337,25 +358,38 @@ impl RuntimePage {
                     ),
             )
             .child(self.render_versioned_core_updates(&version.version, local_source, theme, cx))
-            .when(descriptor.backend() == CoreRuntimeBackend::Service, |this| {
-                this.child(message_banner(zenclash_i18n::text("core_page.maintenance.service_upgrade"), theme.warning, theme))
-            })
+            .when(
+                descriptor.backend() == CoreRuntimeBackend::Service,
+                |this| {
+                    this.child(message_banner(
+                        zenclash_i18n::text("core_page.maintenance.service_upgrade"),
+                        theme.warning,
+                        theme,
+                    ))
+                },
+            )
             .when(local_source, |this| {
                 this.child(
                     setting_card(zenclash_i18n::text("core_page.process.title"), theme)
                         .child(info_row(
                             zenclash_i18n::text("core_page.process.binary"),
-                            descriptor.binary().map_or_else(|| "—".to_owned(), |path| path.display().to_string()),
+                            descriptor
+                                .binary()
+                                .map_or_else(|| "—".to_owned(), |path| path.display().to_string()),
                             theme,
                         ))
                         .child(info_row(
                             zenclash_i18n::text("core_page.process.config"),
-                            descriptor.config_file().map_or_else(|| "—".to_owned(), |path| path.display().to_string()),
+                            descriptor
+                                .config_file()
+                                .map_or_else(|| "—".to_owned(), |path| path.display().to_string()),
                             theme,
                         ))
                         .child(info_row(
                             zenclash_i18n::text("core_page.process.directory"),
-                            descriptor.home_dir().map_or_else(|| "—".to_owned(), |path| path.display().to_string()),
+                            descriptor
+                                .home_dir()
+                                .map_or_else(|| "—".to_owned(), |path| path.display().to_string()),
                             theme,
                         )),
                 )
@@ -444,5 +478,93 @@ impl RuntimePage {
                         })),
                 ),
             )
+    }
+}
+
+// The view must not infer native liveness from controller data or a previous binding.
+fn core_status_copy(
+    backend: CoreRuntimeBackend,
+    observation: &Observation<zenclash_core::ProcessStatus>,
+    generation: u64,
+    controller_available: bool,
+) -> (String, Option<bool>) {
+    let observed = match observation {
+        Observation::Fresh { value, .. } if value.generation == generation => Some(value),
+        _ => None,
+    };
+    let direct = backend == CoreRuntimeBackend::Direct;
+    let copy = if direct {
+        zenclash_i18n::text(if controller_available {
+            "core_page.status.external_connected"
+        } else {
+            "core_page.status.external_unreachable"
+        })
+    } else if let Some(process) = observed {
+        if process.running {
+            process.pid.filter(|pid| *pid != 0).map_or_else(
+                || zenclash_i18n::text("core_page.status.running_without_pid"),
+                |pid| {
+                    zenclash_i18n::text_with(
+                        "core_page.status.running",
+                        &[("pid", pid.to_string())],
+                    )
+                },
+            )
+        } else {
+            zenclash_i18n::text("core_page.status.stopped")
+        }
+    } else {
+        zenclash_i18n::text("core_page.status.unreadable")
+    };
+    (
+        copy,
+        if direct {
+            Some(controller_available)
+        } else {
+            observed.map(|status| status.running)
+        },
+    )
+}
+
+#[cfg(test)]
+mod owner_status_tests {
+    use super::*;
+    use zenclash_core::{CoreKind, ProcessRecoveryStatus, ProcessStatus};
+
+    #[test]
+    fn service_unknown_is_neither_external_nor_stopped_even_with_controller_data() {
+        let (copy, running) =
+            core_status_copy(CoreRuntimeBackend::Service, &Observation::Loading, 3, true);
+        assert_eq!(copy, zenclash_i18n::text("core_page.status.unreadable"));
+        assert_eq!(running, None);
+    }
+
+    #[test]
+    fn an_old_owner_cannot_supply_liveness_and_an_unavailable_pid_is_not_zero() {
+        let status = ProcessStatus {
+            kind: CoreKind::Mihomo,
+            managed: true,
+            pid: None,
+            running: true,
+            generation: 2,
+            exit_reason: None,
+            recovery_attempts: 0,
+            recovery: ProcessRecoveryStatus::Stable,
+        };
+        let observation = Observation::Fresh {
+            value: status,
+            observed_at_ms: 0,
+        };
+        assert_eq!(
+            core_status_copy(CoreRuntimeBackend::Local, &observation, 3, true).1,
+            None
+        );
+        let (copy, running) = core_status_copy(CoreRuntimeBackend::Service, &observation, 2, true);
+        assert_eq!(running, Some(true));
+        assert_eq!(
+            copy,
+            zenclash_i18n::text("core_page.status.running_without_pid")
+        );
+        assert!(!copy.contains("PID 0"));
     }
 }

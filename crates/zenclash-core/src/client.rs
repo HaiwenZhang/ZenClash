@@ -21,8 +21,24 @@ mod tests;
 #[cfg(test)]
 mod ownership_tests;
 
+#[cfg(test)]
+mod startup_tests;
+
 /// Result type returned by Mihomo process, endpoint and API operations.
 pub type MihomoResult<T> = Result<T, MihomoError>;
+
+/// Definitive native rejection of startup ownership, without exposing IPC internals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServiceStartupRejection {
+    /// Another authenticated application already owns the service session.
+    Occupied,
+    /// The actual user is not approved to use the installation.
+    Unauthorized,
+    /// The verified service uses an incompatible protocol.
+    Incompatible,
+    /// Administrator maintenance must finish before ownership can be acquired.
+    MaintenancePending,
+}
 
 /// Error produced while configuring, launching or communicating with Mihomo.
 #[derive(Debug, Error)]
@@ -62,6 +78,39 @@ pub enum MihomoError {
     Process(String),
 }
 
+impl MihomoError {
+    /// Returns a definitive native startup rejection, if one was observed.
+    /// Transport loss and timeouts remain unknown; this reader performs no IPC.
+    #[must_use]
+    pub fn service_startup_rejection(&self) -> Option<ServiceStartupRejection> {
+        fn rejection(
+            error: &zenclash_service::ServiceClientError,
+        ) -> Option<ServiceStartupRejection> {
+            use zenclash_service::{ServiceClientError, ServiceErrorCode};
+            match error {
+                ServiceClientError::Rejected(ServiceErrorCode::Occupied) => {
+                    Some(ServiceStartupRejection::Occupied)
+                }
+                ServiceClientError::Rejected(ServiceErrorCode::Unauthorized) => {
+                    Some(ServiceStartupRejection::Unauthorized)
+                }
+                ServiceClientError::Rejected(ServiceErrorCode::Incompatible) => {
+                    Some(ServiceStartupRejection::Incompatible)
+                }
+                ServiceClientError::Rejected(ServiceErrorCode::MaintenancePending) => {
+                    Some(ServiceStartupRejection::MaintenancePending)
+                }
+                ServiceClientError::Preflight(error) => rejection(error),
+                _ => None,
+            }
+        }
+        match self {
+            Self::Service(error) => rejection(error),
+            _ => None,
+        }
+    }
+}
+
 /// Response returned by Mihomo's `/version` endpoint.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct VersionInfo {
@@ -86,6 +135,24 @@ pub struct MihomoClient {
 }
 
 impl MihomoClient {
+    /// Acquires a verified native service owner using ordinary-user resource paths.
+    ///
+    /// The fallible HTTP-client setup completes before Acquire. After receiving a
+    /// proof, construction is infallible and the returned binding owns that exact
+    /// service session. A lost Acquire acknowledgement is never retried here.
+    ///
+    /// # Errors
+    /// Returns client-construction, native identity, authorization, ownership,
+    /// incompatible-protocol or transport errors. No local core is started.
+    pub async fn connect_service(source_home: std::path::PathBuf) -> MihomoResult<Self> {
+        let http = Self::build_http()?;
+        let service = zenclash_service::ServiceClient::connect().await?;
+        Ok(Self::with_http(
+            ControllerBinding::service_binding(service, source_home),
+            http,
+        ))
+    }
+
     /// Creates a client with bounded connection and request timeouts.
     ///
     /// # Errors
@@ -116,12 +183,19 @@ impl MihomoClient {
     }
 
     fn new_binding(binding: Arc<ControllerBinding>) -> MihomoResult<Self> {
-        let http = reqwest::Client::builder()
+        Ok(Self::with_http(binding, Self::build_http()?))
+    }
+
+    fn build_http() -> MihomoResult<reqwest::Client> {
+        Ok(reqwest::Client::builder()
             .user_agent(concat!("ZenClash/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(30))
-            .build()?;
-        Ok(Self {
+            .build()?)
+    }
+
+    fn with_http(binding: Arc<ControllerBinding>, http: reqwest::Client) -> Self {
+        Self {
             binding,
             http,
             mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -129,14 +203,13 @@ impl MihomoClient {
             pinned_binding: None,
             connections: Arc::default(),
             delay_gate: Arc::new(tokio::sync::Semaphore::new(16)),
-        })
+        }
     }
 
     /// Selects the external runtime kind during unique, unused binding construction.
     ///
     /// # Errors
     /// Rejects a different owned kind or changing kind after sharing or using the binding.
-    #[must_use]
     pub fn with_core_kind(mut self, kind: CoreKind) -> MihomoResult<Self> {
         if self.binding.descriptor().kind() != kind {
             Arc::get_mut(&mut self.binding)
@@ -161,7 +234,8 @@ impl MihomoClient {
     }
 
     pub(crate) fn write_scopes(&self) -> Vec<std::path::PathBuf> {
-        let mut scopes = self.current_config_validator()
+        let mut scopes = self
+            .current_config_validator()
             .map_or_else(Vec::new, |validator| validator.write_scopes());
         match self.owned_core() {
             Some(OwnedCore::Local(process)) => {
@@ -414,11 +488,37 @@ impl MihomoClient {
             .await
     }
 
+    pub(crate) async fn publish_prepared_service(
+        &self,
+        runtime: Arc<crate::service_runtime_session::ServiceRuntimeSession>,
+        guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> MihomoResult<tokio::sync::OwnedMutexGuard<()>> {
+        self.publish_owned_backend(transport::ControllerBackend::Service { runtime }, guard)
+            .await
+    }
+
+    pub(crate) async fn publish_prepared_process(
+        &self,
+        process: Arc<MihomoProcess>,
+        guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> MihomoResult<tokio::sync::OwnedMutexGuard<()>> {
+        self.publish_owned_backend(transport::ControllerBackend::Local(process), guard)
+            .await
+    }
+
     async fn publish_backend(
         &self,
         backend: transport::ControllerBackend,
         guard: tokio::sync::OwnedMutexGuard<()>,
     ) -> MihomoResult<()> {
+        self.publish_owned_backend(backend, guard).await.map(drop)
+    }
+
+    async fn publish_owned_backend(
+        &self,
+        backend: transport::ControllerBackend,
+        guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> MihomoResult<tokio::sync::OwnedMutexGuard<()>> {
         self.binding.ensure_open()?;
         let replacement = match &backend {
             transport::ControllerBackend::Local(process) => Some(process.clone()),
@@ -441,8 +541,7 @@ impl MihomoClient {
             drop(replacement);
             // Keep publication admission even if the awaiting caller is cancelled.
             // At most one retirement task can exist for this shared binding.
-            drop(guard);
-            result
+            result.map(|()| guard)
         })
         .await
         .map_err(|error| {

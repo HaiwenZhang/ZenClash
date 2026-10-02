@@ -30,6 +30,7 @@
 - **Desktop integration**: System proxy, TUN, launch at login, and quick controls from the tray.
 - **Monitoring and diagnostics**: Live traffic, active connections, rules, logs, network diagnostics, and local usage history.
 - **Native interface**: Simplified Chinese and English, with light, dark, and system appearance modes.
+  The new desktop layout includes home area charts and metric trends, profile quota charts, connection and rule statistics, log details, and Settings section navigation. See the [UI implementation record](docs/development/ui-design-implementation.md) for current implementation and acceptance coverage. Home process traffic queries locally recorded samples from the last 24 hours; recording pauses or missing samples mean coverage may be incomplete.
 
 ## Download and Install
 
@@ -52,13 +53,13 @@ The macOS package is not yet notarized by Apple. See the [macOS installation gui
 2. Select a profile on Home, then open **Proxies** to choose a node and test its latency.
 3. Enable the system proxy or TUN as needed, then choose Rule, Global, or Direct mode.
 
-TUN requires system permissions. On Windows, ZenClash cannot yet request the administrator permissions needed for TUN from within the app; use the system proxy to get started.
+TUN requires system permissions. The service mode under development has an in-app first-install and enable flow, but native acceptance on all three platforms is still pending. Check the documentation for your version; use the system proxy to get started.
 
 ## Development
 
 You need the current Rust stable toolchain, your platform's native build tools, and a working Mihomo executable. On Linux, install dependencies with `sudo scripts/install_linux_build_deps.sh`.
 
-The TUN service for all three platforms is being implemented according to the [development plan](docs/development/tun-service-plan.md). In-app installation and native acceptance remain unfinished. Packaging scripts for all three platforms now include the separate service artifact; see the [service packaging record](docs/development/tun-service-packaging.md) for deployment boundaries and validation commands.
+The TUN service for all three platforms is being implemented according to the [development plan](docs/development/tun-service-plan.md). The in-app first-install and enable flow has initial integration and behavior tests; complete repair, uninstall, and native acceptance on all three platforms remain unfinished. Packaging scripts for all three platforms now include the separate service artifact; see the [service packaging record](docs/development/tun-service-packaging.md) for deployment boundaries and validation commands.
 
 Run from the repository root on macOS or Linux:
 

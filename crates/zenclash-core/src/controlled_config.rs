@@ -79,6 +79,46 @@ struct AcceptedRuntime {
     previous_payload: Option<String>,
 }
 
+pub(crate) struct ServiceTunPersistence {
+    cache: RuntimeCacheTransaction,
+    store: ControlledConfigStore,
+    update: ControlledConfigUpdate,
+}
+
+impl ServiceTunPersistence {
+    pub(crate) async fn save(&self) -> ControlledConfigResult<()> {
+        let store = self.store.clone();
+        let update = self.update.clone();
+        tokio::task::spawn_blocking(move || store.commit(&update))
+            .await
+            .map_err(|error| ControlledConfigError::Task(error.to_string()))?
+    }
+    pub(crate) async fn rollback(self) -> ControlledConfigResult<()> {
+        rollback_runtime_cache(self.cache).await
+    }
+    pub(crate) fn saved(self) {
+        self.cache.commit();
+    }
+}
+
+/// Receipt created only after durable business persistence, even if finalization fails.
+pub(crate) struct SavedRuntimeReceipt {
+    pub(crate) delta: Option<serde_json::Value>,
+    pub(crate) confirmation: ControlledConfigResult<()>,
+}
+
+pub(crate) struct ServiceStartupPersistence(RuntimeCacheTransaction);
+
+impl ServiceStartupPersistence {
+    pub(crate) fn saved(self) {
+        self.0.commit();
+    }
+
+    pub(crate) async fn rollback(self) -> ControlledConfigResult<()> {
+        rollback_runtime_cache(self.0).await
+    }
+}
+
 impl AcceptedRuntime {
     async fn commit(self) -> ControlledConfigResult<()> {
         self.cache.finalize(self.runtime.commit()).await
@@ -222,6 +262,9 @@ pub enum ControlledConfigError {
         /// Outbound mode supplied by the enabled YAML override chain.
         effective: String,
     },
+    /// An enabled override conflicts with a requested partial configuration field.
+    #[error("{}", zenclash_i18n::text("overrides.errors.partial_conflict"))]
+    PartialOverrideConflict,
     /// The override exceeded the defensive file-size limit.
     #[error("受控配置超过 16 MiB 限制")]
     TooLarge,
@@ -622,7 +665,8 @@ impl ControlledConfigStore {
     ) -> ControlledConfigResult<()> {
         self.apply_json_update_for_session(client, profile, patch, overrides)
             .await
-            .map_err(|error| error.cause)
+            .map_err(|error| error.cause)?
+            .confirmation
     }
 
     pub(crate) async fn apply_json_update_for_session(
@@ -631,7 +675,12 @@ impl ControlledConfigStore {
         profile: impl AsRef<Path>,
         patch: &serde_json::Value,
         overrides: Vec<PathBuf>,
-    ) -> Result<(), RuntimeMutationError> {
+    ) -> Result<SavedRuntimeReceipt, RuntimeMutationError> {
+        if client.service_client().is_some() && service_partial_patch(patch) {
+            return self
+                .apply_partial_update_for_session(client, profile, patch, overrides)
+                .await;
+        }
         let client = client.pin_binding()?;
         let write_lease = self
             .acquire_write_lease_for_paths(client.write_scopes())
@@ -699,11 +748,10 @@ impl ControlledConfigStore {
                 }
                 .map_err(RuntimeMutationError::attempted);
             }
-            cache
-                .commit()
-                .await
-                .map_err(RuntimeMutationError::attempted)?;
-            Ok(())
+            Ok(SavedRuntimeReceipt {
+                delta: None,
+                confirmation: cache.commit().await,
+            })
         })
         .await
         .map_err(|error| {
@@ -733,7 +781,8 @@ impl ControlledConfigStore {
     ) -> ControlledConfigResult<()> {
         self.apply_mode_update_for_session(client, profile, mode, overrides)
             .await
-            .map_err(|error| error.cause)
+            .map_err(|error| error.cause)?
+            .confirmation
     }
 
     pub(crate) async fn apply_mode_update_for_session(
@@ -742,126 +791,329 @@ impl ControlledConfigStore {
         profile: impl AsRef<Path>,
         mode: &str,
         overrides: Vec<PathBuf>,
-    ) -> Result<(), RuntimeMutationError> {
+    ) -> Result<SavedRuntimeReceipt, RuntimeMutationError> {
+        let mode = mode.trim().to_ascii_lowercase();
+        if !matches!(mode.as_str(), "rule" | "global" | "direct") {
+            return Err(MihomoError::InvalidInput(format!("不支持的出站模式：{mode}")).into());
+        }
+        self.apply_partial_update_for_session(
+            client,
+            profile,
+            &serde_json::json!({"mode":mode}),
+            overrides,
+        )
+        .await
+    }
+
+    async fn apply_partial_update_for_session(
+        &self,
+        client: &MihomoClient,
+        profile: impl AsRef<Path>,
+        patch: &serde_json::Value,
+        overrides: Vec<PathBuf>,
+    ) -> Result<SavedRuntimeReceipt, RuntimeMutationError> {
         let client = client.pin_binding()?;
-        let write_lease = self
+        let lease = self
             .acquire_write_lease_for_paths(client.write_scopes())
             .await?;
         client.ensure_binding_current()?;
-        let leased_client = client.with_write_lease(&write_lease)?;
-        let client = &leased_client;
-        let leased_store = self.with_write_lease(&write_lease);
-        let mode = mode.trim().to_ascii_lowercase();
-        if !matches!(mode.as_str(), "rule" | "global" | "direct") {
-            return Err(
-                ControlledConfigError::Profile(MihomoError::InvalidInput(format!(
-                    "不支持的出站模式：{mode}"
-                )))
-                .into(),
-            );
-        }
-
-        let _mutation_guard = leased_store.mutation_gate.lock().await;
+        let client = client.with_write_lease(&lease)?;
+        let store = self.with_write_lease(&lease);
+        let guard = store.mutation_gate.clone().lock_owned().await;
         client.ensure_binding_current()?;
-        let prepare_lease = leased_store.write_access.acquire();
-        let prepare_store = leased_store.with_write_lease(&prepare_lease);
         let profile = profile.as_ref().to_path_buf();
-        let patch = serde_json::json!({"mode": mode.clone()});
-        let update = tokio::task::spawn_blocking(move || {
-            let _write_lease = prepare_lease;
-            prepare_store.prepare_json_update(profile, &patch)
+        let patch = patch.clone();
+        // An admitted owner retains data authority through persistence and finalization.
+        tokio::spawn(async move {
+            let _lease = lease;
+            let _guard = guard;
+            store
+                .apply_partial_admitted(client, profile, patch, overrides)
+                .await
         })
         .await
-        .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        let next_base = update.next_payload().to_owned();
-        let requested = mode.clone();
-        let next_runtime = tokio::task::spawn_blocking(move || {
-            let runtime = merge_payload_overrides(&next_base, &overrides)?;
-            let value: Value = serde_yaml::from_str(&runtime)?;
-            let effective = value.get("mode").unwrap_or(&Value::Null);
-            if !effective
-                .as_str()
-                .is_some_and(|mode| mode.eq_ignore_ascii_case(&requested))
-            {
-                let effective = match effective.as_str() {
-                    Some(mode) => mode.to_owned(),
-                    None => serde_yaml::to_string(effective)?.trim().to_owned(),
-                };
-                return Err(ControlledConfigError::ModeOverrideConflict {
-                    requested,
-                    effective,
-                });
-            }
-            Ok::<_, ControlledConfigError>(runtime)
-        })
-        .await
-        .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        let next_runtime = leased_store.apply_session_listener_fallbacks(&next_runtime)?;
-        let cache_lease = leased_store.write_access.acquire();
-        let cache_store = leased_store.with_write_lease(&cache_lease);
-        let cache = tokio::task::spawn_blocking(move || {
-            let _write_lease = cache_lease;
-            cache_store.stage_runtime_payload(&next_runtime)
-        })
-        .await
-        .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        .map_err(|error| {
+            RuntimeMutationError::attempted(ControlledConfigError::Task(error.to_string()))
+        })?
+    }
 
-        let previous_mode = match client.runtime_config().await {
-            Ok(config) => config.mode,
-            Err(error) => {
-                rollback_runtime_cache(cache).await?;
-                return Err(ControlledConfigError::Profile(error).into());
-            }
+    async fn apply_partial_admitted(
+        &self,
+        client: MihomoClient,
+        profile: PathBuf,
+        patch: serde_json::Value,
+        overrides: Vec<PathBuf>,
+    ) -> Result<SavedRuntimeReceipt, RuntimeMutationError> {
+        let worker_lease = self.write_access.acquire();
+        let worker = self.with_write_lease(&worker_lease);
+        let requested = patch.clone();
+        let fallback_bundle = client.service_runtime_snapshot()?;
+        let mut update = tokio::task::spawn_blocking(move || {
+            let _lease = worker_lease;
+            worker.prepare_partial_update(
+                &profile,
+                &requested,
+                &overrides,
+                fallback_bundle.as_deref(),
+            )
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let previous_payload = update.previous_payload.clone();
+        let prepared = if client.service_client().is_some() {
+            Some(client.prepare_runtime_patch(&patch).await?)
+        } else {
+            None
         };
-        #[cfg(test)]
-        if let Some(gate) = &leased_store.mode_patch_gate {
-            gate.wait().await;
-        }
-        if let Err(error) = client.set_mode(&mode).await {
-            if matches!(error, MihomoError::StaleBinding) {
-                rollback_runtime_cache(cache).await?;
-                return Err(ControlledConfigError::Profile(error).into());
+        let delta = prepared
+            .as_ref()
+            .and_then(|prepared| prepared.effective_delta())
+            .unwrap_or(patch);
+        // Persist the effective delta too: implicit TUN enable and DNS normalization
+        // must survive later full applications of the controlled layer.
+        update.next_patch = merge_held_delta(
+            std::str::from_utf8(&update.next_patch)
+                .map_err(|_| ControlledConfigError::NotMapping)?,
+            &delta,
+        )?
+        .into_bytes();
+        let next_runtime = merge_held_delta(&previous_payload, &delta)?;
+        let worker_lease = self.write_access.acquire();
+        let worker = self.with_write_lease(&worker_lease);
+        let cache = tokio::task::spawn_blocking(move || {
+            let _lease = worker_lease;
+            worker.stage_runtime_payload(&next_runtime)
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        let (runtime, previous_mode) = if let Some(prepared) = prepared {
+            match prepared.apply(false).await {
+                Ok(runtime) => (Some(runtime), None),
+                Err(error) => {
+                    let attempted = error.mutation_result_unknown();
+                    let cause = match rollback_runtime_cache(cache).await {
+                        Ok(()) => ControlledConfigError::Profile(error),
+                        Err(rollback) => ControlledConfigError::Transaction(format!(
+                            "部分更新失败：{error}；缓存恢复：{rollback}"
+                        )),
+                    };
+                    return Err(RuntimeMutationError { cause, attempted });
+                }
             }
-            let cache_rollback = rollback_runtime_cache(cache).await;
-            let runtime_rollback = client.set_mode(&previous_mode).await;
-            return match (cache_rollback, runtime_rollback) {
-                (Ok(()), Ok(())) => Err(ControlledConfigError::Profile(error)),
-                (cache, runtime) => Err(ControlledConfigError::Transaction(format!(
-                    "切换模式失败：{error}；缓存恢复：{}；Mihomo 恢复：{}",
-                    result_label(cache),
-                    result_label(runtime)
-                ))),
+        } else {
+            let previous_mode = match client.runtime_config().await {
+                Ok(config) => config.mode,
+                Err(error) => {
+                    rollback_runtime_cache(cache).await?;
+                    return Err(error.into());
+                }
+            };
+            #[cfg(test)]
+            if let Some(gate) = &self.mode_patch_gate {
+                gate.wait().await;
             }
-            .map_err(RuntimeMutationError::attempted);
-        }
-
-        let commit_lease = leased_store.write_access.acquire();
-        let commit_store = leased_store.with_write_lease(&commit_lease);
-        let commit_update = update.clone();
+            if let Err(error) = client.patch_configs_verified(&delta).await {
+                if matches!(error, MihomoError::StaleBinding) {
+                    rollback_runtime_cache(cache).await?;
+                    return Err(error.into());
+                }
+                let cache_result = rollback_runtime_cache(cache).await;
+                let runtime_result = client.set_mode(&previous_mode).await;
+                return Err(RuntimeMutationError::attempted(
+                    ControlledConfigError::Transaction(format!(
+                        "部分更新失败：{error}；缓存恢复：{}；内核恢复：{}",
+                        result_label(cache_result),
+                        result_label(runtime_result)
+                    )),
+                ));
+            }
+            (None, Some(previous_mode))
+        };
+        let worker_lease = self.write_access.acquire();
+        let worker = self.with_write_lease(&worker_lease);
         let commit = tokio::task::spawn_blocking(move || {
-            let _write_lease = commit_lease;
-            commit_store.commit(&commit_update)
+            let _lease = worker_lease;
+            worker.commit(&update)
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))
         .and_then(|result| result);
         if let Err(error) = commit {
-            let cache_rollback = rollback_runtime_cache(cache).await;
-            let runtime_rollback = client.set_mode(&previous_mode).await;
-            return match (cache_rollback, runtime_rollback) {
-                (Ok(()), Ok(())) => Err(ControlledConfigError::Transaction(format!(
-                    "保存模式失败，启动缓存与 Mihomo 均已恢复上一模式：{error}"
-                ))),
-                (cache, runtime) => Err(ControlledConfigError::Transaction(format!(
-                    "保存模式失败：{error}；缓存恢复：{}；Mihomo 恢复：{}",
-                    result_label(cache),
-                    result_label(runtime)
-                ))),
-            }
-            .map_err(RuntimeMutationError::attempted);
+            let cache_result = rollback_runtime_cache(cache).await;
+            let runtime_result = if let Some(runtime) = runtime {
+                runtime.rollback(Some(previous_payload)).await
+            } else {
+                client
+                    .set_mode(previous_mode.as_deref().ok_or_else(|| {
+                        ControlledConfigError::Transaction("缺少上一模式快照".into())
+                    })?)
+                    .await
+            };
+            return Err(RuntimeMutationError::attempted(
+                ControlledConfigError::Transaction(format!(
+                    "保存部分配置失败：{error}；缓存恢复：{}；内核恢复：{}",
+                    result_label(cache_result),
+                    result_label(runtime_result)
+                )),
+            ));
         }
-        cache.commit();
-        Ok(())
+        let confirmation = if let Some(runtime) = runtime {
+            cache.finalize(runtime.commit()).await
+        } else {
+            cache.commit();
+            Ok(())
+        };
+        Ok(SavedRuntimeReceipt {
+            delta: Some(delta),
+            confirmation,
+        })
+    }
+
+    pub(crate) async fn lock_service_tun_mutation(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.mutation_gate.clone().lock_owned().await
+    }
+
+    pub(crate) async fn prepare_service_tun_update(
+        &self,
+        profile: PathBuf,
+        overrides: Vec<PathBuf>,
+        bundle: Option<Arc<crate::ServiceRuntimeBundle>>,
+    ) -> ControlledConfigResult<ControlledConfigUpdate> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || {
+            if store.cached_runtime_payload()?.is_none() && bundle.is_none() {
+                return Err(ControlledConfigError::Transaction(zenclash_i18n::text(
+                    "core_page.service.no_snapshot",
+                )));
+            }
+            store.prepare_partial_update(
+                &profile,
+                &serde_json::json!({"tun":{"enable":true},"dns":{"enable":true}}),
+                &overrides,
+                bundle.as_deref(),
+            )
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))?
+    }
+
+    pub(crate) async fn prepare_service_startup_payload(
+        &self,
+        profile: PathBuf,
+        overrides: Vec<PathBuf>,
+    ) -> ControlledConfigResult<(String, Vec<ListenerPortFallback>)> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let payload = store.effective_with_overrides(profile, &overrides)?;
+            let payload = normalize_runtime_payload(CoreKind::Mihomo, payload)?;
+            let payload = store.apply_session_listener_fallbacks(&payload)?;
+            let mut document = serde_yaml::from_str::<Value>(&payload)?;
+            let mut next_session = store.session_listener_fallbacks.lock().clone();
+            let resolved = resolve_conflicts(&mut document, &mut next_session)
+                .map_err(ControlledConfigError::ListenerFallback)?;
+            let payload = serde_yaml::to_string(&document)?;
+            if payload.len() > MAX_PROFILE_BYTES {
+                return Err(ControlledConfigError::TooLarge);
+            }
+            *store.session_listener_fallbacks.lock() = next_session;
+            Ok((
+                payload,
+                resolved
+                    .into_iter()
+                    .map(|(listener, fallback)| ListenerPortFallback {
+                        listener,
+                        original: fallback.original,
+                        current: fallback.current,
+                    })
+                    .collect(),
+            ))
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))?
+    }
+
+    pub(crate) async fn stage_service_startup_payload(
+        &self,
+        payload: String,
+    ) -> ControlledConfigResult<ServiceStartupPersistence> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || {
+            store
+                .stage_runtime_payload(&payload)
+                .map(ServiceStartupPersistence)
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))?
+    }
+
+    pub(crate) async fn stage_service_tun_update(
+        &self,
+        update: ControlledConfigUpdate,
+    ) -> ControlledConfigResult<ServiceTunPersistence> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let cache = store.stage_runtime_payload(&update.next_payload)?;
+            Ok(ServiceTunPersistence {
+                cache,
+                store,
+                update,
+            })
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))?
+    }
+
+    fn prepare_partial_update(
+        &self,
+        profile: &Path,
+        patch: &serde_json::Value,
+        overrides: &[PathBuf],
+        fallback_bundle: Option<&crate::ServiceRuntimeBundle>,
+    ) -> ControlledConfigResult<ControlledConfigUpdate> {
+        let _transaction = self.transaction.lock();
+        let (expected_patch, mut current) = self.load_unlocked()?;
+        // Held cache is authoritative; changed profile sources never enter an accepted delta.
+        let previous_payload = match self.cached_runtime_payload()? {
+            Some(payload) => payload,
+            None if fallback_bundle.is_some() => fallback_bundle
+                .ok_or(ControlledConfigError::NotMapping)?
+                .yaml()
+                .to_owned(),
+            None => {
+                merge_payload_overrides(&merge_profile_patch(profile, current.clone())?, overrides)?
+            }
+        };
+        let next_payload = merge_held_delta(&previous_payload, patch)?;
+        let overridden = merge_payload_overrides(&next_payload, overrides)?;
+        let actual: serde_json::Value = serde_yaml::from_str(&overridden)?;
+        if !contains_delta(&actual, patch) {
+            if let Some(mode) = patch.get("mode").and_then(serde_json::Value::as_str) {
+                return Err(ControlledConfigError::ModeOverrideConflict {
+                    requested: mode.into(),
+                    effective: actual.get("mode").map_or_else(
+                        || "null".into(),
+                        |value| {
+                            value
+                                .as_str()
+                                .map_or_else(|| value.to_string(), str::to_owned)
+                        },
+                    ),
+                });
+            }
+            return Err(ControlledConfigError::PartialOverrideConflict);
+        }
+        merge_yaml(&mut current, serde_yaml::to_value(patch)?);
+        require_mapping(&current)?;
+        let next_patch = serde_yaml::to_string(&current)?.into_bytes();
+        if next_patch.len() > MAX_PROFILE_BYTES {
+            return Err(ControlledConfigError::TooLarge);
+        }
+        Ok(ControlledConfigUpdate {
+            expected_patch,
+            next_patch,
+            previous_payload,
+            next_payload,
+        })
     }
 
     /// Applies and persists a JSON patch by restarting a managed core with the
@@ -1748,4 +2000,60 @@ async fn rollback_cache_and_restart(
 
 fn result_label<T, E: std::fmt::Display>(result: Result<T, E>) -> String {
     result.map_or_else(|error| format!("失败（{error}）"), |_| "成功".into())
+}
+
+pub(crate) fn service_partial_patch(patch: &serde_json::Value) -> bool {
+    patch.as_object().is_some_and(|object| {
+        !object.is_empty()
+            && object.iter().all(|(key, value)| match key.as_str() {
+                "mode" | "log-level" | "port" | "socks-port" | "mixed-port" | "redir-port"
+                | "tproxy-port" | "ipv6" | "allow-lan" | "tcp-concurrent" | "bind-address"
+                | "interface-name" | "find-process-mode" => true,
+                "tun" => value.as_object().is_some_and(|tun| {
+                    !tun.is_empty()
+                        && tun.iter().all(|(key, value)| match key.as_str() {
+                            "mtu" => value
+                                .as_u64()
+                                .is_some_and(|mtu| (576..=65535).contains(&mtu)),
+                            "enable"
+                            | "stack"
+                            | "device"
+                            | "auto-route"
+                            | "auto-detect-interface"
+                            | "auto-redirect"
+                            | "strict-route"
+                            | "gso"
+                            | "dns-hijack" => true,
+                            _ => false,
+                        })
+                }),
+                _ => false,
+            })
+    })
+}
+
+pub(crate) fn merge_held_delta(
+    payload: &str,
+    patch: &serde_json::Value,
+) -> ControlledConfigResult<String> {
+    let mut value: Value = serde_yaml::from_str(payload)?;
+    merge_yaml(&mut value, serde_yaml::to_value(patch)?);
+    let payload = serde_yaml::to_string(&value)?;
+    if payload.len() > MAX_PROFILE_BYTES {
+        return Err(ControlledConfigError::TooLarge);
+    }
+    Ok(payload)
+}
+
+fn contains_delta(actual: &serde_json::Value, patch: &serde_json::Value) -> bool {
+    match patch {
+        serde_json::Value::Object(object) => actual.as_object().is_some_and(|actual| {
+            object.iter().all(|(key, value)| {
+                actual
+                    .get(key)
+                    .is_some_and(|actual| contains_delta(actual, value))
+            })
+        }),
+        _ => actual == patch,
+    }
 }

@@ -4,6 +4,7 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_root="$(cd "${script_dir}/../.." && pwd)"
 test_root="$(mktemp -d)"
+[[ "${test_root}" == /* && "${test_root}" != / && -d "${test_root}" && ! -L "${test_root}" ]]
 mock_bin="${test_root}/bin"
 mock_target="${test_root}/target"
 app_dir="${test_root}/output/ZenClash.app"
@@ -38,6 +39,8 @@ case " $* " in
       missing) exit 0 ;;
       empty) : >"${output}/zenclash-service" ;;
       version) printf '#!/usr/bin/env bash\nexit 1\n' >"${output}/zenclash-service" ;;
+      empty_version) printf '#!/usr/bin/env bash\nexit 0\n' >"${output}/zenclash-service" ;;
+      whitespace_version) printf '#!/usr/bin/env bash\nprintf " \\t\\n"\n' >"${output}/zenclash-service" ;;
       *) printf '#!/usr/bin/env bash\n[[ "${1:-}" == --version ]]\nprintf "zenclash-service fixture\\n"\n' >"${output}/zenclash-service" ;;
     esac
     chmod +x "${output}/zenclash-service"
@@ -106,8 +109,10 @@ grep -Fq -- '--sign - ' "${sign_log}"
 run_build 'Fixture Developer ID'
 assert_payload_and_order
 grep -Fq -- '--options runtime --timestamp --sign Fixture Developer ID ' "${sign_log}"
+cp "${app_dir}/Contents/MacOS/zenclash-service" "${test_root}/accepted-helper"
+printf 'preserve existing bundle\n' >"${app_dir}/preserved-marker"
 
-for failure in missing empty version; do
+for failure in missing empty version empty_version whitespace_version; do
   rm -f "${mock_target}/aarch64-apple-darwin/release/zenclash-service"
   : >"${sign_log}"
   if run_build '' "${failure}" >"${test_root}/${failure}.log" 2>&1; then
@@ -115,5 +120,7 @@ for failure in missing empty version; do
     exit 1
   fi
   [[ ! -s "${sign_log}" ]]
+  cmp "${test_root}/accepted-helper" "${app_dir}/Contents/MacOS/zenclash-service"
+  [[ "$(cat "${app_dir}/preserved-marker")" == 'preserve existing bundle' ]]
 done
 printf 'macOS helper payload regression test passed\n'

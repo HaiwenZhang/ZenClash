@@ -58,6 +58,24 @@ fn keep_main_window_alive_when_closed(
 
 /// Opens the primary `ZenClash` window and installs the native traffic tray.
 pub fn create_main_window(services: AppServices, cx: &mut App) {
+    open_main_window(services, None, cx);
+}
+
+/// Opens the primary window with the verified service owner's startup receipt.
+/// The receipt is consumed before background profile commands begin.
+pub fn create_main_window_with_service_startup(
+    services: AppServices,
+    initialization: Option<zenclash_core::CoreInitializationOutcome>,
+    cx: &mut App,
+) {
+    open_main_window(services, initialization, cx);
+}
+
+fn open_main_window(
+    services: AppServices,
+    initialization: Option<zenclash_core::CoreInitializationOutcome>,
+    cx: &mut App,
+) {
     let title = SharedString::from("ZenClash");
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::centered(
@@ -128,6 +146,7 @@ pub fn create_main_window(services: AppServices, cx: &mut App) {
                 let app = cx.new(|cx| {
                     ZenClashApp::new(
                         services,
+                        initialization,
                         network_tray,
                         preferences_store,
                         preferences,

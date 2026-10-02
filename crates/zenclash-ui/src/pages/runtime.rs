@@ -17,18 +17,18 @@ use gpui_kit::{
 use serde_json::{Value, json};
 use zenclash_core::{
     AppPreferences, AppPreferencesStore, AutostartStatus, ConfigDiffReport, ConnectionsSnapshot,
-    ControlledConfigStore, CoreBinaryInfo, CoreKind, CoreSession, CoreTunPermissionStatus, DiagnosticData, DiagnosticReport,
-    DiagnosticRoute, DiagnosticStep, DiagnosticStepKind, LogMonitor, LogTimeSource, MihomoClient,
-    MihomoLaunchConfig, MihomoLogLevel, NetworkLatencyTarget,
-    NetworkProbeRoutePreference, NetworkProbeSnapshot, Observation, OperationalStatus,
-    ProfileCatalog, ProfileStore, ProviderCatalog, ProviderKind, ProviderOperations,
-    ProxyOperations, ProxyVisibility, PublicIpProvider, RecoveryAction, RemoteProfileOptions,
-    RemoteProfileRoute, RuleCatalog, RuntimeConfig, SystemNetworkSnapshot, SystemProxyManager,
-    SystemProxyMode, SystemProxySession, SystemProxyStatus, TrafficCaptureSession,
-    TrafficHistoryStore, TrafficMonitor, VersionInfo,
-    YamlOverrideCatalog, YamlOverrideStore, default_pac_script, default_system_proxy_bypass,
-    diff_yaml_configs, format_log_entries, format_log_entries_support_safe, format_speed,
-    normalize_pac_script, normalize_system_proxy_bypass, normalize_system_proxy_host,
+    ControlledConfigStore, CoreBinaryInfo, CoreKind, CoreSession, CoreTunPermissionStatus,
+    DiagnosticData, DiagnosticReport, DiagnosticRoute, DiagnosticStep, DiagnosticStepKind,
+    LogMonitor, LogTimeSource, MihomoClient, MihomoLaunchConfig, MihomoLogLevel,
+    NetworkLatencyTarget, NetworkProbeRoutePreference, NetworkProbeSnapshot, Observation,
+    OperationalStatus, ProfileCatalog, ProfileStore, ProviderCatalog, ProviderKind,
+    ProviderOperations, ProxyOperations, ProxyVisibility, PublicIpProvider, RecoveryAction,
+    RemoteProfileOptions, RemoteProfileRoute, RuleCatalog, RuntimeConfig, SystemNetworkSnapshot,
+    SystemProxyManager, SystemProxyMode, SystemProxySession, SystemProxyStatus,
+    TrafficCaptureSession, TrafficHistoryStore, TrafficMonitor, VersionInfo, YamlOverrideCatalog,
+    YamlOverrideStore, default_pac_script, default_system_proxy_bypass, diff_yaml_configs,
+    format_log_entries, format_log_entries_support_safe, format_speed, normalize_pac_script,
+    normalize_system_proxy_bypass, normalize_system_proxy_host,
 };
 
 use crate::app::{HideTrafficIcon, SetDarkTheme, SetLightTheme, SetSystemTheme, ShowTrafficIcon};
@@ -96,6 +96,7 @@ pub struct RuntimePage {
     preferences_store: Option<AppPreferencesStore>,
     preferences: AppPreferences,
     core_management: settings::CoreManagementUiState,
+    settings_navigation: settings::SettingsNavigationState,
     app_update: settings::AppUpdateUiState,
     system_proxy_session: Option<SystemProxySession>,
     traffic_history_store: Option<TrafficHistoryStore>,

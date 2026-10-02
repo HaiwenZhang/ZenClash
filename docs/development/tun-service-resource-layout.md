@@ -1,6 +1,6 @@
 # TUN 服务资源目录与持久节点状态
 
-本文记录 `tun-service-plan.md` 的资源隔离细节；持久节点状态部分仍是待实施设计，不代表 Tailscale、ZeroTier 迁移已完成。
+本文记录 [开发计划](tun-service-plan.md) 的资源隔离细节；修订日期：2026-10-02。同会话缓存继承已有首批验证，provider 底层回读已通过两轮审查；高层缓存保存、跨会话稳定 home 和持久节点状态仍待实施，不代表 Tailscale、ZeroTier 迁移已完成。来源与阶段证据见 [移植计划](tun-service-upstream-migration.md) 和 [实施记录](tun-service-progress.md)。
 
 ## 运行资源隔离
 
@@ -28,6 +28,32 @@ session/
 相关依据为固定版本 [Mihomo v1.19.30](https://github.com/MetaCubeX/mihomo/tree/v1.19.30)：`adapter/provider/parser.go`、`adapter/provider/provider.go`、`adapter/provider/override.go`、`component/ca/keypair.go`、`component/ech/key.go`、`adapter/outbound/ssh.go`、`adapter/outbound/zerotier.go` 和 `adapter/outbound/tailscale.go`。provider 的表达式在 `adapter.ParseProxy` 前执行；原生文件读取限制必须持续有效，不能只检查首次下载。
 
 目前准备层只接受带 `proxies` 序列的本地 YAML proxy provider。Mihomo 的 Base64/V2Ray 转换输入需要客户端先规范化或另行实现等价准备，不能报告为已完整支持。资源准备与文件系统测试不能替代真实 Mihomo、原生服务、TUN 验收。
+
+## 同会话缓存继承：首批已验证
+
+上游差异规划适配为内存 manifest，记录完成上传资源的 SHA-256/长度及声明的远程 provider URL。每次准备复核固定文件内容，manifest 只在准备成功后发布；Validate 后继续上传会使旧校验失效，正式 materialization 后才冻结上传。
+
+相同 URL 的 provider 缓存从当前 accepted 资源复制到独立候选，按实际字节重新计入预算。proxy 缓存仅允许将声明且内容相同的已批准 TLS/SSH 等资源映射到新工作目录；未知路径、资源改变、解析超过 4 MiB 或字节预算不足时不继承该缓存，保留原有受限下载流程。服务不会打开缓存中任意被引用的系统文件。rule 缓存保留字节语义，URL 改变使候选缓存失效，旧 accepted 不被修改。
+
+固定 v1.19.30 的 `component/resource/vehicle.go` 使用 `os.WriteFile` 原地更新缓存，而非原子 rename。当前缓存继承的长度/mtime 前后检查只能拒绝观察到的变化，不能证明运行中读取的是完整版本；本批未验证原生 writer 暂停在半份文件时的强一致性。完整缓存同步需在高层确认内核停止后导出，或后续提供可验证的 writer 协调，不能以连续两次摘要相同宣称已解决。
+
+整个 stage 共用三次有界等待，累计 175 ms；不会按每个 provider 重新发放重试预算。准备成功后释放 prior 资源引用，不形成无限 revision 保留链。runtime 34 项及实际服务 Stage 调度 1 项通过，首审通过；真实内核下载和原生文件竞争仍待验收。
+
+## provider 缓存回读：底层阶段通过，高层保存待接入
+
+回读只接受经过会话授权、匹配 committed revision 且 manifest 已声明的 provider 标识；不接受用户文件路径，不开放主配置、控制器秘密或任意系统文件。路径解析、固定句柄和父目录保护继续复用服务现有校验。
+
+已确认回读实施方式：Begin 只在新鲜状态确认内核已停止、无未提交候选且 committed revision 匹配时接受，接口自身不 Stop。高层捕获/退出/重启事务负责原生停止、导出及后续启动或恢复；只落服务端端点不能算完整缓存同步完成。
+
+当前未发布协议源码已包含 `BeginProviderCacheRead`、`ReadProviderCache` 和 `FinishProviderCacheRead`，客户端与服务端已接入具名操作，分块快照适配自上游 `runtime_generation/readback.rs`。首审前相关测试 16 项、完整服务 195 项、service 默认/服务端完整 CI lint、Windows 和 Linux/macOS 交叉 check 通过。首审发现被拒绝 Start 重置总预算的问题，3 项实际 State 测试先失败再通过；修后相关测试 19 项、check/完整 CI lint 通过，第二轮审查结束。随后最后增量完整服务回归 198 项、Linux/macOS service all-targets/all-features 交叉 check 均通过；普通权限保存与高层恢复仍需接线。这些结果不包含真实 Mihomo 或原生文件竞争验收。
+
+采用单个有界内存快照，避免分页期间文件变化或长期持有 Windows 文件锁。rule/MRS 原始字节最多 128 MiB，proxy YAML 解析及批准资源反向映射最多 4 MiB；传输块 256 KiB，整个 revision 回读最多 256 MiB、256 次尝试、15 秒总期限，分页不续期，finish 不重置整批预算。临时快照最多增加 128 MiB 服务内存，不能以单块大小代表总占用。排队取消不准入；已准入 Begin 的调用方取消等待后，完成任务仍持门栓直到实际文件复制结束。finish、过期、revision 替换和 owner 释放回收快照，但不将丢失响应当成明确取消或可盲目重试。不新增用户落盘格式或依赖；跨会话缓存保存和节点身份迁移分别实施。
+
+## 高层缓存保存与本地恢复：方案待实施
+
+高层在确认 Stop 后、Release 前冻结准确的 revision 与资源 bundle，回读声明的缓存，验证完整长度与摘要，再以普通权限原子保存到托管缓存。不能写回导入的订阅、TLS 源文件或 HTTP provider 的任意原始路径。保存工作与后续启动/释放由同一完成任务持有，外层取消等待不丢弃已准入写入；丢失 Begin/Read 响应时保留准确的未知结果，不自动重发。本地缓存目录、逻辑 provider 映射及保存失败对退出/重启的影响尚待确定。
+
+修复/卸载恢复 Local 的提案是保留不可变启动描述与最新 accepted bundle，在普通用户的受控生成目录物化 TLS、文件 provider 等资源，保留原 Mihomo home。GeoData 从 home 下固定名称读取，不能仅改 YAML 引用；固定缓存文件的替换、恢复和链接拒绝需单独覆盖。生成目录及 GeoData 写入范围尚未批准或实施，不代表已存在新的用户数据格式。详细边界见 [core 接入文档](tun-service-core-integration.md)。
 
 ## 持久节点状态设计：待确认并实施
 

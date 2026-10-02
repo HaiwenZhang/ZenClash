@@ -4,6 +4,7 @@ use super::{
     ScrollableElement, Sizable, Styled, Window, div, empty_state, h_flex, message_banner, v_flex,
 };
 use crate::assets::AppIcon;
+use gpui_kit::StatefulInteractiveElement;
 
 impl RuntimePage {
     fn render_header(
@@ -29,22 +30,35 @@ impl RuntimePage {
             Icon::new(self.page.icon())
         };
         h_flex()
-            .h_16()
+            .min_h_16()
             .px_5()
+            .py_4()
+            .gap_3()
+            .flex_wrap()
             .items_center()
             .justify_between()
             .border_b_1()
             .border_color(theme.border)
             .child(
-                h_flex()
+                v_flex()
+                    .min_w_0()
                     .gap_3()
-                    .child(page_icon.size_5().text_color(theme.primary))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(page_icon.size_3())
+                            .child(zenclash_i18n::text("runtime.design.workspace"))
+                            .child("/")
+                            .child(self.page.label()),
+                    )
                     .child(
                         v_flex()
                             .gap_0()
                             .child(
                                 div()
-                                    .text_lg()
+                                    .text_2xl()
                                     .font_weight(gpui_kit::FontWeight::BOLD)
                                     .child(self.page.label()),
                             )
@@ -104,6 +118,29 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
+        // Installation remains reachable when the current controller cannot provide
+        // runtime forms. The card reads only the application owner's prepared state.
+        if self.page == Page::Tun
+            && self.profile_service.service_state().is_some()
+            && (self.persistent_loading
+                || !self
+                    .config_inputs
+                    .is_for_profile(self.profile_path.as_deref())
+                || matches!(self.data, RuntimeData::Empty))
+        {
+            return v_flex()
+                .gap_4()
+                .children(self.render_service_status(theme, cx))
+                .child(empty_state(
+                    zenclash_i18n::text(if self.persistent_loading || self.loading {
+                        "runtime.empty.loading"
+                    } else {
+                        "runtime.empty.unavailable"
+                    }),
+                    theme,
+                ))
+                .into_any_element();
+        }
         if self.persistent_loading
             || (matches!(
                 self.page,
@@ -182,15 +219,40 @@ impl Render for RuntimePage {
             .bg(theme.background)
             .child(self.render_header(&theme, cx))
             .child(
-                v_flex()
+                h_flex()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scrollbar()
-                    .gap_4()
-                    .px_5()
-                    .py_4()
-                    .child(self.render_status(&theme))
-                    .child(self.render_body(&theme, cx)),
+                    .items_stretch()
+                    .when(self.page == Page::Settings, |this| {
+                        this.child(
+                            v_flex()
+                                .flex_shrink_0()
+                                .min_h_0()
+                                .h_full()
+                                .px_3()
+                                .py_4()
+                                .child(self.render_settings_navigation(&theme, cx)),
+                        )
+                    })
+                    .child(
+                        v_flex()
+                            .id("runtime-body-scroll")
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.settings_navigation.scroll)
+                            .child(
+                                v_flex()
+                                    .min_w_0()
+                                    .gap_4()
+                                    .px_5()
+                                    .py_4()
+                                    .child(self.render_status(&theme))
+                                    .child(self.render_body(&theme, cx)),
+                            )
+                            .vertical_scrollbar(&self.settings_navigation.scroll),
+                    ),
             )
     }
 }

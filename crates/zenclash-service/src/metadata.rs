@@ -28,6 +28,9 @@ pub struct InstalledMetadata {
 
 impl InstalledMetadata {
     /// Builds a current record for one verified installer identity.
+    ///
+    /// # Errors
+    /// Rejects malformed digests or an empty, overlong or invalid user identity.
     pub fn new(
         core_sha256: String,
         helper_sha256: String,
@@ -72,6 +75,9 @@ impl InstalledMetadata {
     }
 
     /// Adds an OS-verified identity after separate administrator authorization.
+    ///
+    /// # Errors
+    /// Rejects an invalid identity or a new identity beyond the user limit.
     pub fn authorize_user(&mut self, owner: String) -> Result<(), MetadataError> {
         if !valid_identity(&owner) {
             return Err(MetadataError::Invalid);
@@ -152,6 +158,10 @@ pub enum MetadataError {
 ///
 /// A future protocol may be reported by a known schema; compatibility belongs
 /// to the handshake and must not be conflated with the storage format.
+///
+/// # Errors
+/// Reports storage errors, over-budget or malformed JSON, unsupported schemas,
+/// missing approved helper digests and invalid record fields.
 pub fn read_metadata(path: &Path) -> Result<InstalledMetadata, MetadataError> {
     let mut bytes = Vec::new();
     File::open(path)?
@@ -184,6 +194,11 @@ pub fn read_metadata(path: &Path) -> Result<InstalledMetadata, MetadataError> {
 /// Existing unknown, malformed, or unreadable records are preserved. All
 /// validation and serialization happen before the existing file is changed.
 /// Call only from the installer or a background task with a protected parent.
+///
+/// # Errors
+/// Rejects invalid or over-budget metadata and unreadable or unrecognized
+/// existing records. Reports random-source, write, sync and atomic-replace
+/// failures without accepting an incomplete new record.
 pub fn write_metadata_atomic(
     path: &Path,
     metadata: &InstalledMetadata,
@@ -263,17 +278,21 @@ mod tests {
     fn protocol_one_record_remains_readable_for_repair_but_cannot_handshake() {
         let directory = directory();
         let path = directory.join("installation.json");
-        let mut metadata = InstalledMetadata::new("a".repeat(64), "c".repeat(64), "1000".into()).unwrap();
+        let mut metadata =
+            InstalledMetadata::new("a".repeat(64), "c".repeat(64), "1000".into()).unwrap();
         metadata.protocol_version = 1;
         write_metadata_atomic(&path, &metadata).unwrap();
         let before = fs::read(&path).unwrap();
         let installed = read_metadata(&path).unwrap();
         assert_eq!(installed.schema_version(), METADATA_SCHEMA_VERSION);
         assert_eq!(installed.protocol_version(), 1);
-        assert!(!crate::ProtocolInfo {
-            protocol_version: installed.protocol_version(),
-            service_version: installed.service_version().to_owned(),
-        }.is_compatible());
+        assert!(
+            !crate::ProtocolInfo {
+                protocol_version: installed.protocol_version(),
+                service_version: installed.service_version().to_owned(),
+            }
+            .is_compatible()
+        );
         assert_eq!(fs::read(&path).unwrap(), before);
         fs::remove_dir_all(directory).unwrap();
     }

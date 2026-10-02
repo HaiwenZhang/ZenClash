@@ -86,6 +86,19 @@ common:
       en: "%{count} days ago"
 
 app:
+  status:
+    controller_connected:
+      zh-CN: 内核控制器已连接
+      en: Core controller connected
+    controller_loading:
+      zh-CN: 正在检查内核控制器
+      en: Checking core controller
+    controller_stale:
+      zh-CN: 内核控制器状态待刷新
+      en: Core controller status needs refresh
+    controller_unavailable:
+      zh-CN: 内核控制器不可用
+      en: Core controller unavailable
   name:
     zh-CN: ZenClash
     en: ZenClash
@@ -175,6 +188,18 @@ app:
         en: "The pre-quit core stop task ended unexpectedly: %{error}"
 
 startup:
+  service_saved_tun:
+    zh-CN: 已保存的 TUN 配置需要后台服务恢复，启动已暂停。
+    en: The saved TUN configuration needs service recovery. Startup is paused.
+  service_occupied:
+    zh-CN: 后台服务正由另一应用使用，启动已暂停。
+    en: Another application owns the service. Startup is paused.
+  service_configuration_unconfirmed:
+    zh-CN: 无法确认配置中的 TUN 状态，启动已暂停。
+    en: TUN state in the configuration could not be confirmed. Startup is paused.
+  local_privileged:
+    zh-CN: 所选内核带有提权权限，无法作为普通本地内核启动。
+    en: The selected core has elevated privileges and cannot start as an ordinary local core.
   separator:
     zh-CN: ；
     en: "; "
@@ -389,6 +414,14 @@ navigation:
       en: Configure the runtime core, appearance, status menu, traffic history, and backups.
 
 runtime:
+  design:
+    workspace:
+      zh-CN: 工作台
+      en: Workspace
+  charts:
+    top_five:
+      zh-CN: 当前快照 · 前 5 类
+      en: Current snapshot · top 5
   stream:
     connected:
       zh-CN: 实时流已连接
@@ -477,6 +510,68 @@ runtime:
       en: "The autostart status task ended unexpectedly: %{error}"
 
 home:
+  history:
+    title:
+      zh-CN: 进程流量 · 最近24小时
+      en: Process traffic · last 24h
+    scope:
+      zh-CN: 最近24小时已记录样本 · 不保证完整覆盖
+      en: Recorded samples in last 24h · coverage may be incomplete
+    loading:
+      zh-CN: 读取已记录流量…
+      en: Loading recorded traffic…
+    unavailable:
+      zh-CN: 历史存储不可用
+      en: History store unavailable
+    failed:
+      zh-CN: 历史查询失败
+      en: History query failed
+    stale:
+      zh-CN: 查询失败 · 显示上次记录摘要
+      en: Query failed · last recorded summary
+    paused:
+      zh-CN: 已暂停记录 · 可查看已有历史
+      en: Recording paused · saved history remains available
+    other:
+      zh-CN: 其他
+      en: Other
+    empty:
+      zh-CN: 最近24小时没有已记录样本
+      en: No recorded samples in the last 24h
+  flow:
+    processes:
+      zh-CN: 进程流量
+      en: Process traffic
+    routes:
+      zh-CN: 活跃连接分流
+      en: Active connection routes
+    recent:
+      zh-CN: 最近连接
+      en: Recent connections
+    scope:
+      zh-CN: 当前活动连接累计 · 非24小时
+      en: Current active connection totals · not 24h
+    loading:
+      zh-CN: 读取连接状态…
+      en: Loading connection snapshot…
+    stale:
+      zh-CN: 读取失败 · 显示上次快照
+      en: Fetch failed · last snapshot
+    proxy:
+      zh-CN: 代理
+      en: Proxy
+    direct:
+      zh-CN: 直连
+      en: Direct
+    reject:
+      zh-CN: 拒绝
+      en: Reject
+    recent_unknown:
+      zh-CN: 暂无可核实开始时间的连接
+      en: No connections with a verified start time
+    all_connections:
+      zh-CN: 全部连接
+      en: All connections
   app_update:
     available:
       zh-CN: ZenClash %{version} 已发布；可查看说明并前往官方 Release 下载。
@@ -519,6 +614,9 @@ home:
       zh-CN: L4 路径待验证
       en: L4 Path Unverified
   profile:
+    all:
+      zh-CN: 全部订阅
+      en: All profiles
     title:
       zh-CN: 当前订阅
       en: Active Profile
@@ -708,6 +806,21 @@ home:
     title:
       zh-CN: 实时流量
       en: Live Traffic
+    range_60:
+      zh-CN: 60秒
+      en: 60s
+    range_300:
+      zh-CN: 5分钟
+      en: 5m
+    pause:
+      zh-CN: 暂停曲线
+      en: Pause chart
+    resume:
+      zh-CN: 恢复实时
+      en: Resume live
+    observed_duration:
+      zh-CN: "已观察 %{seconds} 秒 · B/s"
+      en: "Observed %{seconds}s · B/s"
     live:
       zh-CN: 实时更新
       en: Live
@@ -749,6 +862,28 @@ home:
       en: Now
 
 profiles:
+  design:
+    filter_all:
+      zh-CN: 全部
+      en: All
+    filter_empty:
+      zh-CN: 没有匹配的订阅或配置
+      en: No matching profiles
+    details:
+      zh-CN: 详情
+      en: Details
+    runtime_preview:
+      zh-CN: 当前运行配置摘要
+      en: Runtime configuration summary
+    used:
+      zh-CN: 已用
+      en: Used
+    remaining:
+      zh-CN: 剩余
+      en: Remaining
+    total:
+      zh-CN: 总额度
+      en: Total allowance
   recovery:
     title:
       zh-CN: 需要确认内核运行配置
@@ -791,6 +926,12 @@ profiles:
     collapse_form:
       zh-CN: 收起订阅表单
       en: Hide Subscription Form
+    edit_yaml:
+      zh-CN: 配置编辑…
+      en: Configuration editor…
+    activate_first:
+      zh-CN: 请先应用此配置，再打开编辑工作台
+      en: Apply this profile before opening the configuration editor
     add_remote:
       zh-CN: 添加在线订阅
       en: Add Subscription
@@ -953,6 +1094,9 @@ profiles:
     remaining:
       zh-CN: 剩余 %{days} 天 · Unix %{expire}
       en: "%{days} days remaining · Unix %{expire}"
+    remaining_date:
+      zh-CN: 剩余 %{days} 天 · %{date} 到期（UTC）
+      en: "%{days} days remaining · expires %{date} (UTC)"
   editor:
     generic_name:
       zh-CN: 在线订阅
@@ -1151,6 +1295,19 @@ profiles:
       en: "The profile repository task ended unexpectedly: %{error}"
 
 proxies:
+  design:
+    search:
+      zh-CN: 搜索名称或协议
+      en: Search name or protocol
+    no_matches:
+      zh-CN: 没有匹配的节点
+      en: No matching nodes
+    latency_comparison:
+      zh-CN: 节点延迟对比
+      en: Node latency comparison
+    latency_history:
+      zh-CN: 延迟历史
+      en: Latency history
   header:
     title:
       zh-CN: 代理组
@@ -1305,10 +1462,37 @@ proxies:
       en: "%{count} node delay tests failed"
 
 logs:
+  charts:
+    levels:
+      zh-CN: 级别分布
+      en: Level distribution
+  details:
+    title:
+      zh-CN: 日志详情
+      en: Log details
+    fields:
+      zh-CN: 结构化字段
+      en: Structured fields
+  columns:
+    time:
+      zh-CN: 时间
+      en: Time
+    level:
+      zh-CN: 级别
+      en: Level
+    message:
+      zh-CN: 消息
+      en: Message
+    source:
+      zh-CN: 来源
+      en: Source
   actions:
     export:
       zh-CN: 导出
       en: Export
+    inspect:
+      zh-CN: 查看日志详情
+      en: Inspect log
     copy_safe:
       zh-CN: 安全复制
       en: Safe Copy
@@ -1441,6 +1625,9 @@ logs:
       zh-CN: 本地接收时间
       en: Local receive time
   levels:
+    all:
+      zh-CN: 全部
+      en: All
     silent:
       zh-CN: 静默 · 不接收内核事件
       en: Silent · do not receive core events
@@ -1456,6 +1643,12 @@ logs:
     debug:
       zh-CN: 调试 · 仅排障时临时开启
       en: Debug · enable temporarily for troubleshooting
+
+traffic_capture:
+  errors:
+    completion_task:
+      zh-CN: 流量接管后台任务异常结束：%{error}
+      en: "Traffic capture background task failed: %{error}"
 
 system_proxy:
   title:
@@ -1721,6 +1914,9 @@ config_inputs:
 
 tun:
   permissions:
+    service_authority:
+      zh-CN: 已核验后台服务权限；设备和路由仍需运行时验证
+      en: Background service authority verified; device and route activation still require runtime verification
     title:
       zh-CN: TUN 系统权限
       en: TUN System Permission
@@ -2696,7 +2892,131 @@ resources:
         en: "Could not write the rules file: %{error}"
 
 core_page:
+  service:
+    title:
+      zh-CN: 内核服务
+      en: Core service
+    install_title:
+      zh-CN: 安装服务并开启 TUN？
+      en: Install the service and enable TUN?
+    install_description:
+      zh-CN: 需要安装服务时，系统将请求管理员授权。服务安装后会继续开启 TUN；取消授权会保留当前运行状态。
+      en: The system will request administrator authorization if installation is needed. After installation, ZenClash will continue enabling TUN. Cancelling authorization keeps the current runtime unchanged.
+    install_enable:
+      zh-CN: 安装并开启
+      en: Install and enable
+    enable:
+      zh-CN: 开启 TUN
+      en: Enable TUN
+    enable_with_authorization:
+      zh-CN: 开启 TUN…
+      en: Enable TUN…
+    repair:
+      zh-CN: 修复服务
+      en: Repair service
+    repair_title:
+      zh-CN: 修复内核服务？
+      en: Repair the core service?
+    repair_description:
+      zh-CN: 修复前会退出 TUN 并恢复本地内核。完成后尝试恢复原有流量捕获方式；取消授权或恢复失败时，会显示实际运行状态。
+      en: ZenClash will leave TUN and restore the local core before repair, then attempt to restore the previous traffic capture mode. If authorization is cancelled or recovery fails, the actual runtime state will be shown.
+    start:
+      zh-CN: 启动服务
+      en: Start service
+    start_title:
+      zh-CN: 启动服务并开启 TUN？
+      en: Start the service and enable TUN?
+    start_description:
+      zh-CN: 系统将请求管理员授权。启动服务后会继续开启 TUN；取消授权会保留当前运行状态。
+      en: The system will request administrator authorization. After starting the service, ZenClash will continue enabling TUN. Cancelling authorization keeps the current runtime unchanged.
+    start_enable:
+      zh-CN: 启动并开启
+      en: Start and enable
+    uninstall:
+      zh-CN: 卸载服务
+      en: Uninstall service
+    uninstall_title:
+      zh-CN: 卸载内核服务？
+      en: Uninstall the core service?
+    uninstall_description:
+      zh-CN: 先退出 TUN 并恢复本地内核，再卸载服务。已有配置会保留。取消系统授权会保留服务，并继续使用本地内核。
+      en: ZenClash will leave TUN and restore the local core before uninstalling the service. Existing configurations will be kept. Cancelling system authorization keeps the service installed and the local core running.
+    checking:
+      zh-CN: 正在检查服务
+      en: Checking service
+    authorizing:
+      zh-CN: 正在等待系统授权
+      en: Waiting for system authorization
+    installing:
+      zh-CN: 正在安装服务
+      en: Installing service
+    switching:
+      zh-CN: 正在切换内核
+      en: Switching core
+    enabling:
+      zh-CN: 正在开启 TUN
+      en: Enabling TUN
+    restoring:
+      zh-CN: 正在恢复原有内核
+      en: Restoring the previous core
+    pending:
+      zh-CN: 操作结果待确认，请勿重复提交
+      en: The operation is awaiting confirmation. Do not submit it again.
+    cancelled:
+      zh-CN: 已取消授权，当前运行状态已保留
+      en: Authorization cancelled; the current runtime was kept.
+    ready:
+      zh-CN: 服务可用
+      en: Service available
+    missing:
+      zh-CN: 尚未安装服务
+      en: Service is not installed
+    stopped:
+      zh-CN: 服务未运行
+      en: Service is not running
+    repair_required:
+      zh-CN: 服务文件需要修复
+      en: Service files need repair
+    unauthorized:
+      zh-CN: 当前用户尚未获准使用服务
+      en: The current user is not authorized to use the service
+    incompatible:
+      zh-CN: 服务版本需要更新
+      en: The service version needs updating
+    unrecognized:
+      zh-CN: 无法确认已有安装，请先处理安装状态
+      en: The existing installation could not be verified. Resolve its installation state first.
+    unknown:
+      zh-CN: 无法确认服务状态
+      en: Service status could not be confirmed
+    failed:
+      zh-CN: 服务操作失败。请检查服务状态。
+      en: The service operation failed. Check its current state.
+    unsupported:
+      zh-CN: 当前内核无法通过后台服务开启 TUN。
+      en: The current core cannot enable TUN through the background service.
+    busy:
+      zh-CN: 服务操作正在进行
+      en: A service operation is already in progress
+    stale:
+      zh-CN: 内核已切换，请重新操作
+      en: The core changed; try again
+    bundle_missing:
+      zh-CN: 安装包中的服务组件不可用，请重新安装 ZenClash
+      en: The packaged service component is unavailable. Reinstall ZenClash.
+    no_snapshot:
+      zh-CN: 没有可用于恢复的内核配置。
+      en: No runtime configuration is available for recovery.
+    handover_recovery_failed:
+      zh-CN: 尚未确认服务切换后的恢复结果。请检查内核状态。
+      en: Recovery after the service switch is unconfirmed. Check the core status.
+    cleanup_unconfirmed:
+      zh-CN: 旧内核资源的清理结果待确认。请检查运行状态。
+      en: Cleanup of the previous core resources is unconfirmed. Check the runtime status.
   status:
+    running_without_pid:
+      zh-CN: 运行中 · 进程编号尚不可用
+      en: Running · process ID unavailable
     external_connected:
       zh-CN: 连接到外部内核
       en: Connected to external core
@@ -2758,6 +3078,9 @@ core_page:
       zh-CN: 日志等级
       en: Log Level
   maintenance:
+    service_upgrade:
+      zh-CN: 当前内核由后台服务管理；此处的本地可执行文件替换操作不适用于服务副本。服务升级入口尚在开发。
+      en: The background service manages this core. Local executable replacement does not apply to its protected copy; the service upgrade entry is still in development.
     title:
       zh-CN: 内核维护
       en: Core Maintenance
@@ -2933,6 +3256,15 @@ core_page:
     release_list_task:
       zh-CN: Release 列表任务异常结束：%{error}
       en: "The release-list task ended unexpectedly: %{error}"
+    runtime_kind_locked:
+      zh-CN: 运行时类型已固定，不能更改当前绑定
+      en: Runtime kind is fixed; the current binding cannot be changed.
+    runtime_kind_mismatch:
+      zh-CN: 内核会话类型与实际运行时不一致
+      en: The session kind does not match its actual runtime.
+    runtime_authority_unavailable:
+      zh-CN: 无法确认当前内核的原生权限
+      en: Native authority for the current core could not be confirmed.
     external_install:
       zh-CN: 当前连接的是外部内核，无法安全替换其可执行文件
       en: The active core is external; ZenClash cannot safely replace its executable
@@ -3194,6 +3526,9 @@ overrides:
     base_missing:
       zh-CN: 未配置基础配置文件路径
       en: No base profile path is configured
+    partial_conflict:
+      zh-CN: 部分更新被配置覆写阻止，运行时未修改
+      en: An override conflicts with this partial update; runtime unchanged.
     store_unavailable:
       zh-CN: YAML 覆写仓库不可用
       en: YAML override library unavailable
@@ -3418,6 +3753,32 @@ backup:
       en: "%{reason}; original disk data was restored, but restoring the core runtime configuration failed: %{error}"
 
 connections:
+  charts:
+    processes:
+      zh-CN: 进程连接数
+      en: Connections by process
+    protocols:
+      zh-CN: 协议分布
+      en: Protocol distribution
+  columns:
+    target:
+      zh-CN: 目标 / 进程
+      en: Target / process
+    protocol:
+      zh-CN: 协议
+      en: Protocol
+    outbound:
+      zh-CN: 出口
+      en: Outbound
+    started:
+      zh-CN: 开始时间
+      en: Started
+    duration:
+      zh-CN: 持续时间
+      en: Duration
+  unknown_process:
+    zh-CN: 未知进程
+    en: Unknown process
   filtering:
     zh-CN: 正在更新连接列表…
     en: Updating connections…
@@ -3484,6 +3845,9 @@ connections:
       zh-CN: 收起详情
       en: Hide Details
   details:
+    title:
+      zh-CN: 连接详情
+      en: Connection details
     source:
       zh-CN: 来源
       en: Source
@@ -3523,6 +3887,39 @@ connections:
       en: "The close-connections task ended unexpectedly: %{error}"
 
 rules:
+  charts:
+    types:
+      zh-CN: 规则类型分布
+      en: Rule type distribution
+    hits:
+      zh-CN: 命中策略
+      en: Matched policies
+  details:
+    title:
+      zh-CN: 规则详情
+      en: Rule details
+    misses:
+      zh-CN: 未匹配次数
+      en: Misses
+  columns:
+    order:
+      zh-CN: 顺序
+      en: Order
+    kind:
+      zh-CN: 类型
+      en: Type
+    payload:
+      zh-CN: 匹配内容
+      en: Match content
+    proxy:
+      zh-CN: 策略
+      en: Policy
+    hits:
+      zh-CN: 命中次数
+      en: Hits
+    enabled:
+      zh-CN: 启用
+      en: Enabled
   warnings:
     toggle_unavailable:
       zh-CN: "%{core} 暂不支持单条规则启停"
@@ -3695,6 +4092,19 @@ tray:
       en: An external experimental core cannot reliably apply the full TUN configuration; use a ZenClash-managed core
 
 settings:
+  design:
+    general:
+      zh-CN: 常规
+      en: General
+    appearance:
+      zh-CN: 外观
+      en: Appearance
+    startup:
+      zh-CN: 启动与窗口
+      en: Startup and windows
+    records:
+      zh-CN: 本地记录
+      en: Local records
   versions:
     title:
       zh-CN: 版本信息

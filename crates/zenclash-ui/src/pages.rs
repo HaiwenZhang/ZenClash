@@ -47,13 +47,12 @@ impl Page {
     /// Everyday destinations kept visible in the compact sidebar.
     ///
     /// Home and Settings are rendered separately.
-    pub const PRIMARY: [Self; 7] = [
+    pub const PRIMARY: [Self; 6] = [
         Self::Proxies,
         Self::Profiles,
         Self::Connections,
         Self::Rules,
         Self::Network,
-        Self::Traffic,
         Self::Logs,
     ];
 
@@ -170,7 +169,6 @@ mod tests {
                 Page::Connections,
                 Page::Rules,
                 Page::Network,
-                Page::Traffic,
                 Page::Logs,
                 Page::Settings,
             ]

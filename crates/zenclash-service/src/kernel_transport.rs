@@ -18,7 +18,9 @@ pub(crate) struct NativeController {
     pid: u32,
     secret: String,
     #[cfg(test)]
-    fixture: Option<std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<tokio::io::DuplexStream>>>>,
+    fixture: Option<
+        std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<tokio::io::DuplexStream>>>,
+    >,
 }
 
 pub(crate) struct NativeHttpResponse {
@@ -38,13 +40,27 @@ pub(crate) enum NativeHttpError {
 
 impl NativeController {
     pub(crate) fn new(path: PathBuf, pid: u32, secret: String) -> Self {
-        Self { path, pid, secret, #[cfg(test)] fixture: None }
+        Self {
+            path,
+            pid,
+            secret,
+            #[cfg(test)]
+            fixture: None,
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn fixture(streams: Vec<tokio::io::DuplexStream>, pid: u32) -> Self {
-        assert!(streams.len() <= 32, "fixture connection queue exceeds its budget");
-        Self { path: PathBuf::new(), pid, secret: "fixture-secret".into(), fixture: Some(std::sync::Arc::new(std::sync::Mutex::new(streams.into()))) }
+        assert!(
+            streams.len() <= 32,
+            "fixture connection queue exceeds its budget"
+        );
+        Self {
+            path: PathBuf::new(),
+            pid,
+            secret: "fixture-secret".into(),
+            fixture: Some(std::sync::Arc::new(std::sync::Mutex::new(streams.into()))),
+        }
     }
 
     pub(crate) async fn request(
@@ -58,8 +74,15 @@ impl NativeController {
         let mut request_sent = false;
         #[cfg(test)]
         if let Some(queue) = &self.fixture {
-            let stream = queue.lock().unwrap().pop_front().ok_or_else(|| NativeHttpError::BeforeSend(io::Error::other("fixture has no admitted connection")))?;
-            return tokio::time::timeout(timeout.min(MAX_DEADLINE), exchange(stream, request, &mut request_sent)).await.unwrap_or_else(|_| Err(deadline_error(request_sent)));
+            let stream = queue.lock().unwrap().pop_front().ok_or_else(|| {
+                NativeHttpError::BeforeSend(io::Error::other("fixture has no admitted connection"))
+            })?;
+            return tokio::time::timeout(
+                timeout.min(MAX_DEADLINE),
+                exchange(stream, request, &mut request_sent),
+            )
+            .await
+            .unwrap_or_else(|_| Err(deadline_error(request_sent)));
         }
         let result = tokio::time::timeout(timeout.min(MAX_DEADLINE), async {
             let stream = self.connect().await.map_err(NativeHttpError::BeforeSend)?;
@@ -76,7 +99,7 @@ impl NativeController {
         body: Option<&Value>,
     ) -> Result<Request<Full<Bytes>>, NativeHttpError> {
         // This module is private to the service. Ordinary operations retain the
-        // IPC allowlist; the two extra operations are service-owned reload/stop.
+        // IPC allowlist; full reload and managed patches are service-owned.
         let private_reload = method == "PUT"
             && matches!(path, "/configs?force=true" | "/configs?force=false")
             && body.is_some_and(|body| {
@@ -85,10 +108,9 @@ impl NativeController {
                         !payload.is_empty() && payload.len() <= crate::runtime::MAX_CONFIG_BYTES
                     })
             });
-        let private_patch =
-            method == "PATCH" && path == "/configs" && body.is_some_and(|body| {
-                crate::api::canonical_runtime_patch(body).is_ok()
-            });
+        let private_patch = method == "PATCH"
+            && path == "/configs"
+            && body.is_some_and(|body| crate::api::canonical_kernel_runtime_patch(body).is_ok());
         if !private_reload && !private_patch {
             let request = crate::protocol::ApiRequest {
                 method: method.to_owned(),

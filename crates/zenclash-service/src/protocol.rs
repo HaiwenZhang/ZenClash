@@ -143,6 +143,18 @@ pub(crate) enum SessionOperation {
         revision: u64,
     },
     Stop {},
+    BeginProviderCacheRead {
+        revision: u64,
+        kind: ProviderKind,
+        name: String,
+    },
+    ReadProviderCache {
+        token: ProviderCacheToken,
+        offset: u64,
+    },
+    FinishProviderCacheRead {
+        token: ProviderCacheToken,
+    },
     Logs {
         cursor: u64,
     },
@@ -185,10 +197,32 @@ impl fmt::Debug for SessionOperation {
                 .debug_struct("CommitRuntime")
                 .field("revision", revision)
                 .finish(),
-            Self::PrepareRuntimePatch { base_revision, .. } => f.debug_struct("PrepareRuntimePatch").field("base_revision", base_revision).field("patch", &"[redacted]").finish(),
-            Self::ApplyRuntimePatch { revision } => f.debug_struct("ApplyRuntimePatch").field("revision", revision).finish(),
-            Self::RestoreRuntimePatch { revision } => f.debug_struct("RestoreRuntimePatch").field("revision", revision).finish(),
+            Self::PrepareRuntimePatch { base_revision, .. } => f
+                .debug_struct("PrepareRuntimePatch")
+                .field("base_revision", base_revision)
+                .field("patch", &"[redacted]")
+                .finish(),
+            Self::ApplyRuntimePatch { revision } => f
+                .debug_struct("ApplyRuntimePatch")
+                .field("revision", revision)
+                .finish(),
+            Self::RestoreRuntimePatch { revision } => f
+                .debug_struct("RestoreRuntimePatch")
+                .field("revision", revision)
+                .finish(),
             Self::Stop {} => f.write_str("Stop"),
+            Self::BeginProviderCacheRead { revision, kind, .. } => f
+                .debug_struct("BeginProviderCacheRead")
+                .field("revision", revision)
+                .field("kind", kind)
+                .field("name", &"[redacted]")
+                .finish(),
+            Self::ReadProviderCache { offset, .. } => f
+                .debug_struct("ReadProviderCache")
+                .field("offset", offset)
+                .field("token", &"[redacted]")
+                .finish(),
+            Self::FinishProviderCacheRead { .. } => f.write_str("FinishProviderCacheRead"),
             Self::Logs { cursor } => f.debug_struct("Logs").field("cursor", cursor).finish(),
             Self::Api { request } => f.debug_struct("Api").field("request", request).finish(),
             Self::Subscribe { stream } => {
@@ -216,6 +250,65 @@ impl fmt::Debug for ApiRequest {
     }
 }
 
+/// Namespace of a declared HTTP provider cache.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    /// Proxy provider YAML; readback validates its approved resource references.
+    Proxy,
+    /// Rule provider content, including opaque MRS bytes.
+    Rule,
+}
+
+/// Opaque readback credential usable only within its verified owner session.
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProviderCacheToken(pub(crate) [u8; 32]);
+
+impl fmt::Debug for ProviderCacheToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
+/// Outcome of reading a declared cache from a confirmed stopped runtime.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderCacheRead {
+    /// The declared cache is absent; no snapshot token was reserved.
+    Absent,
+    /// An immutable bounded snapshot is ready for sequential paging.
+    Ready {
+        /// Credential of the sole retained snapshot.
+        token: ProviderCacheToken,
+        /// Number of bytes after safe proxy resource-path normalization.
+        len: u64,
+        /// SHA-256 of the exact returned bytes, independent of mutable cache metadata.
+        sha256: [u8; 32],
+    },
+}
+
+/// One sequential page of an immutable provider snapshot.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderCacheChunk {
+    /// Byte offset supplied by the caller.
+    pub offset: u64,
+    /// At most 256 KiB of cache bytes.
+    pub bytes: Vec<u8>,
+    /// Whether this page reached the end of the snapshot.
+    pub finished: bool,
+}
+
+impl fmt::Debug for ProviderCacheChunk {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProviderCacheChunk")
+            .field("offset", &self.offset)
+            .field("bytes", &"[redacted]")
+            .field("finished", &self.finished)
+            .finish()
+    }
+}
+
 /// Response from a service-approved kernel API request.
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -224,6 +317,25 @@ pub struct ApiResponse {
     pub status: u16,
     /// JSON response body forwarded by the service.
     pub body: serde_json::Value,
+}
+
+/// A partial revision and the safe fields its application will actually send.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedRuntimePatch {
+    /// Revision of the retained partial candidate.
+    pub revision: u64,
+    /// Validated effective delta, including observed TUN enable when necessary.
+    pub effective_patch: serde_json::Value,
+}
+
+impl fmt::Debug for PreparedRuntimePatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PreparedRuntimePatch")
+            .field("revision", &self.revision)
+            .field("effective_patch", &"[redacted]")
+            .finish()
+    }
 }
 
 impl fmt::Debug for ApiResponse {
@@ -322,6 +434,15 @@ pub(crate) enum Response {
     Staged {
         revision: u64,
     },
+    RuntimePatchPrepared {
+        prepared: PreparedRuntimePatch,
+    },
+    ProviderCacheRead {
+        snapshot: ProviderCacheRead,
+    },
+    ProviderCacheChunk {
+        chunk: ProviderCacheChunk,
+    },
     Logs {
         cursor: u64,
         lines: Vec<String>,
@@ -357,6 +478,18 @@ impl fmt::Debug for Response {
             Self::Staged { revision } => f
                 .debug_struct("Staged")
                 .field("revision", revision)
+                .finish(),
+            Self::RuntimePatchPrepared { prepared } => f
+                .debug_struct("RuntimePatchPrepared")
+                .field("prepared", prepared)
+                .finish(),
+            Self::ProviderCacheRead { snapshot } => f
+                .debug_struct("ProviderCacheRead")
+                .field("snapshot", snapshot)
+                .finish(),
+            Self::ProviderCacheChunk { chunk } => f
+                .debug_struct("ProviderCacheChunk")
+                .field("chunk", chunk)
                 .finish(),
             Self::Logs { cursor, .. } => f
                 .debug_struct("Logs")
