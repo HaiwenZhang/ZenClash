@@ -12,7 +12,11 @@ impl RuntimePage {
         let Some(projection) = &self.rules.projection else {
             return v_flex()
                 .gap_3()
-                .child(Input::new(&self.rules.filter).small())
+                .child(
+                    Input::new(&self.rules.filter)
+                        .prefix(gpui_kit::component::Icon::new(IconName::Search))
+                        .small(),
+                )
                 .child(empty_state(
                     zenclash_i18n::text(if self.rules.projecting {
                         "runtime.empty.loading"
@@ -28,7 +32,11 @@ impl RuntimePage {
         let mut table = panel(theme)
             .w_full()
             .min_w(gpui_kit::rems(42.))
-            .child(Input::new(&self.rules.filter).small())
+            .child(
+                Input::new(&self.rules.filter)
+                    .prefix(gpui_kit::component::Icon::new(IconName::Search))
+                    .small(),
+            )
             .child(rule_columns(theme))
             .when(projection.indices.is_empty(), |this| {
                 this.child(empty_state(
@@ -104,7 +112,41 @@ impl RuntimePage {
                     theme,
                 ))
                 .child(detail("rules.columns.kind", rule.kind.clone(), theme))
-                .child(detail("rules.columns.proxy", rule.proxy.clone(), theme));
+                .child(detail("rules.columns.proxy", rule.proxy.clone(), theme))
+                .child(detail(
+                    "rules.columns.enabled",
+                    rule.index
+                        .and_then(|index| self.rules.confirmed_disabled.get(&index).copied())
+                        .or_else(|| rule.extra.as_ref().map(|stats| stats.disabled))
+                        .map_or_else(
+                            || zenclash_i18n::text("common.status.unknown"),
+                            |disabled| {
+                                zenclash_i18n::text(if disabled {
+                                    "common.status.disabled"
+                                } else {
+                                    "common.status.enabled"
+                                })
+                            },
+                        ),
+                    theme,
+                ))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .py_3()
+                        .border_y_1()
+                        .border_color(theme.border)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_sm()
+                                .truncate()
+                                .child(rule.payload.clone()),
+                        )
+                        .child(gpui_kit::component::Icon::new(IconName::ArrowRight).size_4())
+                        .child(policy_badge(&rule.proxy, theme)),
+                );
             if let Some(stats) = &rule.extra {
                 inspector = inspector
                     .child(detail(
@@ -186,7 +228,7 @@ impl RuntimePage {
                     .gap_3()
                     .items_stretch()
                     .child(distribution("rules.charts.types", &projection.kinds, theme))
-                    .child(distribution("rules.charts.hits", &projection.hits, theme)),
+                    .child(policy_distribution(&projection.hits, theme)),
             )
             .child(
                 h_flex()
@@ -224,6 +266,8 @@ impl RuntimePage {
             .test_support()
             .gap_3()
             .py_2()
+            .px_2()
+            .rounded(theme.radius)
             .border_b_1()
             .border_color(theme.border)
             .when(active, |row| row.bg(theme.primary.opacity(0.1)))
@@ -250,7 +294,7 @@ impl RuntimePage {
                         })),
                 ),
             )
-            .child(div().w_24().text_xs().truncate().child(rule.proxy.clone()))
+            .child(div().w_24().child(policy_badge(&rule.proxy, theme)))
             .child(
                 div().w_16().text_xs().text_right().child(
                     rule.extra
@@ -299,7 +343,7 @@ fn panel(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
         .p_4()
         .border_1()
         .border_color(theme.border)
-        .rounded(theme.radius)
+        .rounded(theme.radius_lg)
         .bg(theme.group_box)
 }
 
@@ -364,6 +408,9 @@ fn rule_columns(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
     h_flex()
         .gap_3()
         .py_2()
+        .px_2()
+        .bg(theme.table_head)
+        .rounded(theme.radius)
         .text_xs()
         .text_color(theme.muted_foreground)
         .border_b_1()
@@ -399,4 +446,87 @@ fn rule_columns(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
                 .w_16()
                 .child(zenclash_i18n::text("rules.columns.enabled")),
         )
+}
+
+fn policy_badge(policy: &str, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
+    let color = if policy.eq_ignore_ascii_case("DIRECT") {
+        theme.primary
+    } else if policy.starts_with("REJECT") {
+        theme.danger
+    } else {
+        theme.info
+    };
+    div()
+        .min_w_0()
+        .px_2()
+        .py_0p5()
+        .rounded(theme.radius)
+        .bg(color.opacity(0.1))
+        .text_color(color)
+        .text_xs()
+        .truncate()
+        .child(policy.to_owned())
+}
+
+fn policy_distribution(
+    values: &[(String, u64)],
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Div {
+    let total = values.iter().map(|(_, count)| *count as f64).sum::<f64>();
+    panel(theme)
+        .flex_1()
+        .min_w_0()
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .child(zenclash_i18n::text("rules.charts.hits")),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(zenclash_i18n::text("rules.charts.reported_hits")),
+        )
+        .when(total > 0., |this| {
+            this.child(
+                h_flex()
+                    .w_full()
+                    .h_6()
+                    .rounded(theme.radius)
+                    .overflow_hidden()
+                    .children(values.iter().map(|(policy, count)| {
+                        div()
+                            .h_full()
+                            .flex_grow(*count as f32)
+                            .flex_basis(gpui_kit::px(0.))
+                            .bg(if policy.eq_ignore_ascii_case("DIRECT") {
+                                theme.primary
+                            } else if policy.starts_with("REJECT") {
+                                theme.danger
+                            } else {
+                                theme.chart_1
+                            })
+                    })),
+            )
+        })
+        .children(values.iter().map(|(policy, count)| {
+            h_flex()
+                .gap_3()
+                .justify_between()
+                .child(policy_badge(policy, theme))
+                .child(div().text_sm().child(if total > 0. {
+                    format!("{:.1}%", *count as f64 / total * 100.)
+                } else {
+                    "—".into()
+                }))
+        }))
+        .when(values.is_empty(), |this| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("—"),
+            )
+        })
 }

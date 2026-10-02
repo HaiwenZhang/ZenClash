@@ -1,6 +1,8 @@
 use gpui_kit::component::{Selectable, button::ButtonVariants};
 use gpui_kit::{InteractiveElement, StatefulInteractiveElement};
 
+use gpui_kit::component::ActiveTheme as _;
+
 use super::{
     Button, Context, Disableable, FluentBuilder, Icon, IconName, IntoElement, ParentElement,
     Progress, ProxiesPage, ProxyCatalog, ProxyGroup, ProxyGroupBehavior, ProxyNode, ProxyNodeId,
@@ -23,7 +25,7 @@ impl ProxiesPage {
         };
         let group = &catalog.groups()[selected];
         let navigation = v_flex()
-            .w_56()
+            .w(gpui_kit::rems(15.))
             .min_w_0()
             .max_w_full()
             .flex_shrink_0()
@@ -43,9 +45,29 @@ impl ProxiesPage {
                 let item = &catalog.groups()[index];
                 let name = item.name.clone();
                 Button::new((gpui_kit::ElementId::from("toggle-group"), name.clone()))
-                    .label(item.name.clone())
+                    .accessibility_label(item.name.clone())
                     .tooltip(item.name.clone())
-                    .outline()
+                    .ghost()
+                    .min_h_16()
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                    .truncate()
+                                    .child(item.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .truncate()
+                                    .child(item.now.clone()),
+                            ),
+                    )
                     .selected(index == selected)
                     .w_full()
                     .min_w_0()
@@ -55,7 +77,14 @@ impl ProxiesPage {
                             this.toggle_group(&name, cx);
                         }
                     }))
-            }));
+            }))
+            .child(
+                div()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(self.render_group_visibility(cx)),
+            );
         h_flex()
             .items_start()
             .gap_3()
@@ -64,17 +93,10 @@ impl ProxiesPage {
             .child(
                 v_flex()
                     .flex_1()
-                    .flex_basis(gpui_kit::rems(28.))
+                    .flex_basis(gpui_kit::rems(24.))
                     .min_w_0()
                     .max_w_full()
                     .gap_3()
-                    .when_some(self.search_input.as_ref(), |this, input| {
-                        this.child(
-                            gpui_kit::component::input::Input::new(input)
-                                .id("proxy-node-search")
-                                .prefix(Icon::new(IconName::Search)),
-                        )
-                    })
                     .when(
                         !self.search_query.is_empty() && self.search_projection.is_none(),
                         |this| {
@@ -225,7 +247,7 @@ impl ProxiesPage {
             .flatten();
         let node = id.as_ref().and_then(|id| catalog.node(id));
         v_flex()
-            .w_64()
+            .w(gpui_kit::rems(20.))
             .max_w_full()
             .flex_shrink_0()
             .p_4()
@@ -428,118 +450,97 @@ impl ProxiesPage {
 
     pub(super) fn render_header(
         &self,
-        theme: &gpui_kit::component::Theme,
+        _theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let loading = self.loading;
-        let operation_pending = self.operation_pending();
-        let show_hidden = self.show_hidden;
-        h_flex()
-            .min_h(gpui_kit::rems(4.))
-            .py_3()
+        v_flex()
+            .px_6()
+            .pt_3()
+            .pb_2()
             .gap_3()
-            .flex_wrap()
-            .px_5()
-            .items_center()
-            .justify_between()
-            .border_b_1()
-            .border_color(theme.border)
+            .child(crate::components::workspace::breadcrumb(
+                crate::pages::Page::Proxies,
+                cx,
+            ))
             .child(
                 h_flex()
+                    .justify_between()
+                    .items_end()
                     .gap_3()
-                    .flex_1()
-                    .min_w(gpui_kit::rems(20.))
-                    .child(
-                        Icon::new(IconName::GalleryVerticalEnd)
-                            .size_5()
-                            .text_color(theme.primary),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_0()
-                            .child(
-                                div()
-                                    .text_lg()
-                                    .font_weight(gpui_kit::FontWeight::BOLD)
-                                    .child(zenclash_i18n::text("proxies.header.title")),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .max_w(gpui_kit::rems(40.))
-                                    .text_color(theme.muted_foreground)
-                                    .child(zenclash_i18n::text("proxies.header.description")),
-                            ),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_3()
-                    .items_center()
-                    .flex_wrap()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(zenclash_i18n::text("proxies.actions.show_hidden")),
-                            )
-                            .child(
-                                Switch::new("proxies-show-hidden")
-                                    .accessibility_label(zenclash_i18n::text(
-                                        "proxies.actions.show_hidden",
-                                    ))
-                                    .checked(show_hidden)
-                                    .disabled(loading || operation_pending)
-                                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                        this.set_show_hidden(*checked, cx);
-                                    })),
-                            ),
-                    )
-                    .child(
-                        Button::new("sort-proxies-by-latency")
-                            .label(zenclash_i18n::text("proxies.actions.sort_latency"))
-                            .small()
-                            .outline()
-                            .selected(self.sort_by_latency)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.sort_by_latency = !this.sort_by_latency;
-                                this.proxy_pages.clear();
-                                this.prepare_search(cx);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("hide-unavailable-proxies")
-                            .label(zenclash_i18n::text("proxies.actions.hide_unavailable"))
-                            .small()
-                            .outline()
-                            .selected(self.hide_unavailable)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.hide_unavailable = !this.hide_unavailable;
-                                this.proxy_pages.clear();
-                                this.prepare_search(cx);
-                                cx.notify();
-                            })),
-                    )
+                    .child(crate::components::workspace::title(
+                        crate::pages::Page::Proxies,
+                        cx,
+                    ))
                     .child(
                         Button::new("refresh-proxies")
                             .icon(crate::assets::AppIcon::RefreshCw)
-                            .label(if loading {
-                                zenclash_i18n::text("common.actions.loading")
-                            } else {
-                                zenclash_i18n::text("proxies.actions.refresh")
-                            })
+                            .label(zenclash_i18n::text("proxies.actions.refresh"))
                             .small()
-                            .ghost()
-                            .loading(loading)
-                            .disabled(operation_pending)
+                            .outline()
+                            .loading(self.loading)
+                            .disabled(self.operation_pending())
                             .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
                     ),
             )
+    }
+
+    fn render_node_filters(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        h_flex()
+            .gap_2()
+            .flex_wrap()
+            .child(
+                Button::new("sort-proxies-by-latency")
+                    .label(zenclash_i18n::text("proxies.actions.sort_latency"))
+                    .small()
+                    .outline()
+                    .selected(self.sort_by_latency)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.sort_by_latency = !this.sort_by_latency;
+                        this.proxy_pages.clear();
+                        this.prepare_search(cx);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("hide-unavailable-proxies")
+                    .label(zenclash_i18n::text("proxies.actions.hide_unavailable"))
+                    .small()
+                    .outline()
+                    .selected(self.hide_unavailable)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.hide_unavailable = !this.hide_unavailable;
+                        this.proxy_pages.clear();
+                        this.prepare_search(cx);
+                        cx.notify();
+                    })),
+            )
+    }
+
+    pub(super) fn render_group_visibility(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let theme = cx.theme().clone();
+        let show_hidden = self.show_hidden;
+        let loading = self.loading;
+        let operation_pending = self.operation_pending();
+        h_flex().gap_2().child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(zenclash_i18n::text("proxies.actions.show_hidden")),
+                )
+                .child(
+                    Switch::new("proxies-show-hidden")
+                        .accessibility_label(zenclash_i18n::text("proxies.actions.show_hidden"))
+                        .checked(show_hidden)
+                        .disabled(loading || operation_pending)
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            this.set_show_hidden(*checked, cx);
+                        })),
+                ),
+        )
     }
 
     pub(super) fn render_group(
@@ -624,7 +625,7 @@ impl ProxiesPage {
                                                     .flex_shrink_0()
                                                     .px_2()
                                                     .py(px(2.))
-                                                    .rounded_full()
+                                                    .rounded(theme.radius)
                                                     .bg(theme.muted)
                                                     .text_color(theme.muted_foreground)
                                                     .child(group.kind.clone()),
@@ -802,7 +803,21 @@ impl ProxiesPage {
                     v_flex()
                         .border_t_1()
                         .border_color(theme.border)
-                        .child(h_flex().p_3().gap_2().flex_wrap().children(
+                        .child(
+                            v_flex()
+                                .px_3()
+                                .pt_3()
+                                .gap_2()
+                                .when_some(self.search_input.as_ref(), |this, input| {
+                                    this.child(
+                                        gpui_kit::component::input::Input::new(input)
+                                            .id("proxy-node-search")
+                                            .prefix(Icon::new(IconName::Search)),
+                                    )
+                                })
+                                .child(self.render_node_filters(cx)),
+                        )
+                        .child(div().grid().grid_cols(3).p_3().gap_2().children(
                             nodes[page.start..page.end].iter().filter_map(|&index| {
                                 let id = &group.all[index];
                                 catalog
@@ -940,7 +955,7 @@ impl ProxiesPage {
 
         v_flex()
             .relative()
-            .w_56()
+            .min_w_0()
             .max_w_full()
             .min_h(gpui_kit::rems(8.))
             .gap_2()
@@ -955,7 +970,7 @@ impl ProxiesPage {
             .bg(if selected {
                 theme.primary.opacity(0.12)
             } else {
-                theme.background
+                theme.group_box
             })
             .child(
                 h_flex()
@@ -1007,6 +1022,7 @@ impl ProxiesPage {
             .child(
                 h_flex()
                     .justify_end()
+                    .flex_wrap()
                     .gap_1()
                     .child(
                         Button::new(proxy_element_id("test-proxy", &group.name, id))

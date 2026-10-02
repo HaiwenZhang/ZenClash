@@ -10,7 +10,10 @@ use gpui_kit::{TestAppContext, VisualTestContext, size};
 use super::*;
 use zenclash_core::MihomoProcess;
 
-struct Fixture {
+#[cfg(target_os = "windows")]
+mod design_validation;
+
+pub(super) struct Fixture {
     root: PathBuf,
     runtime: Option<tokio::runtime::Runtime>,
     profiles: ProfileStore,
@@ -24,7 +27,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self::with_controller("http://127.0.0.1:1".to_owned())
     }
 
@@ -81,7 +84,7 @@ impl Fixture {
         }
     }
 
-    fn services(&self) -> RuntimePageServices {
+    pub(super) fn services(&self) -> RuntimePageServices {
         RuntimePageServices {
             profile_store: Some(self.profiles.clone()),
             override_store: Some(self.overrides.clone()),
@@ -113,7 +116,7 @@ impl Fixture {
         }
     }
 
-    fn settle(
+    pub(super) fn settle(
         &self,
         cx: &mut TestAppContext,
         page: &Entity<RuntimePage>,
@@ -149,7 +152,7 @@ impl Drop for Fixture {
     }
 }
 
-fn open(
+pub(super) fn open(
     cx: &mut TestAppContext,
     fixture: &Fixture,
     initial: Page,
@@ -937,6 +940,119 @@ fn network_probe_stops_when_blurred_or_hidden_during_a_mutation(cx: &mut TestApp
 }
 
 #[gpui_kit::test]
+fn connection_transport_buttons_filter_rows_with_pointer_and_keyboard(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (window, page) = open(cx, &fixture, Page::Connections);
+    fixture.settle(cx, &page, |page| !page.persistent_loading && !page.loading);
+    cx.update_window(window, |_, _, cx| {
+        page.update(cx, |page, cx| {
+            page.invalidate_page_load();
+            page.replace_page_data(
+                page.page_task_token_for(Page::Connections),
+                RuntimeData::Connections(Arc::new(zenclash_core::ConnectionsSnapshot {
+                    connections: ["TCP", "UDP"]
+                        .into_iter()
+                        .map(|network| zenclash_core::Connection {
+                            id: network.into(),
+                            metadata: zenclash_core::ConnectionMetadata {
+                                network: network.into(),
+                                host: format!("{}.example", network.to_ascii_lowercase()),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                })),
+                cx,
+            );
+        });
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| !page.connections.projecting);
+    let row = |id: &str| {
+        gpui_kit::ElementId::from((
+            gpui_kit::ElementId::from("connection-details"),
+            id.to_owned(),
+        ))
+    };
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.find(row("TCP"));
+        window.find(row("UDP"));
+        window.click(("connection-transport", 1usize), cx);
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| !page.connections.projecting);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.find(row("TCP"));
+        assert!(window.try_find(row("UDP")).is_none());
+        let focus = page.read(cx).focus_handle.clone();
+        window.focus(&focus, cx);
+        for _ in 0..12 {
+            if window.find(("connection-transport", 2usize)).focused() == Some(true) {
+                break;
+            }
+            window.press("tab", cx);
+        }
+        assert_eq!(
+            window.find(("connection-transport", 2usize)).focused(),
+            Some(true)
+        );
+        window.press("enter", cx);
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| !page.connections.projecting);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.find(row("UDP"));
+        assert!(window.try_find(row("TCP")).is_none());
+        window.click("pause-connections-display", cx);
+        page.update(cx, |page, cx| {
+            page.replace_page_data(
+                page.page_task_token_for(Page::Connections),
+                RuntimeData::Connections(Arc::new(zenclash_core::ConnectionsSnapshot {
+                    connections: vec![zenclash_core::Connection {
+                        id: "latest".into(),
+                        metadata: zenclash_core::ConnectionMetadata {
+                            network: "UDP".into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })),
+                cx,
+            );
+        });
+        window.render_frame(cx);
+        window.find(row("UDP"));
+        assert!(window.try_find(row("latest")).is_none());
+        window.click(("connection-transport", 0usize), cx);
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| !page.connections.projecting);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.find(row("TCP"));
+        window.find(row("UDP"));
+        assert!(window.try_find(row("latest")).is_none());
+        window.click("pause-connections-display", cx);
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| !page.connections.projecting);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.find(row("latest"));
+        assert!(window.try_find(row("UDP")).is_none());
+        assert!(window.try_find(row("TCP")).is_none());
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn offline_settings_keep_local_controls_and_accessible_names(cx: &mut TestAppContext) {
     let fixture = Fixture::new();
     let (window, page) = open(cx, &fixture, Page::Settings);
@@ -978,9 +1094,40 @@ fn offline_settings_keep_local_controls_and_accessible_names(cx: &mut TestAppCon
         }
     })
     .unwrap();
-    cx.simulate_window_resize(window, size(px(1200.), px(820.)));
+    // Default 1280 px app window minus the 224 px application sidebar.
+    cx.simulate_window_resize(window, size(px(1056.), px(820.)));
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
+        for id in [
+            "theme-light",
+            "theme-dark",
+            "theme-system",
+            "workspace-appearance",
+        ] {
+            let bounds = window.find(id).bounds();
+            assert!(bounds.size.width > px(0.));
+            assert!(
+                bounds.origin.x >= px(0.) && bounds.right() <= px(1056.),
+                "{id} exceeds the workspace width"
+            );
+        }
+        for (card, ids) in [
+            (
+                "settings-appearance-card",
+                ["language-zh-cn", "language-en"],
+            ),
+            ("settings-startup-card", ["tray-show", "tray-hide"]),
+        ] {
+            let card_bounds = window.find(card).bounds();
+            for id in ids {
+                let bounds = window.find(id).bounds();
+                assert!(
+                    bounds.origin.x >= card_bounds.origin.x
+                        && bounds.right() <= card_bounds.right(),
+                    "{id} is clipped by its settings card"
+                );
+            }
+        }
         assert!(!window.find("settings-traffic-history").visible());
         window.click(("settings-section", 3usize), cx);
         assert!(window.simulate_next_frame(cx) > 0);
@@ -1629,7 +1776,9 @@ fn backup_retry_button_preserves_failed_snapshot_then_refreshes_after_success(
     })
     .unwrap();
     fixture.settle(cx, &page, |page| {
-        !page.mutation_busy(busy::MutationDomain::Backup) && page.notice.is_some()
+        !page.mutation_busy(busy::MutationDomain::Backup)
+            && applied.load(Ordering::SeqCst) == 1
+            && page.notice.is_some()
     });
     cx.update_window(window, |_, window, cx| {
         let page = page.read(cx);

@@ -262,14 +262,10 @@ impl RuntimePage {
                 );
             }
         }
-        home_card(
-            zenclash_i18n::text("home.history.title"),
-            IconName::Cpu,
-            theme,
-        )
-        .flex_basis(rems(19.))
-        .min_w_0()
-        .child(content)
+        home_card(zenclash_i18n::text("home.history.title"), theme)
+            .flex_basis(rems(19.))
+            .min_w_0()
+            .child(content)
     }
 }
 

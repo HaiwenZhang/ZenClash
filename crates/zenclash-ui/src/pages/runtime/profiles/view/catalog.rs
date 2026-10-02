@@ -61,7 +61,7 @@ impl RuntimePage {
                 }),
             ),
         );
-        let grid = h_flex().gap_3().flex_wrap().p_3().children(
+        let grid = div().grid().grid_cols(2).gap_3().p_3().children(
             self.profiles
                 .forms
                 .catalog_view
@@ -265,7 +265,7 @@ impl RuntimePage {
         v_flex()
             .flex_grow_1()
             .min_w_0()
-            .w(gpui_kit::rems(20.))
+            .w_full()
             .max_w_full()
             .p_4()
             .gap_3()

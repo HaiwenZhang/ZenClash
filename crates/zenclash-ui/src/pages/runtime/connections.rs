@@ -25,6 +25,7 @@ pub(super) struct ConnectionsUiState {
     projection: Option<projection::ConnectionProjection>,
     worker: projection::ProjectionWorker,
     pub(super) projecting: bool,
+    frozen: Option<std::sync::Arc<zenclash_core::ConnectionsSnapshot>>,
 }
 
 impl ConnectionsUiState {
@@ -32,6 +33,7 @@ impl ConnectionsUiState {
         self.worker.cancel();
         self.projection = None;
         self.projecting = false;
+        self.frozen = None;
     }
 
     pub(super) fn new(window: &mut Window, cx: &mut Context<RuntimePage>) -> (Self, Subscription) {
@@ -62,6 +64,7 @@ impl ConnectionsUiState {
                 projection: None,
                 worker: projection::ProjectionWorker::default(),
                 projecting: false,
+                frozen: None,
             },
             subscription,
         )
@@ -70,16 +73,33 @@ impl ConnectionsUiState {
 
 impl RuntimePage {
     pub(super) fn update_connection_presentation(&mut self, cx: &mut Context<Self>) {
-        let RuntimeData::Connections(data) = &self.data else {
-            self.connections.release_presentation();
-            return;
+        let data = match (&self.connections.frozen, &self.data) {
+            (Some(snapshot), _) | (None, RuntimeData::Connections(snapshot)) => snapshot.clone(),
+            _ => {
+                self.connections.release_presentation();
+                return;
+            }
         };
         if self.page != Page::Connections {
             return;
         }
+        if self.connections.frozen.is_some()
+            && self
+                .connections
+                .projection
+                .as_ref()
+                .is_some_and(|projection| {
+                    std::sync::Arc::ptr_eq(&projection.snapshot, &data)
+                        && projection.query == self.connections.query
+                        && projection.transport == self.connections.transport
+                        && projection.sort == self.connections.sort
+                })
+        {
+            return;
+        }
         let (generation, task) = self.connections.worker.start(
             &self.runtime,
-            data.clone(),
+            data,
             self.connections.query.clone(),
             self.connections.transport,
             self.connections.sort,
@@ -111,39 +131,57 @@ impl RuntimePage {
         .detach();
     }
 
+    pub(in crate::pages::runtime) fn render_connection_pause(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Button {
+        Button::new("pause-connections-display")
+            .label(zenclash_i18n::text(if self.connections.frozen.is_some() {
+                "common.actions.resume_display"
+            } else {
+                "common.actions.pause_display"
+            }))
+            .tooltip(zenclash_i18n::text("connections.display_pause_description"))
+            .small()
+            .outline()
+            .disabled(self.connections.projection.is_none())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.connections.frozen = if this.connections.frozen.is_some() {
+                    None
+                } else {
+                    this.connections
+                        .projection
+                        .as_ref()
+                        .map(|projection| projection.snapshot.clone())
+                };
+                this.connections.worker.cancel();
+                this.connections.projecting = false;
+                this.update_connection_presentation(cx);
+                cx.notify();
+            }))
+    }
+
     fn render_connection_options(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let transport = self.connections.transport;
         let sort = self.connections.sort;
-        let transport_owner = cx.entity().downgrade();
         let sort_owner = cx.entity().downgrade();
         h_flex()
             .gap_2()
             .flex_wrap()
-            .child(
-                Button::new("connection-transport")
-                    .label(zenclash_i18n::text(transport.label()))
+            .children(ConnectionTransport::ALL.into_iter().map(|value| {
+                use gpui_kit::component::Selectable as _;
+                Button::new(("connection-transport", value as usize))
+                    .label(zenclash_i18n::text(value.label()))
                     .small()
                     .outline()
-                    .dropdown_caret(true)
-                    .dropdown_menu(move |mut menu, _, _| {
-                        for value in ConnectionTransport::ALL {
-                            let owner = transport_owner.clone();
-                            menu = menu.item(
-                                PopupMenuItem::new(zenclash_i18n::text(value.label()))
-                                    .checked(value == transport)
-                                    .on_click(move |_, _, cx| {
-                                        let _ = owner.update(cx, |page, cx| {
-                                            page.connections.transport = value;
-                                            page.connections.page = 0;
-                                            page.update_connection_presentation(cx);
-                                            cx.notify();
-                                        });
-                                    }),
-                            );
-                        }
-                        menu
-                    }),
-            )
+                    .selected(value == transport)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.connections.transport = value;
+                        this.connections.page = 0;
+                        this.update_connection_presentation(cx);
+                        cx.notify();
+                    }))
+            }))
             .child(
                 Button::new("connection-sort")
                     .label(zenclash_i18n::text(sort.label()))
@@ -216,6 +254,9 @@ impl RuntimePage {
                 this.finish_mutation(token);
                 match result {
                     Ok(data) => {
+                        if this.is_page_task_current(token) {
+                            this.connections.frozen = None;
+                        }
                         if this.replace_page_data(token, data, cx) {
                             this.notice =
                                 Some(zenclash_i18n::text("connections.notices.closed_all"));
@@ -256,7 +297,10 @@ impl RuntimePage {
             let _ = this.update(cx, |this, cx| {
                 this.connections.closing.remove(&id);
                 match result {
-                    Ok(()) if this.is_page_task_current(token) => this.refresh(cx),
+                    Ok(()) if this.is_page_task_current(token) => {
+                        this.connections.frozen = None;
+                        this.refresh(cx);
+                    }
                     Ok(()) => {}
                     Err(error) => this.set_page_error(token, error),
                 }

@@ -79,6 +79,21 @@ impl Page {
         })
     }
 
+    /// Returns the descriptive title of the current workspace surface.
+    #[must_use]
+    pub fn title(self) -> String {
+        match self {
+            Self::Home
+            | Self::Profiles
+            | Self::Proxies
+            | Self::Connections
+            | Self::Rules
+            | Self::Logs
+            | Self::Settings => zenclash_i18n::text(&format!("navigation.{}.title", self.route())),
+            _ => self.label(),
+        }
+    }
+
     /// Returns the stable element identifier used by navigation controls.
     #[must_use]
     pub const fn route(self) -> &'static str {

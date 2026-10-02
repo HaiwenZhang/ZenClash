@@ -5,7 +5,7 @@ use std::{
 
 use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::{
-    Colorize, Disableable, Icon, IconName, Selectable, Sizable,
+    Disableable, Icon, IconName, Selectable, Sizable,
     button::{Button, ButtonVariants},
     chart::AreaChart,
     h_flex,
@@ -97,7 +97,7 @@ impl RuntimePage {
         let operational = self.operational_status.snapshot();
 
         v_flex()
-            .gap_4()
+            .gap_3()
             .child(self.render_home_metrics(&operational.streams, theme))
             .when_some(
                 self.app_update
@@ -143,7 +143,7 @@ impl RuntimePage {
                 h_flex()
                     .items_start()
                     .flex_wrap()
-                    .gap_4()
+                    .gap_3()
                     .child(
                         div()
                             .flex_1()
@@ -152,25 +152,16 @@ impl RuntimePage {
                             .child(self.render_home_traffic(&operational.streams, theme, cx)),
                     )
                     .child(
-                        v_flex()
-                            .flex_1()
-                            .flex_basis(rems(22.))
-                            .min_w_0()
-                            .gap_4()
-                            .child(self.render_home_controls(
-                                config,
-                                &operational.capture,
-                                theme,
-                                cx,
-                            ))
-                            .child(self.render_home_proxy(theme, cx)),
+                        v_flex().flex_1().flex_basis(rems(22.)).min_w_0().child(
+                            self.render_home_controls(config, &operational.capture, theme, cx),
+                        ),
                     ),
             )
             .child(
                 h_flex()
                     .items_start()
                     .flex_wrap()
-                    .gap_4()
+                    .gap_3()
                     .child(self.render_home_process_flow(theme))
                     .child(self.render_home_routes(theme))
                     .child(self.render_home_node_delays(theme, cx)),
@@ -179,7 +170,7 @@ impl RuntimePage {
                 h_flex()
                     .items_start()
                     .flex_wrap()
-                    .gap_4()
+                    .gap_3()
                     .child(self.render_home_profile(theme, cx))
                     .child(self.render_home_recent_connections(theme)),
             )
@@ -356,69 +347,65 @@ impl RuntimePage {
                 )
             });
 
-        home_card(
-            zenclash_i18n::text("home.profile.title"),
-            IconName::FolderOpen,
-            theme,
-        )
-        .flex_basis(rems(30.))
-        .min_w_0()
-        .min_h(rems(11.5))
-        .child(
-            v_flex()
-                .flex_1()
-                .p_4()
-                .gap_3()
-                .child(profile_picker)
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(source),
-                )
-                .child(
-                    v_flex()
-                        .gap_2()
-                        .child(
-                            h_flex()
-                                .gap_3()
-                                .justify_between()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(zenclash_i18n::text("home.profile.usage"))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_right()
-                                        .text_ellipsis()
-                                        .whitespace_nowrap()
-                                        .overflow_hidden()
-                                        .child(usage),
-                                ),
-                        )
-                        .child(
-                            Progress::new("traffic-activity")
-                                .h_1()
-                                .color(theme.primary)
-                                .value(usage_percent),
+        home_card(zenclash_i18n::text("home.profile.title"), theme)
+            .flex_basis(rems(30.))
+            .min_w_0()
+            .min_h(rems(11.5))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .p_4()
+                    .gap_3()
+                    .child(profile_picker)
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(source),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_2()
+                            .child(
+                                h_flex()
+                                    .gap_3()
+                                    .justify_between()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(zenclash_i18n::text("home.profile.usage"))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_right()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .overflow_hidden()
+                                            .child(usage),
+                                    ),
+                            )
+                            .child(
+                                Progress::new("traffic-activity")
+                                    .h_1()
+                                    .color(theme.primary)
+                                    .value(usage_percent),
+                            ),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        h_flex().justify_end().child(
+                            Button::new("home-open-profiles")
+                                .icon(IconName::ArrowRight)
+                                .label(zenclash_i18n::text("home.profile.all"))
+                                .small()
+                                .outline()
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(NavigateProfiles), cx);
+                                }),
                         ),
-                )
-                .child(div().flex_1())
-                .child(
-                    h_flex().justify_end().child(
-                        Button::new("home-open-profiles")
-                            .icon(IconName::ArrowRight)
-                            .label(zenclash_i18n::text("home.profile.all"))
-                            .small()
-                            .outline()
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(NavigateProfiles), cx);
-                            }),
                     ),
-                ),
-        )
-        .into_any_element()
+            )
+            .into_any_element()
     }
 
     fn render_home_proxy(
@@ -447,60 +434,58 @@ impl RuntimePage {
             .truncate()
             .child(selection.node);
 
-        home_card(
-            zenclash_i18n::text("home.proxy.title"),
-            IconName::GalleryVerticalEnd,
-            theme,
-        )
-        .min_h(rems(11.5))
-        .child(
-            v_flex()
-                .flex_1()
-                .p_4()
-                .gap_3()
-                .child(
+        v_flex()
+            .p_4()
+            .gap_3()
+            .border_t_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .text_base()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .child(zenclash_i18n::text("home.proxy.title")),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(selection.group),
+            )
+            .child(
+                h_flex().gap_3().justify_between().child(node_picker).child(
                     div()
+                        .px_2()
+                        .py_1()
+                        .rounded_full()
+                        .bg(latency_color.opacity(0.12))
+                        .font_family(theme.mono_font_family.clone())
                         .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(selection.group),
-                )
-                .child(
-                    h_flex().gap_3().justify_between().child(node_picker).child(
-                        div()
-                            .px_2()
-                            .py_1()
-                            .rounded_full()
-                            .bg(latency_color.opacity(0.12))
-                            .font_family(theme.mono_font_family.clone())
-                            .text_xs()
-                            .text_color(latency_color)
-                            .child(latency),
-                    ),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(selection.kind),
-                )
-                .when_some(self.home.proxy_error.clone(), |this, error| {
-                    this.child(message_banner(error, theme.danger, theme))
-                })
-                .child(div().flex_1())
-                .child(
-                    h_flex().justify_end().child(
-                        Button::new("home-open-proxies")
-                            .icon(IconName::ArrowRight)
-                            .label(zenclash_i18n::text("home.proxy.details"))
-                            .small()
-                            .outline()
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(NavigateProxies), cx);
-                            }),
-                    ),
+                        .text_color(latency_color)
+                        .child(latency),
                 ),
-        )
-        .into_any_element()
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(selection.kind),
+            )
+            .when_some(self.home.proxy_error.clone(), |this, error| {
+                this.child(message_banner(error, theme.danger, theme))
+            })
+            .child(
+                h_flex().justify_end().child(
+                    Button::new("home-open-proxies")
+                        .icon(IconName::ArrowRight)
+                        .label(zenclash_i18n::text("home.proxy.details"))
+                        .small()
+                        .outline()
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(NavigateProxies), cx);
+                        }),
+                ),
+            )
+            .into_any_element()
     }
 
     fn render_home_controls(
@@ -564,215 +549,194 @@ impl RuntimePage {
             },
         );
 
-        home_card(
-            zenclash_i18n::text("home.controls.title"),
-            IconName::Settings2,
-            theme,
-        )
-        .w_full()
-        .child(
-            v_flex()
-                .gap_4()
-                .p_4()
-                .when_some(self.home.action_error.clone(), |this, error| {
-                    this.child(
-                        div()
-                            .w_full()
-                            .child(message_banner(error, theme.danger, theme)),
+        home_card(zenclash_i18n::text("home.controls.title"), theme)
+            .w_full()
+            .child(
+                v_flex()
+                    .px_4()
+                    .pb_4()
+                    .gap_3()
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(mode_button(
+                                "home-mode-rule",
+                                OutboundMode::Rule,
+                                mode,
+                                mode_pending,
+                                SetRuleMode,
+                            ))
+                            .child(mode_button(
+                                "home-mode-global",
+                                OutboundMode::Global,
+                                mode,
+                                mode_pending,
+                                SetGlobalMode,
+                            ))
+                            .child(mode_button(
+                                "home-mode-direct",
+                                OutboundMode::Direct,
+                                mode,
+                                mode_pending,
+                                SetDirectMode,
+                            )),
                     )
-                })
-                .children(
-                    home_service_feedback(
-                        self.profile_service
-                            .service_state()
-                            .map(|state| state.phase()),
-                        service_pending,
-                        self.profile_service.service_tun_warning(),
-                        theme,
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(
+                        if mode_pending {
+                            zenclash_i18n::text_with(
+                                "home.controls.mode_switching",
+                                &[("mode", mode.label())],
+                            )
+                        } else {
+                            mode_description(mode)
+                        },
+                    ))
+                    .when_some(self.home.action_error.clone(), |this, error| {
+                        this.child(message_banner(error, theme.danger, theme))
+                    })
+                    .children(
+                        home_service_feedback(
+                            self.profile_service
+                                .service_state()
+                                .map(|state| state.phase()),
+                            service_pending,
+                            self.profile_service.service_tun_warning(),
+                            theme,
+                        )
+                        .map(|feedback| {
+                            feedback.child(
+                                Button::new("home-service-details")
+                                    .label(zenclash_i18n::text("navigation.tun.label"))
+                                    .small()
+                                    .outline()
+                                    .on_click(|_, window, cx| {
+                                        window
+                                            .dispatch_action(Box::new(crate::app::NavigateTun), cx)
+                                    }),
+                            )
+                        }),
                     )
-                    .map(|feedback| {
-                        feedback.child(
-                            Button::new("home-service-details")
-                                .label(zenclash_i18n::text("navigation.tun.label"))
-                                .small()
-                                .outline()
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(Box::new(crate::app::NavigateTun), cx);
-                                }),
-                        )
-                    }),
-                )
-                .child(
-                    v_flex()
-                        .min_w_0()
-                        .flex_1()
-                        .gap_3()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(zenclash_i18n::text("home.controls.capture_description")),
-                        )
-                        .child(
-                            h_flex()
-                                .justify_between()
-                                .gap_3()
-                                .child(
-                                    v_flex()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                                .child(zenclash_i18n::text("tray.system_proxy")),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .child(proxy_status),
-                                        ),
-                                )
-                                .child(
-                                    Switch::new("home-system-proxy")
-                                        .checked(capture_presentation.system_proxy_enabled)
-                                        .disabled(capture_presentation.pending)
-                                        .on_click(cx.listener(|this, checked, window, cx| {
-                                            this.apply_home_capture_plan(
-                                                if *checked {
-                                                    CapturePlan::SystemProxy
-                                                } else {
-                                                    CapturePlan::Off
-                                                },
-                                                window,
-                                                cx,
-                                            );
-                                        })),
-                                ),
-                        )
-                        .child(
-                            h_flex()
-                                .justify_between()
-                                .gap_3()
-                                .child(
-                                    v_flex()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                                .child(zenclash_i18n::text("home.controls.tun")),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .child(tun_status),
-                                        ),
-                                )
-                                .child(
-                                    Switch::new("home-tun")
-                                        .checked(capture_presentation.tun_enabled)
-                                        .disabled(
-                                            capture_presentation.pending
-                                                || !tun_supported
-                                                || service_pending
-                                                || self.core_busy()
-                                                || self
-                                                    .profile_service
-                                                    .service_state()
-                                                    .is_some_and(|state| state.is_busy()),
-                                        )
-                                        .on_click(cx.listener(|this, checked, window, cx| {
-                                            this.apply_home_capture_plan(
-                                                if *checked {
-                                                    CapturePlan::Tun
-                                                } else {
-                                                    CapturePlan::Off
-                                                },
-                                                window,
-                                                cx,
-                                            );
-                                        })),
-                                ),
-                        )
-                        .child(
-                            h_flex()
-                                .justify_between()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font_family(theme.mono_font_family.clone())
-                                        .text_color(theme.muted_foreground)
-                                        .child(format!("{port} · {capture_status}")),
-                                )
-                                .child(
-                                    Button::new("home-open-system-proxy")
-                                        .icon(IconName::ArrowRight)
-                                        .label(zenclash_i18n::text("home.controls.proxy_settings"))
-                                        .small()
-                                        .ghost()
-                                        .on_click(|_, window, cx| {
-                                            window
-                                                .dispatch_action(Box::new(NavigateSystemProxy), cx);
-                                        }),
-                                ),
-                        ),
-                )
-                .child(
-                    v_flex()
-                        .min_w_0()
-                        .flex_1()
-                        .gap_3()
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                        .child(zenclash_i18n::text("home.controls.routing_mode")),
-                                )
-                                .child(div().text_xs().text_color(theme.muted_foreground).child(
-                                    if mode_pending {
-                                        zenclash_i18n::text_with(
-                                            "home.controls.mode_switching",
-                                            &[("mode", mode.label())],
-                                        )
-                                    } else {
-                                        mode_description(mode)
-                                    },
-                                )),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .child(mode_button(
-                                    "home-mode-rule",
-                                    OutboundMode::Rule,
-                                    mode,
-                                    mode_pending,
-                                    SetRuleMode,
-                                ))
-                                .child(mode_button(
-                                    "home-mode-global",
-                                    OutboundMode::Global,
-                                    mode,
-                                    mode_pending,
-                                    SetGlobalMode,
-                                ))
-                                .child(mode_button(
-                                    "home-mode-direct",
-                                    OutboundMode::Direct,
-                                    mode,
-                                    mode_pending,
-                                    SetDirectMode,
-                                )),
-                        ),
-                ),
-        )
-        .into_any_element()
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .gap_3()
+                            .py_2()
+                            .child(
+                                v_flex()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                            .child(zenclash_i18n::text("tray.system_proxy")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(port),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(proxy_status),
+                                    ),
+                            )
+                            .child(
+                                Switch::new("home-system-proxy")
+                                    .accessibility_label(zenclash_i18n::text("tray.system_proxy"))
+                                    .checked(capture_presentation.system_proxy_enabled)
+                                    .disabled(capture_presentation.pending)
+                                    .on_click(cx.listener(|this, checked, window, cx| {
+                                        this.apply_home_capture_plan(
+                                            if *checked {
+                                                CapturePlan::SystemProxy
+                                            } else {
+                                                CapturePlan::Off
+                                            },
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .gap_3()
+                            .py_2()
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .child(
+                                v_flex()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                            .child(zenclash_i18n::text("home.controls.tun")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(tun_status),
+                                    ),
+                            )
+                            .child(
+                                Switch::new("home-tun")
+                                    .accessibility_label(zenclash_i18n::text("home.controls.tun"))
+                                    .checked(capture_presentation.tun_enabled)
+                                    .disabled(
+                                        capture_presentation.pending
+                                            || !tun_supported
+                                            || service_pending
+                                            || self.core_busy()
+                                            || self
+                                                .profile_service
+                                                .service_state()
+                                                .is_some_and(|state| state.is_busy()),
+                                    )
+                                    .on_click(cx.listener(|this, checked, window, cx| {
+                                        this.apply_home_capture_plan(
+                                            if *checked {
+                                                CapturePlan::Tun
+                                            } else {
+                                                CapturePlan::Off
+                                            },
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(capture_status),
+                            )
+                            .child(
+                                Button::new("home-open-system-proxy")
+                                    .icon(IconName::ArrowRight)
+                                    .label(zenclash_i18n::text("home.controls.proxy_settings"))
+                                    .small()
+                                    .ghost()
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(Box::new(NavigateSystemProxy), cx)
+                                    }),
+                            ),
+                    ),
+            )
+            .child(self.render_home_proxy(theme, cx))
+            .into_any_element()
     }
 
     fn render_home_traffic(
@@ -811,94 +775,90 @@ impl RuntimePage {
             .x(|point| point.label.clone())
             .y(|point| point.download)
             .name(zenclash_i18n::text("home.traffic.download"))
-            .stroke(theme.info)
-            .fill(theme.info.opacity(0.18))
+            .stroke(theme.chart_1)
+            .fill(theme.chart_1.opacity(0.18))
             .natural()
             .y(|point| point.upload)
             .name(zenclash_i18n::text("home.traffic.upload"))
-            .stroke(theme.info.darken(0.2))
-            .fill(theme.info.darken(0.2).opacity(0.14))
+            .stroke(theme.chart_2)
+            .fill(theme.chart_2.opacity(0.14))
             .natural()
             .y_domain(0., ceiling)
             .tooltip_value(|_, _, value| format_speed(value.max(0.) as u64).into())
             .tick_margin(LIVE_TRAFFIC_TICK_MARGIN);
 
-        home_card(
-            zenclash_i18n::text("home.traffic.title"),
-            IconName::ChartPie,
-            theme,
-        )
-        .w_full()
-        .child(
-            v_flex()
-                .p_4()
-                .gap_4()
-                .child(
-                    h_flex()
-                        .flex_wrap()
-                        .gap_3()
-                        .justify_between()
-                        .child(div().text_xs().text_color(theme.muted_foreground).child(
-                            zenclash_i18n::text_with(
-                                "home.traffic.observed_duration",
-                                &[("seconds", observed_seconds.to_string())],
-                            ),
-                        ))
-                        .child(self.render_home_chart_controls(cx)),
-                )
-                .child(
-                    h_flex().flex_wrap().justify_between().gap_3().child(
+        home_card(zenclash_i18n::text("home.traffic.title"), theme)
+            .w_full()
+            .child(
+                v_flex()
+                    .p_4()
+                    .gap_4()
+                    .child(
                         h_flex()
                             .flex_wrap()
-                            .gap_4()
-                            .child(status_label(traffic_status, status_color, theme))
-                            .child(status_label(
+                            .gap_3()
+                            .justify_between()
+                            .child(div().text_xs().text_color(theme.muted_foreground).child(
                                 zenclash_i18n::text_with(
-                                    "home.traffic.connections_status",
-                                    &[("status", connections_status)],
+                                    "home.traffic.observed_duration",
+                                    &[("seconds", observed_seconds.to_string())],
                                 ),
-                                connections_color,
-                                theme,
                             ))
-                            .child(series_label(
-                                zenclash_i18n::text("home.traffic.download"),
-                                if traffic.generation == self.home.generation
-                                    && traffic_stream.value().is_some()
-                                {
-                                    format_speed(traffic.download)
-                                } else {
-                                    zenclash_i18n::text("common.status.unknown")
-                                },
-                                theme.info,
-                                theme,
-                            ))
-                            .child(series_label(
-                                zenclash_i18n::text("home.traffic.upload"),
-                                if traffic.generation == self.home.generation
-                                    && traffic_stream.value().is_some()
-                                {
-                                    format_speed(traffic.upload)
-                                } else {
-                                    zenclash_i18n::text("common.status.unknown")
-                                },
-                                theme.info.darken(0.2),
-                                theme,
-                            )),
+                            .child(self.render_home_chart_controls(cx)),
+                    )
+                    .child(
+                        h_flex().flex_wrap().justify_between().gap_3().child(
+                            h_flex()
+                                .flex_wrap()
+                                .gap_4()
+                                .child(status_label(traffic_status, status_color, theme))
+                                .child(status_label(
+                                    zenclash_i18n::text_with(
+                                        "home.traffic.connections_status",
+                                        &[("status", connections_status)],
+                                    ),
+                                    connections_color,
+                                    theme,
+                                ))
+                                .child(series_label(
+                                    zenclash_i18n::text("home.traffic.download"),
+                                    if traffic.generation == self.home.generation
+                                        && traffic_stream.value().is_some()
+                                    {
+                                        format_speed(traffic.download)
+                                    } else {
+                                        zenclash_i18n::text("common.status.unknown")
+                                    },
+                                    theme.info,
+                                    theme,
+                                ))
+                                .child(series_label(
+                                    zenclash_i18n::text("home.traffic.upload"),
+                                    if traffic.generation == self.home.generation
+                                        && traffic_stream.value().is_some()
+                                    {
+                                        format_speed(traffic.upload)
+                                    } else {
+                                        zenclash_i18n::text("common.status.unknown")
+                                    },
+                                    theme.chart_2,
+                                    theme,
+                                )),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .h(rems(17.))
+                            .w_full()
+                            .rounded(theme.radius)
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.background.opacity(0.36))
+                            .p_3()
+                            .child(chart),
                     ),
-                )
-                .child(
-                    div()
-                        .h(rems(17.))
-                        .w_full()
-                        .rounded(theme.radius)
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.background.opacity(0.36))
-                        .p_3()
-                        .child(chart),
-                ),
-        )
-        .into_any_element()
+            )
+            .into_any_element()
     }
 
     fn change_home_proxy(&mut self, group: String, proxy: String, cx: &mut Context<Self>) {
@@ -1460,45 +1420,21 @@ fn stream_status_text(
     }
 }
 
-fn home_card(
-    title: impl Into<SharedString>,
-    icon: IconName,
-    theme: &gpui_kit::component::Theme,
-) -> gpui_kit::Div {
-    let title = title.into();
+fn home_card(title: impl Into<SharedString>, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
     v_flex()
         .min_w(rems(20.))
         .flex_1()
         .rounded(theme.radius_lg)
         .border_1()
         .border_color(theme.border)
-        .bg(theme.secondary)
-        .overflow_hidden()
-        .when(theme.shadow, |this| this.shadow_sm())
+        .bg(theme.group_box)
         .child(
-            h_flex()
-                .h_12()
+            div()
                 .px_4()
-                .gap_3()
-                .border_b_1()
-                .border_color(theme.border)
-                .bg(theme.muted.opacity(0.24))
-                .child(
-                    div()
-                        .size_7()
-                        .rounded(theme.radius)
-                        .bg(theme.primary.opacity(0.12))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(Icon::new(icon).size_4().text_color(theme.primary)),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                        .child(title),
-                ),
+                .pt_4()
+                .text_base()
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .child(title.into()),
         )
 }
 

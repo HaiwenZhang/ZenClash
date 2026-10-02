@@ -286,7 +286,6 @@ impl RuntimePage {
         );
         home_card(
             zenclash_i18n::text("proxies.design.latency_comparison"),
-            IconName::ChartPie,
             theme,
         )
         .flex_basis(rems(19.))

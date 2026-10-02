@@ -10,22 +10,22 @@ pub const UPLINK_AMBER: u32 = 0x00F2_B84B;
 /// Coral accent used for errors and destructive states.
 pub const FAULT_CORAL: u32 = 0x00FF_6B64;
 
-const DARK_PANEL: u32 = 0x0019_232D;
-const DARK_RAISED: u32 = 0x0023_313E;
-const DARK_BORDER: u32 = 0x002B_3947;
+const DARK_PANEL: u32 = 0x0019_2732;
+const DARK_RAISED: u32 = 0x0021_3342;
+const DARK_BORDER: u32 = 0x002E_475A;
 const DARK_FOREGROUND: u32 = 0x00EC_F2F8;
 const DARK_MUTED_FOREGROUND: u32 = 0x00A8_B7C6;
-const LIGHT_CANVAS: u32 = 0x00F4_F7FA;
+const LIGHT_CANVAS: u32 = 0x00F4_F9FB;
 pub(crate) const LIGHT_PANEL: u32 = 0x00FF_FFFF;
-const LIGHT_RAISED: u32 = 0x00E9_EFF5;
-const LIGHT_BORDER: u32 = 0x00D5_DEE7;
-const LIGHT_INK: u32 = 0x0017_2635;
-const LIGHT_MUTED_INK: u32 = 0x0060_7386;
+const LIGHT_RAISED: u32 = 0x00EC_F3F8;
+const LIGHT_BORDER: u32 = 0x00DF_E9F1;
+const LIGHT_INK: u32 = 0x000D_1B43;
+const LIGHT_MUTED_INK: u32 = 0x0057_6B93;
 const LIGHT_SIGNAL: u32 = 0x000B_7A71;
 const LIGHT_UPLINK: u32 = 0x009B_650E;
 const LIGHT_SUCCESS: u32 = 0x0016_7956;
 const LIGHT_DANGER: u32 = 0x00BD_3F3F;
-const LIGHT_SIDEBAR: u32 = 0x00ED_F4F3;
+const LIGHT_SIDEBAR: u32 = 0x00E8_F4F2;
 
 /// Converts a packed RGB value into GPUI's HSLA representation.
 #[must_use]
@@ -76,6 +76,8 @@ pub fn apply_zen_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut Ap
         colors.secondary_foreground = foreground;
         colors.secondary_hover = raised;
         colors.secondary_active = raised;
+        colors.group_box = panel;
+        colors.group_box_foreground = foreground;
         colors.muted = raised;
         colors.muted_foreground = muted_foreground;
         colors.border = border;
@@ -86,6 +88,10 @@ pub fn apply_zen_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut Ap
         colors.primary_foreground = signal_foreground;
         colors.primary_hover = signal.opacity(0.84);
         colors.primary_active = signal.opacity(0.72);
+        colors.button_primary = signal;
+        colors.button_primary_foreground = signal_foreground;
+        colors.button_primary_hover = colors.primary_hover;
+        colors.button_primary_active = colors.primary_active;
         colors.accent = raised;
         colors.accent_foreground = foreground;
         colors.success = success;
@@ -100,10 +106,11 @@ pub fn apply_zen_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut Ap
         colors.danger_foreground = color(0x0026_0504);
         colors.danger_hover = coral.opacity(0.84);
         colors.danger_active = coral.opacity(0.72);
-        colors.info = signal;
-        colors.info_foreground = signal_foreground;
-        colors.info_hover = signal.opacity(0.84);
-        colors.info_active = signal.opacity(0.72);
+        let info = color(if dark { 0x0062_A8FF } else { 0x0024_6FDD });
+        colors.info = info;
+        colors.info_foreground = color(LIGHT_PANEL);
+        colors.info_hover = info.opacity(0.84);
+        colors.info_active = info.opacity(0.72);
         colors.progress_bar = signal;
         colors.sidebar = sidebar;
         colors.sidebar_foreground = foreground;
@@ -131,8 +138,8 @@ pub fn apply_zen_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut Ap
         colors.switch = border;
         colors.switch_thumb = foreground;
         colors.tab = panel;
-        colors.tab_active = signal;
-        colors.tab_active_foreground = signal_foreground;
+        colors.tab_active = sidebar_accent;
+        colors.tab_active_foreground = signal;
         colors.tab_bar = panel;
         colors.tab_bar_segmented = raised;
         colors.tab_foreground = muted_foreground;
@@ -158,11 +165,11 @@ pub fn apply_zen_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut Ap
 fn configure_theme_metrics(theme: &mut Theme) {
     theme.font_family = ".SystemUIFont".into();
     theme.mono_font_family = "SF Mono".into();
-    theme.font_size = gpui_kit::px(15.);
+    theme.font_size = gpui_kit::px(16.);
     theme.mono_font_size = gpui_kit::px(12.);
     theme.radius = gpui_kit::px(8.);
-    theme.radius_lg = gpui_kit::px(12.);
-    theme.shadow = !theme.mode.is_dark();
+    theme.radius_lg = gpui_kit::px(8.);
+    theme.shadow = false;
 }
 
 #[cfg(test)]
@@ -191,6 +198,27 @@ mod tests {
         DARK_FOREGROUND, DARK_MUTED_FOREGROUND, DEEP_INK, LIGHT_CANVAS, LIGHT_INK, LIGHT_MUTED_INK,
         LIGHT_SIGNAL, SIGNAL_CYAN, contrast_ratio, throughput_activity_percent,
     };
+
+    #[gpui_kit::test]
+    fn desktop_surfaces_follow_the_product_palette_in_both_modes(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::component::{ActiveTheme, ThemeMode};
+        cx.update(gpui_kit::init);
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            cx.update(|cx| {
+                super::apply_zen_theme(mode, None, cx);
+                let theme = cx.theme();
+                assert_eq!(theme.group_box, theme.secondary);
+                assert_eq!(theme.group_box_foreground, theme.foreground);
+                assert_ne!(theme.info, theme.primary);
+                assert_eq!(theme.tab_active, theme.sidebar_accent);
+                assert_eq!(theme.tab_active_foreground, theme.primary);
+                assert_eq!(theme.tokens.button_primary.color, theme.primary);
+                assert_eq!(theme.button_primary_foreground, theme.primary_foreground);
+            });
+        }
+    }
 
     #[test]
     fn activity_percent_is_bounded_without_float_casts() {

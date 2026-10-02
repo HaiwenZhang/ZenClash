@@ -9,6 +9,8 @@ use zenclash_core::ConnectionsSnapshot;
 pub(super) struct ConnectionProjection {
     pub(super) snapshot: Arc<ConnectionsSnapshot>,
     pub(super) query: String,
+    pub(super) transport: ConnectionTransport,
+    pub(super) sort: ConnectionSort,
     pub(super) order: Vec<usize>,
     pub(super) processes: Vec<(String, u64)>,
     pub(super) protocols: Vec<(String, u64)>,
@@ -77,6 +79,8 @@ impl ProjectionWorker {
                 (current.load(Ordering::Acquire) == generation).then_some(ConnectionProjection {
                     snapshot,
                     query,
+                    transport,
+                    sort,
                     order,
                     processes,
                     protocols,

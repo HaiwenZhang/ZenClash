@@ -9669,7 +9669,7 @@ dependencies = [
 
 [[package]]
 name = "zenclash-core"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "cron",
@@ -9699,7 +9699,7 @@ dependencies = [
 
 [[package]]
 name = "zenclash-i18n"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "rust-i18n",
  "serde_yaml",
@@ -9707,7 +9707,7 @@ dependencies = [
 
 [[package]]
 name = "zenclash-service"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "getrandom 0.3.4",
@@ -9728,7 +9728,7 @@ dependencies = [
 
 [[package]]
 name = "zenclash-ui"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "embed-resource",

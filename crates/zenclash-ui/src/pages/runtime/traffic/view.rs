@@ -43,7 +43,6 @@ impl RuntimePage {
                         } else {
                             empty_dash("")
                         },
-                        theme.success,
                         theme,
                     ))
                     .child(metric(
@@ -53,7 +52,6 @@ impl RuntimePage {
                         } else {
                             empty_dash("")
                         },
-                        theme.primary,
                         theme,
                     ))
                     .child(metric(
@@ -62,13 +60,11 @@ impl RuntimePage {
                             || empty_dash(""),
                             |_| format_bytes(history.overview.totals.total),
                         ),
-                        theme.warning,
                         theme,
                     ))
                     .child(metric(
                         zenclash_i18n::text("traffic.metrics.connections"),
                         connection_count.map_or_else(|| empty_dash(""), |count| count.to_string()),
-                        theme.foreground,
                         theme,
                     )),
             )

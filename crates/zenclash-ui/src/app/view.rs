@@ -304,32 +304,46 @@ impl Render for ZenClashApp {
                     .min_h_0()
                     .w_full()
                     .items_stretch()
-                    .child(Sidebar::new(self.current_page).collapsed(self.sidebar_collapsed))
-                    .child(div().flex_1().h_full().min_w_0().child(content)),
-            )
-            .child(
-                h_flex()
-                    .id("main-window-status-bar")
-                    .min_h_6()
-                    .flex_shrink_0()
-                    .px_4()
-                    .gap_3()
-                    .justify_between()
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .child(div().size_2().rounded_full().bg(if connected {
-                                theme.success
-                            } else {
-                                theme.muted_foreground
-                            }))
-                            .child(zenclash_i18n::text(status_key)),
+                        Sidebar::new(self.current_page)
+                            .collapsed(self.sidebar_collapsed)
+                            .status(
+                                self.core_kind.display_name().to_owned(),
+                                zenclash_i18n::text(status_key),
+                                connected,
+                            ),
                     )
-                    .child(format!("ZenClash {}", env!("ZENCLASH_BUILD_VERSION"))),
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .h_full()
+                            .min_w_0()
+                            .child(div().flex_1().min_h_0().child(content))
+                            .child(
+                                h_flex()
+                                    .id("main-window-status-bar")
+                                    .min_h_6()
+                                    .flex_shrink_0()
+                                    .px_4()
+                                    .gap_3()
+                                    .justify_between()
+                                    .border_t_1()
+                                    .border_color(theme.border)
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .child(div().size_2().rounded_full().bg(if connected {
+                                                theme.success
+                                            } else {
+                                                theme.muted_foreground
+                                            }))
+                                            .child(zenclash_i18n::text(status_key)),
+                                    )
+                                    .child(format!("ZenClash {}", env!("ZENCLASH_BUILD_VERSION"))),
+                            ),
+                    ),
             )
     }
 }

@@ -5,3 +5,4 @@ pub(crate) mod mode;
 pub mod sidebar;
 /// Native status icon, menu model, and command routing.
 pub mod tray;
+pub(crate) mod workspace;

@@ -8,6 +8,46 @@ use super::super::{
 };
 
 impl RuntimePage {
+    pub(in crate::pages::runtime) fn render_profile_commands(
+        &self,
+        cx: &mut gpui_kit::Context<Self>,
+    ) -> gpui_kit::Div {
+        h_flex()
+            .gap_2()
+            .child(
+                Button::new("toggle-add-subscription")
+                    .icon(if self.profiles.forms.adding_subscription {
+                        IconName::Close
+                    } else {
+                        IconName::Plus
+                    })
+                    .label(if self.profiles.forms.adding_subscription {
+                        zenclash_i18n::text("profiles.actions.collapse_form")
+                    } else {
+                        zenclash_i18n::text("profiles.actions.add_remote")
+                    })
+                    .small()
+                    .primary()
+                    .disabled(self.core_busy())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.profiles.forms.adding_subscription =
+                            !this.profiles.forms.adding_subscription;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("choose-profile")
+                    .icon(IconName::FolderOpen)
+                    .label(zenclash_i18n::text("profiles.actions.import_local"))
+                    .small()
+                    .outline()
+                    .disabled(self.core_busy())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.choose_profile(window, cx);
+                    })),
+            )
+    }
+
     pub(in super::super) fn render_profile(
         &self,
         theme: &gpui_kit::component::Theme,
@@ -26,89 +66,42 @@ impl RuntimePage {
         v_flex()
             .gap_4()
             .child(
-                h_flex()
-                    .justify_between()
-                    .gap_3()
-                    .flex_wrap()
-                    .child(
-                        h_flex()
-                            .gap_3()
-                            .flex_wrap()
-                            .child(metric(
-                                zenclash_i18n::text("profiles.current.title"),
-                                self.profiles
-                                    .forms
-                                    .catalog_view
-                                    .active_index()
-                                    .filter(|_| {
-                                        self.profiles
-                                            .forms
-                                            .catalog_view
-                                            .is_current(&self.profiles.catalog)
-                                    })
-                                    .and_then(|index| self.profiles.catalog.profiles.get(index))
-                                    .map_or_else(|| empty_dash(""), |profile| profile.name.clone()),
-                                theme.primary,
-                                theme,
-                            ))
-                            .child(metric(
-                                zenclash_i18n::text("profiles.metrics.proxies"),
-                                proxy_count
-                                    .map_or_else(|| empty_dash(""), |count| count.to_string()),
-                                theme.primary,
-                                theme,
-                            ))
-                            .child(metric(
-                                zenclash_i18n::text("profiles.metrics.groups"),
-                                group_count
-                                    .map_or_else(|| empty_dash(""), |count| count.to_string()),
-                                theme.success,
-                                theme,
-                            ))
-                            .child(metric(
-                                zenclash_i18n::text("profiles.metrics.rules"),
-                                rule_count
-                                    .map_or_else(|| empty_dash(""), |count| count.to_string()),
-                                theme.warning,
-                                theme,
-                            )),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("toggle-add-subscription")
-                                    .icon(if self.profiles.forms.adding_subscription {
-                                        IconName::Close
-                                    } else {
-                                        IconName::Plus
-                                    })
-                                    .label(if self.profiles.forms.adding_subscription {
-                                        zenclash_i18n::text("profiles.actions.collapse_form")
-                                    } else {
-                                        zenclash_i18n::text("profiles.actions.add_remote")
-                                    })
-                                    .small()
-                                    .outline()
-                                    .disabled(self.core_busy())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.profiles.forms.adding_subscription =
-                                            !this.profiles.forms.adding_subscription;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("choose-profile")
-                                    .icon(IconName::FolderOpen)
-                                    .label(zenclash_i18n::text("profiles.actions.import_local"))
-                                    .small()
-                                    .primary()
-                                    .disabled(self.core_busy())
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.choose_profile(window, cx);
-                                    })),
-                            ),
-                    ),
+                h_flex().justify_between().gap_3().flex_wrap().child(
+                    h_flex()
+                        .gap_3()
+                        .flex_wrap()
+                        .flex_1()
+                        .min_w_0()
+                        .child(metric(
+                            zenclash_i18n::text("profiles.metrics.profiles"),
+                            if self
+                                .profiles
+                                .forms
+                                .catalog_view
+                                .is_current(&self.profiles.catalog)
+                            {
+                                self.profiles.catalog.profiles.len().to_string()
+                            } else {
+                                empty_dash("")
+                            },
+                            theme,
+                        ))
+                        .child(metric(
+                            zenclash_i18n::text("profiles.metrics.proxies"),
+                            proxy_count.map_or_else(|| empty_dash(""), |count| count.to_string()),
+                            theme,
+                        ))
+                        .child(metric(
+                            zenclash_i18n::text("profiles.metrics.groups"),
+                            group_count.map_or_else(|| empty_dash(""), |count| count.to_string()),
+                            theme,
+                        ))
+                        .child(metric(
+                            zenclash_i18n::text("profiles.metrics.rules"),
+                            rule_count.map_or_else(|| empty_dash(""), |count| count.to_string()),
+                            theme,
+                        )),
+                ),
             )
             .when(self.profiles.forms.adding_subscription, |this| {
                 this.child(self.render_subscription_form(theme, cx))
@@ -125,7 +118,7 @@ impl RuntimePage {
                     .child(
                         v_flex()
                             .flex_1()
-                            .flex_basis(gpui_kit::rems(36.))
+                            .flex_basis(gpui_kit::rems(30.))
                             .min_w_0()
                             .max_w_full()
                             .gap_4()
@@ -136,7 +129,7 @@ impl RuntimePage {
                     )
                     .child(
                         v_flex()
-                            .w(gpui_kit::rems(27.))
+                            .w(gpui_kit::rems(24.))
                             .flex_shrink_0()
                             .max_w_full()
                             .child(self.render_profile_inspector(theme, cx)),

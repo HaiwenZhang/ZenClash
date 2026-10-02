@@ -165,7 +165,7 @@ impl RuntimePage {
         let managed_process = descriptor.backend() != CoreRuntimeBackend::Direct;
         let local_source = descriptor.backend() == CoreRuntimeBackend::Local;
         let operational = self.operational_status.snapshot();
-        let (process_status, process_running) = core_status_copy(
+        let (process_status, _) = core_status_copy(
             descriptor.backend(),
             &operational.process,
             self.core_session.generation(),
@@ -185,17 +185,11 @@ impl RuntimePage {
                         } else {
                             zenclash_i18n::text("core_page.status.unreadable")
                         },
-                        theme.primary,
                         theme,
                     ))
                     .child(metric(
                         zenclash_i18n::text("core_page.metrics.status"),
                         process_status,
-                        match process_running {
-                            Some(true) => theme.success,
-                            Some(false) => theme.danger,
-                            None => theme.warning,
-                        },
                         theme,
                     ))
                     .child(metric(
@@ -205,7 +199,6 @@ impl RuntimePage {
                         } else {
                             zenclash_i18n::text("core_page.status.unreadable")
                         },
-                        theme.warning,
                         theme,
                     )),
             )

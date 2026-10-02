@@ -1,6 +1,6 @@
 use super::{
-    App, Disableable, FluentBuilder, Icon, IconName, InteractiveElement, IntoElement,
-    ParentElement, Styled, Switch, Window, div, h_flex, px, v_flex,
+    App, Disableable, Icon, IconName, InteractiveElement, IntoElement, ParentElement, Styled,
+    Switch, Window, div, h_flex, px, v_flex,
 };
 use gpui_kit::{SharedString, StatefulInteractiveElement};
 
@@ -68,16 +68,13 @@ pub(super) fn setting_card(
         .border_1()
         .border_color(theme.border)
         .bg(theme.secondary)
-        .when(theme.shadow, |this| this.shadow_sm())
         .overflow_hidden()
         .child(
             h_flex()
                 .px_4()
                 .py_3()
                 .gap_3()
-                .border_b_1()
-                .border_color(theme.border)
-                .text_sm()
+                .text_base()
                 .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .child(title),
         )
@@ -213,36 +210,23 @@ where
 pub(super) fn metric(
     label: impl ToString,
     value: String,
-    color: gpui_kit::Hsla,
     theme: &gpui_kit::component::Theme,
 ) -> gpui_kit::AnyElement {
     let label = SharedString::from(label.to_string());
     v_flex()
-        .relative()
-        .min_w(px(190.))
-        .min_h(px(104.))
+        .min_w(gpui_kit::rems(11.))
+        .min_h_24()
         .flex_1()
-        .justify_between()
+        .justify_center()
         .gap_2()
         .p_4()
         .rounded(theme.radius_lg)
         .border_1()
         .border_color(theme.border)
-        .bg(theme.secondary)
-        .overflow_hidden()
+        .bg(theme.group_box)
         .child(
             div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .top_0()
-                .h(px(3.))
-                .bg(color),
-        )
-        .child(
-            div()
-                .text_size(px(10.))
-                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .text_sm()
                 .text_color(theme.muted_foreground)
                 .child(label.clone()),
         )
@@ -258,10 +242,8 @@ pub(super) fn metric(
                         gpui_kit::component::tooltip::Tooltip::new(value.clone()).build(window, cx)
                     }
                 })
-                .font_family(theme.mono_font_family.clone())
-                .text_lg()
-                .font_weight(gpui_kit::FontWeight::BOLD)
-                .text_color(color)
+                .text_2xl()
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .child(value),
         )
         .into_any_element()

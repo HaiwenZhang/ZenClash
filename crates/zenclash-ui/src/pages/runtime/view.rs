@@ -1,100 +1,72 @@
 use super::{
-    ActiveTheme, App, Button, ButtonVariants, Context, Disableable, FluentBuilder, Focusable, Icon,
-    InteractiveElement, IntoElement, Page, ParentElement, Render, RuntimeData, RuntimePage,
-    ScrollableElement, Sizable, Styled, Window, div, empty_state, h_flex, message_banner, v_flex,
+    ActiveTheme, App, Button, Context, Disableable, FluentBuilder, Focusable, InteractiveElement,
+    IntoElement, Page, ParentElement, Render, RuntimeData, RuntimePage, ScrollableElement, Sizable,
+    Styled, Window, div, empty_state, h_flex, message_banner, v_flex,
 };
-use crate::assets::AppIcon;
+use crate::{assets::AppIcon, components::workspace};
 use gpui_kit::StatefulInteractiveElement;
 
 impl RuntimePage {
     fn render_header(
         &self,
-        theme: &gpui_kit::component::Theme,
+        _theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let traffic = self.traffic_monitor.snapshot();
-        let (status, status_color) = if traffic.connected {
-            (
-                zenclash_i18n::text("runtime.stream.connected"),
-                theme.success,
-            )
-        } else {
-            (
-                zenclash_i18n::text("runtime.stream.reconnecting"),
-                theme.warning,
-            )
+        let refresh = Button::new("refresh-runtime-page")
+            .icon(AppIcon::RefreshCw)
+            .label(zenclash_i18n::text(if self.loading {
+                "common.actions.loading"
+            } else {
+                "common.actions.refresh"
+            }))
+            .small()
+            .outline()
+            .loading(self.loading)
+            .disabled(self.core_busy())
+            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx)));
+        let commands = match self.page {
+            Page::Profiles => h_flex()
+                .gap_2()
+                .flex_wrap()
+                .child(refresh)
+                .child(self.render_profile_commands(cx))
+                .into_any_element(),
+            Page::Logs => self.render_log_actions(cx).into_any_element(),
+            Page::Connections => h_flex()
+                .gap_2()
+                .child(refresh)
+                .child(self.render_connection_pause(cx))
+                .child(self.render_connection_close_all(cx))
+                .into_any_element(),
+            Page::Rules => h_flex()
+                .gap_2()
+                .child(refresh)
+                .child(
+                    Button::new("rules-resources")
+                        .label(zenclash_i18n::text("navigation.resources.label"))
+                        .small()
+                        .outline()
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(crate::app::NavigateResources), cx)
+                        }),
+                )
+                .into_any_element(),
+            _ => refresh.into_any_element(),
         };
-        let page_icon = if self.page == Page::Home {
-            Icon::new(AppIcon::House)
-        } else {
-            Icon::new(self.page.icon())
-        };
-        h_flex()
-            .min_h_16()
-            .px_5()
-            .py_4()
+        v_flex()
+            .px_6()
+            .pt_3()
+            .pb_2()
             .gap_3()
-            .flex_wrap()
-            .items_center()
-            .justify_between()
-            .border_b_1()
-            .border_color(theme.border)
-            .child(
-                v_flex()
-                    .min_w_0()
-                    .gap_3()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(page_icon.size_3())
-                            .child(zenclash_i18n::text("runtime.design.workspace"))
-                            .child("/")
-                            .child(self.page.label()),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_0()
-                            .child(
-                                div()
-                                    .text_2xl()
-                                    .font_weight(gpui_kit::FontWeight::BOLD)
-                                    .child(self.page.label()),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(self.page.subtitle()),
-                            ),
-                    ),
-            )
+            .child(workspace::breadcrumb(self.page, cx))
             .child(
                 h_flex()
                     .gap_3()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(div().size_2().rounded_full().bg(status_color))
-                            .child(status),
-                    )
-                    .child(
-                        Button::new("refresh-runtime-page")
-                            .icon(AppIcon::RefreshCw)
-                            .label(zenclash_i18n::text(if self.loading {
-                                "common.actions.loading"
-                            } else {
-                                "common.actions.refresh"
-                            }))
-                            .small()
-                            .ghost()
-                            .loading(self.loading)
-                            .disabled(self.core_busy())
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
-                    ),
+                    .flex_wrap()
+                    .items_end()
+                    .justify_between()
+                    .child(workspace::title(self.page, cx))
+                    .child(commands),
             )
     }
 
@@ -229,8 +201,9 @@ impl Render for RuntimePage {
                                 .flex_shrink_0()
                                 .min_h_0()
                                 .h_full()
-                                .px_3()
-                                .py_4()
+                                .pl_6()
+                                .pr_3()
+                                .py_3()
                                 .child(self.render_settings_navigation(&theme, cx)),
                         )
                     })
@@ -246,8 +219,9 @@ impl Render for RuntimePage {
                                 v_flex()
                                     .min_w_0()
                                     .gap_4()
-                                    .px_5()
-                                    .py_4()
+                                    .px_6()
+                                    .py_3()
+                                    .when(self.page == Page::Settings, |body| body.pl_0())
                                     .child(self.render_status(&theme))
                                     .child(self.render_body(&theme, cx)),
                             )

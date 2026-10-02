@@ -1,7 +1,7 @@
 use gpui_kit::component::{
     ActiveTheme, Collapsible, Icon, IconName, Selectable, Sizable,
-    button::Button,
     button::ButtonVariants,
+    button::{Button, ButtonCustomVariant},
     h_flex,
     sidebar::{Sidebar as GpuiSidebar, SidebarItem},
     v_flex,
@@ -81,6 +81,7 @@ impl OutboundMode {
 pub struct Sidebar {
     current_page: Page,
     collapsed: bool,
+    status: Option<(String, String, bool)>,
 }
 
 impl Sidebar {
@@ -90,7 +91,13 @@ impl Sidebar {
         Self {
             current_page,
             collapsed: false,
+            status: None,
         }
+    }
+
+    pub(crate) fn status(mut self, core: String, label: String, connected: bool) -> Self {
+        self.status = Some((core, label, connected));
+        self
     }
 
     /// Sets whether only navigation icons are visible.
@@ -141,9 +148,9 @@ impl SidebarItem for SidebarNavigation {
 }
 
 impl RenderOnce for SidebarNavigation {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         v_flex()
-            .gap_2()
+            .gap_1()
             .children(self.pages.into_iter().map(|page| {
                 let active = page == self.current_page;
 
@@ -151,10 +158,19 @@ impl RenderOnce for SidebarNavigation {
                     .accessibility_label(page.label())
                     .icon(sidebar_icon(page).size(rems(1.25)))
                     .w_full()
-                    .h(rems(3.))
+                    .h(rems(2.75))
                     .justify_start()
                     .when(self.collapsed, |this| this.justify_center())
-                    .ghost()
+                    .custom(
+                        ButtonCustomVariant::new(cx)
+                            .foreground(if active {
+                                cx.theme().primary
+                            } else {
+                                cx.theme().sidebar_foreground
+                            })
+                            .hover(cx.theme().sidebar_accent)
+                            .active(cx.theme().sidebar_accent),
+                    )
                     .selected(active)
                     .when(!self.collapsed, |this| this.label(page.label()))
                     .tooltip(page.label())
@@ -184,17 +200,16 @@ impl RenderOnce for Sidebar {
             .collapsed(self.collapsed)
             .header(
                 h_flex()
-                    .h(rems(5.25))
+                    .min_h(rems(4.5))
                     .w_full()
-                    .pt_8()
                     .when(!self.collapsed, |this| {
-                        this.gap_3().justify_between().child(
+                        this.gap_2().child(
                             h_flex()
                                 .min_w_0()
                                 .gap_3()
                                 .child(
                                     div()
-                                        .size(rems(3.))
+                                        .size(rems(2.5))
                                         .flex_shrink_0()
                                         .flex()
                                         .items_center()
@@ -202,7 +217,7 @@ impl RenderOnce for Sidebar {
                                         .child(
                                             Icon::empty()
                                                 .path(ZENCLASH_MARK_PATH)
-                                                .size(rems(1.8))
+                                                .size(rems(2.5))
                                                 .text_color(theme.primary),
                                         ),
                                 )
@@ -241,9 +256,39 @@ impl RenderOnce for Sidebar {
             )
             .child(SidebarNavigation::new(self.current_page, navigation))
             .footer(
-                div()
+                v_flex()
                     .w_full()
-                    .child(SidebarNavigation::new(self.current_page, [Page::Settings])),
+                    .gap_3()
+                    .child(SidebarNavigation::new(self.current_page, [Page::Settings]))
+                    .when_some(self.status, |footer, (core, status, connected)| {
+                        footer.child(
+                            h_flex()
+                                .px_3()
+                                .py_2()
+                                .gap_3()
+                                .child(div().size_2p5().flex_shrink_0().rounded_full().bg(
+                                    if connected {
+                                        theme.success
+                                    } else {
+                                        theme.muted_foreground
+                                    },
+                                ))
+                                .when(!self.collapsed, |row| {
+                                    row.child(
+                                        v_flex()
+                                            .min_w_0()
+                                            .gap_1()
+                                            .child(div().text_sm().child(core))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child(status),
+                                            ),
+                                    )
+                                }),
+                        )
+                    }),
             )
     }
 }

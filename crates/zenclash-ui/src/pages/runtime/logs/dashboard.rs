@@ -4,15 +4,12 @@ use gpui_kit::component::progress::Progress;
 use gpui_kit::component::scroll::ScrollableElement;
 
 impl RuntimePage {
-    pub(super) fn log_dashboard(
+    pub(in crate::pages::runtime) fn render_log_actions(
         &self,
-        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui_kit::AnyElement {
+    ) -> gpui_kit::Div {
         let presentation = &self.logs.presentation;
-        let ready = presentation.revision.is_some();
-        let page = list_page(presentation.matches.len(), self.logs.page, LOGS_PER_PAGE);
-        let actions = h_flex()
+        h_flex()
             .gap_2()
             .flex_wrap()
             .child(
@@ -44,13 +41,24 @@ impl RuntimePage {
                     .disabled(presentation.entries.is_empty())
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.log_monitor.clear();
+                        this.logs.paused = false;
                         this.logs.selected = None;
                         this.logs.page = 0;
                         this.logs.cancel_refresh();
                         this.update_log_presentation(cx);
                         cx.notify();
                     })),
-            );
+            )
+    }
+
+    pub(super) fn log_dashboard(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let presentation = &self.logs.presentation;
+        let ready = presentation.revision.is_some();
+        let page = list_page(presentation.matches.len(), self.logs.page, LOGS_PER_PAGE);
         let mut table = panel(theme)
             .w_full()
             .min_w(gpui_kit::rems(42.))
@@ -58,7 +66,13 @@ impl RuntimePage {
                 h_flex()
                     .gap_2()
                     .flex_wrap()
-                    .child(div().flex_1().child(Input::new(&self.logs.filter).small()))
+                    .child(
+                        div().flex_1().min_w(gpui_kit::rems(12.)).child(
+                            Input::new(&self.logs.filter)
+                                .prefix(gpui_kit::component::Icon::new(IconName::Search))
+                                .small(),
+                        ),
+                    )
                     .child(self.log_level_filters(cx)),
             )
             .child(log_columns(theme))
@@ -89,6 +103,8 @@ impl RuntimePage {
                 h_flex()
                     .gap_3()
                     .py_2()
+                    .px_2()
+                    .rounded(theme.radius)
                     .border_b_1()
                     .border_color(theme.border)
                     .when(selected, |row| row.bg(theme.primary.opacity(0.1)))
@@ -168,10 +184,34 @@ impl RuntimePage {
                 ),
         );
         let mut details = panel(theme).child(
-            div()
-                .text_sm()
-                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                .child(zenclash_i18n::text("logs.details.title")),
+            h_flex()
+                .justify_between()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .child(zenclash_i18n::text("logs.details.title")),
+                )
+                .child(
+                    Button::new("pause-logs-display")
+                        .label(zenclash_i18n::text(if self.logs.paused {
+                            "common.actions.resume_display"
+                        } else {
+                            "common.actions.pause_display"
+                        }))
+                        .tooltip(zenclash_i18n::text("logs.display_pause_description"))
+                        .small()
+                        .outline()
+                        .disabled(!ready)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.logs.paused = !this.logs.paused;
+                            this.logs.cancel_refresh();
+                            this.logs.last_refresh = None;
+                            this.update_log_presentation(cx);
+                            cx.notify();
+                        })),
+                ),
         );
         if let Some((_, row)) = &self.logs.selected {
             details = details
@@ -216,19 +256,6 @@ impl RuntimePage {
         }
         v_flex()
             .gap_4()
-            .child(
-                h_flex()
-                    .justify_between()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(zenclash_i18n::text("logs.persistence.capture")),
-                    )
-                    .child(actions),
-            )
             .child(render_log_header(
                 presentation.entries.len(),
                 presentation.matches.len(),
@@ -280,7 +307,17 @@ impl RuntimePage {
                     gpui_kit::ElementId::from("log-level-filter"),
                     level.unwrap_or("ALL").to_owned(),
                 ))
-                .label(label)
+                .label(format!(
+                    "{label} {}",
+                    level.map_or(self.logs.presentation.entries.len() as u64, |level| {
+                        self.logs
+                            .presentation
+                            .level_counts
+                            .iter()
+                            .find(|(name, _)| name == level)
+                            .map_or(0, |(_, count)| *count)
+                    })
+                ))
                 .small()
                 .outline()
                 .selected(self.logs.level_filter.as_deref() == level)
@@ -302,7 +339,7 @@ fn panel(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
         .p_4()
         .border_1()
         .border_color(theme.border)
-        .rounded(theme.radius)
+        .rounded(theme.radius_lg)
         .bg(theme.group_box)
 }
 
@@ -353,6 +390,9 @@ fn log_columns(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
     h_flex()
         .gap_3()
         .py_2()
+        .px_2()
+        .bg(theme.table_head)
+        .rounded(theme.radius)
         .text_xs()
         .text_color(theme.muted_foreground)
         .border_b_1()

@@ -93,19 +93,16 @@ impl RuntimePage {
                             || zenclash_i18n::text("network.metrics.waiting"),
                             |info| info.ip.clone(),
                         ),
-                        theme.primary,
                         theme,
                     ))
                     .child(metric(
                         zenclash_i18n::text("network.metrics.average_latency"),
                         average_latency.map_or_else(|| "—".into(), |value| format!("{value} ms")),
-                        latency_color(average_latency, theme),
                         theme,
                     ))
                     .child(metric(
                         zenclash_i18n::text("network.metrics.route"),
                         empty_dash(&snapshot.route),
-                        theme.warning,
                         theme,
                     )),
             )

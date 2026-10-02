@@ -21,7 +21,7 @@ mod presentation;
 mod view;
 
 const MAX_LOCAL_DELAY_HISTORY: usize = 20;
-const PROXIES_PER_PAGE: usize = 24;
+const PROXIES_PER_PAGE: usize = 9;
 const GROUPS_PER_PAGE: usize = 8;
 
 /// Interactive proxy-group catalog backed by Mihomo's live controller state.
@@ -66,6 +66,47 @@ pub struct ProxiesPage {
 }
 
 impl ProxiesPage {
+    #[cfg(test)]
+    pub(in crate::pages) fn design_validation_fixture(
+        client: MihomoClient,
+        runtime: tokio::runtime::Handle,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let nodes = (0..9)
+            .map(|index| ProxyNode {
+                name: format!("Hong Kong {:02}", index + 1),
+                kind: "Shadowsocks".into(),
+                history: vec![DelayHistory {
+                    delay: 28 + index * 9,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let catalog = ProxyCatalog::from_group_nodes(
+            ["PROXY", "AUTO"]
+                .into_iter()
+                .map(|name| {
+                    (
+                        ProxyGroup {
+                            name: name.into(),
+                            kind: "Selector".into(),
+                            behavior: ProxyGroupBehavior::Selector,
+                            now: nodes[0].name.clone(),
+                            ..Default::default()
+                        },
+                        nodes.clone(),
+                    )
+                })
+                .collect(),
+            nodes.len(),
+        );
+        let indices = presentation::visible_group_indices(&catalog, "rule", false);
+        let mut page = Self::new(client, runtime, cx);
+        page.install_catalog(catalog, "rule".into(), indices);
+        page
+    }
+
     /// Creates the inactive page; its catalog is loaded on first presentation.
     pub fn new(
         client: MihomoClient,
@@ -312,8 +353,8 @@ impl Render for ProxiesPage {
                     .min_h_0()
                     .overflow_y_scrollbar()
                     .gap_4()
-                    .px_5()
-                    .py_4()
+                    .px_6()
+                    .py_3()
                     .when_some(error, |this, error| {
                         this.child(
                             h_flex()
@@ -372,6 +413,7 @@ impl Render for ProxiesPage {
                                     .text_sm()
                                     .child(message),
                             )
+                            .child(self.render_group_visibility(cx))
                         } else {
                             this.child(self.render_workspace(catalog, groups, &theme, cx))
                         }
@@ -1233,6 +1275,36 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn all_hidden_groups_can_be_revealed_from_the_empty_workspace(cx: &mut TestAppContext) {
+        let (window, page, _runtime) = open_catalog(
+            cx,
+            ProxyCatalog::from_group_nodes(
+                vec![(
+                    ProxyGroup {
+                        name: "hidden".into(),
+                        hidden: true,
+                        ..Default::default()
+                    },
+                    Vec::new(),
+                )],
+                1,
+            ),
+        );
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(page.read(cx).visible_group_indices.is_empty());
+            assert!(window.find("proxies-show-hidden").visible());
+            window.click("proxies-show-hidden", cx);
+            window.render_frame(cx);
+            assert_eq!(page.read(cx).visible_group_indices, [0]);
+            window.find((gpui_kit::ElementId::from("toggle-group"), "hidden"));
+            assert!(window.find("proxies-show-hidden").visible());
+            window.remove_window();
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
     fn replacing_and_filtering_group_catalogs_clamps_pages_and_suspend_releases_them(
         cx: &mut TestAppContext,
     ) {
@@ -1634,15 +1706,15 @@ mod tests {
         let page = proxy_page(500, 0);
 
         assert_eq!(page.end - page.start, PROXIES_PER_PAGE);
-        assert_eq!(page.count, 21);
+        assert_eq!(page.count, 56);
     }
 
     #[test]
     fn stale_proxy_page_is_clamped_after_catalog_shrinks() {
         let page = proxy_page(30, 20);
 
-        assert_eq!(page.index, 1);
-        assert_eq!(page.start, 24);
+        assert_eq!(page.index, 3);
+        assert_eq!(page.start, 27);
         assert_eq!(page.end, 30);
     }
 

@@ -2,6 +2,12 @@ _version: 2
 
 common:
   actions:
+    pause_display:
+      zh-CN: 暂停展示
+      en: Pause display
+    resume_display:
+      zh-CN: 恢复展示
+      en: Resume display
     refresh:
       zh-CN: 刷新
       en: Refresh
@@ -302,11 +308,14 @@ sidebar:
 navigation:
   home:
     label:
-      zh-CN: 首页
-      en: Home
+      zh-CN: 总览
+      en: Overview
+    title:
+      zh-CN: 网络总览
+      en: Network overview
     subtitle:
-      zh-CN: 一眼确认当前订阅、节点、代理模式与网络活动。
-      en: Review the active profile, node, proxy mode, and network activity at a glance.
+      zh-CN: 查看流量、节点与当前网络接管状态
+      en: View traffic, nodes, and current traffic capture
   system_proxy:
     label:
       zh-CN: 系统代理
@@ -323,18 +332,24 @@ navigation:
       en: Manage the active core's TUN interface, routing, and permissions.
   profiles:
     label:
-      zh-CN: 订阅管理
+      zh-CN: 订阅
       en: Profiles
+    title:
+      zh-CN: 订阅与配置
+      en: Profiles and configuration
     subtitle:
-      zh-CN: 添加、更新、编辑并切换本地或远程订阅。
-      en: Add, update, edit, and activate local or remote profiles.
+      zh-CN: 管理订阅来源、更新配置，选择当前网络方案
+      en: Manage profile sources, update configurations, and choose an active profile
   proxies:
     label:
       zh-CN: 代理组
-      en: Proxies
+      en: Proxy groups
+    title:
+      zh-CN: 代理组
+      en: Proxy groups
     subtitle:
-      zh-CN: 查看代理组、切换节点并执行延迟测试。
-      en: Browse proxy groups, switch nodes, and run delay tests.
+      zh-CN: 对比节点延迟，选择当前代理组的出口
+      en: Compare node latency and select an outbound for the current group
   mihomo:
     label:
       zh-CN: 内核设置
@@ -346,9 +361,12 @@ navigation:
     label:
       zh-CN: 连接
       en: Connections
+    title:
+      zh-CN: 活动连接
+      en: Active connections
     subtitle:
-      zh-CN: 查看实时连接、速率、规则链并关闭连接。
-      en: Inspect live connections, traffic, routing chains, and close sessions.
+      zh-CN: 从目标、进程与代理路径定位网络活动
+      en: Find network activity by destination, process, and outbound
   dns:
     label:
       zh-CN: DNS 覆写
@@ -367,16 +385,22 @@ navigation:
     label:
       zh-CN: 日志
       en: Logs
+    title:
+      zh-CN: 内核日志
+      en: Core logs
     subtitle:
-      zh-CN: 筛选并跟踪当前内核的实时日志。
-      en: Filter and follow the active core's live logs.
+      zh-CN: 查看运行事件、筛选异常并导出排障信息
+      en: Inspect runtime events, filter issues, and export diagnostic information
   rules:
     label:
       zh-CN: 规则
       en: Rules
+    title:
+      zh-CN: 路由规则
+      en: Routing rules
     subtitle:
-      zh-CN: 浏览当前运行时规则和命中策略。
-      en: Browse active routing rules and matched policies.
+      zh-CN: 按顺序匹配，查看规则内容与当前分流策略
+      en: Inspect ordered rules and their current routing policies
   resources:
     label:
       zh-CN: 外部资源
@@ -393,8 +417,8 @@ navigation:
       en: Manage ordered YAML overrides and preview the effective configuration.
   network:
     label:
-      zh-CN: 网络信息
-      en: Network
+      zh-CN: 网络诊断
+      en: Network diagnostics
     subtitle:
       zh-CN: 查看网络接口、出口地址和连通性。
       en: Inspect network interfaces, public addresses, and connectivity.
@@ -407,11 +431,14 @@ navigation:
       en: Analyze historical usage by host, source, outbound, and process.
   settings:
     label:
-      zh-CN: 应用设置
+      zh-CN: 设置
+      en: Settings
+    title:
+      zh-CN: 设置
       en: Settings
     subtitle:
-      zh-CN: 配置运行内核、主题、状态栏、流量历史与备份。
-      en: Configure the runtime core, appearance, status menu, traffic history, and backups.
+      zh-CN: 外观、启动与本地数据偏好
+      en: Appearance, startup, and local data preferences
 
 runtime:
   design:
@@ -916,6 +943,9 @@ profiles:
     proxies:
       zh-CN: 代理对象
       en: Proxies
+    profiles:
+      zh-CN: 订阅配置
+      en: Profiles
     groups:
       zh-CN: 策略组
       en: Policy Groups
@@ -1462,6 +1492,9 @@ proxies:
       en: "%{count} node delay tests failed"
 
 logs:
+  display_pause_description:
+    zh-CN: 暂停列表更新，仍可筛选；日志采集与文件写入继续运行。
+    en: Pause list updates while allowing filters. Log capture and file writes continue.
   charts:
     levels:
       zh-CN: 级别分布
@@ -3753,6 +3786,9 @@ backup:
       en: "%{reason}; original disk data was restored, but restoring the core runtime configuration failed: %{error}"
 
 connections:
+  display_pause_description:
+    zh-CN: 冻结当前连接快照，仍可筛选；恢复或成功关闭连接后展示最新状态。
+    en: Freeze the current connection snapshot while allowing filters. Resume or successfully close connections to display the latest state.
   charts:
     processes:
       zh-CN: 进程连接数
@@ -3894,6 +3930,9 @@ rules:
     hits:
       zh-CN: 命中策略
       en: Matched policies
+    reported_hits:
+      zh-CN: 前五项策略内的命中占比
+      en: Hit share within the top five policies
   details:
     title:
       zh-CN: 规则详情
@@ -4092,6 +4131,22 @@ tray:
       en: An external experimental core cannot reliably apply the full TUN configuration; use a ZenClash-managed core
 
 settings:
+  local_data:
+    title:
+      zh-CN: 本地数据状态
+      en: Local data status
+    profiles:
+      zh-CN: 已载入配置
+      en: Loaded profiles
+    overrides:
+      zh-CN: 已载入覆写
+      en: Loaded overrides
+    history:
+      zh-CN: 流量历史记录
+      en: Traffic history
+    logs:
+      zh-CN: 日志写入设置
+      en: Log file preference
   design:
     general:
       zh-CN: 常规

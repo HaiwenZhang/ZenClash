@@ -8,11 +8,11 @@ use gpui_kit::{AssetSource, Result, SharedString};
 
 /// Asset path for the monochrome `ZenClash` brand mark.
 pub const ZENCLASH_MARK_PATH: &str = "icons/zenclash-mark.svg";
-/// Asset path for the group icon used by the proxies sidebar destination.
+/// Asset path for the layered group icon used by the proxies sidebar destination.
 pub const GROUP_ICON_PATH: &str = "icons/group.svg";
-/// Asset path for the radio icon used by the connections sidebar destination.
+/// Asset path for the linked chain icon used by the connections sidebar destination.
 pub const RADIO_ICON_PATH: &str = "icons/radio.svg";
-/// Asset path for the ruler icon used by the rules sidebar destination.
+/// Asset path for the rule shield icon used by the rules sidebar destination.
 pub const RULER_ICON_PATH: &str = "icons/ruler.svg";
 /// Asset path for the house icon used by the home destination.
 pub const HOUSE_ICON_PATH: &str = "icons/house.svg";

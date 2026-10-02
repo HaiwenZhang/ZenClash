@@ -33,6 +33,7 @@ pub(super) struct LogUiState {
     exporting: bool,
     level_filter: Option<String>,
     selected: Option<(Arc<zenclash_core::LogEntry>, LogRow)>,
+    paused: bool,
 }
 
 #[derive(Clone, Default)]
@@ -245,6 +246,23 @@ impl Drop for LogProjectionWorker {
 }
 
 impl LogUiState {
+    #[cfg(test)]
+    pub(super) fn prepare_design_validation(&mut self) {
+        let entries = ["info", "warning", "error", "debug"].into_iter().enumerate().map(|(index, level)| {
+            Arc::new(zenclash_core::LogEntry { level: level.into(), payload: format!("[TCP] 127.0.0.1:5000 --> example.com:443 via PROXY / Hong Kong 01 ({index})"), core_time: Some("12:34:56".into()), ..Default::default() })
+        }).collect();
+        let mut presentation = LogPresentation::default();
+        presentation.refresh(0, String::new(), || entries);
+        self.presentation = Arc::new(presentation);
+        self.selected = self
+            .presentation
+            .entries
+            .first()
+            .zip(self.presentation.rows.first())
+            .map(|(entry, row)| (entry.clone(), row.clone()));
+        self.level = Some(MihomoLogLevel::Info);
+    }
+
     pub(super) fn cancel_refresh(&mut self) {
         self.worker.cancel();
         self.loading = false;
@@ -257,6 +275,7 @@ impl LogUiState {
         self.level = None;
         self.persistence = zenclash_core::LogPersistenceStatus::default();
         self.selected = None;
+        self.paused = false;
     }
 
     pub(super) fn new(window: &mut Window, cx: &mut Context<RuntimePage>) -> (Self, Subscription) {
@@ -289,6 +308,7 @@ impl LogUiState {
                 exporting: false,
                 level_filter: None,
                 selected: None,
+                paused: false,
             },
             subscription,
         )
@@ -301,7 +321,12 @@ impl RuntimePage {
             return;
         }
         let previous = self.logs.presentation.clone();
-        let revision = self.log_monitor.revision();
+        let paused = self.logs.paused;
+        let revision = if paused {
+            previous.revision.unwrap_or_default()
+        } else {
+            self.log_monitor.revision()
+        };
         if previous.revision == Some(revision)
             && previous.query == self.logs.query
             && previous.level_filter == self.logs.level_filter
@@ -320,7 +345,7 @@ impl RuntimePage {
             self.logs.query.clone(),
             self.logs.level_filter.clone(),
             move || {
-                let revision = monitor.revision();
+                let revision = if paused { revision } else { monitor.revision() };
                 LogSnapshot {
                     revision,
                     entries: (previous_revision != Some(revision))
@@ -995,6 +1020,80 @@ fn json_value_matches(value: &serde_json::Value, query: &str) -> bool {
 pub(in crate::pages::runtime) mod tests {
     use super::*;
     use gpui_kit::test::TestWindowExt;
+
+    #[gpui_kit::test]
+    fn pausing_log_display_keeps_filterable_rows_and_resume_reads_the_monitor(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use super::super::ui_tests::{Fixture, open};
+        let fixture = Fixture::new();
+        let (window, page) = open(cx, &fixture, Page::Logs);
+        fixture.settle(cx, &page, |page| {
+            !page.persistent_loading && !page.logs.loading
+        });
+        let entries = vec![
+            log_fixture("frozen info"),
+            Arc::new(zenclash_core::LogEntry {
+                level: "warning".into(),
+                payload: "frozen warning".into(),
+                ..Default::default()
+            }),
+        ];
+        let ids = entries
+            .iter()
+            .map(|entry| Arc::as_ptr(entry) as usize)
+            .collect::<Vec<_>>();
+        cx.update_window(window, |_, window, cx| {
+            page.update(cx, |page, cx| {
+                page.ui_visibility = super::super::lifecycle::UiVisibility::new(true);
+                page.logs.cancel_refresh();
+                let mut presentation = LogPresentation::default();
+                presentation.refresh(page.log_monitor.revision(), String::new(), || entries);
+                page.logs.presentation = Arc::new(presentation);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            window.click("pause-logs-display", cx);
+            page.update(cx, |page, cx| {
+                page.log_monitor.clear();
+                page.log_monitor.set_level(MihomoLogLevel::Warning);
+                page.update_log_presentation(cx);
+            });
+            window.render_frame(cx);
+            window.find(("inspect-log", ids[0]));
+            window.find(("inspect-log", ids[1]));
+            window.click(
+                (
+                    gpui_kit::ElementId::from("log-level-filter"),
+                    "WARNING".to_owned(),
+                ),
+                cx,
+            );
+            assert_eq!(page.read(cx).logs.level_filter.as_deref(), Some("WARNING"));
+        })
+        .unwrap();
+        fixture.settle(cx, &page, |page| {
+            !page.logs.loading && page.logs.presentation.level_filter.as_deref() == Some("WARNING")
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find(("inspect-log", ids[0])).is_none());
+            window.find(("inspect-log", ids[1]));
+            assert!(page.read(cx).logs.paused);
+            window.click("pause-logs-display", cx);
+        })
+        .unwrap();
+        fixture.settle(cx, &page, |page| !page.logs.loading);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(!page.read(cx).logs.paused);
+            assert!(window.try_find(("inspect-log", ids[1])).is_none());
+            page.update(cx, |page, _| page.logs.release_results());
+            assert!(!page.read(cx).logs.paused);
+            window.remove_window();
+        })
+        .unwrap();
+    }
 
     #[gpui_kit::test]
     fn settings_log_preferences_save_updates_owner_and_preserves_other_preferences(

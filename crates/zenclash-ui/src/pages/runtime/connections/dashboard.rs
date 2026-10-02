@@ -3,6 +3,21 @@ use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{Selectable, chart::PieChart, progress::Progress};
 
 impl RuntimePage {
+    pub(in crate::pages::runtime) fn render_connection_close_all(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Button {
+        let empty = !matches!(&self.data, RuntimeData::Connections(snapshot) if !snapshot.connections.is_empty());
+
+        Button::new("close-all-connections")
+            .icon(IconName::CircleX)
+            .label(zenclash_i18n::text("connections.actions.close_all"))
+            .danger()
+            .small()
+            .disabled(empty || self.core_busy() || !self.connections.closing.is_empty())
+            .on_click(cx.listener(|this, _, _, cx| this.close_all_connections(cx)))
+    }
+
     pub(super) fn connection_dashboard(
         &self,
         theme: &gpui_kit::component::Theme,
@@ -40,9 +55,11 @@ impl RuntimePage {
                 h_flex()
                     .gap_2()
                     .child(
-                        div()
-                            .flex_1()
-                            .child(Input::new(&self.connections.filter).small()),
+                        div().flex_1().child(
+                            Input::new(&self.connections.filter)
+                                .prefix(gpui_kit::component::Icon::new(IconName::Search))
+                                .small(),
+                        ),
                     )
                     .child(self.render_connection_options(cx)),
             )
@@ -71,6 +88,8 @@ impl RuntimePage {
                 h_flex()
                     .gap_3()
                     .py_2()
+                    .px_2()
+                    .rounded(theme.radius)
                     .border_b_1()
                     .border_color(theme.border)
                     .when(active, |row| row.bg(theme.primary.opacity(0.1)))
@@ -281,25 +300,21 @@ impl RuntimePage {
                     .child(metric(
                         zenclash_i18n::text("connections.metrics.active"),
                         data.connections.len().to_string(),
-                        theme.primary,
                         theme,
                     ))
                     .child(metric(
                         zenclash_i18n::text("connections.metrics.upload"),
                         format_bytes(data.upload_total),
-                        theme.primary,
                         theme,
                     ))
                     .child(metric(
                         zenclash_i18n::text("connections.metrics.download"),
                         format_bytes(data.download_total),
-                        theme.primary,
                         theme,
                     ))
                     .child(metric(
                         zenclash_i18n::text("connections.metrics.memory"),
                         format_bytes(data.memory),
-                        theme.primary,
                         theme,
                     )),
             )
@@ -316,28 +331,16 @@ impl RuntimePage {
                     .child(protocol_distribution(&projection.protocols, theme)),
             )
             .child(
-                h_flex()
-                    .justify_between()
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(
-                        zenclash_i18n::text(if projection_pending {
+                h_flex().justify_between().child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(zenclash_i18n::text(if projection_pending {
                             "connections.filtering"
                         } else {
                             "connections.refresh_hint"
-                        }),
-                    ))
-                    .child(
-                        Button::new("close-all-connections")
-                            .icon(IconName::CircleX)
-                            .label(zenclash_i18n::text("connections.actions.close_all"))
-                            .danger()
-                            .small()
-                            .disabled(
-                                data.connections.is_empty()
-                                    || self.core_busy()
-                                    || !self.connections.closing.is_empty(),
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| this.close_all_connections(cx))),
-                    ),
+                        })),
+                ),
             )
             .child(
                 h_flex()
@@ -364,7 +367,7 @@ fn panel(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
         .p_4()
         .border_1()
         .border_color(theme.border)
-        .rounded(theme.radius)
+        .rounded(theme.radius_lg)
         .bg(theme.group_box)
 }
 
@@ -455,6 +458,9 @@ fn connection_columns(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
     h_flex()
         .gap_3()
         .py_2()
+        .px_2()
+        .bg(theme.table_head)
+        .rounded(theme.radius)
         .text_xs()
         .text_color(theme.muted_foreground)
         .border_b_1()

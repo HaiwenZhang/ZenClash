@@ -298,14 +298,10 @@ impl RuntimePage {
                 );
             }
         }
-        home_card(
-            zenclash_i18n::text("home.flow.routes"),
-            IconName::ChartPie,
-            theme,
-        )
-        .flex_basis(rems(19.))
-        .min_w_0()
-        .child(content)
+        home_card(zenclash_i18n::text("home.flow.routes"), theme)
+            .flex_basis(rems(19.))
+            .min_w_0()
+            .child(content)
     }
     pub(super) fn render_home_recent_connections(
         &self,
@@ -363,14 +359,10 @@ impl RuntimePage {
                     }),
             ),
         );
-        home_card(
-            zenclash_i18n::text("home.flow.recent"),
-            IconName::Network,
-            theme,
-        )
-        .flex_basis(rems(30.))
-        .min_w_0()
-        .child(content)
+        home_card(zenclash_i18n::text("home.flow.recent"), theme)
+            .flex_basis(rems(30.))
+            .min_w_0()
+            .child(content)
     }
 }
 
