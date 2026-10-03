@@ -247,6 +247,14 @@ impl Drop for LogProjectionWorker {
 
 impl LogUiState {
     #[cfg(test)]
+    pub(super) fn design_validation_log_id(&self) -> Option<usize> {
+        self.presentation
+            .matches
+            .first()
+            .map(|&index| Arc::as_ptr(&self.presentation.entries[index]) as usize)
+    }
+
+    #[cfg(test)]
     pub(super) fn prepare_design_validation(&mut self) {
         let entries = ["info", "warning", "error", "debug"].into_iter().enumerate().map(|(index, level)| {
             Arc::new(zenclash_core::LogEntry { level: level.into(), payload: format!("[TCP] 127.0.0.1:5000 --> example.com:443 via PROXY / Hong Kong 01 ({index})"), core_time: Some("12:34:56".into()), ..Default::default() })

@@ -152,20 +152,35 @@ impl RuntimePage {
                     .enumerate()
                     .map(|(index, (label, anchor))| {
                         Button::new(("settings-section", index))
-                            .label(zenclash_i18n::text(label))
-                            .icon(match index {
-                                0 => IconName::Settings2,
-                                1 => IconName::Sun,
-                                2 => IconName::CircleCheck,
-                                3 => IconName::ChartPie,
-                                _ => IconName::FolderOpen,
-                            })
+                            .accessibility_label(zenclash_i18n::text(label))
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .gap_2()
+                                    .child(gpui_kit::component::Icon::new(match index {
+                                        0 => IconName::Settings2,
+                                        1 => IconName::Sun,
+                                        2 => IconName::CircleCheck,
+                                        3 => IconName::ChartPie,
+                                        _ => IconName::FolderOpen,
+                                    }))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .child(zenclash_i18n::text(label)),
+                                    ),
+                            )
                             .min_h_10()
                             .justify_start()
                             .small()
                             .ghost()
                             .w_full()
                             .selected(self.settings_navigation.selected == index)
+                            .when(self.settings_navigation.selected == index, |this| {
+                                this.bg(theme.primary.opacity(0.12))
+                                    .text_color(theme.primary)
+                            })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.settings_navigation.selected = index;
                                 if let Some(anchor) = &anchor {
@@ -188,8 +203,14 @@ impl RuntimePage {
                     .chain(DIAGNOSTIC_TOOL_PAGES)
                     .map(|page| {
                         Button::new((gpui_kit::ElementId::from("settings-tool"), page.route()))
-                            .icon(page.icon())
-                            .label(page.label())
+                            .accessibility_label(page.label())
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .gap_2()
+                                    .child(gpui_kit::component::Icon::new(page.icon()))
+                                    .child(div().min_w_0().truncate().child(page.label())),
+                            )
                             .small()
                             .ghost()
                             .w_full()
@@ -291,8 +312,14 @@ impl RuntimePage {
                     .chain(DIAGNOSTIC_TOOL_PAGES)
                     .map(|page| {
                         Button::new(page.route())
-                            .icon(page.icon())
-                            .label(page.label())
+                            .accessibility_label(page.label())
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .gap_2()
+                                    .child(gpui_kit::component::Icon::new(page.icon()))
+                                    .child(div().min_w_0().truncate().child(page.label())),
+                            )
                             .ghost()
                             .w_full()
                             .min_h_12()

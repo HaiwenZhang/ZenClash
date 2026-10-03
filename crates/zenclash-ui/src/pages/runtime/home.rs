@@ -435,15 +435,31 @@ impl RuntimePage {
             .child(selection.node);
 
         v_flex()
-            .p_4()
-            .gap_3()
+            .px_4()
+            .py_3()
+            .gap_2()
             .border_t_1()
             .border_color(theme.border)
             .child(
-                div()
-                    .text_base()
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .child(zenclash_i18n::text("home.proxy.title")),
+                h_flex()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child(zenclash_i18n::text("home.proxy.title")),
+                    )
+                    .child(
+                        Button::new("home-open-proxies")
+                            .icon(IconName::ArrowRight)
+                            .label(zenclash_i18n::text("home.proxy.details"))
+                            .small()
+                            .ghost()
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(NavigateProxies), cx);
+                            }),
+                    ),
             )
             .child(
                 div()
@@ -473,18 +489,6 @@ impl RuntimePage {
             .when_some(self.home.proxy_error.clone(), |this, error| {
                 this.child(message_banner(error, theme.danger, theme))
             })
-            .child(
-                h_flex().justify_end().child(
-                    Button::new("home-open-proxies")
-                        .icon(IconName::ArrowRight)
-                        .label(zenclash_i18n::text("home.proxy.details"))
-                        .small()
-                        .outline()
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(NavigateProxies), cx);
-                        }),
-                ),
-            )
             .into_any_element()
     }
 
@@ -554,8 +558,8 @@ impl RuntimePage {
             .child(
                 v_flex()
                     .px_4()
-                    .pb_4()
-                    .gap_3()
+                    .pb_3()
+                    .gap_2()
                     .child(
                         h_flex()
                             .gap_1()
@@ -620,7 +624,7 @@ impl RuntimePage {
                         h_flex()
                             .justify_between()
                             .gap_3()
-                            .py_2()
+                            .py_1()
                             .child(
                                 v_flex()
                                     .min_w_0()
@@ -666,7 +670,7 @@ impl RuntimePage {
                         h_flex()
                             .justify_between()
                             .gap_3()
-                            .py_2()
+                            .py_1()
                             .border_t_1()
                             .border_color(theme.border)
                             .child(
@@ -848,7 +852,7 @@ impl RuntimePage {
                     )
                     .child(
                         div()
-                            .h(rems(17.))
+                            .h(rems(13.))
                             .w_full()
                             .rounded(theme.radius)
                             .border_1()

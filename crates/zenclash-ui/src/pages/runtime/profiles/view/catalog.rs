@@ -159,7 +159,6 @@ impl RuntimePage {
             v_flex()
                 .p_4()
                 .gap_4()
-                .child(profile_heading(profile, active, theme))
                 .when_some(profile.subscription.usage.as_ref(), |this, usage| {
                     this.child(subscription_quota_chart(profile, usage, theme))
                 })
@@ -260,7 +259,6 @@ impl RuntimePage {
         let active = self.profiles.catalog.active.as_deref() == Some(profile.id.as_str());
         let selected = self.profiles.forms.catalog_view.is_selected(&profile.id);
         let show_id = profile.id.clone();
-        let source = profile_source(&profile.source);
 
         v_flex()
             .flex_grow_1()
@@ -279,24 +277,22 @@ impl RuntimePage {
             .bg(if selected {
                 theme.primary.opacity(0.06)
             } else {
-                theme.background
+                theme.group_box
             })
-            .child(profile_heading(profile, active, theme))
             .child(
-                Button::new(format!("inspect-profile:{}", profile.id))
-                    .label(zenclash_i18n::text("profiles.design.details"))
-                    .small()
-                    .ghost()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.profiles.forms.catalog_view.select(&show_id);
-                        cx.notify();
-                    })),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(source),
+                h_flex()
+                    .gap_2()
+                    .child(profile_heading(profile, active, theme).flex_1().min_w_0())
+                    .child(
+                        Button::new(format!("inspect-profile:{}", profile.id))
+                            .label(zenclash_i18n::text("profiles.design.details"))
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.profiles.forms.catalog_view.select(&show_id);
+                                cx.notify();
+                            })),
+                    ),
             )
             .when_some(profile.subscription.usage.as_ref(), |this, usage| {
                 this.child(render_subscription_usage(
@@ -584,52 +580,64 @@ fn subscription_quota_chart(
     let remaining_color = theme.chart_1.opacity(0.18);
     let chart = PieChart::new([(percent, true), (100. - percent, false)])
         .id(format!("profile-quota:{}", profile.id))
-        .inner_radius(f32::from(theme.font_size) * 3.8)
+        .outer_radius(f32::from(theme.font_size) * 3.)
+        .inner_radius(f32::from(theme.font_size) * 2.1)
         .value(|point| point.0)
         .color(move |point| if point.1 { used_color } else { remaining_color });
     v_flex()
         .gap_3()
         .child(
-            div().relative().h_48().w_full().child(chart).child(
-                v_flex()
-                    .absolute()
-                    .inset_0()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        div()
-                            .text_2xl()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(format!("{percent:.1}%")),
+            h_flex()
+                .gap_3()
+                .child(
+                    div()
+                        .relative()
+                        .size(gpui_kit::rems(7.))
+                        .flex_shrink_0()
+                        .child(chart)
+                        .child(
+                            v_flex()
+                                .absolute()
+                                .inset_0()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .text_lg()
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                        .child(format!("{percent:.1}%")),
+                                ),
+                        ),
+                )
+                .child(
+                    v_flex().flex_1().min_w_0().gap_3().children(
+                        [
+                            ("profiles.design.used", usage.used()),
+                            (
+                                "profiles.design.remaining",
+                                usage.total.saturating_sub(usage.used()),
+                            ),
+                            ("profiles.design.total", usage.total),
+                        ]
+                        .into_iter()
+                        .map(|(key, bytes)| {
+                            v_flex()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(zenclash_i18n::text(key)),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_family(theme.mono_font_family.clone())
+                                        .child(format_bytes(bytes)),
+                                )
+                        }),
                     ),
-            ),
-        )
-        .children(
-            [
-                ("profiles.design.used", usage.used()),
-                (
-                    "profiles.design.remaining",
-                    usage.total.saturating_sub(usage.used()),
                 ),
-                ("profiles.design.total", usage.total),
-            ]
-            .into_iter()
-            .map(|(key, bytes)| {
-                h_flex()
-                    .justify_between()
-                    .gap_3()
-                    .text_sm()
-                    .child(
-                        div()
-                            .text_color(theme.muted_foreground)
-                            .child(zenclash_i18n::text(key)),
-                    )
-                    .child(
-                        div()
-                            .font_family(theme.mono_font_family.clone())
-                            .child(format_bytes(bytes)),
-                    )
-            }),
         )
         .child(
             div()
@@ -713,7 +721,6 @@ fn profile_heading(
                     profile.source_label()
                 }),
         )
-        .child(div().flex_1())
         .child(
             div()
                 .font_family(theme.mono_font_family.clone())

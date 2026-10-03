@@ -49,6 +49,7 @@ impl RuntimePage {
             .and_then(|id| projection.by_id.get(id))
             .and_then(|&index| data.connections.get(index));
         let mut table = panel(theme)
+            .gap_0p5()
             .w_full()
             .min_w(gpui_kit::rems(42.))
             .child(
@@ -87,7 +88,7 @@ impl RuntimePage {
             table = table.child(
                 h_flex()
                     .gap_3()
-                    .py_2()
+                    .py_1()
                     .px_2()
                     .rounded(theme.radius)
                     .border_b_1()

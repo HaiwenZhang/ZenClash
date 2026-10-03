@@ -156,7 +156,6 @@ impl RenderOnce for SidebarNavigation {
 
                 Button::new(page.route())
                     .accessibility_label(page.label())
-                    .icon(sidebar_icon(page).size(rems(1.25)))
                     .w_full()
                     .h(rems(2.75))
                     .justify_start()
@@ -172,7 +171,16 @@ impl RenderOnce for SidebarNavigation {
                             .active(cx.theme().sidebar_accent),
                     )
                     .selected(active)
-                    .when(!self.collapsed, |this| this.label(page.label()))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_3()
+                            .when(self.collapsed, |this| this.justify_center())
+                            .child(sidebar_icon(page).size(rems(1.25)))
+                            .when(!self.collapsed, |this| {
+                                this.child(div().min_w_0().text_ellipsis().child(page.label()))
+                            }),
+                    )
                     .tooltip(page.label())
                     .on_click(move |_, window, cx| dispatch_navigate(page, window, cx))
             }))

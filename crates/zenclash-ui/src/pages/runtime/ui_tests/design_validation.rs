@@ -1,9 +1,11 @@
-//! Explicit native rendering of isolated page fixtures; no core or capture mutation.
+//! Native page rendering with isolated fixtures or opt-in real subscription validation.
 
 use super::*;
 use gpui_kit::component::{ActiveTheme, ThemeMode};
 use gpui_kit::{AnyView, Bounds, Render, WindowBounds, WindowOptions, point};
 use std::{cell::RefCell, rc::Rc};
+
+mod live;
 
 struct DesignValidationShell {
     page: Page,
@@ -27,9 +29,15 @@ impl Render for DesignValidationShell {
 }
 
 #[test]
-#[ignore = "renders isolated native Windows page fixtures and writes validation PNGs"]
+#[ignore = "renders native Windows pages; optional real core validation requires explicit inputs"]
 fn native_pages_render_for_design_validation() {
-    let fixture = Fixture::new();
+    let (fixture, live, process) = match std::env::var_os("ZENCLASH_UI_VALIDATION_PROFILE") {
+        Some(source) => {
+            let (fixture, live, process) = live::prepare(source.into());
+            (fixture, Some(live), Some(process))
+        }
+        None => (Fixture::new(), None, None),
+    };
     let runtime = fixture.runtime.as_ref().unwrap().handle().clone();
     let runtime_guard = runtime.enter();
     let services = fixture.services();
@@ -42,6 +50,9 @@ fn native_pages_render_for_design_validation() {
     };
     let mut output =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-design-validation");
+    if let Some(private_output) = std::env::var_os("ZENCLASH_UI_VALIDATION_OUTPUT") {
+        output = private_output.into();
+    }
     if locale == zenclash_i18n::EN {
         output = output.join("en");
     }
@@ -64,11 +75,21 @@ fn native_pages_render_for_design_validation() {
                     },
                     |window, cx| {
                         let proxies = cx.new(|cx| {
-                            crate::pages::proxies::ProxiesPage::design_validation_fixture(
-                                services.client.clone(),
-                                services.runtime.clone(),
-                                cx,
-                            )
+                            if let Some(live) = &live {
+                                crate::pages::proxies::ProxiesPage::design_validation_catalog(
+                                    services.client.clone(),
+                                    services.runtime.clone(),
+                                    live.catalog.clone(),
+                                    live.mode.clone(),
+                                    cx,
+                                )
+                            } else {
+                                crate::pages::proxies::ProxiesPage::design_validation_fixture(
+                                    services.client.clone(),
+                                    services.runtime.clone(),
+                                    cx,
+                                )
+                            }
                         });
                         let page = cx.new(|cx| RuntimePage::new(Page::Home, services, window, cx));
                         let shell = cx.new(|_| DesignValidationShell {
@@ -88,6 +109,9 @@ fn native_pages_render_for_design_validation() {
                 let mut saved = Ok(());
                 cx.update(|cx| {
                     page.update(cx, |page, _| {
+                        if live.is_some() {
+                            return;
+                        }
                         let template = page.profiles.catalog.profiles[0].clone();
                         page.profiles.catalog.profiles = [
                             "Daily Network",
@@ -161,16 +185,39 @@ fn native_pages_render_for_design_validation() {
                                         page.settings_navigation
                                             .scroll
                                             .set_offset(point(px(0.), px(0.)));
-                                        let data = fixture_data(destination);
+                                        let data = live
+                                            .as_ref()
+                                            .and_then(|live| {
+                                                live.pages
+                                                    .iter()
+                                                    .find(|(page, _)| *page == destination)
+                                            })
+                                            .map_or_else(
+                                                || fixture_data(destination),
+                                                |(_, data)| data.clone(),
+                                            );
+                                        if let RuntimeData::Connections(snapshot) = &data {
+                                            page.connections.expanded = snapshot
+                                                .connections
+                                                .first()
+                                                .map(|connection| connection.id.clone());
+                                        }
                                         page.replace_page_data(
                                             page.page_task_token_for(destination),
                                             data,
                                             cx,
                                         );
-                                        if destination == Page::Logs {
-                                            page.logs.prepare_design_validation();
+                                        if live.is_some() && destination == Page::Home {
+                                            page.update_home_traffic_presentation(cx);
                                         }
-                                        if destination == Page::Connections {
+                                        if destination == Page::Logs {
+                                            if live.is_some() {
+                                                page.update_log_presentation(cx);
+                                            } else {
+                                                page.logs.prepare_design_validation();
+                                            }
+                                        }
+                                        if live.is_none() && destination == Page::Connections {
                                             page.connections.expanded = Some("fixture-0".into());
                                         }
                                         cx.notify();
@@ -196,22 +243,37 @@ fn native_pages_render_for_design_validation() {
                                     cx.update_window(window.into(), |_, window, cx| {
                                         window.render_frame(cx);
                                         if destination == Page::Rules {
+                                            if !window.try_find(("rule-details", 0usize)).is_some_and(|target| target.visible()) {
+                                                return Err("rule detail action is not visible".to_owned());
+                                            }
                                             window.click(("rule-details", 0usize), cx);
                                             window.render_frame(cx);
+                                        }
+                                        if destination == Page::Logs {
+                                            let first_log = page.read(cx).logs.design_validation_log_id();
+                                            if let Some(id) = first_log {
+                                                let button = window.try_find(("inspect-log", id)).ok_or_else(|| "log detail action is missing".to_owned())?;
+                                                let table = window.try_find("logs-table").ok_or_else(|| "log table is missing".to_owned())?;
+                                                if !button.visible() || button.bounds().right() > table.bounds().right() {
+                                                    return Err("long log pushes its detail action outside the table".to_owned());
+                                                }
+                                                window.click(("inspect-log", id), cx);
+                                                window.render_frame(cx);
+                                            }
                                         }
                                         let bounds = window.viewport_size();
                                         let metadata = serde_json::json!({
                                             "viewport_width": f32::from(bounds.width),
                                             "viewport_height": f32::from(bounds.height),
                                             "scale_factor": window.scale_factor(),
-                                            "fixture": true,
+                                            "fixture": live.is_none(),
                                             "locale": locale,
                                         });
-                                        window.render_to_image().map(|image| (image, metadata))
+                                        window.render_to_image().map(|image| (image, metadata)).map_err(|error| error.to_string())
                                     })
                                 })
-                                .and_then(|image| image)
-                                .map_err(|error| error.to_string());
+                                .map_err(|error| error.to_string())
+                                .and_then(|image| image);
                             let path = output
                                 .join(format!("{}-{suffix}{viewport}.png", destination.route()));
                             saved = cx
@@ -251,6 +313,9 @@ fn native_pages_render_for_design_validation() {
             })
             .detach();
         });
+    if let Some(process) = process {
+        process.stop().unwrap();
+    }
     outcome
         .borrow_mut()
         .take()

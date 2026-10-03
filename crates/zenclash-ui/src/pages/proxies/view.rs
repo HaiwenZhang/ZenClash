@@ -11,6 +11,58 @@ use super::{
 };
 
 impl ProxiesPage {
+    pub(super) fn render_summary(
+        &self,
+        catalog: &ProxyCatalog,
+        theme: &gpui_kit::component::Theme,
+    ) -> gpui_kit::Div {
+        h_flex()
+            .w_full()
+            .gap_4()
+            .p_4()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.group_box)
+            .children(
+                [
+                    ("profiles.metrics.proxies", catalog.proxy_count.to_string()),
+                    (
+                        "profiles.metrics.groups",
+                        catalog.groups().len().to_string(),
+                    ),
+                    (
+                        "proxies.summary.visible_groups",
+                        self.visible_group_indices.len().to_string(),
+                    ),
+                    (
+                        "proxies.summary.mode",
+                        crate::components::sidebar::OutboundMode::from_api(&self.outbound_mode)
+                            .label(),
+                    ),
+                ]
+                .into_iter()
+                .map(|(key, value)| {
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(zenclash_i18n::text(key)),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .child(value),
+                        )
+                }),
+            )
+    }
+
     pub(super) fn render_workspace(
         &self,
         catalog: &ProxyCatalog,
@@ -51,6 +103,7 @@ impl ProxiesPage {
                     .min_h_16()
                     .child(
                         v_flex()
+                            .w_full()
                             .min_w_0()
                             .gap_1()
                             .child(

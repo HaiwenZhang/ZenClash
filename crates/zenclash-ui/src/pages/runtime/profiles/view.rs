@@ -27,6 +27,7 @@ impl RuntimePage {
                         zenclash_i18n::text("profiles.actions.add_remote")
                     })
                     .small()
+                    .h_8()
                     .primary()
                     .disabled(self.core_busy())
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -40,6 +41,7 @@ impl RuntimePage {
                     .icon(IconName::FolderOpen)
                     .label(zenclash_i18n::text("profiles.actions.import_local"))
                     .small()
+                    .h_8()
                     .outline()
                     .disabled(self.core_busy())
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -73,17 +75,10 @@ impl RuntimePage {
                         .flex_1()
                         .min_w_0()
                         .child(metric(
-                            zenclash_i18n::text("profiles.metrics.profiles"),
-                            if self
-                                .profiles
-                                .forms
-                                .catalog_view
-                                .is_current(&self.profiles.catalog)
-                            {
-                                self.profiles.catalog.profiles.len().to_string()
-                            } else {
-                                empty_dash("")
-                            },
+                            zenclash_i18n::text("profiles.metrics.current"),
+                            self.profiles
+                                .active_profile()
+                                .map_or_else(|| empty_dash(""), |profile| profile.name.clone()),
                             theme,
                         ))
                         .child(metric(

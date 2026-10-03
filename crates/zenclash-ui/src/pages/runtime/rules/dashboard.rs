@@ -30,6 +30,7 @@ impl RuntimePage {
         let rules = &projection.snapshot.rules;
         let page = list_page(projection.indices.len(), self.rules.page, RULES_PER_PAGE);
         let mut table = panel(theme)
+            .gap_0p5()
             .w_full()
             .min_w(gpui_kit::rems(42.))
             .child(
@@ -187,30 +188,45 @@ impl RuntimePage {
             .gap_4()
             .child(
                 panel(theme).child(
-                    h_flex()
-                        .justify_between()
-                        .child(
-                            h_flex()
-                                .gap_3()
+                    h_flex().gap_4().children(
+                        [
+                            (
+                                "profiles.metrics.current",
+                                self.profiles
+                                    .active_profile()
+                                    .map_or_else(|| "—".into(), |profile| profile.name.clone()),
+                            ),
+                            ("rules.summary.runtime", rules.len().to_string()),
+                            (
+                                "core_management.title",
+                                self.core_kind.display_name().to_owned(),
+                            ),
+                            (
+                                "rules.summary.filtered",
+                                projection.indices.len().to_string(),
+                            ),
+                        ]
+                        .into_iter()
+                        .map(|(key, value)| {
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_1()
                                 .child(
                                     div()
-                                        .text_sm()
+                                        .text_xs()
                                         .text_color(theme.muted_foreground)
-                                        .child(zenclash_i18n::text("rules.summary.runtime")),
+                                        .child(zenclash_i18n::text(key)),
                                 )
                                 .child(
                                     div()
-                                        .text_lg()
+                                        .text_sm()
+                                        .truncate()
                                         .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                        .child(rules.len().to_string()),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(pagination_summary(page, projection.indices.len())),
-                        ),
+                                        .child(value),
+                                )
+                        }),
+                    ),
                 ),
             )
             .when(!self.core_kind.capabilities().rule_toggle, |this| {
@@ -265,7 +281,7 @@ impl RuntimePage {
             .id(("rule-row", identity))
             .test_support()
             .gap_3()
-            .py_2()
+            .py_1()
             .px_2()
             .rounded(theme.radius)
             .border_b_1()

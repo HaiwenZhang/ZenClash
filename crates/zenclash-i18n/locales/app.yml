@@ -940,6 +940,9 @@ profiles:
       zh-CN: 运行配置已变化，请确认最新的服务状态
       en: The runtime configuration has changed. Confirm the latest service state.
   metrics:
+    current:
+      zh-CN: 当前配置
+      en: Active Profile
     proxies:
       zh-CN: 代理对象
       en: Proxies
@@ -1401,6 +1404,12 @@ proxies:
       zh-CN: 测速并恢复自动
       en: Test & Restore Auto
   summary:
+    visible_groups:
+      zh-CN: 可见策略组
+      en: Visible Groups
+    mode:
+      zh-CN: 路由模式
+      en: Routing Mode
     current:
       zh-CN: 当前：%{proxy} · %{count} 个节点
       en: "Current: %{proxy} · %{count} nodes"

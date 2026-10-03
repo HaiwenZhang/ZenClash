@@ -1,7 +1,7 @@
 use super::*;
 use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::progress::Progress;
-use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::{InteractiveElement, TestSupportExt};
 
 impl RuntimePage {
     pub(in crate::pages::runtime) fn render_log_actions(
@@ -60,10 +60,16 @@ impl RuntimePage {
         let ready = presentation.revision.is_some();
         let page = list_page(presentation.matches.len(), self.logs.page, LOGS_PER_PAGE);
         let mut table = panel(theme)
+            .id("logs-table")
+            .test_support()
+            .max_w_full()
+            .gap_0p5()
             .w_full()
-            .min_w(gpui_kit::rems(42.))
+            .min_w_0()
             .child(
                 h_flex()
+                    .w_full()
+                    .min_w_0()
                     .gap_2()
                     .flex_wrap()
                     .child(
@@ -101,8 +107,10 @@ impl RuntimePage {
             let color = level_color(&row.level, theme);
             table = table.child(
                 h_flex()
+                    .w_full()
+                    .min_w_0()
                     .gap_3()
-                    .py_2()
+                    .py_1()
                     .px_2()
                     .rounded(theme.radius)
                     .border_b_1()
@@ -110,11 +118,16 @@ impl RuntimePage {
                     .when(selected, |row| row.bg(theme.primary.opacity(0.1)))
                     .child(div().w_24().text_xs().truncate().child(row.time.clone()))
                     .child(
-                        div()
-                            .w_20()
-                            .text_xs()
-                            .text_color(color)
-                            .child(row.level.clone()),
+                        div().w_20().child(
+                            div()
+                                .text_xs()
+                                .px_2()
+                                .py_0p5()
+                                .rounded(theme.radius)
+                                .bg(color.opacity(0.12))
+                                .text_color(color)
+                                .child(row.level.clone()),
+                        ),
                     )
                     .child(
                         div()
@@ -274,8 +287,7 @@ impl RuntimePage {
                             .flex_1()
                             .flex_basis(gpui_kit::rems(42.))
                             .min_w_0()
-                            .child(table)
-                            .overflow_x_scrollbar(),
+                            .child(table),
                     )
                     .child(
                         v_flex()

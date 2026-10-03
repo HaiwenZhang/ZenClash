@@ -20,6 +20,7 @@ impl RuntimePage {
                 "common.actions.refresh"
             }))
             .small()
+            .h_8()
             .outline()
             .loading(self.loading)
             .disabled(self.core_busy())
@@ -45,6 +46,7 @@ impl RuntimePage {
                     Button::new("rules-resources")
                         .label(zenclash_i18n::text("navigation.resources.label"))
                         .small()
+                        .h_8()
                         .outline()
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(crate::app::NavigateResources), cx)

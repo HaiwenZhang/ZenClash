@@ -101,9 +101,20 @@ impl ProxiesPage {
                 .collect(),
             nodes.len(),
         );
-        let indices = presentation::visible_group_indices(&catalog, "rule", false);
+        Self::design_validation_catalog(client, runtime, catalog, "rule".into(), cx)
+    }
+
+    #[cfg(test)]
+    pub(in crate::pages) fn design_validation_catalog(
+        client: MihomoClient,
+        runtime: tokio::runtime::Handle,
+        catalog: ProxyCatalog,
+        mode: String,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let indices = presentation::visible_group_indices(&catalog, &mode, false);
         let mut page = Self::new(client, runtime, cx);
-        page.install_catalog(catalog, "rule".into(), indices);
+        page.install_catalog(catalog, mode, indices);
         page
     }
 
@@ -355,6 +366,9 @@ impl Render for ProxiesPage {
                     .gap_4()
                     .px_6()
                     .py_3()
+                    .when_some(catalog, |this, catalog| {
+                        this.child(self.render_summary(catalog, &theme))
+                    })
                     .when_some(error, |this, error| {
                         this.child(
                             h_flex()

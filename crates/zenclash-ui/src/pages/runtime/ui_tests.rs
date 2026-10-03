@@ -15,6 +15,7 @@ mod design_validation;
 
 pub(super) struct Fixture {
     root: PathBuf,
+    managed_process: Option<Arc<MihomoProcess>>,
     runtime: Option<tokio::runtime::Runtime>,
     profiles: ProfileStore,
     overrides: YamlOverrideStore,
@@ -72,6 +73,7 @@ impl Fixture {
         );
         Self {
             root,
+            managed_process: None,
             runtime: Some(runtime),
             profiles,
             overrides,
@@ -144,6 +146,11 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.status.stop();
+        if let Some(process) = self.managed_process.take() {
+            process
+                .stop()
+                .expect("stop isolated core before removing private data");
+        }
         self.runtime
             .take()
             .unwrap()
