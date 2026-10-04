@@ -93,6 +93,19 @@ impl ServiceTunPersistence {
             .await
             .map_err(|error| ControlledConfigError::Task(error.to_string()))?
     }
+    pub(crate) async fn validate_patch(&self) -> ControlledConfigResult<()> {
+        let store = self.store.clone();
+        let expected = self.update.expected_patch.clone();
+        tokio::task::spawn_blocking(move || {
+            let _transaction = store.transaction.lock();
+            if store.current_patch_bytes_unlocked()? != expected {
+                return Err(ControlledConfigError::ConcurrentModification);
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))?
+    }
     pub(crate) async fn rollback(self) -> ControlledConfigResult<()> {
         rollback_runtime_cache(self.cache).await
     }
@@ -477,6 +490,31 @@ impl ControlledConfigStore {
         overrides: &[PathBuf],
     ) -> ControlledConfigResult<String> {
         let payload = self.effective_payload(profile)?;
+        Ok(merge_payload_overrides(&payload, overrides)?)
+    }
+
+    fn effective_source_with_overrides(
+        &self,
+        source: crate::profile::ProfileRuntimeSource,
+        overrides: &[PathBuf],
+    ) -> ControlledConfigResult<String> {
+        let payload = match source {
+            crate::profile::ProfileRuntimeSource::File(path) => self.effective_payload(path)?,
+            crate::profile::ProfileRuntimeSource::Frozen(payload) => {
+                crate::profile::merge_payload_patch(&payload, self.load()?)?
+            }
+            crate::profile::ProfileRuntimeSource::Prepared(candidate) => {
+                let _transaction = self.transaction.lock();
+                let (update, expected_cache) = *candidate;
+                if self.current_patch_bytes_unlocked()? != update.expected_patch
+                    || self.cached_runtime_payload()? != expected_cache
+                {
+                    return Err(ControlledConfigError::ConcurrentModification);
+                }
+                // Ordered overrides are already part of this checked final payload.
+                return Ok(update.next_payload);
+            }
+        };
         Ok(merge_payload_overrides(&payload, overrides)?)
     }
 
@@ -973,6 +1011,16 @@ impl ControlledConfigStore {
         self.mutation_gate.clone().lock_owned().await
     }
 
+    pub(crate) fn owns_service_tun_mutation(
+        &self,
+        guard: &tokio::sync::OwnedMutexGuard<()>,
+    ) -> bool {
+        Arc::ptr_eq(
+            tokio::sync::OwnedMutexGuard::mutex(guard),
+            &self.mutation_gate,
+        )
+    }
+
     pub(crate) async fn prepare_service_tun_update(
         &self,
         profile: PathBuf,
@@ -992,6 +1040,275 @@ impl ControlledConfigStore {
                 &overrides,
                 bundle.as_deref(),
             )
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))?
+    }
+
+    pub(crate) async fn validate_prepared_service_tun(
+        &self,
+        update: ControlledConfigUpdate,
+        expected_cache: Option<String>,
+    ) -> ControlledConfigResult<()> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _transaction = store.transaction.lock();
+            if store.current_patch_bytes_unlocked()? != update.expected_patch
+                || store.cached_runtime_payload()? != expected_cache
+            {
+                return Err(ControlledConfigError::ConcurrentModification);
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))?
+    }
+
+    // The session owns completion and its transition gate; this method keeps
+    // persistence, restart fallback and rollback on the same checked payload.
+    pub(crate) async fn apply_frozen_local_update(
+        &self,
+        client: &MihomoClient,
+        update: ControlledConfigUpdate,
+        expected_cache: Option<String>,
+        persist_patch: bool,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<(crate::CoreApplyKind, SavedRuntimeReceipt), RuntimeMutationError> {
+        let lease = self
+            .acquire_write_lease_for_paths(client.write_scopes())
+            .await?;
+        let store = self.with_write_lease(&lease);
+        let client = client.with_write_lease(&lease)?;
+        let mutation = store.mutation_gate.clone().lock_owned().await;
+        client.ensure_binding_current()?;
+        store
+            .validate_prepared_service_tun(update.clone(), expected_cache)
+            .await?;
+        let payload = update.next_payload().to_owned();
+        let (cache, recovery, kind) = match store
+            .accept_runtime_payload_for_session(&client, payload.clone())
+            .await
+        {
+            Ok(accepted) => (
+                accepted.cache,
+                RuntimeApplicationRecovery::HotReload {
+                    runtime: Box::new(accepted.runtime),
+                    previous_payload: accepted.previous_payload,
+                },
+                crate::CoreApplyKind::HotReloaded,
+            ),
+            Err(error) if crate::core_session::should_restart_after_hot_reload(&error.cause) => {
+                let Some(crate::owned_core::OwnedCore::Local(process)) = client.owned_core() else {
+                    return Err(error);
+                };
+                // Restart reads the owner's launch path. Never fall back to a
+                // mutable source file after admitting this frozen configuration.
+                if process.launch_config().config_file != store.runtime_path() {
+                    return Err(error);
+                }
+                let cache = store
+                    .accept_runtime_payload_with_restart_for_session(
+                        process.clone(),
+                        payload,
+                        Some(cancelled.clone()),
+                    )
+                    .await
+                    .map_err(|mut restart| {
+                        restart.attempted |= error.attempted;
+                        restart
+                    })?;
+                (
+                    cache,
+                    RuntimeApplicationRecovery::Restart {
+                        process,
+                        cancelled: Some(cancelled),
+                    },
+                    crate::CoreApplyKind::Restarted,
+                )
+            }
+            Err(error) => return Err(error),
+        };
+        let transaction = RuntimeApplicationTransaction {
+            cache,
+            recovery,
+            _mutation_guard: mutation,
+            _write_lease: lease,
+        };
+        if persist_patch {
+            let commit_lease = store.write_access.acquire();
+            let commit_store = store.with_write_lease(&commit_lease);
+            let commit = tokio::task::spawn_blocking(move || {
+                let _lease = commit_lease;
+                commit_store.commit(&update)
+            })
+            .await
+            .map_err(|error| ControlledConfigError::Task(error.to_string()))
+            .and_then(|result| result);
+            if let Err(error) = commit {
+                let rollback = transaction.rollback().await;
+                return Err(RuntimeMutationError::attempted(
+                    ControlledConfigError::Transaction(format!(
+                        "保存失败：{error}；上一版本恢复：{}",
+                        result_label(rollback)
+                    )),
+                ));
+            }
+        }
+        Ok((
+            kind,
+            SavedRuntimeReceipt {
+                delta: None,
+                confirmation: transaction.commit().await,
+            },
+        ))
+    }
+
+    pub(crate) async fn prepare_service_config_update(
+        &self,
+        profile: impl Into<crate::profile::ProfileRuntimeSource> + Send,
+        patch: Option<serde_json::Value>,
+        overrides: Vec<PathBuf>,
+        previous_payload: Option<String>,
+    ) -> ControlledConfigResult<ControlledConfigUpdate> {
+        let profile = profile.into();
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut update =
+                if let (crate::profile::ProfileRuntimeSource::File(path), Some(patch)) =
+                    (&profile, &patch)
+                {
+                    store.prepare_update(path, serde_yaml::to_value(patch)?)?
+                } else {
+                    if patch.is_some() {
+                        return Err(ControlledConfigError::PartialOverrideConflict);
+                    }
+                    let _transaction = store.transaction.lock();
+                    let (expected_patch, current) = store.load_unlocked()?;
+                    let payload = match profile {
+                        crate::profile::ProfileRuntimeSource::File(path) => {
+                            merge_profile_patch(&path, current.clone())?
+                        }
+                        crate::profile::ProfileRuntimeSource::Frozen(payload) => {
+                            crate::profile::merge_payload_patch(&payload, current.clone())?
+                        }
+                        crate::profile::ProfileRuntimeSource::Prepared(_) => {
+                            return Err(ControlledConfigError::PartialOverrideConflict);
+                        }
+                    };
+                    ControlledConfigUpdate {
+                        expected_patch,
+                        next_patch: serde_yaml::to_string(&current)?.into_bytes(),
+                        previous_payload: payload.clone(),
+                        next_payload: payload,
+                    }
+                };
+            update.next_payload =
+                store.apply_session_listener_fallbacks(&normalize_runtime_payload(
+                    CoreKind::Mihomo,
+                    merge_payload_overrides(update.next_payload(), &overrides)?,
+                )?)?;
+            if let Some(payload) = previous_payload {
+                update.previous_payload = payload;
+            }
+            validate_listener_change(update.previous_payload(), update.next_payload(), true)
+                .map_err(ControlledConfigError::ListenerFallback)?;
+            Ok(update)
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))?
+    }
+
+    pub(crate) fn prepare_backup_config_update(
+        &self,
+        candidate: &crate::backup::BackupRuntimeCandidate,
+        previous_payload: String,
+    ) -> ControlledConfigResult<ControlledConfigUpdate> {
+        let next_payload = self.apply_session_listener_fallbacks(&normalize_runtime_payload(
+            CoreKind::Mihomo,
+            candidate.payload.clone(),
+        )?)?;
+        validate_listener_change(&previous_payload, &next_payload, true)
+            .map_err(ControlledConfigError::ListenerFallback)?;
+        Ok(ControlledConfigUpdate {
+            expected_patch: Some(candidate.patch.clone()),
+            next_patch: candidate.patch.clone(),
+            previous_payload,
+            next_payload,
+        })
+    }
+
+    pub(crate) async fn prepare_service_tun_recovery_update(
+        &self,
+        bundle: Arc<crate::ServiceRuntimeBundle>,
+    ) -> ControlledConfigResult<ControlledConfigUpdate> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _transaction = store.transaction.lock();
+            let (expected_patch, current) = store.load_unlocked()?;
+            Self::prepare_partial_payload_update(
+                expected_patch,
+                current,
+                bundle.yaml().to_owned(),
+                &serde_json::json!({"tun":{"enable":true},"dns":{"enable":true}}),
+                &[],
+            )
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))?
+    }
+
+    // Caller holds the store mutation gate; borrowed write authority must remain live.
+    pub(crate) async fn persist_local_recovery_payload_admitted(
+        &self,
+        payload: String,
+    ) -> ControlledConfigResult<()> {
+        let lease = self
+            .write_access
+            .borrowed_authority(std::slice::from_ref(&self.root))
+            .map_err(ControlledConfigError::Task)?
+            .ok_or_else(|| {
+                ControlledConfigError::Task("Local recovery write authority has expired".into())
+            })?;
+        let store = self.with_write_lease(&lease);
+        tokio::spawn(async move {
+            let _lease = lease;
+            let prepare = store.clone();
+            let update = tokio::task::spawn_blocking(move || {
+                if payload.len() > MAX_PROFILE_BYTES {
+                    return Err(ControlledConfigError::TooLarge);
+                }
+                let document: Value = serde_yaml::from_str(&payload)?;
+                if document
+                    .get("tun")
+                    .and_then(|tun| tun.get("enable"))
+                    .and_then(Value::as_bool)
+                    != Some(false)
+                {
+                    return Err(ControlledConfigError::PartialOverrideConflict);
+                }
+                let _transaction = prepare.transaction.lock();
+                let (expected, current) = prepare.load_unlocked()?;
+                Self::prepare_partial_payload_update(
+                    expected,
+                    current,
+                    payload,
+                    &serde_json::json!({"tun":{"enable":false}}),
+                    &[],
+                )
+            })
+            .await
+            .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+            let persistence = store.stage_service_tun_update(update).await?;
+            if let Err(error) = persistence.save().await {
+                return match persistence.rollback().await {
+                    Ok(()) => Err(error),
+                    Err(rollback) => Err(ControlledConfigError::Transaction(format!(
+                        "{error}; {rollback}"
+                    ))),
+                };
+            }
+            persistence.saved();
+            Ok(())
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))?
@@ -1071,7 +1388,7 @@ impl ControlledConfigStore {
         fallback_bundle: Option<&crate::ServiceRuntimeBundle>,
     ) -> ControlledConfigResult<ControlledConfigUpdate> {
         let _transaction = self.transaction.lock();
-        let (expected_patch, mut current) = self.load_unlocked()?;
+        let (expected_patch, current) = self.load_unlocked()?;
         // Held cache is authoritative; changed profile sources never enter an accepted delta.
         let previous_payload = match self.cached_runtime_payload()? {
             Some(payload) => payload,
@@ -1083,6 +1400,22 @@ impl ControlledConfigStore {
                 merge_payload_overrides(&merge_profile_patch(profile, current.clone())?, overrides)?
             }
         };
+        Self::prepare_partial_payload_update(
+            expected_patch,
+            current,
+            previous_payload,
+            patch,
+            overrides,
+        )
+    }
+
+    fn prepare_partial_payload_update(
+        expected_patch: Option<Vec<u8>>,
+        mut current: Value,
+        previous_payload: String,
+        patch: &serde_json::Value,
+        overrides: &[PathBuf],
+    ) -> ControlledConfigResult<ControlledConfigUpdate> {
         let next_payload = merge_held_delta(&previous_payload, patch)?;
         let overridden = merge_payload_overrides(&next_payload, overrides)?;
         let actual: serde_json::Value = serde_yaml::from_str(&overridden)?;
@@ -1312,54 +1645,120 @@ impl ControlledConfigStore {
     pub(crate) async fn stage_profile_reload(
         &self,
         client: &MihomoClient,
-        candidate: PathBuf,
+        candidate: impl Into<crate::profile::ProfileRuntimeSource> + Send,
         _previous: Option<PathBuf>,
         overrides: Vec<PathBuf>,
     ) -> Result<RuntimeApplicationTransaction, RuntimeMutationError> {
+        self.stage_profile_runtime(client, candidate.into(), overrides, false, None)
+            .await
+            .map(|(transaction, _)| transaction)
+    }
+
+    pub(crate) async fn stage_profile_reload_with_restart(
+        &self,
+        client: &MihomoClient,
+        candidate: crate::profile::ProfileRuntimeSource,
+        overrides: Vec<PathBuf>,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<(RuntimeApplicationTransaction, crate::CoreApplyKind), RuntimeMutationError> {
+        self.stage_profile_runtime(client, candidate, overrides, true, Some(cancelled))
+            .await
+    }
+
+    async fn stage_profile_runtime(
+        &self,
+        client: &MihomoClient,
+        candidate: crate::profile::ProfileRuntimeSource,
+        overrides: Vec<PathBuf>,
+        allow_restart: bool,
+        cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<(RuntimeApplicationTransaction, crate::CoreApplyKind), RuntimeMutationError> {
         let client = client.pin_binding()?;
         let write_lease = self
             .acquire_write_lease_for_paths(client.write_scopes())
             .await?;
         client.ensure_binding_current()?;
-        let leased_client = client.with_write_lease(&write_lease)?;
-        let client = &leased_client;
-        let leased_store = self.with_write_lease(&write_lease);
-        let mutation_guard = leased_store.mutation_gate.clone().lock_owned().await;
+        let client = client.with_write_lease(&write_lease)?;
+        let store = self.with_write_lease(&write_lease);
+        let mutation_guard = store.mutation_gate.clone().lock_owned().await;
         client.ensure_binding_current()?;
-        let worker_lease = leased_store.write_access.acquire();
-        let store = leased_store.with_write_lease(&worker_lease);
-        // Source files and the candidate override chain can differ from the
-        // accepted revision. Only the applied cache is a truthful rollback.
-        let previous_payload = leased_store.cached_runtime_payload()?;
-        let candidate_payload = tokio::task::spawn_blocking(move || {
-            let _write_lease = worker_lease;
-            store.effective_with_overrides(candidate, &overrides)
+        let worker_lease = store.write_access.acquire();
+        let worker = store.with_write_lease(&worker_lease);
+        let (payload, previous_payload) = tokio::task::spawn_blocking(move || {
+            let _lease = worker_lease;
+            let previous_payload = worker.cached_runtime_payload()?;
+            Ok::<_, ControlledConfigError>((
+                worker.effective_source_with_overrides(candidate, &overrides)?,
+                previous_payload,
+            ))
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        let candidate_payload =
-            leased_store.validate_candidate_listeners(candidate_payload, true)?;
-        let accepted = leased_store
-            .accept_runtime_payload_with_snapshot(client, candidate_payload, previous_payload)
-            .await?;
-        Ok(RuntimeApplicationTransaction {
-            cache: accepted.cache,
-            recovery: RuntimeApplicationRecovery::HotReload {
-                runtime: Box::new(accepted.runtime),
-                previous_payload: accepted.previous_payload,
+        let payload =
+            store.validate_candidate_listeners(client.normalize_config_payload(payload)?, true)?;
+        // Keep the candidate, mutation gate and write authority through fallback.
+        // Re-merging a changed source or override can turn an admitted TUN-off
+        // hot reload into an unauthorized TUN-on process restart.
+        let (cache, recovery, kind) = match store
+            .accept_runtime_payload_with_snapshot(&client, payload.clone(), previous_payload)
+            .await
+        {
+            Ok(accepted) => (
+                accepted.cache,
+                RuntimeApplicationRecovery::HotReload {
+                    runtime: Box::new(accepted.runtime),
+                    previous_payload: accepted.previous_payload,
+                },
+                crate::CoreApplyKind::HotReloaded,
+            ),
+            Err(error)
+                if allow_restart
+                    && crate::core_session::should_restart_after_hot_reload(&error.cause) =>
+            {
+                let Some(crate::owned_core::OwnedCore::Local(process)) = client.owned_core() else {
+                    return Err(error);
+                };
+                if process.launch_config().config_file != store.runtime_path() {
+                    return Err(error);
+                }
+                let cache = store
+                    .accept_runtime_payload_with_restart_for_session(
+                        process.clone(),
+                        payload,
+                        cancelled.clone(),
+                    )
+                    .await
+                    .map_err(|mut restart| {
+                        restart.attempted |= error.attempted;
+                        restart
+                    })?;
+                (
+                    cache,
+                    RuntimeApplicationRecovery::Restart { process, cancelled },
+                    crate::CoreApplyKind::Restarted,
+                )
+            }
+            Err(error) => return Err(error),
+        };
+        Ok((
+            RuntimeApplicationTransaction {
+                cache,
+                recovery,
+                _mutation_guard: mutation_guard,
+                _write_lease: write_lease,
             },
-            _mutation_guard: mutation_guard,
-            _write_lease: write_lease,
-        })
+            kind,
+        ))
     }
 
     pub(crate) async fn stage_profile_validation(
         &self,
         kind: CoreKind,
         client: &MihomoClient,
-        candidate: PathBuf,
+        candidate: impl Into<crate::profile::ProfileRuntimeSource> + Send,
         overrides: Vec<PathBuf>,
     ) -> ControlledConfigResult<RuntimeCandidateValidation> {
+        let candidate = candidate.into();
         let client = client.pin_binding()?;
         let write_lease = self
             .acquire_write_lease_for_paths(client.write_scopes())
@@ -1374,7 +1773,7 @@ impl ControlledConfigStore {
         let store = leased_store.with_write_lease(&worker_lease);
         let payload = tokio::task::spawn_blocking(move || {
             let _write_lease = worker_lease;
-            store.effective_with_overrides(candidate, &overrides)
+            store.effective_source_with_overrides(candidate, &overrides)
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
@@ -1439,10 +1838,11 @@ impl ControlledConfigStore {
     pub(crate) async fn stage_profile_restart(
         &self,
         process: Arc<MihomoProcess>,
-        candidate: PathBuf,
+        candidate: impl Into<crate::profile::ProfileRuntimeSource> + Send,
         overrides: Vec<PathBuf>,
         cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<RuntimeApplicationTransaction, RuntimeMutationError> {
+        let candidate = candidate.into();
         let write_lease = self
             .acquire_write_lease_for_paths(process.write_scopes())
             .await?;
@@ -1452,7 +1852,7 @@ impl ControlledConfigStore {
         let store = leased_store.with_write_lease(&worker_lease);
         let payload = tokio::task::spawn_blocking(move || {
             let _write_lease = worker_lease;
-            store.effective_with_overrides(candidate, &overrides)
+            store.effective_source_with_overrides(candidate, &overrides)
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;

@@ -6,7 +6,10 @@ use std::sync::{
 use futures_util::StreamExt;
 use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::Message;
-use zenclash_service::{ServiceClient, ServiceStream, ServiceSubscription};
+use zenclash_service::{
+    LogStreamOptions, ServiceClient, ServiceClientError, ServiceErrorCode, ServiceLogFormat,
+    ServiceLogLevel, ServiceStream, ServiceSubscription,
+};
 
 use super::{MihomoError, MihomoResult};
 use crate::{
@@ -32,6 +35,10 @@ pub(crate) struct BindingSnapshot {
 }
 
 impl BindingSnapshot {
+    pub(crate) fn is_service(&self) -> bool {
+        matches!(self.backend, ControllerBackend::Service { .. })
+    }
+
     pub(crate) fn owned_core(&self) -> Option<OwnedCore> {
         match &self.backend {
             ControllerBackend::Direct(_) => None,
@@ -102,6 +109,15 @@ impl ControllerBinding {
             binary,
             config_file,
             home_dir,
+        }
+    }
+
+    pub(crate) fn local_recovery_launch(&self) -> Option<crate::MihomoLaunchConfig> {
+        let binding = self.updates.borrow();
+        match &binding.backend {
+            ControllerBackend::Local(process) => Some(process.launch_config().clone()),
+            ControllerBackend::Service { runtime } => runtime.local_launch().cloned(),
+            ControllerBackend::Direct(_) => None,
         }
     }
     pub(crate) fn direct(endpoint: MihomoEndpoint) -> Arc<Self> {
@@ -190,9 +206,6 @@ impl ControllerBinding {
             ControllerBackend::Service { .. } => None,
         }
     }
-    pub(crate) fn service(&self) -> Option<Arc<ServiceClient>> {
-        self.runtime().map(|runtime| runtime.client.clone())
-    }
     pub(crate) fn runtime(
         &self,
     ) -> Option<Arc<crate::service_runtime_session::ServiceRuntimeSession>> {
@@ -231,6 +244,19 @@ impl ControllerBinding {
         timeout: &str,
     ) -> Result<ControllerStream, String> {
         let binding = self.snapshot();
+        self.connect_pinned(&binding, path, query, timeout).await
+    }
+
+    pub(crate) async fn connect_pinned(
+        self: &Arc<Self>,
+        binding: &BindingSnapshot,
+        path: &str,
+        query: &[(&str, &str)],
+        timeout: &str,
+    ) -> Result<ControllerStream, String> {
+        if !self.is_current(binding.generation) {
+            return Err("Controller changed while opening stream".into());
+        }
         let stream = match &binding.backend {
             ControllerBackend::Direct(_) | ControllerBackend::Local(_) => {
                 let endpoint = binding.endpoint().ok_or("Direct binding has no endpoint")?;
@@ -238,22 +264,20 @@ impl ControllerBinding {
                     connect_stream(&endpoint, path, query, timeout).await?,
                 ))
             }
-            ControllerBackend::Service { runtime } => {
-                let kind = match path {
-                    "/traffic" => ServiceStream::Traffic,
-                    "/logs" => ServiceStream::Logs,
-                    "/connections" => ServiceStream::Connections,
-                    "/memory" => ServiceStream::Memory,
-                    _ => return Err("Unsupported service stream".into()),
-                };
-                StreamBackend::Service(
-                    runtime
-                        .client
-                        .subscribe(kind)
-                        .await
-                        .map_err(|error| error.to_string())?,
-                )
-            }
+            ControllerBackend::Service { runtime } => StreamBackend::Service(
+                subscribe_service_stream(path, query, |request| async move {
+                    match request {
+                        ServiceStreamRequest::Logs(options) => {
+                            runtime.client.subscribe_logs(options).await
+                        }
+                        ServiceStreamRequest::Standard(kind) => {
+                            runtime.client.subscribe(kind).await
+                        }
+                    }
+                    .map_err(|error| error.to_string())
+                })
+                .await?,
+            ),
         };
         if !self.is_current(binding.generation) {
             return Err("Controller changed while opening stream".into());
@@ -265,6 +289,67 @@ impl ControllerBinding {
         })
     }
 }
+
+#[derive(Debug)]
+enum ServiceStreamRequest {
+    Logs(LogStreamOptions),
+    Standard(ServiceStream),
+}
+
+async fn subscribe_service_stream<T, F>(
+    path: &str,
+    query: &[(&str, &str)],
+    operation: impl FnOnce(ServiceStreamRequest) -> F + Send,
+) -> Result<T, String>
+where
+    T: Send,
+    F: std::future::Future<Output = Result<T, String>> + Send,
+{
+    let request = match path {
+        "/logs" => ServiceStreamRequest::Logs(log_stream_options(query)?),
+        "/traffic" => ServiceStreamRequest::Standard(ServiceStream::Traffic),
+        "/connections" => ServiceStreamRequest::Standard(ServiceStream::Connections),
+        "/memory" => ServiceStreamRequest::Standard(ServiceStream::Memory),
+        _ => return Err("Unsupported service stream".into()),
+    };
+    operation(request).await
+}
+
+fn log_stream_options(query: &[(&str, &str)]) -> Result<LogStreamOptions, String> {
+    let rejected = || ServiceClientError::Rejected(ServiceErrorCode::InvalidRequest).to_string();
+    let mut level = None;
+    let mut format = None;
+    for &(key, value) in query {
+        match key {
+            "level" if level.is_none() => {
+                level = Some(match value {
+                    "silent" => ServiceLogLevel::Silent,
+                    "error" => ServiceLogLevel::Error,
+                    "warning" => ServiceLogLevel::Warning,
+                    "info" => ServiceLogLevel::Info,
+                    "debug" => ServiceLogLevel::Debug,
+                    _ => return Err(rejected()),
+                });
+            }
+            "format" if format.is_none() => {
+                format = Some(match value {
+                    "plain" => ServiceLogFormat::Plain,
+                    "structured" => ServiceLogFormat::Structured,
+                    _ => return Err(rejected()),
+                });
+            }
+            _ => return Err(rejected()),
+        }
+    }
+    Ok(LogStreamOptions {
+        level: level.unwrap_or(ServiceLogLevel::Info),
+        format: format.unwrap_or(ServiceLogFormat::Plain),
+    })
+}
+
+#[cfg(test)]
+#[path = "service_logs_tests.rs"]
+mod service_logs_tests;
 
 enum StreamBackend {
     Direct(Box<MihomoSocket>),

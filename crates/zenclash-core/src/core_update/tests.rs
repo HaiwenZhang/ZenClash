@@ -23,6 +23,8 @@ use super::{
     workflow::versions_match,
 };
 
+mod real_recovery_tests;
+
 fn unique_directory(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "zenclash-core-update-{label}-{}-{}",
@@ -412,6 +414,8 @@ enum ManagedInstallCase {
     ShutdownReady,
     CallerDropped,
     CurrentStartup,
+    ChangedPrecheck,
+    ChangedPrecheckRollback,
 }
 
 #[cfg(unix)]
@@ -466,6 +470,18 @@ async fn dropping_the_install_caller_does_not_abandon_the_owned_transaction() {
 #[tokio::test]
 async fn release_precheck_uses_the_profile_committed_during_download() {
     exercise_managed_install(ManagedInstallCase::CurrentStartup).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn release_start_reuses_prechecked_payload_after_source_turns_tun_on() {
+    exercise_managed_install(ManagedInstallCase::ChangedPrecheck).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn release_rollback_reuses_prechecked_payload_after_source_turns_tun_on() {
+    exercise_managed_install(ManagedInstallCase::ChangedPrecheckRollback).await;
 }
 
 #[cfg(unix)]
@@ -537,17 +553,22 @@ async fn exercise_managed_install(case: ManagedInstallCase) {
     let validation = match case {
         ManagedInstallCase::RejectConfig => "exit 1",
         ManagedInstallCase::CurrentStartup => "grep -q '8012' \"$5\"",
+        ManagedInstallCase::ChangedPrecheck | ManagedInstallCase::ChangedPrecheckRollback => {
+            "printf 'tun: {enable: true}\\n' > \"$3/../controlled/effective.yaml\"; exit 0"
+        }
         _ => "exit 0",
     };
     let launch = if matches!(
         case,
-        ManagedInstallCase::ReadyFailure | ManagedInstallCase::ReadyFailureStopped
+        ManagedInstallCase::ReadyFailure
+            | ManagedInstallCase::ReadyFailureStopped
+            | ManagedInstallCase::ChangedPrecheckRollback
     ) {
         "exit 7"
     } else {
         "exec sleep 60"
     };
-    let candidate = format!("#!/bin/sh\nif [ \"$1\" = '-v' ]; then printf 'Mihomo Meta v9.9.9 test\\n'; exit 0; fi\nif [ \"$1\" = '-t' ]; then {validation}; exit $?; fi\nprintf 'candidate\\n' >> \"$2/runs\"\n{launch}\n").into_bytes();
+    let candidate = format!("#!/bin/sh\nif [ \"$1\" = '-v' ]; then printf 'Mihomo Meta v9.9.9 test\\n'; exit 0; fi\nif [ \"$1\" = '-t' ]; then {validation}; exit $?; fi\ncat \"$4\" > \"$2/candidate-startup.yaml\"\nprintf 'candidate\\n' >> \"$2/runs\"\n{launch}\n").into_bytes();
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(&candidate).unwrap();
     let archive = encoder.finish().unwrap();
@@ -614,7 +635,9 @@ async fn exercise_managed_install(case: ManagedInstallCase) {
             let (status, body) = if candidate_active
                 && matches!(
                     case,
-                    ManagedInstallCase::ReadyFailure | ManagedInstallCase::ReadyFailureStopped
+                    ManagedInstallCase::ReadyFailure
+                        | ManagedInstallCase::ReadyFailureStopped
+                        | ManagedInstallCase::ChangedPrecheckRollback
                 ) {
                 ("503 Service Unavailable", "unready")
             } else if candidate_active && case == ManagedInstallCase::VersionMismatch {
@@ -723,6 +746,7 @@ async fn exercise_managed_install(case: ManagedInstallCase) {
     }
     let payload = std::fs::read(store.runtime_path()).unwrap();
     let old_startup = std::fs::read(directory.join("data/old-startup.yaml")).unwrap();
+    let candidate_startup = std::fs::read(directory.join("data/candidate-startup.yaml")).ok();
     let runs = std::fs::read_to_string(directory.join("data/runs")).unwrap();
     let generation = session.generation();
     let phase = session.lifecycle_snapshot().phase;
@@ -733,6 +757,7 @@ async fn exercise_managed_install(case: ManagedInstallCase) {
         ManagedInstallCase::Success
         | ManagedInstallCase::SuccessSymlink
         | ManagedInstallCase::CallerDropped
+        | ManagedInstallCase::ChangedPrecheck
         | ManagedInstallCase::CurrentStartup => {
             if let Some(result) = result {
                 let receipt = result.unwrap();
@@ -767,6 +792,7 @@ async fn exercise_managed_install(case: ManagedInstallCase) {
         ManagedInstallCase::RejectConfig
         | ManagedInstallCase::ReadyFailure
         | ManagedInstallCase::ReadyFailureStopped
+        | ManagedInstallCase::ChangedPrecheckRollback
         | ManagedInstallCase::VersionMismatch => {
             assert!(result.unwrap().is_err());
             assert_eq!(
@@ -789,7 +815,19 @@ async fn exercise_managed_install(case: ManagedInstallCase) {
             }
         }
     }
-    if case == ManagedInstallCase::CurrentStartup {
+    if matches!(
+        case,
+        ManagedInstallCase::ChangedPrecheck | ManagedInstallCase::ChangedPrecheckRollback
+    ) {
+        assert_eq!(
+            candidate_startup.as_deref(),
+            Some(previous_payload.as_slice())
+        );
+        assert_eq!(
+            payload, b"tun: {enable: true}\n",
+            "upgrade rewrote the changed source"
+        );
+    } else if case == ManagedInstallCase::CurrentStartup {
         assert!(String::from_utf8(payload).unwrap().contains("8012"));
     } else {
         assert_eq!(payload, previous_payload);

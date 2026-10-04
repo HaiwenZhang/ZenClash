@@ -118,6 +118,69 @@ pub(super) fn process_matches(pid: u32, uid: u32, birth: u64) -> bool {
     process_identity(pid).is_ok_and(|identity| identity == (uid, birth))
 }
 
+#[cfg(feature = "server")]
+pub(super) fn process_image(pid: u32) -> io::Result<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let pid = i32::try_from(pid)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid process PID"))?;
+    let mut buffer = vec![0u8; 4096];
+    // SAFETY: proc_pidpath receives a valid owned output buffer and its byte length.
+    let length =
+        unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    if length <= 0 {
+        return Err(io::Error::last_os_error());
+    }
+    buffer.truncate(length as usize);
+    if buffer.last() == Some(&0) {
+        buffer.pop();
+    }
+    Ok(std::ffi::OsString::from_vec(buffer).into())
+}
+
+#[cfg(feature = "server")]
+pub(super) fn maintenance_host_registered(pid: u32) -> io::Result<()> {
+    let helper = super::service_root().join("zenclash-service");
+    super::validate_protected_path(&helper, false)?;
+    let _pinned = super::open_pinned_file(&helper)?;
+    let mut command = tokio::process::Command::new(&helper);
+    command
+        .env_clear()
+        .env("LC_ALL", "C")
+        .arg("--query-host-pid");
+    let actual =
+        super::super::launchd_probe::capture_host_pid(command, std::time::Duration::from_secs(5))?;
+    super::validate_protected_path(&helper, false)?;
+    if actual != pid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "loaded job host PID changed",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "server")]
+pub(super) fn query_loaded_host_pid() -> io::Result<u32> {
+    super::super::macos_job::query_fixed_host_pid()
+}
+
+#[cfg(feature = "server")]
+pub(super) fn maintenance_service_absent() -> io::Result<()> {
+    use super::super::launchd_probe::{
+        LaunchdServiceState, classify_launchd_service_probe, probe_service,
+    };
+    let output = probe_service(LABEL)?;
+    if classify_launchd_service_probe(output.code, &output.diagnostic)?
+        != LaunchdServiceState::Absent
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "service job remains loaded",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn authenticate_peer(stream: &UnixStream) -> io::Result<(u32, u32, u64)> {
     let mut uid = 0;
     let mut gid = 0;
@@ -308,6 +371,7 @@ fn maintain_service(action: super::super::launchd_probe::MaintenanceAction) -> i
         action,
         || probe_service(LABEL),
         |effect| match effect {
+            MaintenanceEffect::Enable => super::run_native("/bin/launchctl", &["enable", LABEL]),
             MaintenanceEffect::Kickstart => {
                 super::run_native("/bin/launchctl", &["kickstart", LABEL])
             }

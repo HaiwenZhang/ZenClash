@@ -1,6 +1,14 @@
 //! Native transport and privilege boundaries selected at compile time.
 
 #[cfg(all(feature = "server", any(target_os = "macos", test)))]
+#[path = "unix/macos_job.rs"]
+mod macos_job;
+
+#[cfg(all(feature = "server", any(target_os = "linux", test)))]
+#[path = "unix/linux_registration.rs"]
+mod linux_registration;
+
+#[cfg(all(feature = "server", any(target_os = "macos", test)))]
 #[path = "unix/launchd_probe.rs"]
 mod launchd_probe;
 
@@ -43,9 +51,4 @@ pub(crate) fn private_directory(path: &std::path::Path) -> std::io::Result<()> {
     {
         create_protected_directory(path, 0o700)
     }
-}
-
-#[cfg(all(windows, feature = "server"))]
-pub(crate) fn service_was_running() -> std::io::Result<bool> {
-    Ok(service_state()? == Some(windows_sys::Win32::System::Services::SERVICE_RUNNING))
 }

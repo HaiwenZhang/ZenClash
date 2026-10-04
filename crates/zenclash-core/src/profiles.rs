@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use thiserror::Error;
 
 mod activation;
-mod application;
+pub(crate) mod application;
 mod download;
 mod edit;
 mod model;
@@ -20,8 +20,8 @@ mod validation;
 mod tests;
 
 pub use application::{
-    ProfileApplication, ProfileApplicationError, ProfileApplyOutcome, ProfileChange,
-    ProfileRecovery, ProfileVersion,
+    PreparedProfileChange, ProfileApplication, ProfileApplicationError, ProfileApplyOutcome,
+    ProfileChange, ProfilePreparationError, ProfileRecovery, ProfileVersion,
 };
 use download::download_profile;
 pub use model::{

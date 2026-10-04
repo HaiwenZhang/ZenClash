@@ -109,13 +109,13 @@ pub(crate) fn blocked_message(reason: StartupBlocked) -> String {
         StartupBlocked::SavedTun => "startup.service_saved_tun",
         StartupBlocked::ConfigurationUnknown => "startup.service_configuration_unconfirmed",
         StartupBlocked::Health(health) => match health {
-            ServiceHealthKind::Stopped => "core_page.service.stopped",
-            ServiceHealthKind::RepairRequired => "core_page.service.repair_required",
-            ServiceHealthKind::MaintenancePending => "core_page.service.pending",
-            ServiceHealthKind::Unauthorized => "core_page.service.unauthorized",
-            ServiceHealthKind::Incompatible => "core_page.service.incompatible",
-            ServiceHealthKind::UnrecognizedInstallation => "core_page.service.unrecognized",
-            _ => "core_page.service.unknown",
+            ServiceHealthKind::Stopped => "startup.service_stopped",
+            ServiceHealthKind::RepairRequired => "startup.service_repair_required",
+            ServiceHealthKind::MaintenancePending => "startup.service_pending",
+            ServiceHealthKind::Unauthorized => "startup.service_unauthorized",
+            ServiceHealthKind::Incompatible => "startup.service_incompatible",
+            ServiceHealthKind::UnrecognizedInstallation => "startup.service_unrecognized",
+            _ => "startup.service_unknown",
         },
     };
     zenclash_i18n::text(key)
@@ -124,10 +124,10 @@ pub(crate) fn blocked_message(reason: StartupBlocked) -> String {
 pub(crate) fn connection_message(error: &MihomoError) -> String {
     let key = match error.service_startup_rejection() {
         Some(ServiceStartupRejection::Occupied) => "startup.service_occupied",
-        Some(ServiceStartupRejection::Unauthorized) => "core_page.service.unauthorized",
-        Some(ServiceStartupRejection::Incompatible) => "core_page.service.incompatible",
-        Some(ServiceStartupRejection::MaintenancePending) => "core_page.service.pending",
-        None => "core_page.service.unknown",
+        Some(ServiceStartupRejection::Unauthorized) => "startup.service_unauthorized",
+        Some(ServiceStartupRejection::Incompatible) => "startup.service_incompatible",
+        Some(ServiceStartupRejection::MaintenancePending) => "startup.service_pending",
+        None => "startup.service_unknown",
     };
     zenclash_i18n::text(key)
 }
@@ -229,6 +229,11 @@ mod tests {
         for (health, tun) in [
             (ServiceHealthKind::Unknown, Some(false)),
             (ServiceHealthKind::Stopped, Some(false)),
+            (ServiceHealthKind::RepairRequired, Some(false)),
+            (ServiceHealthKind::MaintenancePending, Some(false)),
+            (ServiceHealthKind::Unauthorized, Some(false)),
+            (ServiceHealthKind::Incompatible, Some(false)),
+            (ServiceHealthKind::UnrecognizedInstallation, Some(false)),
             (ServiceHealthKind::Missing, Some(true)),
             (ServiceHealthKind::Missing, None),
         ] {
@@ -302,6 +307,21 @@ mod tests {
         assert_eq!(
             effective_tun_enabled(&serde_json::json!({"rules":[]})),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn startup_connection_error_preserves_unknown_without_exposing_raw_details() {
+        let error = MihomoError::Process("private IPC details and controller credentials".into());
+        let message = connection_message(&error);
+        assert_eq!(
+            message,
+            blocked_message(StartupBlocked::Health(ServiceHealthKind::Unknown))
+        );
+        assert!(!message.contains("credentials"));
+        assert_ne!(
+            blocked_message(StartupBlocked::Health(ServiceHealthKind::Incompatible)),
+            message
         );
     }
 }

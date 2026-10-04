@@ -48,6 +48,8 @@ struct State {
     root: PathBuf,
     installation: InstalledMetadata,
     authority: SessionAuthority,
+    owner_lock: Option<crate::maintenance_lock::MaintenanceLock>,
+    runtime_recovered: bool,
     revision: u64,
     staged: Option<Stage>,
     active: Option<Stage>,
@@ -63,6 +65,86 @@ struct State {
 }
 
 impl State {
+    fn acquire(&mut self, peer: PeerIdentity) -> Result<Response, ServiceErrorCode> {
+        // Existing owners retain the same descriptor across idempotent Acquire.
+        let guard = if self.authority.owner().is_none() {
+            #[cfg(test)]
+            let result = if let Some(root) = &self.fixture_root {
+                crate::maintenance_lock::MaintenanceLock::acquire_with(
+                    &self.root,
+                    true,
+                    &|path, directory| root.validate(path, directory),
+                )
+            } else {
+                crate::maintenance_lock::MaintenanceLock::acquire_shared(&self.root)
+            };
+            #[cfg(not(test))]
+            let result = crate::maintenance_lock::MaintenanceLock::acquire_shared(&self.root);
+            Some(result.map_err(|error| {
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    ServiceErrorCode::MaintenancePending
+                } else {
+                    ServiceErrorCode::Internal
+                }
+            })?)
+        } else {
+            None
+        };
+        // Inspect the journal while maintenance publication is excluded.
+        if crate::maintenance_journal::Journal::load(&self.root)
+            .map_err(|_| ServiceErrorCode::Internal)?
+            .is_some()
+        {
+            return Err(ServiceErrorCode::MaintenancePending);
+        }
+        if !self.runtime_recovered {
+            self.recover_runtime()
+                .map_err(|_| ServiceErrorCode::Internal)?;
+            self.runtime_recovered = true;
+        }
+        let proof = self
+            .authority
+            .acquire(peer, Instant::now())
+            .map_err(session_error)?;
+        if let Some(guard) = guard {
+            self.owner_lock = Some(guard);
+        }
+        let next_sequence = self
+            .authority
+            .next_sequence()
+            .ok_or(ServiceErrorCode::Internal)?;
+        Ok(Response::Acquired {
+            proof,
+            next_sequence,
+        })
+    }
+
+    fn recover_runtime(&self) -> io::Result<()> {
+        let root = self.root.join("runtimes");
+        self.private_directory(&root)?;
+        self.private_directory(&self.root.join("ipc"))?;
+        let mut budget = crate::installer::RuntimeCleanupBudget::default();
+        for (count, entry) in std::fs::read_dir(root)?.enumerate() {
+            if count >= 64 {
+                return Err(io::Error::other("stale runtime recovery exceeds budget"));
+            }
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name
+                .to_str()
+                .ok_or_else(|| io::Error::other("unknown runtime entry"))?;
+            let random = name
+                .strip_prefix("stage-")
+                .ok_or_else(|| io::Error::other("unknown runtime entry"))?;
+            if random.len() != 64 || !random.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(io::Error::other("unknown runtime entry"));
+            }
+            // The native service manager already contained the previous host's children.
+            self.remove_runtime_with_budget(&entry.path(), &mut budget)?;
+        }
+        Ok(())
+    }
+
     fn readback_preflight(&mut self, revision: u64) -> Result<(), ServiceErrorCode> {
         let snapshot = self.snapshot()?;
         if snapshot.running || snapshot.pid.is_some() {
@@ -179,6 +261,17 @@ impl State {
             .any(|user| user == peer.user())
     }
 
+    fn accepts_hello_from(&self, peer: &PeerIdentity, maintenance_verified: bool) -> bool {
+        self.authorized(peer) || maintenance_verified
+    }
+
+    fn accepts_hello(&self, peer: &PeerIdentity) -> bool {
+        if self.authorized(peer) {
+            return true;
+        }
+        self.accepts_hello_from(peer, crate::platform::maintenance_identity(peer))
+    }
+
     async fn stop(&mut self) -> io::Result<()> {
         if let Some(kernel) = &mut self.kernel {
             kernel.stop().await?;
@@ -210,6 +303,7 @@ impl State {
                 .release_after_stop(&proof)
                 .map_err(io::Error::other)?;
         }
+        self.owner_lock = None;
         Ok(())
     }
 
@@ -958,7 +1052,9 @@ impl State {
                 })
             }
             // Subscription connections are admitted and dispatched separately.
-            SessionOperation::Subscribe { .. } => Err(ServiceErrorCode::InvalidRequest),
+            SessionOperation::Subscribe { .. } | SessionOperation::SubscribeLogs { .. } => {
+                Err(ServiceErrorCode::InvalidRequest)
+            }
         }
     }
 
@@ -1113,35 +1209,7 @@ async fn connection<T: AsyncRead + AsyncWrite + Unpin + Send>(
             Err(ServiceErrorCode::Unauthorized)
         } else {
             match request {
-                Request::Acquire {} => {
-                    if crate::maintenance_journal::Journal::load(&state.root)
-                        .map_err(io::Error::other)?
-                        .is_some()
-                    {
-                        drop(state);
-                        write_frame(
-                            &mut stream,
-                            &Response::Error {
-                                code: ServiceErrorCode::MaintenancePending,
-                            },
-                            FRAME_TIMEOUT,
-                        )
-                        .await
-                        .map_err(io::Error::other)?;
-                        continue;
-                    }
-                    match state.authority.acquire(peer.clone(), Instant::now()) {
-                        Ok(proof) => state
-                            .authority
-                            .next_sequence()
-                            .map(|next_sequence| Response::Acquired {
-                                proof,
-                                next_sequence,
-                            })
-                            .ok_or(ServiceErrorCode::Internal),
-                        Err(error) => Err(session_error(error)),
-                    }
-                }
+                Request::Acquire {} => state.acquire(peer.clone()),
                 Request::Session {
                     proof,
                     sequence,
@@ -1152,11 +1220,34 @@ async fn connection<T: AsyncRead + AsyncWrite + Unpin + Send>(
                         .admit(&peer, &proof, sequence, Instant::now())
                     {
                         Ok(()) => {
-                            if let SessionOperation::Subscribe { stream: kind } = operation {
-                                if !state.snapshot().is_ok_and(|snapshot| snapshot.running) {
+                            if matches!(
+                                &operation,
+                                SessionOperation::Subscribe { .. }
+                                    | SessionOperation::SubscribeLogs { .. }
+                            ) {
+                                if matches!(
+                                    &operation,
+                                    SessionOperation::Subscribe {
+                                        stream: crate::protocol::StreamKind::Logs
+                                    }
+                                ) {
+                                    Err(ServiceErrorCode::InvalidRequest)
+                                } else if !state.snapshot().is_ok_and(|snapshot| snapshot.running) {
                                     Err(ServiceErrorCode::KernelUnavailable)
                                 } else if let Some(kernel) = &state.kernel {
-                                    match kernel.subscribe(kind).await {
+                                    let events = match operation {
+                                        SessionOperation::Subscribe { stream } => {
+                                            kernel.subscribe(stream).await
+                                        }
+                                        SessionOperation::SubscribeLogs { options } => {
+                                            kernel.subscribe_logs(options).await
+                                        }
+                                        _ => Err(io::Error::new(
+                                            io::ErrorKind::InvalidInput,
+                                            "invalid subscription operation",
+                                        )),
+                                    };
+                                    match events {
                                         Ok(events) => {
                                             subscription = Some((proof, events));
                                             Ok(Response::Ok)
@@ -1261,13 +1352,12 @@ pub(crate) async fn run(mut shutdown: watch::Receiver<bool>) -> io::Result<()> {
     if installation.protocol_version() != PROTOCOL_VERSION {
         return Err(io::Error::other("installed protocol incompatible"));
     }
-    crate::platform::private_directory(&root.join("runtimes"))?;
-    crate::platform::private_directory(&root.join("ipc"))?;
-    recover_stale_stages(&root.join("runtimes"))?;
     let state = Arc::new(Mutex::new(State {
         root,
         installation,
         authority: SessionAuthority::default(),
+        owner_lock: None,
+        runtime_recovered: false,
         revision: 0,
         staged: None,
         active: None,
@@ -1305,7 +1395,7 @@ pub(crate) async fn run(mut shutdown: watch::Receiver<bool>) -> io::Result<()> {
             accepted = listener.accept() => {
                 match accepted {
                     Ok((stream, peer)) => {
-                        if !state.lock().await.authorized(&peer) { continue; }
+                        if !state.lock().await.accepts_hello(&peer) { continue; }
                         if let Ok(permit) = connections.clone().try_acquire_owned() {
                             let state = state.clone();
                             tasks.spawn(async move { let _permit = permit; connection(stream, peer, state).await });
@@ -1326,36 +1416,9 @@ pub(crate) async fn run(mut shutdown: watch::Receiver<bool>) -> io::Result<()> {
     result
 }
 
-fn recover_stale_stages(root: &std::path::Path) -> io::Result<()> {
-    let mut budget = crate::installer::RuntimeCleanupBudget::default();
-    crate::platform::validate_protected_path(root, true)?;
-    for (count, entry) in std::fs::read_dir(root)?.enumerate() {
-        if count >= 64 {
-            return Err(io::Error::other("stale runtime recovery exceeds budget"));
-        }
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name
-            .to_str()
-            .ok_or_else(|| io::Error::other("unknown runtime entry"))?;
-        let random = name
-            .strip_prefix("stage-")
-            .ok_or_else(|| io::Error::other("unknown runtime entry"))?;
-        if random.len() != 64 || !random.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(io::Error::other("unknown runtime entry"));
-        }
-        crate::platform::validate_protected_path(&entry.path(), true)?;
-        // Only known private stage directories are recoverable. The native
-        // service manager has already contained the previous host's children.
-        crate::installer::remove_private_runtime_with_budget(
-            &entry.path(),
-            0,
-            &mut 0,
-            &mut budget,
-        )?;
-    }
-    Ok(())
-}
+#[cfg(test)]
+#[path = "server_maintenance_tests.rs"]
+mod maintenance_tests;
 
 #[cfg(test)]
 #[path = "server_patch_tests.rs"]
@@ -1382,6 +1445,8 @@ mod tests {
             )
             .unwrap(),
             authority: SessionAuthority::default(),
+            owner_lock: None,
+            runtime_recovered: true,
             revision: 2,
             staged: None,
             active: None,

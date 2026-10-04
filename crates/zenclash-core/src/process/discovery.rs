@@ -4,7 +4,8 @@ use serde::Deserialize;
 
 use super::resources::{
     bundled_core_binary, bundled_profile, default_core_home_dir, find_core_binary,
-    install_bundled_core, install_bundled_mihomo_data, is_core_binary_candidate,
+    install_bundled_core, install_bundled_core_with_lease, install_bundled_mihomo_data,
+    is_core_binary_candidate,
 };
 use crate::{
     CoreCapabilities, CoreConfigValidationError, CoreConfigValidator, CoreKind, MihomoEndpoint,
@@ -18,7 +19,7 @@ pub struct MihomoLaunchConfig {
     pub kind: CoreKind,
     /// Core executable selected from an override, bundle, workspace, or `PATH`.
     pub binary: PathBuf,
-    /// Clash/Mihomo YAML file passed with `-f`.
+    /// Original YAML source; Local Mihomo freezes its bytes and passes them via stdin.
     pub config_file: PathBuf,
     /// Writable Mihomo data directory passed with `-d`.
     pub home_dir: PathBuf,
@@ -210,54 +211,48 @@ impl MihomoLaunchConfig {
     ) -> MihomoResult<Self> {
         let project_root = project_root.as_ref();
         let (config_file, home_dir) = runtime_paths(project_root, kind, config_override);
-        let binary_override = std::env::var_os("ZENCLASH_CORE_BINARY")
-            .map(|value| ("ZENCLASH_CORE_BINARY", PathBuf::from(value)))
-            .or_else(|| {
-                std::env::var_os(kind.binary_environment_variable())
-                    .map(|value| (kind.binary_environment_variable(), PathBuf::from(value)))
-            });
-        let binary = match binary_override {
-            Some((_, binary)) if is_core_binary_candidate(&binary) => binary,
-            Some((variable, binary)) => {
-                return Err(MihomoError::Process(format!(
-                    "{} 指向的 {} 文件不可执行：{}",
-                    variable,
-                    kind.display_name(),
-                    binary.display()
-                )));
-            }
-            None => {
-                if let Some(binary) = preferred_binary {
-                    if !is_core_binary_candidate(binary) {
-                        return Err(MihomoError::Process(format!(
-                            "首选 {} 文件不可执行：{}",
-                            kind.display_name(),
-                            binary.display()
-                        )));
-                    }
-                    binary.to_path_buf()
-                } else if let Some(bundled) = bundled_core_binary(kind) {
-                    install_bundled_core(kind, &bundled, &home_dir)?
-                } else {
-                    workspace_core_candidates(project_root, kind)
-                        .into_iter()
-                        .find(|candidate| is_core_binary_candidate(candidate))
-                        .or_else(|| find_core_binary(kind))
-                        .ok_or_else(|| {
-                            MihomoError::Process(format!(
-                                "找不到 {}；请设置 {} 或将 {} 放入 PATH",
-                                kind.display_name(),
-                                kind.binary_environment_variable(),
-                                kind.executable_stem()
-                            ))
-                        })?
-                }
-            }
-        };
+        let binary = resolve_core_binary(project_root, kind, preferred_binary, &home_dir, None)?;
         if kind == CoreKind::Mihomo {
             install_bundled_mihomo_data(&home_dir)?;
         }
         Self::for_kind(kind, binary, config_file, home_dir)
+    }
+
+    /// Resolves ordinary Mihomo identity for Service recovery without reading source YAML.
+    /// Preserves the supplied source path and home; the accepted bundle supplies runtime YAML.
+    /// Executable selection follows normal startup rules and rejects privileged executables.
+    /// Packaged executable installation is protected by the existing home write lease.
+    /// No GeoData is installed and no process is started.
+    ///
+    /// # Errors
+    /// Returns executable discovery, ordinary permission or background worker errors.
+    pub async fn discover_ordinary_recovery(
+        project_root: PathBuf,
+        preferred_binary: Option<PathBuf>,
+        config_file: PathBuf,
+        home_dir: PathBuf,
+    ) -> MihomoResult<Self> {
+        tokio::task::spawn_blocking(move || {
+            let lease = crate::data_coordinator::DataWriteLease::shared([home_dir.clone()]);
+            let binary = resolve_core_binary(
+                &project_root,
+                CoreKind::Mihomo,
+                preferred_binary.as_deref(),
+                &home_dir,
+                Some(&lease),
+            )?;
+            crate::verify_ordinary_local_executable(&binary)?;
+            Ok(Self {
+                kind: CoreKind::Mihomo,
+                binary,
+                config_file,
+                home_dir,
+                endpoint: MihomoEndpoint::default(),
+                controller_override: None,
+            })
+        })
+        .await
+        .map_err(|_| MihomoError::Process(zenclash_i18n::text("core_page.service.failed")))?
     }
 
     /// Returns the capabilities guaranteed by the selected runtime core.
@@ -281,6 +276,64 @@ impl MihomoLaunchConfig {
         CoreConfigValidator::new(self.kind, self.binary.clone(), self.home_dir.clone())
             .validate_file(&self.config_file)
     }
+}
+
+fn resolve_core_binary(
+    project_root: &Path,
+    kind: CoreKind,
+    preferred_binary: Option<&Path>,
+    home_dir: &Path,
+    lease: Option<&crate::data_coordinator::DataWriteLease>,
+) -> MihomoResult<PathBuf> {
+    let binary_override = std::env::var_os("ZENCLASH_CORE_BINARY")
+        .map(|value| ("ZENCLASH_CORE_BINARY", PathBuf::from(value)))
+        .or_else(|| {
+            std::env::var_os(kind.binary_environment_variable())
+                .map(|value| (kind.binary_environment_variable(), PathBuf::from(value)))
+        });
+    Ok(match binary_override {
+        Some((_, binary)) if is_core_binary_candidate(&binary) => binary,
+        Some((variable, binary)) => {
+            return Err(MihomoError::Process(format!(
+                "{} 指向的 {} 文件不可执行：{}",
+                variable,
+                kind.display_name(),
+                binary.display()
+            )));
+        }
+        None => {
+            if let Some(binary) = preferred_binary {
+                if !is_core_binary_candidate(binary) {
+                    return Err(MihomoError::Process(format!(
+                        "首选 {} 文件不可执行：{}",
+                        kind.display_name(),
+                        binary.display()
+                    )));
+                }
+                binary.to_path_buf()
+            } else if let Some(bundled) = bundled_core_binary(kind) {
+                match lease {
+                    Some(lease) => {
+                        install_bundled_core_with_lease(kind, &bundled, home_dir, lease)?
+                    }
+                    None => install_bundled_core(kind, &bundled, home_dir)?,
+                }
+            } else {
+                workspace_core_candidates(project_root, kind)
+                    .into_iter()
+                    .find(|candidate| is_core_binary_candidate(candidate))
+                    .or_else(|| find_core_binary(kind))
+                    .ok_or_else(|| {
+                        MihomoError::Process(format!(
+                            "找不到 {}；请设置 {} 或将 {} 放入 PATH",
+                            kind.display_name(),
+                            kind.binary_environment_variable(),
+                            kind.executable_stem()
+                        ))
+                    })?
+            }
+        }
+    })
 }
 
 fn workspace_default_profile(project_root: &Path) -> PathBuf {
@@ -325,6 +378,115 @@ fn endpoint_from_config_file(path: &Path) -> MihomoResult<MihomoEndpoint> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ordinary_recovery_identity_ignores_source_yaml_and_preserves_home() {
+        const CHILD_ROOT: &str = "ZENCLASH_TEST_RECOVERY_IDENTITY";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            let home = root.join("home");
+            let binary = root.join(if cfg!(windows) {
+                "mihomo.exe"
+            } else {
+                "mihomo"
+            });
+            let mode = std::env::var("ZENCLASH_TEST_RECOVERY_IDENTITY_MODE").unwrap();
+            let result = MihomoLaunchConfig::discover_ordinary_recovery(
+                root.clone(),
+                Some(binary.clone()),
+                root.join("removed.yaml"),
+                home.clone(),
+            )
+            .await;
+            if mode == "invalid-override" {
+                assert!(
+                    result.is_err(),
+                    "an explicit missing override must not fall back"
+                );
+            } else if mode == "setid" {
+                assert!(matches!(result, Err(MihomoError::InvalidInput(_))));
+            } else {
+                let launch = result.unwrap();
+                assert_eq!(launch.binary, binary);
+                assert_eq!(launch.home_dir, home);
+                assert_eq!(launch.config_file, root.join("removed.yaml"));
+                assert!(!launch.config_file.exists());
+                let invalid = MihomoLaunchConfig::discover_ordinary_recovery(
+                    root.clone(),
+                    Some(launch.binary),
+                    root.join("invalid.yaml"),
+                    home.clone(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(invalid.config_file, root.join("invalid.yaml"));
+            }
+            assert_eq!(
+                std::fs::read(home.join("GeoIP.dat")).unwrap(),
+                b"accepted geoip"
+            );
+            assert_eq!(
+                std::fs::read(root.join("invalid.yaml")).unwrap(),
+                b"tun: [broken"
+            );
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "zenclash-recovery-identity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        let binary = root.join(if cfg!(windows) {
+            "mihomo.exe"
+        } else {
+            "mihomo"
+        });
+        std::fs::write(&binary, b"not executed").unwrap();
+        std::fs::write(root.join("invalid.yaml"), b"tun: [broken").unwrap();
+        std::fs::write(root.join("home/GeoIP.dat"), b"accepted geoip").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let modes = if cfg!(unix) {
+            vec!["ordinary", "invalid-override", "setid"]
+        } else {
+            vec!["ordinary", "invalid-override"]
+        };
+        for mode in modes {
+            #[cfg(unix)]
+            if mode == "setid" {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o4755)).unwrap();
+            }
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.arg("--exact")
+                .arg("process::discovery::tests::ordinary_recovery_identity_ignores_source_yaml_and_preserves_home")
+                .env(CHILD_ROOT, &root)
+                .env("ZENCLASH_TEST_RECOVERY_IDENTITY_MODE", mode)
+                .env_remove("ZENCLASH_CORE_BINARY")
+                .env_remove("ZENCLASH_MIHOMO_BINARY");
+            if mode == "invalid-override" {
+                command.env("ZENCLASH_CORE_BINARY", root.join("missing-binary"));
+            }
+            let output = tokio::task::spawn_blocking(move || command.output())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn config_parser_reads_controller_and_secret() {

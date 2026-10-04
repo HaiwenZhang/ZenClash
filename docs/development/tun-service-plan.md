@@ -1,18 +1,20 @@
 # 三平台 TUN 服务开发计划
 
 - 制定日期：2026-10-01。
-- 修订日期：2026-10-02。
+- 修订日期：2026-10-03。
 - 方案状态：采用三平台独立 ZenClash 服务，开发方式调整为优先移植 `examples/clash-verge-service-ipc` 的有用代码，再适配当前实现；本文是实施计划，不代表移植或功能已经完成。
 - 目标平台：Windows、macOS、使用 systemd 的 Linux 发行版。
 - 交付目标：首次开启 TUN 时安装并授权服务，安装成功后自动完成开启；后续普通权限启动 ZenClash 即可直接开关 TUN。
 
+2026-10-03 用户调整当前开发优先级：先实施 GUI 修复/卸载与恢复、本地 TUN 配置准入、缓存与身份持久化、旧服务迁移与内核升级；其他事项暂缓。用户已确认本地最终有效 TUN 配置进入授权与服务交接流程，成功后再应用，不能以“只拒绝并提示”代替该行为。配置候选及其资源须先准备并验证，授权取消和交接失败保留原进程/配置；后续批次复用现有捕获与配置完成任务，覆盖退出与失败恢复。新持久化目录和迁移影响随具体批次明确记录，不将此前提案直接报告为已完成。
+
 当前仍处于开发阶段，P0–P6 的整体完成标记保持未勾选。服务、配置事务、唯一 owner 生命周期和部分配置事务已有分阶段实现与验证；开发继续采用移植上游有用代码后适配 ZenClash 的方式。最新证据见 [实施记录](tun-service-progress.md)，实际来源见 [UPSTREAM.md](../../crates/zenclash-service/UPSTREAM.md)。
 
 - 首次安装并开启 TUN 已接通页面确认弹窗与托盘，收据分类修复已通过第二轮审查；Windows 完整 UI 库 294 项、UI binary 11 项通过，core/UI check 和标准严格 clippy 通过。UI 的完整 CI 附加 lint 仍有五项问题，真实窗口验收尚未完成。
-- main/UI 服务优先选择和初始化收据接线的首审 P1/P2 已修复并通过第二轮审查；Windows 完整 core 534 通过/0 失败/2 忽略、Linux 完整 core 577 通过/0 失败/2 忽略，初始化 9 项、ProfileService 14 项及 i18n 4 项通过。Linux core all-targets/all-features check 和完整 CI 严格 lint 通过；可见恢复界面及真实服务启动尚未验收。
+- main/UI 服务优先选择和初始化收据接线的首审 P1/P2 已修复并通过第二轮审查；Windows 完整 core 534 通过/0 失败/2 忽略、Linux 完整 core 577 通过/0 失败/2 忽略，初始化 9 项、ProfileService 14 项及 i18n 4 项通过。Linux core all-targets/all-features check 和完整 CI 严格 lint 通过。随后用户确认无 owner 启动保持退出，仅改进错误提示；真实服务启动尚未验收，最新提示批次见实施记录。
 - Windows、Linux 普通权限下真实 Mihomo 自动生命周期分别 2 项通过，两平台已在启动修复后复验。WSL 普通用户下 Linux 服务库 176 项及执行文件检查 4 项通过；两项 Unix 更新回滚夹具同步问题已修复并通过独立首审，更新模块 19 通过/2 忽略、启动相关 29 项通过。这些结果不覆盖真实高权限服务或 TUN；macOS core 仍缺 C 工具链。
 - Windows SCM 注册身份与 owner/DACL 校验已移植适配，新增 11 项行为通过，完整 Windows service 209 项通过；check、完整 CI 严格 lint、Linux/macOS service 交叉 check 与首次独立审查通过。真实 release helper 已构建并通过版本检查；这些结果不代替 SCM、安装包或 TUN 验收。
-- 首页 TUN 的统一服务命令阶段已收尾。日志流等级与格式透传仍有功能缺口，需要补入 P3；同时确认 Managed Local Mihomo 的最终有效配置 TUN 准入、Linux/macOS 有效注册归属和 §7.3 维护原子准入方案。随后完成启动失败恢复界面、修复/卸载、高层缓存保存、跨会话状态与旧权限迁移，最后进行三平台安装、TUN、失败恢复及发布验收。
+- 首页 TUN 的统一服务命令阶段已收尾。P3 日志等级与格式已贯通，阶段验证见 §7.5；§7.3 维护原子准入已获确认并进入开发。Managed Local Mihomo 的最终有效配置 TUN 准入和 Linux/macOS 有效注册归属仍待收尾。按已确认的退出策略改进启动提示，继续修复/卸载、高层缓存保存、跨会话状态与旧权限迁移，最后进行三平台安装、TUN、失败恢复及发布验收。
 - 维护准入仍有缺口：worker 的 `.maintenance.lock` 只互斥维护进程，当前服务端只检查 journal，不能据此宣称已经冻结新会话；获锁后暂存到 journal 发布前，以及没有 journal 的卸载分支，仍需原子准入与实际 owner 核验。普通权限预检或延长 lease 不能代替该门栓。
 - Linux/macOS 原生注册归属还需补齐：固定 unit/job 名称及受保护目录不证明实际加载的服务属于 ZenClash。维护前核对实际执行路径、参数、账户及有效注册；查询失败保持未知，不能视为不存在后停止、覆盖或删除同名外部注册。上游 macOS 查询分类已复用，完整归属校验仍需适配实现。
 - macOS 查询分类已移植并接 start/stop/unregister，未知结果零操作；Windows 分类/调度 10 项、普通 Linux 整组 16 项、check/完整 CI lint 与首审通过，真实 launchd 及有效注册归属尚待完成。首页 TUN 统一服务命令与待确认反馈的 P2 修复通过第二轮审查，完整 Windows UI 299 项通过；随后四行详情导航收尾的 Home 5 项、service_tun 7 项、UI check/标准严格 lint/fmt 通过。完整 CI 附加 lint 仍有旧五项问题，真实窗口及三平台 TUN 未验收。
@@ -213,20 +215,28 @@ macOS 不在已签名 App bundle 中继续改写内核权限或内容；使用�
 - 配置事务区分已暂存、已校验、内核已应用与业务已提交。热加载连接中断时按“结果未知”回读和恢复，不自动重发修改请求；确认提交前保留旧配置及对应资源。
 - 维护事务覆盖在停止、替换、启动和提交各阶段被强制终止的情形，恢复原先停止的服务时不能擅自将其启动。
 
-### 7.3 维护原子准入提案（待确认，尚未实现）
+### 7.3 维护原子准入（2026-10-03 已确认，开发中）
+
+用户已明确确认按本节实施共享/排他原生锁、协议 v3 与旧 v2 受控迁移。基线三项实际失败后完成核心接线；首审 P1/P2 取得实际失败证据后修复。最终 Windows service 311、普通 Linux 270 项通过，三服务目标 check/CI lint 与第二轮审查通过，详细证据见 [实施记录](tun-service-progress.md)。旧服务包拥有注册迁移、完整 loaded/inactive 归属及目标平台原生验收仍未完成，未将整个本节或 P0–P6 勾选为完成。
 
 现有未发布 helper 的 `service_version=0.1.2`、协议 v2 和安装摘要不能证明实际运行代码持有 owner 共享锁。磁盘文件摘要不是已经映射的宿主代码证明；维护 worker 即使取得 v2 会话，普通心跳也不能消除 lease 过期后他人准入的窗口。
 
-建议把该能力绑定到编译时协议 v3，沿用现有 `Hello` 和元数据字段，不新增依赖、任意操作或用户配置格式：
+按已确认方案把该能力绑定到编译时协议 v3，沿用现有 `Hello` 和元数据字段，不新增依赖、任意操作或用户配置格式：
 
 1. 服务在新 `Acquire` 准入时持有既有 `.maintenance.lock` 的原生共享锁，锁由同一个 owner 保留。幂等重取、停止未释放、清理失败、响应丢失和调用方取消均不松锁；只有实际停止及完整 Release/过期回收成功才释放。
 2. 维护 worker 取得同一稳定锁文件的排他锁后，以固定原生宿主身份和已验证 IPC 的编译时 v3 握手核实能力，再允许停止或变更。先取 owner 者阻止维护，先取维护锁者使新 `Acquire` 返回 `MaintenancePending`。握手失败、宿主身份更换、超时或锁观察失败一律零控制操作，不能以磁盘元数据的协议数字代替实际宿主证明。
 3. 新安装在既有安装元数据的 `protocol_version` 写 v3；当前 v1/v2 数据仍只读保留供受控修复，不直接改写未知记录。旧 GUI/旧 helper 与 v3 互不控制，普通启动明确报告不兼容；回滚维持原产物与原协议值。
-4. 运行中的 v2 helper 没有共享锁证明，不能自动停止后冒充安全升级。一次性迁移先明确结束旧应用/会话，再由管理员受控停止固定且已核实归属的宿主、确认实际退出后 Repair；其后 v3 的修复/卸载使用上述原子门栓。该迁移行为需确认，不能作为普通首次开启或无提示后台维护。
+4. 运行中的 v2 helper 没有共享锁证明，不能自动停止后冒充安全升级。一次性迁移先明确结束旧应用/会话，再由管理员受控停止固定且已核实归属的宿主、确认实际退出后 Repair；其后 v3 的修复/卸载使用上述原子门栓。该迁移行为已经确认，不能作为普通首次开启或无提示后台维护。
 
-验证先取得实际 State `Acquire` 后维护排他锁仍成功的失败证据，再覆盖两种竞争顺序、幂等 Acquire、Stop/Release、过期回收失败、取消等待、Windows share 与 Unix flock、稳定 inode，以及旧协议/宿主变化时零维护。`cargo check` 后独立审查，真实平台维护仍另行验收。此提案不代表锁或 v3 已落地，也不替代 Linux/macOS 的有效注册归属校验。
+验证先取得实际 State `Acquire` 后维护排他锁仍成功的失败证据，再覆盖两种竞争顺序、幂等 Acquire、Stop/Release、过期回收失败、取消等待、Windows share 与 Unix flock、稳定 inode，以及旧协议/宿主变化时零维护。`cargo check` 后独立审查，真实平台维护仍另行验收。核心锁、会话与维护接线的阶段证据不替代 Linux/macOS 的完整有效注册归属校验或真实平台维护验收。
 
 ### 7.4 Linux 有效注册查询提案（工具要求待确认）
+
+2026-10-04 新核对与替代提案：当前 offline-migration 仍要求注册不存在，不能完成保留已停止注册的旧服务迁移；已有 v3 安装无可信 IPC 时也无法维护。上游没有可移植的有效执行归属门禁。新增 [Linux 有效注册查询方案](tun-service-linux-registration.md)，建议在现有 `systemctl` 维护之外复用仓库锁定 zbus 做类型化 D-Bus 查询，不增加 busctl 要求；服务 crate 的新增直接依赖、feature 与体积影响仍需用户确认，尚未修改 Cargo 或实现。下文保留此前 busctl 提案的依据，不把用户“参考上游”视为批准新增工具。
+
+2026-10-03 用户要求 Linux/macOS 优先开发、真机测试稍后进行，并指定参考本地上游实现。核对上游 Linux 仍为 `systemctl` 维护、macOS 为 `launchctl` 维护；没有有效 unit/job 归属门禁可直接复制。因此不把该回复视为批准新增 `/usr/bin/busctl` 要求，本轮先沿现有工具补固定磁盘 unit 门禁与 macOS `enable` 恢复；有效归属方案仍保持待完成，不能由磁盘模板校验或两次查询代替。
+
+本轮上述适配已经落地：固定磁盘 unit 在早期维护及各副作用前核验；磁盘 unit 全缺失的停止/卸载通过现有 `systemctl show` 的简单机器属性确认 not-found/inactive/MainPID=0，否则保留部署；macOS 缺 plist 不执行 Start，明确未加载且完整已批准时先 Enable 再 Bootstrap。Linux 普通用户完整 service 239 项、Windows 283 项通过，三服务目标 check/CI lint 与修后第二轮审查通过，详细证据见 [实施记录](tun-service-progress.md)。该缺失分支查询不解析 ExecStart，也没有实现完整有效 unit/job 归属或原子准入；这些仍按以下提案处理。
 
 拟使用固定 `/usr/bin/busctl`、系统总线和明确的 systemd D-Bus 属性，核对管理器实际加载的注册；不新增 Rust 依赖或用户数据格式。缺少工具、输出超限、超时或无法解析时拒绝维护。该运行时工具要求已提出确认，尚未实施。
 
@@ -241,13 +251,15 @@ macOS 不在已签名 App bundle 中继续改写内核权限或内容；使用�
 
 拟把“当前实例不存在”与“允许启动新实例”分开：使用管理器 `UnitPath` 和受保护固定名观察避免覆盖既存文件；新建采用 `create_new`，重新加载后在 enable/start 前核对有效执行与生命周期属性。失败只允许按本次新建的固定文件身份清理自己的产物，不能停止、禁用或删除未知外部注册，也不能删除 drop-in。崩溃恢复沿用安装事务，缺少归属证据时保留文件并拒绝维护。具体分支尚在核查，并未实施。
 
-macOS 另需证明已加载 job 的实际程序和参数。当前查询分类只证明已加载或明确不存在，不能解析未承诺稳定的 `launchctl print` 内部字典冒充归属校验；原生接口与兼容范围单独确认和验收。
+macOS 另需证明已加载 job 的实际程序和参数。当前查询分类只证明已加载或明确不存在，不能解析未承诺稳定的 `launchctl print` 内部字典冒充归属校验。§7.3 中活动宿主的固定 typed PID 查询正在适配：系统 ServiceManagement/CoreFoundation 框架、固定只读 helper 子命令与有界子进程捕获；只用于关联已验证 IPC 进程，不替代 inactive job 或完整加载参数归属。原生接口、SDK 链接与兼容范围仍需目标平台验收，见 [macOS 查询研究](tun-service-macos-registration-research.md)。
 
-### 7.5 Service 日志流参数提案（待确认，尚未实现）
+### 7.5 Service 日志流参数适配（2026-10-03 阶段完成）
 
-当前 [core 日志连接](../../crates/zenclash-core/src/logs.rs) 请求 `level` 及 `format=structured`，但 [Service transport](../../crates/zenclash-core/src/client/transport.rs) 只传 `StreamKind`，服务内核固定采集 `/logs?level=debug`。客户端过滤不能代替采集等级控制。本地上游的 `GetClashLogs` 返回进程日志环，不提供这条 WebSocket 参数透传实现；此处需要适配 ZenClash 现有链路，不标为上游直接复制。
+本节保留日志批次实施时的 v2 证据。随后 §7.3 已获确认并开始升级 v3；当前构建拒绝旧 v2 握手发生在 Acquire 前，不再沿用旧 v2 会话兼容。日志操作和失败零回退的约束继续保留，v3 的验证结果单独记录。
 
-推荐独立批次如下，实施前确认跨 crate 的协议兼容影响：
+本批修复了参数丢失：[core 日志连接](../../crates/zenclash-core/src/logs.rs) 的等级与格式现在经 [Service transport](../../crates/zenclash-core/src/client/transport.rs) 传至内核，不再固定采集 debug。本地上游的 `GetClashLogs` 返回进程日志环，不提供这条 WebSocket 参数透传实现；此处适配 ZenClash 现有链路，不标为上游直接复制。
+
+2026-10-03 用户在上述跨 crate 协议方案说明后明确要求继续开发，本批按以下边界实施；该确认只覆盖日志流适配，不代替 §7.3、§7.4 或其他持久化与产品行为决策。
 
 1. 保持当前未发布的协议 v2，新增严格命名 `SubscribeLogs` 操作及具名 `LogStreamOptions`；等级只接受 `silent/error/warning/info/debug`，格式只接受 `plain/structured`。原 `Subscribe` 仅接流量、连接和内存；新服务拒绝其旧 Logs 分支。现有客户端 `subscribe(Logs)` 通过新日志操作发送默认 Info/Structured，core 则传递实际请求选项，不接受任意 query 或 URL。
 2. 旧 v2 helper 不能解析新操作，会关闭该订阅连接；客户端保留控制 owner 并反馈日志订阅失败，不重试旧 `Subscribe Logs`，也不恢复 Local 控制器。该事实不能诊断为已经收到 typed `Incompatible`，普通连接/帧错误不能伪装成版本证明。
@@ -255,7 +267,9 @@ macOS 另需证明已加载 job 的实际程序和参数。当前查询分类只
 4. 首批保留 core 的 Service 订阅失败不自动格式回退行为，验证固定正式 Mihomo 的 structured 支持。已核对 [Mihomo v1.19.30 日志路由](https://raw.githubusercontent.com/MetaCubeX/mihomo/v1.19.30/hub/route/server.go)：该版本支持 `structured`，其他格式值使用 plain，400 分支表示日志等级无效，没有格式不支持的专用响应。因此不能把 400 当作允许 plain 重发的证据；[日志等级映射](https://raw.githubusercontent.com/MetaCubeX/mihomo/v1.19.30/log/level.go) 使用 `warning`，`warn` 仅是 core 的解析别名。鉴权、租约、I/O、超时或未知错误均不触发回退。以后增加旧内核兼容时，应先证明该版本的格式检测机制，再单独确认方案。
 5. 先取得参数丢失的实际请求失败证据，再覆盖等级与格式的 WebSocket 请求、非法或重复 query 零内核连接、订阅准入及序号、旧 generation/PID 失效、关闭与取消、消息字节预算、旧 helper 拒绝且零旧日志调用。使用受控内核 IPC 验证生产握手；随后 check、相关回归与独立审查，真实固定 Mihomo 验证另行记录。
 
-该提案不新增依赖、目录或持久化 schema，不改 stdout 日志环，也不表示协议或日志功能已经实现。
+本批不新增依赖、目录或持久化 schema，不改 stdout 日志环；实际完成状态以行为回归、检查及独立审查为准。
+
+阶段结果：参数丢失与迟到回退行为先失败再通过；core 完整库 540 通过/2 忽略，service 完整库 263 通过/1 忽略；workspace check、core/service CI 附加严格 lint、格式及差异检查通过，第二轮最终独立审查 PASS。Windows 普通用户真实 Mihomo v1.19.30 日志专项另行显式执行通过，Linux GNU x64/macOS Intel service 交叉 check 通过。真实专项同时定位并修复原生管道忙 231：仅该码异步重试，打开、同句柄 PID 与握手共用五秒期限。沙箱内 AccessDenied 与沙箱外普通用户通过分别记录，不能解释为必须管理员运行。以上不证明高权限服务、三平台 TUN 或整个 P3 完成，见 [实施记录](tun-service-progress.md)。
 
 验证入口沿用 [kernel.rs](../../crates/zenclash-service/src/kernel.rs) 的私有内核传输与 WebSocket 字节限制，不新建另一套转发层。现有测试使用已升级的 raw socket，尚不能验证握手 query；实施时在原生 PID 身份校验之后复用私有握手函数，以 Tokio duplex 执行真实 WebSocket 升级并断言请求。400 拒绝必须只产生一次请求。旧 helper fixture 使用原 v2 严格操作定义验证新操作被拒绝，不能只断言新 DTO 可以序列化。源代码核对不是实际 Mihomo 或完整 Service 链路的运行证据。
 
@@ -263,32 +277,33 @@ macOS 另需证明已加载 job 的实际程序和参数。当前查询分类只
 
 各阶段先确定上游可移植部分，保留或补充能够失败的行为测试，再移植并做最小适配，验证通过后推进。已有差异先恢复到可编译、可验证状态；不在未收尾的事务和所有权修改之上继续叠加移植。以下清单在实现和验证均完成后才勾选。
 
-### 当前执行顺序（2026-10-02）
+### 当前执行顺序（2026-10-03）
 
 以下先列尚未收尾的工作；既有阶段证据保留在后面的表格和实施记录中。阶段测试通过不等于对应 P0–P6 已完成。
 
-实现顺序与决策顺序分别推进。日志流是已定位的功能缺口，可先制定独立批次；涉及订阅协议字段联动，实施前说明兼容影响并确认。以下涉及产品行为、工具要求或持久化迁移的待确认项，不因已有底层入口而视为获得批准。当前不按测试数量估算完成百分比。
+实现顺序与决策顺序分别推进。日志流批次已获确认并实施；以下涉及产品行为、工具要求或持久化迁移的待确认项，不因已有底层入口而视为获得批准。当前不按测试数量估算完成百分比。
 
 | 优先级 | 剩余工作 | 完成判据与决策边界 |
 | --- | --- | --- |
-| 独立批次 | Service 日志等级与格式透传 | core 请求的 `level` 和 `format=structured` 在 Service transport 中丢失，服务内核固定使用 `/logs?level=debug`。按 §7.5 贯通受限日志选项、协议与内核订阅；验证实际请求、订阅失败零回退、错误传播、消息预算与旧 generation 拒绝。协议字段兼容方案待确认；尚未实现 |
-| 1 | Managed Local Mihomo 最终有效配置 TUN 准入 | 只读核对发现完整配置、PATCH 和重启链没有统一门禁；见 [core 接入文档 §5.6](tun-service-core-integration.md#56-managed-local-配置的-tun-准入缺口)。拒绝并引导显式开启服务，或纳入服务交接事务，产品行为待确认；尚未实现或新增回归 |
+| 独立批次 | Service 日志等级与格式透传 | 已按 §7.5 贯通具名选项；行为回归覆盖实际请求、订阅失败零回退、预算与旧 generation 拒绝。Windows 普通用户真实 Mihomo 日志专项通过；完整检查和独立审查见实施记录，不代表高权限服务或 TUN 验收 |
+| 本轮优先 | Managed Local Mihomo 最终有效配置 TUN 准入 | GUI 配置及目录、备份的自动授权与交接已有阶段接线；普通完整配置/PATCH 拒绝绕过，启动与重启复用冻结配置。见 [core 接入文档 §5.6](tun-service-core-integration.md#56-managed-local-配置的-tun-准入与剩余缺口)。失败恢复、直接重启自动交接及三平台实机全链路仍待核对，不能将分层回归视为所有入口完成 |
 | 2 | Linux/macOS 有效注册归属 | 维护前核对系统实际加载的执行路径、参数、账户及注册文件；未知或外部同名注册零修改。macOS 已完成的查询分类不代替归属校验 |
-| 3 | 原子维护准入 | §7.3 协议 v3 与旧服务受控迁移方案待确认；不能用当前 worker 锁或 lease 声称会话已冻结 |
-| 4 | 恢复界面与修复/卸载事务 | 无 owner 恢复界面、本地资源物化范围及 Windows 多账户 GUI 卸载策略待确认；覆盖取消、结果未知、退出与恢复失败 |
-| 5 | 高层缓存保存与跨会话状态 | Stop 后导出、普通权限保存、后续启动/恢复；provider 缓存目录方案待确认，稳定 home、身份导入和旧 setuid 迁移仍未完成 |
+| 3 | 原子维护准入 | §7.3 核心锁、协议 v3 与 worker 接线已通过阶段验证；包拥有旧服务迁移、完整有效归属及三平台原生维护仍待完成 |
+| 4 | 启动失败提示与修复/卸载事务 | 本地双槽物化与 GeoData 有界替换已确认并有阶段回归；修复/卸载已有页面及 Manager 接线。用户确认无 owner 启动维持退出，仅改进错误提示；不开发恢复窗口或离线主界面。Windows 多账户 GUI 卸载策略待确认；完整原生串联、取消、未知结果和退出仍需验收 |
+| 5 | 高层缓存保存与跨会话状态 | Stop 后内存导出、双槽恢复以及返回 Service 前的本地 HTTP 缓存导出已有阶段接线；跨会话保存的映射/失败策略、稳定 home、持久节点身份导入和旧 setuid 迁移仍未完成 |
 | 6 | 三平台发布与原生验收 | 首页统一入口已有阶段回归及第二轮审查，真实窗口和侧栏仍待验收；完成真实安装包、系统授权、服务、TUN、路由、异常退出、升级/卸载与 release 性能验证 |
 
 待确认的具体决策：
 
 | 决策 | 确认内容与影响 |
 | --- | --- |
-| Local 最终有效 TUN 配置 | 拒绝并引导显式服务开启，或纳入授权与服务交接；覆盖完整应用、PATCH、备份、更新及重启，不能默改导入源 |
-| 维护原子准入 | §7.3 的共享/排他锁、协议 v3 能力及旧 v2 helper 受控停止后迁移；现有 journal 检查仍有竞争窗口 |
-| Linux 注册查询 | §7.4 是否要求固定 `/usr/bin/busctl`，以及工具缺失时的拒绝语义；macOS 已加载 job 的可靠查询接口另行确定 |
-| 无 owner 启动恢复 | 使用重新检查/退出窗口，或完整离线界面；决定启动失败后仍可执行哪些操作 |
-| 修复/卸载恢复 Local | 托管生成目录、双槽与 GeoData 写入及回滚范围；不覆盖订阅或原始 YAML，见 [资源布局](tun-service-resource-layout.md) |
-| provider 与跨会话状态 | 普通权限缓存目录、逻辑资源映射、保存失败策略、稳定 home 和节点身份导入；涉及新持久化结构与迁移 |
+| Local 最终有效 TUN 配置（已确认） | 进入授权与服务交接，成功后再应用；覆盖完整应用、PATCH、备份、更新及重启，不能默改导入源 |
+| 维护原子准入（已确认） | §7.3 的共享/排他锁、协议 v3 能力及旧 v2 helper 受控停止后迁移；开发中，现有 journal 检查不能代替原子准入 |
+| Linux 注册查询（已确认方向） | 用户要求参考本地 `examples/clash-verge-service-ipc`，不把固定 `/usr/bin/busctl` 作为新增运行时要求；有效注册归属与失败拒绝的当前证据见实施记录 |
+| 无 owner 启动失败（已确认） | 维持退出，仅改进错误提示。区分服务缺失、停止、维护、未授权、不兼容、占用、归属未知与配置 TUN 不可确认，并给出对应处理方式；不新增恢复窗口、离线主界面或自动 Local 回退 |
+| 修复/卸载恢复 Local（已确认） | `ControlledConfigStore.root()/local-runtime/{slot0,slot1}`、TUN-off、保留原 home，固定 GeoData 名有界原子替换及回滚；既有用户无需迁移，不覆盖订阅或原始 YAML。已实施部分的验证见 [core 接入 §5.5](tun-service-core-integration.md#55-修复与卸载接线已确认方案分批实施) |
+| provider 与跨会话状态 | [缓存实施方案](tun-service-cache-persistence.md) 已具体定义普通权限双槽缓存、版本 1 清单、来源映射和可丢弃缓存保存失败策略，待确认后实施；稳定 home 和节点身份导入另行确认，涉及新持久结构与迁移 |
+| Service 内核升级范围 | [升级接线方案](tun-service-core-upgrade.md) 建议经既有 Repair 部署候选服务内核及当前配套 helper，保留普通 Local binary；不新增持久化格式。同步升级两份副本则需另行设计协调提交和中断恢复结构。范围及跨 crate 候选 attestation 接线待确认 |
 | Windows 共享服务卸载 | 多个已授权账户共用服务时，卸载 GUI 保留服务还是拒绝并要求管理员处理；服务内核升级及旧 setuid 清理还需归属与恢复事务 |
 
 | 顺序 | 可审查的交付批次 | 验证与推进条件 |
@@ -296,7 +311,7 @@ macOS 另需证明已加载 job 的实际程序和参数。当前查询分类只
 | 1 | core 部分事务收尾已通过：复用 Restore，在明确停止后清理未保存 PATCH 候选，保留 accepted 配置及共享资源 | 停止后的 accepted 重启、准备/恢复响应丢失、Finalizing 拒绝及清理失败行为已验证；check、严格 clippy 和第二轮审查通过，见实施记录 |
 | 2 | 底层 `readback.rs` 适配已通过两轮审查；继续接高层缓存保存与恢复 | 修后相关行为 19 项、完整服务 198 项、check/CI lint 和 Linux/macOS service 交叉检查通过；高层确认 Stop 后导出、普通权限保存，再决定启动或释放 |
 | 3 | 首次 Start/后端交接核心阶段已通过首审；Manager/UI 收据分类修复已通过第二轮审查 | 相关行为、core/UI check 与标准严格 clippy 通过，随后 Windows 完整 UI 库 294 项及 binary 11 项通过；UI CI 附加 lint 和实机验收仍待完成 |
-| 4 | main/UI 启动批次 P1/P2 修复、Windows/Linux 阶段回归和第二轮审查已通过；继续完成恢复界面、修复与卸载 | 确认失败零 Stop/捕获释放和损坏配置重复启动零 Local 已验证；Windows core 534、Linux core 577 项通过，各 2 项忽略，Linux check/完整 CI lint 通过。没有 owner 的恢复界面和修复/卸载资源物化方案仍待确认 |
+| 4 | main/UI 启动批次 P1/P2 修复、Windows/Linux 阶段回归和第二轮审查已通过；无 owner 维持退出，继续修复与卸载 | 确认失败零 Stop/捕获释放和损坏配置重复启动零 Local 已验证；Windows core 534、Linux core 577 项通过，各 2 项忽略，Linux check/完整 CI lint 通过。双槽物化已确认并有阶段回归；启动提示批次见实施记录，原生维护串联尚待验收 |
 | 5 | 补资源持久性及迁移 | 跨会话稳定 home、FakeIP/节点身份、旧 setuid 和内核副本更新分别验证；新持久化结构先说明迁移影响 |
 | 6 | 完成发布维护与三平台验收 | Linux 原生包升级/卸载、Windows GUI 卸载协调、macOS 维护入口，以及真实授权、服务、Mihomo、TUN、失败恢复和 release 资源测量 |
 
@@ -333,9 +348,9 @@ macOS 另需证明已加载 job 的实际程序和参数。当前查询分类只
 
 ### P3：接入 core 的完整生命周期
 
-- [ ] 贯通 Service 日志流的受限等级与格式参数；先确认订阅协议兼容方案，再以实际 HTTP/WebSocket 请求行为验证，保留鉴权、预算和 generation 约束。
+- [x] 贯通 Service 日志流的受限等级与格式参数；已确认本批协议兼容方案，以实际 HTTP/WebSocket 请求行为验证，保留鉴权、预算和 generation 约束；三平台高权限服务验收仍按 P6 执行。
 
-- [ ] 在实际 Local owner + Mihomo 的完整应用、PATCH 和重启前核对最终 effective TUN 配置；覆盖有序 override、备份恢复、更新及自动恢复，不误拒 Service、External 或实验后端。处理策略待确认，禁止默改源配置或自动安装服务。
+- [ ] 在实际 Local owner + Mihomo 的完整应用、PATCH 和重启前核对最终 effective TUN 配置；覆盖有序 override、备份恢复、更新及自动恢复，不误拒 Service、External 或实验后端。已确认进入授权和服务交接后应用；禁止默改源配置或绕过授权安装服务。
 
 - [ ] 移植上游资源差异规划、路径规则、有界重试及 provider 缓存回读，适配当前资源包、会话、revision 与预算；跨 revision 缓存保留和持久身份导入分别验收。
 - [ ] 在进程边界接入本地与服务两种执行方式，保持受管内核快照的一致含义。
@@ -349,6 +364,8 @@ macOS 另需证明已加载 job 的实际程序和参数。当前查询分类只
 完成条件：既有本地与外部控制器行为通过回归测试，服务模式的配置、切换、升级、退出形成完整事务。
 
 ### P4：GPUI 操作与双语反馈
+
+2026-10-04 阶段进展：TUN 页已有修复/卸载按钮与确认框，后台组合恢复 Local 和原生维护，维护完成后刷新服务健康；显式重新开启 TUN 复用同代恢复资源。直接 Service 启动的普通身份准备已接入后台流程；自动捕获恢复已有阶段接线；代理偏好关闭与 GUI 回读已接线；临时 Local 返回 Service 时的 HTTP provider 缓存导出及重新校验已接线；完整管理员维护串联及实机验收仍未完成，下列整体项保持未勾选；测试边界见 [实施记录](tun-service-progress.md)。
 
 - [ ] 首页、TUN 页面和现有托盘入口共用一套命令与服务状态，避免重复安装及状态分歧。
 - [ ] 增加安装并开启、服务状态、修复、卸载操作；显示真实进度和可恢复错误。

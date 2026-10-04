@@ -25,6 +25,7 @@ pub(super) enum MaintenanceAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum MaintenanceEffect {
     Kickstart,
+    Enable,
     Bootstrap,
     Bootout,
     RemoveRegistration,
@@ -56,7 +57,35 @@ pub(super) fn probe_service(label: &str) -> io::Result<ProbeOutput> {
 // timed-out read future closes them directly; no reader thread can outlive the probe
 // or wait indefinitely for a descendant that inherited stdout/stderr.
 #[cfg(all(unix, any(target_os = "macos", test)))]
-fn capture_probe(mut command: tokio::process::Command, limit: Duration) -> io::Result<ProbeOutput> {
+fn capture_probe(command: tokio::process::Command, limit: Duration) -> io::Result<ProbeOutput> {
+    let output = capture_probe_output(command, limit)?;
+    Ok(ProbeOutput {
+        code: output.code,
+        diagnostic: format!("{}\n{}", output.stdout, output.stderr),
+    })
+}
+
+#[cfg(all(unix, any(target_os = "macos", test)))]
+struct NativeProbeOutput {
+    code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+#[cfg(all(unix, any(target_os = "macos", test)))]
+pub(super) fn capture_host_pid(
+    command: tokio::process::Command,
+    limit: Duration,
+) -> io::Result<u32> {
+    let output = capture_probe_output(command, limit)?;
+    super::macos_job::parse_host_pid(output.code, &output.stdout, &output.stderr)
+}
+
+#[cfg(all(unix, any(target_os = "macos", test)))]
+fn capture_probe_output(
+    mut command: tokio::process::Command,
+    limit: Duration,
+) -> io::Result<NativeProbeOutput> {
     use std::process::Stdio;
     use tokio::io::AsyncReadExt;
 
@@ -111,9 +140,10 @@ fn capture_probe(mut command: tokio::process::Command, limit: Duration) -> io::R
                     "launchd probe output was not UTF-8",
                 )
             })?;
-            Ok::<_, io::Error>(ProbeOutput {
+            Ok::<_, io::Error>(NativeProbeOutput {
                 code: status.code(),
-                diagnostic: format!("{stdout}\n{stderr}"),
+                stdout,
+                stderr,
             })
         })
         .await;
@@ -145,10 +175,13 @@ pub(super) fn maintain(
     let output = probe()?;
     let state = classify_launchd_service_probe(output.code, &output.diagnostic)?;
     match action {
-        MaintenanceAction::Start => effect(match state {
-            LaunchdServiceState::Loaded => MaintenanceEffect::Kickstart,
-            LaunchdServiceState::Absent => MaintenanceEffect::Bootstrap,
-        }),
+        MaintenanceAction::Start => match state {
+            LaunchdServiceState::Loaded => effect(MaintenanceEffect::Kickstart),
+            LaunchdServiceState::Absent => {
+                effect(MaintenanceEffect::Enable)?;
+                effect(MaintenanceEffect::Bootstrap)
+            }
+        },
         MaintenanceAction::Stop | MaintenanceAction::Unregister => {
             if state == LaunchdServiceState::Loaded {
                 effect(MaintenanceEffect::Bootout)?;
@@ -252,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_absence_bootstraps_without_kickstart() {
+    fn explicit_absence_enables_then_bootstraps_without_kickstart() {
         let mut effects = Vec::new();
         maintain(
             MaintenanceAction::Start,
@@ -268,7 +301,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(effects, [MaintenanceEffect::Bootstrap]);
+        assert_eq!(
+            effects,
+            [MaintenanceEffect::Enable, MaintenanceEffect::Bootstrap]
+        );
     }
 
     #[test]

@@ -1,6 +1,28 @@
 # TUN 服务上游代码移植计划
 
-- 修订日期：2026-10-02。
+- 修订日期：2026-10-03。
+
+## v3 原子维护核心接线阶段
+
+按用户确认的 §7.3，原生锁参考上游 `core/repair.rs` 与 `core/owner.rs`；SHA-256 与适配边界见 [UPSTREAM.md](../../crates/zenclash-service/UPSTREAM.md)。上游是排他锁，ZenClash 的会话共享准入、稳定文件身份、v3 能力握手和维护同连接宿主核验属于本项目适配，不能写成上游已提供的共享能力。
+
+Linux 的有界固定 systemctl MainPID、macOS 系统框架 typed PID 与固定只读 helper 查询也属于项目适配，没有新增 busctl 要求、Rust 依赖或持久化结构。新宿主在提交前再次核对管理器 PID；旧 journal 不重新启动旧 helper。Windows 311、普通 Linux 270 项及三服务目标 check/CI lint 通过；首审 P1/P2 实际回归失败后修复，第二轮最终 PASS（2/2）。macOS SDK 链接/原生 API、完整 loaded/inactive 归属及包拥有旧服务迁移仍待完成，详细证据见 [实施记录](tun-service-progress.md)。以下保留此前日志和固定注册批次的 v2 历史证据。
+
+## Service 日志流参数适配
+
+2026-10-03 将 ZenClash 的日志等级与格式贯通具名 `SubscribeLogs` 协议操作、core transport 和内核 WebSocket。上游 `GetClashLogs` 读取 stdout 日志环，没有这条 WebSocket 参数透传实现，因此本项属于现有代码适配，不新增虚假的上游复制记录。协议保持 v2，旧 helper 拒绝新操作时日志失败，不重试旧操作或切换 Local。
+
+普通用户真实 Windows Mihomo v1.19.30 验证暴露命名管道实例重建期间的 `ERROR_PIPE_BUSY`；生产路径仅对此码异步等待，打开、同句柄 PID 验证与握手共用五秒期限。五项管道行为测试及真实日志专项已通过；完整检查和独立审查结果见 [实施记录](tun-service-progress.md)。这不代表三平台高权限服务与 TUN 已验收。
+
+## Linux 固定 unit 与 macOS Enable 恢复
+
+2026-10-03 按用户指定继续参考本地上游。macOS 直接适配 `src/bin/install_service.rs` 的 `enable → bootstrap` 短路顺序；源文件 SHA-256 为 `e47937a3069bd821c6fabc49dc29e27b1c9442c9071ec67725713a3cb2554fed`，新增来源行见 [UPSTREAM.md](../../crates/zenclash-service/UPSTREAM.md)。固定 plist 已有 `RunAtLoad=true`，不额外移植旧 `launchctl start`；已加载路径保留 kickstart。Start 在查询前及每次副作用前要求完整已批准 plist，缺失、被替换、Enable 失败均阻止后续 bootstrap。
+
+Linux 沿用上游及现有 `systemctl` 主线，不引入 busctl。新增 [磁盘 unit 门禁](../../crates/zenclash-service/src/platform/unix/linux_registration.rs) 复用项目已有保护、固定句柄及模板检查，不标记为上游直接复制。对 `/etc` 与包拥有的 `/usr/lib` 固定 unit 做 16 KiB 有界完整 LF/CRLF 比对，维护 effect 前重验，应用不删包文件；早期门禁在私有目录和 journal 恢复之前执行。
+
+首次审查发现原有“磁盘 unit 缺失便跳过 Stop”的危险边界：卸载、部署与恢复可能继续删除或替换仍被运行服务使用的文件。修复后，两个文件均缺失的 Stop/Unregister 先通过已有固定 `systemctl show` 查询简单属性；唯成功退出、无 stderr、唯一完整 `LoadState=not-found`、`ActiveState=inactive`、`MainPID=0` 允许继续，其他结果保留部署。查询清除环境覆盖，stdout/stderr 共用 64 KiB 预算，截止 30 秒；超时终止自有子进程并最多等待 5 秒回收。`show` 的机器解析属性依据 [systemd 官方文档](https://github.com/systemd/systemd/blob/main/man/systemctl.xml)，不解析复合 ExecStart 或诊断输出。
+
+参数与维护行为回归先失败再通过；首次审查 P1 已修复，第二轮最终 PASS。本批完整测试及跨平台检查见 [实施记录](tun-service-progress.md)。磁盘模板和缺失分支的观察不证明已加载服务的实际执行归属；管理员并发修改不是由这次查询锁定，原子维护准入仍未完成。真机 launchd/systemd、授权和 TUN 由用户后续环境验收，不以交叉编译冒充。
 - 对应 [三平台开发计划](tun-service-plan.md)；当前进度与验证见 [实施记录](tun-service-progress.md)。
 - 开发方式：直接移植有用的上游实现及对应行为测试，再按 ZenClash 当前实现适配。以下是实施清单；分批记录验证结果，不能把单批移植作为完整功能验收。
 

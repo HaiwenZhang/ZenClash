@@ -195,14 +195,35 @@ app:
 
 startup:
   service_saved_tun:
-    zh-CN: 已保存的 TUN 配置需要后台服务恢复，启动已暂停。
-    en: The saved TUN configuration needs service recovery. Startup is paused.
+    zh-CN: 后台服务缺失，已保存的配置启用了 TUN。恢复后台服务后重新启动 ZenClash。
+    en: The service is missing and the saved configuration enables TUN. Restore the service, then restart ZenClash.
   service_occupied:
-    zh-CN: 后台服务正由另一应用使用，启动已暂停。
-    en: Another application owns the service. Startup is paused.
+    zh-CN: 后台服务正由另一应用使用。退出占用服务的应用后重新启动 ZenClash。
+    en: Another application owns the service. Close that application, then restart ZenClash.
   service_configuration_unconfirmed:
-    zh-CN: 无法确认配置中的 TUN 状态，启动已暂停。
-    en: TUN state in the configuration could not be confirmed. Startup is paused.
+    zh-CN: 无法读取或确认已保存配置中的 TUN 状态。检查并修复配置后重新启动 ZenClash。
+    en: The saved configuration could not be read or its TUN state could not be confirmed. Check and repair the configuration, then restart ZenClash.
+  service_stopped:
+    zh-CN: 后台服务已停止。启动服务后重新启动 ZenClash。
+    en: The service is stopped. Start the service, then restart ZenClash.
+  service_repair_required:
+    zh-CN: 后台服务需要修复。修复服务安装后重新启动 ZenClash。
+    en: The service needs repair. Repair the service installation, then restart ZenClash.
+  service_pending:
+    zh-CN: 后台服务正在维护或有未完成的维护事务。完成维护后重新启动 ZenClash。
+    en: Service maintenance is active or unfinished. Complete maintenance, then restart ZenClash.
+  service_unauthorized:
+    zh-CN: 当前账户尚未获得后台服务使用授权。完成系统授权后重新启动 ZenClash。
+    en: This account is not authorized to use the service. Complete system authorization, then restart ZenClash.
+  service_incompatible:
+    zh-CN: 后台服务与当前 ZenClash 版本不兼容。更新应用及服务至配套版本后重试。
+    en: The service is incompatible with this version of ZenClash. Update the app and service to matching versions, then try again.
+  service_unrecognized:
+    zh-CN: 无法确认后台服务安装归属。核实服务安装后重试；不要直接覆盖未知服务。
+    en: The service installation could not be verified. Verify the installation before retrying; do not overwrite an unknown service.
+  service_unknown:
+    zh-CN: 无法确认后台服务状态，ZenClash 未启动本地内核。检查服务状态与访问权限后重试。
+    en: The service status could not be confirmed, and ZenClash did not start a local core. Check service status and access permissions, then try again.
   local_privileged:
     zh-CN: 所选内核带有提权权限，无法作为普通本地内核启动。
     en: The selected core has elevated privileges and cannot start as an ordinary local core.
@@ -1221,6 +1242,9 @@ profiles:
       zh-CN: 配置已从 ZenClash 仓库删除
       en: Profile removed from the ZenClash library
   errors:
+    candidate_changed:
+      zh-CN: 候选配置在验证期间已改变，请刷新后重试
+      en: The candidate profile changed during validation; refresh and try again
     profile_path_missing:
       zh-CN: 未配置当前配置文件路径
       en: No active profile path is configured
@@ -2956,12 +2980,27 @@ core_page:
     repair:
       zh-CN: 修复服务
       en: Repair service
+    local_save_failed:
+      zh-CN: "无法保存本地恢复配置，暂不能维护服务：%{error}"
+      en: "Could not save the local recovery configuration; service maintenance is blocked: %{error}"
+    capture_restore_unknown:
+      zh-CN: 捕获恢复状态无法确认，请检查当前内核和系统代理。
+      en: Capture restoration could not be confirmed. Check the current core and system proxy.
+    local_identity_authority_failed:
+      zh-CN: 本地内核准备的写入权限已失效，请重新发起维护
+      en: Local core preparation lost its write authority. Start maintenance again.
     repair_title:
       zh-CN: 修复内核服务？
       en: Repair the core service?
     repair_description:
-      zh-CN: 修复前会退出 TUN 并恢复本地内核。完成后尝试恢复原有流量捕获方式；取消授权或恢复失败时，会显示实际运行状态。
-      en: ZenClash will leave TUN and restore the local core before repair, then attempt to restore the previous traffic capture mode. If authorization is cancelled or recovery fails, the actual runtime state will be shown.
+      zh-CN: 修复前会退出 TUN 并恢复本地内核。系统将请求管理员授权；修复或取消后，服务可用且捕获设置未变时尝试恢复原接管方式，否则保留本地内核。
+      en: ZenClash will leave TUN and restore the local core before requesting administrator authorization. After repair or cancellation, it will try to restore the previous capture mode if the service is available and capture settings have not changed; otherwise the local core remains in use.
+    repair_action:
+      zh-CN: 修复服务…
+      en: Repair service…
+    uninstall_action:
+      zh-CN: 卸载服务…
+      en: Uninstall service…
     start:
       zh-CN: 启动服务
       en: Start service
@@ -3049,6 +3088,18 @@ core_page:
     no_snapshot:
       zh-CN: 没有可用于恢复的内核配置。
       en: No runtime configuration is available for recovery.
+    required:
+      zh-CN: 开启 TUN 需要先完成授权并切换到后台服务。
+      en: Enabling TUN requires authorization and handover to the background service.
+    payload_too_large:
+      zh-CN: 运行配置超过 %{limit} MiB 限制。
+      en: The runtime configuration exceeds the %{limit} MiB limit.
+    input_not_regular:
+      zh-CN: 内核启动配置必须是普通文件。
+      en: The core startup configuration must be a regular file.
+    yaml_merge_depth:
+      zh-CN: YAML 合并嵌套超过安全深度限制。
+      en: YAML merge nesting exceeds the safe depth limit.
     handover_recovery_failed:
       zh-CN: 尚未确认服务切换后的恢复结果。请检查内核状态。
       en: Recovery after the service switch is unconfirmed. Check the core status.

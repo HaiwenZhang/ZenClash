@@ -31,6 +31,93 @@ pub(crate) use security::{service_root, validate_protected_path};
 #[cfg(feature = "server")]
 pub(crate) use transport::Listener;
 pub(crate) use transport::connect;
+#[cfg(feature = "server")]
+pub(crate) use transport::{
+    Stream as MaintenanceStream, maintenance_endpoint_absent, maintenance_peer,
+};
+
+#[cfg(feature = "server")]
+pub(crate) fn maintenance_host_registered(peer: &crate::session::PeerIdentity) -> io::Result<()> {
+    if scm::service_pid()? != Some(peer.pid()) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "registered host identity changed",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn maintenance_identity(peer: &crate::session::PeerIdentity) -> bool {
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+    };
+    use windows_sys::Win32::System::Threading::OpenProcessToken;
+    let verified = || -> io::Result<bool> {
+        let process = identity::process_handle(peer.pid())?;
+        if identity::identity_from_handle(peer.pid(), process.0)? != *peer {
+            return Ok(false);
+        }
+        if peer.user() == "S-1-5-18" {
+            return Ok(true);
+        }
+        let mut token = std::ptr::null_mut();
+        // SAFETY: process is a live native process and token is an owned output handle.
+        if unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &mut token) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let token = Handle(token);
+        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+        let mut size = 0;
+        // SAFETY: elevation points to correctly sized initialized native storage.
+        if unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenElevation,
+                (&mut elevation as *mut TOKEN_ELEVATION).cast(),
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut size,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(size as usize == std::mem::size_of::<TOKEN_ELEVATION>()
+            && elevation.TokenIsElevated != 0
+            && identity::identity_from_handle(peer.pid(), process.0)? == *peer)
+    };
+    verified().unwrap_or(false)
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn maintenance_service_absent() -> io::Result<()> {
+    if service_state()?.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "service remains registered",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn maintenance_peer_exited(peer: &crate::session::PeerIdentity) -> io::Result<bool> {
+    use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    let process = match identity::process_handle(peer.pid()) {
+        Ok(process) => process,
+        Err(error) if error.raw_os_error() == Some(87) => return Ok(true),
+        Err(error) => return Err(error),
+    };
+    // SAFETY: process owns a valid synchronizable native process handle.
+    match unsafe { WaitForSingleObject(process.0, 0) } {
+        WAIT_OBJECT_0 => Ok(true),
+        WAIT_TIMEOUT => {
+            Ok(identity::identity_from_handle(peer.pid(), process.0)?.birth() != peer.birth())
+        }
+        _ => Err(io::Error::last_os_error()),
+    }
+}
 
 #[cfg(feature = "server")]
 use std::ptr;

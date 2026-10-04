@@ -30,6 +30,84 @@ use linux as native;
 use macos as native;
 
 pub(crate) type LocalStream = UnixStream;
+#[cfg(feature = "server")]
+pub(crate) type MaintenanceStream = UnixStream;
+
+#[cfg(feature = "server")]
+pub(crate) fn maintenance_peer(stream: &UnixStream) -> io::Result<crate::session::PeerIdentity> {
+    let (uid, pid, birth) = native::authenticate_peer(stream)?;
+    if uid != 0 || !native::process_matches(pid, uid, birth) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "maintenance host identity changed",
+        ));
+    }
+    let expected = service_root().join("zenclash-service");
+    validate_protected_path(&expected, false)?;
+    if native::process_image(pid)? != expected || !native::process_matches(pid, uid, birth) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "maintenance host image changed",
+        ));
+    }
+    Ok(crate::session::PeerIdentity::new(
+        uid.to_string(),
+        pid,
+        birth,
+    ))
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn maintenance_host_registered(peer: &crate::session::PeerIdentity) -> io::Result<()> {
+    native::maintenance_host_registered(peer.pid())
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn maintenance_identity(peer: &crate::session::PeerIdentity) -> bool {
+    peer.user() == "0" && peer_alive(peer)
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn maintenance_service_absent() -> io::Result<()> {
+    native::maintenance_service_absent()
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn maintenance_endpoint_absent() -> io::Result<()> {
+    let path = socket_path();
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+        Ok(metadata) if metadata.file_type().is_socket() && metadata.uid() == 0 => {
+            validate_protected_path(
+                path.parent()
+                    .ok_or_else(|| io::Error::other("missing socket parent"))?,
+                true,
+            )?;
+            if endpoint_is_stale(&path)? {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "service endpoint remains live",
+                ))
+            }
+        }
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "unexpected service endpoint",
+        )),
+    }
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn maintenance_peer_exited(peer: &crate::session::PeerIdentity) -> io::Result<bool> {
+    match native::process_identity(peer.pid()) {
+        Ok((_uid, birth)) => Ok(birth != peer.birth()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error),
+    }
+}
 
 pub(crate) fn service_root() -> PathBuf {
     native::service_root().into()
@@ -119,7 +197,7 @@ pub(crate) fn require_admin() -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(all(feature = "server", target_os = "macos"))]
+#[cfg(feature = "server")]
 pub(crate) fn validate_service_registration() -> io::Result<()> {
     native::validate_service_registration()
 }
@@ -364,27 +442,6 @@ pub(crate) fn unregister_service() -> io::Result<()> {
 }
 
 #[cfg(feature = "server")]
-pub(crate) fn service_was_running() -> io::Result<bool> {
-    // The verified endpoint proves a live root-owned daemon process without
-    // acquiring another user's session or requiring protocol compatibility.
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    match runtime.block_on(connect()) {
-        Ok(_) => Ok(true),
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-            ) =>
-        {
-            Ok(false)
-        }
-        Err(error) => Err(error),
-    }
-}
-
-#[cfg(feature = "server")]
 pub(super) fn run_native(program: &str, args: &[&str]) -> io::Result<()> {
     let status = run_native_status(program, args)?;
     if status.success() {
@@ -517,6 +574,12 @@ fn endpoint_is_stale(path: &Path) -> io::Result<bool> {
         Some(libc::EINPROGRESS) | Some(libc::EAGAIN) | Some(libc::EALREADY) => Ok(false),
         _ => Err(error),
     }
+}
+
+#[cfg(all(feature = "server", target_os = "macos"))]
+pub(crate) fn query_loaded_host_pid() -> io::Result<u32> {
+    require_admin()?;
+    native::query_loaded_host_pid()
 }
 
 #[cfg(test)]

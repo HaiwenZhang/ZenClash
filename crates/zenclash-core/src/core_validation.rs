@@ -74,6 +74,7 @@ pub struct CoreConfigValidator {
     binary: PathBuf,
     home_dir: PathBuf,
     write_access: crate::data_coordinator::DataWriteAccess,
+    recovery_asset_root: Option<PathBuf>,
 }
 
 impl CoreConfigValidator {
@@ -86,6 +87,7 @@ impl CoreConfigValidator {
             binary: binary.into(),
             write_access: crate::data_coordinator::DataWriteAccess::new(&home_dir),
             home_dir,
+            recovery_asset_root: None,
         }
     }
 
@@ -93,8 +95,20 @@ impl CoreConfigValidator {
         self.kind
     }
 
+    pub(crate) fn with_recovery_asset_root(mut self, root: Option<PathBuf>) -> Self {
+        self.recovery_asset_root = root;
+        self
+    }
+
+    pub(crate) fn with_binary(mut self, binary: PathBuf) -> Self {
+        self.binary = binary;
+        self
+    }
+
     pub(crate) fn write_scopes(&self) -> Vec<PathBuf> {
-        vec![self.home_dir.clone(), self.binary.clone()]
+        let mut scopes = vec![self.home_dir.clone(), self.binary.clone()];
+        scopes.extend(self.recovery_asset_root.clone());
+        scopes
     }
 
     pub(crate) fn with_write_lease(&self, lease: &crate::data_coordinator::DataWriteLease) -> Self {
@@ -151,15 +165,27 @@ impl CoreConfigValidator {
                 source,
             }
         })?;
-        let output = platform_command::output_path_with_timeout(
-            &self.binary,
-            &[
-                OsStr::new("-t"),
-                OsStr::new("-d"),
-                self.home_dir.as_os_str(),
-                OsStr::new("-f"),
-                config.as_os_str(),
-            ],
+        let mut command = std::process::Command::new(&self.binary);
+        command.args([
+            OsStr::new("-t"),
+            OsStr::new("-d"),
+            self.home_dir.as_os_str(),
+            OsStr::new("-f"),
+            config.as_os_str(),
+        ]);
+        if self.kind == CoreKind::Mihomo {
+            command.env_remove("CLASH_CONFIG_STRING");
+            configure_recovery_assets(&mut command, self.recovery_asset_root.as_deref()).map_err(
+                |error| CoreConfigValidationError::Command {
+                    kind: self.kind,
+                    path: config.to_path_buf(),
+                    message: error.to_string(),
+                },
+            )?;
+        }
+        let output = platform_command::output_from_command(
+            command,
+            &self.binary.display().to_string(),
             CONFIG_VALIDATION_TIMEOUT,
         )
         .map_err(|message| CoreConfigValidationError::Command {
@@ -227,6 +253,20 @@ impl CoreConfigValidator {
             std::process::id()
         ))
     }
+}
+
+pub(crate) fn configure_recovery_assets(
+    command: &mut std::process::Command,
+    root: Option<&Path>,
+) -> Result<(), std::env::JoinPathsError> {
+    if let Some(root) = root {
+        // Both fixed slots are needed for an atomic recovery reload into the inactive slot.
+        let slots = [root.join("slot0"), root.join("slot1")];
+        command
+            .env("SAFE_PATHS", std::env::join_paths(slots)?)
+            .env_remove("SKIP_SAFE_PATH_CHECK");
+    }
+    Ok(())
 }
 
 struct TemporaryConfig(PathBuf);

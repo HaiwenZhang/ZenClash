@@ -24,6 +24,14 @@ fn unknown() -> MihomoError {
 }
 
 impl RuntimeTransport for Service {
+    async fn read_cache(
+        &self,
+        _revision: u64,
+        _kind: zenclash_service::ProviderKind,
+        _name: &str,
+    ) -> crate::MihomoResult<Option<Vec<u8>>> {
+        panic!("initial startup must not export provider caches")
+    }
     async fn stage(&self, _bundle: &crate::ServiceRuntimeBundle) -> crate::MihomoResult<u64> {
         self.calls.lock().push("stage");
         Ok(1)

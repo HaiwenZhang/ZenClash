@@ -68,6 +68,27 @@ fn open_client(name: &str) -> io::Result<NamedPipeClient> {
 }
 
 fn validate_server(stream: &NamedPipeClient) -> io::Result<()> {
+    verified_server_identity(stream).map(|_| ())
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn maintenance_peer(stream: &NamedPipeClient) -> io::Result<PeerIdentity> {
+    verified_server_identity(stream)
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn maintenance_endpoint_absent() -> io::Result<()> {
+    match open_client(PIPE_NAME) {
+        Err(error) if error.raw_os_error() == Some(2) => Ok(()),
+        Err(error) => Err(error),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "service pipe remains live",
+        )),
+    }
+}
+
+fn verified_server_identity(stream: &NamedPipeClient) -> io::Result<crate::session::PeerIdentity> {
     let mut pid = 0;
     if unsafe { GetNamedPipeServerProcessId(stream.as_raw_handle().cast(), &mut pid) } == 0 {
         return Err(io::Error::last_os_error());
@@ -91,7 +112,7 @@ fn validate_server(stream: &NamedPipeClient) -> io::Result<()> {
             "service image does not match the protected installation",
         ));
     }
-    Ok(())
+    Ok(identity)
 }
 
 #[cfg(feature = "server")]

@@ -33,6 +33,118 @@ fn write_profile(root: &Path) -> PathBuf {
 }
 
 #[tokio::test]
+async fn local_recovery_save_conflict_restores_cache_and_preserves_external_patch() {
+    let root = test_root("local-recovery-save-conflict");
+    let profile = write_profile(&root);
+    let mut store = ControlledConfigStore::new(root.join("store"));
+    store.materialize(&profile).unwrap();
+    let before = fs::read(store.runtime_path()).unwrap();
+    let (gate, entered, release) = super::CommitGate::new();
+    store.commit_gate = Some(gate);
+    let lease = store.acquire_write_lease().await.unwrap();
+    let mutation = store.lock_service_tun_mutation().await;
+    let borrowed = store.with_write_lease(&lease);
+    let task = tokio::spawn(async move {
+        let _lease = lease;
+        let _mutation = mutation;
+        borrowed
+            .persist_local_recovery_payload_admitted("tun:\n  enable: false\n".into())
+            .await
+    });
+    entered.await.unwrap();
+    let replacement = b"mode: direct\n";
+    fs::write(store.patch_path(), replacement).unwrap();
+    release.send(()).unwrap();
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(ControlledConfigError::ConcurrentModification)
+    ));
+    assert_eq!(fs::read(store.runtime_path()).unwrap(), before);
+    assert_eq!(fs::read(store.patch_path()).unwrap(), replacement);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_local_recovery_save_waiter_does_not_abandon_admitted_persistence() {
+    let root = test_root("local-recovery-save-cancel");
+    let profile = write_profile(&root);
+    let mut store = ControlledConfigStore::new(root.join("store"));
+    store.materialize(&profile).unwrap();
+    let (gate, entered, release) = super::CommitGate::new();
+    store.commit_gate = Some(gate);
+    let bundle = std::sync::Arc::new(
+        crate::ServiceRuntimeBundle::prepare("tun:\n  enable: false\n", root.clone())
+            .await
+            .unwrap(),
+    );
+    let waiting_store = store.clone();
+    let home = root.clone();
+    let waiter = tokio::spawn(async move {
+        bundle
+            .with_local_geodata(&waiting_store, home, |recovery| async move {
+                recovery
+                    .persist_local_payload("tun:\n  enable: false\n".into())
+                    .await
+                    .map_err(|error| crate::MihomoError::Process(error.to_string()))
+            })
+            .await
+    });
+    entered.await.unwrap();
+    waiter.abort();
+    assert!(waiter.await.unwrap_err().is_cancelled());
+    release.send(()).unwrap();
+    let _finished = store.lock_service_tun_mutation().await;
+    assert_eq!(
+        store.load().unwrap()["tun"]["enable"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        serde_yaml::from_slice::<serde_yaml::Value>(&fs::read(store.runtime_path()).unwrap())
+            .unwrap()["tun"]["enable"]
+            .as_bool(),
+        Some(false)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn service_tun_recovery_preparation_uses_held_payload_without_sources_or_cache() {
+    let root = test_root("service-tun-recovery-held");
+    let profile = write_profile(&root);
+    let store = ControlledConfigStore::new(root.join("store"));
+    store.materialize(&profile).unwrap();
+    let bundle = std::sync::Arc::new(
+        crate::ServiceRuntimeBundle::prepare(
+            "mode: rule\ntun:\n  enable: false\ndns:\n  enable: false\nrules: [MATCH,DIRECT]\n",
+            root.clone(),
+        )
+        .await
+        .unwrap(),
+    );
+    fs::remove_file(profile).unwrap();
+    fs::write(store.runtime_path(), b"[broken cache").unwrap();
+    let before_layer = store.load().unwrap();
+    let update = store
+        .prepare_service_tun_recovery_update(bundle.clone())
+        .await
+        .unwrap();
+    let previous: serde_yaml::Value = serde_yaml::from_str(update.previous_payload()).unwrap();
+    let next: serde_yaml::Value = serde_yaml::from_str(update.next_payload()).unwrap();
+    assert_eq!(previous["tun"]["enable"].as_bool(), Some(false));
+    assert_eq!(next["tun"]["enable"].as_bool(), Some(true));
+    assert_eq!(next["dns"]["enable"].as_bool(), Some(true));
+    assert_eq!(next["mode"].as_str(), Some("rule"));
+    assert_eq!(store.load().unwrap(), before_layer);
+    assert_eq!(fs::read(store.runtime_path()).unwrap(), b"[broken cache");
+    assert_eq!(
+        serde_yaml::from_str::<serde_yaml::Value>(bundle.yaml()).unwrap()["tun"]["enable"]
+            .as_bool(),
+        Some(false)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn profile_mode_replaced_after_preflight_sends_no_patch_and_keeps_generation() {
     profile_mode_replaced_after_preflight(false).await;
 }
@@ -792,6 +904,58 @@ async fn accepted_profile_without_an_applied_snapshot_reports_unknown_on_rollbac
     fs::remove_dir_all(root).unwrap();
 }
 
+#[tokio::test]
+async fn frozen_local_patch_save_failure_restores_exact_runtime_and_cache() {
+    let root = test_root("frozen-local-save-failure");
+    let profile = write_profile(&root);
+    let mut store = ControlledConfigStore::new(root.join("store"));
+    store.materialize(&profile).unwrap();
+    let previous = store.cached_runtime_payload().unwrap().unwrap();
+    let update = store
+        .prepare_service_config_update(
+            profile.clone(),
+            Some(serde_json::json!({"mode":"global"})),
+            vec![],
+            Some(previous.clone()),
+        )
+        .await
+        .unwrap();
+    let next = update.next_payload().to_owned();
+    let (gate, entered, release) = super::CommitGate::new();
+    store.commit_gate = Some(gate);
+    let (client, requests) = reload_fixture(2);
+    let worker = store.clone();
+    let expected = previous.clone();
+    let task = tokio::spawn(async move {
+        worker
+            .apply_frozen_local_update(
+                &client,
+                update,
+                Some(expected),
+                true,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), entered)
+        .await
+        .unwrap()
+        .unwrap();
+    fs::write(&profile, "tun: {enable: true}\nmode: direct\n").unwrap();
+    fs::create_dir(store.patch_path()).unwrap();
+    release.send(()).unwrap();
+    let error = task.await.unwrap().err().unwrap();
+    assert!(error.attempted);
+    assert_eq!(
+        store.cached_runtime_payload().unwrap().as_deref(),
+        Some(previous.as_str())
+    );
+    let requests = requests.join().unwrap();
+    assert_eq!(requests[0]["payload"].as_str(), Some(next.as_str()));
+    assert_eq!(requests[1]["payload"].as_str(), Some(previous.as_str()));
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn reload_fixture(count: usize) -> (MihomoClient, thread::JoinHandle<Vec<serde_json::Value>>) {
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
     let address = listener.local_addr().unwrap();
@@ -1166,4 +1330,35 @@ async fn cancelling_partial_mode_waiter_keeps_durable_cache_in_completion_owner(
         "saved mode lost its accepted startup payload when only the waiter was cancelled"
     );
     fs::remove_dir_all(root).unwrap();
+}
+#[tokio::test]
+async fn full_candidate_keeps_the_supplied_previous_snapshot_when_cache_changes() {
+    let root =
+        std::env::temp_dir().join(format!("zenclash-held-config-cache-{}", std::process::id()));
+    let store = ControlledConfigStore::new(&root);
+    std::fs::create_dir_all(store.root()).unwrap();
+    let previous = "tun: {enable: false}\nmode: direct\n";
+    let changed = "tun: {enable: false}\nmode: global\n";
+    std::fs::write(store.runtime_path(), changed).unwrap();
+    let update = store
+        .prepare_service_config_update(
+            crate::profile::ProfileRuntimeSource::Frozen("tun: {enable: true}\n".into()),
+            None,
+            vec![],
+            Some(previous.into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(update.previous_payload(), previous);
+    assert_eq!(
+        std::fs::read_to_string(store.runtime_path()).unwrap(),
+        changed
+    );
+    assert!(matches!(
+        store
+            .validate_prepared_service_tun(update, Some(previous.into()))
+            .await,
+        Err(ControlledConfigError::ConcurrentModification)
+    ));
+    std::fs::remove_dir_all(root).unwrap();
 }

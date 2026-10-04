@@ -33,13 +33,18 @@ const MAX_CORE_RECOVERY_ATTEMPTS: u32 = 3;
 mod automatic;
 mod binding;
 mod permissions;
+mod service_recovery;
 mod service_startup;
 pub(crate) mod service_tun;
 
+pub use service_recovery::CoreLocalRecoveryOutcome;
 pub use service_startup::CoreInitializationOutcome;
 
 #[cfg(test)]
 pub(crate) mod ownership_tests;
+
+#[cfg(test)]
+mod real_backup_recovery;
 
 #[derive(Clone, Copy)]
 struct CoreRecoveryPolicy {
@@ -315,7 +320,9 @@ pub struct CoreSession {
     transition: Arc<tokio::sync::Mutex<CommittedConfig>>,
     backup_gate: Arc<tokio::sync::Mutex<()>>,
     capture_publication_gate: Arc<tokio::sync::Mutex<()>>,
+    capture_intent_revision: Arc<AtomicU64>,
     pending_backup: Arc<RwLock<Option<PendingBackupRestore>>>,
+    local_backup_recovery: Arc<RwLock<Option<LocalBackupRecovery>>>,
     committed_profile: Arc<RwLock<CommittedProfileCache>>,
     generation: Arc<AtomicU64>,
     shutdown_requested: Arc<AtomicBool>,
@@ -328,6 +335,14 @@ pub struct CoreSession {
 struct CommittedConfig {
     profile: Option<PathBuf>,
     overrides: Vec<PathBuf>,
+}
+
+#[derive(Clone)]
+struct LocalBackupRecovery {
+    binding: u64,
+    active: Option<PathBuf>,
+    // Unknown PUT outcomes reuse these exact files; neither possibly active slot is replaced.
+    pending: Option<(Arc<crate::ServiceRuntimeBundle>, PathBuf, String)>,
 }
 
 struct CommittedProfileCache {
@@ -487,7 +502,9 @@ impl CoreSession {
             })),
             backup_gate: Arc::new(tokio::sync::Mutex::new(())),
             capture_publication_gate: Arc::default(),
+            capture_intent_revision: Arc::default(),
             pending_backup: Arc::new(RwLock::new(None)),
+            local_backup_recovery: Arc::new(RwLock::new(None)),
             generation: Arc::new(AtomicU64::new(0)),
             shutdown_requested: Arc::new(AtomicBool::new(false)),
             supervisor_started: Arc::new(AtomicBool::new(false)),
@@ -731,14 +748,36 @@ impl CoreSession {
         self.accept_saved_delta(None, Some(&requested))
     }
 
+    #[cfg(test)]
     pub(crate) async fn stage_profile_application(
         &self,
         store: &ControlledConfigStore,
-        candidate: PathBuf,
-        previous: Option<PathBuf>,
+        candidate: impl Into<crate::profile::ProfileRuntimeSource> + Send,
+        _previous: Option<PathBuf>,
         overrides: Vec<PathBuf>,
         apply_runtime: bool,
     ) -> Result<CoreProfileApplication, CoreProfileStageError> {
+        self.stage_profile_application_expected(
+            store,
+            candidate,
+            _previous,
+            overrides,
+            apply_runtime,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn stage_profile_application_expected(
+        &self,
+        store: &ControlledConfigStore,
+        candidate: impl Into<crate::profile::ProfileRuntimeSource> + Send,
+        _previous: Option<PathBuf>,
+        overrides: Vec<PathBuf>,
+        apply_runtime: bool,
+        expected: Option<(u64, u64)>,
+    ) -> Result<CoreProfileApplication, CoreProfileStageError> {
+        let candidate = candidate.into();
         let client = self.client.pin_binding().map_err(CoreSessionError::from)?;
         let write_lease = store
             .acquire_write_lease_for_paths(self.write_scopes_for_client(&client))
@@ -755,6 +794,12 @@ impl CoreSession {
             .ensure_binding_current()
             .map_err(CoreSessionError::from)?;
         self.ensure_running_operations_allowed()?;
+        if let Some((binding, generation)) = expected
+            && (client.runtime_descriptor().binding_generation() != binding
+                || self.generation() != generation)
+        {
+            return Err(CoreSessionError::from(MihomoError::StaleBinding).into());
+        }
         let active_overrides = overrides.clone();
         let state = if !apply_runtime {
             CoreProfileApplicationState::Validated(
@@ -778,38 +823,18 @@ impl CoreSession {
                 kind: CoreApplyKind::Restarted,
             }
         } else {
-            match store
-                .stage_profile_reload(&client, candidate.clone(), previous, overrides.clone())
+            let (transaction, kind) = store
+                .stage_profile_reload_with_restart(
+                    &client,
+                    candidate,
+                    overrides,
+                    self.shutdown_requested.clone(),
+                )
                 .await
-            {
-                Ok(transaction) => CoreProfileApplicationState::Runtime {
-                    transaction: Box::new(transaction),
-                    kind: CoreApplyKind::HotReloaded,
-                },
-                Err(error)
-                    if should_restart_after_hot_reload(&error.cause)
-                        && self.local_process(&client).is_ok() =>
-                {
-                    let hot_reload_attempted = error.attempted;
-                    CoreProfileApplicationState::Runtime {
-                        transaction: Box::new(
-                            store
-                                .stage_profile_restart(
-                                    self.local_process(&client)?,
-                                    candidate,
-                                    overrides,
-                                    Some(self.shutdown_requested.clone()),
-                                )
-                                .await
-                                .map_err(|mut error| {
-                                    error.attempted |= hot_reload_attempted;
-                                    self.profile_stage_error(error)
-                                })?,
-                        ),
-                        kind: CoreApplyKind::Restarted,
-                    }
-                }
-                Err(error) => return Err(self.profile_stage_error(error)),
+                .map_err(|error| self.profile_stage_error(error))?;
+            CoreProfileApplicationState::Runtime {
+                transaction: Box::new(transaction),
+                kind,
             }
         };
         Ok(CoreProfileApplication {
@@ -835,6 +860,53 @@ impl CoreSession {
         self.maintain_with_timeout(intent, CORE_READY_TIMEOUT).await
     }
 
+    /// Confirms service-kernel shutdown and exports its accepted resources and caches.
+    /// Returns the published generation and an immutable ordinary-user recovery bundle.
+    /// Once admitted, completion retains the transition even if its caller is cancelled.
+    /// This does not release the service, perform administrator maintenance, or persist files.
+    ///
+    /// # Errors
+    /// Rejects non-service owners, shutdown, unresolved revisions, and export failures.
+    /// Failure retains the prior accepted bundle and the explicit stop intention.
+    pub async fn export_service_runtime(
+        &self,
+    ) -> Result<(u64, Arc<crate::ServiceRuntimeBundle>), CoreSessionError> {
+        self.ensure_not_shutting_down()?;
+        let client = self.client.pin_binding()?;
+        let lease = self.acquire_process_write_lease(&client).await?;
+        let transition = self.transition.clone().lock_owned().await;
+        client.ensure_binding_current()?;
+        self.ensure_not_shutting_down()?;
+        let mutation = client.lock_runtime_binding().await?;
+        let Some(crate::owned_core::OwnedCore::Service(runtime)) = client.owned_core() else {
+            return Err(CoreSessionError::ReleaseUnsupported { core: self.kind });
+        };
+        self.ensure_not_shutting_down()?;
+        self.lifecycle.write().stop_requested = true;
+        self.network_suspended.store(false, Ordering::Release);
+        let session = self.clone();
+        tokio::spawn(async move {
+            let _lease = lease;
+            let _transition = transition;
+            let _mutation = mutation;
+            let result = runtime
+                .stop_and_export()
+                .await
+                .map_err(CoreSessionError::Process);
+            {
+                let mut lifecycle = session.lifecycle.write();
+                record_maintenance_outcome(&mut lifecycle, CoreMaintenanceIntent::Stop, &result);
+                if session.is_shutting_down() {
+                    lifecycle.phase = CoreLifecyclePhase::ShuttingDown;
+                }
+            }
+            let generation = session.next_generation();
+            Ok((generation, result?))
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))?
+    }
+
     async fn maintain_with_timeout(
         &self,
         intent: CoreMaintenanceIntent,
@@ -853,17 +925,22 @@ impl CoreSession {
         let before = match &owner {
             crate::owned_core::OwnedCore::Local(process) => {
                 let process = process.clone();
-                Some(
-                    tokio::task::spawn_blocking(move || process.snapshot())
-                        .await
-                        .map_err(|error| MihomoError::Process(error.to_string()))?,
-                )
+                tokio::task::spawn_blocking(move || process.try_snapshot())
+                    .await
+                    .map_err(|error| MihomoError::Process(error.to_string()))?
+                    .ok()
             }
             crate::owned_core::OwnedCore::Service(_) => None,
         };
         self.ensure_not_shutting_down()?;
-        self.network_suspended.store(false, Ordering::Release);
-        self.lifecycle.write().stop_requested = intent == CoreMaintenanceIntent::Stop;
+        let previous_network_suspended = self.network_suspended.swap(false, Ordering::AcqRel);
+        let previous_lifecycle = {
+            let mut lifecycle = self.lifecycle.write();
+            let previous = (lifecycle.phase, lifecycle.stop_requested);
+            lifecycle.stop_requested = intent == CoreMaintenanceIntent::Stop;
+            previous
+        };
+        let local_observed = before.is_some();
         let session = self.clone();
         tokio::spawn(async move {
             let _transition = transition;
@@ -873,9 +950,9 @@ impl CoreSession {
                 .await;
             let changed = match owner {
                 crate::owned_core::OwnedCore::Local(process) => {
-                    let after = tokio::task::spawn_blocking(move || process.snapshot()).await;
+                    let after = tokio::task::spawn_blocking(move || process.try_snapshot()).await;
                     match (before, after) {
-                        (Some(before), Ok(after)) => before.pid != after.pid
+                        (Some(before), Ok(Ok(after))) => before.pid != after.pid
                             || before.running != after.running || before.exit_reason != after.exit_reason,
                         _ => true,
                     }
@@ -886,7 +963,20 @@ impl CoreSession {
             };
             {
                 let mut lifecycle = session.lifecycle.write();
-                record_maintenance_outcome(&mut lifecycle, intent, &result);
+                if intent == CoreMaintenanceIntent::Restart
+                    && result.is_err()
+                    && local_observed
+                    && !changed
+                {
+                    // Validation and TUN rejection cannot revoke an unchanged local owner.
+                    lifecycle.phase = previous_lifecycle.0;
+                    lifecycle.stop_requested = previous_lifecycle.1;
+                    session
+                        .network_suspended
+                        .store(previous_network_suspended, Ordering::Release);
+                } else {
+                    record_maintenance_outcome(&mut lifecycle, intent, &result);
+                }
                 if session.is_shutting_down() {
                     lifecycle.stop_requested = true;
                     lifecycle.phase = CoreLifecyclePhase::ShuttingDown;
@@ -1291,6 +1381,16 @@ impl CoreSession {
         if expected_generation.is_some_and(|generation| generation != self.generation()) {
             return Err(CoreSessionError::Process(MihomoError::StaleTransport));
         }
+        if let Some(state) = self.local_backup_recovery.read().as_ref()
+            && state.binding == client.runtime_descriptor().binding_generation()
+            && let Some((held, _, _)) = &state.pending
+            && !snapshot
+                .service_bundle
+                .as_ref()
+                .is_some_and(|bundle| Arc::ptr_eq(held, bundle))
+        {
+            return Err(MihomoError::StaleBinding.into());
+        }
         let snapshot = snapshot.clone();
         let session = self.clone();
         tokio::spawn(async move {
@@ -1338,11 +1438,48 @@ impl CoreSession {
         committed: &mut CommittedConfig,
         authority: RuntimeRestoreAuthority,
     ) -> Result<CoreApplyOutcome, CoreSessionError> {
-        let payload = snapshot.payload.clone().ok_or_else(|| {
+        let mut payload = snapshot.payload.clone().ok_or_else(|| {
             CoreSessionError::Config(ControlledConfigError::Transaction(zenclash_i18n::text(
                 "backup.errors.no_runtime_snapshot",
             )))
         })?;
+        let mut local_recovery = None;
+        if let (Some(crate::owned_core::OwnedCore::Local(local)), Some(bundle)) =
+            (client.owned_core(), snapshot.service_bundle.as_ref())
+        {
+            let binding = client.runtime_descriptor().binding_generation();
+            let launch = local.launch_config().config_file.clone();
+            let root = store.root().join("local-runtime");
+            let active = (launch == root.join("slot0/runtime.yaml")
+                || launch == root.join("slot1/runtime.yaml"))
+            .then_some(launch);
+            let mut state = self
+                .local_backup_recovery
+                .read()
+                .clone()
+                .filter(|state| state.binding == binding)
+                .unwrap_or(LocalBackupRecovery {
+                    binding,
+                    active,
+                    pending: None,
+                });
+            let path = if let Some((held, path, prepared)) = &state.pending {
+                if !Arc::ptr_eq(held, bundle) {
+                    return Err(MihomoError::StaleBinding.into());
+                }
+                payload = prepared.clone();
+                path.clone()
+            } else {
+                let (path, prepared) = bundle
+                    .materialize_local_runtime_prepared(store, state.active.clone())
+                    .await?;
+                payload = prepared;
+                state.pending = Some((bundle.clone(), path.clone(), payload.clone()));
+                path
+            };
+            *self.local_backup_recovery.write() = Some(state);
+            local_recovery = Some(path);
+        }
         let process = if self.kind.capabilities().full_config_reload {
             None
         } else {
@@ -1364,7 +1501,19 @@ impl CoreSession {
             )
             .await;
         if let Err(error) = result {
+            if local_recovery.is_some()
+                && !error.attempted
+                && let Some(state) = self.local_backup_recovery.write().as_mut()
+            {
+                state.pending = None;
+            }
             return Err(self.runtime_mutation_error(error));
+        }
+        if let Some(path) = local_recovery
+            && let Some(state) = self.local_backup_recovery.write().as_mut()
+        {
+            state.active = Some(path);
+            state.pending = None;
         }
         *committed = snapshot.committed.clone();
         Ok(CoreApplyOutcome {
@@ -1779,10 +1928,10 @@ async fn supervise_managed_core(
     }
 }
 
-pub(crate) fn record_maintenance_outcome(
+pub(crate) fn record_maintenance_outcome<T>(
     lifecycle: &mut CoreLifecycleSnapshot,
     intent: CoreMaintenanceIntent,
-    result: &Result<(), CoreSessionError>,
+    result: &Result<T, CoreSessionError>,
 ) {
     lifecycle.stop_requested = intent == CoreMaintenanceIntent::Stop;
     lifecycle.phase = if result.is_err() {
@@ -1917,7 +2066,7 @@ async fn recover_managed_core(session: &CoreSession, policy: CoreRecoveryPolicy)
     }
 }
 
-fn should_restart_after_hot_reload(error: &ControlledConfigError) -> bool {
+pub(crate) fn should_restart_after_hot_reload(error: &ControlledConfigError) -> bool {
     matches!(error, ControlledConfigError::Profile(MihomoError::Http(_)))
 }
 

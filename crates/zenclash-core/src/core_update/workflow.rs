@@ -10,9 +10,7 @@ use super::{
     CoreUpdateError, CoreUpdateResult, PreparedCoreUpdate, service::MihomoReleaseService,
     transaction::CoreUpdateTransaction,
 };
-use crate::{
-    CoreConfigValidator, MihomoClient, MihomoProcess, VersionInfo, data_coordinator::DataWriteLease,
-};
+use crate::{MihomoClient, MihomoProcess, VersionInfo, data_coordinator::DataWriteLease};
 
 pub(crate) struct InstalledCore {
     pub(crate) version: VersionInfo,
@@ -32,31 +30,40 @@ impl MihomoReleaseService {
         let expected_tag = prepared.tag().to_owned();
         let candidate = prepared.candidate_path()?.to_path_buf();
         // Resolve the startup payload here: a profile may have changed during download.
-        let config = process.launch_config();
-        let validator =
-            CoreConfigValidator::new(process.kind(), candidate, config.home_dir.clone())
-                .with_write_lease(lease);
-        let config_file = config.config_file.clone();
-        let precheck = tokio::task::spawn_blocking(move || validator.validate_file(config_file))
-            .await
-            .map_err(|error| {
-                CoreUpdateError::Runtime(format!("候选内核配置预检任务异常结束：{error}"))
-            })?
-            .map_err(|error| {
+        let validator = process
+            .config_validator()
+            .with_binary(candidate)
+            .with_write_lease(lease);
+        let precheck_process = process.clone();
+        let precheck = tokio::task::spawn_blocking(move || {
+            let payload: Arc<str> = precheck_process
+                .read_launch_payload()
+                .map_err(|error| CoreUpdateError::Runtime(error.to_string()))?
+                .into();
+            validator.validate_payload(&payload).map_err(|error| {
                 CoreUpdateError::Runtime(format!("候选内核拒绝当前运行配置：{error}"))
-            });
+            })?;
+            Ok::<_, CoreUpdateError>(payload)
+        })
+        .await
+        .map_err(|error| {
+            CoreUpdateError::Runtime(format!("候选内核配置预检任务异常结束：{error}"))
+        })?;
         if cancelled.load(Ordering::Acquire) {
             tokio::task::spawn_blocking(move || drop(prepared))
                 .await
                 .map_err(|error| CoreUpdateError::Runtime(error.to_string()))?;
             return Err(CoreUpdateError::Cancelled);
         }
-        if let Err(error) = precheck {
-            tokio::task::spawn_blocking(move || drop(prepared))
-                .await
-                .map_err(|error| CoreUpdateError::Runtime(error.to_string()))?;
-            return Err(error);
-        }
+        let payload = match precheck {
+            Ok(payload) => payload,
+            Err(error) => {
+                tokio::task::spawn_blocking(move || drop(prepared))
+                    .await
+                    .map_err(|error| CoreUpdateError::Runtime(error.to_string()))?;
+                return Err(error);
+            }
+        };
         let restore_running = process.is_running();
         stop_process(process.clone()).await?;
         if cancelled.load(Ordering::Acquire) {
@@ -74,6 +81,7 @@ impl MihomoReleaseService {
                     &cancelled,
                     lease,
                     restore_running,
+                    payload,
                 )
                 .await);
             }
@@ -84,12 +92,13 @@ impl MihomoReleaseService {
                     &cancelled,
                     lease,
                     restore_running,
+                    payload,
                 )
                 .await);
             }
         };
         let verification = async {
-            restart_process(process.clone(), &cancelled, lease).await?;
+            restart_process(process.clone(), &cancelled, lease, payload.clone()).await?;
             let reported = tokio::select! {
                 biased;
                 () = wait_for_cancellation(Some(cancelled.clone())) => return Err(CoreUpdateError::Cancelled),
@@ -115,6 +124,7 @@ impl MihomoReleaseService {
                     &cancelled,
                     lease,
                     restore_running,
+                    payload,
                 )
                 .await);
             }
@@ -161,9 +171,15 @@ async fn restart_process(
     process: Arc<MihomoProcess>,
     cancelled: &Arc<AtomicBool>,
     lease: &DataWriteLease,
+    payload: Arc<str>,
 ) -> CoreUpdateResult<()> {
     process
-        .restart_and_wait_until_with_lease(Duration::from_secs(20), Some(cancelled.clone()), lease)
+        .restart_and_wait_with_payload(
+            Duration::from_secs(20),
+            Some(cancelled.clone()),
+            lease,
+            payload,
+        )
         .await
         .map_err(|error| {
             if cancelled.load(Ordering::Acquire) {
@@ -180,6 +196,7 @@ async fn restart_after_activation_failure(
     cancelled: &Arc<AtomicBool>,
     lease: &DataWriteLease,
     restore_running: bool,
+    payload: Arc<str>,
 ) -> CoreUpdateError {
     if cancelled.load(Ordering::Acquire) {
         return CoreUpdateError::Cancelled;
@@ -190,7 +207,7 @@ async fn restart_after_activation_failure(
             &[("error", activation_error)],
         ));
     }
-    match restart_process(process, cancelled, lease).await {
+    match restart_process(process, cancelled, lease, payload).await {
         Ok(()) => CoreUpdateError::Runtime(format!("{activation_error}；旧内核已重新启动")),
         Err(restart) => {
             CoreUpdateError::Runtime(format!("{activation_error}；旧内核重新启动失败：{restart}"))
@@ -205,6 +222,7 @@ async fn rollback_rejected_core(
     cancelled: &Arc<AtomicBool>,
     lease: &DataWriteLease,
     restore_running: bool,
+    payload: Arc<str>,
 ) -> CoreUpdateError {
     if let Err(error) = stop_process(process.clone()).await {
         let backup = transaction.preserve_for_manual_recovery();
@@ -243,7 +261,7 @@ async fn rollback_rejected_core(
             &[("error", rejection.to_string()), ("cleanup", cleanup)],
         ));
     }
-    match restart_process(process, cancelled, lease).await {
+    match restart_process(process, cancelled, lease, payload).await {
         Ok(()) => CoreUpdateError::Runtime(format!("{rejection}；已自动恢复并启动旧内核{cleanup}")),
         Err(error) => CoreUpdateError::Runtime(format!(
             "{rejection}；旧内核已恢复但重新启动失败：{error}{cleanup}"

@@ -991,10 +991,10 @@ impl RuntimePage {
         let submitted_inputs = self.config_inputs.submitted(&patch, cx);
         let controlled = self.controlled_config_store.clone();
         let overrides = self.enabled_override_paths();
-        let core_session = self.core_session.clone();
+        let profiles = self.profile_service.clone();
         let task = self.runtime.spawn(async move {
-            let outcome = core_session
-                .apply(
+            let outcome = profiles
+                .apply_config(
                     &controlled,
                     EffectiveConfigIntent::Patch {
                         profile,

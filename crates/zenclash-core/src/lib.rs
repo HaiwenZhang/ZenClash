@@ -11,12 +11,13 @@ mod service_runtime;
 mod service_runtime_session;
 
 pub use service_manager::{
-    ServiceHealthKind, ServiceManager, ServiceManagerError, ServiceManagerSnapshot,
-    ServiceOperation, ServicePhase, ServiceTunRequest, startup_service_health,
-    verify_ordinary_local_executable,
+    PreparedServiceBackupConfig, ServiceConfigOutcome, ServiceHealthKind,
+    ServiceMaintenancePreparation, ServiceMaintenanceRecoveryOutcome, ServiceMaintenanceRequest,
+    ServiceManager, ServiceManagerError, ServiceManagerSnapshot, ServiceOperation, ServicePhase,
+    ServiceTunRequest, startup_service_health, verify_ordinary_local_executable,
 };
 
-pub use service_runtime::ServiceRuntimeBundle;
+pub use service_runtime::{LocalGeoDataRecovery, ServiceRuntimeBundle};
 mod config_diff;
 mod controlled_config;
 mod core_backend;
@@ -48,6 +49,7 @@ mod system_proxy;
 mod traffic;
 mod traffic_capture;
 mod traffic_history;
+mod tun_admission;
 mod tun_permissions;
 mod tun_runtime;
 mod websocket;
@@ -75,8 +77,8 @@ pub use core_installation::{CoreBinaryError, CoreBinaryInfo, validate_core_binar
 pub use core_session::{
     CoreApplyKind, CoreApplyOutcome, CoreBackupAdmission, CoreCommittedProfileSnapshot,
     CoreInitializationOutcome, CoreInstallOutcome, CoreLifecyclePhase, CoreLifecycleSnapshot,
-    CoreMaintenanceIntent, CoreRestoreSnapshot, CoreSession, CoreSessionError, CoreSessionSnapshot,
-    EffectiveConfigIntent,
+    CoreLocalRecoveryOutcome, CoreMaintenanceIntent, CoreRestoreSnapshot, CoreSession,
+    CoreSessionError, CoreSessionSnapshot, EffectiveConfigIntent,
 };
 pub use core_update::{
     CoreUpdateError, CoreUpdateResult, CoreUpdateTransaction, MihomoRelease, MihomoReleaseAsset,
@@ -125,10 +127,11 @@ pub use profile::merge_profile_overrides;
 pub use profiles::{
     DEFAULT_PROFILE_DOWNLOAD_TIMEOUT_SECONDS, DEFAULT_PROFILE_UPDATE_INTERVAL_MINUTES,
     MAX_PROFILE_DOWNLOAD_TIMEOUT_SECONDS, MAX_PROFILE_UPDATE_INTERVAL_MINUTES,
-    MIN_PROFILE_DOWNLOAD_TIMEOUT_SECONDS, MIN_PROFILE_UPDATE_INTERVAL_MINUTES, ProfileActivation,
-    ProfileApplication, ProfileApplicationError, ProfileApplyOutcome, ProfileCatalog,
-    ProfileChange, ProfileRecord, ProfileRecovery, ProfileSource, ProfileStore, ProfileStoreError,
-    ProfileStoreResult, ProfileUpdate, ProfileVersion, RemoteProfileOptions, RemoteProfileRoute,
+    MIN_PROFILE_DOWNLOAD_TIMEOUT_SECONDS, MIN_PROFILE_UPDATE_INTERVAL_MINUTES,
+    PreparedProfileChange, ProfileActivation, ProfileApplication, ProfileApplicationError,
+    ProfileApplyOutcome, ProfileCatalog, ProfileChange, ProfilePreparationError, ProfileRecord,
+    ProfileRecovery, ProfileSource, ProfileStore, ProfileStoreError, ProfileStoreResult,
+    ProfileUpdate, ProfileVersion, RemoteProfileOptions, RemoteProfileRoute,
     SubscriptionAuthorization, SubscriptionMetadata, SubscriptionUsage, validate_clash_yaml,
 };
 pub use provider_operations::{
@@ -159,8 +162,8 @@ pub use traffic::{
     LIVE_TRAFFIC_SAMPLE_COUNT, TrafficMonitor, TrafficSample, TrafficSnapshot, format_speed,
 };
 pub use traffic_capture::{
-    CaptureOutcome, CapturePlan, ObservedCapturePlan, ServiceTunOutcome, TrafficCaptureError,
-    TrafficCaptureSession, TrafficCaptureSnapshot,
+    CaptureOutcome, CapturePlan, ObservedCapturePlan, ServiceLocalRecoveryOutcome,
+    ServiceTunOutcome, TrafficCaptureError, TrafficCaptureSession, TrafficCaptureSnapshot,
 };
 pub use traffic_history::{
     DEFAULT_TRAFFIC_RETENTION_DAYS, TrafficAggregate, TrafficDeltaLogger, TrafficDimension,

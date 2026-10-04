@@ -310,9 +310,12 @@ impl MihomoClient {
     /// Returns serialization, transport or API-status errors.
     pub async fn patch_configs<T: Serialize + Sync + ?Sized>(&self, body: &T) -> MihomoResult<()> {
         let client = self.pin_binding()?;
+        let body = serde_json::to_value(body)
+            .map_err(|error| MihomoError::InvalidInput(error.to_string()))?;
+        if let Some(crate::owned_core::OwnedCore::Local(process)) = client.owned_core() {
+            crate::tun_admission::ensure_local_patch(process.kind(), &body)?;
+        }
         if client.runtime_session().is_some() {
-            let body = serde_json::to_value(body)
-                .map_err(|error| MihomoError::InvalidInput(error.to_string()))?;
             let write_lease = client.acquire_write_lease().await?;
             client.ensure_binding_current()?;
             let client = match write_lease.as_ref() {
@@ -340,7 +343,7 @@ impl MihomoClient {
             .await
             .map_err(|_| MihomoError::Process("Service partial completion failed".into()))?;
         }
-        client.patch_json("/configs", body).await
+        client.patch_json("/configs", &body).await
     }
 
     /// Applies a JSON `/configs` patch and verifies that Mihomo reports the
@@ -508,6 +511,9 @@ impl MihomoClient {
                 None => runtime.prepare(&payload).await?,
             })
         } else {
+            if let Some(crate::owned_core::OwnedCore::Local(process)) = client.owned_core() {
+                crate::tun_admission::ensure_local_yaml(process.kind(), &payload)?;
+            }
             client.validate_config_payload_unlocked(&payload).await?;
             PreparedConfigKind::Direct(payload)
         };

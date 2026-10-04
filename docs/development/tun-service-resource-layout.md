@@ -1,6 +1,6 @@
 # TUN 服务资源目录与持久节点状态
 
-本文记录 [开发计划](tun-service-plan.md) 的资源隔离细节；修订日期：2026-10-02。同会话缓存继承已有首批验证，provider 底层回读已通过两轮审查；高层缓存保存、跨会话稳定 home 和持久节点状态仍待实施，不代表 Tailscale、ZeroTier 迁移已完成。来源与阶段证据见 [移植计划](tun-service-upstream-migration.md) 和 [实施记录](tun-service-progress.md)。
+本文记录 [开发计划](tun-service-plan.md) 的资源隔离细节；修订日期：2026-10-04。同会话缓存继承、provider 底层回读及部分高层恢复已有阶段验证；跨会话缓存保存、稳定 home 和持久节点状态仍待实施，不代表 Tailscale、ZeroTier 迁移已完成。新增存储与失败策略的具体提案见 [跨会话缓存实施方案](tun-service-cache-persistence.md)，尚待用户确认。来源与阶段证据见 [移植计划](tun-service-upstream-migration.md) 和 [实施记录](tun-service-progress.md)。
 
 ## 运行资源隔离
 
@@ -49,11 +49,13 @@ session/
 
 采用单个有界内存快照，避免分页期间文件变化或长期持有 Windows 文件锁。rule/MRS 原始字节最多 128 MiB，proxy YAML 解析及批准资源反向映射最多 4 MiB；传输块 256 KiB，整个 revision 回读最多 256 MiB、256 次尝试、15 秒总期限，分页不续期，finish 不重置整批预算。临时快照最多增加 128 MiB 服务内存，不能以单块大小代表总占用。排队取消不准入；已准入 Begin 的调用方取消等待后，完成任务仍持门栓直到实际文件复制结束。finish、过期、revision 替换和 owner 释放回收快照，但不将丢失响应当成明确取消或可盲目重试。不新增用户落盘格式或依赖；跨会话缓存保存和节点身份迁移分别实施。
 
-## 高层缓存保存与本地恢复：方案待实施
+## 高层缓存保存与本地恢复：已有阶段接线，跨会话仍待实施
 
-高层在确认 Stop 后、Release 前冻结准确的 revision 与资源 bundle，回读声明的缓存，验证完整长度与摘要，再以普通权限原子保存到托管缓存。不能写回导入的订阅、TLS 源文件或 HTTP provider 的任意原始路径。保存工作与后续启动/释放由同一完成任务持有，外层取消等待不丢弃已准入写入；丢失 Begin/Read 响应时保留准确的未知结果，不自动重发。本地缓存目录、逻辑 provider 映射及保存失败对退出/重启的影响尚待确定。
+CoreSession 已接停止与内存导出入口：已准入完成任务持有租约和会话门栓，确认停止后读取当前 accepted revision 的 HTTP provider 缓存，发布前复核状态。全部成功才替换内存 bundle；失败保留旧 bundle 和停止意图。原 YAML 与非 HTTP 缓存资源保留。随后 GUI 维护已接到 Service→Local 恢复，使用用户确认的 `ControlledConfigStore.root()/local-runtime/{slot0,slot1}` 生成 TUN-off 配置和持有资源，并保留原 Mihomo home；GeoData 仅对固定名称有界替换并覆盖失败回滚。Local→Service 接续也已接 HTTP provider 缓存导出。阶段回归见 [实施记录](tun-service-progress.md)，完整原生串联和跨会话持久化仍未完成；历次证据按批次区分。
 
-修复/卸载恢复 Local 的提案是保留不可变启动描述与最新 accepted bundle，在普通用户的受控生成目录物化 TLS、文件 provider 等资源，保留原 Mihomo home。GeoData 从 home 下固定名称读取，不能仅改 YAML 引用；固定缓存文件的替换、恢复和链接拒绝需单独覆盖。生成目录及 GeoData 写入范围尚未批准或实施，不代表已存在新的用户数据格式。详细边界见 [core 接入文档](tun-service-core-integration.md)。
+高层在确认 Stop 后、Release 前冻结准确的 revision 与资源 bundle，回读声明的缓存，验证完整长度与摘要，再以普通权限原子保存到托管缓存。不能写回导入的订阅、TLS 源文件或 HTTP provider 的任意原始路径。保存工作与后续启动/释放由同一完成任务持有，外层取消等待不丢弃已准入写入；丢失 Begin/Read 响应时保留准确的未知结果，不自动重发。已确认的双槽目录不等同于跨会话 provider 映射与节点身份清单的批准；后两者的持久格式及保存失败对退出/重启的影响仍需明确。
+
+修复/卸载恢复 Local 保留不可变启动描述与最新 accepted bundle，在普通用户的受控生成目录物化 TLS、文件 provider 等资源，保留原 Mihomo home。2026-10-03 用户已确认 `ControlledConfigStore.root()/local-runtime/{slot0,slot1}` 双槽生成与固定 GeoData 原子激活/失败回滚的范围：无既有用户迁移，不改写订阅/TLS 源。双槽文件生成已有 Windows/普通 WSL Linux 阶段验证，随后 GUI 维护已接入 Manager 恢复流程，完整原生串联仍未验收。GeoData 从 home 下固定名称读取，不能仅改 YAML 引用；`with_local_geodata` 先有界备份再原子激活，正常错误恢复旧字节与原先不存在的状态，静态链接目标拒绝。维护调用方必须确认内核停止并正确发布 Local owner；已有阶段接线和失败回归不能代替真实服务验证。详细边界见 [core 接入文档](tun-service-core-integration.md#55-修复与卸载接线已确认方案分批实施)。
 
 ## 持久节点状态设计：待确认并实施
 

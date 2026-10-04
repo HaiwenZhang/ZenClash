@@ -86,6 +86,7 @@ async fn restore_prepared(
     prepared: PreparedBackupRestore,
     runtime: CoreProfileRuntime,
 ) -> Result<RestoreOutcome, String> {
+    let (prepared, application) = runtime.prepare_backup_restore(prepared).await?;
     let admission = runtime
         .session()
         .begin_backup_restore()
@@ -93,11 +94,17 @@ async fn restore_prepared(
         .map_err(|error| error.to_string())?;
     // One admitted completion owns activation through cleanup; dropping the UI waiter cannot
     // release disk authority while an accepted runtime or blocking persistence task continues.
-    tokio::spawn(restore_admitted(manager, prepared, runtime, admission))
-        .await
-        .map_err(|error| {
-            zenclash_i18n::text_with("backup.errors.state_task", &[("error", error.to_string())])
-        })?
+    tokio::spawn(restore_admitted(
+        manager,
+        prepared,
+        runtime,
+        admission,
+        application,
+    ))
+    .await
+    .map_err(|error| {
+        zenclash_i18n::text_with("backup.errors.state_task", &[("error", error.to_string())])
+    })?
 }
 
 async fn restore_admitted(
@@ -105,6 +112,7 @@ async fn restore_admitted(
     prepared: PreparedBackupRestore,
     runtime: CoreProfileRuntime,
     admission: zenclash_core::CoreBackupAdmission,
+    application: crate::profile_service::PreparedBackupApplication,
 ) -> Result<RestoreOutcome, String> {
     let file_count = prepared.file_count();
     let payload_bytes = prepared.payload_bytes();
@@ -149,7 +157,13 @@ async fn restore_admitted(
     let overrides = override_store.enabled_paths(&override_catalog);
     let previous_runtime_version = runtime.session().generation();
     let runtime_version = match runtime
-        .reload_with_overrides(controlled_store.clone(), &profile_path, overrides)
+        .reload_backup_config(
+            controlled_store.clone(),
+            &profile_path,
+            overrides,
+            application,
+            transaction.previous_runtime_snapshot(),
+        )
         .await
     {
         Ok(outcome) => outcome.generation,

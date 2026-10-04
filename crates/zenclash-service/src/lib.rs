@@ -13,6 +13,8 @@ mod kernel;
 mod kernel_transport;
 #[cfg(feature = "server")]
 mod maintenance_journal;
+#[cfg(feature = "server")]
+mod maintenance_lock;
 mod metadata;
 #[cfg(feature = "server")]
 mod package_maintenance;
@@ -68,6 +70,8 @@ mod session;
 
 pub use client::{ServiceClient, ServiceClientError, ServiceLogs, ServiceSubscription};
 pub use frame::{FrameError, MAX_FRAME_BYTES, read_frame, write_frame};
+#[cfg(all(feature = "server", target_os = "macos"))]
+pub use installer::query_service_host_pid;
 #[cfg(feature = "server")]
 pub use installer::run_maintenance;
 pub use installer::{
@@ -80,11 +84,12 @@ pub use metadata::{
 #[cfg(feature = "server")]
 pub use package_maintenance::run_package_uninstall;
 pub use protocol::{
-    ApiResponse as ServiceApiResponse, PreparedRuntimePatch as ServicePreparedRuntimePatch,
+    ApiResponse as ServiceApiResponse, LogStreamOptions,
+    PreparedRuntimePatch as ServicePreparedRuntimePatch,
     RuntimeCandidate as ServiceRuntimeCandidate,
     RuntimeCandidateKind as ServiceRuntimeCandidateKind,
     RuntimeCandidatePhase as ServiceRuntimeCandidatePhase, RuntimeStatus as ServiceRuntimeStatus,
-    ServiceErrorCode, StreamKind as ServiceStream,
+    ServiceErrorCode, ServiceLogFormat, ServiceLogLevel, StreamKind as ServiceStream,
 };
 pub use protocol::{PROTOCOL_VERSION, ProtocolInfo, SessionProof, SessionToken};
 pub use protocol::{ProviderCacheChunk, ProviderCacheRead, ProviderCacheToken, ProviderKind};

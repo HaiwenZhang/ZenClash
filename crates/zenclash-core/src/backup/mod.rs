@@ -180,15 +180,39 @@ impl BackupManager {
 }
 
 /// A completely validated backup extracted into an isolated staging directory.
-#[derive(Debug)]
 pub struct PreparedBackupRestore {
     data_root: PathBuf,
     staging_root: PathBuf,
     file_count: usize,
     payload_bytes: u64,
+    previous_runtime: Option<((u64, u64), crate::CoreRestoreSnapshot)>,
+}
+
+impl std::fmt::Debug for PreparedBackupRestore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedBackupRestore")
+            .field("data_root", &self.data_root)
+            .field("staging_root", &self.staging_root)
+            .field("file_count", &self.file_count)
+            .field("payload_bytes", &self.payload_bytes)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PreparedBackupRestore {
+    pub(crate) fn retain_runtime(
+        &mut self,
+        expected: (u64, u64),
+        snapshot: crate::CoreRestoreSnapshot,
+    ) {
+        self.previous_runtime = Some((expected, snapshot));
+    }
+    pub(crate) fn runtime_candidate(&self) -> BackupResult<BackupRuntimeCandidate> {
+        let lease = crate::data_coordinator::DataWriteLease::shared([self.staging_root.clone()]);
+        BackupRuntimeCandidate::read(&self.staging_root, &self.data_root, &lease)
+    }
+
     /// Number of authoritative files validated in the archive.
     #[must_use]
     pub const fn file_count(&self) -> usize {
@@ -227,6 +251,61 @@ impl PreparedBackupRestore {
         session: &crate::CoreSession,
     ) -> BackupResult<BackupRestoreTransaction> {
         transaction::activate(self, Some(session))
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct BackupRuntimeCandidate {
+    pub(crate) data_root: PathBuf,
+    pub(crate) profile: PathBuf,
+    pub(crate) overrides: Vec<PathBuf>,
+    pub(crate) payload: String,
+    pub(crate) patch: Vec<u8>,
+}
+
+impl BackupRuntimeCandidate {
+    fn read(
+        source: &Path,
+        destination: &Path,
+        lease: &crate::data_coordinator::DataWriteLease,
+    ) -> BackupResult<Self> {
+        let profiles = crate::ProfileStore::open(source.join("profiles"), Some(lease))?;
+        let profile = profiles.active_path()?.ok_or_else(|| {
+            BackupError::InvalidArchive(zenclash_i18n::text("backup.errors.missing_profile"))
+        })?;
+        let overrides = crate::YamlOverrideStore::open(source.join("yaml-overrides"), Some(lease))?;
+        let paths = overrides.enabled_paths(&overrides.load()?);
+        let controlled =
+            ControlledConfigStore::new(source.join("controlled-config")).with_write_lease(lease);
+        let payload = controlled.effective_with_overrides(&profile, &paths)?;
+        let patch = crate::profiles::read_profile_bytes(&source.join(CONTROLLED_PATH))?;
+        let relocate = |path: &Path| {
+            path.strip_prefix(source)
+                .map(|relative| destination.join(relative))
+                .map_err(|error| BackupError::InvalidArchive(error.to_string()))
+        };
+        Ok(Self {
+            data_root: destination.to_path_buf(),
+            profile: relocate(&profile)?,
+            overrides: paths
+                .iter()
+                .map(|path| relocate(path))
+                .collect::<BackupResult<_>>()?,
+            payload,
+            patch,
+        })
+    }
+
+    pub(crate) fn validate_live(
+        &self,
+        lease: &crate::data_coordinator::DataWriteLease,
+    ) -> BackupResult<()> {
+        if Self::read(&self.data_root, &self.data_root, lease)? != *self {
+            return Err(BackupError::Transaction(zenclash_i18n::text(
+                "core_page.service.stale",
+            )));
+        }
+        Ok(())
     }
 }
 

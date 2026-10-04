@@ -13,6 +13,35 @@ use crate::{
 };
 
 #[tokio::test]
+async fn local_recovery_launch_tracks_actual_owner_and_clears_for_external_binding() {
+    let directory =
+        std::env::temp_dir().join(format!("zenclash-recovery-launch-{}", std::process::id()));
+    let process = MihomoProcess::prepare_stopped(MihomoLaunchConfig {
+        kind: CoreKind::Mihomo,
+        binary: directory.join("ordinary-mihomo"),
+        config_file: directory.join("original.yaml"),
+        home_dir: directory.join("home"),
+        endpoint: MihomoEndpoint::default(),
+        controller_override: None,
+    });
+    let session = CoreSession::open(
+        CoreKind::Mihomo,
+        MihomoClient::from_process(process.clone()).unwrap(),
+    )
+    .unwrap();
+    let count = Arc::strong_count(&process);
+    let launch = session.clone().local_recovery_launch().unwrap();
+    assert_eq!(launch.binary, process.launch_config().binary);
+    assert_eq!(Arc::strong_count(&process), count);
+    session
+        .switch_to_direct(MihomoEndpoint::default())
+        .await
+        .unwrap();
+    assert!(session.local_recovery_launch().is_none());
+    session.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn maintenance_restart_failure_invalidates_an_observation_of_the_old_child() {
     let fixture = ChildFixture::new("maintenance-restart-failure").await;
     let session = CoreSession::open(
@@ -38,6 +67,104 @@ async fn maintenance_restart_failure_invalidates_an_observation_of_the_old_child
         crate::CoreLifecyclePhase::Unknown
     );
     session.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn rejected_local_restart_preserves_running_lifecycle_and_pid() {
+    let fixture = ChildFixture::new("rejected-restart-running").await;
+    let session = CoreSession::open(
+        CoreKind::Mihomo,
+        MihomoClient::from_process(fixture.process.clone()).unwrap(),
+    )
+    .unwrap();
+    let pid = fixture.process.snapshot().pid;
+    std::fs::write(
+        &fixture.process.launch_config().config_file,
+        "tun: {enable: true}\n",
+    )
+    .unwrap();
+    let result = session.maintain(CoreMaintenanceIntent::Restart).await;
+    let lifecycle = session.lifecycle_snapshot();
+    let current = fixture.process.snapshot().pid;
+    let generation = session.generation();
+    session.shutdown().await.unwrap();
+    assert!(matches!(
+        result,
+        Err(crate::CoreSessionError::Process(
+            crate::MihomoError::ServiceRequired
+        ))
+    ));
+    assert_eq!(current, pid);
+    assert_eq!(generation, 0);
+    assert_eq!(lifecycle.phase, crate::CoreLifecyclePhase::Stable);
+    assert!(!lifecycle.stop_requested);
+}
+
+#[tokio::test]
+async fn rejected_local_restart_preserves_explicit_stop_intent() {
+    let fixture = ChildFixture::new("rejected-restart-stopped").await;
+    let session = CoreSession::open(
+        CoreKind::Mihomo,
+        MihomoClient::from_process(fixture.process.clone()).unwrap(),
+    )
+    .unwrap();
+    session.maintain(CoreMaintenanceIntent::Stop).await.unwrap();
+    let generation = session.generation();
+    std::fs::write(
+        &fixture.process.launch_config().config_file,
+        "tun: {enable: true}\n",
+    )
+    .unwrap();
+    let result = session.maintain(CoreMaintenanceIntent::Restart).await;
+    let lifecycle = session.lifecycle_snapshot();
+    let current = session.generation();
+    let running = fixture.process.snapshot().running;
+    session.shutdown().await.unwrap();
+    assert!(result.is_err());
+    assert!(!running);
+    assert_eq!(current, generation);
+    assert_eq!(lifecycle.phase, crate::CoreLifecyclePhase::Stopped);
+    assert!(lifecycle.stop_requested);
+}
+
+#[tokio::test]
+async fn rejected_local_restart_preserves_network_resume_eligibility() {
+    let fixture = ChildFixture::new("rejected-restart-network").await;
+    let session = CoreSession::open(
+        CoreKind::Mihomo,
+        MihomoClient::from_process(fixture.process.clone()).unwrap(),
+    )
+    .unwrap();
+    let capture = crate::TrafficCaptureSession::new(
+        session.clone(),
+        crate::ControlledConfigStore::new(fixture.directory.join("store")),
+        None,
+        None,
+    );
+    assert!(session.suspend_for_network(&capture).await.unwrap());
+    let generation = session.generation();
+    std::fs::write(
+        &fixture.process.launch_config().config_file,
+        "tun: {enable: true}\n",
+    )
+    .unwrap();
+    let result = session.maintain(CoreMaintenanceIntent::Restart).await;
+    let lifecycle = session.lifecycle_snapshot();
+    let rejected_generation = session.generation();
+    std::fs::write(
+        &fixture.process.launch_config().config_file,
+        "rules:\n  - MATCH,DIRECT\n",
+    )
+    .unwrap();
+    let resumed = session.resume_after_network(&capture).await.unwrap();
+    let running = fixture.process.snapshot().running;
+    session.shutdown().await.unwrap();
+    assert!(result.is_err());
+    assert_eq!(rejected_generation, generation);
+    assert_eq!(lifecycle.phase, crate::CoreLifecyclePhase::NetworkSuspended);
+    assert!(!lifecycle.stop_requested);
+    assert!(resumed, "rejection lost the accepted network suspension");
+    assert!(running);
 }
 
 #[tokio::test]
@@ -488,6 +615,10 @@ pub(crate) struct ChildFixture {
 }
 
 impl ChildFixture {
+    pub(crate) fn responder_for_test_abort(&self) {
+        self.responder.abort();
+    }
+
     pub(crate) async fn new(label: &str) -> Self {
         let directory = std::env::temp_dir().join(format!(
             "zenclash-current-child-{label}-{}-{}",

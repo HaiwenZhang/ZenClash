@@ -3,7 +3,7 @@ use gpui_kit::component::{Disableable, WindowExt, button::Button, h_flex};
 use gpui_kit::{Context, ParentElement, Window};
 use zenclash_core::{
     CaptureOutcome, CoreRuntimeBackend, ServiceHealthKind, ServiceManagerSnapshot,
-    ServiceTunRequest,
+    ServiceOperation, ServiceTunRequest,
 };
 
 use super::super::{Page, PageTaskToken, RuntimePage};
@@ -22,6 +22,7 @@ impl RuntimePage {
         let pending = self.profile_service.pending_finalization();
         h_flex()
             .justify_end()
+            .flex_wrap()
             .gap_2()
             .p_4()
             .children(pending.map(|version| {
@@ -41,11 +42,37 @@ impl RuntimePage {
                         "core_page.service.enable"
                     }))
                     .outline()
-                    .loading(state.is_busy())
+                    .loading(
+                        state.is_busy() && state.operation() == Some(ServiceOperation::EnableTun),
+                    )
                     .disabled(self.core_busy() || state.is_busy() || pending.is_some())
                     .on_click(
                         cx.listener(|this, _, window, cx| this.request_service_tun(window, cx)),
                     ),
+            )
+            .children(
+                [
+                    (
+                        ServiceOperation::Repair,
+                        "repair-service",
+                        "core_page.service.repair_action",
+                    ),
+                    (
+                        ServiceOperation::Uninstall,
+                        "uninstall-service",
+                        "core_page.service.uninstall_action",
+                    ),
+                ]
+                .map(|(operation, id, label)| {
+                    Button::new(id)
+                        .label(zenclash_i18n::text(label))
+                        .outline()
+                        .loading(state.is_busy() && state.operation() == Some(operation))
+                        .disabled(self.core_busy() || state.is_busy())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.request_service_maintenance(operation, window, cx);
+                        }))
+                }),
             )
     }
 

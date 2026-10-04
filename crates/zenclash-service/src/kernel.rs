@@ -7,7 +7,10 @@ use std::{
 };
 
 use crate::kernel_transport::{NativeController, NativeHttpError};
-use crate::protocol::{ApiRequest, ApiResponse, RuntimeStatus, ServiceErrorCode, StreamKind};
+use crate::protocol::{
+    ApiRequest, ApiResponse, LogStreamOptions, RuntimeStatus, ServiceErrorCode, ServiceLogFormat,
+    ServiceLogLevel, StreamKind,
+};
 use futures_util::StreamExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::{
@@ -19,6 +22,7 @@ const MAX_LOG_LINES: usize = 1024;
 const MAX_LOG_BYTES: usize = 1024 * 1024;
 const MAX_LOG_LINE: usize = 4096;
 const MAX_API_BYTES: usize = 4 * 1024 * 1024;
+const SUBSCRIPTION_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 struct LogBuffer {
@@ -328,49 +332,46 @@ impl Kernel {
     }
 
     pub(crate) async fn subscribe(&self, stream: StreamKind) -> io::Result<KernelSubscription> {
-        let path = match stream {
-            StreamKind::Logs => "/logs?level=debug",
-            StreamKind::Traffic => "/traffic",
-            StreamKind::Connections => "/connections",
-            StreamKind::Memory => "/memory",
-        };
-        let mut request = format!("ws://localhost{path}")
-            .into_client_request()
-            .map_err(io::Error::other)?;
-        request.headers_mut().insert(
-            "Authorization",
-            format!("Bearer {}", self.secret)
-                .parse()
-                .map_err(io::Error::other)?,
-        );
+        if matches!(stream, StreamKind::Logs) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "logs require explicit subscription options",
+            ));
+        }
+        self.subscribe_inner(KernelStream::Events(stream)).await
+    }
+
+    pub(crate) async fn subscribe_logs(
+        &self,
+        options: LogStreamOptions,
+    ) -> io::Result<KernelSubscription> {
+        self.subscribe_inner(KernelStream::Logs(options)).await
+    }
+
+    async fn subscribe_inner(&self, stream: KernelStream) -> io::Result<KernelSubscription> {
+        tokio::time::timeout(SUBSCRIPTION_TIMEOUT, self.subscribe_connected(stream)).await?
+    }
+
+    async fn subscribe_connected(&self, stream: KernelStream) -> io::Result<KernelSubscription> {
         #[cfg(windows)]
-        let transport =
-            tokio::net::windows::named_pipe::ClientOptions::new().open(&self.controller)?;
+        let transport = open_kernel_pipe(|| {
+            tokio::net::windows::named_pipe::ClientOptions::new().open(&self.controller)
+        })
+        .await?;
         #[cfg(windows)]
         verify_kernel_pipe(&transport, self.pid)?;
         #[cfg(unix)]
         let transport = tokio::net::UnixStream::connect(&self.controller).await?;
         #[cfg(unix)]
         crate::platform::verify_kernel_peer(&transport, self.pid)?;
-        let transport: Box<dyn KernelIo> = Box::new(transport);
-        let config = WebSocketConfig {
-            max_message_size: Some(MAX_API_BYTES),
-            max_frame_size: Some(MAX_API_BYTES),
-            max_write_buffer_size: MAX_API_BYTES,
-            ..WebSocketConfig::default()
-        };
-        let (socket, _) = tokio::time::timeout(
-            Duration::from_secs(5),
-            tokio_tungstenite::client_async_with_config(request, transport, Some(config)),
+        subscribe_verified(
+            Box::new(transport),
+            stream,
+            &self.secret,
+            &self.controller,
+            self.pid,
         )
-        .await?
-        .map_err(io::Error::other)?;
-        Ok(KernelSubscription {
-            socket,
-            secret: self.secret.clone(),
-            controller: self.controller.to_string_lossy().into_owned(),
-            pid: self.pid,
-        })
+        .await
     }
 
     pub(crate) async fn api(&self, request: &ApiRequest) -> Result<ApiResponse, ServiceErrorCode> {
@@ -521,6 +522,94 @@ pub(crate) struct KernelSubscription {
     secret: String,
     controller: String,
     pub(crate) pid: u32,
+}
+
+enum KernelStream {
+    Events(StreamKind),
+    Logs(LogStreamOptions),
+}
+
+#[cfg(windows)]
+async fn open_kernel_pipe(
+    mut open: impl FnMut() -> io::Result<tokio::net::windows::named_pipe::NamedPipeClient> + Send,
+) -> io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    // The caller bounds native open and the subsequent authenticated handshake
+    // together. Before a handle exists no request bytes have been transmitted.
+    loop {
+        match open() {
+            Err(error) if error.raw_os_error() == Some(231) => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            result => return result,
+        }
+    }
+}
+
+async fn subscribe_verified(
+    transport: Box<dyn KernelIo>,
+    stream: KernelStream,
+    secret: &str,
+    controller: &Path,
+    pid: u32,
+) -> io::Result<KernelSubscription> {
+    let (path, limit) = match stream {
+        KernelStream::Logs(options) => {
+            let level = match options.level {
+                ServiceLogLevel::Silent => "silent",
+                ServiceLogLevel::Error => "error",
+                ServiceLogLevel::Warning => "warning",
+                ServiceLogLevel::Info => "info",
+                ServiceLogLevel::Debug => "debug",
+            };
+            let format = match options.format {
+                ServiceLogFormat::Plain => "plain",
+                ServiceLogFormat::Structured => "structured",
+            };
+            (format!("/logs?level={level}&format={format}"), 128 * 1024)
+        }
+        KernelStream::Events(stream) => {
+            let path = match stream {
+                StreamKind::Traffic => "/traffic",
+                StreamKind::Connections => "/connections",
+                StreamKind::Memory => "/memory",
+                StreamKind::Logs => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "logs require explicit subscription options",
+                    ));
+                }
+            };
+            (path.to_owned(), MAX_API_BYTES)
+        }
+    };
+    let mut request = format!("ws://localhost{path}")
+        .into_client_request()
+        .map_err(io::Error::other)?;
+    request.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {}", secret)
+            .parse()
+            .map_err(io::Error::other)?,
+    );
+    let config = WebSocketConfig {
+        write_buffer_size: 16 * 1024,
+        max_message_size: Some(limit),
+        max_frame_size: Some(limit),
+        max_write_buffer_size: limit,
+        ..WebSocketConfig::default()
+    };
+    let (socket, _) = tokio::time::timeout(
+        SUBSCRIPTION_TIMEOUT,
+        tokio_tungstenite::client_async_with_config(request, transport, Some(config)),
+    )
+    .await?
+    .map_err(io::Error::other)?;
+    Ok(KernelSubscription {
+        socket,
+        secret: secret.to_owned(),
+        controller: controller.to_string_lossy().into_owned(),
+        pid,
+    })
 }
 
 impl KernelSubscription {
@@ -753,3 +842,15 @@ mod tests {
         assert_eq!(logs.bytes, MAX_LOG_LINES * 4);
     }
 }
+
+#[cfg(test)]
+#[path = "kernel_log_stream_tests.rs"]
+mod log_stream_tests;
+
+#[cfg(test)]
+#[path = "kernel/real_log_tests.rs"]
+mod real_log_tests;
+
+#[cfg(all(test, windows))]
+#[path = "kernel_pipe_tests.rs"]
+mod pipe_tests;

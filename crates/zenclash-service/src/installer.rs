@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(feature = "server")]
-use crate::InstalledMetadata;
+use crate::{InstalledMetadata, maintenance_lock::MaintenanceLock};
 use crate::{ServiceClient, platform};
 
 const MAX_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
@@ -446,6 +446,7 @@ struct Invocation {
     owner_pid: u32,
     owner_birth: u64,
     core: Option<(PathBuf, String)>,
+    offline_migration: bool,
 }
 
 #[cfg(feature = "server")]
@@ -464,7 +465,21 @@ impl Invocation {
             }
         };
         let mut fields = std::collections::BTreeMap::new();
-        for pair in arguments[1..].chunks(2) {
+        let mut offline_migration = false;
+        let mut index = 1;
+        while index < arguments.len() {
+            if arguments[index] == "--offline-migration" {
+                if action != MaintenanceAction::Repair || offline_migration {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "offline migration requires one explicit repair",
+                    ));
+                }
+                offline_migration = true;
+                index += 1;
+                continue;
+            }
+            let pair = &arguments[index..arguments.len().min(index + 2)];
             if pair.len() != 2 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -488,6 +503,7 @@ impl Invocation {
                     "unknown or repeated maintenance option",
                 ));
             }
+            index += 2;
         }
         let string = |key| {
             fields
@@ -542,6 +558,7 @@ impl Invocation {
             owner_pid,
             owner_birth,
             core,
+            offline_migration,
         })
     }
 }
@@ -593,97 +610,123 @@ pub fn run_maintenance(arguments: &[OsString]) -> io::Result<()> {
         ));
     }
     let root = platform::root_directory()?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     platform::validate_service_registration()?;
     platform::create_private_directory(&root, true)?;
     let _guard = MaintenanceLock::acquire(&root)?;
     validate_maintenance_files(&root)?;
-    if let Some(journal) = crate::maintenance_journal::Journal::load(&root)? {
-        recover_maintenance(&root, &journal)?;
-    }
+    let journal = crate::maintenance_journal::Journal::load(&root)?;
     let metadata_path = root.join("install.json");
-    let previous = if metadata_path.exists() {
-        platform::validate_protected_path(&metadata_path, false)?;
-        Some(crate::read_metadata(&metadata_path).map_err(io::Error::other)?)
-    } else {
-        None
-    };
-    match invocation.action {
-        MaintenanceAction::Start => {
-            if previous.is_none() {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "service is not installed",
-                ));
+    let previous = read_previous_metadata(&metadata_path)?;
+    with_maintenance_admission(
+        || MaintenanceAdmission::establish(previous.as_ref(), invocation.offline_migration),
+        |admission| {
+            if let Some(journal) = journal {
+                recover_maintenance(&root, &journal, admission)?;
             }
-            platform::start_service()?;
-        }
-        MaintenanceAction::Uninstall => {
-            // Only this service's fixed private artifacts are removed. Unknown
-            // root entries, package resources, and source paths remain intact.
-            if previous.is_none()
-                && fs::read_dir(&root)?
-                    .any(|entry| entry.is_ok_and(|entry| entry.file_name() != ".maintenance.lock"))
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "installation ownership metadata missing",
-                ));
-            }
-            platform::stop_service()?;
-            platform::unregister_service()?;
-            remove_private_runtime(&root.join("runtimes"), 0, &mut 0)?;
-            for name in [
-                helper_name(),
-                core_name(),
-                "install.json",
-                "helper.previous",
-                "core.previous",
-                "metadata.previous",
-                "helper.new",
-                "core.new",
-                "helper.diagnostic",
-                "core.diagnostic",
-            ] {
-                remove_private_file(&root.join(name))?;
-            }
-        }
-        MaintenanceAction::Install | MaintenanceAction::Repair => {
-            let (source, core_digest) = invocation.core.ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "approved core source missing")
-            })?;
-            let core = platform::open_pinned_file(&source)?;
-            let mut metadata = InstalledMetadata::new(
-                core_digest.clone(),
-                invocation.helper_digest.clone(),
-                owner.user().to_owned(),
-            )
-            .map_err(io::Error::other)?;
-            if let Some(previous) = &previous {
-                for user in previous.authorized_users() {
-                    metadata
-                        .authorize_user(user.clone())
-                        .map_err(io::Error::other)?;
+            let previous = read_previous_metadata(&metadata_path)?;
+            match invocation.action {
+                MaintenanceAction::Start => {
+                    if previous.is_none() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            "service is not installed",
+                        ));
+                    }
+                    admission.start_service()?;
+                }
+                MaintenanceAction::Uninstall => {
+                    // Only this service's fixed private artifacts are removed. Unknown
+                    // root entries, package resources, and source paths remain intact.
+                    if previous.is_none()
+                        && fs::read_dir(&root)?.any(|entry| {
+                            entry.is_ok_and(|entry| entry.file_name() != ".maintenance.lock")
+                        })
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "installation ownership metadata missing",
+                        ));
+                    }
+                    admission.stop_service()?;
+                    admission.before_mutation()?;
+                    platform::unregister_service()?;
+                    remove_private_runtime(&root.join("runtimes"), 0, &mut 0)?;
+                    for name in [
+                        helper_name(),
+                        core_name(),
+                        "install.json",
+                        "helper.previous",
+                        "core.previous",
+                        "metadata.previous",
+                        "helper.new",
+                        "core.new",
+                        "helper.diagnostic",
+                        "core.diagnostic",
+                    ] {
+                        remove_private_file(&root.join(name))?;
+                    }
+                }
+                MaintenanceAction::Install | MaintenanceAction::Repair => {
+                    let (source, core_digest) = invocation.core.ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "approved core source missing")
+                    })?;
+                    let core = platform::open_pinned_file(&source)?;
+                    let mut metadata = InstalledMetadata::new(
+                        core_digest.clone(),
+                        invocation.helper_digest.clone(),
+                        owner.user().to_owned(),
+                    )
+                    .map_err(io::Error::other)?;
+                    if let Some(previous) = &previous {
+                        for user in previous.authorized_users() {
+                            metadata
+                                .authorize_user(user.clone())
+                                .map_err(io::Error::other)?;
+                        }
+                    }
+                    deploy(
+                        &root,
+                        ApprovedArtifact {
+                            source: &current,
+                            digest: &invocation.helper_digest,
+                        },
+                        ApprovedArtifact {
+                            source: &source,
+                            digest: &core_digest,
+                        },
+                        &metadata,
+                        &owner,
+                        invocation.action == MaintenanceAction::Repair,
+                        admission,
+                    )?;
+                    drop(core);
                 }
             }
-            deploy(
-                &root,
-                ApprovedArtifact {
-                    source: &current,
-                    digest: &invocation.helper_digest,
-                },
-                ApprovedArtifact {
-                    source: &source,
-                    digest: &core_digest,
-                },
-                &metadata,
-                &owner,
-                invocation.action == MaintenanceAction::Repair,
-            )?;
-            drop(core);
+            Ok(())
+        },
+    )
+}
+
+#[cfg(feature = "server")]
+fn read_previous_metadata(path: &Path) -> io::Result<Option<InstalledMetadata>> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            platform::validate_protected_path(path, false)?;
+            Ok(Some(crate::read_metadata(path).map_err(io::Error::other)?))
         }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
     }
-    Ok(())
+}
+
+#[cfg(feature = "server")]
+fn with_maintenance_admission<A, T>(
+    verify: impl FnOnce() -> io::Result<A>,
+    effect: impl FnOnce(&mut A) -> io::Result<T>,
+) -> io::Result<T> {
+    let mut admission = verify()?;
+    effect(&mut admission)
 }
 
 fn helper_name() -> &'static str {
@@ -702,62 +745,145 @@ fn core_name() -> &'static str {
 }
 
 #[cfg(feature = "server")]
-struct MaintenanceLock {
-    file: fs::File,
+struct MaintenanceAdmission {
+    host: Option<crate::client::MaintenanceHost>,
+    absence_required: bool,
+    registration_written: bool,
+    start_attempted: bool,
 }
 
 #[cfg(feature = "server")]
-impl MaintenanceLock {
-    fn acquire(root: &Path) -> io::Result<Self> {
-        let path = root.join(".maintenance.lock");
-        if path.exists() {
-            platform::validate_protected_path(&path, false)?;
-        }
-        let mut options = fs::OpenOptions::new();
-        options.read(true).write(true).create(true);
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            options.share_mode(0);
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-        }
-        let file = options.open(path)?;
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            // SAFETY: file exclusively owns a live descriptor; nonblocking lock.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+impl MaintenanceAdmission {
+    fn establish(
+        previous: Option<&InstalledMetadata>,
+        offline_migration: bool,
+    ) -> io::Result<Self> {
+        let absent = offline_migration || previous.is_none();
+        let host = if absent {
+            require_maintenance_absence()?;
+            None
+        } else {
+            if previous
+                .is_some_and(|metadata| metadata.protocol_version() != crate::PROTOCOL_VERSION)
+            {
                 return Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "service maintenance is already in progress",
+                    io::ErrorKind::Unsupported,
+                    "legacy service requires explicit offline migration",
                 ));
             }
+            let host = maintenance_runtime()?
+                .block_on(crate::client::MaintenanceHost::probe())
+                .map_err(io::Error::other)?;
+            host.revalidate()?;
+            Some(host)
+        };
+        Ok(Self {
+            host,
+            absence_required: absent,
+            registration_written: false,
+            start_attempted: false,
+        })
+    }
+
+    fn before_mutation(&self) -> io::Result<()> {
+        if self.host.is_some() || self.start_attempted {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "service host shutdown is unconfirmed",
+            ));
         }
-        Ok(Self { file })
+        if self.absence_required && !self.registration_written {
+            require_maintenance_absence()
+        } else {
+            platform::maintenance_endpoint_absent()
+        }
+    }
+
+    fn start_service(&mut self) -> io::Result<()> {
+        if let Some(host) = &self.host {
+            return host.revalidate();
+        }
+        self.before_mutation()?;
+        self.start_attempted = true;
+        platform::start_service()
+    }
+
+    fn stop_service(&mut self) -> io::Result<()> {
+        if self.start_attempted {
+            // A replacement host needs its own native identity and v3 proof.
+            self.host = Some(
+                maintenance_runtime()?
+                    .block_on(crate::client::MaintenanceHost::probe())
+                    .map_err(io::Error::other)?,
+            );
+            self.start_attempted = false;
+        }
+        let Some(host) = &self.host else {
+            return self.before_mutation();
+        };
+        host.revalidate()?;
+        platform::stop_service()?;
+        let peer = host.peer();
+        maintenance_runtime()?.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if platform::maintenance_peer_exited(peer)? {
+                        return Ok::<(), io::Error>(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::TimedOut, "service host exit is unconfirmed")
+            })?
+        })?;
+        platform::maintenance_endpoint_absent()?;
+        self.host = None;
+        Ok(())
     }
 }
 
 #[cfg(feature = "server")]
-impl Drop for MaintenanceLock {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            // Keep the inode stable: unlinking a lock allows a second lock inode.
-            // SAFETY: self.file is still open and owns its lock.
-            unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+fn accept_ready_host<H>(host: H, verify: impl FnOnce(&H) -> io::Result<()>) -> io::Result<H> {
+    verify(&host)?;
+    Ok(host)
+}
+
+#[cfg(feature = "server")]
+async fn wait_until_maintenance_ready() -> io::Result<crate::client::MaintenanceHost> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "verified service host did not become ready",
+            ));
         }
-        #[cfg(windows)]
+        if let Ok(Ok(host)) = tokio::time::timeout(
+            remaining.min(Duration::from_secs(2)),
+            crate::client::MaintenanceHost::probe(),
+        )
+        .await
         {
-            let _ = &self.file;
+            return Ok(host);
         }
+        tokio::time::sleep(remaining.min(Duration::from_millis(100))).await;
     }
+}
+
+#[cfg(feature = "server")]
+fn maintenance_runtime() -> io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+}
+
+#[cfg(feature = "server")]
+fn require_maintenance_absence() -> io::Result<()> {
+    platform::maintenance_service_absent()?;
+    platform::maintenance_endpoint_absent()
 }
 
 #[cfg(feature = "server")]
@@ -837,23 +963,66 @@ fn validate_maintenance_files(root: &Path) -> io::Result<()> {
 fn recover_maintenance(
     root: &Path,
     journal: &crate::maintenance_journal::Journal,
+    admission: &mut MaintenanceAdmission,
 ) -> io::Result<()> {
     journal.validate_recovery(root)?;
-    platform::stop_service()?;
+    admission.stop_service()?;
+    admission.before_mutation()?;
     journal.recover_storage(root)?;
-    if journal.recovery_metadata().is_some() {
-        platform::register_service()?;
-        if journal.restore_running() {
-            platform::start_service()?;
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?
-                .block_on(wait_until_ready())?;
-        }
-    } else {
-        platform::unregister_service()?;
-    }
+    restore_recovered_service(
+        journal
+            .recovery_metadata()
+            .map(InstalledMetadata::protocol_version),
+        journal.restore_running(),
+        |effect| {
+            match effect {
+                RecoveryServiceEffect::Register => {
+                    platform::register_service()?;
+                    admission.registration_written = true;
+                }
+                RecoveryServiceEffect::Start => {
+                    admission.start_service()?;
+                    let host = maintenance_runtime()?.block_on(wait_until_maintenance_ready())?;
+                    admission.host = Some(accept_ready_host(
+                        host,
+                        crate::client::MaintenanceHost::revalidate,
+                    )?);
+                    admission.start_attempted = false;
+                }
+                RecoveryServiceEffect::Unregister => {
+                    platform::unregister_service()?;
+                    admission.registration_written = false;
+                }
+            }
+            Ok(())
+        },
+    )?;
     journal.finish(root)
+}
+
+#[cfg(feature = "server")]
+#[derive(Debug, PartialEq, Eq)]
+enum RecoveryServiceEffect {
+    Register,
+    Start,
+    Unregister,
+}
+
+#[cfg(feature = "server")]
+fn restore_recovered_service(
+    protocol: Option<u32>,
+    restore_running: bool,
+    mut effect: impl FnMut(RecoveryServiceEffect) -> io::Result<()>,
+) -> io::Result<()> {
+    if protocol != Some(crate::PROTOCOL_VERSION) {
+        // Restoring approved legacy bytes never re-enables their old unguarded host.
+        return effect(RecoveryServiceEffect::Unregister);
+    }
+    effect(RecoveryServiceEffect::Register)?;
+    if restore_running {
+        effect(RecoveryServiceEffect::Start)?;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "server")]
@@ -864,10 +1033,11 @@ fn deploy(
     metadata: &InstalledMetadata,
     owner: &crate::session::PeerIdentity,
     repair: bool,
+    admission: &mut MaintenanceAdmission,
 ) -> io::Result<()> {
     let helper_stage = root.join("helper.new");
     let core_stage = root.join("core.new");
-    let was_running = platform::service_was_running()?;
+    let was_running = admission.host.is_some();
     stage_copy(
         approved_helper.source,
         &helper_stage,
@@ -885,7 +1055,8 @@ fn deploy(
     };
     let mut journal = prepare(root, metadata, approved_helper.digest, was_running)?;
     let result = (|| {
-        platform::stop_service()?;
+        admission.stop_service()?;
+        admission.before_mutation()?;
         if !platform::peer_alive(owner) {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
@@ -901,11 +1072,14 @@ fn deploy(
         crate::write_metadata_atomic(&root.join("install.json"), journal.new_metadata())
             .map_err(io::Error::other)?;
         platform::register_service()?;
-        platform::start_service()?;
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?
-            .block_on(wait_until_ready())?;
+        admission.registration_written = true;
+        admission.start_service()?;
+        let host = maintenance_runtime()?.block_on(wait_until_maintenance_ready())?;
+        admission.host = Some(accept_ready_host(
+            host,
+            crate::client::MaintenanceHost::revalidate,
+        )?);
+        admission.start_attempted = false;
         journal.commit(root)?;
         journal.finish(root)
     })();
@@ -913,7 +1087,7 @@ fn deploy(
         // Read the durable phase again: commit can succeed before cleanup fails.
         let persisted = crate::maintenance_journal::Journal::load(root)?
             .ok_or_else(|| io::Error::other("maintenance journal disappeared before recovery"))?;
-        if let Err(recovery) = recover_maintenance(root, &persisted) {
+        if let Err(recovery) = recover_maintenance(root, &persisted, admission) {
             return Err(io::Error::other(format!(
                 "service update failed ({error}); durable recovery remains pending ({recovery})"
             )));
@@ -1099,7 +1273,7 @@ impl OwnedTestRoot {
         &self.0
     }
 
-    fn validate(&self, path: &Path, directory: bool) -> io::Result<()> {
+    pub(crate) fn validate(&self, path: &Path, directory: bool) -> io::Result<()> {
         let denied = || {
             io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -1386,5 +1560,298 @@ mod maintenance_request_tests {
             ServiceHealthKind::Missing
         );
         assert!(!root.exists());
+    }
+}
+
+#[cfg(all(test, feature = "server"))]
+mod maintenance_admission_tests {
+    use super::*;
+    use crate::protocol::{Request, Response};
+    use crate::session::PeerIdentity;
+    use crate::{FrameError, ProtocolInfo, read_frame, write_frame};
+    use tokio::io::AsyncReadExt;
+
+    fn peer(birth: u64) -> PeerIdentity {
+        PeerIdentity::new("0".into(), 123, birth)
+    }
+
+    async fn rejected_wire_has_no_effect(response: Response) {
+        let root = OwnedTestRoot::create().unwrap();
+        let (mut stream, mut remote) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let request: Request = read_frame(&mut remote, Duration::from_secs(1))
+                .await
+                .unwrap();
+            assert!(matches!(
+                request,
+                Request::Hello {
+                    protocol_version: crate::PROTOCOL_VERSION
+                }
+            ));
+            write_frame(&mut remote, &response, Duration::from_secs(1))
+                .await
+                .unwrap();
+            assert_eq!(
+                remote.read(&mut [0]).await.unwrap(),
+                0,
+                "no Acquire or mutation follows a rejected Hello"
+            );
+        });
+        let verified = crate::client::maintenance_hello(&mut stream, |_| Ok(peer(1))).await;
+        let effect = root.path().join("stop-swap-recovery");
+        let result = with_maintenance_admission(
+            || verified.map_err(io::Error::other),
+            |_| fs::write(&effect, b"unexpected effect"),
+        );
+        assert!(result.is_err());
+        assert!(!effect.exists());
+        drop(stream);
+        server.await.unwrap();
+        fs::remove_dir(root.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn maintenance_v2_hello_rejection_prevents_acquire_stop_swap_and_recovery() {
+        rejected_wire_has_no_effect(Response::Hello {
+            info: ProtocolInfo {
+                protocol_version: 2,
+                service_version: "legacy".into(),
+            },
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn maintenance_unknown_hello_response_has_no_effect() {
+        rejected_wire_has_no_effect(Response::Ok).await;
+    }
+
+    #[tokio::test]
+    async fn maintenance_changed_native_identity_during_same_stream_hello_has_no_effect() {
+        let (mut stream, mut remote) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let _: Request = read_frame(&mut remote, Duration::from_secs(1))
+                .await
+                .unwrap();
+            write_frame(
+                &mut remote,
+                &Response::Hello {
+                    info: ProtocolInfo::current(),
+                },
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+            assert_eq!(remote.read(&mut [0]).await.unwrap(), 0);
+        });
+        let mut birth = 0;
+        let verified = crate::client::maintenance_hello(&mut stream, |_| {
+            birth += 1;
+            Ok(peer(birth))
+        })
+        .await;
+        let mut effects = 0;
+        assert!(
+            with_maintenance_admission(
+                || verified.map_err(io::Error::other),
+                |_| {
+                    effects += 1;
+                    Ok(())
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(effects, 0);
+        drop(stream);
+        server.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn maintenance_hello_timeout_has_no_effect_or_acquire() {
+        let (mut stream, mut remote) = tokio::io::duplex(4096);
+        let task = tokio::spawn(async move {
+            let verified = crate::client::maintenance_hello(&mut stream, |_| Ok(peer(1))).await;
+            let mut effects = 0;
+            let result = with_maintenance_admission(
+                || verified.map_err(io::Error::other),
+                |_| {
+                    effects += 1;
+                    Ok(())
+                },
+            );
+            (result, effects, stream)
+        });
+        let request: Request = read_frame(&mut remote, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(matches!(request, Request::Hello { .. }));
+        tokio::time::advance(Duration::from_secs(21)).await;
+        let (result, effects, stream) = task.await.unwrap();
+        assert!(result.is_err());
+        assert_eq!(effects, 0);
+        drop(stream);
+        assert!(
+            matches!(read_frame::<_, Request>(&mut remote, Duration::from_secs(1)).await, Err(FrameError::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn maintenance_unconfirmed_absence_prevents_every_effect() {
+        let mut effects = 0;
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::AlreadyExists,
+        ] {
+            assert!(
+                with_maintenance_admission::<(), ()>(
+                    || Err(io::Error::new(kind, "unconfirmed absence")),
+                    |_| {
+                        effects += 1;
+                        Ok(())
+                    }
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(effects, 0);
+    }
+
+    fn repair_arguments() -> Vec<OsString> {
+        let source = std::env::temp_dir().join("mihomo");
+        [
+            OsString::from("--repair"),
+            OsString::from("--helper-sha256"),
+            OsString::from("a".repeat(64)),
+            OsString::from("--owner-pid"),
+            OsString::from("12"),
+            OsString::from("--owner-birth"),
+            OsString::from("34"),
+            OsString::from("--core-source"),
+            source.into_os_string(),
+            OsString::from("--core-sha256"),
+            OsString::from("b".repeat(64)),
+        ]
+        .into()
+    }
+
+    #[test]
+    fn maintenance_offline_migration_requires_explicit_repair_once() {
+        let mut args = repair_arguments();
+        assert!(!Invocation::parse(&args).unwrap().offline_migration);
+        args.push("--offline-migration".into());
+        assert!(Invocation::parse(&args).unwrap().offline_migration);
+        args.push("--offline-migration".into());
+        assert!(Invocation::parse(&args).is_err());
+        for action in ["--install", "--start", "--uninstall"] {
+            let mut args = repair_arguments();
+            args[0] = action.into();
+            args.push("--offline-migration".into());
+            assert!(Invocation::parse(&args).is_err());
+        }
+    }
+    #[test]
+    fn maintenance_changed_account_does_not_prove_original_process_exit() {
+        let current = platform::current_identity().unwrap();
+        let other_account =
+            PeerIdentity::new("different-account".into(), current.pid(), current.birth());
+        assert!(!platform::maintenance_peer_exited(&other_account).unwrap());
+        let recycled = PeerIdentity::new(current.user().into(), current.pid(), current.birth() + 1);
+        assert!(platform::maintenance_peer_exited(&recycled).unwrap());
+    }
+    #[tokio::test]
+    async fn maintenance_post_ready_unknown_registration_keeps_start_attempt_and_recovery_material()
+    {
+        let root = OwnedTestRoot::create().unwrap();
+        let material = root.path().join("metadata.previous");
+        fs::write(&material, b"original recovery bytes").unwrap();
+        let (mut stream, mut remote) = tokio::io::duplex(4096);
+        let task = tokio::spawn(async move {
+            let request: Request = read_frame(&mut remote, Duration::from_secs(1))
+                .await
+                .unwrap();
+            assert!(matches!(
+                request,
+                Request::Hello {
+                    protocol_version: crate::PROTOCOL_VERSION
+                }
+            ));
+            write_frame(
+                &mut remote,
+                &Response::Hello {
+                    info: ProtocolInfo::current(),
+                },
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        });
+        let host = crate::client::maintenance_hello(&mut stream, |_| Ok(peer(1)))
+            .await
+            .unwrap();
+        let mut start_attempted = true;
+        let result = accept_ready_host(host, |_| {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "registered PID differs",
+            ))
+        })
+        .and_then(|_| {
+            start_attempted = false;
+            fs::write(&material, b"committed and finished")
+        });
+        let bytes = fs::read(&material).unwrap();
+        fs::remove_file(&material).unwrap();
+        fs::remove_dir(root.path()).unwrap();
+        task.await.unwrap();
+        assert!(
+            result.is_err(),
+            "unknown registered PID must prevent commit/finish"
+        );
+        assert!(start_attempted);
+        assert_eq!(bytes, b"original recovery bytes");
+    }
+}
+
+/// Queries the PID of the one fixed system launchd job through Apple's typed API.
+///
+/// This read-only helper entry is isolated in an owned subprocess by maintenance.
+/// It never accepts a caller-selected domain, label, path, or service operation.
+///
+/// # Errors
+/// Rejects non-root callers, unavailable/missing job data, invalid field types,
+/// conversion loss, and a PID outside the native positive process-ID range.
+#[cfg(all(feature = "server", target_os = "macos"))]
+pub fn query_service_host_pid() -> io::Result<u32> {
+    platform::query_loaded_host_pid()
+}
+
+#[cfg(all(test, feature = "server"))]
+mod recovery_host_capability_tests {
+    use super::*;
+    #[test]
+    fn legacy_journal_recovery_keeps_old_host_unregistered_and_stopped() {
+        for protocol in [None, Some(1), Some(2)] {
+            let mut effects = Vec::new();
+            restore_recovered_service(protocol, true, |effect| {
+                effects.push(effect);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(effects, [RecoveryServiceEffect::Unregister]);
+        }
+        let mut effects = Vec::new();
+        restore_recovered_service(Some(crate::PROTOCOL_VERSION), true, |effect| {
+            effects.push(effect);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            effects,
+            [
+                RecoveryServiceEffect::Register,
+                RecoveryServiceEffect::Start
+            ]
+        );
     }
 }

@@ -9,6 +9,8 @@ use std::{
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use zenclash_service::ServiceClient;
 
+mod local_recovery;
+
 pub(crate) trait RuntimeTransport: Send + Sync + 'static {
     fn stage(
         &self,
@@ -31,9 +33,25 @@ pub(crate) trait RuntimeTransport: Send + Sync + 'static {
     ) -> impl Future<Output = MihomoResult<zenclash_service::ServicePreparedRuntimePatch>> + Send;
     fn apply_patch(&self, revision: u64) -> impl Future<Output = MihomoResult<()>> + Send;
     fn restore_patch(&self, revision: u64) -> impl Future<Output = MihomoResult<()>> + Send;
+    fn read_cache(
+        &self,
+        revision: u64,
+        kind: zenclash_service::ProviderKind,
+        name: &str,
+    ) -> impl Future<Output = MihomoResult<Option<Vec<u8>>>> + Send;
 }
 
 impl RuntimeTransport for ServiceClient {
+    async fn read_cache(
+        &self,
+        revision: u64,
+        kind: zenclash_service::ProviderKind,
+        name: &str,
+    ) -> MihomoResult<Option<Vec<u8>>> {
+        Ok(self
+            .read_complete_provider_cache(revision, kind, name)
+            .await?)
+    }
     async fn stage(&self, bundle: &ServiceRuntimeBundle) -> MihomoResult<u64> {
         bundle.stage(self).await
     }
@@ -82,6 +100,7 @@ pub(crate) type ServiceRuntimeSession = RuntimeSession<ServiceClient>;
 pub(crate) struct RuntimeSession<T: RuntimeTransport> {
     pub(crate) client: Arc<T>,
     source_home: PathBuf,
+    local_launch: Option<crate::MihomoLaunchConfig>,
     state: Arc<Mutex<RuntimeState>>,
 }
 
@@ -132,8 +151,22 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
         Arc::new(Self {
             client,
             source_home,
+            local_launch: None,
             state: Arc::new(Mutex::new(RuntimeState::default())),
         })
+    }
+
+    pub(crate) fn from_local(client: Arc<T>, launch: crate::MihomoLaunchConfig) -> Arc<Self> {
+        Arc::new(Self {
+            client,
+            source_home: launch.home_dir.clone(),
+            local_launch: Some(launch),
+            state: Arc::new(Mutex::new(RuntimeState::default())),
+        })
+    }
+
+    pub(crate) fn local_launch(&self) -> Option<&crate::MihomoLaunchConfig> {
+        self.local_launch.as_ref()
     }
 
     pub(crate) fn source_home(&self) -> &Path {
@@ -326,6 +359,48 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
         }
         self.confirm_finalizing_locked(&mut state).await?;
         self.confirm_stop().await
+    }
+
+    pub(crate) async fn stop_and_export(&self) -> MihomoResult<Arc<ServiceRuntimeBundle>> {
+        let mut state = self.state.lock().await;
+        if state.closing || state.released {
+            return Err(unknown());
+        }
+        self.confirm_finalizing_locked(&mut state).await?;
+        if state.candidate.is_some() || state.pending_patch_base.is_some() {
+            return Err(unknown());
+        }
+        let active = state
+            .active
+            .as_ref()
+            .ok_or_else(|| MihomoError::Process("No accepted service runtime snapshot".into()))?;
+        let providers = active._bundle.cache_providers()?;
+        let revision = active.revision;
+        let mut bundle = active._bundle.cache_export_base(&providers);
+        self.confirm_stop().await?;
+        let export = async {
+            let status = self.client.status().await?;
+            if !export_status_matches(&status, revision) {
+                return Err(unknown());
+            }
+            for provider in providers {
+                let bytes = self
+                    .client
+                    .read_cache(revision, provider.kind, &provider.name)
+                    .await?;
+                bundle.replace_provider_cache(&provider, bytes)?;
+            }
+            if !export_status_matches(&self.client.status().await?, revision) {
+                return Err(unknown());
+            }
+            Ok::<_, MihomoError>(Arc::new(bundle))
+        };
+        let bundle = tokio::time::timeout(std::time::Duration::from_secs(15), export)
+            .await
+            .map_err(|_| unknown())??;
+        let active = state.active.as_mut().ok_or_else(unknown)?;
+        active._bundle = bundle.clone();
+        Ok(bundle)
     }
 
     pub(crate) async fn confirm_finalizing_before_stop(&self) -> MihomoResult<()> {
@@ -724,6 +799,14 @@ fn unknown() -> MihomoError {
     ))
 }
 
+fn export_status_matches(status: &zenclash_service::ServiceRuntimeStatus, revision: u64) -> bool {
+    !status.running
+        && status.pid.is_none()
+        && status.applied_revision.is_none()
+        && status.committed_revision == Some(revision)
+        && status.candidate.is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -732,6 +815,35 @@ mod tests {
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     };
+
+    #[tokio::test]
+    async fn local_launch_identity_survives_deleted_source_and_service_release() {
+        let home = home();
+        std::fs::create_dir_all(&home).unwrap();
+        let config = home.join("original.yaml");
+        std::fs::write(&config, "rules: []\n").unwrap();
+        let launch =
+            crate::MihomoLaunchConfig::new(home.join("ordinary-mihomo"), &config, &home).unwrap();
+        let service = Arc::new(Service::default());
+        let owner = RuntimeSession::from_local(service.clone(), launch.clone());
+        std::fs::remove_file(&config).unwrap();
+        let retained = owner.local_launch().unwrap();
+        assert_eq!(retained.binary, launch.binary);
+        assert_eq!(retained.config_file, launch.config_file);
+        assert_eq!(retained.home_dir, launch.home_dir);
+        assert_eq!(owner.source_home(), launch.home_dir);
+        assert!(service.calls.lock().is_empty());
+        owner.release_owned().await.unwrap();
+        assert_eq!(owner.local_launch().unwrap().binary, launch.binary);
+        std::fs::remove_dir(home).unwrap();
+    }
+
+    #[test]
+    fn direct_service_startup_has_no_invented_local_launch() {
+        let owner =
+            RuntimeSession::new(Arc::new(Service::default()), PathBuf::from("ordinary-home"));
+        assert!(owner.local_launch().is_none());
+    }
 
     #[derive(Default)]
     struct Service {
@@ -749,15 +861,38 @@ mod tests {
         running: AtomicBool,
         lose_stop_ack: AtomicBool,
         stop_has_no_effect: AtomicBool,
+        lose_release_ack: AtomicBool,
         lose_start_ack: AtomicBool,
         patch_candidate: Mutex<Option<zenclash_service::ServiceRuntimeCandidate>>,
         prepare_delta: Mutex<Option<serde_json::Value>>,
         lose_prepare_ack: AtomicBool,
         reject_apply_patch: Mutex<Option<zenclash_service::ServiceErrorCode>>,
         lose_restore_ack: AtomicBool,
+        caches: Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
+        reject_cache: AtomicBool,
+        change_revision_during_cache: AtomicBool,
     }
 
     impl RuntimeTransport for Service {
+        async fn read_cache(
+            &self,
+            revision: u64,
+            _kind: zenclash_service::ProviderKind,
+            name: &str,
+        ) -> MihomoResult<Option<Vec<u8>>> {
+            self.calls
+                .lock()
+                .push(format!("read-cache:{revision}:{name}"));
+            assert!(!self.running.load(Ordering::SeqCst));
+            assert_eq!(self.committed.load(Ordering::SeqCst), revision);
+            if self.reject_cache.load(Ordering::SeqCst) {
+                return Err(unknown());
+            }
+            if self.change_revision_during_cache.load(Ordering::SeqCst) {
+                self.committed.store(revision + 1, Ordering::SeqCst);
+            }
+            Ok(self.caches.lock().get(name).cloned())
+        }
         async fn stage(&self, bundle: &ServiceRuntimeBundle) -> MihomoResult<u64> {
             let revision = self.next.fetch_add(1, Ordering::SeqCst) + 1;
             self.calls
@@ -856,7 +991,12 @@ mod tests {
         }
         async fn release(&self) -> MihomoResult<()> {
             self.calls.lock().push("release".into());
-            self.stop().await
+            let stopped = self.stop().await;
+            if self.lose_release_ack.swap(false, Ordering::SeqCst) {
+                Err(unknown())
+            } else {
+                stopped
+            }
         }
         async fn prepare_patch(
             &self,
@@ -930,6 +1070,476 @@ mod tests {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ))
+    }
+
+    async fn local_recovery_owner(
+        label: &str,
+    ) -> (
+        crate::core_session::ownership_tests::ChildFixture,
+        Arc<Service>,
+        Arc<RuntimeSession<Service>>,
+        crate::ControlledConfigStore,
+    ) {
+        let fixture = crate::core_session::ownership_tests::ChildFixture::new(label).await;
+        fixture.process.stop_async().await.unwrap();
+        let launch = fixture
+            .process
+            .launch_config()
+            .clone()
+            .with_controller_endpoint(fixture.process.endpoint().clone());
+        let service = Arc::new(Service::default());
+        let owner = RuntimeSession::from_local(service.clone(), launch);
+        std::fs::write(owner.source_home().join("GeoIP.dat"), b"accepted geoip").unwrap();
+        std::fs::write(
+            owner.source_home().join("cert.pem"),
+            b"fixture public certificate",
+        )
+        .unwrap();
+        std::fs::write(
+            owner.source_home().join("nodes.yaml"),
+            b"proxies:\n- name: node\n  type: http\n  certificate: cert.pem\n",
+        )
+        .unwrap();
+        owner
+            .prepare("tun:\n  enable: true\nproxy-providers:\n  local:\n    type: file\n    path: nodes.yaml\nrule-providers:\n  downloaded:\n    type: http\n    path: downloaded.mrs\n")
+            .await
+            .unwrap()
+            .apply(true)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
+        std::fs::write(
+            owner.source_home().join("GeoIP.dat"),
+            b"prior ordinary geoip",
+        )
+        .unwrap();
+        std::fs::remove_file(&fixture.process.launch_config().config_file).unwrap();
+        std::fs::remove_file(owner.source_home().join("cert.pem")).unwrap();
+        std::fs::remove_file(owner.source_home().join("nodes.yaml")).unwrap();
+        service.calls.lock().clear();
+        let store = crate::ControlledConfigStore::new(owner.source_home().parent().unwrap());
+        (fixture, service, owner, store)
+    }
+
+    #[tokio::test]
+    async fn service_local_recovery_release_precedes_publication_and_shutdown_reaps_new_owner() {
+        let (fixture, service, owner, store) =
+            local_recovery_owner("geodata-service-recovery-success").await;
+        let launch = owner.local_launch().unwrap().clone();
+        let lease = store
+            .acquire_write_lease_for_paths(fixture.process.write_scopes())
+            .await
+            .unwrap();
+        let store = store.with_write_lease(&lease);
+        let client = crate::MihomoClient::from_process(fixture.process.clone()).unwrap();
+        let session = crate::CoreSession::open(crate::CoreKind::Mihomo, client.clone()).unwrap();
+        let mutation = client.lock_runtime_binding().await.unwrap();
+        let published = Arc::new(Mutex::new(None));
+        let observed = published.clone();
+        let witness = service.clone();
+        let outcome = owner
+            .recover_local_runtime(
+                &store,
+                launch,
+                Arc::new(AtomicBool::new(false)),
+                std::time::Duration::from_secs(2),
+                move |process| async move {
+                    assert!(witness.calls.lock().iter().any(|call| call == "release"));
+                    assert!(process.snapshot().pid.is_none());
+                    *observed.lock() = Some(process.clone());
+                    client.publish_prepared_process(process, mutation).await
+                },
+            )
+            .await
+            .unwrap();
+        assert!(outcome.failure.is_none());
+        let process = published.lock().as_ref().unwrap().clone();
+        assert!(process.snapshot().pid.is_some());
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_slice(&std::fs::read(&process.launch_config().config_file).unwrap())
+                .unwrap();
+        assert_eq!(yaml["tun"]["enable"].as_bool(), Some(false));
+        assert_eq!(
+            store.load().unwrap()["tun"]["enable"].as_bool(),
+            Some(false)
+        );
+        let cached: serde_yaml::Value =
+            serde_yaml::from_slice(&std::fs::read(store.runtime_path()).unwrap()).unwrap();
+        assert_eq!(
+            cached, yaml,
+            "restart cache must reference the ordinary recovery slot"
+        );
+        assert_eq!(
+            std::fs::read(owner.source_home().join("GeoIP.dat")).unwrap(),
+            b"accepted geoip"
+        );
+        let next_owner = RuntimeSession::from_local(
+            Arc::new(Service::default()),
+            owner.local_launch().unwrap().clone(),
+        );
+        let cache_path = yaml["rule-providers"]["downloaded"]["path"]
+            .as_str()
+            .unwrap();
+        std::fs::write(cache_path, b"downloaded during local recovery").unwrap();
+        // Production reads after Stop; the ordinary child fixture exercises the same boundary.
+        process.stop_async().await.unwrap();
+        let refreshed = outcome
+            .bundle
+            .export_local_caches(&store, process.launch_config().config_file.clone())
+            .await
+            .unwrap();
+        let next_bundle = Arc::new(
+            refreshed
+                .with_delta(&serde_json::json!({"tun":{"enable":true}}))
+                .unwrap(),
+        );
+        next_owner
+            .prepare_bundle(next_bundle.clone())
+            .await
+            .unwrap()
+            .apply(true)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_yaml::from_str::<serde_yaml::Value>(next_owner.snapshot().unwrap().yaml())
+                .unwrap()["tun"]["enable"]
+                .as_bool(),
+            Some(true)
+        );
+        let next_config = next_bundle
+            .materialize_local_runtime(&store, Some(process.launch_config().config_file.clone()))
+            .await
+            .unwrap();
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_slice(&std::fs::read(&next_config).unwrap()).unwrap();
+        assert_eq!(
+            std::fs::read(
+                yaml["rule-providers"]["downloaded"]["path"]
+                    .as_str()
+                    .unwrap()
+            )
+            .unwrap(),
+            b"downloaded during local recovery"
+        );
+        let provider: serde_yaml::Value = serde_yaml::from_slice(
+            &std::fs::read(yaml["proxy-providers"]["local"]["path"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(provider["proxies"][0]["certificate"].as_str().unwrap()).unwrap(),
+            b"fixture public certificate"
+        );
+        process
+            .restart_and_wait_until_with_lease(std::time::Duration::from_secs(3), None, &lease)
+            .await
+            .unwrap();
+        assert!(process.snapshot().pid.is_some());
+        session.shutdown().await.unwrap();
+        assert!(process.snapshot().pid.is_none());
+    }
+
+    #[tokio::test]
+    async fn initial_handover_recovery_uses_held_resources_after_sources_are_deleted() {
+        let (fixture, _, accepted, store) =
+            local_recovery_owner("geodata-initial-handover-recovery").await;
+        let bundle = accepted.snapshot().unwrap();
+        let service = Arc::new(Service::default());
+        let owner =
+            RuntimeSession::from_local(service.clone(), accepted.local_launch().unwrap().clone());
+        assert!(
+            owner.snapshot().is_err(),
+            "the failed trial has no accepted runtime"
+        );
+        let lease = store
+            .acquire_write_lease_for_paths(fixture.process.write_scopes())
+            .await
+            .unwrap();
+        let store = store.with_write_lease(&lease);
+        let client = crate::MihomoClient::from_process(fixture.process.clone()).unwrap();
+        let session = crate::CoreSession::open(crate::CoreKind::Mihomo, client.clone()).unwrap();
+        let mutation = client.lock_runtime_binding().await.unwrap();
+        let published = Arc::new(Mutex::new(None));
+        let observed = published.clone();
+        let store_mutation = store.lock_service_tun_mutation().await;
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            owner.recover_held_local_runtime(
+                (&store, store_mutation),
+                owner.local_launch().unwrap().clone(),
+                bundle,
+                Arc::new(AtomicBool::new(false)),
+                std::time::Duration::from_secs(2),
+                move |process| async move {
+                    assert!(service.calls.lock().iter().any(|call| call == "release"));
+                    assert!(process.snapshot().pid.is_none());
+                    *observed.lock() = Some(process.clone());
+                    client.publish_prepared_process(process, mutation).await
+                },
+            ),
+        )
+        .await
+        .expect("held store admission must not self-lock")
+        .unwrap();
+        assert!(outcome.failure.is_none());
+        let process = published.lock().as_ref().unwrap().clone();
+        assert!(process.snapshot().pid.is_some());
+        assert_eq!(process.launch_config().home_dir, owner.source_home());
+        let payload = std::fs::read(&process.launch_config().config_file).unwrap();
+        let yaml: serde_yaml::Value = serde_yaml::from_slice(&payload).unwrap();
+        assert_eq!(yaml["tun"]["enable"].as_bool(), Some(false));
+        assert_eq!(std::fs::read(store.runtime_path()).unwrap(), payload);
+        let provider: serde_yaml::Value = serde_yaml::from_slice(
+            &std::fs::read(yaml["proxy-providers"]["local"]["path"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(provider["proxies"][0]["certificate"].as_str().unwrap()).unwrap(),
+            b"fixture public certificate"
+        );
+        assert_eq!(
+            std::fs::read(owner.source_home().join("GeoIP.dat")).unwrap(),
+            b"accepted geoip"
+        );
+        assert!(!fixture.process.launch_config().config_file.exists());
+        session.shutdown().await.unwrap();
+        assert!(process.snapshot().pid.is_none());
+    }
+
+    #[tokio::test]
+    async fn initial_handover_recovery_unknown_release_preserves_home_without_publication() {
+        let (fixture, _, accepted, store) =
+            local_recovery_owner("geodata-initial-handover-release-unknown").await;
+        let bundle = accepted.snapshot().unwrap();
+        let service = Arc::new(Service::default());
+        service.lose_release_ack.store(true, Ordering::SeqCst);
+        let owner = RuntimeSession::from_local(service, accepted.local_launch().unwrap().clone());
+        let lease = store
+            .acquire_write_lease_for_paths(fixture.process.write_scopes())
+            .await
+            .unwrap();
+        let store = store.with_write_lease(&lease);
+        let published = Arc::new(AtomicBool::new(false));
+        let observed = published.clone();
+        assert!(
+            owner
+                .recover_held_local_runtime(
+                    (&store, store.lock_service_tun_mutation().await),
+                    owner.local_launch().unwrap().clone(),
+                    bundle,
+                    Arc::new(AtomicBool::new(false)),
+                    std::time::Duration::from_millis(200),
+                    move |_| async move {
+                        observed.store(true, Ordering::SeqCst);
+                        Ok(Arc::new(tokio::sync::Mutex::new(())).lock_owned().await)
+                    },
+                )
+                .await
+                .is_err()
+        );
+        assert!(!published.load(Ordering::SeqCst));
+        assert!(fixture.process.snapshot().pid.is_none());
+        assert_eq!(
+            std::fs::read(owner.source_home().join("GeoIP.dat")).unwrap(),
+            b"prior ordinary geoip"
+        );
+    }
+
+    #[tokio::test]
+    async fn service_local_recovery_unknown_release_never_publishes_or_starts_local() {
+        let (fixture, service, owner, store) =
+            local_recovery_owner("geodata-service-recovery-release-unknown").await;
+        let launch = owner.local_launch().unwrap().clone();
+        let lease = store
+            .acquire_write_lease_for_paths(fixture.process.write_scopes())
+            .await
+            .unwrap();
+        let store = store.with_write_lease(&lease);
+        service.lose_release_ack.store(true, Ordering::SeqCst);
+        let published = Arc::new(AtomicBool::new(false));
+        let observed = published.clone();
+        assert!(
+            owner
+                .recover_local_runtime(
+                    &store,
+                    launch,
+                    Arc::new(AtomicBool::new(false)),
+                    std::time::Duration::from_millis(200),
+                    move |_| async move {
+                        observed.store(true, Ordering::SeqCst);
+                        Ok(Arc::new(tokio::sync::Mutex::new(())).lock_owned().await)
+                    }
+                )
+                .await
+                .is_err()
+        );
+        assert!(!published.load(Ordering::SeqCst));
+        assert!(fixture.process.snapshot().pid.is_none());
+        assert_eq!(
+            std::fs::read(owner.source_home().join("GeoIP.dat")).unwrap(),
+            b"prior ordinary geoip"
+        );
+    }
+
+    #[tokio::test]
+    async fn service_local_recovery_save_failure_keeps_running_owner_and_activated_resources() {
+        let (fixture, _, owner, store) =
+            local_recovery_owner("geodata-service-recovery-save-failure").await;
+        let launch = owner.local_launch().unwrap().clone();
+        let previous = b"tun:\n  enable: true\n";
+        std::fs::write(store.runtime_path(), previous).unwrap();
+        std::fs::create_dir(store.root().join("override.yaml")).unwrap();
+        let lease = store
+            .acquire_write_lease_for_paths(fixture.process.write_scopes())
+            .await
+            .unwrap();
+        let store = store.with_write_lease(&lease);
+        let client = crate::MihomoClient::from_process(fixture.process.clone()).unwrap();
+        let session = crate::CoreSession::open(crate::CoreKind::Mihomo, client.clone()).unwrap();
+        let mutation = client.lock_runtime_binding().await.unwrap();
+        let published = Arc::new(Mutex::new(None));
+        let observed = published.clone();
+        let outcome = owner
+            .recover_local_runtime(
+                &store,
+                launch,
+                Arc::new(AtomicBool::new(false)),
+                std::time::Duration::from_secs(2),
+                move |process| async move {
+                    *observed.lock() = Some(process.clone());
+                    client.publish_prepared_process(process, mutation).await
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            outcome.failure.is_some(),
+            "saving failure must prohibit maintenance"
+        );
+        let process = published.lock().as_ref().unwrap().clone();
+        assert!(
+            process.snapshot().pid.is_some(),
+            "the safe ordinary owner remains available to shutdown"
+        );
+        assert_eq!(
+            std::fs::read(owner.source_home().join("GeoIP.dat")).unwrap(),
+            b"accepted geoip"
+        );
+        assert_eq!(std::fs::read(store.runtime_path()).unwrap(), previous);
+        session.shutdown().await.unwrap();
+        assert!(process.snapshot().pid.is_none());
+    }
+
+    #[tokio::test]
+    async fn service_local_recovery_readiness_failure_keeps_stopped_owner_and_rolls_back_geodata() {
+        let (fixture, _, owner, store) =
+            local_recovery_owner("geodata-service-recovery-readiness-failure").await;
+        fixture.responder_for_test_abort();
+        let launch = owner.local_launch().unwrap().clone();
+        let lease = store
+            .acquire_write_lease_for_paths(fixture.process.write_scopes())
+            .await
+            .unwrap();
+        let store = store.with_write_lease(&lease);
+        let client = crate::MihomoClient::from_process(fixture.process.clone()).unwrap();
+        let session = crate::CoreSession::open(crate::CoreKind::Mihomo, client.clone()).unwrap();
+        let mutation = client.lock_runtime_binding().await.unwrap();
+        let published = Arc::new(Mutex::new(None));
+        let observed = published.clone();
+        assert!(
+            owner
+                .recover_local_runtime(
+                    &store,
+                    launch,
+                    Arc::new(AtomicBool::new(false)),
+                    std::time::Duration::from_millis(100),
+                    move |process| async move {
+                        *observed.lock() = Some(process.clone());
+                        client.publish_prepared_process(process, mutation).await
+                    }
+                )
+                .await
+                .is_err()
+        );
+        assert!(published.lock().as_ref().unwrap().snapshot().pid.is_none());
+        assert_eq!(
+            std::fs::read(owner.source_home().join("GeoIP.dat")).unwrap(),
+            b"prior ordinary geoip"
+        );
+        session.shutdown().await.unwrap();
+    }
+
+    async fn accepted_cache_owner() -> (Arc<Service>, Arc<RuntimeSession<Service>>) {
+        let service = Arc::new(Service::default());
+        let owner = RuntimeSession::new(service.clone(), home());
+        owner
+            .prepare(
+                "rule-providers:\n  rules:\n    type: http\n    url: https://example.com/rules\n",
+            )
+            .await
+            .unwrap()
+            .apply(false)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
+        service
+            .caches
+            .lock()
+            .insert("rules".into(), b"downloaded cache".to_vec());
+        service.calls.lock().clear();
+        (service, owner)
+    }
+
+    #[tokio::test]
+    async fn stopped_export_rejects_revision_change_after_last_cache_read() {
+        let (service, owner) = accepted_cache_owner().await;
+        let before = owner.snapshot().unwrap();
+        service
+            .change_revision_during_cache
+            .store(true, Ordering::SeqCst);
+        assert!(owner.stop_and_export().await.is_err());
+        assert!(Arc::ptr_eq(&before, &owner.snapshot().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn stopped_export_confirms_stop_and_only_then_reads_accepted_cache() {
+        let (service, owner) = accepted_cache_owner().await;
+        let before = owner.snapshot().unwrap();
+        let exported = owner.stop_and_export().await.unwrap();
+        assert!(!service.running.load(Ordering::SeqCst));
+        assert!(!Arc::ptr_eq(&before, &exported));
+        assert!(Arc::ptr_eq(&exported, &owner.snapshot().unwrap()));
+        assert_eq!(
+            *service.calls.lock(),
+            ["stop", "status", "status", "read-cache:1:rules", "status"]
+        );
+    }
+
+    #[tokio::test]
+    async fn stopped_export_failure_preserves_accepted_bundle_without_restart_or_release() {
+        let (service, owner) = accepted_cache_owner().await;
+        let before = owner.snapshot().unwrap();
+        service.reject_cache.store(true, Ordering::SeqCst);
+        assert!(owner.stop_and_export().await.is_err());
+        assert!(Arc::ptr_eq(&before, &owner.snapshot().unwrap()));
+        assert_eq!(
+            *service.calls.lock(),
+            ["stop", "status", "status", "read-cache:1:rules"]
+        );
+    }
+
+    #[tokio::test]
+    async fn stopped_export_unconfirmed_stop_never_reads_cache() {
+        let (service, owner) = accepted_cache_owner().await;
+        service.stop_has_no_effect.store(true, Ordering::SeqCst);
+        assert!(owner.stop_and_export().await.is_err());
+        assert_eq!(*service.calls.lock(), ["stop", "status"]);
     }
 
     // Protocol-state fixture only: these assertions do not prove native service execution.

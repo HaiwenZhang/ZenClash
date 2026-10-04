@@ -3,7 +3,7 @@
 - 修订日期：2026-10-02。
 - 对应计划：[三平台 TUN 服务开发计划](tun-service-plan.md) 的 P0、P3 与 P4 接入边界。
 - 实现方向：优先移植上游服务代码并适配本节契约，具体来源与批次见 [上游代码移植计划](tun-service-upstream-migration.md)。`CoreSession`、配置事务、捕获协调和 GPUI 保留现有责任；移植尚未完成。
-- 状态：共享传输、资源 bundle、完整配置事务、唯一 owner 生命周期和部分配置事务已有阶段验证。首次安装并开启的 Manager/页面/托盘批次与随后 main/UI 启动批次分别通过第二轮审查；启动首审 P1/P2 已修复。Windows 完整 core 534 项、Linux 完整 core 577 项通过，各 2 项忽略；Windows 完整 UI 库 294 项、binary 11 项通过。core/UI check、标准严格 clippy 和 Linux core 完整 CI lint 通过；UI 附加 lint 仍有五项问题。恢复界面、修复/卸载、高层缓存保存与三平台真实验收尚未完成。详细证据见 [实施记录](tun-service-progress.md)，阶段结果不代表完整应用验收。
+- 状态：共享传输、资源 bundle、完整配置事务、唯一 owner 生命周期和部分配置事务已有阶段验证。首次安装并开启的 Manager/页面/托盘批次与随后 main/UI 启动批次分别通过第二轮审查；启动首审 P1/P2 已修复。Windows 完整 core 534 项、Linux 完整 core 577 项通过，各 2 项忽略；Windows 完整 UI 库 294 项、binary 11 项通过。core/UI check、标准严格 clippy 和 Linux core 完整 CI lint 通过；UI 附加 lint 仍有五项问题。无 owner 启动已按用户选择维持退出并改进错误提示；完整修复/卸载、高层缓存保存与三平台真实验收尚未完成。详细证据见 [实施记录](tun-service-progress.md)，阶段结果不代表完整应用验收。
 - 当前验证环境：Windows，以及 WSL Ubuntu 26.04 普通用户下的 Linux ELF 测试。两平台真实 Mihomo 普通生命周期分别 2 项通过；macOS 及三平台原生高权限服务、授权、TUN 与退出验收仍待执行。
 
 ## 1. 已有所有者与不能丢失的行为
@@ -114,7 +114,9 @@
 
 改为由 `MihomoClient` 或小型共享 `ControllerTransport` 提供具名 event stream。内部 `CoreEventStream` 分为 HTTP WebSocket 与 `ServiceSubscription`，统一产生 JSON data；不需要向 UI 暴露 socket 或 HTTP authorization。
 
-保留现有 generation watch、旧帧拒绝、取消、退避、日志 128 KiB 帧限额和历史 byte budget。日志当前支持 level 与 `format=structured` 的兼容回退；service 的 `Subscribe(Logs)` 必须补充同等具名 level/structured 策略，不能静默丢失用户等级选择。Traffic/Connections/Memory 按服务明确支持的 stream kind 连接。
+2026-10-03 已贯通 `SubscribeLogs { options: LogStreamOptions }`：core 严格解析等级与格式，拒绝非法、重复和未知 query，Service 传递具名选项并保留日志 128 KiB 帧限额、取消和 generation 校验。Service 订阅失败不重试 plain、旧日志操作或 Local；旧 v2 helper 拒绝新操作时保留控制 owner。Direct/Local 的 structured/plain 尝试固定在原 binding generation，迟到错误不能连接新控制器。Traffic/Connections/Memory 继续使用原 stream kind。
+
+Windows 内核管道仅对 `ERROR_PIPE_BUSY` 作有界异步重试；打开、同句柄 PID 验证与 WebSocket 握手共用五秒期限。普通用户真实 Mihomo v1.19.30 日志专项通过，证明内核管道格式、等级过滤、PID 和关闭重连行为；尚不证明高权限服务安装、受保护启动或 TUN。完整证据见 [实施记录](tun-service-progress.md)。
 
 ## 4. 运行绑定与身份
 
@@ -199,34 +201,80 @@ main/UI 首审发现自动网络暂停 Stop 破坏 Finalizing 提交，以及自
 
 随后 Windows 完整 core **534 通过、0 失败、2 忽略**，完整 UI 库 **294 项**与 binary **11 项**通过；WSL 普通用户下 Linux 完整 core **577 通过、0 失败、2 忽略**、启动相关 **29 项**通过。core/UI check、标准严格 clippy、core 附加 lint 及 Linux core 完整 CI lint 通过。Linux 两项 Unix 更新回滚夹具的同步问题也已修复并通过独立首审，更新模块 19 通过/2 忽略。UI 完整 CI 附加 lint 在 proxy/logs/profile 文件仍有五项失败；可见恢复界面和原生高权限服务启动仍待完成。
 
-服务没有可用 owner 时，当前启动返回明确错误，尚未接通可见恢复界面；独立恢复窗口与完整离线主界面的选择待用户确认。以上传输夹具和普通文件测试不能作为真实服务、窗口交互或 TUN 验收，也不把此前 Local→Service 测试作为“重启即可直接使用服务”的证据。
+2026-10-04 用户明确选择服务没有可用 owner 时“维持退出，仅改进错误提示”，不新增恢复窗口或离线主界面。当前启动仍经既有 tracing/stderr 报告错误并退出；启动专用双语文案区分各类服务拒绝与配置不可确认，并给出处理方式，不再称“启动已暂停”。未知连接失败仍保持未知，不推断协议不兼容或暴露原始 IPC/凭据。以上传输夹具和普通文件测试不能作为真实服务、窗口交互或 TUN 验收，也不把此前 Local→Service 测试作为“重启即可直接使用服务”的证据。
 
 启动需先核对服务身份、协议、健康和授权内核版本，普通权限准备资源后直接建立 Service owner。服务缺失、损坏、占用或状态未知时准确反馈；不能先启动含 TUN 的本地配置，也不能静默依赖旧 setuid。后续在真实服务环境验收健康服务零本地 child、缺失/不兼容/占用、Start 响应丢失及启动与 shutdown 并发。
 
-### 5.5 修复与卸载接线：待确认方案
+2026-10-04 Local 显式 TUN 命令已将配置/资源候选和 pending backup 的资源准备移到服务健康查询及授权之前；授权期间释放 capture/transition/store 与 Data lease，之后用会话身份、binding/generation、patch 和精确缓存复核。候选过期在 Stage/Local Stop 前拒绝，不重读订阅或 TLS 源。此为下述自动配置准入的共同前置事务，任意完整配置/PATCH 的自动交接仍未实现；验证边界见 [实施记录](tun-service-progress.md)。
 
-底层维护授权和结果分类已有验证，Manager 的 Repair/Uninstall 命令类型不代表完整业务流程已实现。建议第一次 Local→Service 时只保存不可变本地启动描述，不永久保留旧进程 Arc；维护时先冻结最新 accepted bundle 和捕获意图，普通权限准备并校验关闭 TUN 的本地配置，再确认服务 B Stop/Release，创建并发布新的真实 Local owner，最后请求维护授权。全部阶段归同一个 capture 完成任务，shutdown 等待该任务；B 停止/释放未确认时不得拉起 Local 或执行维护。
+### 5.5 修复与卸载接线：已确认方案，分批实施
 
-恢复资源只能来自已持有的 bundle，不能重新读取已被删除或改变的订阅/TLS 源。候选生成目录为 `ControlledConfigStore.root()/local-runtime/{slot0,slot1}`，保留原 home；GeoData 固定缓存名需有界原子替换及失败恢复。目录、写入范围与失败策略尚待确认，当前没有实施或新增持久化 schema，不能把提案记为完成。
+底层维护授权和结果分类已有验证，Manager 的 Repair/Uninstall 尚不代表完整业务流程已实现。Local→Service 现在只保存不可变本地启动描述，不永久保留旧进程 Arc；`CoreSession::local_recovery_launch` 读取当前绑定持有的普通描述，直接 Service 启动与 External 无描述时返回 None。原 config 路径不能替代 accepted bundle 字节。`CoreSession::recover_service_to_local` 已组合 runtime 层 Stop/导出、普通配置物化与预检、Release、新 Local owner 发布及就绪。捕获层新增同名入口，在共享 capture completion 中保存此前捕获观察、释放自有原生代理并调用 Core admitted 恢复；等待各 Core 准入锁后复核请求 generation。B 停止/释放未确认时不得拉起 Local 或执行维护。
 
-卸载授权取消后，保留服务安装和已恢复的 Local；修复取消只有在新鲜服务健康、同一意图且未退出时才尝试恢复捕获。维护结果未知禁止重发或自动启动服务。保存成功后的维护/清理错误保留保存收据；重新建立服务须新会话与新 revision，不能复用已 Release 的 owner。provider 最新缓存同步另在确认 Stop 后、Release 前接入，未接入时安全冷启动不能宣称缓存已保留。
+Manager 已提供 `request_maintenance` → `prepare_maintenance` → 显式 `with_authorization` → `maintain_prepared` 的分阶段 API，准备结果保留恢复资源，身份和版本变化后拒绝提交；Local 准备不启动另一进程。原生授权不持 runtime gate，复用 command completion 与 native pending observer。调用方必须保留准备结果；准备完成与原生维护完成是两种事实。Service 分支的整体行为、失败/取消后的自动恢复、捕获偏好持久化和完整 GUI 流程尚待验收，见实施记录，不能据此宣称完整修复/卸载可用。
 
-### 5.6 Managed Local 配置的 TUN 准入缺口
+2026-10-04 Local 就绪后已保存受控 `tun.enable=false` 和双槽生成的确切启动配置，保留普通资源绝对路径；成功后同步待恢复备份的配置 delta。缓存暂存与受控层保存遵循既有比较提交和失败回滚，不重新读取订阅/provider/TLS 源。保存失败保留正在运行的 Local 与已激活 GeoData，通过失败准备结果阻止原生维护，也拒绝新的维护请求；不能把实际 Local 进程存在当作维护准备成功。保存只接受当前恢复事务的借用写权限，事务结束后的句柄不能重新取得权限。维护后自动恢复已有阶段接线。Service→Local 维护暂停现在复用现有 `set_enabled(false, 0)` 事务，在 Stop/Release 前保存关闭意图并释放自有代理，防止后台 reconcile 依据旧 enabled 偏好重开。原生或保存失败按既有事务回滚并阻止继续准备；外部代理不改写。修复后的有效恢复经同一 owner 保存开启意图；卸载及取消卸载保留关闭意图。正常退出仍只释放所有权，保留下一次启动偏好。GUI 在准备失败或维护结束后后台回读偏好，仅同步 SystemProxy 字段；不覆盖语言等其他偏好。上述事务与界面接线仍需真实服务串联验收。
+
+[ProfileService](../../crates/zenclash-ui/src/profile_service.rs) 已提供对应的业务层 `request_service_maintenance` → `prepare_service_maintenance` → `maintain_prepared_service`，准备与提交采用同一共享命令锁及 owned completion，页面丢弃等待者不丢失已准入任务。共享记录最多保存最新准备结果和最后一次 Service→Local 资源准备；后来的 Local 准备不会丢弃上一恢复资源。原生提交要求最新 Arc 收据身份以及显式 consent，Manager 继续校验运行时身份/版本/就绪。成功且当前版本匹配的 Local 恢复清理旧 Service 提交确认状态，失败或旧结果不清理新版记录。
+
+TUN 页已通过标准 Kit 按钮和确认框调用上述业务入口；已有普通身份时，确认之前只保存当前意图。直接 Service 缺少普通身份时，先在后台按正常内核选择顺序准备身份，允许生成普通内核缓存；不读取源 YAML、不停止进程、不授权。确认后在后台准备 Local 并提交原生维护，页面关闭不撤销已准入任务。维护成功后重新观察服务健康，避免卸载后仍显示旧 Ready。匹配同代恢复收据时，现有开启 TUN 入口改用 `request_enable_tun_after_recovery` 的资源接续路径。修复完成或已确认失败/取消后，业务完成任务已接入 `restore_prepared_capture`：新鲜健康为 Ready、同一恢复收据和捕获意图且未退出时，复用 held bundle 重新进入 TUN，不再次发起授权；此前 Owned 且 active 的系统代理随后独立恢复，保留 Advanced 组合。原生结果未知、安装不可用、新用户选择或陈旧配置禁止自动恢复；卸载继续 Local。TUN 保存收据与后续代理警告分别记录，代理失败不丢失已保存配置。确认文案已同步该行为；完整管理员串联仍缺实机验收。直接 Service 启动缺少普通身份时，Manager 从当前 Service owner 保留的普通 source home 和 accepted profile 路径准备恢复描述，等待前后复核身份及版本；公开 Service descriptor 仍不提供受保护 executable/home。发现失败在停止之前反馈，准备成功后才展示确认框。分层回归不代表完整 GUI 维护可用。完整 Service→业务层→native 串联证据和三平台实机验收仍待补齐。
+
+恢复资源只能来自已持有的 bundle，不能重新读取已被删除或改变的订阅/TLS 源。2026-10-03 用户已确认生成目录 `ControlledConfigStore.root()/local-runtime/{slot0,slot1}`、关闭恢复配置 TUN、保留原 home，以及 GeoData 固定缓存名的有界原子替换与失败恢复。新增普通用户托管生成目录，既有用户无需迁移；首次恢复时生成，不改写订阅/TLS 源。 admitted 普通恢复入口同时核对 store mutation 身份及租约覆盖范围；双槽要求覆盖 store root，GeoData 要求覆盖 store root 与原 home，不完整租约在写入前返回错误，不能越范围写入或触发授权构造 panic。普通权限双槽文件生成已有 Windows/普通 WSL Linux 阶段验证；`with_local_geodata` 提供原 home 固定名称激活及正常错误回滚，`LocalGeoDataRecovery` 复用持有租约进行受限本地预检/启动，已接入 runtime 恢复组合入口。启动失败须确认新子进程停止后才能回滚；停止未确认通过 outcome 报告失败并保留激活资源和 owner，禁止继续维护。GUI 维护与真实管理员服务验收仍未完成；验证边界见实施记录。
+
+捕获意图版本保存在 CoreSession 的共享内存中，不新增持久化格式。普通捕获 Apply 和显式服务 TUN 记录新意图；Service→Local 准备在排队前冻结版本，拿到门后复核，收据保留冻结值。自动 TUN 与代理恢复在捕获门内复核版本，网络观察后、代理写入前再检查；新用户意图不被旧收据采纳。代理恢复使用 TUN 保存收据的确切 generation，无 TUN 时使用维护准备原版本，不能重新接纳当前 generation。
+
+卸载授权取消后，保留服务安装和已恢复的 Local；修复取消只有在新鲜服务健康、同一意图且未退出时才尝试恢复捕获。维护结果未知禁止重发或自动启动服务。保存成功后的维护/清理错误保留保存收据；重新建立服务须新会话与新 revision，不能复用已 Release 的 owner。确认 Stop 后、Release 前的完整 provider 缓存导出已接入 runtime 恢复，失败不发布不完整快照；临时 Local 运行期间新增 HTTP provider 缓存现已在重新进入 Service 的交接中接线：确认 Local Stop 后仅从当前固定恢复槽有界读取缓存，保留 held TLS/GeoData，再重新 Stage/Validate；导出或准备失败回滚暂存并尝试经确认 Release 恢复 Local。新增缓存、缺失及非法文件已有普通文件测试，真实 ServiceClient 往返与失败恢复尚未验收。
+
+2026-10-04 已新增 `ServiceManager::request_enable_tun_after_recovery`，由同会话、同代且就绪的 `CoreLocalRecoveryOutcome` 携带关闭 TUN 的 held bundle，继续走既有授权和交接事务；显式恢复准备不重读订阅、override 或运行缓存。收据不授予维护权限，也不替代新鲜健康核验。源 YAML/provider/TLS 删除后的资源接续已有模拟 Service 与普通 Local 子进程行为证据；完整 Manager 修复流程、GUI 调用和原生维护验收仍待实施。
+
+2026-10-04 初始 Local→Service 交接失败的回滚也使用授权前持有的 previous bundle，不再重启原配置/资源路径。没有 accepted Service snapshot 的失败试运行可从已持有资源生成 TUN-off 双槽 Local 配置，保留原 home；确认 Release 后再激活 GeoData、发布并启动新 owner，保存确切恢复缓存。生产外层 store mutation guard 连续传入文件生成和 GeoData 完成任务，避免再次获取同一把锁；guard 必须属于同一 store。源删除、持外层锁、Release 未知与退出停止已有普通进程行为验证；不代表管理员服务或真实 TUN 失败恢复已验收，见 [实施记录](tun-service-progress.md)。
+
+2026-10-04 真实 Mihomo 恢复路径修正：正式 v1.19.30 的 [路径规则](https://raw.githubusercontent.com/MetaCubeX/mihomo/v1.19.30/constant/path.go) 默认只允许原 home 内 provider，双槽资源位于受控 store 下；真实普通权限回归已证实此前生成配置在预检阶段被拒绝。恢复准入现在在普通 binary、租约覆盖与 TUN-off 检查后，仅为准确 `store.root()/local-runtime/{slot0,slot1}/runtime.yaml` 设置对应双槽根的内存许可。[Process](../../crates/zenclash-core/src/process.rs) 与 [预检](../../crates/zenclash-core/src/core_validation.rs) 共同把该根下两个固定槽作为完整路径列表传入 Mihomo 的 `SAFE_PATHS`，覆盖继承的 SAFE_PATHS 并移除继承的 SKIP_SAFE_PATH_CHECK，继续使用原 home；后续同一 Local owner 重启和校验保留该许可。普通非恢复 owner 不设置此许可，meow 保持原路径；没有新增依赖、用户设置、协议或持久结构。对应资源根纳入数据协调范围。真实 file-provider 消费与外槽拒绝证据见 [实施记录](tun-service-progress.md)，不代表真实 GeoData/TLS 或管理员维护完成。
+
+### 5.6 Managed Local 配置的 TUN 准入与剩余缺口
+
+2026-10-04 Local 重启拒绝的状态恢复：[CoreSession 维护](../../crates/zenclash-core/src/core_session.rs) 在 TUN/配置拒绝且原生前后观察证明进程没有变化时，保留原 Stable/Stopped/NetworkSuspended 阶段、显式停止意图及网络暂停资格，不推进 generation。内部 `try_snapshot` 能区分原生查询失败；不可信观察不会被当作已停止或未变化，准入后的失败继续按 Unknown 和代际失效处理。前置观察任务异常仍在准入前返回。该分支仅适用于 Local，Service 未放宽；退出意图仍最终覆盖。此修复不等于直接重启已接入 Manager 自动授权交接，后者仍待完成，验证见 [实施记录](tun-service-progress.md)。
+
+2026-10-04 普通内核升级配置冻结：[升级事务](../../crates/zenclash-core/src/core_update/workflow.rs) 在下载完成后、有权消费当前配置时读取一次 Local/Mihomo payload，执行 TUN 准入及候选预检；候选启动、激活失败恢复和旧内核回滚都复用同一份内容，不再重新打开原配置。候选和旧内核各自仍执行配置验证，取消、未就绪清理及原 home 保持原有语义。源变化或删除不会改变本次升级的启动内容；独立普通重启仍读取其当时的配置。此批不实现 Service 受保护升级、旧包注册迁移或直接重启的自动授权交接，验证结果见 [实施记录](tun-service-progress.md)。
+
+2026-10-04 启动冻结：普通 [Process](../../crates/zenclash-core/src/process.rs) 的 Mihomo 启动/重启只读取一次配置，最终 TUN 检查、重启预检及启动复用该 payload。[输入实现](../../crates/zenclash-core/src/process/input.rs) 使用自动清理的文件句柄作为 stdin，沿用 Mihomo `-f -`，保留原 home；不依赖管道写入任务。启动与验证清除 `CLASH_CONFIG_STRING`，避免它替换已检查内容。Unix 非阻塞打开后核对同一 handle 的普通文件类型，Windows 另核对磁盘类型；读取保持 16 MiB 上限。取消、无效输入和快照准备失败均发生在停止旧进程前。依据为固定 [Mihomo v1.19.30 main.go](https://raw.githubusercontent.com/MetaCubeX/mihomo/v1.19.30/main.go)；meow 沿原文件参数。此批关闭启动文件替换窗口，不代表 GUI 丢失 Service owner、跨会话缓存身份、旧服务迁移和受保护升级已完成。验证结果见 [实施记录](tun-service-progress.md)。
+
+2026-10-04 最新备份接线：[workflow](../../crates/zenclash-ui/src/pages/runtime/settings/backup/workflow.rs) 在 `begin_backup_restore` 与激活之前冻结 Local/Mihomo 的最终归档候选和旧资源，必要时完成 Manager 系统授权；授权等待不持数据写权限或捕获门。激活持 exclusive lease 后先比较旧运行缓存、源身份、绑定及版本，再替换数据；消费再次比较归档候选，沿冻结候选应用，禁止在此阶段再次弹授权。CaptureBackend 使用传入的授权 store，借用本次备份租约。旧 held snapshot 进入外层事务，Service 回滚复用 bundle，Local 回滚生成 §5.5 双槽 TUN-off 配置；会话内存跟踪热重载后活动槽，未知结果保留待确认文件且只复用同一候选重试。没有新增用户持久化格式，原始源不改写。分层验证与原生验证边界见 [实施记录](tun-service-progress.md)；下述历次分析保留各批时间边界。
+
+2026-10-04 自动准备与执行兜底复用同一个最终 YAML TUN 判定。基础源和每个 ordered override 在层合并前分别展开 YAML merge，保证覆写层继承的值按已有层顺序覆盖；Service bundle 与本地 proxy provider YAML 在资源重写前展开 merge，以持有真正生效的 provider/TLS 字节。完整展开复用 [profile.rs](../../crates/zenclash-core/src/profile.rs) 的后序函数：先展开默认映射，再消费当前 merge；保留显式键和 merge 序列先者优先，限制深度为 128。单次库 `apply_merge()` 不能保证链式 merge 完整，不再直接作为这些入口的最终判定。原订阅及 override 文件不改写。此修复解决 merge 候选被当普通配置而在底层拒绝的问题，仍不是备份激活前授权流程的实现。
+
+2026-10-04 底层补上 [tun_admission](../../crates/zenclash-core/src/tun_admission.rs) 政策：实际 Local/Mihomo 的完整 payload 在普通验证/派发之前展开 YAML merge 并检查最终 TUN；PATCH 在派发前检查 Go JSON 接受的大小写字段变体，任何启用请求均拒绝。普通 Process 首次启动及重启读取有界启动配置；重启在验证前后检查，拒绝发生在停止旧进程之前。返回结构化 `ServiceRequired`，不当作结果未知或重启理由。External、Service 和 meow 不受此 Mihomo Local 政策限制；该低层拒绝不替代 GUI 已接的 Manager 自动授权流程。启动文件仍未冻结，检查到内核读取之间的改写窗口以及备份 exclusive lease 内等待授权仍待解决，不能宣称所有入口完成统一准入。
+
+当前生产接线（2026-10-04 最新批次）：GUI 托管目录操作通过 `apply_with_service` 先冻结最终候选。Local/Mihomo 最终 TUN 开启时交给 Manager 授权及既有 Service trial；同一 Core completion 在停止前和试运行后比较目录/源，试运行成功后保存目录和运行缓存，完整应用不改写 controlled 层。失败恢复 held Local；成功但 Commit 未确认保留 durable source/runtime 收据及捕获警告。无运行尝试的陈旧候选是拒绝，不从其他事务的全局 generation 推断本次未知状态；运行尝试的结果版本在捕获门内固定。直接普通目录消费拒绝需要 Service 的候选。上述生产接线已有分层回归，真实管理员服务/Mihomo/TUN 全链路未验收，不能据此认为全部入口准入完成。下面保留历次分析及其时间边界，当前验证见 [实施记录](tun-service-progress.md)。
 
 2026-10-02 只读核对确认：启动入口拒绝含 TUN 的 Local 配置，并不覆盖启动后的配置生命周期。实际 owner 为 Local、后端为 Mihomo 时，完整应用、直接 PATCH 和缓存重启尚无统一 TUN 准入；最终有效配置启用 TUN 可进入这些执行路径。该结论是源码调用链证据，不证明普通权限成功创建网卡。本轮没有修改生产代码、运行新增回归或执行提权。
 
 | 入口 | 当前路径 |
 | --- | --- |
-| 订阅导入、激活、更新及编辑 | [ProfileApplication](../../crates/zenclash-core/src/profiles/application.rs) → [CoreSession](../../crates/zenclash-core/src/core_session.rs) → [ControlledConfig](../../crates/zenclash-core/src/controlled_config.rs) → Local 完整热载；传输结果未知时可转本地重启 |
-| 完整 apply 与 PATCH | Session 沿 pinned owner 应用；[client/api.rs](../../crates/zenclash-core/src/client/api.rs) 的直接 PATCH 发送前也缺少该门禁 |
-| 备份导入 | [backup/workflow.rs](../../crates/zenclash-ui/src/pages/runtime/settings/backup/workflow.rs) → ProfileService → 同一完整 apply；失败恢复依赖确切旧快照 |
-| 更新、监督及显式重启 | [core_update/workflow.rs](../../crates/zenclash-core/src/core_update/workflow.rs) 和 [process.rs](../../crates/zenclash-core/src/process.rs) 沿当前启动缓存恢复 |
+| 订阅导入、激活、更新及编辑 | ProfileService → [ProfileApplication](../../crates/zenclash-core/src/profiles/application.rs) 最终候选；需要 Service 时经 Manager 授权与 Core 目录 participant；其他候选沿原事务 |
+| 完整 apply 与 PATCH | Session 沿 pinned owner 应用；[client/api.rs](../../crates/zenclash-core/src/client/api.rs) 普通完整 payload 与直接 PATCH 派发前检查实际 Local/Mihomo；GUI 共享入口继续自动授权 |
+| 备份导入 | [backup/workflow.rs](../../crates/zenclash-ui/src/pages/runtime/settings/backup/workflow.rs) → ProfileService → Manager 激活前准备与授权，激活后消费冻结候选；外层失败使用旧 held snapshot 恢复 |
+| 更新、监督及显式重启 | [core_update/workflow.rs](../../crates/zenclash-core/src/core_update/workflow.rs) 和 [process.rs](../../crates/zenclash-core/src/process.rs) 已冻结一次读取后的启动配置，普通升级预检、候选启动及回滚复用冻结内容，候选 validator 继承当前恢复 owner 的双槽许可；Process 拒绝 Local TUN-on。直接 GUI 重启自动授权交接仍未接入，不能以底层拒绝代表完成 |
+
+2026-10-04 直接重启接线前置核对：现有 [GUI 重启](../../crates/zenclash-ui/src/pages/runtime/mihomo.rs) 直接调用 `CoreSession::maintain(Restart)`；Process 读取当前 launch config 指定的生成文件，并不重新合并已选择订阅。`ServiceManager::try_apply_service_config` 经 `prepare_service_config_source` 重新合并 profile、controlled patch 和 overrides。即使传 Frozen profile，`prepare_service_config_update` 仍再次叠加 controlled patch/overrides，因此不能把已生效生成 YAML 当作普通 profile 直接传入，也不能简单以 `ReapplyCurrent` 替代原重启。
+
+直接重启待选择的是产品语义，已提出用户选择，尚未接线。推荐保留当前生成配置语义：在后台及现有会话准入中一次有界读取并冻结准确字节；TUN-off 继续普通重启，TUN-on 经 Manager 授权与 capture/Core 交接。冻结候选不得重新叠加设置或补开 DNS；旧资源和 TUN-off 恢复沿已批准 §5.5 持有、物化和失败恢复路径，原 home 保持不变。授权等待不持 Data lease、capture/transition/store 锁；授权后必须重新核对 binding/generation、候选源与受控状态，陈旧结果在 Stage/Stop 前拒绝，退出继续同步清理唯一 owner。另一选项是明确改为重建 profile/overrides/settings 后再重启；该行为不能从既有配置操作自动授权的批准中自行推断。
 
 判断必须基于最终 effective 配置：源 profile → controlled patch → 有序 YAML overrides。源 `tun.enable=true` 可以被后层覆盖为 false，源 false 也可以被覆盖为 true；不能只检查订阅源。Mihomo normalizer 不关闭 TUN，`-t` 只验证配置，不能代替运行时服务准入。这些配置链未调用旧 `request_grant`；遗留公开 `TrafficCaptureSession::apply(Tun)` 的授权路径是另一项待迁移边界。
 
 建议复用一个 core 私有政策函数，只对实际 Local owner + Mihomo 生效：完整 payload 在验证、缓存和发送前检查最终 YAML；PATCH 在发送前检查启用请求；ControlledConfig 重启在最终合并后、写缓存前检查，Process 重启再检查真实启动缓存。现有单点不能同时覆盖 HTTP 与进程启动，不能仅按 endpoint 或 core kind 推断所有权。Service 保持受控 revision 事务，External 不获得本地控制能力，meow 保持实验后端边界。
 
-产品行为待确认：拒绝并提示用户显式开启服务，或将配置操作纳入获授权的服务交接事务。前者改变 Local 含 TUN 配置的应用结果；后者扩大配置操作的事务和交互范围。尚未实施，不自动改写源配置、不自动安装服务，也不依赖 OS 报错决定准入。
+2026-10-04 目录候选已拆为 `ProfileApplication::prepare_change` 与 `apply_prepared`，既有 apply 复用。准备后仅持有源字节、目录/源比较和会话版本，不保留 staging 或 Data 写租约；消费等待新的全范围租约后再核对目录/源，Core transition 内复核 binding/generation。原导入源删除可用 held 内容，受管源或目录修改拒绝，跨会话及新运行操作后的陈旧候选拒绝。提交与失败恢复仍用原单一事务。这为授权期间释放准入提供前置；随后 Local/Mihomo 已接共同配置准备以冻结最终 effective 配置和 TUN 前后资源，Manager 自动授权与 Service trial 仍未接入；不能用一次性配置接受先行保存运行缓存来替代目录的比较提交，验证边界见 [实施记录](tun-service-progress.md)。
+
+2026-10-04 实际 Local/Mihomo 目录运行候选已用 held 基础 YAML 接入 Core 共同配置准备，目标目录文件未提交也可准备完整 effective payload；最终 TUN 判定包含 controlled/ordered overrides，并持有旧缓存及开启 TUN 所需的前后资源。`requires_service` 只报告准备事实，目录尚未按该标志接 Manager 授权。普通消费在 store mutation gate 内比较受控层字节与确切缓存，使用已冻结最终 payload，不重新读取 override。目录 Service trial 必须在普通消费转换之前接入；没有授权/试运行与目录提交一体化证据时不能报告目录 TUN 准入完成，见 [实施记录](tun-service-progress.md)。
+
+2026-10-04 共享业务入口已有阶段接线：ProfileService 的完整 override 重载/重应用和运行页手动 PATCH，在最终候选 TUN 开启时准备完整配置及资源并进入授权和交接，保留原 DNS 等配置及 typed core 错误；保存收据与捕获警告归 owned 业务任务。TUN 关闭的 Local/Mihomo 候选同样冻结并在应用前核对会话、binding/generation、受控层和运行缓存，首次应用不要求缓存；源文件 Off→On 或 override 删除不再导致该共享入口应用未经检查的配置。重启回退仅允许实际 owner 启动路径等于托管缓存路径，并使用冻结 payload；保存失败恢复确切旧运行与缓存。ProfileApplication 目录提交、直接 Core/client、备份/重启/更新尚未统一；真实管理员交接与失败恢复未验收。该阶段不能代替全部入口准入，见 [实施记录](tun-service-progress.md)。
+
+2026-10-04 托管目录事务已新增有界基础源快照：运行阶段消费 `StagedProfile` 持有的 UTF-8 内容，目录提交核对 staging 并持久化同一份字节。候选被改写时拒绝目录提交并回滚确切旧缓存/运行内容；不新增目录记录，临时文件随事务清理。此为授权前准备的前置修复，controlled/override 最终 payload 尚未统一冻结，目录事务仍未接入自动服务交接，不能据此宣布本节完成。
+
+2026-10-04 目录完整重载进一步改为单一最终 payload：基础源、controlled 和 ordered overrides 在准入中合并一次，HTTP 未知失败后的普通 Local 重启保持同一 payload、mutation gate 与写权限；启动路径必须等于托管缓存，Service/External 不进入重启回退。既有不可读旧缓存仍在合并前拒绝。目录授权/服务交接以及其余直接/备份/启动/更新入口的 TUN 准入未完成。
+
+2026-10-03 用户已确认产品行为：配置操作进入授权及服务交接流程，成功后再应用。不得以只拒绝并提示代替该选择。需复用 ServiceManager 与捕获的完成任务，在停止 Local 前准备并验证最终 effective 候选及资源，取消授权或交接失败保留原进程和配置；来源、controlled patch 与有序 overrides 必须在同一事务中固定。尚未完成自动配置接线，不把现有显式开启服务入口计作本项已实现。启动/恢复/内核更新等没有交互窗口的路径也必须经过同一明确准入，不能依赖 OS 报错后再处理。
 
 后续行为回归应复用普通 HTTP/子进程 fixture：有效 false→true 时零发送、零重启，原 PID、缓存、持久化与 generation 保持；覆盖 override 正反覆盖、PATCH、备份、更新及自动恢复，并证明 Service/External/meow 不误拒。既有缓存回滚和确切备份恢复测试不能替代这些新增准入证据。
 

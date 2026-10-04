@@ -55,11 +55,13 @@ The macOS package is not yet notarized by Apple. See the [macOS installation gui
 
 TUN requires system permissions. The service mode under development has an in-app first-install and enable flow, but native acceptance on all three platforms is still pending. Check the documentation for your version; use the system proxy to get started.
 
+Managed Mihomo startup reports an error and exits when service status, ownership, or authorization prevents startup, including when the service is missing and saved TUN is enabled. Resolve the service or configuration issue described in the error, then restart. A missing service with confirmed TUN-off still permits normal local startup; the app does not automatically fall back to bypass a service rejection.
+
 ## Development
 
 You need the current Rust stable toolchain, your platform's native build tools, and a working Mihomo executable. On Linux, install dependencies with `sudo scripts/install_linux_build_deps.sh`.
 
-The TUN service for all three platforms is being implemented according to the [development plan](docs/development/tun-service-plan.md). The in-app first-install and enable flow has initial integration and behavior tests; complete repair, uninstall, and native acceptance on all three platforms remain unfinished. Packaging scripts for all three platforms now include the separate service artifact; see the [service packaging record](docs/development/tun-service-packaging.md) for deployment boundaries and validation commands.
+The TUN service for all three platforms is being implemented according to the [development plan](docs/development/tun-service-plan.md). The in-app first-install and enable flow has initial integration and behavior tests. The TUN page now provides repair and uninstall confirmation controls, restoring the local core before maintenance; TUN can then be enabled again. Background preparation of ordinary core identity after direct Service startup is integrated; automatic capture restoration after repair, proxy preference persistence during maintenance, and UI synchronization are integrated, while the complete administrator maintenance flow and native acceptance on all three platforms remain unfinished, so the complete workflow is still in development. Packaging scripts for all three platforms now include the separate service artifact; see the [service packaging record](docs/development/tun-service-packaging.md) for deployment boundaries and validation commands.
 
 Run from the repository root on macOS or Linux:
 
@@ -92,6 +94,7 @@ Further reading: [packaging scripts](scripts) · [development and validation not
 - Traffic history stays local; you can disable it or change its retention period in Settings. At most 1,000,000 samples are retained, with the oldest observation timestamps evicted first. Normal exit awaits the final write; a failed write preserves the bounded pending queue for retry.
 - The log buffer and persistence queue limit both entry counts and serialized bytes. Oversized logs show an error, and filtering and display data are prepared in the background.
 - Cores started by ZenClash stop when the app exits normally.
+- Ordinary Mihomo startup and restart use the checked configuration snapshot. Later source-file changes cannot replace that launch input; a failed restart check preserves the current core.
 - Configurations, logs, and backups may contain subscription URLs or controller secrets. Redact them before sharing.
 
 ## Contributing

@@ -7,6 +7,8 @@ use parking_lot::{Mutex, RwLock};
 
 use super::*;
 
+mod frozen_launch_tests;
+
 #[test]
 fn controller_listener_conflict_is_detected_without_confusing_proxy_listener_errors() {
     let controller = VecDeque::from([String::from(
@@ -62,6 +64,7 @@ fn exited_process_snapshot_does_not_expose_a_stale_pid() {
         child: Mutex::new(Some(child)),
         logs: Arc::new(RwLock::new(VecDeque::new())),
         last_exit_reason: RwLock::new(None),
+        recovery_asset_root: RwLock::new(None),
         config: MihomoLaunchConfig {
             kind: CoreKind::Mihomo,
             binary: PathBuf::from("/usr/bin/true"),
@@ -77,6 +80,65 @@ fn exited_process_snapshot_does_not_expose_a_stale_pid() {
     assert_eq!((snapshot.running, snapshot.pid), (false, None));
     assert!(snapshot.exit_reason.is_some());
     assert_eq!(snapshot.kind, CoreKind::Mihomo);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unobservable_local_restart_rejection_invalidates_the_lifecycle() {
+    let directory = std::env::temp_dir().join(format!(
+        "zenclash-unobservable-restart-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let config = directory.join("profile.yaml");
+    std::fs::write(&config, "tun: {enable: true}\n").unwrap();
+    let child = Command::new("/usr/bin/sleep").arg("30").spawn().unwrap();
+    let pid = child.id() as libc::pid_t;
+    let process = Arc::new(MihomoProcess {
+        drop_gate: Mutex::new(None),
+        child: Mutex::new(Some(child)),
+        logs: Arc::new(RwLock::new(VecDeque::new())),
+        last_exit_reason: RwLock::new(None),
+        recovery_asset_root: RwLock::new(None),
+        config: MihomoLaunchConfig {
+            kind: CoreKind::Mihomo,
+            binary: PathBuf::from("/usr/bin/sleep"),
+            config_file: config,
+            home_dir: directory.clone(),
+            endpoint: MihomoEndpoint::default(),
+            controller_override: None,
+        },
+    });
+    let session = crate::CoreSession::open(
+        CoreKind::Mihomo,
+        MihomoClient::from_process(process.clone()).unwrap(),
+    )
+    .unwrap();
+    // SAFETY: this test owns the one positive live child PID and reaps it once.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+    let mut status = 0;
+    // SAFETY: status is live native storage; waitpid targets only this owned child.
+    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    assert!(process.child.lock().as_mut().unwrap().try_wait().is_err());
+    let result = session
+        .maintain(crate::CoreMaintenanceIntent::Restart)
+        .await;
+    let lifecycle = session.lifecycle_snapshot();
+    let generation = session.generation();
+    // The fixture was already reaped above; release only its stale test handle.
+    process.child.lock().take();
+    session.shutdown().await.unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+    assert!(result.is_err());
+    assert_eq!(lifecycle.phase, crate::CoreLifecyclePhase::Unknown);
+    assert!(
+        generation > 0,
+        "failed observation retained a trusted read version"
+    );
 }
 
 #[cfg(unix)]
@@ -261,6 +323,7 @@ fn ui_metadata_and_logs_remain_available_while_lifecycle_lock_is_held() {
         child: parking_lot::Mutex::new(None),
         logs: std::sync::Arc::new(parking_lot::RwLock::new(VecDeque::from(["ready".into()]))),
         last_exit_reason: parking_lot::RwLock::new(None),
+        recovery_asset_root: RwLock::new(None),
         config: MihomoLaunchConfig {
             kind: CoreKind::Mihomo,
             binary: "mihomo".into(),
@@ -297,4 +360,50 @@ fn ui_metadata_and_logs_remain_available_while_lifecycle_lock_is_held() {
     assert_eq!(logs, ["ready"]);
     assert!(managed);
     assert_eq!(generation, 0);
+}
+
+#[tokio::test]
+async fn local_tun_restart_rejection_preserves_the_running_child() {
+    let fixture =
+        crate::core_session::ownership_tests::ChildFixture::new("geodata-local-tun-restart-gate")
+            .await;
+    let first_pid = fixture.process.snapshot().pid;
+    std::fs::write(
+        &fixture.process.launch_config().config_file,
+        "tun: {enable: true}\n",
+    )
+    .unwrap();
+    let process = fixture.process.clone();
+    let result = tokio::task::spawn_blocking(move || process.restart())
+        .await
+        .unwrap();
+    assert!(matches!(result, Err(MihomoError::ServiceRequired)));
+    assert_eq!(fixture.process.snapshot().pid, first_pid);
+    assert!(fixture.process.snapshot().running);
+}
+
+#[test]
+fn local_tun_spawn_rejection_does_not_create_the_runtime_home() {
+    let root = std::env::temp_dir().join(format!(
+        "zenclash-local-tun-spawn-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("source.yaml");
+    std::fs::write(&source, "tun: {enable: true}\n").unwrap();
+    let home = root.join("home");
+    let launch =
+        MihomoLaunchConfig::new(root.join("must-not-run"), source.clone(), home.clone()).unwrap();
+    let result = MihomoProcess::spawn(launch);
+    assert!(matches!(result, Err(MihomoError::ServiceRequired)));
+    assert!(!home.exists());
+    assert_eq!(
+        std::fs::read_to_string(source).unwrap(),
+        "tun: {enable: true}\n"
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }

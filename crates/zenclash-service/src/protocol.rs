@@ -3,7 +3,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 /// Wire protocol version; independent from the installation metadata schema.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Service handshake information, containing no client-supplied identity.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -164,6 +164,9 @@ pub(crate) enum SessionOperation {
     Subscribe {
         stream: StreamKind,
     },
+    SubscribeLogs {
+        options: LogStreamOptions,
+    },
 }
 
 impl fmt::Debug for SessionOperation {
@@ -228,6 +231,10 @@ impl fmt::Debug for SessionOperation {
             Self::Subscribe { stream } => {
                 f.debug_struct("Subscribe").field("stream", stream).finish()
             }
+            Self::SubscribeLogs { options } => f
+                .debug_struct("SubscribeLogs")
+                .field("options", options)
+                .finish(),
         }
     }
 }
@@ -345,6 +352,46 @@ impl fmt::Debug for ApiResponse {
             .field("body", &"[redacted]")
             .finish()
     }
+}
+
+/// Severity threshold for a named service log subscription.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceLogLevel {
+    /// Disable log events.
+    Silent,
+    /// Errors only.
+    Error,
+    /// Warnings and errors.
+    Warning,
+    /// Operational events, warnings and errors.
+    #[default]
+    Info,
+    /// Include verbose diagnostic events.
+    Debug,
+}
+
+/// JSON representation requested from the kernel log stream.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceLogFormat {
+    /// Legacy type/payload JSON events.
+    Plain,
+    /// Events with time, level, message and structured fields.
+    #[default]
+    Structured,
+}
+
+/// Explicit bounded log options; defaults in Rust are Info and Structured.
+///
+/// Every wire request must supply both fields; missing or unknown fields fail.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LogStreamOptions {
+    /// Severity threshold requested from the kernel.
+    pub level: ServiceLogLevel,
+    /// Kernel event representation to request.
+    pub format: ServiceLogFormat,
 }
 
 /// Named kernel event streams available through the service policy.
@@ -546,6 +593,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn named_log_wire_options_require_both_fields_and_reject_query_injection() {
+        for options in [
+            serde_json::json!({}),
+            serde_json::json!({"level":"info"}),
+            serde_json::json!({"format":"structured"}),
+            serde_json::json!({"level":"warn", "format":"plain"}),
+            serde_json::json!({"level":"trace", "format":"plain"}),
+            serde_json::json!({"level":"info", "format":"unsupported"}),
+            serde_json::json!({"level":"info", "format":"structured", "path":"/configs"}),
+        ] {
+            assert!(
+                serde_json::from_value::<SessionOperation>(serde_json::json!({
+                    "action":"subscribe_logs", "options":options
+                }))
+                .is_err()
+            );
+        }
+        let operation: SessionOperation = serde_json::from_value(serde_json::json!({
+            "action":"subscribe_logs", "options":{"level":"warning", "format":"plain"}
+        }))
+        .unwrap();
+        assert!(matches!(
+            operation,
+            SessionOperation::SubscribeLogs {
+                options: LogStreamOptions {
+                    level: ServiceLogLevel::Warning,
+                    format: ServiceLogFormat::Plain
+                }
+            }
+        ));
+    }
+
+    #[test]
     fn wire_roundtrip_keeps_staged_content_but_diagnostics_redact_it() {
         let request = Request::Session {
             proof: SessionProof::new(1, SessionToken([0xab; 32])),
@@ -591,6 +671,18 @@ mod tests {
         }))
         .unwrap();
         assert!(!incompatible.is_compatible());
+    }
+
+    #[test]
+    fn atomic_maintenance_requires_protocol_three_and_rejects_legacy_helpers() {
+        assert_eq!(ProtocolInfo::current().protocol_version, 3);
+        for version in [1, 2] {
+            let legacy = ProtocolInfo {
+                protocol_version: version,
+                service_version: "0.1.2".into(),
+            };
+            assert!(!legacy.is_compatible());
+        }
     }
 
     #[test]

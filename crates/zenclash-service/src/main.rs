@@ -1,5 +1,22 @@
 fn main() -> std::process::ExitCode {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    #[cfg(target_os = "macos")]
+    if arguments
+        .iter()
+        .map(|argument| argument.as_os_str())
+        .eq([std::ffi::OsStr::new("--query-host-pid")])
+    {
+        return match zenclash_service::query_service_host_pid() {
+            Ok(pid) => {
+                println!("{pid}");
+                std::process::ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("service host query failed: {error}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
     if arguments
         .iter()
         .map(|argument| argument.as_os_str())

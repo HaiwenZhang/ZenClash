@@ -18,6 +18,7 @@ use crate::{
 };
 
 mod discovery;
+mod input;
 mod resources;
 
 #[cfg(test)]
@@ -38,6 +39,7 @@ pub struct MihomoProcess {
     logs: Arc<RwLock<VecDeque<String>>>,
     last_exit_reason: RwLock<Option<String>>,
     config: MihomoLaunchConfig,
+    recovery_asset_root: RwLock<Option<PathBuf>>,
     #[cfg(test)]
     drop_gate: Mutex<Option<TestDropGate>>,
 }
@@ -87,7 +89,7 @@ pub struct MihomoProcessSnapshot {
     pub exit_reason: Option<String>,
     /// Executable used to launch the child.
     pub binary: PathBuf,
-    /// Active YAML configuration passed to the child.
+    /// Original startup source; Local Mihomo receives a frozen copy through stdin.
     pub config_file: PathBuf,
     /// Mihomo writable data directory.
     pub home_dir: PathBuf,
@@ -96,6 +98,24 @@ pub struct MihomoProcessSnapshot {
 }
 
 impl MihomoProcess {
+    /// Creates an owned, stopped runtime without filesystem or process operations.
+    ///
+    /// Recovery callers publish this owner before invoking the authorized restart
+    /// path, so shutdown can still reach a child whose readiness fails or is cancelled.
+    /// This performs no executable or configuration validation and grants no startup authority.
+    #[must_use]
+    pub fn prepare_stopped(config: MihomoLaunchConfig) -> Arc<Self> {
+        Arc::new(Self {
+            child: Mutex::new(None),
+            logs: Arc::new(RwLock::new(VecDeque::new())),
+            last_exit_reason: RwLock::new(None),
+            config,
+            recovery_asset_root: RwLock::new(None),
+            #[cfg(test)]
+            drop_gate: Mutex::new(None),
+        })
+    }
+
     /// Starts Mihomo and attaches bounded output collectors.
     ///
     /// # Errors
@@ -105,14 +125,20 @@ impl MihomoProcess {
     pub fn spawn(config: MihomoLaunchConfig) -> MihomoResult<Arc<Self>> {
         let _write_lease =
             crate::data_coordinator::DataWriteLease::shared(launch_write_scopes(&config));
+        let payload = local_launch_payload(&config)?;
+        let input = payload
+            .as_deref()
+            .map(|payload| input::snapshot(&config.home_dir, payload))
+            .transpose()?;
         let logs = Arc::new(RwLock::new(VecDeque::new()));
-        let child = spawn_child(&config, logs.clone())?;
+        let child = spawn_child(&config, logs.clone(), input, None)?;
 
         Ok(Arc::new(Self {
             child: Mutex::new(Some(child)),
             logs,
             last_exit_reason: RwLock::new(None),
             config,
+            recovery_asset_root: RwLock::new(None),
             #[cfg(test)]
             drop_gate: Mutex::new(None),
         }))
@@ -133,8 +159,9 @@ impl MihomoProcess {
         }
     }
 
-    /// Stops the current child and starts the same binary and configuration.
+    /// Checks a single startup snapshot before stopping and restarting the child.
     ///
+    /// Local Mihomo receives the exact checked bytes, even if the source changes.
     /// Existing bounded logs remain available and new stdout/stderr collectors
     /// append to the same history.
     ///
@@ -153,21 +180,60 @@ impl MihomoProcess {
         lease: &crate::data_coordinator::DataWriteLease,
         cancelled: Option<&AtomicBool>,
     ) -> MihomoResult<()> {
-        self.config_validator()
-            .with_write_lease(lease)
-            .validate_file(&self.config.config_file)
-            .map_err(|error| {
-                MihomoError::Process(format!("重启前配置预检失败，当前内核保持运行：{error}"))
-            })?;
+        let payload = local_launch_payload(&self.config)?;
+        self.restart_payload_with_write_lease(lease, cancelled, payload.as_deref())
+    }
+
+    pub(crate) fn read_launch_payload(&self) -> MihomoResult<String> {
+        local_launch_payload(&self.config)?.ok_or_else(|| {
+            MihomoError::Process(zenclash_i18n::text(
+                "core_page.errors.runtime_kind_mismatch",
+            ))
+        })
+    }
+
+    fn restart_payload_with_write_lease(
+        &self,
+        lease: &crate::data_coordinator::DataWriteLease,
+        cancelled: Option<&AtomicBool>,
+        payload: Option<&str>,
+    ) -> MihomoResult<()> {
+        if let Some(payload) = payload {
+            if self.kind() != CoreKind::Mihomo {
+                return Err(MihomoError::Process(zenclash_i18n::text(
+                    "core_page.errors.runtime_kind_mismatch",
+                )));
+            }
+            crate::tun_admission::ensure_local_yaml(self.kind(), payload)?;
+        }
+        let validator = self.config_validator().with_write_lease(lease);
+        let validation = match payload {
+            Some(payload) => validator.validate_payload(payload),
+            None => validator.validate_file(&self.config.config_file),
+        };
+        validation.map_err(|error| {
+            MihomoError::Process(format!("重启前配置预检失败，当前内核保持运行：{error}"))
+        })?;
         if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
             return Err(MihomoError::Process("内核重启在配置预检后已取消".into()));
         }
+        let input = payload
+            .map(|payload| input::snapshot(&self.config.home_dir, payload))
+            .transpose()?;
         let mut child_slot = self.child.lock();
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Err(MihomoError::Process("内核重启在配置预检后已取消".into()));
+        }
         stop_child(&mut child_slot)?;
         if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
             return Err(MihomoError::Process("内核重启在创建子进程前已取消".into()));
         }
-        let child = spawn_child(&self.config, self.logs.clone())?;
+        let child = spawn_child(
+            &self.config,
+            self.logs.clone(),
+            input,
+            self.recovery_asset_root.read().as_deref(),
+        )?;
         *self.last_exit_reason.write() = None;
         *child_slot = Some(child);
         Ok(())
@@ -204,6 +270,28 @@ impl MihomoProcess {
         cancelled: Option<Arc<AtomicBool>>,
         lease: &crate::data_coordinator::DataWriteLease,
     ) -> MihomoResult<()> {
+        self.restart_and_wait_with_input(timeout, cancelled, lease, None)
+            .await
+    }
+
+    pub(crate) async fn restart_and_wait_with_payload(
+        self: &Arc<Self>,
+        timeout: Duration,
+        cancelled: Option<Arc<AtomicBool>>,
+        lease: &crate::data_coordinator::DataWriteLease,
+        payload: Arc<str>,
+    ) -> MihomoResult<()> {
+        self.restart_and_wait_with_input(timeout, cancelled, lease, Some(payload))
+            .await
+    }
+
+    async fn restart_and_wait_with_input(
+        self: &Arc<Self>,
+        timeout: Duration,
+        cancelled: Option<Arc<AtomicBool>>,
+        lease: &crate::data_coordinator::DataWriteLease,
+        payload: Option<Arc<str>>,
+    ) -> MihomoResult<()> {
         if cancelled
             .as_ref()
             .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
@@ -217,8 +305,13 @@ impl MihomoProcess {
             crate::data_coordinator::DataWriteAccess::new(&self.config.home_dir).authorized(lease);
         let write_lease = access.acquire();
         let worker_cancelled = cancelled.clone();
-        tokio::task::spawn_blocking(move || {
-            process.restart_with_write_lease(&write_lease, worker_cancelled.as_deref())
+        tokio::task::spawn_blocking(move || match payload.as_deref() {
+            Some(payload) => process.restart_payload_with_write_lease(
+                &write_lease,
+                worker_cancelled.as_deref(),
+                Some(payload),
+            ),
+            None => process.restart_with_write_lease(&write_lease, worker_cancelled.as_deref()),
         })
         .await
         .map_err(|error| MihomoError::Process(format!("内核重启后台任务异常结束：{error}")))??;
@@ -318,10 +411,17 @@ impl MihomoProcess {
             self.config.binary.clone(),
             self.config.home_dir.clone(),
         )
+        .with_recovery_asset_root(self.recovery_asset_root.read().clone())
     }
 
     pub(crate) fn write_scopes(&self) -> Vec<PathBuf> {
-        launch_write_scopes(&self.config)
+        let mut scopes = launch_write_scopes(&self.config);
+        scopes.extend(self.recovery_asset_root.read().clone());
+        scopes
+    }
+
+    pub(crate) fn set_recovery_asset_root(&self, root: Option<PathBuf>) {
+        *self.recovery_asset_root.write() = root;
     }
 
     /// Returns immutable launch metadata without waiting for process transitions.
@@ -357,22 +457,30 @@ impl MihomoProcess {
     /// Captures process paths, live PID, running state, and recent logs.
     #[must_use]
     pub fn snapshot(&self) -> MihomoProcessSnapshot {
+        self.try_snapshot().unwrap_or_else(|error| {
+            tracing::warn!(%error, "failed to snapshot Mihomo process status");
+            self.observed_snapshot(false, None)
+        })
+    }
+
+    pub(crate) fn try_snapshot(&self) -> std::io::Result<MihomoProcessSnapshot> {
         let (running, pid) = {
             let mut child = self.child.lock();
-            child
-                .as_mut()
-                .map_or((false, None), |process| match process.try_wait() {
-                    Ok(None) => (true, Some(process.id())),
-                    Ok(Some(status)) => {
+            match child.as_mut() {
+                Some(process) => match process.try_wait()? {
+                    None => (true, Some(process.id())),
+                    Some(status) => {
                         *self.last_exit_reason.write() = Some(format!("内核退出状态：{status}"));
                         (false, None)
                     }
-                    Err(error) => {
-                        tracing::warn!(%error, "failed to snapshot Mihomo process status");
-                        (false, None)
-                    }
-                })
+                },
+                None => (false, None),
+            }
         };
+        Ok(self.observed_snapshot(running, pid))
+    }
+
+    fn observed_snapshot(&self, running: bool, pid: Option<u32>) -> MihomoProcessSnapshot {
         MihomoProcessSnapshot {
             kind: self.config.kind,
             running,
@@ -515,17 +623,28 @@ fn readiness_attempt_timeout(remaining: Duration) -> Duration {
 fn spawn_child(
     config: &MihomoLaunchConfig,
     logs: Arc<RwLock<VecDeque<String>>>,
+    input: Option<std::fs::File>,
+    recovery_asset_root: Option<&std::path::Path>,
 ) -> MihomoResult<Child> {
     std::fs::create_dir_all(&config.home_dir)
         .map_err(|error| MihomoError::Process(error.to_string()))?;
     let mut command = Command::new(&config.binary);
     configure_child_command(&mut command);
     configure_child_environment(&mut command, config.kind);
-    command
-        .arg("-d")
-        .arg(&config.home_dir)
-        .arg("-f")
-        .arg(&config.config_file);
+    if config.kind == CoreKind::Mihomo {
+        crate::core_validation::configure_recovery_assets(&mut command, recovery_asset_root)
+            .map_err(|error| MihomoError::Process(error.to_string()))?;
+    }
+    command.arg("-d").arg(&config.home_dir).arg("-f");
+    if let Some(input) = input {
+        // Mihomo's config-string environment takes precedence over -f, including stdin.
+        command
+            .env_remove("CLASH_CONFIG_STRING")
+            .arg("-")
+            .stdin(Stdio::from(input));
+    } else {
+        command.arg(&config.config_file);
+    }
     if let Some(controller) = &config.controller_override {
         command
             .arg("--ext-ctl")
@@ -555,6 +674,15 @@ fn spawn_child(
         return Err(error);
     }
     Ok(child)
+}
+
+fn local_launch_payload(config: &MihomoLaunchConfig) -> MihomoResult<Option<String>> {
+    if config.kind != CoreKind::Mihomo {
+        return Ok(None);
+    }
+    let payload = input::read_config(&config.config_file)?;
+    crate::tun_admission::ensure_local_yaml(config.kind, &payload)?;
+    Ok(Some(payload))
 }
 
 fn configure_child_environment(command: &mut Command, kind: CoreKind) {

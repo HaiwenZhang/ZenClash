@@ -7,8 +7,23 @@ enum RuntimeSwitch {
 }
 
 impl CoreSession {
+    /// Returns ordinary launch metadata retained across a Local-to-Service handover.
+    ///
+    /// Reads only prepared memory and retains no retired process owner. A session
+    /// started directly on a service or external controller returns `None`.
+    /// The original config path is identity, not a recovery payload: materialize
+    /// the accepted resource bundle and verify the ordinary binary before startup.
+    #[must_use]
+    pub fn local_recovery_launch(&self) -> Option<crate::MihomoLaunchConfig> {
+        self.client.local_recovery_launch()
+    }
+
     pub(crate) fn capture_publication_gate(&self) -> Arc<tokio::sync::Mutex<()>> {
         self.capture_publication_gate.clone()
+    }
+
+    pub(crate) fn capture_intent_revision(&self) -> Arc<AtomicU64> {
+        self.capture_intent_revision.clone()
     }
 
     /// Reads prepared runtime identity without cloning the process owner or performing I/O.

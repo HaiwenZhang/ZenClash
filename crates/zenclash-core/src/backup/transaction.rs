@@ -33,7 +33,7 @@ pub(super) fn activate(
     // stays under the same exclusive authority.
     runtime_scopes.extend(write_scopes(&prepared.data_root));
     let lease = crate::data_coordinator::DataWriteLease::exclusive(runtime_scopes);
-    let previous_runtime = session
+    let mut previous_runtime = session
         .map(|session| {
             let controlled =
                 crate::ControlledConfigStore::new(prepared.data_root.join("controlled-config"))
@@ -43,6 +43,27 @@ pub(super) fn activate(
                 .map_err(|error| BackupError::Transaction(error.to_string()))
         })
         .transpose()?;
+    if let Some((expected, held)) = prepared.previous_runtime.take() {
+        let current = session.ok_or_else(|| {
+            BackupError::Transaction(zenclash_i18n::text("core_page.service.stale"))
+        })?;
+        if current.runtime_descriptor().backend() != crate::CoreRuntimeBackend::Local
+            || (
+                current.runtime_descriptor().binding_generation(),
+                current.generation(),
+            ) != expected
+        {
+            return Err(BackupError::Transaction(zenclash_i18n::text(
+                "core_page.service.stale",
+            )));
+        }
+        let actual = previous_runtime.as_ref().ok_or_else(|| {
+            BackupError::Transaction(zenclash_i18n::text("core_page.service.no_snapshot"))
+        })?;
+        crate::CoreSession::validate_backup_snapshot(&held, actual)
+            .map_err(|error| BackupError::Transaction(error.to_string()))?;
+        previous_runtime = Some(held);
+    }
     let parent = prepared
         .data_root
         .parent()

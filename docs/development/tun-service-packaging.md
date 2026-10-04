@@ -6,6 +6,12 @@
 
 ## Linux 产物
 
+### 2026-10-03 v3 本地 release helper 验证
+
+当前工作区 v3 源码已用 Windows Rust 工具链和普通 WSL Ubuntu 26.04 链接桥构建 Linux x64 GNU helper：`cargo build -p zenclash-service --features server --locked --release --target x86_64-unknown-linux-gnu` 退出 0。产物为 `target/x86_64-unknown-linux-gnu/release/zenclash-service`，2,647,040 字节，SHA-256 `5E43D41BF6C39F898F9FF8DB832F99639467EF0065EC0E7D3056E646190CF9E4`；只读 ELF 检查为 x86-64 ELF64 PIE，普通用户 zen 的 `--version` 输出 `zenclash-service 0.2.0`，退出 0。
+
+这是本地构建证据，不是固定发布校验和或正式 DEB/RPM。`readelf --version-info` 显示符号需求最高为 `GLIBC_2.39`，未证明旧发行版兼容；正式包仍需在既有发布环境构建、验证最低支持系统。没有执行安装、注册、服务运行入口或 TUN。旧 v2 helper 与当前 v3 GUI 不兼容，打包应从配套源码重新构建 helper；`--version` 仅验证构建版本，不是实际 IPC 握手证明。
+
 [DEB 构建脚本](../../scripts/build_deb_package.sh) 和 [RPM 构建脚本](../../scripts/build_rpm_package.sh) 在构建 GUI 后单独执行：
 
 ```sh
@@ -40,9 +46,11 @@ Windows 非提权进程下的入口权限行为有先失败再通过证据，未
 
 固定 SCM 注册的路径、参数、服务类型、账户和 owner/DACL 门栓已通过源码、行为及独立首审验证，见 [移植记录](tun-service-upstream-migration.md#windows-scm-注册身份)。2026-10-02 实际 Windows release helper 构建成功，`--version` 输出 `zenclash-service 0.1.2` 且退出码为 0；当前没有 Inno Setup 编译器，这不是安装包验收。GUI 卸载不能直接调用要求保护路径的 `--package-uninstall`：仍需普通权限桥接固定 UAC 维护入口，并在提权 worker 中确认共享授权及实际 owner，避免停止其他账户或新会话的内核。共享服务的卸载策略待确认。
 
-当前源码的 Windows helper 已重新构建：`cargo build --release --locked -p zenclash-service --features server --bin zenclash-service` 退出 0。产物为 `target/release/zenclash-service.exe`，2,762,752 字节，SHA-256 为 `592613BBCD520601A2C7BB690031E455585CB85842B55474A05FA68E77D60132`；实际 `--version` 检查通过。此摘要仅标识本次本地产物，不是固定发布校验和；未执行安装、卸载或服务运行入口。
+2026-10-03 日志适配最终源码的 Windows helper 已重新构建：`cargo build --release --locked -p zenclash-service --features server --bin zenclash-service` 退出 0。产物为 `target/release/zenclash-service.exe`，2,775,040 字节，SHA-256 为 `94B9F95D4E167A1C8EA08BCB745FD55EC2712579294ED18CFA5F8648755BB77F`；实际 `--version` 输出 `zenclash-service 0.2.0`，退出 0。此摘要仅标识本次本地产物，不是固定发布校验和；未执行安装、卸载或服务运行入口。上段 0.1.2 是 2026-10-02 历史证据，不能作为当前版本。
 
 ## macOS 产物
+
+2026-10-03 已补充既有发布目标 `aarch64-apple-darwin` 的 service all-targets/all-features 交叉 check 和 CI 全部附加严格 lint，均退出 0；此前 Intel 目标的检查证据仍保留。此次只向当前开发 Rust 工具链添加对应目标标准库，不修改 Cargo 依赖、Rust 版本、签名、最低系统版本或发布目标。ARM64 和 Intel 交叉 check 都不验证 Apple SDK/framework 链接、App 签名或原生 API 运行，这些仍需 macOS 实机。
 
 [App 构建脚本](../../scripts/build_macos_app.sh) 使用原有 `aarch64-apple-darwin` 目标构建服务，校验非空、可执行及版本检查后，将 helper 放入 `Contents/MacOS/zenclash-service`，LaunchDaemon 资源放入 `Contents/Resources/org.zenclash.service.plist`。plist 中的服务路径仍指向管理员保护目录，打包不会向 `/Library/LaunchDaemons` 写文件。
 

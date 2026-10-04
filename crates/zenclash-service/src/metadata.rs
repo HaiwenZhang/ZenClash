@@ -275,25 +275,20 @@ fn replace_file(temporary: &Path, path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn protocol_one_record_remains_readable_for_repair_but_cannot_handshake() {
+    fn legacy_records_remain_readable_for_repair_without_rewriting_bytes() {
         let directory = directory();
         let path = directory.join("installation.json");
         let mut metadata =
             InstalledMetadata::new("a".repeat(64), "c".repeat(64), "1000".into()).unwrap();
-        metadata.protocol_version = 1;
-        write_metadata_atomic(&path, &metadata).unwrap();
-        let before = fs::read(&path).unwrap();
-        let installed = read_metadata(&path).unwrap();
-        assert_eq!(installed.schema_version(), METADATA_SCHEMA_VERSION);
-        assert_eq!(installed.protocol_version(), 1);
-        assert!(
-            !crate::ProtocolInfo {
-                protocol_version: installed.protocol_version(),
-                service_version: installed.service_version().to_owned(),
-            }
-            .is_compatible()
-        );
-        assert_eq!(fs::read(&path).unwrap(), before);
+        for version in [1, 2] {
+            metadata.protocol_version = version;
+            write_metadata_atomic(&path, &metadata).unwrap();
+            let before = fs::read(&path).unwrap();
+            let installed = read_metadata(&path).unwrap();
+            assert_eq!(installed.schema_version(), METADATA_SCHEMA_VERSION);
+            assert_eq!(installed.protocol_version(), version);
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
         fs::remove_dir_all(directory).unwrap();
     }
 

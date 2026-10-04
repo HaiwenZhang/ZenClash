@@ -116,9 +116,32 @@ pub enum ProfileApplicationError {
     /// A controller read required to prepare the transaction failed.
     #[error(transparent)]
     Controller(#[from] MihomoError),
+    /// Service authorization or admission rejected the managed application.
+    #[error(transparent)]
+    Service(#[from] Box<crate::ServiceManagerError>),
     /// A blocking repository task ended unexpectedly.
     #[error("配置事务后台任务异常结束：{0}")]
     Task(String),
+}
+
+/// Rejection while preparing a source candidate, before runtime state changes.
+#[derive(Debug, Error)]
+#[error("{cause}")]
+pub struct ProfilePreparationError {
+    /// Last active managed source observed during preparation.
+    pub last_known_good: Option<ProfileVersion>,
+    /// Source, download, catalog or staging failure.
+    #[source]
+    pub cause: ProfileApplicationError,
+}
+
+impl From<ProfilePreparationError> for ProfileApplyOutcome {
+    fn from(error: ProfilePreparationError) -> Self {
+        Self::Rejected {
+            last_known_good: error.last_known_good,
+            cause: error.cause,
+        }
+    }
 }
 
 /// Result of one profile application transaction.
@@ -208,13 +231,40 @@ pub struct ProfileApplication {
     commit_gate: Option<std::sync::Arc<crate::controlled_config::CommitGate>>,
 }
 
+/// Held managed-source candidate bound to one application session and repository.
+/// Preparing it does not apply configuration or authorize service installation.
+/// Source bytes and comparison metadata remain in memory; no staging file or write
+/// authority is retained while callers wait for authorization.
+pub struct PreparedProfileChange {
+    staged: StagedProfile,
+    overrides: Vec<PathBuf>,
+    binding: u64,
+    generation: u64,
+    session: CoreSession,
+    controlled_root: PathBuf,
+    runtime: Option<crate::core_session::service_tun::PreparedConfig>,
+}
+
+impl PreparedProfileChange {
+    /// Reports whether the checked Local/Mihomo candidate requires service ownership.
+    /// This reports preparation only; it does not grant authorization or apply TUN.
+    #[must_use]
+    pub fn requires_service(&self) -> bool {
+        self.runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.requires_service())
+    }
+}
+
 struct StagedProfile {
     store: ProfileStore,
     record: ProfileRecord,
     candidate_path: PathBuf,
+    payload: std::sync::Arc<str>,
     expected_catalog: ProfileCatalog,
     disposition: StagedProfileDisposition,
-    _write_lease: crate::data_coordinator::DataWriteLease,
+    _write_lease: Option<crate::data_coordinator::DataWriteLease>,
+    materialized: bool,
 }
 
 enum StagedProfileDisposition {
@@ -234,6 +284,131 @@ struct CommittedProfile {
     path: PathBuf,
 }
 
+/// One-shot catalog participant in the admitted service transaction.
+pub(crate) struct ServiceProfileCommit {
+    root: PathBuf,
+    staged: parking_lot::Mutex<Option<StagedProfile>>,
+    committed: parking_lot::Mutex<Option<CommittedProfile>>,
+    failure: parking_lot::Mutex<Option<ProfileApplicationError>>,
+    runtime_attempted: std::sync::atomic::AtomicBool,
+    runtime_generation: parking_lot::Mutex<Option<u64>>,
+}
+
+impl ServiceProfileCommit {
+    fn new(staged: StagedProfile) -> Self {
+        Self {
+            root: staged.store.root().to_path_buf(),
+            staged: parking_lot::Mutex::new(Some(staged)),
+            committed: parking_lot::Mutex::new(None),
+            failure: parking_lot::Mutex::new(None),
+            runtime_attempted: std::sync::atomic::AtomicBool::new(false),
+            runtime_generation: parking_lot::Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn mark_runtime_attempted(&self) {
+        self.runtime_attempted.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn record_runtime_generation(&self, generation: u64) {
+        if self.runtime_attempted.load(Ordering::Acquire) {
+            *self.runtime_generation.lock() = Some(generation);
+        }
+    }
+
+    fn unsaved_outcome(
+        &self,
+        session: &CoreSession,
+        recovery: ProfileRecovery,
+        cause: ProfileApplicationError,
+        restored: bool,
+    ) -> ProfileApplyOutcome {
+        if !self.runtime_attempted.load(Ordering::Acquire) {
+            return ProfileApplyOutcome::Rejected {
+                last_known_good: recovery.last_known_good,
+                cause,
+            };
+        }
+        let generation = self
+            .runtime_generation
+            .lock()
+            .unwrap_or_else(|| session.mark_runtime_unknown());
+        if restored {
+            ProfileApplyOutcome::RolledBack {
+                last_known_good: recovery.last_known_good,
+                cause,
+                runtime_version: generation,
+            }
+        } else {
+            ProfileApplyOutcome::RuntimeUnknown {
+                recovery,
+                cause,
+                runtime_version: generation,
+            }
+        }
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub(crate) async fn validate(
+        self: &std::sync::Arc<Self>,
+        lease: &crate::data_coordinator::DataWriteLease,
+    ) -> Result<(), CoreSessionError> {
+        self.run(lease, false).await
+    }
+
+    pub(crate) async fn commit(
+        self: &std::sync::Arc<Self>,
+        lease: &crate::data_coordinator::DataWriteLease,
+    ) -> Result<(), CoreSessionError> {
+        self.run(lease, true).await
+    }
+
+    async fn run(
+        self: &std::sync::Arc<Self>,
+        lease: &crate::data_coordinator::DataWriteLease,
+        commit: bool,
+    ) -> Result<(), CoreSessionError> {
+        if !lease.covers(&self.root) {
+            return Err(MihomoError::StaleBinding.into());
+        }
+        let participant = self.clone();
+        let lease = crate::data_coordinator::DataWriteAccess::new(&self.root)
+            .authorized(lease)
+            .borrowed_authority(std::slice::from_ref(&self.root))
+            .map_err(crate::ControlledConfigError::Transaction)?
+            .ok_or(MihomoError::StaleBinding)?;
+        let result = run_store(move || {
+            let mut pending = participant.staged.lock();
+            let staged = pending.as_mut().ok_or_else(|| {
+                ProfileStoreError::Transaction(zenclash_i18n::text("core_page.service.unknown"))
+            })?;
+            staged.validate_source_current()?;
+            if commit {
+                // Materialize only after the runtime trial, under the shared transaction lease.
+                staged.store = staged.store.with_write_lease(&lease);
+                staged._write_lease = Some(staged.store.write_access.acquire());
+                staged.candidate_path =
+                    write_staging_payload(staged.store.root(), staged.payload.as_bytes())?;
+                staged.materialized = true;
+                let staged = pending.take().ok_or_else(|| {
+                    ProfileStoreError::Transaction(zenclash_i18n::text("core_page.service.unknown"))
+                })?;
+                *participant.committed.lock() = Some(staged.commit()?);
+            }
+            Ok(())
+        })
+        .await;
+        result.map_err(|error| {
+            let message = error.to_string();
+            *self.failure.lock() = Some(error);
+            crate::ControlledConfigError::Transaction(message).into()
+        })
+    }
+}
+
 impl StagedProfile {
     fn existing(store: ProfileStore, id: &str) -> ProfileStoreResult<Self> {
         let _write_lease = store.write_access.acquire();
@@ -247,6 +422,9 @@ impl StagedProfile {
             .ok_or_else(|| ProfileStoreError::NotFound(id.into()))?;
         let source_path = store.profile_path(&record);
         let payload = read_profile_bytes(&source_path)?;
+        let frozen: std::sync::Arc<str> = String::from_utf8(payload.clone())
+            .map_err(|error| ProfileStoreError::InvalidYaml(error.to_string()))?
+            .into();
         let candidate_path = write_staging_payload(store.root(), &payload)?;
         drop(_transaction);
         let store = store.with_write_lease(&_write_lease);
@@ -254,8 +432,10 @@ impl StagedProfile {
             store,
             record,
             candidate_path,
+            payload: frozen,
             expected_catalog: catalog,
-            _write_lease,
+            _write_lease: Some(_write_lease),
+            materialized: true,
             disposition: StagedProfileDisposition::ExistingActivation {
                 source_path,
                 expected_payload: payload,
@@ -305,8 +485,10 @@ impl StagedProfile {
             store,
             record,
             candidate_path,
+            payload: payload.into(),
             expected_catalog: catalog,
-            _write_lease,
+            _write_lease: Some(_write_lease),
+            materialized: true,
             disposition: StagedProfileDisposition::New,
         })
     }
@@ -355,8 +537,10 @@ impl StagedProfile {
             store,
             record,
             candidate_path,
+            payload: payload.into(),
             expected_catalog: catalog,
-            _write_lease,
+            _write_lease: Some(_write_lease),
+            materialized: true,
             disposition: StagedProfileDisposition::Update {
                 source_path,
                 expected_payload,
@@ -397,8 +581,10 @@ impl StagedProfile {
             store,
             record,
             candidate_path,
+            payload: new_payload.into(),
             expected_catalog: catalog,
-            _write_lease,
+            _write_lease: Some(_write_lease),
+            materialized: true,
             disposition: StagedProfileDisposition::Update {
                 source_path,
                 expected_payload: persisted_payload,
@@ -418,10 +604,6 @@ impl StagedProfile {
             .map(|profile| self.store.profile_path(profile))
     }
 
-    fn candidate_path(&self) -> &Path {
-        &self.candidate_path
-    }
-
     fn record(&self) -> &ProfileRecord {
         &self.record
     }
@@ -437,18 +619,23 @@ impl StagedProfile {
         }
     }
 
-    fn commit(self) -> ProfileStoreResult<CommittedProfile> {
-        let _write_lease = self.store.write_access.acquire();
+    fn validate_source_current(&self) -> ProfileStoreResult<()> {
         let _transaction = self.store.transaction.lock();
-        let mut catalog = self.store.load_unlocked()?;
-        if catalog != self.expected_catalog {
+        self.validate_source_against_catalog(&self.store.load_unlocked()?)
+    }
+
+    fn validate_source_against_catalog(&self, catalog: &ProfileCatalog) -> ProfileStoreResult<()> {
+        if *catalog != self.expected_catalog {
             return Err(ProfileStoreError::Transaction(
                 "配置目录在候选验证期间已改变，请刷新后重试".into(),
             ));
         }
-
         match &self.disposition {
             StagedProfileDisposition::ExistingActivation {
+                source_path,
+                expected_payload,
+            }
+            | StagedProfileDisposition::Update {
                 source_path,
                 expected_payload,
             } => {
@@ -458,6 +645,28 @@ impl StagedProfile {
                         self.record.id
                     )));
                 }
+            }
+            StagedProfileDisposition::New => {}
+        }
+        Ok(())
+    }
+
+    fn commit(self) -> ProfileStoreResult<CommittedProfile> {
+        let _write_lease = self.store.write_access.acquire();
+        let _transaction = self.store.transaction.lock();
+        let mut catalog = self.store.load_unlocked()?;
+        if read_profile_bytes(&self.candidate_path)?.as_slice() != self.payload.as_bytes() {
+            return Err(ProfileStoreError::Transaction(zenclash_i18n::text(
+                "profiles.errors.candidate_changed",
+            )));
+        }
+        self.validate_source_against_catalog(&catalog)?;
+
+        match &self.disposition {
+            StagedProfileDisposition::ExistingActivation {
+                source_path,
+                expected_payload: _,
+            } => {
                 catalog.active = Some(self.record.id.clone());
                 self.store.save_unlocked(&catalog)?;
                 Ok(CommittedProfile {
@@ -466,9 +675,9 @@ impl StagedProfile {
                 })
             }
             StagedProfileDisposition::New => {
-                let payload = read_profile_bytes(&self.candidate_path)?;
+                let payload = self.payload.as_bytes();
                 let path = self.store.profile_path(&self.record);
-                atomic_write(&path, &payload)?;
+                atomic_write(&path, payload)?;
                 catalog.profiles.push(self.record.clone());
                 catalog.active = Some(self.record.id.clone());
                 if let Err(error) = self.store.save_unlocked(&catalog) {
@@ -488,19 +697,12 @@ impl StagedProfile {
                 source_path,
                 expected_payload,
             } => {
-                if read_profile_bytes(source_path)? != *expected_payload {
-                    return Err(ProfileStoreError::Transaction(format!(
-                        "配置 {} 在候选验证期间已改变，请刷新后重试",
-                        self.record.id
-                    )));
-                }
                 let index = catalog
                     .profiles
                     .iter()
                     .position(|profile| profile.id == self.record.id)
                     .ok_or_else(|| ProfileStoreError::NotFound(self.record.id.clone()))?;
-                let payload = read_profile_bytes(&self.candidate_path)?;
-                atomic_write(source_path, &payload)?;
+                atomic_write(source_path, self.payload.as_bytes())?;
                 catalog.profiles[index] = self.record.clone();
                 self.store.save_catalog_or_restore_payload_unlocked(
                     &catalog,
@@ -520,7 +722,9 @@ impl StagedProfile {
 
 impl Drop for StagedProfile {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.candidate_path);
+        if self.materialized {
+            let _ = fs::remove_file(&self.candidate_path);
+        }
     }
 }
 
@@ -563,8 +767,248 @@ impl ProfileApplication {
         }
     }
 
+    /// Prepares held source bytes and catalog comparisons without changing runtime.
+    /// No write lease, transition or runtime mutation gate remains held on return.
+    /// Consume the candidate with this same application's `apply_prepared` after waiting.
+    ///
+    /// # Errors
+    /// Returns a typed rejection for source, download, catalog or staging failures.
+    pub async fn prepare_change(
+        &self,
+        change: ProfileChange,
+    ) -> Result<PreparedProfileChange, ProfilePreparationError> {
+        let binding = self.session.runtime_descriptor().binding_generation();
+        let generation = self.session.generation();
+        let mut scopes = self.session.write_scopes();
+        scopes.extend([
+            self.store.root().to_path_buf(),
+            self.controlled.root().to_path_buf(),
+        ]);
+        let lease = self
+            .store
+            .write_access
+            .acquire_paths_async(scopes)
+            .await
+            .map_err(|error| ProfilePreparationError {
+                last_known_good: None,
+                cause: ProfileApplicationError::Task(error),
+            })?;
+        let application = Self {
+            store: self.store.with_write_lease(&lease),
+            controlled: self.controlled.with_write_lease(&lease),
+            session: self.session.clone(),
+            #[cfg(test)]
+            commit_gate: self.commit_gate.clone(),
+        };
+        let (mut staged, overrides) = application.stage_change(change).await?;
+        let last_known_good = staged.last_known_good();
+        let runtime = if staged.changes_runtime()
+            && self.session.kind() == crate::CoreKind::Mihomo
+            && self.session.runtime_descriptor().backend() == crate::CoreRuntimeBackend::Local
+        {
+            Some(
+                self.session
+                    .prepare_service_profile_config(
+                        &application.controlled,
+                        (binding, generation),
+                        staged.store.profile_path(&staged.record),
+                        staged.payload.clone(),
+                        overrides.clone(),
+                    )
+                    .await
+                    .map_err(|error| ProfilePreparationError {
+                        last_known_good: last_known_good.clone(),
+                        cause: error.into(),
+                    })?,
+            )
+        } else {
+            None
+        };
+        let ordinary_store = self.store.clone();
+        let staged = run_store(move || {
+            fs::remove_file(&staged.candidate_path)?;
+            staged.materialized = false;
+            staged.store = ordinary_store;
+            staged._write_lease = None;
+            Ok(staged)
+        })
+        .await
+        .map_err(|cause| ProfilePreparationError {
+            last_known_good,
+            cause,
+        })?;
+        Ok(PreparedProfileChange {
+            staged,
+            overrides,
+            binding,
+            generation,
+            session: self.session.clone(),
+            controlled_root: self.controlled.root().to_path_buf(),
+            runtime,
+        })
+    }
+
     /// Applies one managed-profile change and classifies its recovery state.
     pub async fn apply(&self, change: ProfileChange) -> ProfileApplyOutcome {
+        match self.prepare_change(change).await {
+            Ok(prepared) => self.apply_prepared(prepared).await,
+            Err(error) => error.into(),
+        }
+    }
+
+    /// Applies a managed change, authorizing Service ownership for an effective TUN candidate.
+    /// Returns capture facts separately from the directory receipt. Once admitted,
+    /// completion retains both receipts even when its waiter stops waiting.
+    pub async fn apply_with_service(
+        &self,
+        manager: &crate::ServiceManager,
+        change: ProfileChange,
+    ) -> (ProfileApplyOutcome, Option<crate::ServiceTunOutcome>) {
+        let prepared = match self.prepare_change(change).await {
+            Ok(prepared) => prepared,
+            Err(error) => return (error.into(), None),
+        };
+        if !prepared.requires_service() {
+            return (self.apply_prepared(prepared).await, None);
+        }
+        let last_known_good = prepared.staged.last_known_good();
+        let source_version = ProfileVersion::from(prepared.staged.record());
+        let recovery = ProfileRecovery {
+            attempted: source_version.clone(),
+            last_known_good: last_known_good.clone(),
+        };
+        if !manager.owns_profile_application(&self.session, &self.controlled) {
+            return (
+                ProfileApplyOutcome::Rejected {
+                    last_known_good,
+                    cause: MihomoError::StaleBinding.into(),
+                },
+                None,
+            );
+        }
+        let Some(crate::core_session::service_tun::PreparedConfig::Service(runtime)) =
+            prepared.runtime
+        else {
+            return (
+                ProfileApplyOutcome::Rejected {
+                    last_known_good,
+                    cause: MihomoError::StaleBinding.into(),
+                },
+                None,
+            );
+        };
+        let participant = std::sync::Arc::new(ServiceProfileCommit::new(prepared.staged));
+        let mut runtime = (*runtime).clone();
+        runtime.profile_commit = Some(participant.clone());
+        let failure_recovery = recovery.clone();
+        let application = self.clone();
+        let manager = manager.clone();
+        let completion = tokio::spawn(async move {
+            let result = manager
+                .apply_service_profile(std::sync::Arc::new(runtime))
+                .await;
+            let committed = participant.committed.lock().take();
+            let failure = participant.failure.lock().take();
+            let (service, mut manager_failure) = match result {
+                Ok(service) => (Some(service), None),
+                Err(error) => (
+                    None,
+                    Some(ProfileApplicationError::Service(Box::new(error))),
+                ),
+            };
+            if let Some(committed) = committed {
+                let core = service.as_ref().and_then(crate::ServiceTunOutcome::core);
+                let pending = service
+                    .as_ref()
+                    .is_none_or(|service| service.commit_pending());
+                let outcome = if let Some(core) = core.filter(|_| !pending) {
+                    ProfileApplyOutcome::Applied {
+                        profile: committed.record,
+                        path: committed.path,
+                        source_version,
+                        runtime_version: core.generation,
+                        kind: core.kind,
+                    }
+                } else {
+                    ProfileApplyOutcome::CommittedButRuntimeUnknown {
+                        profile: committed.record,
+                        path: committed.path,
+                        source_version,
+                        cause: manager_failure.take().unwrap_or_else(|| {
+                            ProfileApplicationError::Controller(MihomoError::Process(
+                                zenclash_i18n::text("core_page.service.pending"),
+                            ))
+                        }),
+                        runtime_version: core.map_or_else(
+                            || {
+                                participant
+                                    .runtime_generation
+                                    .lock()
+                                    .unwrap_or_else(|| application.session.mark_runtime_unknown())
+                            },
+                            |core| core.generation,
+                        ),
+                    }
+                };
+                return (outcome, service);
+            }
+            let restored = service.as_ref().is_some_and(|service| {
+                matches!(service.capture(), crate::CaptureOutcome::RolledBack { .. })
+            });
+            let cause = failure.or(manager_failure).unwrap_or_else(|| {
+                ProfileApplicationError::Controller(MihomoError::Process(
+                    match service.as_ref().map(crate::ServiceTunOutcome::capture) {
+                        Some(
+                            crate::CaptureOutcome::RolledBack { failure, .. }
+                            | crate::CaptureOutcome::ReconcileNeeded { failure, .. },
+                        ) => failure.clone(),
+                        _ => zenclash_i18n::text("core_page.service.unknown"),
+                    },
+                ))
+            });
+            let outcome =
+                participant.unsaved_outcome(&application.session, recovery, cause, restored);
+            (outcome, service)
+        });
+        completion.await.unwrap_or_else(|error| {
+            (
+                ProfileApplyOutcome::RuntimeUnknown {
+                    recovery: failure_recovery,
+                    cause: ProfileApplicationError::Task(error.to_string()),
+                    runtime_version: self.session.mark_runtime_unknown(),
+                },
+                None,
+            )
+        })
+    }
+
+    /// Consumes one held candidate after rechecking session and repository identity.
+    /// Once admitted, completion retains authority if its waiter is cancelled.
+    pub async fn apply_prepared(&self, prepared: PreparedProfileChange) -> ProfileApplyOutcome {
+        let last_known_good = prepared.staged.last_known_good();
+        if prepared.requires_service() {
+            return ProfileApplyOutcome::Rejected {
+                last_known_good,
+                cause: Box::new(crate::ServiceManagerError::ConsentRequired).into(),
+            };
+        }
+        let current = || {
+            prepared.controlled_root == self.controlled.root()
+                && prepared.staged.store.root() == self.store.root()
+                && std::sync::Arc::ptr_eq(
+                    &prepared.session.capture_publication_gate(),
+                    &self.session.capture_publication_gate(),
+                )
+                && (!prepared.staged.changes_runtime()
+                    || (prepared.binding == self.session.runtime_descriptor().binding_generation()
+                        && prepared.generation == self.session.generation()))
+        };
+        if !current() {
+            return ProfileApplyOutcome::Rejected {
+                last_known_good,
+                cause: MihomoError::StaleBinding.into(),
+            };
+        }
         let mut scopes = self.session.write_scopes();
         scopes.extend([
             self.store.root().to_path_buf(),
@@ -574,8 +1018,35 @@ impl ProfileApplication {
             Ok(lease) => lease,
             Err(error) => {
                 return ProfileApplyOutcome::Rejected {
-                    last_known_good: None,
+                    last_known_good,
                     cause: ProfileApplicationError::Task(error),
+                };
+            }
+        };
+        if !current() {
+            return ProfileApplyOutcome::Rejected {
+                last_known_good,
+                cause: MihomoError::StaleBinding.into(),
+            };
+        }
+        let mut staged = prepared.staged;
+        let store = self.store.with_write_lease(&lease);
+        let staged = match run_store(move || {
+            staged.store = store;
+            staged._write_lease = Some(staged.store.write_access.acquire());
+            staged.validate_source_current()?;
+            staged.candidate_path =
+                write_staging_payload(staged.store.root(), staged.payload.as_bytes())?;
+            staged.materialized = true;
+            Ok(staged)
+        })
+        .await
+        {
+            Ok(staged) => staged,
+            Err(cause) => {
+                return ProfileApplyOutcome::Rejected {
+                    last_known_good,
+                    cause,
                 };
             }
         };
@@ -586,10 +1057,20 @@ impl ProfileApplication {
             #[cfg(test)]
             commit_gate: self.commit_gate.clone(),
         };
-        application.apply_with_write_lease(change).await
+        application
+            .apply_staged_expected(
+                staged,
+                prepared.overrides,
+                Some((prepared.binding, prepared.generation)),
+                prepared.runtime,
+            )
+            .await
     }
 
-    async fn apply_with_write_lease(&self, change: ProfileChange) -> ProfileApplyOutcome {
+    async fn stage_change(
+        &self,
+        change: ProfileChange,
+    ) -> Result<(StagedProfile, Vec<PathBuf>), ProfilePreparationError> {
         match change {
             ProfileChange::ImportLocal { source, overrides } => {
                 self.import_local(source, overrides).await
@@ -622,30 +1103,38 @@ impl ProfileApplication {
         }
     }
 
-    async fn import_local(&self, source: PathBuf, overrides: Vec<PathBuf>) -> ProfileApplyOutcome {
+    async fn import_local(
+        &self,
+        source: PathBuf,
+        overrides: Vec<PathBuf>,
+    ) -> Result<(StagedProfile, Vec<PathBuf>), ProfilePreparationError> {
         let last_known_good = match self.last_known_good().await {
             Ok(version) => version,
             Err(cause) => {
-                return ProfileApplyOutcome::Rejected {
+                return Err(ProfilePreparationError {
                     last_known_good: None,
                     cause,
-                };
+                });
             }
         };
         let store = self.store.clone();
         let staged = match run_store(move || StagedProfile::local(store, &source)).await {
             Ok(staged) => staged,
             Err(cause) => {
-                return ProfileApplyOutcome::Rejected {
+                return Err(ProfilePreparationError {
                     last_known_good,
                     cause,
-                };
+                });
             }
         };
-        self.apply_staged(staged, overrides).await
+        Ok((staged, overrides))
     }
 
-    async fn update_remote(&self, id: String, overrides: Vec<PathBuf>) -> ProfileApplyOutcome {
+    async fn update_remote(
+        &self,
+        id: String,
+        overrides: Vec<PathBuf>,
+    ) -> Result<(StagedProfile, Vec<PathBuf>), ProfilePreparationError> {
         let store = self.store.clone();
         let lookup_id = id.clone();
         let (expected_record, last_known_good) = match run_store(move || {
@@ -669,10 +1158,10 @@ impl ProfileApplication {
         {
             Ok(prepared) => prepared,
             Err(cause) => {
-                return ProfileApplyOutcome::Rejected {
+                return Err(ProfilePreparationError {
                     last_known_good: None,
                     cause,
-                };
+                });
             }
         };
         let ProfileSource::Remote {
@@ -681,27 +1170,27 @@ impl ProfileApplication {
             options,
         } = &expected_record.source
         else {
-            return ProfileApplyOutcome::Rejected {
+            return Err(ProfilePreparationError {
                 last_known_good,
                 cause: ProfileStoreError::NotFound(format!("{id} 不是在线订阅")).into(),
-            };
+            });
         };
         let proxy_port = match self.subscription_proxy_port(options.route()).await {
             Ok(port) => port,
             Err(cause) => {
-                return ProfileApplyOutcome::Rejected {
+                return Err(ProfilePreparationError {
                     last_known_good,
                     cause,
-                };
+                });
             }
         };
         let downloaded = match download_profile(url, user_agent, options, proxy_port).await {
             Ok(downloaded) => downloaded,
             Err(error) => {
-                return ProfileApplyOutcome::Rejected {
+                return Err(ProfilePreparationError {
                     last_known_good,
                     cause: error.into(),
-                };
+                });
             }
         };
         let store = self.store.clone();
@@ -717,13 +1206,13 @@ impl ProfileApplication {
         {
             Ok(staged) => staged,
             Err(cause) => {
-                return ProfileApplyOutcome::Rejected {
+                return Err(ProfilePreparationError {
                     last_known_good,
                     cause,
-                };
+                });
             }
         };
-        self.apply_staged(staged, overrides).await
+        Ok((staged, overrides))
     }
 
     async fn edit_yaml(
@@ -732,14 +1221,14 @@ impl ProfileApplication {
         expected_payload: String,
         new_payload: String,
         overrides: Vec<PathBuf>,
-    ) -> ProfileApplyOutcome {
+    ) -> Result<(StagedProfile, Vec<PathBuf>), ProfilePreparationError> {
         let last_known_good = match self.last_known_good().await {
             Ok(version) => version,
             Err(cause) => {
-                return ProfileApplyOutcome::Rejected {
+                return Err(ProfilePreparationError {
                     last_known_good: None,
                     cause,
-                };
+                });
             }
         };
         let store = self.store.clone();
@@ -750,13 +1239,13 @@ impl ProfileApplication {
         {
             Ok(staged) => staged,
             Err(cause) => {
-                return ProfileApplyOutcome::Rejected {
+                return Err(ProfilePreparationError {
                     last_known_good,
                     cause,
-                };
+                });
             }
         };
-        self.apply_staged(staged, overrides).await
+        Ok((staged, overrides))
     }
 
     async fn add_remote(
@@ -766,59 +1255,59 @@ impl ProfileApplication {
         user_agent: String,
         options: RemoteProfileOptions,
         overrides: Vec<PathBuf>,
-    ) -> ProfileApplyOutcome {
+    ) -> Result<(StagedProfile, Vec<PathBuf>), ProfilePreparationError> {
         let last_known_good = match self.last_known_good().await {
             Ok(version) => version,
             Err(cause) => {
-                return ProfileApplyOutcome::Rejected {
+                return Err(ProfilePreparationError {
                     last_known_good: None,
                     cause,
-                };
+                });
             }
         };
         let name = match normalized_profile_name(&name) {
             Ok(name) => name,
             Err(error) => {
-                return ProfileApplyOutcome::Rejected {
+                return Err(ProfilePreparationError {
                     last_known_good,
                     cause: error.into(),
-                };
+                });
             }
         };
         let url = match normalized_remote_url(&url) {
             Ok(url) => url,
             Err(error) => {
-                return ProfileApplyOutcome::Rejected {
+                return Err(ProfilePreparationError {
                     last_known_good,
                     cause: error.into(),
-                };
+                });
             }
         };
         let user_agent = match normalized_user_agent(&user_agent) {
             Ok(user_agent) => user_agent,
             Err(error) => {
-                return ProfileApplyOutcome::Rejected {
+                return Err(ProfilePreparationError {
                     last_known_good,
                     cause: error.into(),
-                };
+                });
             }
         };
         let proxy_port = match self.subscription_proxy_port(options.route()).await {
             Ok(port) => port,
             Err(cause) => {
-                return ProfileApplyOutcome::Rejected {
+                return Err(ProfilePreparationError {
                     last_known_good,
                     cause,
-                };
+                });
             }
         };
         let downloaded = match download_profile(&url, &user_agent, &options, proxy_port).await {
             Ok(downloaded) => downloaded,
             Err(error) => {
-                return ProfileApplyOutcome::Rejected {
+                return Err(ProfilePreparationError {
                     last_known_good,
                     cause: error.into(),
-                };
+                });
             }
         };
         let source = ProfileSource::Remote {
@@ -834,42 +1323,58 @@ impl ProfileApplication {
         {
             Ok(staged) => staged,
             Err(cause) => {
-                return ProfileApplyOutcome::Rejected {
+                return Err(ProfilePreparationError {
                     last_known_good,
                     cause,
-                };
+                });
             }
         };
-        self.apply_staged(staged, overrides).await
+        Ok((staged, overrides))
     }
 
-    async fn activate_existing(&self, id: String, overrides: Vec<PathBuf>) -> ProfileApplyOutcome {
+    async fn activate_existing(
+        &self,
+        id: String,
+        overrides: Vec<PathBuf>,
+    ) -> Result<(StagedProfile, Vec<PathBuf>), ProfilePreparationError> {
         let last_known_good = match self.last_known_good().await {
             Ok(version) => version,
             Err(cause) => {
-                return ProfileApplyOutcome::Rejected {
+                return Err(ProfilePreparationError {
                     last_known_good: None,
                     cause,
-                };
+                });
             }
         };
         let store = self.store.clone();
         let staged = match run_store(move || StagedProfile::existing(store, &id)).await {
             Ok(staged) => staged,
             Err(cause) => {
-                return ProfileApplyOutcome::Rejected {
+                return Err(ProfilePreparationError {
                     last_known_good,
                     cause,
-                };
+                });
             }
         };
-        self.apply_staged(staged, overrides).await
+        Ok((staged, overrides))
     }
 
+    #[cfg(test)]
     async fn apply_staged(
         &self,
         staged: StagedProfile,
         overrides: Vec<PathBuf>,
+    ) -> ProfileApplyOutcome {
+        self.apply_staged_expected(staged, overrides, None, None)
+            .await
+    }
+
+    async fn apply_staged_expected(
+        &self,
+        staged: StagedProfile,
+        overrides: Vec<PathBuf>,
+        expected: Option<(u64, u64)>,
+        prepared_runtime: Option<crate::core_session::service_tun::PreparedConfig>,
     ) -> ProfileApplyOutcome {
         let last_known_good = staged.last_known_good();
         let source_version = ProfileVersion::from(staged.record());
@@ -880,12 +1385,16 @@ impl ProfileApplication {
         let changes_runtime = staged.changes_runtime();
         let runtime = match self
             .session
-            .stage_profile_application(
+            .stage_profile_application_expected(
                 &self.controlled,
-                staged.candidate_path().to_path_buf(),
+                prepared_runtime.map_or_else(
+                    || crate::profile::ProfileRuntimeSource::Frozen(staged.payload.clone()),
+                    |prepared| prepared.into_profile_source(),
+                ),
                 staged.previous_path(),
                 overrides,
                 changes_runtime,
+                expected.filter(|_| changes_runtime),
             )
             .await
         {
@@ -1042,6 +1551,220 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn service_directory_stale_rejection_does_not_claim_a_newer_runtime_failure() {
+        let fixture = Fixture::new("service-directory-stale-outcome");
+        let application = fixture.application("127.0.0.1:9".parse().unwrap());
+        let prepared = application
+            .prepare_change(ProfileChange::ActivateExisting {
+                id: fixture.candidate.id.clone(),
+                overrides: vec![],
+            })
+            .await
+            .unwrap();
+        let recovery = ProfileRecovery {
+            attempted: ProfileVersion::from(prepared.staged.record()),
+            last_known_good: prepared.staged.last_known_good(),
+        };
+        let participant = ServiceProfileCommit::new(prepared.staged);
+        let newer = application.session.mark_runtime_unknown();
+        let result = participant.unsaved_outcome(
+            &application.session,
+            recovery,
+            Box::new(crate::ServiceManagerError::Stale).into(),
+            false,
+        );
+        assert!(matches!(
+            result,
+            ProfileApplyOutcome::Rejected {
+                cause: ProfileApplicationError::Service(_),
+                ..
+            }
+        ));
+        assert_eq!(application.session.generation(), newer);
+        assert_eq!(
+            fixture.store.load().unwrap().active.as_deref(),
+            Some(fixture.previous.id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn service_directory_failure_keeps_its_own_completed_runtime_version() {
+        let fixture = Fixture::new("service-directory-failure-version");
+        let application = fixture.application("127.0.0.1:9".parse().unwrap());
+        let prepared = application
+            .prepare_change(ProfileChange::ActivateExisting {
+                id: fixture.candidate.id.clone(),
+                overrides: vec![],
+            })
+            .await
+            .unwrap();
+        let recovery = ProfileRecovery {
+            attempted: ProfileVersion::from(prepared.staged.record()),
+            last_known_good: prepared.staged.last_known_good(),
+        };
+        let participant = ServiceProfileCommit::new(prepared.staged);
+        participant.mark_runtime_attempted();
+        let completed = application.session.mark_runtime_unknown();
+        participant.record_runtime_generation(completed);
+        let newer = application.session.mark_runtime_unknown();
+        let result = participant.unsaved_outcome(
+            &application.session,
+            recovery,
+            ProfileApplicationError::Task("trial failed".into()),
+            false,
+        );
+        assert!(
+            matches!(result, ProfileApplyOutcome::RuntimeUnknown { runtime_version, .. } if runtime_version == completed)
+        );
+        assert_eq!(application.session.generation(), newer);
+    }
+
+    #[tokio::test]
+    async fn service_catalog_participant_defers_commit_and_keeps_held_source() {
+        let fixture = Fixture::new("service-catalog-held");
+        let application = fixture.application("127.0.0.1:9".parse().unwrap());
+        let source = fixture.write_source("new.yaml", "HELD");
+        let prepared = application
+            .prepare_change(ProfileChange::ImportLocal {
+                source: source.clone(),
+                overrides: vec![],
+            })
+            .await
+            .unwrap();
+        let record = prepared.staged.record.clone();
+        let participant = std::sync::Arc::new(ServiceProfileCommit::new(prepared.staged));
+        fs::remove_file(&source).unwrap();
+        let lease = fixture
+            .controlled
+            .acquire_write_lease_for_paths(vec![fixture.store.root().to_path_buf()])
+            .await
+            .unwrap();
+        participant.validate(&lease).await.unwrap();
+        assert!(!fixture.store.profile_path(&record).exists());
+        assert_eq!(
+            fixture.store.load().unwrap().active.as_deref(),
+            Some(fixture.previous.id.as_str())
+        );
+        participant.commit(&lease).await.unwrap();
+        assert_eq!(
+            fs::read_to_string(fixture.store.profile_path(&record)).unwrap(),
+            profile_payload("HELD")
+        );
+        assert_eq!(
+            fixture.store.load().unwrap().active.as_deref(),
+            Some(record.id.as_str())
+        );
+        assert!(participant.committed.lock().is_some());
+        assert!(!source.exists());
+        assert!(
+            participant.commit(&lease).await.is_err(),
+            "the receipt cannot be committed twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn service_catalog_conflict_restores_staged_cache_without_rewriting_controlled_layer() {
+        let fixture = Fixture::new("service-catalog-conflict");
+        let application = fixture.application("127.0.0.1:9".parse().unwrap());
+        let source = fixture.write_source("new.yaml", "HELD");
+        let prepared = application
+            .prepare_change(ProfileChange::ImportLocal {
+                source,
+                overrides: vec![],
+            })
+            .await
+            .unwrap();
+        let destination = fixture.store.profile_path(&prepared.staged.record);
+        let payload = prepared.staged.payload.clone();
+        let participant = std::sync::Arc::new(ServiceProfileCommit::new(prepared.staged));
+        let lease = fixture
+            .controlled
+            .acquire_write_lease_for_paths(vec![fixture.store.root().to_path_buf()])
+            .await
+            .unwrap();
+        let controlled = fixture.controlled.with_write_lease(&lease);
+        fs::create_dir_all(controlled.root()).unwrap();
+        fs::write(controlled.runtime_path(), "mode: direct\n").unwrap();
+        let update = controlled
+            .prepare_service_config_update(
+                crate::profile::ProfileRuntimeSource::Frozen(payload),
+                None,
+                vec![],
+                Some("mode: direct\n".into()),
+            )
+            .await
+            .unwrap();
+        participant.validate(&lease).await.unwrap();
+        let persistence = controlled.stage_service_tun_update(update).await.unwrap();
+        persistence.validate_patch().await.unwrap();
+        fixture.store.activate(&fixture.candidate.id).unwrap();
+        assert!(participant.commit(&lease).await.is_err());
+        persistence.rollback().await.unwrap();
+        assert_eq!(
+            fs::read_to_string(controlled.runtime_path()).unwrap(),
+            "mode: direct\n"
+        );
+        assert!(!controlled.root().join("override.yaml").exists());
+        assert!(!destination.exists());
+        assert!(participant.committed.lock().is_none());
+        assert!(matches!(
+            participant.failure.lock().as_ref(),
+            Some(ProfileApplicationError::Store(_))
+        ));
+        assert_eq!(
+            fixture.store.load().unwrap().active.as_deref(),
+            Some(fixture.candidate.id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_tun_directory_cannot_bypass_service_admission() {
+        let fixture = crate::core_session::ownership_tests::ChildFixture::new(
+            "geodata-directory-service-admission",
+        )
+        .await;
+        let session = CoreSession::open(
+            CoreKind::Mihomo,
+            MihomoClient::from_process(fixture.process.clone()).unwrap(),
+        )
+        .unwrap();
+        let home = fixture.process.launch_config().home_dir.clone();
+        let store = ProfileStore::new(home.join("profiles")).unwrap();
+        let controlled = ControlledConfigStore::new(home.join("controlled"));
+        fs::create_dir_all(controlled.root()).unwrap();
+        fs::write(controlled.runtime_path(), "tun: {enable: false}\n").unwrap();
+        let source = home.join("tun-source.yaml");
+        fs::write(&source, "tun: {enable: true}\n").unwrap();
+        let application =
+            ProfileApplication::new(store.clone(), controlled.clone(), session.clone());
+        let prepared = application
+            .prepare_change(ProfileChange::ImportLocal {
+                source,
+                overrides: vec![],
+            })
+            .await
+            .unwrap();
+        assert!(prepared.requires_service());
+        let pid = fixture.process.snapshot().pid;
+        let result = application.apply_prepared(prepared).await;
+        assert!(matches!(
+            result,
+            ProfileApplyOutcome::Rejected {
+                cause: ProfileApplicationError::Service(_),
+                ..
+            }
+        ));
+        assert!(store.load().unwrap().profiles.is_empty());
+        assert_eq!(
+            fs::read_to_string(controlled.runtime_path()).unwrap(),
+            "tun: {enable: false}\n"
+        );
+        assert_eq!(session.generation(), 0);
+        assert_eq!(fixture.process.snapshot().pid, pid);
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn cancelling_the_waiter_does_not_abandon_admitted_profile_persistence() {
         let fixture = Fixture::new("cancel-persistence");
         fixture
@@ -1103,6 +1826,375 @@ mod tests {
         assert_eq!(
             session.committed_profile_snapshot().profile_path.as_deref(),
             Some(fixture.store.profile_path(&fixture.candidate).as_path())
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_local_directory_applies_final_layers_after_override_is_deleted() {
+        let fixture = crate::core_session::ownership_tests::ChildFixture::new(
+            "geodata-prepared-directory-final-layers",
+        )
+        .await;
+        let session = CoreSession::open(
+            crate::CoreKind::Mihomo,
+            crate::MihomoClient::from_process(fixture.process.clone()).unwrap(),
+        )
+        .unwrap();
+        let home = fixture.process.launch_config().home_dir.clone();
+        let store = ProfileStore::new(home.join("profiles")).unwrap();
+        let controlled = ControlledConfigStore::new(home.join("controlled"));
+        let source = home.join("new-source.yaml");
+        fs::write(&source, "tun: {enable: true}\nmode: global\n").unwrap();
+        let override_path = home.join("ordered.yaml");
+        fs::write(&override_path, "tun: {enable: false}\nmode: direct\n").unwrap();
+        let application =
+            ProfileApplication::new(store.clone(), controlled.clone(), session.clone());
+        let prepared = application
+            .prepare_change(ProfileChange::ImportLocal {
+                source: source.clone(),
+                overrides: vec![override_path.clone()],
+            })
+            .await
+            .unwrap();
+        assert!(!prepared.requires_service(), "final override disables TUN");
+        fs::remove_file(&source).unwrap();
+        fs::remove_file(override_path).unwrap();
+        let outcome = application.apply_prepared(prepared).await;
+        assert!(
+            matches!(
+                outcome,
+                ProfileApplyOutcome::Applied {
+                    runtime_version: 1,
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_slice(&fs::read(controlled.runtime_path()).unwrap()).unwrap();
+        assert_eq!(yaml["tun"]["enable"].as_bool(), Some(false));
+        assert_eq!(yaml["mode"].as_str(), Some("direct"));
+        let catalog = store.load().unwrap();
+        assert_eq!(catalog.profiles.len(), 1);
+        assert_eq!(
+            fs::read_to_string(store.profile_path(&catalog.profiles[0])).unwrap(),
+            "tun: {enable: true}\nmode: global\n"
+        );
+        session.shutdown().await.unwrap();
+        assert!(fixture.process.snapshot().pid.is_none());
+    }
+
+    #[tokio::test]
+    async fn prepared_local_directory_rejects_changed_controlled_layer_without_committing() {
+        let fixture = crate::core_session::ownership_tests::ChildFixture::new(
+            "geodata-prepared-directory-controlled-conflict",
+        )
+        .await;
+        let session = CoreSession::open(
+            crate::CoreKind::Mihomo,
+            crate::MihomoClient::from_process(fixture.process.clone()).unwrap(),
+        )
+        .unwrap();
+        let home = fixture.process.launch_config().home_dir.clone();
+        let store = ProfileStore::new(home.join("profiles")).unwrap();
+        let controlled = ControlledConfigStore::new(home.join("controlled"));
+        let source = home.join("new-source.yaml");
+        fs::write(&source, "tun: {enable: false}\nmode: rule\n").unwrap();
+        let application =
+            ProfileApplication::new(store.clone(), controlled.clone(), session.clone());
+        let prepared = application
+            .prepare_change(ProfileChange::ImportLocal {
+                source,
+                overrides: vec![],
+            })
+            .await
+            .unwrap();
+        fs::create_dir_all(controlled.root()).unwrap();
+        let changed = "tun: {enable: true}\nmode: global\n";
+        fs::write(controlled.root().join("override.yaml"), changed).unwrap();
+        let pid = fixture.process.snapshot().pid;
+        let outcome = application.apply_prepared(prepared).await;
+        assert!(
+            matches!(outcome, ProfileApplyOutcome::Rejected { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(session.generation(), 0);
+        assert_eq!(fixture.process.snapshot().pid, pid);
+        assert!(store.load().unwrap().profiles.is_empty());
+        assert!(!controlled.runtime_path().exists());
+        assert_eq!(
+            fs::read_to_string(controlled.root().join("override.yaml")).unwrap(),
+            changed
+        );
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn prepared_import_releases_restore_authority_and_applies_held_source() {
+        let fixture = Fixture::new("prepared-import-held");
+        let source = fixture.write_source("held.yaml", "HELD");
+        let (address, server) = response_server(
+            "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+        );
+        let application = fixture.application(address);
+        let prepared = application
+            .prepare_change(ProfileChange::ImportLocal {
+                source: source.clone(),
+                overrides: vec![],
+            })
+            .await
+            .unwrap();
+        assert_eq!(fixture.store.load().unwrap().profiles.len(), 2);
+        assert_eq!(
+            fs::read_dir(fixture.store.root().join("staging"))
+                .unwrap()
+                .count(),
+            0
+        );
+        let root = fixture.root.clone();
+        let exclusive = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            tokio::task::spawn_blocking(move || {
+                crate::data_coordinator::DataWriteLease::exclusive([root])
+            }),
+        )
+        .await
+        .expect("preparation must release restore admission")
+        .unwrap();
+        drop(exclusive);
+        fs::remove_file(&source).unwrap();
+        let outcome = application.apply_prepared(prepared).await;
+        let request = server.join().unwrap();
+        let ProfileApplyOutcome::Applied {
+            path,
+            runtime_version,
+            ..
+        } = outcome
+        else {
+            panic!("held import failed: {outcome:?}");
+        };
+        assert_eq!(runtime_version, 1);
+        assert!(request.starts_with("PUT /configs?force=true "));
+        assert_eq!(fs::read_to_string(path).unwrap(), profile_payload("HELD"));
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read_dir(fixture.store.root().join("staging"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_activation_rejects_changed_source_before_runtime_apply() {
+        let fixture = Fixture::new("prepared-activation-changed");
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let application = fixture.application(listener.local_addr().unwrap());
+        let prepared = application
+            .prepare_change(ProfileChange::ActivateExisting {
+                id: fixture.candidate.id.clone(),
+                overrides: vec![],
+            })
+            .await
+            .unwrap();
+        let path = fixture.store.profile_path(&fixture.candidate);
+        fs::write(&path, profile_payload("CHANGED")).unwrap();
+        let outcome = application.apply_prepared(prepared).await;
+        assert!(matches!(outcome, ProfileApplyOutcome::Rejected { .. }));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert_eq!(application.session.generation(), 0);
+        assert_eq!(
+            fixture.store.load().unwrap().active.as_deref(),
+            Some(fixture.previous.id.as_str())
+        );
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            profile_payload("CHANGED")
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_activation_cannot_cross_sessions_with_matching_versions() {
+        let fixture = Fixture::new("prepared-cross-session");
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let application = fixture.application(address);
+        let other = fixture.application(address);
+        let prepared = application
+            .prepare_change(ProfileChange::ActivateExisting {
+                id: fixture.candidate.id.clone(),
+                overrides: vec![],
+            })
+            .await
+            .unwrap();
+        assert_eq!(application.session.generation(), other.session.generation());
+        let outcome = other.apply_prepared(prepared).await;
+        assert!(matches!(
+            outcome,
+            ProfileApplyOutcome::Rejected {
+                cause: ProfileApplicationError::Controller(MihomoError::StaleBinding),
+                ..
+            }
+        ));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            fixture.store.load().unwrap().active.as_deref(),
+            Some(fixture.previous.id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_activation_cannot_replace_a_newer_runtime_transition() {
+        let fixture = Fixture::new("prepared-stale-generation");
+        let (address, server) = response_server(
+            "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+        );
+        let application = fixture.application(address);
+        let prepared = application
+            .prepare_change(ProfileChange::ActivateExisting {
+                id: fixture.candidate.id.clone(),
+                overrides: vec![],
+            })
+            .await
+            .unwrap();
+        let accepted = application
+            .apply(ProfileChange::ActivateExisting {
+                id: fixture.previous.id.clone(),
+                overrides: vec![],
+            })
+            .await;
+        assert!(matches!(
+            accepted,
+            ProfileApplyOutcome::Applied {
+                runtime_version: 1,
+                ..
+            }
+        ));
+        server.join().unwrap();
+        let rejected = application.apply_prepared(prepared).await;
+        assert!(matches!(
+            rejected,
+            ProfileApplyOutcome::Rejected {
+                cause: ProfileApplicationError::Controller(MihomoError::StaleBinding),
+                ..
+            }
+        ));
+        assert_eq!(application.session.generation(), 1);
+        assert_eq!(
+            fixture.store.load().unwrap().active.as_deref(),
+            Some(fixture.previous.id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn staged_profile_tampering_rolls_back_the_held_candidate_without_committing_catalog() {
+        let fixture = Fixture::new("held-staged-source");
+        fixture
+            .controlled
+            .materialize(fixture.store.profile_path(&fixture.previous))
+            .unwrap();
+        let previous = fixture
+            .controlled
+            .cached_runtime_payload()
+            .unwrap()
+            .unwrap();
+        let payload = format!("tun: {{enable: false}}\n{}", profile_payload("HELD"));
+        let staged = StagedProfile::new(
+            fixture.store.clone(),
+            "Held".into(),
+            ProfileSource::Local {
+                original_path: fixture.root.join("original.yaml").display().to_string(),
+            },
+            payload,
+            SubscriptionMetadata::default(),
+        )
+        .unwrap();
+        fs::write(
+            &staged.candidate_path,
+            format!("tun: {{enable: true}}\n{}", profile_payload("CHANGED")),
+        )
+        .unwrap();
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut requests = Vec::new();
+            while requests.len() < 2 && std::time::Instant::now() < deadline {
+                let (stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("{error}"),
+                };
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut bytes = vec![0; length];
+                reader.read_exact(&mut bytes).unwrap();
+                requests.push(serde_json::from_slice::<serde_json::Value>(&bytes).unwrap());
+                reader.get_mut().write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            }
+            requests
+        });
+        let application = fixture.application(address);
+        let outcome = application.apply_staged(staged, vec![]).await;
+        let requests = server.join().unwrap();
+        assert!(matches!(
+            outcome,
+            ProfileApplyOutcome::RolledBack {
+                runtime_version: 1,
+                ..
+            }
+        ));
+        let accepted: serde_yaml::Value =
+            serde_yaml::from_str(requests[0]["payload"].as_str().unwrap()).unwrap();
+        assert_eq!(accepted["tun"]["enable"].as_bool(), Some(false));
+        assert_eq!(accepted["rules"][0].as_str(), Some("MATCH,HELD"));
+        assert_eq!(requests[1]["payload"].as_str(), Some(previous.as_str()));
+        assert_eq!(
+            fixture
+                .controlled
+                .cached_runtime_payload()
+                .unwrap()
+                .as_deref(),
+            Some(previous.as_str())
+        );
+        let catalog = fixture.store.load().unwrap();
+        assert_eq!(
+            catalog.active.as_deref(),
+            Some(fixture.previous.id.as_str())
+        );
+        assert_eq!(catalog.profiles.len(), 2);
+        assert_eq!(
+            fs::read_dir(fixture.store.root().join("staging"))
+                .unwrap()
+                .count(),
+            0
         );
     }
 

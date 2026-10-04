@@ -778,8 +778,10 @@ async fn connect_log_stream(
     binding: &Arc<ControllerBinding>,
     level: MihomoLogLevel,
 ) -> Result<ControllerStream, String> {
+    let snapshot = binding.snapshot();
     let structured = binding
-        .connect(
+        .connect_pinned(
+            &snapshot,
             "/logs",
             &[("level", level.api_value()), ("format", "structured")],
             "连接 Mihomo 结构化日志流超时",
@@ -787,9 +789,10 @@ async fn connect_log_stream(
         .await;
     match structured {
         Ok(socket) => Ok(socket),
-        Err(error) if binding.service().is_some() => Err(error),
+        Err(error) if snapshot.is_service() => Err(error),
         Err(structured_error) => binding
-            .connect(
+            .connect_pinned(
+                &snapshot,
                 "/logs",
                 &[("level", level.api_value())],
                 "连接 Mihomo 日志流超时",
@@ -859,6 +862,90 @@ fn parse_core_timestamp(time: &str, received_at_ms: u64) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_late_log_connection_error_never_falls_back_to_a_new_controller() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let old_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let new_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let old_endpoint =
+            MihomoEndpoint::new(format!("http://{}", old_listener.local_addr().unwrap()), "");
+        let new_endpoint =
+            MihomoEndpoint::new(format!("http://{}", new_listener.local_addr().unwrap()), "");
+        let client = MihomoClient::new(old_endpoint).unwrap();
+        let binding = client.binding.clone();
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let (release, resume) = tokio::sync::oneshot::channel();
+        let old_server = tokio::spawn(async move {
+            let (mut socket, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(3), old_listener.accept())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let mut bytes = [0_u8; 1024];
+                let count = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    socket.read(&mut bytes),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_ne!(count, 0);
+                request.extend_from_slice(&bytes[..count]);
+                assert!(request.len() <= 8192);
+            }
+            assert!(
+                String::from_utf8(request)
+                    .unwrap()
+                    .starts_with("GET /logs?level=warning&format=structured HTTP/1.1")
+            );
+            ready.send(()).unwrap();
+            resume.await.unwrap();
+            // Closing without a handshake releases the original failed attempt.
+            drop(socket);
+        });
+        let caller_binding = binding.clone();
+        let opening = tokio::spawn(async move {
+            connect_log_stream(&caller_binding, MihomoLogLevel::Warning).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(3), started)
+            .await
+            .unwrap()
+            .unwrap();
+        // Publish through the actual binding; no synthetic generation flag.
+        client.switch_to_direct(new_endpoint).await.unwrap();
+        let new_server = tokio::spawn(async move {
+            let Ok(Ok((mut socket, _))) =
+                tokio::time::timeout(std::time::Duration::from_millis(500), new_listener.accept())
+                    .await
+            else {
+                return false;
+            };
+            socket
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            true
+        });
+        release.send(()).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), opening)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_err());
+        old_server.await.unwrap();
+        assert!(
+            !new_server.await.unwrap(),
+            "plain fallback connected to the new controller"
+        );
+    }
 
     #[test]
     fn parses_real_log_frame() {

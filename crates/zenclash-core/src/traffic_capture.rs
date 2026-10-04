@@ -3,7 +3,10 @@
 use std::{
     path::PathBuf,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -145,6 +148,31 @@ pub struct ServiceTunOutcome {
     recovery_warning: Option<String>,
 }
 
+/// Frozen capture observation and the runtime result before native service maintenance.
+pub struct ServiceLocalRecoveryOutcome {
+    before: TrafficCaptureSnapshot,
+    runtime: crate::CoreLocalRecoveryOutcome,
+    capture_revision: u64,
+}
+
+impl ServiceLocalRecoveryOutcome {
+    pub(crate) const fn capture_revision(&self) -> u64 {
+        self.capture_revision
+    }
+
+    /// Reads the capture facts held before owned native capture was released.
+    #[must_use]
+    pub const fn before(&self) -> &TrafficCaptureSnapshot {
+        &self.before
+    }
+
+    /// Reads Local readiness and the scoped resources for a later service handover.
+    #[must_use]
+    pub const fn runtime(&self) -> &crate::CoreLocalRecoveryOutcome {
+        &self.runtime
+    }
+}
+
 impl ServiceTunOutcome {
     /// Returns a receipt only when business persistence succeeded, including pending finalization.
     #[must_use]
@@ -191,6 +219,7 @@ pub struct TrafficCaptureSession {
     backend: Arc<dyn CaptureBackend>,
     profile: Arc<RwLock<Option<PathBuf>>>,
     operation: Arc<tokio::sync::Mutex<()>>,
+    intent_revision: Arc<AtomicU64>,
 }
 
 enum CaptureOperation {
@@ -209,6 +238,7 @@ impl TrafficCaptureSession {
         profile: Option<PathBuf>,
     ) -> Self {
         let operation = core_session.capture_publication_gate();
+        let intent_revision = core_session.capture_intent_revision();
         let profile = Arc::new(RwLock::new(profile));
         let backend = Arc::new(ProductionCaptureBackend {
             core_session,
@@ -220,7 +250,28 @@ impl TrafficCaptureSession {
             backend,
             profile,
             operation,
+            intent_revision,
         }
+    }
+
+    pub(crate) fn controlled_store(&self) -> Option<ControlledConfigStore> {
+        self.backend.controlled_store()
+    }
+
+    pub(crate) fn current_profile(&self) -> Option<PathBuf> {
+        self.profile.read().clone()
+    }
+
+    pub(crate) fn note_capture_intent(&self) {
+        let _ = self
+            .intent_revision
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |revision| {
+                Some(revision.saturating_add(1))
+            });
+    }
+
+    pub(crate) fn capture_revision(&self) -> u64 {
+        self.intent_revision.load(Ordering::SeqCst)
     }
 
     pub(crate) fn shares_core_session(&self, session: &CoreSession) -> bool {
@@ -232,6 +283,180 @@ impl TrafficCaptureSession {
         *self.profile.write() = profile;
     }
 
+    /// Releases owned native capture and recovers the service into ordinary Local ownership.
+    ///
+    /// Captures intent under the shared publication gate. Once admitted, the
+    /// completion survives cancellation of its caller and shutdown waits for it.
+    /// Persists disabled system-proxy intent through its existing transaction before
+    /// leaving Service. Does not grant maintenance authorization or restore capture
+    /// after failure; an uncertain runtime must first be reconciled.
+    ///
+    /// # Errors
+    /// Rejects mismatched capture owners, shutdown, stale versions, non-service
+    /// runtimes, native capture release failure or failed Local recovery.
+    pub async fn recover_service_to_local(
+        &self,
+        session: &CoreSession,
+        store: &ControlledConfigStore,
+        fallback: Option<crate::MihomoLaunchConfig>,
+        expected_binding: u64,
+        expected_generation: u64,
+    ) -> Result<ServiceLocalRecoveryOutcome, crate::CoreSessionError> {
+        if !self.shares_core_session(session) {
+            return Err(crate::MihomoError::StaleBinding.into());
+        }
+        let capture_revision = self.capture_revision();
+        let capture = self.operation.clone().lock_owned().await;
+        if self.capture_revision() != capture_revision {
+            return Err(crate::MihomoError::StaleBinding.into());
+        }
+        if session.is_shutting_down() {
+            return Err(crate::CoreSessionError::ShuttingDown);
+        }
+        let descriptor = session.runtime_descriptor();
+        if descriptor.binding_generation() != expected_binding
+            || session.generation() != expected_generation
+        {
+            return Err(crate::MihomoError::StaleBinding.into());
+        }
+        if descriptor.backend() != crate::CoreRuntimeBackend::Service {
+            return Err(crate::CoreSessionError::ReleaseUnsupported {
+                core: session.kind(),
+            });
+        }
+        let owner = self.clone();
+        let session = session.clone();
+        let store = store.clone();
+        tokio::spawn(async move {
+            let before = owner
+                .snapshot_from_backend()
+                .await
+                .map_err(|error| crate::MihomoError::InvalidInput(error.to_string()))?;
+            owner
+                .suspend_maintenance_proxy_admitted(&before.system_proxy)
+                .await
+                .map_err(crate::MihomoError::InvalidInput)?;
+            if session.is_shutting_down() {
+                return Err(crate::CoreSessionError::ShuttingDown);
+            }
+            if session.runtime_descriptor().binding_generation() != expected_binding
+                || session.generation() != expected_generation
+            {
+                return Err(crate::MihomoError::StaleBinding.into());
+            }
+            let runtime = session
+                .recover_service_to_local_admitted(&store, fallback, capture, expected_generation)
+                .await?;
+            Ok(ServiceLocalRecoveryOutcome {
+                before,
+                runtime,
+                capture_revision,
+            })
+        })
+        .await
+        .map_err(|error| crate::ControlledConfigError::Task(error.to_string()))?
+    }
+
+    pub(crate) async fn suspend_maintenance_proxy_admitted(
+        &self,
+        before: &Observation<SystemProxySessionSnapshot>,
+    ) -> Result<(), String> {
+        if !before.is_fresh() {
+            return Err(zenclash_i18n::text(
+                "core_page.service.capture_restore_unknown",
+            ));
+        }
+        if before.value().is_some_and(|proxy| {
+            proxy.intent_enabled || proxy.ownership == SystemProxyOwnershipState::Owned
+        }) {
+            self.backend.set_system_proxy(false, 0).await
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) async fn restore_maintenance_proxy(
+        &self,
+        session: &CoreSession,
+        before: TrafficCaptureSnapshot,
+        expected_binding: u64,
+        expected_generation: u64,
+        expected_capture_revision: u64,
+    ) -> Result<(), crate::CoreSessionError> {
+        if !self.shares_core_session(session) {
+            return Err(crate::MihomoError::StaleBinding.into());
+        }
+        let guard = self.operation.clone().lock_owned().await;
+        let owner = self.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            if session.is_shutting_down() {
+                return Err(crate::CoreSessionError::ShuttingDown);
+            }
+            if session.runtime_descriptor().binding_generation() != expected_binding
+                || session.generation() != expected_generation
+                || owner.intent_revision.load(Ordering::SeqCst) != expected_capture_revision
+            {
+                return Err(crate::MihomoError::StaleBinding.into());
+            }
+            owner
+                .restore_maintenance_proxy_admitted(&before, expected_capture_revision)
+                .await
+                .map_err(capture_core_error)
+        })
+        .await
+        .map_err(|error| crate::ControlledConfigError::Task(error.to_string()))?
+    }
+
+    async fn restore_maintenance_proxy_admitted(
+        &self,
+        before: &TrafficCaptureSnapshot,
+        expected_revision: u64,
+    ) -> Result<(), TrafficCaptureError> {
+        if !before.system_proxy.is_fresh() {
+            return Err(TrafficCaptureError::Backend(zenclash_i18n::text(
+                "core_page.service.capture_restore_unknown",
+            )));
+        }
+        if !system_proxy_is_owned_and_active(before) {
+            return Ok(());
+        }
+        let current = self.snapshot_from_backend().await?;
+        if !current.system_proxy.is_fresh() || !current.core_available {
+            return Err(TrafficCaptureError::Backend(zenclash_i18n::text(
+                "core_page.service.capture_restore_unknown",
+            )));
+        }
+        if has_external_system_proxy(&current) {
+            return Err(TrafficCaptureError::ExternalSystemProxy);
+        }
+        let port = current
+            .system_proxy_port
+            .filter(|port| *port != 0)
+            .ok_or_else(|| {
+                TrafficCaptureError::Backend(zenclash_i18n::text(
+                    "core_page.service.capture_restore_unknown",
+                ))
+            })?;
+        if self.capture_revision() != expected_revision {
+            return Err(TrafficCaptureError::Backend(
+                crate::MihomoError::StaleBinding.to_string(),
+            ));
+        }
+        self.backend
+            .set_system_proxy(true, port)
+            .await
+            .map_err(TrafficCaptureError::Backend)?;
+        let after = self.snapshot_from_backend().await?;
+        if !after.system_proxy.is_fresh() || !system_proxy_is_owned_and_active(&after) {
+            return Err(TrafficCaptureError::Backend(zenclash_i18n::text(
+                "core_page.service.capture_restore_unknown",
+            )));
+        }
+        Ok(())
+    }
+
     /// Applies one ordinary capture plan with rollback after partial failure.
     ///
     /// # Errors
@@ -239,6 +464,7 @@ impl TrafficCaptureSession {
     /// Returns an error before partial mutation, including missing profiles,
     /// unavailable permissions, and external System Proxy ownership conflicts.
     pub async fn apply(&self, plan: CapturePlan) -> Result<CaptureOutcome, TrafficCaptureError> {
+        self.note_capture_intent();
         self.complete_admitted(CaptureOperation::Apply(plan)).await
     }
 
@@ -254,6 +480,27 @@ impl TrafficCaptureSession {
         expected_binding: u64,
         expected_generation: u64,
     ) -> Result<ServiceTunOutcome, crate::CoreSessionError> {
+        self.note_capture_intent();
+        self.enable_service_tun_with_bundle(
+            service,
+            expected_binding,
+            expected_generation,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn enable_service_tun_with_bundle(
+        &self,
+        service: Option<(Arc<zenclash_service::ServiceClient>, PathBuf)>,
+        expected_binding: u64,
+        expected_generation: u64,
+        recovery_bundle: Option<Arc<crate::ServiceRuntimeBundle>>,
+        expected_capture_revision: Option<u64>,
+        prepared_config: Option<Arc<crate::core_session::service_tun::PreparedServiceTun>>,
+    ) -> Result<ServiceTunOutcome, crate::CoreSessionError> {
         let session = self.clone();
         // The acquired helper belongs to this completion even while capture is queued.
         // Manager command admission bounds this workflow to one outstanding authorization.
@@ -261,7 +508,14 @@ impl TrafficCaptureSession {
             let _guard = session.operation.clone().lock_owned().await;
             let acquired = service.as_ref().map(|(client, _)| client.clone());
             let result = session
-                .enable_service_tun_admitted(service, expected_binding, expected_generation)
+                .enable_service_tun_admitted(
+                    service,
+                    expected_binding,
+                    expected_generation,
+                    recovery_bundle,
+                    expected_capture_revision,
+                    prepared_config,
+                )
                 .await;
             if result.is_err()
                 && let Some(acquired) = acquired
@@ -280,13 +534,22 @@ impl TrafficCaptureSession {
         service: Option<(Arc<zenclash_service::ServiceClient>, PathBuf)>,
         expected_binding: u64,
         expected_generation: u64,
+        recovery_bundle: Option<Arc<crate::ServiceRuntimeBundle>>,
+        expected_capture_revision: Option<u64>,
+        prepared_config: Option<Arc<crate::core_session::service_tun::PreparedServiceTun>>,
     ) -> Result<ServiceTunOutcome, crate::CoreSessionError> {
+        if expected_capture_revision.is_some_and(|expected| expected != self.capture_revision()) {
+            return Err(crate::MihomoError::StaleBinding.into());
+        }
         self.backend
             .validate_service_tun_request(expected_binding, expected_generation)?;
         let before = self
             .snapshot_from_backend()
             .await
             .map_err(capture_core_error)?;
+        if expected_capture_revision.is_some_and(|expected| expected != self.capture_revision()) {
+            return Err(crate::MihomoError::StaleBinding.into());
+        }
         if has_external_system_proxy(&before) {
             return Err(capture_core_error(TrafficCaptureError::ExternalSystemProxy));
         }
@@ -299,7 +562,13 @@ impl TrafficCaptureSession {
         }
         let runtime = self
             .backend
-            .enable_service_tun(service, expected_binding, expected_generation)
+            .enable_service_tun(
+                service,
+                expected_binding,
+                expected_generation,
+                recovery_bundle,
+                prepared_config,
+            )
             .await;
         let runtime = match runtime {
             Ok(runtime) => runtime,
@@ -590,6 +859,7 @@ impl TrafficCaptureSession {
             backend,
             profile: Arc::default(),
             operation: Arc::default(),
+            intent_revision: Arc::default(),
         }
     }
 }
@@ -603,6 +873,10 @@ struct CaptureBackendSnapshot {
 }
 
 trait CaptureBackend: Send + Sync {
+    fn controlled_store(&self) -> Option<ControlledConfigStore> {
+        None
+    }
+
     fn owns_service(&self, _service: &Arc<zenclash_service::ServiceClient>) -> bool {
         false
     }
@@ -619,6 +893,8 @@ trait CaptureBackend: Send + Sync {
         _service: Option<(Arc<zenclash_service::ServiceClient>, PathBuf)>,
         _expected_binding: u64,
         _expected_generation: u64,
+        _recovery_bundle: Option<Arc<crate::ServiceRuntimeBundle>>,
+        _prepared_config: Option<Arc<crate::core_session::service_tun::PreparedServiceTun>>,
     ) -> Pin<
         Box<
             dyn Future<
@@ -654,6 +930,10 @@ struct ProductionCaptureBackend {
 }
 
 impl CaptureBackend for ProductionCaptureBackend {
+    fn controlled_store(&self) -> Option<ControlledConfigStore> {
+        Some(self.controlled.clone())
+    }
+
     fn owns_service(&self, service: &Arc<zenclash_service::ServiceClient>) -> bool {
         self.core_session
             .client()
@@ -679,6 +959,8 @@ impl CaptureBackend for ProductionCaptureBackend {
         service: Option<(Arc<zenclash_service::ServiceClient>, PathBuf)>,
         expected_binding: u64,
         expected_generation: u64,
+        recovery_bundle: Option<Arc<crate::ServiceRuntimeBundle>>,
+        prepared_config: Option<Arc<crate::core_session::service_tun::PreparedServiceTun>>,
     ) -> Pin<
         Box<
             dyn Future<
@@ -692,13 +974,18 @@ impl CaptureBackend for ProductionCaptureBackend {
     > {
         Box::pin(async move {
             let profile = self.profile.read().clone();
+            let controlled = prepared_config
+                .as_ref()
+                .and_then(|prepared| prepared.authorized_store.clone())
+                .unwrap_or_else(|| self.controlled.clone());
             self.core_session
                 .enable_service_tun_admitted(
-                    &self.controlled,
+                    &controlled,
                     service,
-                    expected_binding,
-                    expected_generation,
+                    (expected_binding, expected_generation),
                     profile,
+                    recovery_bundle,
+                    prepared_config,
                 )
                 .await
         })
@@ -996,6 +1283,225 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn maintenance_tun_admission_rejects_new_capture_choice_before_handover() {
+        let backend = FakeBackend::new(false, SystemProxyOwnershipState::Unowned, false);
+        let capture = TrafficCaptureSession::with_backend(Arc::new(backend.clone()));
+        let revision = capture.capture_revision();
+        capture.apply(CapturePlan::Off).await.unwrap();
+        let before = backend.operations();
+        let result = capture
+            .enable_service_tun_with_bundle(None, 0, 0, None, Some(revision), None)
+            .await;
+        assert!(matches!(
+            result,
+            Err(crate::CoreSessionError::Process(
+                crate::MihomoError::StaleBinding
+            ))
+        ));
+        assert_eq!(backend.operations(), before);
+    }
+
+    #[tokio::test]
+    async fn maintenance_proxy_restores_owned_advanced_capture_using_current_listener() {
+        let backend = FakeBackend::new(true, SystemProxyOwnershipState::Owned, true);
+        let capture = TrafficCaptureSession::with_backend(Arc::new(backend.clone()));
+        let before = capture.snapshot_from_backend().await.unwrap();
+        backend.write_proxy(false, 0).unwrap();
+        backend.state.lock().unwrap().system_proxy_port = Some(9090);
+        capture
+            .restore_maintenance_proxy_admitted(&before, capture.capture_revision())
+            .await
+            .unwrap();
+        let after = capture.snapshot_from_backend().await.unwrap();
+        assert_eq!(after.observed_plan, ObservedCapturePlan::Advanced);
+        assert_eq!(after.system_proxy.value().unwrap().actual.port, 9090);
+        assert_eq!(
+            backend.operations(),
+            ["system-proxy:false", "system-proxy:true"]
+        );
+    }
+
+    #[tokio::test]
+    async fn maintenance_proxy_preserves_external_or_unavailable_current_capture() {
+        let backend = FakeBackend::new(true, SystemProxyOwnershipState::Owned, false);
+        let capture = TrafficCaptureSession::with_backend(Arc::new(backend.clone()));
+        let before = capture.snapshot_from_backend().await.unwrap();
+        backend.state.lock().unwrap().system_proxy.ownership = SystemProxyOwnershipState::Lost;
+        assert!(matches!(
+            capture
+                .restore_maintenance_proxy_admitted(&before, capture.capture_revision())
+                .await,
+            Err(TrafficCaptureError::ExternalSystemProxy)
+        ));
+        assert!(backend.operations().is_empty());
+        backend.write_proxy(false, 0).unwrap();
+        backend.set_core_available(false);
+        assert!(
+            capture
+                .restore_maintenance_proxy_admitted(&before, capture.capture_revision())
+                .await
+                .is_err()
+        );
+        assert_eq!(backend.operations(), ["system-proxy:false"]);
+    }
+
+    #[tokio::test]
+    async fn maintenance_proxy_never_acquires_unowned_or_unknown_previous_capture() {
+        let backend = FakeBackend::new(true, SystemProxyOwnershipState::Lost, true);
+        let capture = TrafficCaptureSession::with_backend(Arc::new(backend.clone()));
+        let before = capture.snapshot_from_backend().await.unwrap();
+        capture
+            .restore_maintenance_proxy_admitted(&before, capture.capture_revision())
+            .await
+            .unwrap();
+        assert!(
+            capture
+                .restore_maintenance_proxy_admitted(
+                    &failed_snapshot("unknown".into()),
+                    capture.capture_revision()
+                )
+                .await
+                .is_err()
+        );
+        assert!(backend.operations().is_empty());
+    }
+
+    #[tokio::test]
+    async fn maintenance_proxy_rejects_zero_listener_without_native_write() {
+        let backend = FakeBackend::new(true, SystemProxyOwnershipState::Owned, false);
+        let capture = TrafficCaptureSession::with_backend(Arc::new(backend.clone()));
+        let before = capture.snapshot_from_backend().await.unwrap();
+        backend.write_proxy(false, 0).unwrap();
+        backend.state.lock().unwrap().system_proxy_port = Some(0);
+        assert!(
+            capture
+                .restore_maintenance_proxy_admitted(&before, capture.capture_revision())
+                .await
+                .is_err()
+        );
+        assert_eq!(backend.operations(), ["system-proxy:false"]);
+    }
+
+    #[tokio::test]
+    async fn maintenance_proxy_rejects_new_capture_intent_without_core_generation_change() {
+        let core = CoreSession::open(
+            crate::CoreKind::Mihomo,
+            crate::MihomoClient::new(crate::MihomoEndpoint::default()).unwrap(),
+        )
+        .unwrap();
+        let backend = FakeBackend::new(true, SystemProxyOwnershipState::Owned, false);
+        let capture = TrafficCaptureSession {
+            backend: Arc::new(backend.clone()),
+            profile: Arc::default(),
+            operation: core.capture_publication_gate(),
+            intent_revision: core.capture_intent_revision(),
+        };
+        let before = capture.snapshot_from_backend().await.unwrap();
+        backend.write_proxy(false, 0).unwrap();
+        let generation = core.generation();
+        let revision = capture.capture_revision();
+        capture.apply(CapturePlan::SystemProxy).await.unwrap();
+        assert_eq!(core.generation(), generation);
+        let count = backend.operations().len();
+        assert!(matches!(
+            capture
+                .restore_maintenance_proxy(&core, before, 0, generation, revision)
+                .await,
+            Err(crate::CoreSessionError::Process(
+                crate::MihomoError::StaleBinding
+            ))
+        ));
+        assert_eq!(backend.operations().len(), count);
+        assert!(backend.state.lock().unwrap().system_proxy.intent_enabled);
+    }
+
+    #[tokio::test]
+    async fn maintenance_proxy_rejects_replaced_runtime_without_using_new_version() {
+        let core = CoreSession::open(
+            crate::CoreKind::Mihomo,
+            crate::MihomoClient::new(crate::MihomoEndpoint::default()).unwrap(),
+        )
+        .unwrap();
+        let backend = FakeBackend::new(true, SystemProxyOwnershipState::Owned, false);
+        let capture = TrafficCaptureSession {
+            backend: Arc::new(backend.clone()),
+            profile: Arc::default(),
+            operation: core.capture_publication_gate(),
+            intent_revision: core.capture_intent_revision(),
+        };
+        let before = capture.snapshot_from_backend().await.unwrap();
+        core.switch_to_direct(crate::MihomoEndpoint {
+            secret: "replacement-maintenance-fixture".into(),
+            ..crate::MihomoEndpoint::default()
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            capture
+                .restore_maintenance_proxy(&core, before, 0, 0, 0)
+                .await,
+            Err(crate::CoreSessionError::Process(
+                crate::MihomoError::StaleBinding
+            ))
+        ));
+        assert!(backend.operations().is_empty());
+    }
+
+    #[tokio::test]
+    async fn maintenance_proxy_waiter_cancellation_keeps_shutdown_waiting_for_write() {
+        let core = CoreSession::open(
+            crate::CoreKind::Mihomo,
+            crate::MihomoClient::new(crate::MihomoEndpoint::default()).unwrap(),
+        )
+        .unwrap();
+        let backend = FakeBackend::new(true, SystemProxyOwnershipState::Owned, true);
+        let capture = TrafficCaptureSession {
+            backend: Arc::new(backend.clone()),
+            profile: Arc::default(),
+            operation: core.capture_publication_gate(),
+            intent_revision: core.capture_intent_revision(),
+        };
+        let before = capture.snapshot_from_backend().await.unwrap();
+        backend.write_proxy(false, 0).unwrap();
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let release = ReleaseWrite(Arc::new((Mutex::new(false), std::sync::Condvar::new())));
+        *backend.blocked_write.lock().unwrap() = Some(BlockedWrite {
+            entered,
+            release: release.0.clone(),
+        });
+        let session = core.clone();
+        let task = tokio::spawn(async move {
+            capture
+                .restore_maintenance_proxy(&session, before, 0, 0, 0)
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let session = core.clone();
+        let mut shutdown = tokio::spawn(async move { session.shutdown().await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut shutdown)
+                .await
+                .is_err()
+        );
+        drop(release);
+        tokio::time::timeout(std::time::Duration::from_secs(2), shutdown)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            backend.operations(),
+            ["system-proxy:false", "system-proxy:true"]
+        );
+        assert!(backend.state.lock().unwrap().tun_configured);
+    }
+
+    #[tokio::test]
     async fn cancelled_capture_queue_does_not_start_native_work_after_admission_releases() {
         let session = CoreSession::open(
             crate::CoreKind::Mihomo,
@@ -1007,15 +1513,187 @@ mod tests {
             backend: Arc::new(backend.clone()),
             profile: Arc::default(),
             operation: session.capture_publication_gate(),
+            intent_revision: session.capture_intent_revision(),
         };
         let held = session.capture_publication_gate().lock_owned().await;
         let queued = tokio::spawn(async move { capture.apply(CapturePlan::SystemProxy).await });
         tokio::task::yield_now().await;
         assert!(!queued.is_finished());
         queued.abort();
-        assert!(queued.await.unwrap_err().is_cancelled());
+        assert!(matches!(queued.await, Err(error) if error.is_cancelled()));
         drop(held);
         tokio::task::yield_now().await;
+        assert!(backend.operations().is_empty());
+    }
+
+    #[tokio::test]
+    async fn service_recovery_queue_never_adopts_a_new_capture_intent() {
+        let core = CoreSession::open(
+            crate::CoreKind::Mihomo,
+            crate::MihomoClient::new(crate::MihomoEndpoint::default()).unwrap(),
+        )
+        .unwrap();
+        let backend = FakeBackend::new(false, SystemProxyOwnershipState::Unowned, false);
+        let capture = TrafficCaptureSession {
+            backend: Arc::new(backend.clone()),
+            profile: Arc::default(),
+            operation: core.capture_publication_gate(),
+            intent_revision: core.capture_intent_revision(),
+        };
+        let held = core.capture_publication_gate().lock_owned().await;
+        let queued_capture = capture.clone();
+        let session = core.clone();
+        let (polled, waiting) = tokio::sync::oneshot::channel();
+        let mut polled = Some(polled);
+        let recovery = tokio::spawn(async move {
+            let store =
+                ControlledConfigStore::new(std::env::temp_dir().join("unused-capture-queue-store"));
+            let mut future =
+                Box::pin(queued_capture.recover_service_to_local(&session, &store, None, 0, 0));
+            std::future::poll_fn(|cx| {
+                let result = future.as_mut().poll(cx);
+                if result.is_pending()
+                    && let Some(polled) = polled.take()
+                {
+                    let _ = polled.send(());
+                }
+                result
+            })
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        let applying = capture.clone();
+        let apply = tokio::spawn(async move { applying.apply(CapturePlan::Off).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while capture.capture_revision() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        apply.abort();
+        assert!(apply.await.unwrap_err().is_cancelled());
+        drop(held);
+        assert!(matches!(
+            recovery.await.unwrap(),
+            Err(crate::CoreSessionError::Process(
+                crate::MihomoError::StaleBinding
+            ))
+        ));
+        assert!(backend.operations().is_empty());
+        assert_eq!(core.generation(), 0);
+    }
+
+    #[tokio::test]
+    async fn service_recovery_cancelled_in_capture_queue_performs_no_native_release() {
+        let session = CoreSession::open(
+            crate::CoreKind::Mihomo,
+            crate::MihomoClient::new(crate::MihomoEndpoint::default()).unwrap(),
+        )
+        .unwrap();
+        let backend = FakeBackend::new(true, SystemProxyOwnershipState::Owned, true);
+        let capture = TrafficCaptureSession {
+            backend: Arc::new(backend.clone()),
+            profile: Arc::default(),
+            operation: session.capture_publication_gate(),
+            intent_revision: session.capture_intent_revision(),
+        };
+        let binding = session.runtime_descriptor().binding_generation();
+        let generation = session.generation();
+        let held = session.capture_publication_gate().lock_owned().await;
+        let queued = tokio::spawn(async move {
+            let store = ControlledConfigStore::new(std::env::temp_dir().join("unused-recovery"));
+            capture
+                .recover_service_to_local(&session, &store, None, binding, generation)
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!queued.is_finished());
+        queued.abort();
+        assert!(matches!(queued.await, Err(error) if error.is_cancelled()));
+        drop(held);
+        tokio::task::yield_now().await;
+        assert!(backend.operations().is_empty());
+    }
+
+    #[tokio::test]
+    async fn service_recovery_rechecks_generation_after_capture_queue() {
+        let session = CoreSession::open(
+            crate::CoreKind::Mihomo,
+            crate::MihomoClient::new(crate::MihomoEndpoint::default()).unwrap(),
+        )
+        .unwrap();
+        let backend = FakeBackend::new(true, SystemProxyOwnershipState::Owned, true);
+        let capture = TrafficCaptureSession {
+            backend: Arc::new(backend.clone()),
+            profile: Arc::default(),
+            operation: session.capture_publication_gate(),
+            intent_revision: session.capture_intent_revision(),
+        };
+        let binding = session.runtime_descriptor().binding_generation();
+        let generation = session.generation();
+        let held = session.capture_publication_gate().lock_owned().await;
+        let queued_session = session.clone();
+        let queued = tokio::spawn(async move {
+            let store = ControlledConfigStore::new(std::env::temp_dir().join("unused-recovery"));
+            capture
+                .recover_service_to_local(&queued_session, &store, None, binding, generation)
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!queued.is_finished());
+        session.mark_runtime_unknown();
+        drop(held);
+        assert!(matches!(
+            queued.await.unwrap(),
+            Err(crate::CoreSessionError::Process(
+                crate::MihomoError::StaleBinding
+            ))
+        ));
+        assert!(backend.operations().is_empty());
+    }
+
+    #[tokio::test]
+    async fn service_recovery_rejects_another_core_before_capture_admission() {
+        let open = || {
+            CoreSession::open(
+                crate::CoreKind::Mihomo,
+                crate::MihomoClient::new(crate::MihomoEndpoint::default()).unwrap(),
+            )
+            .unwrap()
+        };
+        let session = open();
+        let other = open();
+        let backend = FakeBackend::new(true, SystemProxyOwnershipState::Owned, true);
+        let capture = TrafficCaptureSession {
+            backend: Arc::new(backend.clone()),
+            profile: Arc::default(),
+            operation: session.capture_publication_gate(),
+            intent_revision: session.capture_intent_revision(),
+        };
+        let _held = session.capture_publication_gate().lock_owned().await;
+        let store = ControlledConfigStore::new(std::env::temp_dir().join("unused-recovery"));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            capture.recover_service_to_local(
+                &other,
+                &store,
+                None,
+                other.runtime_descriptor().binding_generation(),
+                other.generation(),
+            ),
+        )
+        .await
+        .expect("mismatched owner must not wait on capture");
+        assert!(matches!(
+            result,
+            Err(crate::CoreSessionError::Process(
+                crate::MihomoError::StaleBinding
+            ))
+        ));
         assert!(backend.operations().is_empty());
     }
 
@@ -1059,6 +1737,7 @@ mod tests {
             backend: Arc::new(backend.clone()),
             profile: Arc::default(),
             operation: session.capture_publication_gate(),
+            intent_revision: session.capture_intent_revision(),
         };
         let apply = tokio::spawn(async move { capture.apply(CapturePlan::SystemProxy).await });
         tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
@@ -1214,6 +1893,8 @@ mod tests {
             _service: Option<(Arc<zenclash_service::ServiceClient>, PathBuf)>,
             _binding: u64,
             _generation: u64,
+            _recovery_bundle: Option<Arc<crate::ServiceRuntimeBundle>>,
+            _prepared_config: Option<Arc<crate::core_session::service_tun::PreparedServiceTun>>,
         ) -> Pin<
             Box<
                 dyn Future<
@@ -1520,6 +2201,7 @@ mod tests {
             backend: backend.clone(),
             profile: Arc::default(),
             operation: core.capture_publication_gate(),
+            intent_revision: core.capture_intent_revision(),
         };
         let waiter = tokio::spawn(async move { capture.enable_service_tun(None, 0, 0).await });
         tokio::time::timeout(std::time::Duration::from_secs(2), waiting)

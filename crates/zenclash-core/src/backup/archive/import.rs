@@ -49,6 +49,7 @@ pub(in crate::backup) fn prepare_restore(
             staging_root,
             file_count,
             payload_bytes,
+            previous_runtime: None,
         }),
         Err(error) => {
             if let Err(cleanup) = fs::remove_dir_all(&staging_root) {

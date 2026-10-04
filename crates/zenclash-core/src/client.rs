@@ -59,6 +59,9 @@ pub enum MihomoError {
     /// Binding changed before dispatch: no request was sent and the outcome is definitive.
     #[error("{}", zenclash_i18n::text("core_page.errors.binding_changed"))]
     StaleBinding,
+    /// A Local Mihomo mutation requires authorization and service handover before dispatch.
+    #[error("{}", zenclash_i18n::text("core_page.service.required"))]
+    ServiceRequired,
     /// The controller's JSON response does not match the requested schema.
     #[error("invalid Mihomo response: {0}")]
     Decode(#[from] serde_json::Error),
@@ -271,6 +274,10 @@ impl MihomoClient {
         self.binding.descriptor()
     }
 
+    pub(crate) fn local_recovery_launch(&self) -> Option<crate::MihomoLaunchConfig> {
+        self.binding.local_recovery_launch()
+    }
+
     pub(crate) async fn lock_runtime_binding(
         &self,
     ) -> MihomoResult<tokio::sync::OwnedMutexGuard<()>> {
@@ -439,16 +446,20 @@ impl MihomoClient {
             }
             runtime.release_owned().await?;
         }
-        self.publish_backend(
-            transport::ControllerBackend::Service {
-                runtime: crate::service_runtime_session::ServiceRuntimeSession::new(
-                    service,
-                    source_home,
-                ),
-            },
-            guard,
-        )
-        .await
+        let runtime = match self
+            .binding
+            .local_recovery_launch()
+            .filter(|launch| launch.home_dir == source_home)
+        {
+            Some(launch) => {
+                crate::service_runtime_session::ServiceRuntimeSession::from_local(service, launch)
+            }
+            None => {
+                crate::service_runtime_session::ServiceRuntimeSession::new(service, source_home)
+            }
+        };
+        self.publish_backend(transport::ControllerBackend::Service { runtime }, guard)
+            .await
     }
 
     /// Publishes a real managed child and its controller to every existing clone.

@@ -7,9 +7,16 @@ use zenclash_service::{MaintenanceError, ServiceHealth, service_health};
 
 use crate::{CoreKind, CoreRuntimeBackend, CoreSession, CoreSessionError, TrafficCaptureSession};
 
+mod backup;
+mod maintenance;
 mod startup;
 mod tun;
 
+pub use maintenance::{
+    ServiceMaintenancePreparation, ServiceMaintenanceRecoveryOutcome, ServiceMaintenanceRequest,
+};
+
+pub use backup::PreparedServiceBackupConfig;
 pub use startup::verify_ordinary_local_executable;
 
 pub use zenclash_service::ServiceHealthKind;
@@ -172,6 +179,14 @@ struct ServiceIntent {
     generation: u64,
 }
 
+/// Accepted configuration outcome, including service capture and finalization facts.
+pub enum ServiceConfigOutcome {
+    /// Ordinary Local application of the immutable checked configuration.
+    Local(crate::CoreApplyOutcome),
+    /// TUN configuration accepted through authorized service ownership.
+    Service(Box<crate::ServiceTunOutcome>),
+}
+
 /// One explicit TUN request paired with the runtime shown when it was created.
 ///
 /// This is an in-memory intent, not administrator permission. A confirmation
@@ -183,6 +198,9 @@ pub struct ServiceTunRequest {
     source_home: Option<PathBuf>,
     core_source: Option<PathBuf>,
     allow_authorization: bool,
+    recovery_bundle: Option<Arc<crate::ServiceRuntimeBundle>>,
+    expected_capture_revision: Option<u64>,
+    prepared_config: Option<Arc<crate::core_session::service_tun::PreparedServiceTun>>,
 }
 
 impl ServiceTunRequest {
@@ -274,12 +292,35 @@ impl ServiceManager {
             source_home: descriptor.home_dir().map(std::path::Path::to_owned),
             core_source: descriptor.binary().map(std::path::Path::to_owned),
             allow_authorization: false,
+            recovery_bundle: None,
+            expected_capture_revision: None,
+            prepared_config: None,
         };
         if request.backend == CoreRuntimeBackend::Local
             && (request.source_home.is_none() || request.core_source.is_none())
         {
             return Err(ServiceManagerError::Unsupported);
         }
+        self.check_intent(request.intent)?;
+        Ok(request)
+    }
+
+    /// Captures a TUN request using the exact resources of a successful Local recovery.
+    ///
+    /// Does not reread deleted sources or grant administrator authorization. The
+    /// request retains one bounded immutable snapshot while confirmation is pending.
+    ///
+    /// # Errors
+    /// Rejects failed recovery, another session, changed binding/generation or shutdown.
+    pub fn request_enable_tun_after_recovery(
+        &self,
+        recovery: &crate::CoreLocalRecoveryOutcome,
+    ) -> Result<ServiceTunRequest, ServiceManagerError> {
+        let mut request = self.request_enable_tun()?;
+        let bundle = recovery
+            .held_bundle_for(&self.session)
+            .map_err(|_| ServiceManagerError::Stale)?;
+        request.recovery_bundle = Some(bundle);
         self.check_intent(request.intent)?;
         Ok(request)
     }

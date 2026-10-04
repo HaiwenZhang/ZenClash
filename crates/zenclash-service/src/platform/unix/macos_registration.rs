@@ -16,9 +16,20 @@ pub(super) fn validate_registration(
     path: &Path,
     validate: &impl Fn(&Path, bool) -> io::Result<()>,
 ) -> io::Result<()> {
+    validate_registration_inner(path, validate, false)
+}
+
+fn validate_registration_inner(
+    path: &Path,
+    validate: &impl Fn(&Path, bool) -> io::Result<()>,
+    required: bool,
+) -> io::Result<()> {
     let before = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if required {
+                return Err(error);
+            }
             validate(path.parent().ok_or_else(unknown_registration)?, true)?;
             return match fs::symlink_metadata(path) {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -107,10 +118,12 @@ pub(super) fn maintain_registration(
     probe: impl FnOnce() -> io::Result<ProbeOutput>,
     mut effect: impl FnMut(MaintenanceEffect) -> io::Result<()>,
 ) -> io::Result<()> {
-    with_known_registration(path, validate, || {
-        launchd_probe::maintain(action, probe, |operation| {
-            with_known_registration(path, validate, || effect(operation))
-        })
+    let check =
+        || validate_registration_inner(path, validate, matches!(action, MaintenanceAction::Start));
+    check()?;
+    launchd_probe::maintain(action, probe, |operation| {
+        check()?;
+        effect(operation)
     })
 }
 
@@ -156,6 +169,84 @@ mod tests {
             code: Some(0),
             diagnostic: String::new(),
         })
+    }
+
+    fn absent() -> io::Result<ProbeOutput> {
+        Ok(ProbeOutput {
+            code: Some(113),
+            diagnostic: "Could not find service".into(),
+        })
+    }
+
+    #[test]
+    fn approved_absent_registration_enables_before_bootstrap() {
+        let fixture = Fixture::new();
+        let path = fixture.path();
+        fs::write(&path, PLIST).unwrap();
+        let mut effects = Vec::new();
+        maintain_registration(
+            &path,
+            &fixture_protection,
+            MaintenanceAction::Start,
+            absent,
+            |effect| {
+                effects.push(effect);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            effects,
+            [MaintenanceEffect::Enable, MaintenanceEffect::Bootstrap]
+        );
+    }
+
+    #[test]
+    fn failed_enable_does_not_bootstrap_or_remove_approved_registration() {
+        let fixture = Fixture::new();
+        let path = fixture.path();
+        fs::write(&path, PLIST).unwrap();
+        let mut effects = Vec::new();
+        let result = maintain_registration(
+            &path,
+            &fixture_protection,
+            MaintenanceAction::Start,
+            absent,
+            |effect| {
+                effects.push(effect);
+                if effect == MaintenanceEffect::Enable {
+                    return Err(io::Error::other("fixture enable failure"));
+                }
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(effects, [MaintenanceEffect::Enable]);
+        assert_eq!(fs::read(path).unwrap(), PLIST.as_bytes());
+    }
+
+    #[test]
+    fn registration_changed_after_enable_prevents_bootstrap() {
+        let fixture = Fixture::new();
+        let path = fixture.path();
+        fs::write(&path, PLIST).unwrap();
+        let mut effects = Vec::new();
+        let result = maintain_registration(
+            &path,
+            &fixture_protection,
+            MaintenanceAction::Start,
+            absent,
+            |effect| {
+                if effect == MaintenanceEffect::Enable {
+                    fs::write(&path, b"foreign replacement")?;
+                }
+                effects.push(effect);
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(effects, [MaintenanceEffect::Enable]);
+        assert_eq!(fs::read(path).unwrap(), b"foreign replacement");
     }
 
     #[test]
@@ -291,10 +382,10 @@ mod tests {
     }
 
     #[test]
-    fn missing_registration_retains_bootstrap_behavior() {
+    fn missing_registration_start_does_not_enable_or_bootstrap() {
         let fixture = Fixture::new();
         let mut effects = Vec::new();
-        maintain_registration(
+        let result = maintain_registration(
             &fixture.path(),
             &fixture_protection,
             MaintenanceAction::Start,
@@ -308,9 +399,47 @@ mod tests {
                 effects.push(effect);
                 Ok(())
             },
-        )
-        .unwrap();
-        assert_eq!(effects, [MaintenanceEffect::Bootstrap]);
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn missing_registration_start_does_not_kickstart_a_loaded_label() {
+        let fixture = Fixture::new();
+        let calls = Cell::new(0);
+        let result = maintain_registration(
+            &fixture.path(),
+            &fixture_protection,
+            MaintenanceAction::Start,
+            loaded,
+            |_| {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn registration_removed_after_enable_prevents_bootstrap() {
+        let fixture = Fixture::new();
+        let path = fixture.path();
+        fs::write(&path, PLIST).unwrap();
+        let mut effects = Vec::new();
+        let result = maintain_registration(
+            &path,
+            &fixture_protection,
+            MaintenanceAction::Start,
+            absent,
+            |effect| {
+                effects.push(effect);
+                fs::remove_file(&path)
+            },
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(effects, [MaintenanceEffect::Enable]);
     }
 
     #[test]

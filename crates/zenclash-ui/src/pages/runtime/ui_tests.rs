@@ -749,6 +749,123 @@ fn service_tun_confirmation_cannot_authorize_a_core_switched_while_dialog_open(
 }
 
 #[gpui_kit::test]
+fn service_maintenance_dialogs_cancel_with_keyboard_and_restore_focus(cx: &mut TestAppContext) {
+    use gpui_kit::component::WindowExt;
+
+    let fixture = Fixture::new();
+    let [local, _unused] = owned_ui_children(&fixture);
+    fixture
+        .runtime
+        .as_ref()
+        .unwrap()
+        .block_on(fixture.core.switch_to_process(local.clone()))
+        .unwrap();
+    let pid = local.snapshot().pid;
+    let generation = fixture.core.generation();
+    let bytes = fs::read(&local.launch_config().config_file).unwrap();
+    let (window, page) = open_service_tun(cx, &fixture);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    cx.update_window(window, |_, window, cx| {
+        for id in ["repair-service", "uninstall-service"] {
+            window.render_frame(cx);
+            window.focus(&page.read(cx).focus_handle.clone(), cx);
+            for _ in 0..12 {
+                if window.find(id).focused() == Some(true) {
+                    break;
+                }
+                window.press("tab", cx);
+            }
+            assert_eq!(window.find(id).focused(), Some(true));
+            window.press("enter", cx);
+            assert!(window.has_active_dialog(cx));
+            window.press("escape", cx);
+            assert!(!window.has_active_dialog(cx));
+            assert_eq!(window.find(id).focused(), Some(true));
+            window.click(id, cx);
+            assert!(window.has_active_dialog(cx));
+            window.press("escape", cx);
+        }
+        assert_eq!(local.snapshot().pid, pid);
+        assert_eq!(fixture.core.generation(), generation);
+        assert_eq!(fs::read(&local.launch_config().config_file).unwrap(), bytes);
+        assert!(
+            page.read(cx)
+                .profile_service
+                .service_maintenance_preparation()
+                .is_none()
+        );
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn service_maintenance_confirmation_rejects_replaced_owner_before_native_work(
+    cx: &mut TestAppContext,
+) {
+    use gpui_kit::component::WindowExt;
+
+    let fixture = Fixture::new();
+    let [local, replacement] = owned_ui_children(&fixture);
+    let runtime = fixture.runtime.as_ref().unwrap();
+    runtime
+        .block_on(fixture.core.switch_to_process(local))
+        .unwrap();
+    let (window, page) = open_service_tun(cx, &fixture);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    let preferences =
+        zenclash_core::AppPreferencesStore::new(fixture.root.join("maintenance-preferences.json"));
+    preferences
+        .save(&zenclash_core::AppPreferences::default())
+        .unwrap();
+    cx.update_window(window, |_, window, cx| {
+        page.update(cx, |page, _| {
+            page.preferences_store = Some(preferences.clone());
+            page.preferences.system_proxy_enabled = true;
+            page.preferences.language = zenclash_core::LanguagePreference::En;
+        });
+        window.render_frame(cx);
+        window.click("uninstall-service", cx);
+        assert!(window.has_active_dialog(cx));
+    })
+    .unwrap();
+    runtime
+        .block_on(fixture.core.switch_to_process(replacement.clone()))
+        .unwrap();
+    let generation = fixture.core.generation();
+    let pid = replacement.snapshot().pid;
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("ok", cx);
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| !page.core_busy() && page.error.is_some());
+    cx.update_window(window, |_, window, cx| {
+        assert_eq!(
+            page.read(cx).error.as_deref(),
+            Some(zenclash_i18n::text("core_page.service.stale").as_str())
+        );
+        assert!(!page.read(cx).preferences.system_proxy_enabled);
+        assert_eq!(
+            page.read(cx).preferences.language,
+            zenclash_core::LanguagePreference::En
+        );
+        assert!(!preferences.load().unwrap().system_proxy_enabled);
+        assert_eq!(fixture.core.generation(), generation);
+        assert_eq!(replacement.snapshot().pid, pid);
+        assert!(
+            page.read(cx)
+                .profile_service
+                .service_maintenance_preparation()
+                .is_none()
+        );
+        assert!(!window.has_active_dialog(cx));
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn saving_yaml_preserves_edits_made_after_submission(cx: &mut TestAppContext) {
     let fixture = Fixture::new();
     let (window, page) = open(cx, &fixture, Page::Override);

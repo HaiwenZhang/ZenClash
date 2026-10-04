@@ -179,7 +179,10 @@ impl DataWriteAccess {
         DataWriteLease::shared(self.paths.clone())
     }
 
-    fn borrowed_authority(&self, paths: &[PathBuf]) -> Result<Option<DataWriteLease>, String> {
+    pub(crate) fn borrowed_authority(
+        &self,
+        paths: &[PathBuf],
+    ) -> Result<Option<DataWriteLease>, String> {
         let lease = self
             .permit
             .as_ref()
@@ -277,6 +280,17 @@ fn acquire(paths: impl IntoIterator<Item = PathBuf>, exclusive: bool) -> DataWri
         inner: Arc::new(LeaseInner { id, paths }),
         valid: Arc::new(AtomicBool::new(true)),
     }
+}
+
+#[cfg(test)]
+pub(crate) fn has_waiting_restore(path: &Path) -> bool {
+    let paths = write_paths(&[path.to_path_buf()]);
+    coordinator()
+        .state
+        .lock()
+        .waiting_restores
+        .iter()
+        .any(|record| overlapping(&paths, &record.paths))
 }
 
 fn write_paths(requested: &[PathBuf]) -> Vec<PathBuf> {

@@ -49,6 +49,21 @@ pub(super) fn process_matches(pid: u32, uid: u32, birth: u64) -> bool {
     process_identity(pid).is_ok_and(|identity| identity == (uid, birth))
 }
 
+#[cfg(feature = "server")]
+pub(super) fn process_image(pid: u32) -> io::Result<std::path::PathBuf> {
+    fs::read_link(format!("/proc/{pid}/exe"))
+}
+
+#[cfg(feature = "server")]
+pub(super) fn maintenance_host_registered(pid: u32) -> io::Result<()> {
+    super::super::linux_registration::observe_running_pid(pid)
+}
+
+#[cfg(feature = "server")]
+pub(super) fn maintenance_service_absent() -> io::Result<()> {
+    super::super::linux_registration::observe_absence()
+}
+
 pub(super) fn authenticate_peer(stream: &UnixStream) -> io::Result<(u32, u32, u64)> {
     let peer = stream.peer_cred()?;
     let pid = peer
@@ -132,62 +147,83 @@ pub(super) async fn request_maintenance(arguments: &[std::ffi::OsString]) -> io:
 #[cfg(feature = "server")]
 const UNIT_PATH: &str = "/etc/systemd/system/zenclash-service.service";
 #[cfg(feature = "server")]
-const UNIT: &str = include_str!("../../../../../platforms/linux/zenclash-service.service");
+const PACKAGE_UNIT_PATH: &str = "/usr/lib/systemd/system/zenclash-service.service";
+
+#[cfg(feature = "server")]
+pub(super) fn validate_service_registration() -> io::Result<()> {
+    super::super::linux_registration::validate_registration(
+        Path::new(UNIT_PATH),
+        Path::new(PACKAGE_UNIT_PATH),
+        &super::validate_protected_path,
+    )
+    .map(|_| ())
+}
 
 #[cfg(feature = "server")]
 pub(super) fn register_service() -> io::Result<()> {
     super::require_admin()?;
+    validate_service_registration()?;
     // The root also stores secrets and writable runtime data: label executables only.
     for name in ["zenclash-service", "mihomo"] {
         super::super::selinux::ensure_executable_label(&Path::new(service_root()).join(name))?;
     }
-    super::validate_protected_path(Path::new("/etc/systemd/system"), true)?;
-    let temp = Path::new("/etc/systemd/system/.zenclash-service.service.new");
-    super::write_registration(temp, Path::new(UNIT_PATH), UNIT.as_bytes())?;
-    super::run_native("/usr/bin/systemctl", &["daemon-reload"])?;
-    super::run_native(
-        "/usr/bin/systemctl",
-        &["enable", "zenclash-service.service"],
-    )
+    maintain_service(super::super::linux_registration::MaintenanceAction::Register)
 }
 
 #[cfg(feature = "server")]
 pub(super) fn start_service() -> io::Result<()> {
-    super::require_admin()?;
-    super::run_native("/usr/bin/systemctl", &["start", "zenclash-service.service"])
+    maintain_service(super::super::linux_registration::MaintenanceAction::Start)
 }
 
 #[cfg(feature = "server")]
 pub(super) fn stop_service() -> io::Result<()> {
-    super::require_admin()?;
-    // stop is idempotent for inactive units; missing registration needs no stop.
-    if !Path::new(UNIT_PATH).exists()
-        && !Path::new("/usr/lib/systemd/system/zenclash-service.service").exists()
-    {
-        return Ok(());
-    }
-    super::run_native("/usr/bin/systemctl", &["stop", "zenclash-service.service"])
+    maintain_service(super::super::linux_registration::MaintenanceAction::Stop)
 }
 
 #[cfg(feature = "server")]
 pub(super) fn unregister_service() -> io::Result<()> {
-    stop_service()?;
-    if Path::new(UNIT_PATH).exists()
-        || Path::new("/usr/lib/systemd/system/zenclash-service.service").exists()
-    {
-        super::run_native(
-            "/usr/bin/systemctl",
-            &["disable", "zenclash-service.service"],
-        )?;
-    }
-    if Path::new(UNIT_PATH).exists() {
-        super::validate_protected_path(Path::new(UNIT_PATH), false)?;
-        // App-owned /etc override only. Package-owned /usr/lib unit and Polkit
-        // policy are removed by DEB/RPM, never by an application operation.
-        fs::remove_file(UNIT_PATH)?;
-        super::run_native("/usr/bin/systemctl", &["daemon-reload"])?;
-    }
-    Ok(())
+    maintain_service(super::super::linux_registration::MaintenanceAction::Unregister)
+}
+
+#[cfg(feature = "server")]
+fn maintain_service(action: super::super::linux_registration::MaintenanceAction) -> io::Result<()> {
+    use super::super::linux_registration::{MaintenanceEffect, UNIT};
+    super::require_admin()?;
+    super::super::linux_registration::maintain_registration(
+        Path::new(UNIT_PATH),
+        Path::new(PACKAGE_UNIT_PATH),
+        &super::validate_protected_path,
+        action,
+        |effect| match effect {
+            MaintenanceEffect::ObserveAbsence => {
+                super::super::linux_registration::observe_absence()
+            }
+            MaintenanceEffect::WriteRegistration => super::write_registration(
+                Path::new("/etc/systemd/system/.zenclash-service.service.new"),
+                Path::new(UNIT_PATH),
+                UNIT.as_bytes(),
+            ),
+            MaintenanceEffect::Reload => {
+                super::run_native("/usr/bin/systemctl", &["daemon-reload"])
+            }
+            MaintenanceEffect::Enable => super::run_native(
+                "/usr/bin/systemctl",
+                &["enable", "zenclash-service.service"],
+            ),
+            MaintenanceEffect::Start => {
+                super::run_native("/usr/bin/systemctl", &["start", "zenclash-service.service"])
+            }
+            MaintenanceEffect::Stop => {
+                super::run_native("/usr/bin/systemctl", &["stop", "zenclash-service.service"])
+            }
+            MaintenanceEffect::Disable => super::run_native(
+                "/usr/bin/systemctl",
+                &["disable", "zenclash-service.service"],
+            ),
+            // DEB/RPM own the /usr/lib unit; app maintenance removes only its /etc override.
+            MaintenanceEffect::RemoveRegistration => fs::remove_file(UNIT_PATH),
+        },
+    )
 }
 
 #[cfg(test)]

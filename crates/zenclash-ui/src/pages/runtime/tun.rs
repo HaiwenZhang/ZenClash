@@ -9,6 +9,7 @@ use zenclash_core::{
     ServiceHealthKind, ServicePhase,
 };
 
+mod maintenance;
 mod service;
 
 impl RuntimePage {

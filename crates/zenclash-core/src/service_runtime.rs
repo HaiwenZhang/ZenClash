@@ -13,6 +13,10 @@ use zenclash_service::ServiceClient;
 
 use crate::{MihomoError, MihomoResult};
 
+mod local_geodata;
+pub use local_geodata::LocalGeoDataRecovery;
+mod local_runtime;
+
 const MAX_ASSET_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
 const MAX_ASSETS: usize = 256;
@@ -24,6 +28,12 @@ const GEODATA: [&str; 3] = ["GeoIP.dat", "geosite.dat", "ASN.mmdb"];
 struct RuntimeAsset {
     path: String,
     bytes: Arc<[u8]>,
+}
+
+pub(crate) struct CacheProvider {
+    pub(crate) kind: zenclash_service::ProviderKind,
+    pub(crate) name: String,
+    path: String,
 }
 
 /// An immutable resource snapshot prepared entirely with ordinary user authority.
@@ -64,6 +74,88 @@ impl ServiceRuntimeBundle {
     #[must_use]
     pub fn yaml(&self) -> &str {
         &self.yaml
+    }
+
+    pub(crate) fn cache_providers(&self) -> MihomoResult<Vec<CacheProvider>> {
+        let value: Value = serde_yaml::from_str(&self.yaml)
+            .map_err(|_| invalid("Invalid accepted service runtime YAML"))?;
+        let mut providers = Vec::new();
+        for (field, kind) in [
+            ("proxy-providers", zenclash_service::ProviderKind::Proxy),
+            ("rule-providers", zenclash_service::ProviderKind::Rule),
+        ] {
+            let Some(mapping) = value.get(field) else {
+                continue;
+            };
+            let mapping = mapping
+                .as_mapping()
+                .ok_or_else(|| invalid("Invalid provider mapping"))?;
+            for (name, provider) in mapping {
+                let provider = provider
+                    .as_mapping()
+                    .ok_or_else(|| invalid("Invalid provider definition"))?;
+                if provider
+                    .get(Value::from("type"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("http")
+                    != "http"
+                {
+                    continue;
+                }
+                let name = name
+                    .as_str()
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| invalid("Invalid provider name"))?;
+                let path = provider
+                    .get(Value::from("path"))
+                    .and_then(Value::as_str)
+                    .filter(|path| path.starts_with("assets/providers/"))
+                    .ok_or_else(|| invalid("Invalid prepared cache destination"))?;
+                providers.push(CacheProvider {
+                    kind,
+                    name: name.to_owned(),
+                    path: path.to_owned(),
+                });
+                if providers.len() > MAX_ASSETS {
+                    return Err(invalid("Service provider count exceeds its budget"));
+                }
+            }
+        }
+        Ok(providers)
+    }
+
+    pub(crate) fn cache_export_base(&self, providers: &[CacheProvider]) -> Self {
+        let mut bundle = self.clone();
+        bundle
+            .assets
+            .retain(|asset| !providers.iter().any(|provider| provider.path == asset.path));
+        bundle
+    }
+
+    pub(crate) fn replace_provider_cache(
+        &mut self,
+        provider: &CacheProvider,
+        bytes: Option<Vec<u8>>,
+    ) -> MihomoResult<()> {
+        self.assets.retain(|asset| asset.path != provider.path);
+        if let Some(bytes) = bytes {
+            if self.assets.len() >= MAX_ASSETS
+                || self
+                    .assets
+                    .iter()
+                    .map(|asset| asset.bytes.len())
+                    .sum::<usize>()
+                    .checked_add(bytes.len())
+                    .is_none_or(|total| total > MAX_TOTAL_BYTES)
+            {
+                return Err(invalid("Service exported resources exceed their budget"));
+            }
+            self.assets.push(RuntimeAsset {
+                path: provider.path.clone(),
+                bytes: bytes.into(),
+            });
+        }
+        Ok(())
     }
 
     pub(crate) fn with_delta(&self, delta: &serde_json::Value) -> MihomoResult<Self> {
@@ -124,6 +216,8 @@ struct BundleBuilder<'a> {
 fn prepare_bundle(payload: &str, source_home: &Path) -> MihomoResult<ServiceRuntimeBundle> {
     let mut value: Value =
         serde_yaml::from_str(payload).map_err(|_| invalid("Invalid service runtime YAML"))?;
+    crate::profile::expand_yaml_merges(&mut value)
+        .map_err(|_| invalid("Invalid service runtime YAML merge"))?;
     if !value.is_mapping() {
         return Err(invalid("Service runtime must be a YAML mapping"));
     }
@@ -173,6 +267,8 @@ fn prepare_bundle(payload: &str, source_home: &Path) -> MihomoResult<ServiceRunt
                             if provider_kind == "proxy-providers" {
                                 let mut provider_yaml: Value = serde_yaml::from_slice(&bytes)
                                     .map_err(|_| invalid("Invalid proxy provider YAML"))?;
+                                crate::profile::expand_yaml_merges(&mut provider_yaml)
+                                    .map_err(|_| invalid("Invalid proxy provider YAML merge"))?;
                                 builder.rewrite_tls(&mut provider_yaml, 0)?;
                                 bytes = serde_yaml::to_string(&provider_yaml)
                                     .map_err(|_| invalid("Cannot encode proxy provider YAML"))?
@@ -352,6 +448,11 @@ impl BundleBuilder<'_> {
 }
 
 fn read_asset(path: &Path) -> std::io::Result<Vec<u8>> {
+    read_asset_with_limit(path, MAX_ASSET_BYTES)
+}
+
+fn read_asset_with_limit(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
+    let limit = limit.min(MAX_ASSET_BYTES);
     let mut options = File::options();
     options.read(true);
     #[cfg(unix)]
@@ -361,14 +462,14 @@ fn read_asset(path: &Path) -> std::io::Result<Vec<u8>> {
     }
     let file = options.open(path)?;
     let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.len() > MAX_ASSET_BYTES {
+    if !metadata.is_file() || metadata.len() > limit {
         return Err(std::io::Error::other(
             "Service resource is not a bounded regular file",
         ));
     }
     let mut bytes = Vec::new();
-    file.take(MAX_ASSET_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_ASSET_BYTES {
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
         return Err(std::io::Error::other(
             "Service resource grew beyond its byte budget",
         ));
@@ -383,6 +484,78 @@ fn invalid(message: &str) -> MihomoError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn merged_provider_and_tls_are_held_before_sources_disappear() {
+        let home = TestHome::new();
+        std::fs::write(home.0.join("cert.pem"), b"held merged certificate").unwrap();
+        std::fs::write(home.0.join("nodes.yaml"), "proxies: []\n").unwrap();
+        let payload = "defaults: &base\n  proxy-providers:\n    local: {type: file, path: nodes.yaml}\n  proxies:\n  - {name: local, type: http, server: localhost, port: 8080, certificate: cert.pem}\nnext: &next {<<: *base}\n<<: *next\n";
+        let bundle = ServiceRuntimeBundle::prepare(payload, home.0.clone())
+            .await
+            .unwrap();
+        std::fs::remove_file(home.0.join("cert.pem")).unwrap();
+        std::fs::remove_file(home.0.join("nodes.yaml")).unwrap();
+        let document: Value = serde_yaml::from_str(bundle.yaml()).unwrap();
+        let provider = document["proxy-providers"]["local"]["path"]
+            .as_str()
+            .unwrap();
+        let certificate = document["proxies"][0]["certificate"].as_str().unwrap();
+        assert!(
+            bundle
+                .assets
+                .iter()
+                .any(|asset| asset.path == provider && asset.bytes.as_ref() == b"proxies: []\n")
+        );
+        assert!(
+            bundle.assets.iter().any(|asset| asset.path == certificate
+                && asset.bytes.as_ref() == b"held merged certificate")
+        );
+    }
+
+    #[test]
+    fn exported_final_budget_does_not_include_superseded_http_seeds() {
+        let providers: Vec<_> = ["a", "b", "c"]
+            .into_iter()
+            .map(|name| CacheProvider {
+                kind: zenclash_service::ProviderKind::Rule,
+                name: name.into(),
+                path: format!("assets/providers/{name}"),
+            })
+            .collect();
+        let bundle = ServiceRuntimeBundle {
+            yaml: String::new(),
+            assets: providers
+                .iter()
+                .zip([1, MAX_TOTAL_BYTES / 2, MAX_TOTAL_BYTES / 2 - 1])
+                .map(|(provider, size)| RuntimeAsset {
+                    path: provider.path.clone(),
+                    bytes: vec![0; size].into(),
+                })
+                .collect(),
+        };
+        let mut exported = bundle.cache_export_base(&providers);
+        exported
+            .replace_provider_cache(&providers[0], Some(vec![1, 2]))
+            .expect("a two-byte final cache must not be charged for superseded seeds");
+        exported
+            .replace_provider_cache(&providers[1], None)
+            .unwrap();
+        exported
+            .replace_provider_cache(&providers[2], None)
+            .unwrap();
+        assert_eq!(exported.assets.len(), 1);
+        assert_eq!(exported.assets[0].bytes.as_ref(), [1, 2]);
+        assert_eq!(bundle.assets.len(), 3);
+        assert_eq!(
+            bundle
+                .assets
+                .iter()
+                .map(|asset| asset.bytes.len())
+                .sum::<usize>(),
+            MAX_TOTAL_BYTES
+        );
+    }
 
     #[tokio::test]
     async fn startup_geodata_preserves_packaged_metadb_bytes_without_rewriting_source() {
@@ -436,9 +609,9 @@ mod tests {
         assert_eq!(mmdb.bytes.as_ref(), b"selected db");
     }
 
-    struct TestHome(PathBuf);
+    pub(super) struct TestHome(pub(super) PathBuf);
     impl TestHome {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let mut random = [0_u8; 16];
             getrandom::fill(&mut random).unwrap();
             let path = std::env::temp_dir().join(format!(
@@ -491,6 +664,89 @@ mod tests {
             std::fs::read_to_string(home.0.join("nodes.yaml")).unwrap(),
             provider
         );
+    }
+
+    #[tokio::test]
+    async fn exported_http_cache_replaces_only_its_prepared_resource() {
+        let home = TestHome::new();
+        std::fs::write(home.0.join("rules.txt"), b"old cache").unwrap();
+        std::fs::write(home.0.join("cert.pem"), b"certificate").unwrap();
+        let payload = "rule-providers:\n  rules:\n    type: http\n    url: https://example.com/rules\n    path: rules.txt\nproxies:\n- name: p\n  type: http\n  certificate: cert.pem\n";
+        let original = ServiceRuntimeBundle::prepare(payload, home.0.clone())
+            .await
+            .unwrap();
+        let mut exported = original.clone();
+        let providers = exported.cache_providers().unwrap();
+        assert_eq!(providers.len(), 1);
+        exported
+            .replace_provider_cache(&providers[0], Some(b"new cache".to_vec()))
+            .unwrap();
+        let bytes = |bundle: &ServiceRuntimeBundle| {
+            bundle
+                .assets
+                .iter()
+                .find(|asset| asset.path == providers[0].path)
+                .unwrap()
+                .bytes
+                .clone()
+        };
+        assert_eq!(bytes(&original).as_ref(), b"old cache");
+        assert_eq!(bytes(&exported).as_ref(), b"new cache");
+        assert_eq!(exported.yaml, original.yaml);
+        assert!(
+            exported
+                .assets
+                .iter()
+                .any(|asset| asset.bytes.as_ref() == b"certificate")
+        );
+        assert_eq!(
+            std::fs::read(home.0.join("rules.txt")).unwrap(),
+            b"old cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn exported_absent_cache_removes_seed_while_empty_cache_retains_empty_asset() {
+        let home = TestHome::new();
+        std::fs::write(home.0.join("rules.txt"), b"seed").unwrap();
+        let payload = "rule-providers:\n  rules:\n    type: http\n    url: https://example.com/rules\n    path: rules.txt\n";
+        let original = ServiceRuntimeBundle::prepare(payload, home.0.clone())
+            .await
+            .unwrap();
+        let providers = original.cache_providers().unwrap();
+        let mut absent = original.clone();
+        absent.replace_provider_cache(&providers[0], None).unwrap();
+        assert!(
+            !absent
+                .assets
+                .iter()
+                .any(|asset| asset.path == providers[0].path)
+        );
+        let mut empty = original.clone();
+        empty
+            .replace_provider_cache(&providers[0], Some(vec![]))
+            .unwrap();
+        assert!(
+            empty
+                .assets
+                .iter()
+                .any(|asset| asset.path == providers[0].path && asset.bytes.is_empty())
+        );
+        assert_eq!(original.assets.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn exported_cache_declarations_exclude_file_and_inline_providers() {
+        let home = TestHome::new();
+        std::fs::write(home.0.join("rules.txt"), b"rules").unwrap();
+        let payload = "rule-providers:\n  file:\n    type: file\n    path: rules.txt\n  inline:\n    type: inline\n    payload: []\n  remote:\n    url: https://example.com/rules\n";
+        let bundle = ServiceRuntimeBundle::prepare(payload, home.0.clone())
+            .await
+            .unwrap();
+        let providers = bundle.cache_providers().unwrap();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].name, "remote");
+        assert_eq!(providers[0].kind, zenclash_service::ProviderKind::Rule);
     }
 
     #[tokio::test]

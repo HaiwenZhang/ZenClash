@@ -661,3 +661,148 @@ async fn acknowledged_rule_disable_returns_without_catalog_readback() {
     assert!(patch_request.starts_with("PATCH /rules/disable HTTP/1.1"));
     assert!(patch_request.contains(r#""7":false"#));
 }
+
+#[tokio::test]
+async fn local_tun_reload_is_rejected_before_controller_dispatch() {
+    let fixture =
+        crate::core_session::ownership_tests::ChildFixture::new("geodata-local-tun-reload-gate")
+            .await;
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = count.clone();
+    let server = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let mut request = [0; 8192];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            stream
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        }
+    });
+    let launch = fixture
+        .process
+        .launch_config()
+        .clone()
+        .with_controller_endpoint(MihomoEndpoint::new(format!("http://{address}"), ""));
+    let process = crate::MihomoProcess::prepare_stopped(launch);
+    let client = MihomoClient::from_process(process).unwrap();
+    for payload in [
+        "tun: {enable: true}\n",
+        "defaults: &base {enable: true}\ntun:\n  <<: *base\n",
+        "defaults: &base {tun: {enable: true}}\n<<: *base\n",
+        "a: &a {enable: true}\nb: &b {<<: *a}\ntun: {<<: *b}\n",
+    ] {
+        let result = client.reload_payload(payload, true).await;
+        assert!(matches!(result, Err(MihomoError::ServiceRequired)));
+    }
+    server.abort();
+    assert!(!MihomoError::ServiceRequired.mutation_result_unknown());
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn local_tun_patch_is_rejected_before_controller_dispatch() {
+    let fixture =
+        crate::core_session::ownership_tests::ChildFixture::new("geodata-local-tun-patch-gate")
+            .await;
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = count.clone();
+    let server = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let mut request = [0; 8192];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            stream
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        }
+    });
+    let launch = fixture
+        .process
+        .launch_config()
+        .clone()
+        .with_controller_endpoint(MihomoEndpoint::new(format!("http://{address}"), ""));
+    let process = crate::MihomoProcess::prepare_stopped(launch);
+    let client = MihomoClient::from_process(process).unwrap();
+    for patch in [
+        serde_json::json!({"tun":{"enable":true}}),
+        serde_json::json!({"Tun":{"Enable":true}}),
+        serde_json::json!({"tun":{"ENABLE":true}}),
+        serde_json::json!({"tun":{"enable":false},"TUN":{"enable":true}}),
+        serde_json::json!({"tun":{"enable":false,"Enable":true}}),
+    ] {
+        let result = client.patch_configs(&patch).await;
+        assert!(matches!(result, Err(MihomoError::ServiceRequired)));
+    }
+    server.abort();
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn external_tun_patch_keeps_its_controller_path() {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 8192];
+        let length = stream.read(&mut request).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        String::from_utf8_lossy(&request[..length]).into_owned()
+    });
+    let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+    client
+        .patch_configs(&serde_json::json!({"tun":{"enable":true}}))
+        .await
+        .unwrap();
+    let request = server.join().unwrap();
+    assert!(request.starts_with("PATCH /configs "));
+    assert!(request.contains(r#""enable":true"#));
+}
+
+#[tokio::test]
+async fn meow_owned_tun_patch_does_not_claim_mihomo_service_admission() {
+    let fixture =
+        crate::core_session::ownership_tests::ChildFixture::new("geodata-meow-tun-policy-kind")
+            .await;
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 8192];
+        let length = stream.read(&mut request).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        String::from_utf8_lossy(&request[..length]).into_owned()
+    });
+    let mut launch = fixture
+        .process
+        .launch_config()
+        .clone()
+        .with_controller_endpoint(MihomoEndpoint::new(format!("http://{address}"), ""));
+    launch.kind = crate::CoreKind::Meow;
+    let client = MihomoClient::from_process(crate::MihomoProcess::prepare_stopped(launch)).unwrap();
+    client
+        .patch_configs(&serde_json::json!({"tun":{"enable":true}}))
+        .await
+        .unwrap();
+    assert!(server.join().unwrap().starts_with("PATCH /configs "));
+}

@@ -26,6 +26,7 @@ pub struct ProfileService {
     overrides: Option<YamlOverrideStore>,
     failure: Arc<Mutex<ProfileRecoveryState>>,
     service_manager: Option<ServiceManager>,
+    maintenance_command: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Default)]
@@ -35,6 +36,8 @@ struct ProfileRecoveryState {
     unresolved: Option<Arc<ProfileApplyOutcome>>,
     service_tun_pending: Option<u64>,
     service_tun_warning: Option<String>,
+    service_maintenance: Option<Arc<zenclash_core::ServiceMaintenancePreparation>>,
+    service_recovery: Option<Arc<zenclash_core::ServiceMaintenancePreparation>>,
 }
 
 impl ProfileRecoveryState {
@@ -54,6 +57,12 @@ impl ProfileRecoveryState {
         self.latest_failure = None;
         self.service_tun_pending = None;
         self.service_tun_warning = None;
+    }
+
+    fn accept_local_recovery(&mut self, version: u64) {
+        if self.accept_version(version) {
+            self.clear_failure();
+        }
     }
 
     fn pending_finalization(&self) -> Option<u64> {
@@ -82,6 +91,11 @@ pub(crate) struct ProfileReceipt {
     name: String,
     runtime_version: Option<u64>,
     _outcome: Arc<ProfileApplyOutcome>,
+}
+
+pub(crate) struct PreparedBackupApplication {
+    runtime_identity: (u64, u64),
+    service: Option<zenclash_core::PreparedServiceBackupConfig>,
 }
 
 impl ProfileReceipt {
@@ -149,6 +163,7 @@ impl ProfileService {
             overrides,
             failure: Arc::new(Mutex::new(ProfileRecoveryState::default())),
             service_manager: None,
+            maintenance_command: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -168,11 +183,197 @@ impl ProfileService {
     }
 
     pub(crate) fn request_service_tun(&self) -> Result<ServiceTunRequest, String> {
+        let manager = self
+            .service_manager
+            .as_ref()
+            .ok_or_else(|| zenclash_i18n::text("core_page.service.unknown"))?;
+        if self.session.runtime_descriptor().backend() == zenclash_core::CoreRuntimeBackend::Local
+            && let Some(preparation) = self.service_local_recovery()
+            && let Some(recovery) = preparation.recovery()
+            && recovery.runtime().generation() == self.session.generation()
+        {
+            return manager
+                .request_enable_tun_after_recovery(recovery.runtime())
+                .map_err(service_failure_message);
+        }
+        manager
+            .request_enable_tun()
+            .map_err(service_failure_message)
+    }
+
+    /// Captures a maintenance intent for the current runtime without performing I/O.
+    ///
+    /// # Errors
+    /// Returns an error when maintenance is unsupported or the runtime is unresolved.
+    pub fn request_service_maintenance(
+        &self,
+        operation: zenclash_core::ServiceOperation,
+        fallback: Option<zenclash_core::MihomoLaunchConfig>,
+    ) -> Result<zenclash_core::ServiceMaintenanceRequest, String> {
         self.service_manager
             .as_ref()
             .ok_or_else(|| zenclash_i18n::text("core_page.service.unknown"))?
-            .request_enable_tun()
+            .request_maintenance(operation, fallback)
             .map_err(service_failure_message)
+    }
+
+    /// Resolves ordinary identity for direct Service maintenance before confirmation.
+    /// Manager owns background discovery and its prepared progress.
+    ///
+    /// # Errors
+    /// Returns unsupported/stale intent, overlapping command or executable discovery errors.
+    pub async fn discover_service_maintenance(
+        &self,
+        operation: zenclash_core::ServiceOperation,
+        project_root: PathBuf,
+        preferred_binary: Option<PathBuf>,
+    ) -> Result<zenclash_core::ServiceMaintenanceRequest, String> {
+        self.service_manager
+            .as_ref()
+            .ok_or_else(|| zenclash_i18n::text("core_page.service.unknown"))?
+            .discover_maintenance_request(operation, project_root, preferred_binary)
+            .await
+            .map_err(service_failure_message)
+    }
+
+    /// Prepares maintenance and retains its receipt independently of any page waiter.
+    /// No administrator operation is submitted by this method.
+    ///
+    /// # Errors
+    /// Returns runtime preparation errors; an unready receipt remains available to callers.
+    pub async fn prepare_service_maintenance(
+        &self,
+        request: zenclash_core::ServiceMaintenanceRequest,
+        store: &ControlledConfigStore,
+    ) -> Result<Arc<zenclash_core::ServiceMaintenancePreparation>, String> {
+        let manager = self
+            .service_manager
+            .clone()
+            .ok_or_else(|| zenclash_i18n::text("core_page.service.unknown"))?;
+        let store = store.clone();
+        let profiles = self.clone();
+        let command = self
+            .maintenance_command
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| service_failure_message(ServiceManagerError::Busy))?;
+        tokio::spawn(async move {
+            let _command = command;
+            let preparation = Arc::new(
+                manager
+                    .prepare_maintenance(request, &store)
+                    .await
+                    .map_err(service_failure_message)?,
+            );
+            let mut state = profiles.failure.lock();
+            if let Some(recovery) = preparation.recovery() {
+                if recovery.runtime().ready()
+                    && profiles.session.generation() == recovery.runtime().generation()
+                {
+                    state.accept_local_recovery(recovery.runtime().generation());
+                }
+                state.service_recovery = Some(preparation.clone());
+            }
+            state.service_maintenance = Some(preparation.clone());
+            Ok(preparation)
+        })
+        .await
+        .map_err(|_| zenclash_i18n::text("core_page.service.pending"))?
+    }
+
+    /// Reads the latest maintenance preparation without I/O.
+    pub fn service_maintenance_preparation(
+        &self,
+    ) -> Option<Arc<zenclash_core::ServiceMaintenancePreparation>> {
+        self.failure.lock().service_maintenance.clone()
+    }
+
+    /// Reads the last Service-to-Local resources, preserved across later Local commands.
+    /// The core receipt still checks identity and generation before any resource reuse.
+    pub fn service_local_recovery(
+        &self,
+    ) -> Option<Arc<zenclash_core::ServiceMaintenancePreparation>> {
+        self.failure.lock().service_recovery.clone()
+    }
+
+    /// Submits the latest preparation with the caller's explicit authorization choice.
+    /// Keeps recovery resources after success, cancellation, or failure.
+    ///
+    /// # Errors
+    /// Rejects replaced/foreign receipts, missing consent, stale runtime or native failure.
+    pub async fn maintain_prepared_service(
+        &self,
+        preparation: Arc<zenclash_core::ServiceMaintenancePreparation>,
+        allow_authorization: bool,
+    ) -> Result<(), String> {
+        let manager = self
+            .service_manager
+            .clone()
+            .ok_or_else(|| zenclash_i18n::text("core_page.service.unknown"))?;
+        let command = self
+            .maintenance_command
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| service_failure_message(ServiceManagerError::Busy))?;
+        let current = self.failure.lock().service_maintenance.clone();
+        if !current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &preparation))
+        {
+            return Err(service_failure_message(ServiceManagerError::Stale));
+        }
+        let preparation = if allow_authorization {
+            preparation.as_ref().clone().with_authorization()
+        } else {
+            preparation.as_ref().clone()
+        };
+        let profiles = self.clone();
+        tokio::spawn(async move {
+            let _command = command;
+            let maintenance = manager.maintain_prepared(&preparation).await;
+            let recoverable = allow_authorization
+                && preparation.operation() == zenclash_core::ServiceOperation::Repair
+                && preparation.recovery().is_some()
+                && maintenance.as_ref().err().is_none_or(|error| {
+                    !error.is_native_outcome_unconfirmed()
+                        && !matches!(
+                            error,
+                            ServiceManagerError::Stale
+                                | ServiceManagerError::Closed
+                                | ServiceManagerError::Busy
+                                | ServiceManagerError::ConsentRequired
+                        )
+                });
+            let recovery = if recoverable {
+                match manager.restore_prepared_capture(&preparation).await {
+                    Ok(outcome) => {
+                        if let Some(tun) = outcome.tun()
+                            && let Some(core) = tun.core()
+                        {
+                            profiles.record_service_tun(
+                                core,
+                                tun.commit_pending(),
+                                outcome.warning().or(tun.recovery_warning()),
+                            );
+                        }
+                        outcome.warning().map(str::to_owned)
+                    }
+                    Err(error) => Some(service_failure_message(error)),
+                }
+            } else {
+                None
+            };
+            match (maintenance, recovery) {
+                (Ok(()), None) => Ok(()),
+                (Ok(()), Some(warning)) => Err(warning),
+                (Err(error), None) => Err(service_failure_message(error)),
+                (Err(error), Some(warning)) => {
+                    Err(format!("{}; {warning}", service_failure_message(error)))
+                }
+            }
+        })
+        .await
+        .map_err(|_| zenclash_i18n::text("core_page.service.pending"))?
     }
 
     pub(crate) async fn enable_service_tun(
@@ -386,12 +587,39 @@ impl ProfileService {
         change: ProfileChange,
         context: ChangeContext,
     ) -> Result<ProfileReceipt, ProfileFailure> {
-        let outcome = Arc::new(
-            ProfileApplication::new(store, controlled, self.session.clone())
-                .apply(change)
-                .await,
-        );
-        self.finish_apply(outcome, context)
+        let profiles = self.clone();
+        tokio::spawn(async move {
+            let application = ProfileApplication::new(store, controlled, profiles.session.clone());
+            let (outcome, service) = if let Some(manager) = &profiles.service_manager {
+                application.apply_with_service(manager, change).await
+            } else {
+                (application.apply(change).await, None)
+            };
+            let receipt = profiles.finish_apply(Arc::new(outcome), context);
+            if let Some(service) = service
+                && let Some(core) = service.core()
+            {
+                let capture_warning = match service.capture() {
+                    zenclash_core::CaptureOutcome::RolledBack { failure, .. }
+                    | zenclash_core::CaptureOutcome::ReconcileNeeded { failure, .. } => {
+                        Some(failure.as_str())
+                    }
+                    _ => None,
+                };
+                let warning = match (service.recovery_warning(), capture_warning) {
+                    (Some(first), Some(second)) => Some(format!("{first}; {second}")),
+                    (first, second) => first.or(second).map(str::to_owned),
+                };
+                profiles.record_profile_service_facts(
+                    core,
+                    service.commit_pending(),
+                    warning.as_deref(),
+                );
+            }
+            receipt
+        })
+        .await
+        .map_err(|_| ProfileFailure::from(zenclash_i18n::text("core_page.service.pending")))?
     }
 
     fn finish_apply(
@@ -492,19 +720,115 @@ impl ProfileService {
         path: &Path,
         overrides: Vec<PathBuf>,
     ) -> Result<CoreApplyOutcome, String> {
-        let outcome = self
-            .session
-            .apply(
-                &controlled,
-                EffectiveConfigIntent::ActivateProfile {
-                    profile: path.to_path_buf(),
-                    overrides,
-                },
+        self.apply_config(
+            &controlled,
+            EffectiveConfigIntent::ActivateProfile {
+                profile: path.to_path_buf(),
+                overrides,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn prepare_backup_restore(
+        &self,
+        prepared: zenclash_core::PreparedBackupRestore,
+    ) -> Result<
+        (
+            zenclash_core::PreparedBackupRestore,
+            PreparedBackupApplication,
+        ),
+        String,
+    > {
+        let runtime_identity = (
+            self.session.runtime_descriptor().binding_generation(),
+            self.session.generation(),
+        );
+        let (prepared, service) = match self.service_manager.as_ref() {
+            Some(manager) => manager
+                .prepare_backup_restore(prepared)
+                .await
+                .map_err(service_failure_message)?,
+            None => (prepared, None),
+        };
+        Ok((
+            prepared,
+            PreparedBackupApplication {
+                runtime_identity,
+                service,
+            },
+        ))
+    }
+
+    pub(crate) async fn reload_backup_config(
+        &self,
+        controlled: ControlledConfigStore,
+        path: &Path,
+        overrides: Vec<PathBuf>,
+        prepared: PreparedBackupApplication,
+        previous: Option<zenclash_core::CoreRestoreSnapshot>,
+    ) -> Result<CoreApplyOutcome, String> {
+        if prepared.runtime_identity
+            != (
+                self.session.runtime_descriptor().binding_generation(),
+                self.session.generation(),
             )
+        {
+            return Err(zenclash_i18n::text("core_page.service.stale"));
+        }
+        if let Some(prepared) = prepared.service {
+            let manager = self
+                .service_manager
+                .as_ref()
+                .ok_or_else(|| zenclash_i18n::text("core_page.service.unknown"))?;
+            let previous =
+                previous.ok_or_else(|| zenclash_i18n::text("core_page.service.no_snapshot"))?;
+            let outcome = manager
+                .apply_backup_config(&controlled, &previous, prepared)
+                .await
+                .map_err(service_failure_message)?;
+            return self
+                .accept_service_config_outcome(outcome)
+                .map_err(|error| error.to_string());
+        }
+        self.reload_with_overrides(controlled, path, overrides)
             .await
-            .map_err(|error| error.to_string())?;
-        self.record_accepted_runtime(&outcome);
-        Ok(outcome)
+    }
+
+    fn accept_service_config_outcome(
+        &self,
+        outcome: zenclash_core::ServiceConfigOutcome,
+    ) -> Result<CoreApplyOutcome, CoreSessionError> {
+        let outcome = match outcome {
+            zenclash_core::ServiceConfigOutcome::Local(core) => {
+                self.record_accepted_runtime(&core);
+                return Ok(core);
+            }
+            zenclash_core::ServiceConfigOutcome::Service(outcome) => outcome,
+        };
+        if let Some(core) = outcome.core() {
+            let capture_warning = match outcome.capture() {
+                zenclash_core::CaptureOutcome::RolledBack { failure, .. }
+                | zenclash_core::CaptureOutcome::ReconcileNeeded { failure, .. } => {
+                    Some(failure.as_str())
+                }
+                _ => None,
+            };
+            let warning = match (outcome.recovery_warning(), capture_warning) {
+                (Some(first), Some(second)) => Some(format!("{first}; {second}")),
+                (first, second) => first.or(second).map(str::to_owned),
+            };
+            self.record_service_tun(core, outcome.commit_pending(), warning.as_deref());
+            return Ok(*core);
+        }
+        Err(CoreSessionError::Config(
+            zenclash_core::ControlledConfigError::Transaction(match outcome.capture() {
+                zenclash_core::CaptureOutcome::RolledBack { failure, .. }
+                | zenclash_core::CaptureOutcome::ReconcileNeeded { failure, .. } => failure.clone(),
+                _ => zenclash_i18n::text("core_page.service.unknown"),
+            }),
+        ))
     }
 
     pub(crate) async fn reapply_with_overrides(
@@ -513,20 +837,51 @@ impl ProfileService {
         overrides: Vec<PathBuf>,
     ) -> Result<Option<CoreApplyOutcome>, String> {
         match self
-            .session
-            .apply(
+            .apply_config(
                 &controlled,
                 EffectiveConfigIntent::ReapplyCurrent { overrides },
             )
             .await
         {
-            Ok(outcome) => {
-                self.record_accepted_runtime(&outcome);
-                Ok(Some(outcome))
-            }
+            Ok(outcome) => Ok(Some(outcome)),
             Err(CoreSessionError::NoCommittedProfile) => Ok(None),
             Err(error) => Err(error.to_string()),
         }
+    }
+
+    pub(crate) async fn apply_config(
+        &self,
+        controlled: &ControlledConfigStore,
+        intent: EffectiveConfigIntent,
+    ) -> Result<CoreApplyOutcome, CoreSessionError> {
+        let profiles = self.clone();
+        let controlled = controlled.clone();
+        tokio::spawn(async move {
+            if let Some(manager) = profiles.service_manager.as_ref()
+                && let Some(outcome) = manager
+                    .try_apply_service_config(&controlled, intent.clone())
+                    .await
+                    .map_err(|error| match error {
+                        ServiceManagerError::Runtime(cause) => *cause,
+                        error => CoreSessionError::Config(
+                            zenclash_core::ControlledConfigError::Transaction(
+                                service_failure_message(error),
+                            ),
+                        ),
+                    })?
+            {
+                return profiles.accept_service_config_outcome(outcome);
+            }
+            let outcome = profiles.session.apply(&controlled, intent).await?;
+            profiles.record_accepted_runtime(&outcome);
+            Ok(outcome)
+        })
+        .await
+        .map_err(|_| {
+            CoreSessionError::Config(zenclash_core::ControlledConfigError::Transaction(
+                zenclash_i18n::text("core_page.service.pending"),
+            ))
+        })?
     }
 
     fn record_accepted_runtime(&self, outcome: &CoreApplyOutcome) {
@@ -545,6 +900,24 @@ impl ProfileService {
             // Pending acknowledgement is a distinct fact; a saved startup has
             // already accepted its source and cannot offer old-source rollback.
             self.record_service_tun(saved, commit_pending, None);
+        }
+    }
+
+    fn record_profile_service_facts(
+        &self,
+        outcome: &CoreApplyOutcome,
+        commit_pending: bool,
+        recovery_warning: Option<&str>,
+    ) {
+        if self.session.generation() != outcome.generation {
+            return;
+        }
+        let mut state = self.failure.lock();
+        // Directory and capture facts are two receipts for the same accepted transaction.
+        // Add capture facts without clearing its committed-but-unknown source receipt.
+        if state.runtime_result_version == Some(outcome.generation) {
+            state.service_tun_pending = commit_pending.then_some(outcome.generation);
+            state.service_tun_warning = recovery_warning.map(str::to_owned);
         }
     }
 
@@ -686,6 +1059,187 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    #[tokio::test]
+    async fn service_config_reapply_without_a_committed_profile_preserves_the_noop_result() {
+        let (profiles, store) = maintenance_fixture();
+        assert!(
+            profiles
+                .reapply_with_overrides(store.clone(), vec![])
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(profiles.session.generation(), 0);
+        assert!(!store.root().exists());
+        assert!(profiles.service_state().unwrap().health().is_none());
+        assert!(profiles.pending_finalization().is_none());
+        profiles.session.shutdown().await.unwrap();
+    }
+
+    fn maintenance_fixture() -> (ProfileService, ControlledConfigStore) {
+        let home = std::env::temp_dir().join(format!(
+            "zenclash-ui-maintenance-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = ControlledConfigStore::new(home.join("controlled"));
+        let process =
+            zenclash_core::MihomoProcess::prepare_stopped(zenclash_core::MihomoLaunchConfig {
+                kind: CoreKind::Mihomo,
+                binary: home.join("ordinary-mihomo"),
+                config_file: home.join("missing-source.yaml"),
+                home_dir: home,
+                endpoint: zenclash_core::MihomoEndpoint::default(),
+                controller_override: None,
+            });
+        let session = CoreSession::open(
+            CoreKind::Mihomo,
+            MihomoClient::from_process(process).unwrap(),
+        )
+        .unwrap();
+        let capture =
+            zenclash_core::TrafficCaptureSession::new(session.clone(), store.clone(), None, None);
+        let manager = ServiceManager::new(session.clone(), capture);
+        (
+            ProfileService::new(session, None).with_service_manager(manager),
+            store,
+        )
+    }
+
+    #[tokio::test]
+    async fn maintenance_preparation_survives_page_owner_drop_and_consent_rejection() {
+        let (page, store) = maintenance_fixture();
+        let shared = page.clone();
+        let request = page
+            .request_service_maintenance(zenclash_core::ServiceOperation::Uninstall, None)
+            .unwrap();
+        let preparation = page
+            .prepare_service_maintenance(request, &store)
+            .await
+            .unwrap();
+        drop(page);
+        assert!(Arc::ptr_eq(
+            &shared.service_maintenance_preparation().unwrap(),
+            &preparation
+        ));
+        assert!(
+            shared
+                .maintain_prepared_service(preparation.clone(), false)
+                .await
+                .is_err()
+        );
+        assert!(Arc::ptr_eq(
+            &shared.service_maintenance_preparation().unwrap(),
+            &preparation
+        ));
+        assert!(preparation.ready());
+        assert!(shared.service_local_recovery().is_none());
+        assert!(
+            !store.root().exists(),
+            "Local preparation performed filesystem writes"
+        );
+    }
+
+    #[tokio::test]
+    async fn replaced_maintenance_preparation_cannot_submit_native_work() {
+        let (profiles, store) = maintenance_fixture();
+        let request = profiles
+            .request_service_maintenance(zenclash_core::ServiceOperation::Repair, None)
+            .unwrap();
+        let previous = profiles
+            .prepare_service_maintenance(request, &store)
+            .await
+            .unwrap();
+        let request = profiles
+            .request_service_maintenance(zenclash_core::ServiceOperation::Uninstall, None)
+            .unwrap();
+        let current = profiles
+            .prepare_service_maintenance(request, &store)
+            .await
+            .unwrap();
+        assert!(
+            profiles
+                .maintain_prepared_service(previous, true)
+                .await
+                .is_err()
+        );
+        assert!(Arc::ptr_eq(
+            &profiles.service_maintenance_preparation().unwrap(),
+            &current
+        ));
+        assert_eq!(profiles.service_state().unwrap().revision(), 2);
+        assert!(!store.root().exists());
+    }
+
+    #[tokio::test]
+    async fn maintenance_business_command_rejects_overlap_before_preparation() {
+        let (profiles, store) = maintenance_fixture();
+        let shared = profiles.clone();
+        let _command = profiles.maintenance_command.lock().await;
+        let request = shared
+            .request_service_maintenance(zenclash_core::ServiceOperation::Repair, None)
+            .unwrap();
+        assert!(
+            shared
+                .prepare_service_maintenance(request, &store)
+                .await
+                .is_err()
+        );
+        assert!(shared.service_maintenance_preparation().is_none());
+        assert_eq!(shared.service_state().unwrap().revision(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_maintenance_waiter_still_publishes_shared_preparation() {
+        use std::{future::Future, task::Poll};
+
+        let (profiles, store) = maintenance_fixture();
+        let request = profiles
+            .request_service_maintenance(zenclash_core::ServiceOperation::Uninstall, None)
+            .unwrap();
+        let mut waiter = Box::pin(profiles.prepare_service_maintenance(request, &store));
+        std::future::poll_fn(|cx| {
+            assert!(waiter.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(waiter);
+        let _finished = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            profiles.maintenance_command.lock(),
+        )
+        .await
+        .unwrap();
+        let preparation = profiles.service_maintenance_preparation().unwrap();
+        assert!(preparation.ready());
+        assert_eq!(
+            preparation.operation(),
+            zenclash_core::ServiceOperation::Uninstall
+        );
+        assert!(!store.root().exists());
+    }
+
+    #[test]
+    fn accepted_local_recovery_retires_old_service_confirmation_without_losing_newer_results() {
+        let mut state = ProfileRecoveryState {
+            runtime_result_version: Some(7),
+            service_tun_pending: Some(7),
+            service_tun_warning: Some("old service commit uncertainty".into()),
+            ..ProfileRecoveryState::default()
+        };
+        state.accept_local_recovery(8);
+        assert_eq!(state.runtime_result_version, Some(8));
+        assert!(state.pending_finalization().is_none());
+        assert!(state.service_tun_warning.is_none());
+        state.runtime_result_version = Some(9);
+        state.service_tun_pending = Some(9);
+        state.accept_local_recovery(8);
+        assert_eq!(state.pending_finalization(), Some(9));
+    }
+
     fn committed_fixture() -> (
         PathBuf,
         ProfileStore,
@@ -722,6 +1276,61 @@ mod tests {
             runtime_version: session.generation(),
         });
         (root, store, ProfileService::new(session, None), outcome)
+    }
+
+    #[test]
+    fn directory_service_facts_keep_same_generation_warning_and_durable_receipt() {
+        let (root, _, service, outcome) = committed_fixture();
+        let generation = service.session.generation();
+        service
+            .finish_apply(outcome, ChangeContext::Selection)
+            .unwrap();
+        service.record_profile_service_facts(
+            &CoreApplyOutcome {
+                kind: zenclash_core::CoreApplyKind::HotReloaded,
+                generation,
+            },
+            true,
+            Some("capture readback failed"),
+        );
+        let state = service.failure.lock();
+        assert_eq!(
+            state.service_tun_warning.as_deref(),
+            Some("capture readback failed")
+        );
+        assert_eq!(state.service_tun_pending, Some(generation));
+        assert!(matches!(
+            state.unresolved.as_deref(),
+            Some(ProfileApplyOutcome::CommittedButRuntimeUnknown { .. })
+        ));
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn directory_service_facts_cannot_overwrite_a_newer_runtime_result() {
+        let (root, _, service, outcome) = committed_fixture();
+        let generation = service.session.generation();
+        service
+            .finish_apply(outcome, ChangeContext::Selection)
+            .unwrap();
+        let mut state = service.failure.lock();
+        state.runtime_result_version = Some(generation + 1);
+        state.service_tun_warning = Some("new warning".into());
+        drop(state);
+        service.record_profile_service_facts(
+            &CoreApplyOutcome {
+                kind: zenclash_core::CoreApplyKind::HotReloaded,
+                generation,
+            },
+            true,
+            Some("old warning"),
+        );
+        assert_eq!(
+            service.failure.lock().service_tun_warning.as_deref(),
+            Some("new warning")
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

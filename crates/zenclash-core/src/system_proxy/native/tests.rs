@@ -251,6 +251,152 @@ fn read_pac(status: &PacServerStatus) -> String {
     response
 }
 
+impl Fixture {
+    fn capture(&self) -> crate::TrafficCaptureSession {
+        let core = crate::CoreSession::open(
+            crate::CoreKind::Mihomo,
+            crate::MihomoClient::new(crate::MihomoEndpoint::default()).unwrap(),
+        )
+        .unwrap();
+        crate::TrafficCaptureSession::new(
+            core,
+            crate::ControlledConfigStore::new(self.root.join("controlled")),
+            Some(self.session.clone()),
+            None,
+        )
+    }
+
+    fn observed_proxy(&self) -> crate::Observation<SystemProxySessionSnapshot> {
+        crate::Observation::Fresh {
+            value: self.session.snapshot().unwrap(),
+            observed_at_ms: 1,
+        }
+    }
+}
+
+#[tokio::test]
+async fn maintenance_proxy_suspension_persists_off_across_reconciliation_and_reopen() {
+    let fixture = Fixture::new();
+    fixture.session.set_enabled(true, 7890).unwrap();
+    fixture
+        .capture()
+        .suspend_maintenance_proxy_admitted(&fixture.observed_proxy())
+        .await
+        .unwrap();
+    let preferences = fixture.store.load().unwrap();
+    assert!(!preferences.system_proxy_enabled);
+    assert!(preferences.system_proxy_ownership.is_none());
+    assert!(!fixture.backend.status("Wi-Fi").unwrap().active());
+    let writes = fixture.backend.0.lock().writes.clone();
+    let reopened = SystemProxySession::new(fixture.store.clone(), fixture.controller.clone());
+    assert_eq!(
+        reopened.reconcile(true, Some(7890)).unwrap(),
+        SystemProxyReconcileOutcome::Unchanged
+    );
+    assert_eq!(fixture.backend.0.lock().writes, writes);
+}
+
+#[tokio::test]
+async fn maintenance_proxy_suspension_releases_pac_and_preserves_a_native_replacement() {
+    let fixture = Fixture::new();
+    let listener = fixture.start_pac();
+    let observed = fixture.observed_proxy();
+    fixture
+        .capture()
+        .suspend_maintenance_proxy_admitted(&observed)
+        .await
+        .unwrap();
+    assert!(!fixture.store.load().unwrap().system_proxy_enabled);
+    assert!(fixture.controller.pac_status().is_none());
+    assert!(TcpStream::connect(listener.address).is_err());
+
+    fixture.session.set_enabled(true, 7890).unwrap();
+    let external = SystemProxyStatus {
+        service: "Wi-Fi".into(),
+        enabled: true,
+        server: "external.test".into(),
+        port: 8080,
+        ..Default::default()
+    };
+    fixture
+        .backend
+        .0
+        .lock()
+        .services
+        .insert("Wi-Fi".into(), external.clone());
+    let writes = fixture.backend.0.lock().writes.clone();
+    fixture
+        .capture()
+        .suspend_maintenance_proxy_admitted(&fixture.observed_proxy())
+        .await
+        .unwrap();
+    let saved = fixture.store.load().unwrap();
+    assert!(!saved.system_proxy_enabled);
+    assert!(saved.system_proxy_ownership.is_none());
+    assert_eq!(fixture.backend.status("Wi-Fi").unwrap(), external);
+    assert_eq!(fixture.backend.0.lock().writes, writes);
+}
+
+#[tokio::test]
+async fn maintenance_proxy_suspension_native_failure_preserves_intent_and_ownership() {
+    let fixture = Fixture::new();
+    let expected = fixture.session.set_enabled(true, 7890).unwrap();
+    let before = fixture.backend.status("Wi-Fi").unwrap();
+    fixture.backend.0.lock().faults.push_back(Fault::Reject);
+    assert!(
+        fixture
+            .capture()
+            .suspend_maintenance_proxy_admitted(&fixture.observed_proxy())
+            .await
+            .is_err()
+    );
+    assert_eq!(fixture.store.load().unwrap(), expected);
+    assert_eq!(fixture.backend.status("Wi-Fi").unwrap(), before);
+}
+
+#[tokio::test]
+async fn maintenance_proxy_suspension_save_failure_restores_the_previous_live_pac() {
+    let fixture = Fixture::new();
+    let listener = fixture.start_pac();
+    let observed = fixture.observed_proxy();
+    let before = fixture.backend.status("Wi-Fi").unwrap();
+    fixture.backend.0.lock().break_preferences = Some(fixture.root.join("preferences.json"));
+    assert!(
+        fixture
+            .capture()
+            .suspend_maintenance_proxy_admitted(&observed)
+            .await
+            .is_err()
+    );
+    assert_eq!(fixture.backend.status("Wi-Fi").unwrap(), before);
+    assert_eq!(fixture.controller.pac_status().unwrap(), listener);
+    assert!(read_pac(&listener).contains("127.0.0.1:7890"));
+}
+
+#[tokio::test]
+async fn maintenance_proxy_suspension_off_or_unknown_does_not_write_preferences_or_native_state() {
+    let fixture = Fixture::new();
+    fixture.store.save(&AppPreferences::default()).unwrap();
+    let before = std::fs::read(fixture.root.join("preferences.json")).unwrap();
+    fixture
+        .capture()
+        .suspend_maintenance_proxy_admitted(&fixture.observed_proxy())
+        .await
+        .unwrap();
+    assert!(
+        fixture
+            .capture()
+            .suspend_maintenance_proxy_admitted(&crate::Observation::Loading)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read(fixture.root.join("preferences.json")).unwrap(),
+        before
+    );
+    assert!(fixture.backend.0.lock().writes.is_empty());
+}
+
 #[test]
 fn exit_releases_the_recorded_service_after_the_active_service_changes() {
     let fixture = Fixture::new();

@@ -46,7 +46,7 @@ pub(crate) fn output_path_with_timeout(
     output_from_command(process, &command.display().to_string(), timeout)
 }
 
-fn output_from_command(
+pub(crate) fn output_from_command(
     mut command: Command,
     display_name: &str,
     timeout: Duration,
