@@ -280,7 +280,7 @@ fn owned_ui_children(fixture: &Fixture) -> [Arc<MihomoProcess>; 2] {
         fs::copy(&binary, &executable).unwrap();
         let config = directory.join("profile.yaml");
         fs::write(&config, "rules: [MATCH,DIRECT]\n").unwrap();
-        MihomoProcess::spawn(MihomoLaunchConfig {
+        MihomoProcess::spawn_isolated_for_test(MihomoLaunchConfig {
             kind: CoreKind::Mihomo,
             binary: executable,
             config_file: config,

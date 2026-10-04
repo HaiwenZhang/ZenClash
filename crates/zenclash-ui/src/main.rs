@@ -6,7 +6,10 @@ use std::{
     net::TcpListener,
     path::{Path, PathBuf},
     process::Command,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -97,10 +100,12 @@ fn append_startup_notice(target: &mut Option<String>, notice: String) {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_name("zenclash-io")
-        .build()?;
+    let runtime = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("zenclash-io")
+            .build()?,
+    );
     let _runtime_guard = runtime.enter();
     let preferences_store = match AppPreferencesStore::discover() {
         Ok(store) => Some(store),
@@ -117,8 +122,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("application data directory unavailable; instance locking is disabled");
         None
     };
-    let (mut preferences, preferences_recovery_notice) =
-        load_preferences(preferences_store.as_ref())?;
+    let (preferences, preferences_recovery_notice) = load_preferences(preferences_store.as_ref())?;
     zenclash_i18n::set_locale(preferences.language.locale());
     let environment_core = std::env::var("ZENCLASH_CORE")
         .ok()
@@ -126,94 +130,337 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()?;
     let requested_core = environment_core.unwrap_or(preferences.core_kind);
     let controlled_config_store = ControlledConfigStore::discover()?;
-    let mut recovery_notices = preferences_recovery_notice.into_iter().collect::<Vec<_>>();
+    let recovery_notices = preferences_recovery_notice.into_iter().collect::<Vec<_>>();
     let profile_store = ProfileStore::discover()?;
     let override_store = YamlOverrideStore::discover()?;
+    let pending = prepare_disconnected_startup(requested_core, None)?;
+    let runtime_handle = runtime.handle().clone();
+    let restart_after_exit = Arc::new(parking_lot::Mutex::new(None));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cleanup: StartupCleanup = Arc::new(parking_lot::Mutex::new(None));
+    let pending_services = app::AppServices {
+        initializing: true,
+        await_service_handoff: false,
+        profile_store: None,
+        override_store: None,
+        preferences_store: preferences_store.clone(),
+        preferences: preferences.clone(),
+        core_kind: requested_core,
+        core_session: pending.session,
+        traffic_monitor: TrafficMonitor::start_with_client(&runtime_handle, pending.client.clone()),
+        log_monitor: LogMonitor::start_with_client(
+            &runtime_handle,
+            pending.client.clone(),
+            zenclash_core::MihomoLogLevel::Info,
+        ),
+        client: pending.client,
+        traffic_history_store: None,
+        traffic_history_session: None,
+        profile_path: None,
+        controlled_config_store: controlled_config_store.clone(),
+        runtime: runtime_handle.clone(),
+        startup_notice: Some(zenclash_i18n::text("startup.initializing")),
+        startup_error: None,
+        restart_after_exit: restart_after_exit.clone(),
+    };
+    let inputs = StartupInputs {
+        preferences_store,
+        preferences,
+        requested_core,
+        environment_core,
+        controlled_config_store,
+        profile_store,
+        override_store,
+        recovery_notices,
+    };
+    let (finished_sender, finished_receiver) = tokio::sync::oneshot::channel();
+    let worker_runtime = runtime.clone();
+    let worker_cancelled = cancelled.clone();
+    let worker_cleanup = cleanup.clone();
+    let worker_restart = restart_after_exit.clone();
+    let startup_task = runtime.spawn_blocking(move || {
+        let result = prepare_application(
+            &worker_runtime,
+            inputs,
+            worker_cancelled,
+            worker_cleanup,
+            worker_restart,
+        )
+        .map_err(|error| error.to_string());
+        let _ = finished_sender.send(());
+        result
+    });
+
+    gpui_kit::application().with_assets(Assets).run(move |cx| {
+        app::init(cx);
+        app::create_main_window_with_pending_startup(pending_services, startup_task, cx);
+        cx.activate(true);
+    });
+    // GPUI's native quit observers have a 200 ms deadline. Finish on Tokio after
+    // the event loop returns, before dropping the runtime or allowing restart.
+    cancelled.store(true, Ordering::Release);
+    let shutdown_result = runtime.block_on(async {
+        let _ = finished_receiver.await;
+        let completed = cleanup.lock().take();
+        let mut failures = Vec::new();
+        if let Some(history) = completed.as_ref().and_then(|owner| owner.history.as_ref())
+            && let Err(error) = history.shutdown().await
+        {
+            failures.push(error);
+        }
+        // The native event loop has already exited: always stop the owned child,
+        // even when history persistence failed. Any failure prevents restart.
+        if let Some(owner) = completed
+            && let Err(error) = owner.core.shutdown().await
+        {
+            failures.push(error.to_string());
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    });
+    shutdown_result.map_err(std::io::Error::other)?;
+    drop(_instance_lock);
+    if let Some(request) = restart_after_exit.lock().take() {
+        spawn_restarted_process(&request).map_err(|error| {
+            std::io::Error::other(zenclash_i18n::text_with(
+                "startup.restart_failed",
+                &[
+                    ("path", request.executable.display().to_string()),
+                    ("error", error.to_string()),
+                ],
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+struct StartupOwner {
+    core: CoreSession,
+    history: Option<Arc<app::TrafficHistorySession>>,
+}
+type StartupCleanup = Arc<parking_lot::Mutex<Option<StartupOwner>>>;
+struct StartupInputs {
+    preferences_store: Option<AppPreferencesStore>,
+    preferences: AppPreferences,
+    requested_core: CoreKind,
+    environment_core: Option<CoreKind>,
+    controlled_config_store: ControlledConfigStore,
+    profile_store: ProfileStore,
+    override_store: YamlOverrideStore,
+    recovery_notices: Vec<String>,
+}
+fn ensure_startup_active(cancelled: &AtomicBool) -> Result<(), Box<dyn std::error::Error>> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "application closed during startup",
+        )
+        .into());
+    }
+    Ok(())
+}
+fn prepare_application(
+    runtime: &tokio::runtime::Runtime,
+    inputs: StartupInputs,
+    cancelled: Arc<AtomicBool>,
+    cleanup: StartupCleanup,
+    restart_after_exit: Arc<parking_lot::Mutex<Option<app::RestartRequest>>>,
+) -> Result<app::BootstrappedApplication, Box<dyn std::error::Error>> {
+    let StartupInputs {
+        preferences_store,
+        mut preferences,
+        requested_core,
+        environment_core,
+        controlled_config_store,
+        profile_store,
+        override_store,
+        mut recovery_notices,
+    } = inputs;
+    ensure_startup_active(&cancelled)?;
     let external = std::env::var_os("ZENCLASH_CONTROLLER").is_some();
     let managed_mihomo = !external && requested_core == CoreKind::Mihomo;
-    let layers = startup::prepare_configuration_layers(
-        managed_mihomo,
-        &profile_store,
-        &controlled_config_store,
-        &override_store,
-    )
-    .map_err(|error| {
-        tracing::warn!(%error, "startup configuration layers could not be confirmed");
-        if managed_mihomo {
-            Box::new(std::io::Error::other(startup::blocked_message(
-                startup::StartupBlocked::ConfigurationUnknown,
-            ))) as Box<dyn std::error::Error>
+    let mut await_service_handoff = false;
+    let prepared = (|| -> Result<PreparedStartup, Box<dyn std::error::Error>> {
+        let layers = startup::prepare_configuration_layers(
+            managed_mihomo,
+            &profile_store,
+            &controlled_config_store,
+            &override_store,
+        )
+        .map_err(|error| {
+            tracing::warn!(%error, "startup configuration layers could not be confirmed");
+            if managed_mihomo {
+                Box::new(std::io::Error::other(startup::blocked_message(
+                    startup::StartupBlocked::ConfigurationUnknown,
+                ))) as Box<dyn std::error::Error>
+            } else {
+                error
+            }
+        })?;
+        recovery_notices.extend(layers.notices);
+        let configuration_unknown = layers.unknown;
+        let override_paths = layers.overrides;
+        let preferred_binary = preferences
+            .core_binaries
+            .path(requested_core)
+            .map(Path::to_path_buf);
+        let mut health = (!external && requested_core == CoreKind::Mihomo)
+            .then(|| runtime.block_on(zenclash_core::startup_service_health()));
+        let resources = if health.is_some() {
+            let root = project_root()?;
+            let selected = std::env::var_os("ZENCLASH_CONFIG")
+                .map(PathBuf::from)
+                .or(profile_store.active_path()?)
+                .or_else(|| {
+                    let candidate = root.join("platforms/common/default.yaml");
+                    candidate.is_file().then_some(candidate)
+                });
+            Some(runtime.block_on(MihomoRuntimeResources::prepare(root, selected))?)
         } else {
-            error
+            None
+        };
+        let mut tun_enabled = if health.is_some() && !configuration_unknown {
+            resources.as_ref().and_then(|resources| {
+                controlled_config_store
+                    .effective_json_with_overrides(resources.config_file(), &override_paths)
+                    .ok()
+                    .and_then(|value| startup::effective_tun_enabled(&value))
+            })
+        } else {
+            None
+        };
+        let elevated = zenclash_core::current_process_elevated();
+        let explicit_local = std::env::args_os().any(|argument| argument == "--continue-local");
+        await_service_handoff = cfg!(windows)
+            && tun_enabled == Some(true)
+            && !explicit_local
+            && health != Some(ServiceHealthKind::Missing);
+        if cfg!(windows)
+            && tun_enabled == Some(true)
+            && !elevated
+            && !explicit_local
+            && health != Some(ServiceHealthKind::Missing)
+        {
+            // Match Verge's bounded wait for an automatically starting service.
+            if health != Some(ServiceHealthKind::Ready) {
+                runtime.block_on(async {
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                    while tokio::time::Instant::now() < deadline {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        if cancelled.load(Ordering::Acquire) {
+                            break;
+                        }
+                        health = Some(zenclash_core::startup_service_health().await);
+                        if health == Some(ServiceHealthKind::Ready) {
+                            break;
+                        }
+                    }
+                });
+            }
         }
-    })?;
-    recovery_notices.extend(layers.notices);
-    let configuration_unknown = layers.unknown;
-    let override_paths = layers.overrides;
-    let preferred_binary = preferences
-        .core_binaries
-        .path(requested_core)
-        .map(Path::to_path_buf);
-    let health = (!external && requested_core == CoreKind::Mihomo)
-        .then(|| runtime.block_on(zenclash_core::startup_service_health()));
-    let resources = if matches!(
-        health,
-        Some(ServiceHealthKind::Ready | ServiceHealthKind::Missing)
-    ) {
-        let root = project_root()?;
-        let selected = std::env::var_os("ZENCLASH_CONFIG")
-            .map(PathBuf::from)
-            .or(profile_store.active_path()?)
-            .or_else(|| {
-                let candidate = root.join("platforms/common/default.yaml");
-                candidate.is_file().then_some(candidate)
-            });
-        Some(runtime.block_on(MihomoRuntimeResources::prepare(root, selected))?)
-    } else {
-        None
-    };
-    let tun_enabled = if health == Some(ServiceHealthKind::Missing) && !configuration_unknown {
-        resources.as_ref().and_then(|resources| {
-            controlled_config_store
-                .effective_json_with_overrides(resources.config_file(), &override_paths)
-                .ok()
-                .and_then(|value| startup::effective_tun_enabled(&value))
+        ensure_startup_active(&cancelled)?;
+        if (health == Some(ServiceHealthKind::Missing) || explicit_local)
+            && tun_enabled == Some(true)
+            && !elevated
+        {
+            let resources = resources
+                .as_ref()
+                .ok_or_else(|| std::io::Error::other("missing runtime resources"))?;
+            let update = controlled_config_store.prepare_json_update(
+                resources.config_file(),
+                &serde_json::json!({"tun":{"enable":false}}),
+            )?;
+            controlled_config_store.commit(&update)?;
+            recovery_notices.push(zenclash_i18n::text(if explicit_local {
+                "startup.tun_disabled_local_choice"
+            } else {
+                "startup.tun_disabled_missing_service"
+            }));
+            tun_enabled = Some(false);
+        }
+        let local_store = if managed_mihomo && !elevated {
+            controlled_config_store.without_startup_tun()
+        } else {
+            controlled_config_store.clone()
+        };
+        startup::route_startup_with_policy(
+            requested_core,
+            external,
+            health,
+            tun_enabled,
+            explicit_local,
+            || {
+                ensure_startup_active(&cancelled)?;
+                prepare_service_startup(
+                    runtime,
+                    resources.as_ref(),
+                    &controlled_config_store,
+                    &override_paths,
+                )
+            },
+            || {
+                ensure_startup_active(&cancelled)?;
+                if managed_mihomo {
+                    runtime.block_on(zenclash_core::check_sidecar_available())?;
+                    if explicit_local || health != Some(ServiceHealthKind::Missing) {
+                        recovery_notices.push(zenclash_i18n::text(if explicit_local {
+                            "startup.local_choice"
+                        } else {
+                            "startup.local_fallback"
+                        }));
+                        if tun_enabled == Some(true) && !elevated {
+                            recovery_notices
+                                .push(zenclash_i18n::text("startup.local_tun_disabled"));
+                        }
+                    }
+                }
+                prepare_legacy_startup(
+                    runtime,
+                    &mut preferences,
+                    requested_core,
+                    preferred_binary.as_deref(),
+                    environment_core.is_none(),
+                    &local_store,
+                    &override_paths,
+                )
+            },
+        )
+        .or_else(|failure| {
+            // A lost/refused service Start must be checked afresh, never inferred idle.
+            if cfg!(windows)
+                && health == Some(ServiceHealthKind::Ready)
+                && matches!(&failure, startup::StartupFailure::Operation(_))
+                && runtime
+                    .block_on(zenclash_core::check_sidecar_available())
+                    .is_ok()
+            {
+                recovery_notices.push(zenclash_i18n::text("startup.local_fallback"));
+                ensure_startup_active(&cancelled).map_err(startup::StartupFailure::Operation)?;
+                return prepare_legacy_startup(
+                    runtime,
+                    &mut preferences,
+                    requested_core,
+                    preferred_binary.as_deref(),
+                    environment_core.is_none(),
+                    &local_store,
+                    &override_paths,
+                )
+                .map_err(startup::StartupFailure::Operation);
+            }
+            Err(failure)
         })
-    } else {
-        None
-    };
-    let prepared = startup::route_startup(
-        requested_core,
-        external,
-        health,
-        tun_enabled,
-        || {
-            prepare_service_startup(
-                &runtime,
-                resources.as_ref(),
-                &controlled_config_store,
-                &override_paths,
-            )
-        },
-        || {
-            prepare_legacy_startup(
-                &runtime,
-                &mut preferences,
-                requested_core,
-                preferred_binary.as_deref(),
-                environment_core.is_none(),
-                &controlled_config_store,
-                &override_paths,
-            )
-        },
-    )
-    .map_err(|failure| match failure {
-        startup::StartupFailure::Operation(error) => error,
-        startup::StartupFailure::Blocked(reason) => {
-            Box::new(std::io::Error::other(startup::blocked_message(reason)))
-                as Box<dyn std::error::Error>
-        }
-    })?;
+        .map_err(|failure| match failure {
+            startup::StartupFailure::Operation(error) => error,
+            startup::StartupFailure::Blocked(reason) => {
+                Box::new(std::io::Error::other(startup::blocked_message(reason)))
+                    as Box<dyn std::error::Error>
+            }
+        })
+    })()
+    .or_else(|error| prepare_offline_startup(requested_core, error.to_string()))?;
     let PreparedStartup {
         kind: core_kind,
         client,
@@ -223,6 +470,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         error: startup_error,
         initialization,
     } = prepared;
+    *cleanup.lock() = Some(StartupOwner {
+        core: core_session.clone(),
+        history: None,
+    });
+    let controlled_config_store = controlled_config_store.with_runtime_tun_policy(&client);
     remember_working_core(
         preferences_store.as_ref(),
         &mut preferences,
@@ -246,72 +498,34 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let traffic_history_session = traffic_history_store.clone().map(|store| {
         app::TrafficHistorySession::start(&runtime_handle, client.clone(), store, &preferences)
     });
-    let app_traffic_history_session = traffic_history_session.clone();
-    let shutdown_core = core_session.clone();
-    let restart_after_exit = Arc::new(parking_lot::Mutex::new(None));
-    let app_restart_after_exit = Arc::clone(&restart_after_exit);
-
-    gpui_kit::application().with_assets(Assets).run(move |cx| {
-        app::init(cx);
-        app::create_main_window_with_service_startup(
-            app::AppServices {
-                profile_store: Some(profile_store),
-                override_store: Some(override_store),
-                preferences_store,
-                preferences,
-                core_kind,
-                core_session,
-                client,
-                traffic_monitor: traffic,
-                log_monitor: logs,
-                traffic_history_store,
-                traffic_history_session: app_traffic_history_session,
-                profile_path,
-                controlled_config_store,
-                runtime: runtime_handle,
-                startup_notice,
-                startup_error,
-                restart_after_exit: app_restart_after_exit,
-            },
-            initialization,
-            cx,
-        );
-        cx.activate(true);
+    *cleanup.lock() = Some(StartupOwner {
+        core: core_session.clone(),
+        history: traffic_history_session.clone(),
     });
-    // GPUI's native quit observers have a 200 ms deadline. Finish on Tokio after
-    // the event loop returns, before dropping the runtime or allowing restart.
-    let shutdown_result = runtime.block_on(async {
-        let mut failures = Vec::new();
-        if let Some(history) = traffic_history_session
-            && let Err(error) = history.shutdown().await
-        {
-            failures.push(error);
-        }
-        // The native event loop has already exited: always stop the owned child,
-        // even when history persistence failed. Any failure prevents restart.
-        if let Err(error) = shutdown_core.shutdown().await {
-            failures.push(error.to_string());
-        }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(failures.join("; "))
-        }
-    });
-    shutdown_result.map_err(std::io::Error::other)?;
-    drop(_instance_lock);
-    if let Some(executable) = restart_after_exit.lock().take() {
-        spawn_restarted_process(&executable).map_err(|error| {
-            std::io::Error::other(zenclash_i18n::text_with(
-                "startup.restart_failed",
-                &[
-                    ("path", executable.display().to_string()),
-                    ("error", error.to_string()),
-                ],
-            ))
-        })?;
-    }
-    Ok(())
+    Ok(app::BootstrappedApplication {
+        services: app::AppServices {
+            initializing: false,
+            await_service_handoff,
+            profile_store: Some(profile_store),
+            override_store: Some(override_store),
+            preferences_store,
+            preferences,
+            core_kind,
+            core_session,
+            client,
+            traffic_monitor: traffic,
+            log_monitor: logs,
+            traffic_history_store,
+            traffic_history_session: traffic_history_session.clone(),
+            profile_path,
+            controlled_config_store,
+            runtime: runtime_handle,
+            startup_notice,
+            startup_error,
+            restart_after_exit,
+        },
+        initialization,
+    })
 }
 
 struct PreparedStartup {
@@ -322,6 +536,34 @@ struct PreparedStartup {
     notice: Option<String>,
     error: Option<String>,
     initialization: Option<CoreInitializationOutcome>,
+}
+
+fn prepare_offline_startup(
+    kind: CoreKind,
+    error: String,
+) -> Result<PreparedStartup, Box<dyn std::error::Error>> {
+    // A blocked service must not start a competing kernel, but the user still
+    // needs the window to inspect service health and request maintenance.
+    tracing::warn!(%error, "core startup blocked; opening UI without a controller");
+    prepare_disconnected_startup(kind, Some(error))
+}
+
+fn prepare_disconnected_startup(
+    kind: CoreKind,
+    error: Option<String>,
+) -> Result<PreparedStartup, Box<dyn std::error::Error>> {
+    let client = MihomoClient::new(MihomoEndpoint::new("127.0.0.1:0", "zenclash-offline"))?
+        .with_core_kind(kind)?;
+    let session = CoreSession::open(kind, client.clone())?;
+    Ok(PreparedStartup {
+        kind,
+        client,
+        session,
+        profile: None,
+        notice: None,
+        error,
+        initialization: None,
+    })
 }
 
 fn prepare_legacy_startup(
@@ -498,6 +740,22 @@ fn prepare_service_startup(
         }
         Err(error) => (None, Some(error.to_string())),
     };
+    if cfg!(windows)
+        && error.is_some()
+        && initialization
+            .as_ref()
+            .is_none_or(|outcome| outcome.saved().is_none())
+    {
+        // Release the uncertain service owner before the caller's fresh idle
+        // check. A failed Stop/Release keeps this session reachable by the GUI.
+        if runtime.block_on(session.shutdown()).is_ok()
+            && runtime
+                .block_on(zenclash_core::check_sidecar_available())
+                .is_ok()
+        {
+            return Err(std::io::Error::other(error.as_deref().unwrap_or_default()).into());
+        }
+    }
     let notice = initialization.as_ref().and_then(|outcome| {
         let changes = outcome
             .listener_fallbacks()
@@ -525,8 +783,12 @@ fn prepare_service_startup(
         initialization,
     })
 }
-fn spawn_restarted_process(executable: &Path) -> std::io::Result<()> {
-    Command::new(executable).spawn()?;
+fn spawn_restarted_process(request: &app::RestartRequest) -> std::io::Result<()> {
+    let mut command = Command::new(&request.executable);
+    if request.continue_local {
+        command.arg("--continue-local");
+    }
+    command.spawn()?;
     Ok(())
 }
 
@@ -940,10 +1202,100 @@ fn allocate_managed_controller() -> std::io::Result<MihomoEndpoint> {
 #[cfg(test)]
 mod tracing_tests {
     use super::{
-        append_startup_notice, is_controller_listener_conflict, offline_core_state, project_root,
-        tracing_filter,
+        append_startup_notice, is_controller_listener_conflict, offline_core_state,
+        prepare_offline_startup, project_root, tracing_filter,
     };
-    use zenclash_core::CoreKind;
+    use zenclash_core::{CoreKind, ServiceHealthKind};
+
+    #[test]
+    fn pending_gui_has_no_controller_owner_or_applied_configuration() {
+        let pending = super::prepare_disconnected_startup(CoreKind::Mihomo, None).unwrap();
+        assert_eq!(pending.client.endpoint().unwrap().controller, "127.0.0.1:0");
+        assert!(!pending.session.is_managed());
+        assert!(pending.profile.is_none());
+        assert!(pending.initialization.is_none());
+        assert!(pending.error.is_none());
+    }
+
+    #[test]
+    fn cancelled_bootstrap_returns_before_loading_layers_or_starting_a_core() {
+        let root = std::env::temp_dir().join(format!(
+            "zenclash-cancelled-startup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let controlled = zenclash_core::ControlledConfigStore::new(root.join("controlled"));
+        std::fs::create_dir_all(root.join("controlled")).unwrap();
+        let damaged = root.join("controlled/override.yaml");
+        std::fs::write(&damaged, "tun: [invalid").unwrap();
+        let inputs = super::StartupInputs {
+            preferences_store: None,
+            preferences: zenclash_core::AppPreferences::default(),
+            requested_core: CoreKind::Mihomo,
+            environment_core: None,
+            controlled_config_store: controlled,
+            profile_store: zenclash_core::ProfileStore::new(root.join("profiles")).unwrap(),
+            override_store: zenclash_core::YamlOverrideStore::new(root.join("overrides")).unwrap(),
+            recovery_notices: Vec::new(),
+        };
+        let cleanup = std::sync::Arc::new(parking_lot::Mutex::new(None));
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = super::prepare_application(
+            &runtime,
+            inputs,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            cleanup.clone(),
+            std::sync::Arc::new(parking_lot::Mutex::new(None)),
+        );
+        let error = result.err().expect("cancelled bootstrap must stop");
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::Interrupted
+        );
+        assert!(cleanup.lock().is_none());
+        assert_eq!(std::fs::read_to_string(damaged).unwrap(), "tun: [invalid");
+        assert!(root.starts_with(std::env::temp_dir()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn blocked_service_startup_keeps_the_gui_available_without_a_kernel() {
+        for reason in [
+            super::startup::StartupBlocked::Health(ServiceHealthKind::Stopped),
+            super::startup::StartupBlocked::Health(ServiceHealthKind::Unknown),
+            super::startup::StartupBlocked::ConfigurationUnknown,
+        ] {
+            let prepared =
+                prepare_offline_startup(CoreKind::Mihomo, super::startup::blocked_message(reason))
+                    .unwrap();
+            assert_eq!(
+                prepared.client.endpoint().unwrap().controller,
+                "127.0.0.1:0"
+            );
+            assert!(!prepared.session.is_managed());
+            assert!(prepared.session.runtime_descriptor().binary().is_none());
+            assert!(prepared.profile.is_none());
+            assert!(prepared.initialization.is_none());
+            assert_eq!(
+                prepared.error,
+                Some(super::startup::blocked_message(reason))
+            );
+        }
+    }
+
+    #[test]
+    fn failed_core_preparation_preserves_the_error_for_the_gui() {
+        let prepared = prepare_offline_startup(CoreKind::Mihomo, "invalid profile".into()).unwrap();
+        assert_eq!(prepared.error.as_deref(), Some("invalid profile"));
+        assert_eq!(
+            prepared.client.endpoint().unwrap().controller,
+            "127.0.0.1:0"
+        );
+        assert!(prepared.session.runtime_descriptor().binary().is_none());
+    }
 
     #[test]
     fn application_filter_overrides_verbose_protocol_targets() {

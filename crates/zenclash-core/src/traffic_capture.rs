@@ -274,6 +274,12 @@ impl TrafficCaptureSession {
         self.intent_revision.load(Ordering::SeqCst)
     }
 
+    /// Reads the current user capture intent version without native operations.
+    #[must_use]
+    pub fn intent_revision(&self) -> u64 {
+        self.capture_revision()
+    }
+
     pub(crate) fn shares_core_session(&self, session: &CoreSession) -> bool {
         Arc::ptr_eq(&self.operation, &session.capture_publication_gate())
     }

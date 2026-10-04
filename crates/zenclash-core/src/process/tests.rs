@@ -321,6 +321,8 @@ fn ui_metadata_and_logs_remain_available_while_lifecycle_lock_is_held() {
     let process = MihomoProcess {
         drop_gate: Mutex::new(None),
         child: parking_lot::Mutex::new(None),
+        execution: parking_lot::Mutex::new(None),
+        isolated_test_child: true,
         logs: std::sync::Arc::new(parking_lot::RwLock::new(VecDeque::from(["ready".into()]))),
         last_exit_reason: parking_lot::RwLock::new(None),
         recovery_asset_root: RwLock::new(None),

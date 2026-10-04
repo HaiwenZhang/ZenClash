@@ -16,11 +16,25 @@ impl CoreSession {
         let result = match client.owned_core() {
             Some(crate::owned_core::OwnedCore::Local(process)) => {
                 let binary = process.launch_config().binary.clone();
-                tokio::task::spawn_blocking(move || TunPermissionManager::new(binary)?.status())
-                    .await
-                    .map_err(|error| MihomoError::Process(error.to_string()))?
-                    .map(CoreTunPermissionStatus::Local)
-                    .map_err(|error| error.to_string())
+                let mihomo = self.kind == CoreKind::Mihomo;
+                tokio::task::spawn_blocking(move || {
+                    if mihomo {
+                        let binary = std::fs::canonicalize(binary).map_err(|error| {
+                            crate::TunPermissionError::InvalidBinary(error.to_string())
+                        })?;
+                        return Ok(crate::TunPermissionStatus {
+                            granted: zenclash_service::current_process_elevated(),
+                            can_request: false,
+                            binary,
+                            detail: zenclash_i18n::text("startup.local_tun_authority"),
+                        });
+                    }
+                    TunPermissionManager::new(binary)?.status()
+                })
+                .await
+                .map_err(|error| MihomoError::Process(error.to_string()))?
+                .map(CoreTunPermissionStatus::Local)
+                .map_err(|error| error.to_string())
             }
             Some(crate::owned_core::OwnedCore::Service(runtime)) => runtime
                 .client
@@ -54,6 +68,15 @@ impl CoreSession {
     /// # Errors
     /// Rejects shutdown, stale binding, unavailable authority, or failed native authorization.
     pub async fn ensure_tun_permission(&self) -> Result<(), CoreSessionError> {
+        if self.kind == CoreKind::Mihomo
+            && self.runtime_descriptor().backend() == crate::CoreRuntimeBackend::Local
+        {
+            return if zenclash_service::current_process_elevated() {
+                self.ensure_not_shutting_down()
+            } else {
+                Err(MihomoError::ServiceRequired.into())
+            };
+        }
         self.ensure_tun_permission_with(|binary| {
             let manager = TunPermissionManager::new(binary)?;
             let already_granted = manager.status()?.granted;

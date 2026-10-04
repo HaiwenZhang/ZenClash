@@ -109,7 +109,8 @@ impl RuntimePage {
                     )
                     .child(
                         div()
-                            .w_12()
+                            .w_16()
+                            .flex_shrink_0()
                             .text_xs()
                             .child(connection.metadata.network.clone()),
                     )
@@ -136,7 +137,8 @@ impl RuntimePage {
                     )
                     .child(
                         div()
-                            .w_12()
+                            .w_16()
+                            .flex_shrink_0()
                             .text_xs()
                             .child(projection.durations[index].clone()),
                     )
@@ -473,7 +475,8 @@ fn connection_columns(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
         )
         .child(
             div()
-                .w_12()
+                .w_16()
+                .flex_shrink_0()
                 .child(zenclash_i18n::text("connections.columns.protocol")),
         )
         .child(
@@ -495,7 +498,8 @@ fn connection_columns(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
         )
         .child(
             div()
-                .w_12()
+                .w_16()
+                .flex_shrink_0()
                 .child(zenclash_i18n::text("connections.columns.duration")),
         )
         .child(div().w_8())

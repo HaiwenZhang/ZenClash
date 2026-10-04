@@ -5,6 +5,7 @@
 #[cfg(feature = "server")]
 mod api;
 mod client;
+mod execution;
 mod frame;
 mod installer;
 #[cfg(feature = "server")]
@@ -69,6 +70,7 @@ pub fn run_service() -> std::io::Result<()> {
 mod session;
 
 pub use client::{ServiceClient, ServiceClientError, ServiceLogs, ServiceSubscription};
+pub use execution::{CoreExecutionGuard, check_sidecar_available, current_process_elevated};
 pub use frame::{FrameError, MAX_FRAME_BYTES, read_frame, write_frame};
 #[cfg(all(feature = "server", target_os = "macos"))]
 pub use installer::query_service_host_pid;

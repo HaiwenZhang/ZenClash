@@ -17,9 +17,11 @@ mod preparation_tests {
 
     #[tokio::test]
     async fn backup_local_recovery_retains_provider_and_tls_after_sources_are_deleted() {
-        let fixture =
-            crate::core_session::ownership_tests::ChildFixture::new("geodata-backup-held-recovery")
-                .await;
+        let fixture = crate::core_session::ownership_tests::ChildFixture::with_config_path(
+            "geodata-backup-held-recovery",
+            "home/controlled/local-runtime/slot0/runtime.yaml",
+        )
+        .await;
         let session = CoreSession::open(
             CoreKind::Mihomo,
             MihomoClient::from_process(fixture.process.clone()).unwrap(),
@@ -811,7 +813,9 @@ impl CoreSession {
             crate::ServiceRuntimeBundle::prepare(update.previous_payload(), home.clone()).await?,
         );
         previous.service_bundle = Some(previous_bundle.clone());
-        let prepared = if crate::tun_admission::yaml_enables_tun(update.next_payload())? {
+        let prepared = if crate::tun_admission::yaml_enables_tun(update.next_payload())?
+            && !zenclash_service::current_process_elevated()
+        {
             let next =
                 Arc::new(crate::ServiceRuntimeBundle::prepare(update.next_payload(), home).await?);
             PreparedConfig::Service(Arc::new(PreparedServiceTun {
@@ -864,6 +868,9 @@ impl CoreSession {
         fallback_profile: Option<PathBuf>,
         recovery_bundle: Option<Arc<crate::ServiceRuntimeBundle>>,
     ) -> Result<Arc<PreparedServiceTun>, CoreSessionError> {
+        // Explicit TUN handover prepares privileged bytes while the current
+        // binding still points to the ordinary child with its TUN-off projection.
+        let store = store.for_service_runtime();
         let client = self.client.pin_binding()?;
         self.check_service_tun_admission(&client, binding, generation)?;
         let home = match client.owned_core() {
@@ -1018,7 +1025,9 @@ impl CoreSession {
                 expected_cache.clone(),
             )
             .await?;
-        if !crate::tun_admission::yaml_enables_tun(update.next_payload())? {
+        if !crate::tun_admission::yaml_enables_tun(update.next_payload())?
+            || zenclash_service::current_process_elevated()
+        {
             store
                 .validate_prepared_service_tun(update.clone(), expected_cache.clone())
                 .await?;

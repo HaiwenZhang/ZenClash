@@ -23,6 +23,11 @@ impl Fixture {
         let source = root.join("child.rs");
         fs::write(&source, r#"
 use std::{fs, io::Read, path::PathBuf, time::Duration};
+fn publish(path: &std::path::Path, bytes: impl AsRef<[u8]>) {
+    let staged = path.with_extension("pending");
+    fs::write(&staged, bytes).unwrap();
+    fs::rename(staged, path).unwrap();
+}
 fn wait(path: &std::path::Path) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !path.exists() && std::time::Instant::now() < deadline { std::thread::sleep(Duration::from_millis(5)); }
@@ -37,19 +42,19 @@ fn main() {
         let payload = if std::env::var_os("CLASH_CONFIG_STRING").is_some() {
             b"tun: {enable: true}\n".to_vec()
         } else { fs::read(config).unwrap() };
-        fs::write(home.join("checked"), payload).unwrap();
+        publish(&home.join("checked"), payload);
         wait(&home.join("allow-check"));
         return;
     }
     let n: usize = fs::read_to_string(home.join("launch-count")).unwrap_or_default().parse().unwrap_or(0) + 1;
-    fs::write(home.join("launch-count"), n.to_string()).unwrap();
+    publish(&home.join("launch-count"), n.to_string());
     wait(&home.join(format!("read-{n}")));
     let payload = if std::env::var_os("CLASH_CONFIG_STRING").is_some() {
         b"tun: {enable: true}\n".to_vec()
     } else if config == "-" {
         let mut bytes = Vec::new(); std::io::stdin().read_to_end(&mut bytes).unwrap(); bytes
     } else { fs::read(config).unwrap() };
-    fs::write(home.join(format!("observed-{n}")), payload).unwrap();
+    publish(&home.join(format!("observed-{n}")), payload);
     std::thread::sleep(Duration::from_secs(30));
 }
 "#).unwrap();

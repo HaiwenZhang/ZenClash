@@ -29,9 +29,18 @@ and `src/core/owner.rs`
 (SHA-256 `5688f6013bc9145b5092fcdbe23730d524c89873ca8c0f5b3f354de159047b60`).
 Upstream uses exclusive native locks. ZenClash adapts the native primitives in
 `src/maintenance_lock.rs` to shared session admission and exclusive maintenance,
-with stable file identity and protected-path checks. Shared admission, protocol v3,
+with stable file identity and protected-path checks. Shared admission, protocol v4,
 and same-stream maintenance host verification are project adaptations, not copied
 upstream capabilities. Their verification status remains in the implementation record.
+
+The cross-process kernel reservation in `src/execution.rs` adapts the Windows
+owner-thread mutex and SDDL from `src/execution_windows_lock.rs` (SHA-256
+`5ebbd990c79f78cd5f3cc674ef0b5f6951d9ca0d8f8c12a70a51e4a5ac45882b`).
+Unix uses the same shared read-only `/tmp` file-lock pattern as upstream.
+ZenClash adds read-only authenticated `Inspect` in protocol v4; older helpers
+must be repaired before service ownership is adopted. Startup policy follows
+the local Clash Verge Rev `src/core/manager/lifecycle.rs` snapshot (SHA-256
+`c3dcfbd9819938be2ac2108b7ac73854d63a4cc0098e1792a233748848a60b81`).
 
 The Linux fixed-unit and macOS fixed-plist content gates are ZenClash-specific and reuse existing
 protected-path validator, pinned file handle and launchd maintenance dispatch.

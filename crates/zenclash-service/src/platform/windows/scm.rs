@@ -120,6 +120,25 @@ fn query(service: &ServiceHandle) -> io::Result<SERVICE_STATUS_PROCESS> {
     Ok(status)
 }
 
+pub(crate) fn require_stopped_service() -> io::Result<()> {
+    let manager = manager(SC_MANAGER_CONNECT)?;
+    let handle = match service(&manager, SERVICE_QUERY_STATUS) {
+        Ok(handle) => handle,
+        Err(error) if error.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST as i32) => {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    let status = query(&handle)?;
+    if status.dwCurrentState != SERVICE_STOPPED || status.dwProcessId != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "service stop is unconfirmed",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(feature = "server")]
 pub(crate) fn register_service() -> io::Result<()> {
     let root = service_root()?;

@@ -26,9 +26,20 @@ mod traffic_history;
 mod tray;
 mod view;
 
-pub use bootstrap::{create_main_window, create_main_window_with_service_startup, init};
+pub use bootstrap::{
+    BootstrappedApplication, create_main_window, create_main_window_with_pending_startup,
+    create_main_window_with_service_startup, init,
+};
 use platform::{open_directory, tray_directories};
 pub use traffic_history::TrafficHistorySession;
+
+/// Process arguments prepared only after capture and kernel shutdown succeeds.
+pub struct RestartRequest {
+    /// Executable to launch again.
+    pub executable: PathBuf,
+    /// Explicit local-kernel choice for the new session.
+    pub continue_local: bool,
+}
 use tray::LatestCommandQueue;
 
 use crate::{
@@ -142,7 +153,7 @@ pub struct ZenClashApp {
     preferences_store: Option<AppPreferencesStore>,
     preferences: AppPreferences,
     preferences_save_task: Option<tokio::task::JoinHandle<()>>,
-    restart_after_exit: Arc<parking_lot::Mutex<Option<PathBuf>>>,
+    restart_after_exit: Arc<parking_lot::Mutex<Option<RestartRequest>>>,
     log_monitor: Arc<LogMonitor>,
     traffic_history_session: Option<Arc<TrafficHistorySession>>,
     _subscriptions: Vec<Subscription>,
@@ -169,8 +180,12 @@ impl MainWindowMemoryState {
     }
 }
 
-/// Runtime services prepared by the executable before constructing the UI.
+/// Runtime services supplied to the application window.
 pub struct AppServices {
+    /// Defer capture restoration and background commands until bootstrap completes.
+    pub initializing: bool,
+    /// Watch for delayed Windows service readiness when saved TUN remains requested.
+    pub await_service_handoff: bool,
     /// Profile repository opened during bootstrap.
     pub profile_store: Option<zenclash_core::ProfileStore>,
     /// YAML override repository opened during bootstrap.
@@ -204,7 +219,7 @@ pub struct AppServices {
     /// Persistent startup failure shown while the app runs in offline recovery mode.
     pub startup_error: Option<String>,
     /// Deferred application restart request consumed after the instance lock is released.
-    pub restart_after_exit: Arc<parking_lot::Mutex<Option<PathBuf>>>,
+    pub restart_after_exit: Arc<parking_lot::Mutex<Option<RestartRequest>>>,
 }
 
 impl ZenClashApp {
@@ -218,6 +233,8 @@ impl ZenClashApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let AppServices {
+            initializing,
+            await_service_handoff,
             profile_store,
             override_store,
             preferences_store: _,
@@ -252,8 +269,8 @@ impl ZenClashApp {
             system_proxy_session.clone(),
             profile_path.clone(),
         );
-        let _supervisor_started =
-            core_session.start_supervisor_with_capture(&runtime, traffic_capture.clone());
+        let _supervisor_started = !initializing
+            && core_session.start_supervisor_with_capture(&runtime, traffic_capture.clone());
         let operational_status = OperationalStatus::start(
             &runtime,
             core_session.clone(),
@@ -305,6 +322,17 @@ impl ZenClashApp {
             Self::subscribe_proxy_selection_events(&runtime_page, cx);
         let runtime_config_subscription = Self::subscribe_runtime_config_events(&runtime_page, cx);
         let preferences_subscription = Self::subscribe_preference_events(&runtime_page, cx);
+        let local_subscription = cx.subscribe(
+            &runtime_page,
+            |this, _, _: &crate::pages::runtime::ContinueLocalRequested, cx| {
+                match std::env::current_exe() {
+                    Ok(executable) => this.begin_quit_mode(Some(executable), true, cx),
+                    Err(error) => this.runtime_page.update(cx, |page, cx| {
+                        page.report_system_proxy_reconcile_error(&error.to_string(), cx)
+                    }),
+                }
+            },
+        );
         let appearance_subscription = cx.observe_window_appearance(window, |this, window, cx| {
             if this.preferences.appearance == AppearancePreference::System {
                 apply_zen_theme(ThemeMode::from(window.appearance()), Some(window), cx);
@@ -360,17 +388,107 @@ impl ZenClashApp {
                 proxy_selection_subscription,
                 runtime_config_subscription,
                 preferences_subscription,
+                local_subscription,
                 appearance_subscription,
             ],
         };
-        app.start_traffic_updates(cx);
-        app.restore_system_proxy(cx);
-        app.start_mode_sync(cx);
-        app.start_profile_updates(cx);
-        app.start_automatic_runtime(cx);
-        app.start_tray_updates(cx);
-        app.refresh_tray_menu(cx);
+        if !initializing {
+            app.start_traffic_updates(cx);
+            app.restore_system_proxy(cx);
+            app.start_mode_sync(cx);
+            app.start_profile_updates(cx);
+            app.start_automatic_runtime(cx);
+            if await_service_handoff {
+                app.start_service_handoff(cx);
+            }
+            app.start_tray_updates(cx);
+            app.refresh_tray_menu(cx);
+        }
         app
+    }
+
+    fn finish_startup(
+        &mut self,
+        result: Result<BootstrappedApplication, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.quit_state != system_proxy::QuitState::Idle {
+            return;
+        }
+        let BootstrappedApplication {
+            mut services,
+            initialization,
+        } = match result {
+            Ok(application) => application,
+            Err(error) => {
+                self.runtime_page.update(cx, |page, cx| {
+                    page.report_system_proxy_reconcile_error(&error, cx)
+                });
+                return;
+            }
+        };
+        // Preferences may have changed while service startup was pending.
+        if let Some(store) = services.preferences_store.as_ref()
+            && let Ok(preferences) = store.load()
+        {
+            services.preferences = preferences;
+        }
+        let preferences = services.preferences.clone();
+        let preferences_store = services.preferences_store.clone();
+        let network_tray =
+            NetworkTrayIcon::new(services.core_kind, services.traffic_monitor.clone())
+                .inspect_err(
+                    |error| tracing::warn!(%error, "failed to create native traffic tray icon"),
+                )
+                .ok();
+        if let Some(tray) = network_tray.as_ref()
+            && let Err(error) = tray.set_visible(preferences.traffic_tray_visible)
+        {
+            tracing::warn!(%error, "failed to restore traffic tray visibility");
+        }
+        if let Err(error) = bootstrap::configure_log_monitor(
+            &services.log_monitor,
+            preferences_store.as_ref(),
+            &preferences,
+        ) {
+            tracing::warn!(%error, "failed to configure core log persistence after startup");
+        }
+        let page = self.current_page;
+        let sidebar_collapsed = self.sidebar_collapsed;
+        let window_visible = self.main_window_visible;
+        #[cfg(target_os = "macos")]
+        let window_memory = std::mem::take(&mut self.main_window_memory);
+        let floating_visible = self.floating_window.is_some();
+        // Auxiliary windows must follow the newly published runtime as well.
+        for handle in [self.floating_window.take(), self.status_panel.take()]
+            .into_iter()
+            .flatten()
+        {
+            let _ = cx.update_window(handle, |_, window, _| window.remove_window());
+        }
+        *self = Self::new(
+            services,
+            initialization,
+            network_tray,
+            preferences_store,
+            preferences,
+            window,
+            cx,
+        );
+        self.sidebar_collapsed = sidebar_collapsed;
+        #[cfg(target_os = "macos")]
+        {
+            self.main_window_memory = window_memory;
+        }
+        self.navigate(page, cx);
+        if !window_visible {
+            self.release_hidden_page_data(cx);
+        }
+        if floating_visible {
+            self.toggle_floating_window(cx);
+        }
+        cx.notify();
     }
 
     fn subscribe_profile_events(
@@ -435,9 +553,13 @@ impl ZenClashApp {
                     bootstrap::refresh_native_app_menu(cx);
                     this.proxies_page.update(cx, |_, cx| cx.notify());
                     let runtime_page = runtime_page_for_localization.clone();
+                    let proxies_page = this.proxies_page.clone();
                     let main_window = this.main_window;
                     cx.defer(move |cx| {
                         let _ = cx.update_window(main_window, |_, window, cx| {
+                            proxies_page.update(cx, |page, cx| {
+                                page.refresh_localized_placeholders(window, cx);
+                            });
                             runtime_page.update(cx, |page, cx| {
                                 page.refresh_localized_placeholders(window, cx);
                             });

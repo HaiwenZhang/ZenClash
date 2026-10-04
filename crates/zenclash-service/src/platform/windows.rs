@@ -20,6 +20,7 @@ pub(crate) use identity::current_identity;
 #[cfg(feature = "server")]
 pub(crate) use identity::{peer_alive, process_identity as identity_from_pid, require_admin};
 pub(crate) use install::{open_pinned_file, request_maintenance};
+pub(crate) use scm::require_stopped_service;
 #[cfg(feature = "server")]
 pub(crate) use scm::{
     dispatch_service, register_service, report_ready, service_state, start_service, stop_service,

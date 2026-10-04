@@ -58,7 +58,7 @@ fn keep_main_window_alive_when_closed(
 
 /// Opens the primary `ZenClash` window and installs the native traffic tray.
 pub fn create_main_window(services: AppServices, cx: &mut App) {
-    open_main_window(services, None, cx);
+    open_main_window(services, None, None, cx);
 }
 
 /// Opens the primary window with the verified service owner's startup receipt.
@@ -68,12 +68,32 @@ pub fn create_main_window_with_service_startup(
     initialization: Option<zenclash_core::CoreInitializationOutcome>,
     cx: &mut App,
 ) {
-    open_main_window(services, initialization, cx);
+    open_main_window(services, initialization, None, cx);
+}
+
+/// Services and the verified startup receipt published by background bootstrap.
+pub struct BootstrappedApplication {
+    /// Initialized application services.
+    pub services: AppServices,
+    /// Initialization receipt consumed before profile commands can begin.
+    pub initialization: Option<zenclash_core::CoreInitializationOutcome>,
+}
+
+type StartupTask = tokio::task::JoinHandle<Result<BootstrappedApplication, String>>;
+
+/// Opens the window immediately while core and service preparation runs in the background.
+pub fn create_main_window_with_pending_startup(
+    services: AppServices,
+    startup: StartupTask,
+    cx: &mut App,
+) {
+    open_main_window(services, None, Some(startup), cx);
 }
 
 fn open_main_window(
     services: AppServices,
     initialization: Option<zenclash_core::CoreInitializationOutcome>,
+    startup: Option<StartupTask>,
     cx: &mut App,
 ) {
     let title = SharedString::from("ZenClash");
@@ -128,19 +148,21 @@ fn open_main_window(
                 apply_zen_theme(theme, Some(window), cx);
                 window.set_window_title(&title);
                 window.activate_window();
-                let network_tray = match NetworkTrayIcon::new(
-                    services.core_kind,
-                    services.traffic_monitor.clone(),
-                ) {
-                    Ok(tray) => {
-                        if let Err(error) = tray.set_visible(preferences.traffic_tray_visible) {
-                            tracing::warn!(%error, "failed to restore traffic tray visibility");
+                let network_tray = if services.initializing {
+                    None
+                } else {
+                    match NetworkTrayIcon::new(services.core_kind, services.traffic_monitor.clone())
+                    {
+                        Ok(tray) => {
+                            if let Err(error) = tray.set_visible(preferences.traffic_tray_visible) {
+                                tracing::warn!(%error, "failed to restore traffic tray visibility");
+                            }
+                            Some(tray)
                         }
-                        Some(tray)
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "failed to create native traffic tray icon");
-                        None
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to create native traffic tray icon");
+                            None
+                        }
                     }
                 };
                 let app = cx.new(|cx| {
@@ -154,6 +176,18 @@ fn open_main_window(
                         cx,
                     )
                 });
+                if let Some(startup) = startup {
+                    let app = app.downgrade();
+                    let handle = window.window_handle();
+                    cx.spawn(async move |cx| {
+                        let result = startup.await.unwrap_or_else(|error| Err(error.to_string()));
+                        let _ = cx.update_window(handle, |_, window, cx| {
+                            let _ =
+                                app.update(cx, |app, cx| app.finish_startup(result, window, cx));
+                        });
+                    })
+                    .detach();
+                }
                 #[cfg(target_os = "macos")]
                 keep_main_window_alive_when_closed(window, app.downgrade(), cx);
                 #[cfg(target_os = "windows")]

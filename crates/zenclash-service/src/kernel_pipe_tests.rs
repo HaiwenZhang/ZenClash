@@ -134,6 +134,7 @@ async fn busy_open_and_stalled_upgrade_share_one_production_deadline() {
     let pid = std::process::id();
     let kernel = Kernel {
         child: None,
+        execution: None,
         pid,
         client: NativeController::new(controller.clone(), pid, "fixture-secret".into()),
         secret: "fixture-secret".into(),

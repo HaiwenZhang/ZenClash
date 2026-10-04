@@ -58,7 +58,6 @@ pub(crate) fn prepare_configuration_layers(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StartupBlocked {
     Health(ServiceHealthKind),
-    SavedTun,
     ConfigurationUnknown,
 }
 
@@ -68,30 +67,76 @@ pub(crate) enum StartupFailure<E> {
     Operation(E),
 }
 
-pub(crate) fn route_startup<T, E>(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StartupPlatform {
+    Windows,
+    Macos,
+    Linux,
+}
+
+impl StartupPlatform {
+    pub(crate) fn current() -> Self {
+        if cfg!(windows) {
+            Self::Windows
+        } else if cfg!(target_os = "macos") {
+            Self::Macos
+        } else {
+            Self::Linux
+        }
+    }
+}
+
+/// Clash Verge keeps installed-but-unavailable Unix services behind a user choice.
+/// Windows permits automatic fallback after the separate native idle check.
+pub(crate) fn permits_local_fallback(
+    platform: StartupPlatform,
+    health: ServiceHealthKind,
+    explicit: bool,
+) -> bool {
+    match health {
+        ServiceHealthKind::Ready => explicit,
+        ServiceHealthKind::Missing => true,
+        ServiceHealthKind::Stopped
+        | ServiceHealthKind::RepairRequired
+        | ServiceHealthKind::Incompatible
+        | ServiceHealthKind::Unknown => platform == StartupPlatform::Windows || explicit,
+        _ => false,
+    }
+}
+
+pub(crate) fn route_startup_with_policy<T, E>(
     kind: CoreKind,
     external: bool,
     health: Option<ServiceHealthKind>,
     tun_enabled: Option<bool>,
+    explicit_local: bool,
     service: impl FnOnce() -> Result<T, E>,
     local: impl FnOnce() -> Result<T, E>,
 ) -> Result<T, StartupFailure<E>> {
     if external || kind != CoreKind::Mihomo {
         return local().map_err(StartupFailure::Operation);
     }
-    match health.unwrap_or(ServiceHealthKind::Unknown) {
-        ServiceHealthKind::Ready => service().map_err(StartupFailure::Operation),
-        ServiceHealthKind::Missing if tun_enabled == Some(false) => {
-            local().map_err(StartupFailure::Operation)
-        }
-        ServiceHealthKind::Missing if tun_enabled == Some(true) => {
-            Err(StartupFailure::Blocked(StartupBlocked::SavedTun))
-        }
-        ServiceHealthKind::Missing => Err(StartupFailure::Blocked(
+    let health = health.unwrap_or(ServiceHealthKind::Unknown);
+    if explicit_local && tun_enabled.is_none() {
+        return Err(StartupFailure::Blocked(
             StartupBlocked::ConfigurationUnknown,
-        )),
-        health => Err(StartupFailure::Blocked(StartupBlocked::Health(health))),
+        ));
     }
+    if explicit_local && permits_local_fallback(StartupPlatform::current(), health, true) {
+        return local().map_err(StartupFailure::Operation);
+    }
+    if health == ServiceHealthKind::Ready {
+        return service().map_err(StartupFailure::Operation);
+    }
+    if tun_enabled.is_none() {
+        return Err(StartupFailure::Blocked(
+            StartupBlocked::ConfigurationUnknown,
+        ));
+    }
+    if permits_local_fallback(StartupPlatform::current(), health, explicit_local) {
+        return local().map_err(StartupFailure::Operation);
+    }
+    Err(StartupFailure::Blocked(StartupBlocked::Health(health)))
 }
 
 pub(crate) fn effective_tun_enabled(value: &serde_json::Value) -> Option<bool> {
@@ -106,7 +151,6 @@ pub(crate) fn effective_tun_enabled(value: &serde_json::Value) -> Option<bool> {
 
 pub(crate) fn blocked_message(reason: StartupBlocked) -> String {
     let key = match reason {
-        StartupBlocked::SavedTun => "startup.service_saved_tun",
         StartupBlocked::ConfigurationUnknown => "startup.service_configuration_unconfirmed",
         StartupBlocked::Health(health) => match health {
             ServiceHealthKind::Stopped => "startup.service_stopped",
@@ -166,11 +210,12 @@ mod tests {
             for attempt in 0..2 {
                 let result = prepare_configuration_layers(true, &profiles, &controlled, &overrides);
                 if let Ok(layers) = result {
-                    let routed = route_startup(
+                    let routed = route_startup_with_policy(
                         CoreKind::Mihomo,
                         false,
                         Some(ServiceHealthKind::Missing),
                         (!layers.unknown).then_some(false),
+                        false,
                         || Ok::<(), ()>(()),
                         || {
                             starts.set(starts.get() + 1);
@@ -193,11 +238,12 @@ mod tests {
     fn startup_ready_service_never_launches_local_and_keeps_acquire_failure() {
         let local_starts = Cell::new(0);
         let acquired = Cell::new(false);
-        let result = route_startup(
+        let result = route_startup_with_policy(
             CoreKind::Mihomo,
             false,
             Some(ServiceHealthKind::Ready),
             Some(true),
+            false,
             || {
                 acquired.set(true);
                 Err::<(), _>("occupied after health observation")
@@ -225,24 +271,20 @@ mod tests {
     }
 
     #[test]
-    fn startup_unconfirmed_service_or_saved_tun_never_runs_local_callback() {
+    fn startup_authorization_and_maintenance_blocks_never_run_local_callback() {
         for (health, tun) in [
-            (ServiceHealthKind::Unknown, Some(false)),
-            (ServiceHealthKind::Stopped, Some(false)),
-            (ServiceHealthKind::RepairRequired, Some(false)),
             (ServiceHealthKind::MaintenancePending, Some(false)),
             (ServiceHealthKind::Unauthorized, Some(false)),
-            (ServiceHealthKind::Incompatible, Some(false)),
             (ServiceHealthKind::UnrecognizedInstallation, Some(false)),
-            (ServiceHealthKind::Missing, Some(true)),
             (ServiceHealthKind::Missing, None),
         ] {
             let local_starts = Cell::new(0);
-            let result = route_startup(
+            let result = route_startup_with_policy(
                 CoreKind::Mihomo,
                 false,
                 Some(health),
                 tun,
+                false,
                 || Ok::<(), ()>(()),
                 || {
                     local_starts.set(local_starts.get() + 1);
@@ -261,11 +303,12 @@ mod tests {
     #[test]
     fn startup_missing_service_with_disabled_tun_preserves_ordinary_local_start() {
         let started = Cell::new(0);
-        let result = route_startup(
+        let result = route_startup_with_policy(
             CoreKind::Mihomo,
             false,
             Some(ServiceHealthKind::Missing),
             Some(false),
+            false,
             || Err::<(), _>("unexpected Acquire"),
             || {
                 started.set(started.get() + 1);
@@ -279,15 +322,51 @@ mod tests {
     #[test]
     fn startup_explicit_external_and_experimental_core_do_not_acquire_mihomo_service() {
         for (kind, external) in [(CoreKind::Mihomo, true), (CoreKind::Meow, false)] {
-            let result = route_startup(
+            let result = route_startup_with_policy(
                 kind,
                 external,
                 Some(ServiceHealthKind::Ready),
                 Some(true),
+                false,
                 || Err::<(), _>("unexpected service adoption"),
                 || Ok(()),
             );
             assert!(result.is_ok());
+        }
+    }
+
+    #[test]
+    fn platform_matrix_matches_verge_automatic_and_explicit_sidecar_choices() {
+        for platform in [
+            StartupPlatform::Windows,
+            StartupPlatform::Macos,
+            StartupPlatform::Linux,
+        ] {
+            assert!(permits_local_fallback(
+                platform,
+                ServiceHealthKind::Missing,
+                false
+            ));
+            for health in [
+                ServiceHealthKind::Stopped,
+                ServiceHealthKind::RepairRequired,
+                ServiceHealthKind::Incompatible,
+                ServiceHealthKind::Unknown,
+            ] {
+                assert_eq!(
+                    permits_local_fallback(platform, health, false),
+                    platform == StartupPlatform::Windows
+                );
+                assert!(permits_local_fallback(platform, health, true));
+            }
+            for health in [
+                ServiceHealthKind::Unauthorized,
+                ServiceHealthKind::MaintenancePending,
+                ServiceHealthKind::UnrecognizedInstallation,
+            ] {
+                assert!(!permits_local_fallback(platform, health, false));
+                assert!(!permits_local_fallback(platform, health, true));
+            }
         }
     }
 

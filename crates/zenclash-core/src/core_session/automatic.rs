@@ -10,7 +10,9 @@ impl CoreSession {
         lifecycle.phase = CoreLifecyclePhase::ShuttingDown;
     }
 
-    pub(crate) fn is_shutting_down(&self) -> bool {
+    /// Reads whether shutdown has closed runtime publication admission.
+    #[must_use]
+    pub fn is_shutting_down(&self) -> bool {
         self.shutdown_requested.load(Ordering::Acquire)
     }
 

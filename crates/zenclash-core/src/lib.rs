@@ -2,6 +2,8 @@
 
 #![deny(missing_docs)]
 
+pub use zenclash_service::{check_sidecar_available, current_process_elevated};
+
 mod app_update;
 mod autostart;
 mod backup;

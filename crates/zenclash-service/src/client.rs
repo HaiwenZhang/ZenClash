@@ -226,6 +226,22 @@ impl ServiceClient {
         hello(&mut stream).await
     }
 
+    /// Checks whether the verified service has an owner or pending kernel state.
+    /// Does not acquire a session or change the running configuration.
+    ///
+    /// # Errors
+    /// Reports unavailable or incompatible service evidence.
+    pub async fn inspect_busy() -> Result<bool, ServiceClientError> {
+        let mut stream = native_connect().await?;
+        hello(&mut stream).await?;
+        write_frame(&mut stream, &Request::Inspect {}, Duration::from_secs(1)).await?;
+        match read_frame(&mut stream, Duration::from_secs(1)).await? {
+            Response::Inspection { busy } => Ok(busy),
+            Response::Error { code } => Err(ServiceClientError::Rejected(code)),
+            _ => Err(ServiceClientError::UnexpectedResponse),
+        }
+    }
+
     /// Reads the last prepared runtime observation without performing IPC.
     pub fn snapshot(&self) -> Option<RuntimeStatus> {
         self.snapshot

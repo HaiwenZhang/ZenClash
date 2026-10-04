@@ -620,6 +620,10 @@ impl ChildFixture {
     }
 
     pub(crate) async fn new(label: &str) -> Self {
+        Self::with_config_path(label, "profile.yaml").await
+    }
+
+    pub(crate) async fn with_config_path(label: &str, relative: &str) -> Self {
         let directory = std::env::temp_dir().join(format!(
             "zenclash-current-child-{label}-{}-{}",
             std::process::id(),
@@ -655,7 +659,8 @@ impl ChildFixture {
             "{}",
             String::from_utf8_lossy(&compilation.stderr)
         );
-        let config = directory.join("profile.yaml");
+        let config = directory.join(relative);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         std::fs::write(&config, "rules:\n  - MATCH,DIRECT\n").unwrap();
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await

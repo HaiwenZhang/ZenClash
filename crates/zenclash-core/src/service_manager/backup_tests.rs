@@ -17,7 +17,11 @@ struct Fixture {
 
 impl Fixture {
     async fn new(label: &str, tun: bool) -> Self {
-        let child = crate::core_session::ownership_tests::ChildFixture::new(label).await;
+        let child = crate::core_session::ownership_tests::ChildFixture::with_config_path(
+            label,
+            "home/target/controlled-config/local-runtime/slot0/runtime.yaml",
+        )
+        .await;
         let session = CoreSession::open(
             CoreKind::Mihomo,
             MihomoClient::from_process(child.process.clone()).unwrap(),

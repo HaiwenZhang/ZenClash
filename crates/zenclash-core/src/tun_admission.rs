@@ -68,9 +68,30 @@ pub(crate) fn ensure_local_patch(kind: CoreKind, patch: &serde_json::Value) -> M
 }
 
 fn ensure_disabled(enable: Option<bool>) -> MihomoResult<()> {
-    if enable == Some(true) {
+    ensure_native_authority(enable, zenclash_service::current_process_elevated())
+}
+
+fn ensure_native_authority(enable: Option<bool>, elevated: bool) -> MihomoResult<()> {
+    if enable == Some(true) && !elevated {
         Err(MihomoError::ServiceRequired)
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn local_tun_requires_native_privilege_but_disabled_capture_needs_no_service() {
+        assert!(matches!(
+            ensure_native_authority(Some(true), false),
+            Err(MihomoError::ServiceRequired)
+        ));
+        assert!(ensure_native_authority(Some(true), true).is_ok());
+        for elevated in [false, true] {
+            assert!(ensure_native_authority(Some(false), elevated).is_ok());
+            assert!(ensure_native_authority(None, elevated).is_ok());
+        }
     }
 }

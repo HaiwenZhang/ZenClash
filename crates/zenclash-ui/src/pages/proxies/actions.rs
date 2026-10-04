@@ -9,6 +9,19 @@ use futures_util::{StreamExt, stream};
 const MAX_DELAY_TEST_CONCURRENCY: usize = 16;
 
 impl ProxiesPage {
+    pub(crate) fn refresh_localized_placeholders(
+        &mut self,
+        window: &mut gpui_kit::Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(input) = &self.search_input {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(zenclash_i18n::text("proxies.design.search"), window, cx);
+            });
+        }
+        cx.notify();
+    }
+
     pub(super) fn ensure_search_input(
         &mut self,
         window: &mut gpui_kit::Window,

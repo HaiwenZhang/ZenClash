@@ -56,6 +56,7 @@ type Child = tokio::process::Child;
 
 pub(crate) struct Kernel {
     child: Option<Child>,
+    execution: Option<crate::CoreExecutionGuard>,
     pid: u32,
     client: NativeController,
     secret: String,
@@ -75,6 +76,15 @@ impl Kernel {
         controller: PathBuf,
         secret: String,
     ) -> io::Result<Self> {
+        let execution = if cfg!(test) {
+            None
+        } else {
+            Some(
+                tokio::task::spawn_blocking(crate::CoreExecutionGuard::acquire)
+                    .await
+                    .map_err(io::Error::other)??,
+            )
+        };
         #[cfg(windows)]
         let mut child = crate::platform::NativeChild::spawn(binary, config, home)?;
         #[cfg(unix)]
@@ -96,6 +106,7 @@ impl Kernel {
         }
         let mut kernel = Self {
             child: Some(child),
+            execution,
             pid,
             client,
             secret,
@@ -140,6 +151,7 @@ impl Kernel {
         {
             self.exit_reason = Some(format!("kernel exited: {status}"));
             self.child = None;
+            self.execution.take();
         }
         Ok(RuntimeStatus {
             candidate: None,
@@ -214,6 +226,7 @@ impl Kernel {
                 }
             }
         }
+        self.execution.take();
         for task in self.readers.drain(..) {
             let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
         }
@@ -436,6 +449,7 @@ impl Kernel {
     pub(crate) fn fixture(streams: Vec<tokio::io::DuplexStream>, pid: u32) -> Self {
         Self {
             child: None,
+            execution: None,
             pid,
             client: NativeController::fixture(streams, pid),
             secret: "fixture-secret".into(),
@@ -457,6 +471,34 @@ impl Kernel {
     #[cfg(test)]
     pub(crate) fn replace_fixture_pid(&mut self, pid: u32) {
         self.fixture_status.as_mut().unwrap().pid = Some(pid);
+    }
+}
+
+impl Drop for Kernel {
+    fn drop(&mut self) {
+        if let Some(guard) = self.execution.take()
+            && let Some(child) = self.child.take()
+        {
+            #[cfg(unix)]
+            let mut child = child;
+            // A cancelled shutdown cannot release the slot before child exit.
+            // Normal lifecycle paths call stop() and reap before reaching Drop.
+            guard.release_after_exit(move || match child.try_wait() {
+                Ok(Some(_)) => true,
+                Ok(None) => {
+                    #[cfg(windows)]
+                    {
+                        let _ = child.kill();
+                    }
+                    #[cfg(unix)]
+                    {
+                        let _ = child.start_kill();
+                    }
+                    false
+                }
+                Err(_) => false,
+            });
+        }
     }
 }
 

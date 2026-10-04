@@ -581,6 +581,30 @@ mod tests {
     use gpui_kit::{AnyWindowHandle, AppContext, Entity, TestAppContext, size};
 
     #[gpui_kit::test]
+    fn localized_search_placeholder_refresh_preserves_the_input_and_query(cx: &mut TestAppContext) {
+        let (window, page, _runtime) = open_catalog(cx, ProxyCatalog::default());
+        cx.update_window(window, |_, window, cx| {
+            page.update(cx, |page, cx| page.ensure_search_input(window, cx));
+            let input = page.read(cx).search_input.clone().unwrap();
+            input.update(cx, |input, cx| {
+                input.set_value("Tokyo", window, cx);
+                input.set_placeholder("stale locale", window, cx);
+            });
+            page.update(cx, |page, cx| {
+                page.refresh_localized_placeholders(window, cx)
+            });
+            assert_eq!(page.read(cx).search_input.as_ref().unwrap(), &input);
+            assert_eq!(input.read(cx).value().as_str(), "Tokyo");
+            assert_eq!(
+                input.read(cx).presentation().placeholder().as_str(),
+                zenclash_i18n::text("proxies.design.search")
+            );
+            page.update(cx, |page, _| page.suspend());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
     fn refreshed_healthy_catalog_restores_a_previously_failed_search_result(
         cx: &mut TestAppContext,
     ) {

@@ -65,6 +65,16 @@ struct State {
 }
 
 impl State {
+    fn execution_busy(&self) -> bool {
+        self.authority.owner().is_some()
+            || self.kernel.is_some()
+            || self.runtime_unknown
+            || self.staged.is_some()
+            || self.retired.is_some()
+            || crate::maintenance_journal::Journal::load(&self.root)
+                .map_or(true, |journal| journal.is_some())
+    }
+
     fn acquire(&mut self, peer: PeerIdentity) -> Result<Response, ServiceErrorCode> {
         // Existing owners retain the same descriptor across idempotent Acquire.
         let guard = if self.authority.owner().is_none() {
@@ -1209,6 +1219,9 @@ async fn connection<T: AsyncRead + AsyncWrite + Unpin + Send>(
             Err(ServiceErrorCode::Unauthorized)
         } else {
             match request {
+                Request::Inspect {} => Ok(Response::Inspection {
+                    busy: state.execution_busy(),
+                }),
                 Request::Acquire {} => state.acquire(peer.clone()),
                 Request::Session {
                     proof,
@@ -1459,6 +1472,22 @@ mod tests {
             readback: Default::default(),
             fixture_root: None,
         }
+    }
+
+    #[test]
+    fn execution_inspection_does_not_acquire_and_reports_existing_or_uncertain_owner() {
+        let fixture = crate::installer::OwnedTestRoot::create().unwrap();
+        let mut state = state_for_test(fixture.path().to_path_buf());
+        assert!(!state.execution_busy());
+        assert!(state.authority.owner().is_none());
+        state.runtime_unknown = true;
+        assert!(state.execution_busy());
+        state.runtime_unknown = false;
+        state
+            .authority
+            .acquire(PeerIdentity::new("test-user".into(), 42, 1), Instant::now())
+            .unwrap();
+        assert!(state.execution_busy());
     }
 
     #[tokio::test]

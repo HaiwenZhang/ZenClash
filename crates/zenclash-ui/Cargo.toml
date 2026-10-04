@@ -53,3 +53,4 @@ objc2-foundation = { workspace = true, features = [
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
+zenclash-core = { path = "../zenclash-core", features = ["test-support"] }

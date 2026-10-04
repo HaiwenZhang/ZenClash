@@ -5,6 +5,9 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 chrono.workspace = true
 cron.workspace = true

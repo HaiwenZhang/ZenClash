@@ -91,6 +91,7 @@ fn descriptor(pid: u32, controller: PathBuf, secret: String) -> Kernel {
     // including the same-handle native PID check, uses production methods.
     Kernel {
         child: None,
+        execution: None,
         pid,
         client: NativeController::new(controller.clone(), pid, secret.clone()),
         secret,

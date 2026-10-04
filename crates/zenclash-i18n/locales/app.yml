@@ -194,6 +194,33 @@ app:
         en: "The pre-quit core stop task ended unexpectedly: %{error}"
 
 startup:
+  initializing:
+    zh-CN: 正在初始化内核…
+    en: Initializing core…
+  local_tun_authority:
+    zh-CN: 直接运行内核的 TUN 权限取决于当前进程的管理员或 root 权限；普通用户通过后台服务使用 TUN。
+    en: Local TUN requires an elevated or root process; ordinary users use TUN through the service.
+  tun_disabled_missing_service:
+    zh-CN: 后台服务未安装且当前进程权限不足，已关闭保存的 TUN 设置。普通代理可继续使用。
+    en: The service is missing and this process lacks TUN privileges. Saved TUN was disabled; ordinary proxying remains available.
+  local_fallback:
+    zh-CN: 后台服务不可用，已确认没有服务内核占用，改为直接运行内核。
+    en: The service is unavailable. Its kernel slot was confirmed idle; the core is running locally.
+  local_choice:
+    zh-CN: 本次会话已选择直接运行内核。
+    en: This session is running the core locally by your choice.
+  tun_disabled_local_choice:
+    zh-CN: 已选择直接运行内核；当前进程权限不足，已关闭保存的 TUN 设置。
+    en: Local execution was selected. Saved TUN was disabled because this process lacks native privileges.
+  local_tun_disabled:
+    zh-CN: 当前普通内核运行时临时关闭 TUN，保存的 TUN 意图保留。Windows 会在等待期间尝试交接给就绪服务。
+    en: TUN is temporarily off for this ordinary core; saved TUN intent is retained. Windows will attempt handoff while waiting for service readiness.
+  continue_local:
+    zh-CN: 直接运行内核
+    en: Run core locally
+  continue_local_description:
+    zh-CN: 重启后直接运行普通内核。权限不足时不启用 TUN；后台服务安装会保留。
+    en: Restart with a local core. TUN stays off without native privileges; the service installation is retained.
   service_saved_tun:
     zh-CN: 后台服务缺失，已保存的配置启用了 TUN。恢复后台服务后重新启动 ZenClash。
     en: The service is missing and the saved configuration enables TUN. Restore the service, then restart ZenClash.

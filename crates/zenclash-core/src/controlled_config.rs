@@ -345,6 +345,8 @@ impl ControlledConfigUpdate {
 /// recursively merged over whichever profile is active.
 #[derive(Clone, Debug)]
 pub struct ControlledConfigStore {
+    startup_tun_disabled: bool,
+    runtime_tun_policy: Option<std::sync::Weak<crate::client::ControllerBinding>>,
     root: PathBuf,
     write_access: DataWriteAccess,
     transaction: Arc<Mutex<()>>,
@@ -371,6 +373,8 @@ impl ControlledConfigStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
         Self {
+            startup_tun_disabled: false,
+            runtime_tun_policy: None,
             write_access: DataWriteAccess::new(&root),
             transaction: shared_transaction(&root),
             root,
@@ -381,6 +385,54 @@ impl ControlledConfigStore {
             #[cfg(test)]
             mode_patch_gate: None,
         }
+    }
+
+    /// Creates a startup-only projection for an unprivileged ordinary child.
+    /// Saved TUN intent is retained for a later privileged service handover.
+    #[must_use]
+    pub fn without_startup_tun(&self) -> Self {
+        Self {
+            startup_tun_disabled: true,
+            ..self.clone()
+        }
+    }
+
+    /// Projects ordinary Mihomo updates with TUN off until a privileged owner is published.
+    /// A weak binding observation prevents configuration stores retaining old owners.
+    #[must_use]
+    pub fn with_runtime_tun_policy(&self, client: &MihomoClient) -> Self {
+        Self {
+            runtime_tun_policy: Some(Arc::downgrade(&client.binding)),
+            ..self.clone()
+        }
+    }
+
+    pub(crate) fn for_service_runtime(&self) -> Self {
+        Self {
+            startup_tun_disabled: false,
+            runtime_tun_policy: None,
+            ..self.clone()
+        }
+    }
+
+    fn startup_payload(&self, payload: String) -> ControlledConfigResult<String> {
+        let ordinary = self
+            .runtime_tun_policy
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .is_some_and(|binding| {
+                let runtime = binding.descriptor();
+                runtime.kind() == CoreKind::Mihomo
+                    && runtime.backend() == crate::CoreRuntimeBackend::Local
+                    && !zenclash_service::current_process_elevated()
+            });
+        if !self.startup_tun_disabled && !ordinary {
+            return Ok(payload);
+        }
+        Ok(crate::profile::merge_payload_patch(
+            &payload,
+            serde_yaml::from_str("tun: {enable: false}")?,
+        )?)
     }
 
     pub(crate) async fn acquire_write_lease(&self) -> ControlledConfigResult<DataWriteLease> {
@@ -439,7 +491,7 @@ impl ControlledConfigStore {
     /// read, parsed, merged, validated, or serialized.
     pub fn effective_payload(&self, profile: impl AsRef<Path>) -> ControlledConfigResult<String> {
         let patch = self.load()?;
-        Ok(merge_profile_patch(profile.as_ref(), patch)?)
+        self.startup_payload(merge_profile_patch(profile.as_ref(), patch)?)
     }
 
     /// Reads the untouched UTF-8 source profile for diagnostics and previews.
@@ -490,7 +542,7 @@ impl ControlledConfigStore {
         overrides: &[PathBuf],
     ) -> ControlledConfigResult<String> {
         let payload = self.effective_payload(profile)?;
-        Ok(merge_payload_overrides(&payload, overrides)?)
+        self.startup_payload(merge_payload_overrides(&payload, overrides)?)
     }
 
     fn effective_source_with_overrides(
@@ -515,7 +567,7 @@ impl ControlledConfigStore {
                 return Ok(update.next_payload);
             }
         };
-        Ok(merge_payload_overrides(&payload, overrides)?)
+        self.startup_payload(merge_payload_overrides(&payload, overrides)?)
     }
 
     /// Builds the final effective profile as JSON after ordered YAML overrides.
@@ -640,8 +692,9 @@ impl ControlledConfigStore {
     }
 
     fn apply_session_listener_fallbacks(&self, payload: &str) -> ControlledConfigResult<String> {
+        let payload = self.startup_payload(payload.to_owned())?;
         let session = self.session_listener_fallbacks.lock();
-        let payload = apply_session_fallbacks(payload, &session)
+        let payload = apply_session_fallbacks(&payload, &session)
             .map_err(ControlledConfigError::ListenerFallback)?;
         if payload.len() > MAX_PROFILE_BYTES {
             return Err(ControlledConfigError::TooLarge);
@@ -2217,10 +2270,7 @@ impl ControlledConfigStore {
                 attempted,
                 cause: ControlledConfigError::Transaction(zenclash_i18n::text_with(
                     "backup.errors.exact_runtime_restore_failed",
-                    &[
-                        ("error", error.to_string()),
-                        ("cache", cache_rollback),
-                    ],
+                    &[("error", error.to_string()), ("cache", cache_rollback)],
                 )),
             });
         }

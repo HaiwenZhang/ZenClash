@@ -3,7 +3,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 /// Wire protocol version; independent from the installation metadata schema.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Service handshake information, containing no client-supplied identity.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -76,6 +76,7 @@ pub(crate) enum Request {
         protocol_version: u32,
     },
     Acquire {},
+    Inspect {},
     Session {
         proof: SessionProof,
         sequence: u64,
@@ -91,6 +92,7 @@ impl fmt::Debug for Request {
                 .field("protocol_version", protocol_version)
                 .finish(),
             Self::Acquire {} => f.write_str("Acquire"),
+            Self::Inspect {} => f.write_str("Inspect"),
             Self::Session {
                 proof,
                 sequence,
@@ -467,6 +469,9 @@ pub enum RuntimeCandidatePhase {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Response {
+    Inspection {
+        busy: bool,
+    },
     Hello {
         info: ProtocolInfo,
     },
@@ -508,6 +513,7 @@ pub(crate) enum Response {
 impl fmt::Debug for Response {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Inspection { busy } => f.debug_struct("Inspection").field("busy", busy).finish(),
             Self::Hello { info } => f.debug_struct("Hello").field("info", info).finish(),
             Self::Acquired {
                 proof,
@@ -675,7 +681,7 @@ mod tests {
 
     #[test]
     fn atomic_maintenance_requires_protocol_three_and_rejects_legacy_helpers() {
-        assert_eq!(ProtocolInfo::current().protocol_version, 3);
+        assert_eq!(ProtocolInfo::current().protocol_version, 4);
         for version in [1, 2] {
             let legacy = ProtocolInfo {
                 protocol_version: version,

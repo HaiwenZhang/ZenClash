@@ -195,6 +195,12 @@ pub struct RuntimeConfigApplied;
 
 impl EventEmitter<RuntimeConfigApplied> for RuntimePage {}
 
+/// Explicit session choice to restart with an ordinary local kernel.
+#[derive(Clone, Copy, Debug)]
+pub struct ContinueLocalRequested;
+
+impl EventEmitter<ContinueLocalRequested> for RuntimePage {}
+
 /// Event emitted after persisted application preference fields become authoritative.
 #[derive(Clone, Debug)]
 pub struct PreferencesRestored {

@@ -67,6 +67,15 @@ impl ZenClashApp {
     }
 
     pub(super) fn begin_quit(&mut self, restart: Option<PathBuf>, cx: &mut Context<Self>) {
+        self.begin_quit_mode(restart, false, cx);
+    }
+
+    pub(super) fn begin_quit_mode(
+        &mut self,
+        restart: Option<PathBuf>,
+        continue_local: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.quit_state == QuitState::InProgress {
             return;
         }
@@ -108,7 +117,7 @@ impl ZenClashApp {
                     return;
                 }
                 if let Some(executable) = restart {
-                    *this.restart_after_exit.lock() = Some(executable);
+                    *this.restart_after_exit.lock() = Some(super::RestartRequest { executable, continue_local });
                 }
                 cx.quit();
             });

@@ -16,6 +16,8 @@ impl RuntimePage {
     ) -> gpui_kit::Div {
         let authorization = self.core_session.runtime_descriptor().backend()
             == CoreRuntimeBackend::Local
+            && !matches!(&self.data, super::super::RuntimeData::Tun { permissions, .. }
+                if permissions.is_fresh() && permissions.value().is_some_and(|status| status.granted()))
             && state
                 .health()
                 .is_none_or(|health| health.kind() != ServiceHealthKind::Ready);
@@ -25,6 +27,53 @@ impl RuntimePage {
             .flex_wrap()
             .gap_2()
             .p_4()
+            .children(
+                state
+                    .health()
+                    .filter(|health| {
+                        matches!(
+                            health.kind(),
+                            ServiceHealthKind::Stopped
+                                | ServiceHealthKind::RepairRequired
+                                | ServiceHealthKind::Incompatible
+                                | ServiceHealthKind::Unknown
+                        )
+                    })
+                    .filter(|_| {
+                        self.core_session.runtime_descriptor().backend()
+                            != CoreRuntimeBackend::Service
+                    })
+                    .map(|_| {
+                        Button::new("continue-local")
+                            .label(zenclash_i18n::text("startup.continue_local"))
+                            .outline()
+                            .disabled(self.core_busy() || state.is_busy() || pending.is_some())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                if window.has_active_dialog(cx) {
+                                    return;
+                                }
+                                if window.focused(cx).is_none() {
+                                    window.focus(&this.focus_handle, cx);
+                                }
+                                let page = cx.entity().downgrade();
+                                window.open_alert_dialog(cx, move |dialog, _, _| {
+                                    let page = page.clone();
+                                    dialog
+                                        .confirm()
+                                        .title(zenclash_i18n::text("startup.continue_local"))
+                                        .description(zenclash_i18n::text(
+                                            "startup.continue_local_description",
+                                        ))
+                                        .on_ok(move |_, _, cx| {
+                                            let _ = page.update(cx, |_, cx| {
+                                                cx.emit(super::super::ContinueLocalRequested)
+                                            });
+                                            true
+                                        })
+                                });
+                            }))
+                    }),
+            )
             .children(pending.map(|version| {
                 Button::new("confirm-service-tun")
                     .label(zenclash_i18n::text("profiles.recovery.confirm"))
@@ -83,6 +132,12 @@ impl RuntimePage {
                 .service_state()
                 .is_some_and(|state| state.is_busy())
         {
+            return;
+        }
+        if self.core_session.runtime_descriptor().backend() == CoreRuntimeBackend::Local
+            && zenclash_core::current_process_elevated()
+        {
+            self.apply_tun_plan(true, zenclash_i18n::text("tun.notices.enabled"), cx);
             return;
         }
         if self.page == Page::Home {

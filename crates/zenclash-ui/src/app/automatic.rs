@@ -75,6 +75,68 @@ impl SourceScanner {
 }
 
 impl ZenClashApp {
+    pub(super) fn start_service_handoff(&self, cx: &mut Context<Self>) {
+        if !cfg!(windows)
+            || !self.core_session.is_managed()
+            || self.core_session.runtime_descriptor().backend()
+                != zenclash_core::CoreRuntimeBackend::Local
+        {
+            return;
+        }
+        let core = self.core_session.clone();
+        let capture = self.traffic_capture.clone();
+        let profiles = self.profile_service.clone();
+        let runtime = self.runtime.clone();
+        let generation = core.generation();
+        let revision = capture.intent_revision();
+        cx.spawn(async move |this, cx| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(120);
+            while std::time::Instant::now() < deadline {
+                if core.is_shutting_down()
+                    || core.generation() != generation
+                    || capture.intent_revision() != revision
+                    || core.runtime_descriptor().backend()
+                        != zenclash_core::CoreRuntimeBackend::Local
+                {
+                    return;
+                }
+                if runtime
+                    .spawn(zenclash_core::startup_service_health())
+                    .await
+                    .ok()
+                    == Some(zenclash_core::ServiceHealthKind::Ready)
+                {
+                    let Ok(request) = profiles.request_service_tun() else {
+                        return;
+                    };
+                    // No authorization consent: a ready service can be used, but a
+                    // concurrent stop cannot turn an automatic handoff into a prompt.
+                    let result = runtime
+                        .spawn(async move { profiles.enable_service_tun(request).await })
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        if let Err(error) = result
+                            .map_err(|error| error.to_string())
+                            .and_then(|result| result)
+                        {
+                            this.runtime_page.update(cx, |page, cx| {
+                                page.report_system_proxy_reconcile_error(&error, cx)
+                            });
+                        }
+                        this.refresh_tray_menu(cx);
+                        cx.notify();
+                    });
+                    return;
+                }
+                runtime
+                    .spawn(async { tokio::time::sleep(Duration::from_secs(2)).await })
+                    .await
+                    .ok();
+            }
+        })
+        .detach();
+    }
+
     pub(super) fn start_automatic_runtime(&self, cx: &mut Context<Self>) {
         if !self.core_session.is_managed() {
             return;

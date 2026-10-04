@@ -36,6 +36,8 @@ const QUIET_MEOW_PROTOCOL_LOGS: &str = "tokio_tungstenite=warn,tungstenite=warn"
 /// Owned managed Mihomo child process with bounded stdout/stderr history.
 pub struct MihomoProcess {
     child: Mutex<Option<Child>>,
+    execution: Mutex<Option<zenclash_service::CoreExecutionGuard>>,
+    isolated_test_child: bool,
     logs: Arc<RwLock<VecDeque<String>>>,
     last_exit_reason: RwLock<Option<String>>,
     config: MihomoLaunchConfig,
@@ -107,6 +109,8 @@ impl MihomoProcess {
     pub fn prepare_stopped(config: MihomoLaunchConfig) -> Arc<Self> {
         Arc::new(Self {
             child: Mutex::new(None),
+            execution: Mutex::new(None),
+            isolated_test_child: false,
             logs: Arc::new(RwLock::new(VecDeque::new())),
             last_exit_reason: RwLock::new(None),
             config,
@@ -123,6 +127,24 @@ impl MihomoProcess {
     /// Returns an error when the data directory, child process, or collector
     /// threads cannot be created. A partially started child is terminated.
     pub fn spawn(config: MihomoLaunchConfig) -> MihomoResult<Arc<Self>> {
+        Self::spawn_inner(config, false)
+    }
+
+    /// Starts a synthetic UI test child outside the production kernel slot.
+    /// Never used by application startup, service handover or real-core acceptance.
+    ///
+    /// # Errors
+    /// Reports the same child/configuration failures as ordinary spawning.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn spawn_isolated_for_test(config: MihomoLaunchConfig) -> MihomoResult<Arc<Self>> {
+        Self::spawn_inner(config, true)
+    }
+
+    fn spawn_inner(
+        config: MihomoLaunchConfig,
+        isolated_test_child: bool,
+    ) -> MihomoResult<Arc<Self>> {
         let _write_lease =
             crate::data_coordinator::DataWriteLease::shared(launch_write_scopes(&config));
         let payload = local_launch_payload(&config)?;
@@ -131,10 +153,13 @@ impl MihomoProcess {
             .map(|payload| input::snapshot(&config.home_dir, payload))
             .transpose()?;
         let logs = Arc::new(RwLock::new(VecDeque::new()));
+        let execution = reserve_execution(config.kind, isolated_test_child)?;
         let child = spawn_child(&config, logs.clone(), input, None)?;
 
         Ok(Arc::new(Self {
             child: Mutex::new(Some(child)),
+            execution: Mutex::new(execution),
+            isolated_test_child,
             logs,
             last_exit_reason: RwLock::new(None),
             config,
@@ -225,6 +250,10 @@ impl MihomoProcess {
             return Err(MihomoError::Process("内核重启在配置预检后已取消".into()));
         }
         stop_child(&mut child_slot)?;
+        let mut execution = self.execution.lock();
+        if execution.is_none() {
+            *execution = reserve_execution(self.kind(), self.isolated_test_child)?;
+        }
         if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
             return Err(MihomoError::Process("内核重启在创建子进程前已取消".into()));
         }
@@ -501,7 +530,9 @@ impl MihomoProcess {
     /// Returns an error when status inspection, termination, or waiting fails.
     pub fn stop(&self) -> MihomoResult<()> {
         let mut child = self.child.lock();
-        stop_child(&mut child)
+        stop_child(&mut child)?;
+        self.execution.lock().take();
+        Ok(())
     }
 
     /// Stops and reaps the managed child without blocking an async caller.
@@ -727,8 +758,35 @@ impl Drop for MihomoProcess {
         }
         if let Err(error) = self.stop() {
             tracing::warn!(%error, "failed to stop Mihomo while dropping process owner");
+            // Never advertise a free kernel slot while termination is unconfirmed.
+            if let Some(guard) = self.execution.get_mut().take()
+                && let Some(mut child) = self.child.get_mut().take()
+            {
+                guard.release_after_exit(move || match child.try_wait() {
+                    Ok(Some(_)) => true,
+                    Ok(None) => {
+                        let _ = child.kill();
+                        child.wait().is_ok()
+                    }
+                    Err(_) => false,
+                });
+            }
         }
     }
+}
+
+fn reserve_execution(
+    kind: CoreKind,
+    isolated_test_child: bool,
+) -> MihomoResult<Option<zenclash_service::CoreExecutionGuard>> {
+    // Unit fixtures intentionally run many isolated synthetic children in parallel.
+    // Native reservation itself is exercised in zenclash-service and real-core tests.
+    if kind != CoreKind::Mihomo || cfg!(test) || isolated_test_child {
+        return Ok(None);
+    }
+    zenclash_service::CoreExecutionGuard::acquire()
+        .map(Some)
+        .map_err(|error| MihomoError::Process(error.to_string()))
 }
 
 fn collect_output(

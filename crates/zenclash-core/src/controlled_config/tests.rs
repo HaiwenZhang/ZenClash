@@ -32,6 +32,105 @@ fn write_profile(root: &Path) -> PathBuf {
     path
 }
 
+#[test]
+fn startup_tun_projection_overrides_yaml_layers_without_erasing_saved_intent() {
+    let root = test_root("startup-tun-projection");
+    let profile = write_profile(&root);
+    fs::write(&profile, "tun: {enable: true}\nmode: rule\n").unwrap();
+    let yaml_override = root.join("user.yaml");
+    fs::write(&yaml_override, "tun: {enable: true, stack: mixed}\n").unwrap();
+    let store = ControlledConfigStore::new(root.join("store"));
+    let projected = store.without_startup_tun();
+    let payload = projected
+        .effective_with_overrides(&profile, std::slice::from_ref(&yaml_override))
+        .unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&payload).unwrap();
+    assert_eq!(yaml["tun"]["enable"].as_bool(), Some(false));
+    assert_eq!(yaml["tun"]["stack"].as_str(), Some("mixed"));
+    assert!(
+        crate::tun_admission::yaml_enables_tun(
+            &store
+                .effective_with_overrides(&profile, &[yaml_override])
+                .unwrap()
+        )
+        .unwrap()
+    );
+    assert!(
+        fs::read_to_string(&profile)
+            .unwrap()
+            .contains("enable: true")
+    );
+    assert_eq!(store.load_json().unwrap(), serde_json::json!({}));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn ordinary_runtime_updates_keep_tun_projection_and_service_preparation_retains_intent() {
+    let root = test_root("runtime-tun-projection");
+    let profile = write_profile(&root);
+    fs::write(&profile, "tun: {enable: true}\nmode: rule\n").unwrap();
+    let binary = root.join(if cfg!(windows) {
+        "mihomo.exe"
+    } else {
+        "mihomo"
+    });
+    fs::write(&binary, b"synthetic stopped owner; never executed").unwrap();
+    let process = crate::MihomoProcess::prepare_stopped(crate::MihomoLaunchConfig {
+        kind: CoreKind::Mihomo,
+        binary,
+        config_file: profile.clone(),
+        home_dir: root.join("home"),
+        endpoint: MihomoEndpoint::default(),
+        controller_override: None,
+    });
+    let client = MihomoClient::from_process(process).unwrap();
+    let store = ControlledConfigStore::new(root.join("store")).with_runtime_tun_policy(&client);
+    let ordinary = store
+        .prepare_service_config_update(
+            profile.clone(),
+            Some(serde_json::json!({"mode":"direct"})),
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::tun_admission::yaml_enables_tun(ordinary.next_payload()).unwrap(),
+        zenclash_service::current_process_elevated()
+    );
+    let service = store
+        .for_service_runtime()
+        .prepare_service_config_update(
+            profile,
+            Some(serde_json::json!({"mode":"direct"})),
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(crate::tun_admission::yaml_enables_tun(service.next_payload()).unwrap());
+    assert!(
+        store
+            .runtime_tun_policy
+            .as_ref()
+            .unwrap()
+            .upgrade()
+            .is_some()
+    );
+    assert_eq!(store.load_json().unwrap(), serde_json::json!({}));
+    drop(client);
+    assert!(
+        store
+            .runtime_tun_policy
+            .as_ref()
+            .unwrap()
+            .upgrade()
+            .is_none(),
+        "projection must not keep runtime owners alive"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[tokio::test]
 async fn local_recovery_save_conflict_restores_cache_and_preserves_external_patch() {
     let root = test_root("local-recovery-save-conflict");

@@ -944,7 +944,11 @@ impl RuntimePage {
         {
             return;
         }
-        if plan == CapturePlan::Tun {
+        if plan == CapturePlan::Tun
+            && !(self.core_session.runtime_descriptor().backend()
+                == zenclash_core::CoreRuntimeBackend::Local
+                && zenclash_core::current_process_elevated())
+        {
             self.request_service_tun(window, cx);
             return;
         }
