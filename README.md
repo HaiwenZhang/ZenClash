@@ -81,6 +81,8 @@ cargo test --workspace --all-features --locked
 
 完整 Clippy 规则见 [CI 工作流](.github/workflows/ci.yml)。真实内核集成测试默认忽略，需要提供内核路径后显式运行。
 
+本轮实机测试的范围、问题修复和未验证事项见 [Windows 验收记录（2026-10-04）](docs/development/windows-acceptance-2026-10-04.md)。
+
 更多开发资料：[打包脚本](scripts) · [开发与验收文档](docs/development) · [项目规约](AGENTS.md) · [GPUI Kit 迁移与 Windows 验收](docs/development/gpui-kit-migration.md)。
 
 ## 数据与隐私

@@ -685,6 +685,25 @@ impl RuntimePage {
         .detach();
     }
 
+    pub(super) fn restore_page_focus(&self, page: Page, cx: &mut Context<Self>) {
+        let generation = self.navigation_generation;
+        let entity = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            let _ = entity.update(cx, |this, cx| {
+                if this.page != page
+                    || this.navigation_generation != generation
+                    || !this.ui_visibility.page_presented
+                {
+                    return;
+                }
+                let focus = this.focus_handle.clone();
+                let _ = cx.update_window(this.window_handle, |_, window, cx| {
+                    focus.focus(window, cx);
+                });
+            });
+        });
+    }
+
     /// Switches the active tab and invalidates results from older page tasks.
     pub fn switch_to(&mut self, page: Page, cx: &mut Context<Self>) {
         if self.page == page {
@@ -708,6 +727,19 @@ impl RuntimePage {
             self.release_home_presentation();
         }
         self.navigation_generation = self.navigation_generation.wrapping_add(1);
+        let generation = self.navigation_generation;
+        let page = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            let _ = page.update(cx, |page, cx| {
+                if page.navigation_generation != generation || !page.ui_visibility.page_presented {
+                    return;
+                }
+                let focus = page.focus_handle.clone();
+                let _ = cx.update_window(page.window_handle, |_, window, cx| {
+                    focus.focus(window, cx);
+                });
+            });
+        });
         self.data = RuntimeData::Empty;
         self.connections.release_presentation();
         self.rules.release_presentation();

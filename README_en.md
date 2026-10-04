@@ -81,6 +81,8 @@ cargo test --workspace --all-features --locked
 
 See the [CI workflow](.github/workflows/ci.yml) for the full Clippy rules. Real-core integration tests are ignored by default and must be run explicitly with a core path configured.
 
+See the [Windows acceptance record (2026-10-04)](docs/development/windows-acceptance-2026-10-04.md) for the scope, fixes, and unverified items from the current device tests (in Chinese).
+
 Further reading: [packaging scripts](scripts) · [development and validation notes](docs/development) · [project guidelines](AGENTS.md) · [GPUI Kit migration and Windows acceptance](docs/development/gpui-kit-migration.md). The development notes and guidelines are primarily in Chinese.
 
 ## Data and Privacy

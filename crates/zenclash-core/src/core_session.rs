@@ -1444,6 +1444,7 @@ impl CoreSession {
             )))
         })?;
         let mut local_recovery = None;
+        let mut recovery_restart = None;
         if let (Some(crate::owned_core::OwnedCore::Local(local)), Some(bundle)) =
             (client.owned_core(), snapshot.service_bundle.as_ref())
         {
@@ -1453,6 +1454,15 @@ impl CoreSession {
             let active = (launch == root.join("slot0/runtime.yaml")
                 || launch == root.join("slot1/runtime.yaml"))
             .then_some(launch);
+            if active.is_none() {
+                if local.kind() != CoreKind::Mihomo
+                    || local.launch_config().config_file != store.runtime_path()
+                {
+                    return Err(MihomoError::StaleBinding.into());
+                }
+                crate::verify_ordinary_local_executable(&local.launch_config().binary)?;
+                recovery_restart = Some(local.clone());
+            }
             let mut state = self
                 .local_backup_recovery
                 .read()
@@ -1478,9 +1488,12 @@ impl CoreSession {
                 path
             };
             *self.local_backup_recovery.write() = Some(state);
+            local.set_recovery_asset_root(Some(root));
             local_recovery = Some(path);
         }
-        let process = if self.kind.capabilities().full_config_reload {
+        let process = if recovery_restart.is_some() {
+            recovery_restart
+        } else if self.kind.capabilities().full_config_reload {
             None
         } else {
             Some(self.local_process(client)?)

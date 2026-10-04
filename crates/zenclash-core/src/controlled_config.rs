@@ -2182,13 +2182,13 @@ impl ControlledConfigStore {
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
         let mut applied_runtime = None;
         client.ensure_binding_current()?;
-        let (applied, attempted) = if let Some(process) = process {
+        let (applied, attempted) = if let Some(process) = &process {
             let attempted = !cancelled.load(std::sync::atomic::Ordering::Acquire);
             (
                 process
                     .restart_and_wait_until_with_lease(
                         std::time::Duration::from_secs(20),
-                        Some(cancelled),
+                        Some(cancelled.clone()),
                         &write_lease,
                     )
                     .await,
@@ -2208,14 +2208,18 @@ impl ControlledConfigStore {
             (applied, attempted)
         };
         if let Err(error) = applied {
-            let cache_rollback = rollback_runtime_cache(cache).await;
+            let cache_rollback = if let Some(process) = process {
+                rollback_cache_and_restart(cache, process, &write_lease, Some(cancelled)).await
+            } else {
+                result_label(rollback_runtime_cache(cache).await)
+            };
             return Err(RuntimeMutationError {
                 attempted,
                 cause: ControlledConfigError::Transaction(zenclash_i18n::text_with(
                     "backup.errors.exact_runtime_restore_failed",
                     &[
                         ("error", error.to_string()),
-                        ("cache", result_label(cache_rollback)),
+                        ("cache", cache_rollback),
                     ],
                 )),
             });

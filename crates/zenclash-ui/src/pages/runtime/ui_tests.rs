@@ -180,6 +180,74 @@ pub(super) fn open(
     (handle.into(), page.unwrap())
 }
 
+#[gpui_kit::test]
+fn collapsing_subscription_form_restores_focus(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (window, page) = open(cx, &fixture, Page::Profiles);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("toggle-add-subscription", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(page.read(cx).profiles.forms.adding_subscription);
+        let input = page
+            .read(cx)
+            .profiles
+            .forms
+            .subscription_name
+            .focus_handle(cx);
+        window.focus(&input, cx);
+        window.render_frame(cx);
+        assert!(input.is_focused(window));
+        window.click("toggle-add-subscription", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(!page.read(cx).profiles.forms.adding_subscription);
+        assert!(page.read(cx).focus_handle.is_focused(window));
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn switching_pages_restores_focus_after_a_subscription_input_disappears(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (window, page) = open(cx, &fixture, Page::Profiles);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("toggle-add-subscription", cx);
+        let input = page
+            .read(cx)
+            .profiles
+            .forms
+            .subscription_name
+            .focus_handle(cx);
+        window.focus(&input, cx);
+        window.render_frame(cx);
+        assert!(input.is_focused(window));
+        page.update(cx, |page, cx| page.switch_to(Page::Settings, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(page.read(cx).focus_handle.is_focused(window));
+        window.press("tab", cx);
+        assert!(window.focused(cx).is_some());
+    })
+    .unwrap();
+    cx.update_window(window, |_, window, _| window.remove_window())
+        .unwrap();
+}
+
 // Ordinary owned children exercise UI binding behavior, not Mihomo or TUN acceptance.
 fn owned_ui_children(fixture: &Fixture) -> [Arc<MihomoProcess>; 2] {
     let source = fixture.root.join("ui-owned-child.rs");

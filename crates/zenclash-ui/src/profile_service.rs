@@ -1631,10 +1631,25 @@ mod tests {
         ));
         let store = ProfileStore::new(root.join("profiles")).unwrap();
         let source = root.join("source.yaml");
-        std::fs::write(&source, "mixed-port: 7890\nrules: [MATCH,DIRECT]\n").unwrap();
+        let first_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let second_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let ports = [
+            first_port.local_addr().unwrap().port(),
+            second_port.local_addr().unwrap().port(),
+        ];
+        drop((first_port, second_port));
+        std::fs::write(
+            &source,
+            format!("mixed-port: {}\nrules: [MATCH,DIRECT]\n", ports[0]),
+        )
+        .unwrap();
         let first = store.import_local(&source).unwrap();
         let path = store.activate(&first.id).unwrap();
-        std::fs::write(&source, "mixed-port: 7891\nrules: [MATCH,REJECT]\n").unwrap();
+        std::fs::write(
+            &source,
+            format!("mixed-port: {}\nrules: [MATCH,REJECT]\n", ports[1]),
+        )
+        .unwrap();
         let second = store.import_local(&source).unwrap();
         let overrides = YamlOverrideStore::new(root.join("overrides")).unwrap();
         let controlled = ControlledConfigStore::new(root.join("controlled"));

@@ -289,6 +289,7 @@ impl RuntimePage {
                     Ok(outcome) => {
                         this.profiles.forms.subscription_error = None;
                         this.profiles.forms.adding_subscription = false;
+                        this.restore_page_focus(Page::Profiles, cx);
                         this.apply_profile_activation(
                             outcome,
                             |name| {

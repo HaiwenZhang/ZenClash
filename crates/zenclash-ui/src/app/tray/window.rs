@@ -96,6 +96,19 @@ impl ZenClashApp {
             self.runtime_page
                 .update(cx, |runtime_page, cx| runtime_page.set_presented(false, cx));
             self.refresh_visible_proxies(cx);
+            if previous_page != page {
+                let app = cx.entity().downgrade();
+                cx.defer(move |cx| {
+                    let _ = app.update(cx, |app, cx| {
+                        if app.current_page == Page::Proxies {
+                            let focus = app.focus_handle.clone();
+                            let _ = cx.update_window(app.main_window, |_, window, cx| {
+                                focus.focus(window, cx);
+                            });
+                        }
+                    });
+                });
+            }
         } else {
             if previous_page == Page::Proxies {
                 self.refresh_visible_proxies(cx);

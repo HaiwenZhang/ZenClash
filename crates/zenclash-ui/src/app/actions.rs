@@ -13,8 +13,16 @@ impl ZenClashApp {
         self.begin_quit(None, cx);
     }
 
-    fn update_preferences(&mut self, mutate: impl Fn(&mut AppPreferences) + Send + 'static) {
+    fn update_preferences(
+        &mut self,
+        mutate: impl Fn(&mut AppPreferences) + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
         mutate(&mut self.preferences);
+        let preferences = self.preferences.clone();
+        self.runtime_page.update(cx, |page, cx| {
+            page.preferences_restored_from_app(preferences, cx);
+        });
         let Some(store) = self.preferences_store.clone() else {
             return;
         };
@@ -211,9 +219,12 @@ impl ZenClashApp {
         cx: &mut Context<Self>,
     ) {
         apply_zen_theme(ThemeMode::Light, Some(window), cx);
-        self.update_preferences(|preferences| {
-            preferences.appearance = AppearancePreference::Light;
-        });
+        self.update_preferences(
+            |preferences| {
+                preferences.appearance = AppearancePreference::Light;
+            },
+            cx,
+        );
         cx.notify();
     }
 
@@ -224,9 +235,12 @@ impl ZenClashApp {
         cx: &mut Context<Self>,
     ) {
         apply_zen_theme(ThemeMode::from(window.appearance()), Some(window), cx);
-        self.update_preferences(|preferences| {
-            preferences.appearance = AppearancePreference::System;
-        });
+        self.update_preferences(
+            |preferences| {
+                preferences.appearance = AppearancePreference::System;
+            },
+            cx,
+        );
         cx.notify();
     }
 
@@ -237,9 +251,12 @@ impl ZenClashApp {
         cx: &mut Context<Self>,
     ) {
         apply_zen_theme(ThemeMode::Dark, Some(window), cx);
-        self.update_preferences(|preferences| {
-            preferences.appearance = AppearancePreference::Dark;
-        });
+        self.update_preferences(
+            |preferences| {
+                preferences.appearance = AppearancePreference::Dark;
+            },
+            cx,
+        );
         cx.notify();
     }
 
@@ -254,7 +271,7 @@ impl ZenClashApp {
         {
             tracing::warn!(%error, "failed to show native traffic tray");
         }
-        self.update_preferences(|preferences| preferences.traffic_tray_visible = true);
+        self.update_preferences(|preferences| preferences.traffic_tray_visible = true, cx);
         cx.notify();
     }
 
@@ -269,7 +286,7 @@ impl ZenClashApp {
         {
             tracing::warn!(%error, "failed to hide native traffic tray");
         }
-        self.update_preferences(|preferences| preferences.traffic_tray_visible = false);
+        self.update_preferences(|preferences| preferences.traffic_tray_visible = false, cx);
         cx.notify();
     }
 

@@ -33,6 +33,9 @@ impl RuntimePage {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.profiles.forms.adding_subscription =
                             !this.profiles.forms.adding_subscription;
+                        if !this.profiles.forms.adding_subscription {
+                            this.restore_page_focus(super::super::Page::Profiles, cx);
+                        }
                         cx.notify();
                     })),
             )
