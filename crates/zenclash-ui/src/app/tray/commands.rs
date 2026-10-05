@@ -167,7 +167,7 @@ impl ZenClashApp {
             && self.profile_service.service_state().is_some_and(|state| {
                 state
                     .health()
-                    .is_none_or(|health| health.kind() != zenclash_core::ServiceHealthKind::Ready)
+                    .is_none_or(|health| *health != zenclash_core::ServiceHealthKind::Ready)
             })
         {
             // System authorization is an explicit window decision. Retain the

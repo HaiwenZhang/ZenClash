@@ -36,6 +36,7 @@ impl Default for SettingsNavigationState {
 mod app_update;
 pub(super) mod backup;
 mod core_management;
+mod legal;
 pub(in crate::pages::runtime) use app_update::AppUpdateUiState;
 pub(in crate::pages::runtime) use core_management::CoreManagementUiState;
 
@@ -95,6 +96,7 @@ impl RuntimePage {
             .min_w_0()
             .gap_4()
             .child(self.render_version_info(theme))
+            .child(self.render_license_info(theme, cx))
             .child(self.render_app_update(theme, cx))
             .child(self.render_advanced_tools(theme))
             .child(self.render_local_data_status(theme));

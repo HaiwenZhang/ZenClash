@@ -1276,8 +1276,8 @@ pub(in crate::pages::runtime) mod tests {
             client,
             runtime: runtime.handle().clone(),
             traffic_monitor: traffic,
-            log_monitor: logs.clone(),
-            operational_status: status.clone(),
+            log_monitor: logs,
+            operational_status: status,
             traffic_capture: TrafficCaptureSession::new(core, controlled.clone(), None, None),
             profile_path: None,
             controlled_config_store: controlled,
@@ -1290,6 +1290,10 @@ pub(in crate::pages::runtime) mod tests {
         }
     }
 
+    #[expect(
+        clippy::future_not_send,
+        reason = "GPUI test contexts remain on the foreground thread"
+    )]
     pub(in crate::pages::runtime) async fn settle_log_preferences(
         cx: &mut gpui_kit::TestAppContext,
         runtime: &tokio::runtime::Runtime,

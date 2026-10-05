@@ -2,7 +2,7 @@
 
 #![deny(missing_docs)]
 
-pub use zenclash_service::{check_sidecar_available, current_process_elevated};
+pub use zenclash_service_integration::{check_sidecar_available, current_process_elevated};
 
 mod app_update;
 mod autostart;
@@ -16,7 +16,8 @@ pub use service_manager::{
     PreparedServiceBackupConfig, ServiceConfigOutcome, ServiceHealthKind,
     ServiceMaintenancePreparation, ServiceMaintenanceRecoveryOutcome, ServiceMaintenanceRequest,
     ServiceManager, ServiceManagerError, ServiceManagerSnapshot, ServiceOperation, ServicePhase,
-    ServiceTunRequest, startup_service_health, verify_ordinary_local_executable,
+    ServiceTunRequest, configure_service_ipc, startup_service_health, startup_service_health_for,
+    verify_ordinary_local_executable,
 };
 
 pub use service_runtime::{LocalGeoDataRecovery, ServiceRuntimeBundle};

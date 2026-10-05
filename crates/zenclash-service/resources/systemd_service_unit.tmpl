@@ -1,0 +1,16 @@
+# Modified for the ZenClash fork on 2026-10-04; see NOTICE.md. GPL-3.0-only.
+[Unit]
+Description=ZenClash Service manages the Mihomo core.
+After=network-online.target nftables.service iptables.service
+
+[Service]
+Type=simple
+ExecStart={exec_start}
+Group={group}
+Restart=always
+RestartSec=5
+RuntimeDirectory={runtime_directory}
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

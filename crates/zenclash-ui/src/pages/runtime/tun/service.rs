@@ -14,13 +14,10 @@ impl RuntimePage {
         state: &ServiceManagerSnapshot,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
+        let run_state = self.core_session.run_state();
         let authorization = self.core_session.runtime_descriptor().backend()
             == CoreRuntimeBackend::Local
-            && !matches!(&self.data, super::super::RuntimeData::Tun { permissions, .. }
-                if permissions.is_fresh() && permissions.value().is_some_and(|status| status.granted()))
-            && state
-                .health()
-                .is_none_or(|health| health.kind() != ServiceHealthKind::Ready);
+            && !run_state.tun_capable();
         let pending = self.profile_service.pending_finalization();
         h_flex()
             .justify_end()
@@ -32,16 +29,14 @@ impl RuntimePage {
                     .health()
                     .filter(|health| {
                         matches!(
-                            health.kind(),
-                            ServiceHealthKind::Stopped
-                                | ServiceHealthKind::RepairRequired
-                                | ServiceHealthKind::Incompatible
-                                | ServiceHealthKind::Unknown
+                            health,
+                            ServiceHealthKind::Unavailable(_) | ServiceHealthKind::VersionMismatch
                         )
                     })
                     .filter(|_| {
-                        self.core_session.runtime_descriptor().backend()
-                            != CoreRuntimeBackend::Service
+                        run_state.service_needs_attention()
+                            && self.core_session.runtime_descriptor().backend()
+                                != CoreRuntimeBackend::Service
                     })
                     .map(|_| {
                         Button::new("continue-local")
@@ -135,7 +130,7 @@ impl RuntimePage {
             return;
         }
         if self.core_session.runtime_descriptor().backend() == CoreRuntimeBackend::Local
-            && zenclash_core::current_process_elevated()
+            && self.core_session.run_state().is_admin
         {
             self.apply_tun_plan(true, zenclash_i18n::text("tun.notices.enabled"), cx);
             return;
@@ -174,7 +169,7 @@ impl RuntimePage {
         let health = self
             .profile_service
             .service_state()
-            .and_then(|state| state.health().map(|health| health.kind()));
+            .and_then(|state| state.health().cloned());
         if !request.needs_authorization_consent() || health == Some(ServiceHealthKind::Ready) {
             self.enable_service_tun(request, cx);
             return;
@@ -187,25 +182,28 @@ impl RuntimePage {
         if window.focused(cx).is_none() {
             window.focus(&self.focus_handle, cx);
         }
-        let stopped = health == Some(ServiceHealthKind::Stopped);
+        let repair = matches!(
+            health,
+            Some(ServiceHealthKind::Unavailable(_) | ServiceHealthKind::VersionMismatch)
+        );
         let page = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let page = page.clone();
             let request = request.clone();
             dialog
                 .confirm()
-                .title(zenclash_i18n::text(if stopped {
-                    "core_page.service.start_title"
+                .title(zenclash_i18n::text(if repair {
+                    "core_page.service.repair_enable_title"
                 } else {
                     "core_page.service.install_title"
                 }))
-                .description(zenclash_i18n::text(if stopped {
-                    "core_page.service.start_description"
+                .description(zenclash_i18n::text(if repair {
+                    "core_page.service.repair_enable_description"
                 } else {
                     "core_page.service.install_description"
                 }))
-                .ok_text(zenclash_i18n::text(if stopped {
-                    "core_page.service.start_enable"
+                .ok_text(zenclash_i18n::text(if repair {
+                    "core_page.service.repair_enable"
                 } else {
                     "core_page.service.install_enable"
                 }))

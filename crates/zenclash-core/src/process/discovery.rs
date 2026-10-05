@@ -37,6 +37,13 @@ pub struct MihomoRuntimeResources {
 }
 
 impl MihomoRuntimeResources {
+    /// Resolves the ordinary Mihomo home without parsing a profile or seeding resources.
+    /// Used when startup failed and the GUI needs service health and maintenance.
+    #[must_use]
+    pub fn recovery_home(project_root: &Path) -> PathBuf {
+        runtime_home(project_root, CoreKind::Mihomo)
+    }
+
     /// Resolves the existing Mihomo configuration/home rules and seeds packaged GeoData.
     ///
     /// Runs filesystem work on a worker. YAML parsing and kernel validation belong
@@ -85,10 +92,13 @@ fn runtime_paths(
         .or_else(|| std::env::var_os("ZENCLASH_CONFIG").map(PathBuf::from))
         .or_else(bundled_profile)
         .unwrap_or_else(|| workspace_default_profile(project_root));
-    let home_dir = std::env::var_os("ZENCLASH_CORE_HOME")
+    (config_file, runtime_home(project_root, kind))
+}
+
+fn runtime_home(project_root: &Path, kind: CoreKind) -> PathBuf {
+    std::env::var_os("ZENCLASH_CORE_HOME")
         .or_else(|| std::env::var_os(kind.home_environment_variable()))
-        .map_or_else(|| default_core_home_dir(project_root, kind), PathBuf::from);
-    (config_file, home_dir)
+        .map_or_else(|| default_core_home_dir(project_root, kind), PathBuf::from)
 }
 
 #[derive(Debug, Default, Deserialize)]

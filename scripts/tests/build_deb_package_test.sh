@@ -5,6 +5,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_root="$(cd "${script_dir}/../.." && pwd)"
 test_root="$(mktemp -d)"
 mock_bin="${test_root}/bin"
+export MIHOMO_VERSION=v1.19.30
+export ZENCLASH_DEPENDENCY_LICENSE_DIR="${test_root}/dependency-licenses"
 mock_target="${test_root}/target"
 output_dir="${test_root}/dist"
 dpkg_log="${test_root}/dpkg-deb.log"
@@ -28,7 +30,7 @@ set -euo pipefail
 mkdir -p "${MOCK_TARGET_DIR}/release"
 case " $* " in
   *" -p zenclash-service "*)
-    [[ " $* " == *" --features server "* ]]
+    [[ " $* " == *" --features standalone,client "* ]]
     if [[ "${MOCK_MISSING_SERVICE:-0}" == 0 ]]; then
       case "${MOCK_SERVICE_VERSION:-valid}" in
         valid) printf '#!/usr/bin/env bash\nprintf "zenclash-service fixture\\n"\n' ;;
@@ -37,6 +39,10 @@ case " $* " in
         *) exit 2 ;;
       esac >"${MOCK_TARGET_DIR}/release/zenclash-service"
       chmod +x "${MOCK_TARGET_DIR}/release/zenclash-service"
+      for tool in zenclash-service-install zenclash-service-uninstall; do
+        [[ " $* " == *" --bin ${tool} "* ]]
+        cp "${MOCK_TARGET_DIR}/release/zenclash-service" "${MOCK_TARGET_DIR}/release/${tool}"
+      done
     fi
     ;;
   *)
@@ -65,9 +71,15 @@ case "${1:-}" in
     cp "${3:?missing package root}/DEBIAN/control" "${MOCK_CONTROL_COPY}"
     [[ -x "${3}/usr/lib/zenclash/zenclash-service" ]]
     cp "${3}/usr/lib/zenclash/zenclash-service" "${MOCK_SERVICE_COPY}"
-    cp "${3}/usr/lib/systemd/system/zenclash-service.service" "${MOCK_UNIT_COPY}"
+    for tool in zenclash-service-install zenclash-service-uninstall; do
+      [[ -s "${3}/usr/lib/zenclash/${tool}" && -x "${3}/usr/lib/zenclash/${tool}" ]]
+    done
+    [[ ! -e "${3}/usr/lib/systemd/system/zenclash-service.service" ]]
     cp "${3}/usr/share/polkit-1/actions/org.zenclash.service.policy" "${MOCK_POLICY_COPY}"
     cp "${3}/usr/lib/zenclash/package-service.sh" "${MOCK_LIBRARY_COPY}"
+    for name in NOTICE.md CORRESPONDING-SOURCE.md licenses/zenclash-service/LICENSE licenses/zenclash-service-integration/LICENSE licenses/dependencies/MANIFEST.json; do
+      [[ -s "${3}/usr/share/doc/zenclash/${name}" ]]
+    done
     [[ -x "${3}/DEBIAN/prerm" && -x "${3}/DEBIAN/postinst" && -x "${3}/DEBIAN/postrm" ]]
     cp "${3}/DEBIAN/prerm" "${MOCK_PRERM_COPY}"
     : >"${package_path}"
@@ -83,9 +95,14 @@ case "${1:-}" in
     printf '%s\n' '-rw-r--r-- root/root 1 ./usr/lib/zenclash/geoip.metadb'
     printf '%s\n' '-rw-r--r-- root/root 1 ./usr/lib/zenclash/recovery.yaml'
     printf '%s\n' '-rw-r--r-- root/root 1 ./usr/share/doc/zenclash/LICENSE'
+    for name in NOTICE.md CORRESPONDING-SOURCE.md licenses/zenclash-service/LICENSE licenses/zenclash-service-integration/LICENSE licenses/dependencies/MANIFEST.json; do
+      printf '%s\n' "-rw-r--r-- root/root 1 ./usr/share/doc/zenclash/${name}"
+    done
     printf '%s\n' '-rwxr-xr-x root/root 1 ./usr/lib/zenclash/zenclash-service'
     printf '%s\n' '-rw-r--r-- root/root 1 ./usr/lib/zenclash/package-service.sh'
-    printf '%s\n' '-rw-r--r-- root/root 1 ./usr/lib/systemd/system/zenclash-service.service'
+    for tool in zenclash-service-install zenclash-service-uninstall; do
+      printf '%s\n' "-rwxr-xr-x root/root 1 ./usr/lib/zenclash/${tool}"
+    done
     printf '%s\n' '-rw-r--r-- root/root 1 ./usr/share/polkit-1/actions/org.zenclash.service.policy'
     ;;
   *)
@@ -121,6 +138,7 @@ chmod +x \
   "${mock_bin}/install" \
   "${test_root}/mihomo"
 printf 'fixture\n' >"${test_root}/geoip.metadb"
+python3 "${script_dir}/license_fixture.py" "${project_root}" "${ZENCLASH_DEPENDENCY_LICENSE_DIR}" "${test_root}/geoip.metadb"
 
 PATH="${mock_bin}:${PATH}" \
   MOCK_CONTROL_COPY="${control_copy}" \
@@ -144,7 +162,6 @@ grep -Fxq \
   'Depends: libasound2t64, libfontconfig1, libgtk-3-0t64, libayatana-appindicator3-1, libvulkan1, libwayland-client0, libxdo3, libxkbcommon-x11-0' \
   "${control_copy}"
 cmp "${mock_target}/release/zenclash-service" "${service_copy}"
-cmp "${project_root}/platforms/linux/zenclash-service.service" "${unit_copy}"
 cmp "${project_root}/platforms/linux/org.zenclash.service.policy" "${policy_copy}"
 cmp "${project_root}/platforms/linux/package-service.sh" "${library_copy}"
 

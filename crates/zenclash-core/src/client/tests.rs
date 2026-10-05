@@ -48,15 +48,19 @@ async fn replacing_an_external_binding_does_not_run_its_previous_validator() {
 }
 
 #[test]
-fn service_preflight_rejection_is_definitive_but_lost_response_is_unknown() {
-    use zenclash_service::{FrameError, ServiceClientError, ServiceErrorCode};
-    let rejected = MihomoError::Service(ServiceClientError::Rejected(
-        ServiceErrorCode::InvalidConfiguration,
+fn native_preflight_is_definitive_but_lost_controller_response_is_unknown() {
+    use zenclash_service::ServiceErrorCode;
+    use zenclash_service_integration::{NativeHttpError, ServiceCallError};
+    let rejected = MihomoError::Service(ServiceCallError::Rejected {
+        code: ServiceErrorCode::InvalidRuntimeAsset as u16,
+        message: String::new(),
+    });
+    let connection = MihomoError::Service(ServiceCallError::Controller(
+        NativeHttpError::BeforeSend(std::io::Error::other("unavailable")),
     ));
-    let lost = MihomoError::Service(ServiceClientError::Frame(FrameError::Timeout));
-    let connection = MihomoError::Service(ServiceClientError::Connection(std::io::Error::other(
-        "unavailable",
-    )));
+    let lost = MihomoError::Service(ServiceCallError::Controller(
+        NativeHttpError::OutcomeUnknown(std::io::Error::other("response lost")),
+    ));
     assert!(!rejected.mutation_result_unknown());
     assert!(!connection.mutation_result_unknown());
     assert!(lost.mutation_result_unknown());

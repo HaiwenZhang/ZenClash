@@ -9,19 +9,19 @@ use std::{
 };
 
 use serde_yaml::Value;
-use zenclash_service::ServiceClient;
 
 use crate::{MihomoError, MihomoResult};
 
 mod local_geodata;
 pub use local_geodata::LocalGeoDataRecovery;
 mod local_runtime;
+mod native_snapshot;
+pub(crate) use native_snapshot::FrozenRuntime;
 
-const MAX_ASSET_BYTES: u64 = 128 * 1024 * 1024;
+pub(crate) const MAX_ASSET_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
 const MAX_ASSETS: usize = 256;
 const MAX_CONFIG_BYTES: usize = 4 * 1024 * 1024;
-const CHUNK_BYTES: usize = 256 * 1024;
 const GEODATA: [&str; 3] = ["GeoIP.dat", "geosite.dat", "ASN.mmdb"];
 
 #[derive(Clone)]
@@ -30,10 +30,15 @@ struct RuntimeAsset {
     bytes: Arc<[u8]>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProviderKind {
+    Proxy,
+    Rule,
+}
+
 pub(crate) struct CacheProvider {
-    pub(crate) kind: zenclash_service::ProviderKind,
-    pub(crate) name: String,
-    path: String,
+    pub(crate) kind: ProviderKind,
+    pub(crate) path: String,
 }
 
 /// An immutable resource snapshot prepared entirely with ordinary user authority.
@@ -76,13 +81,23 @@ impl ServiceRuntimeBundle {
         &self.yaml
     }
 
+    pub(crate) fn controller_secret(&self) -> MihomoResult<String> {
+        let value: Value = serde_yaml::from_str(&self.yaml)
+            .map_err(|_| invalid("Invalid prepared service runtime YAML"))?;
+        match value.get("secret") {
+            None | Some(Value::Null) => Ok(String::new()),
+            Some(Value::String(secret)) => Ok(secret.clone()),
+            Some(_) => Err(invalid("Mihomo controller secret must be a string")),
+        }
+    }
+
     pub(crate) fn cache_providers(&self) -> MihomoResult<Vec<CacheProvider>> {
         let value: Value = serde_yaml::from_str(&self.yaml)
             .map_err(|_| invalid("Invalid accepted service runtime YAML"))?;
         let mut providers = Vec::new();
         for (field, kind) in [
-            ("proxy-providers", zenclash_service::ProviderKind::Proxy),
-            ("rule-providers", zenclash_service::ProviderKind::Rule),
+            ("proxy-providers", ProviderKind::Proxy),
+            ("rule-providers", ProviderKind::Rule),
         ] {
             let Some(mapping) = value.get(field) else {
                 continue;
@@ -102,8 +117,7 @@ impl ServiceRuntimeBundle {
                 {
                     continue;
                 }
-                let name = name
-                    .as_str()
+                name.as_str()
                     .filter(|name| !name.is_empty())
                     .ok_or_else(|| invalid("Invalid provider name"))?;
                 let path = provider
@@ -113,7 +127,6 @@ impl ServiceRuntimeBundle {
                     .ok_or_else(|| invalid("Invalid prepared cache destination"))?;
                 providers.push(CacheProvider {
                     kind,
-                    name: name.to_owned(),
                     path: path.to_owned(),
                 });
                 if providers.len() > MAX_ASSETS {
@@ -176,32 +189,6 @@ impl ServiceRuntimeBundle {
             yaml,
             assets: self.assets.clone(),
         })
-    }
-
-    /// Uploads this exact snapshot; it never rereads a mutable source file.
-    ///
-    /// # Errors
-    /// Returns a native transport or service policy rejection without retrying uploads.
-    pub async fn stage(&self, service: &ServiceClient) -> MihomoResult<u64> {
-        let revision = service.stage(self.yaml()).await?;
-        for asset in &self.assets {
-            if asset.bytes.is_empty() {
-                service.upload_asset(&asset.path, 0, &[], true).await?;
-            } else {
-                for (index, chunk) in asset.bytes.chunks(CHUNK_BYTES).enumerate() {
-                    let offset = index * CHUNK_BYTES;
-                    service
-                        .upload_asset(
-                            &asset.path,
-                            offset as u64,
-                            chunk,
-                            offset + chunk.len() == asset.bytes.len(),
-                        )
-                        .await?;
-                }
-            }
-        }
-        Ok(revision)
     }
 }
 
@@ -518,8 +505,7 @@ mod tests {
         let providers: Vec<_> = ["a", "b", "c"]
             .into_iter()
             .map(|name| CacheProvider {
-                kind: zenclash_service::ProviderKind::Rule,
-                name: name.into(),
+                kind: ProviderKind::Rule,
                 path: format!("assets/providers/{name}"),
             })
             .collect();
@@ -745,8 +731,12 @@ mod tests {
             .unwrap();
         let providers = bundle.cache_providers().unwrap();
         assert_eq!(providers.len(), 1);
-        assert_eq!(providers[0].name, "remote");
-        assert_eq!(providers[0].kind, zenclash_service::ProviderKind::Rule);
+        let yaml: Value = serde_yaml::from_str(bundle.yaml()).unwrap();
+        assert_eq!(
+            providers[0].path,
+            yaml["rule-providers"]["remote"]["path"].as_str().unwrap()
+        );
+        assert_eq!(providers[0].kind, ProviderKind::Rule);
     }
 
     #[tokio::test]

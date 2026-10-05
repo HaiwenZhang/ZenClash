@@ -5,6 +5,7 @@ impl CoreSession {
     pub fn request_shutdown(&self) {
         self.shutdown_requested.store(true, Ordering::Release);
         self.client.close_runtime_admission();
+        self.close_run_state_for_shutdown();
         let mut lifecycle = self.lifecycle.write();
         lifecycle.stop_requested = true;
         lifecycle.phase = CoreLifecyclePhase::ShuttingDown;
@@ -27,6 +28,7 @@ impl CoreSession {
         let session = self.clone();
         let capture = capture.clone();
         tokio::spawn(async move {
+            let _run_attempt = session.begin_core_run_attempt();
             let client = session.client.pin_binding()?;
             {
                 let _lease = session.acquire_process_write_lease(&client).await?;
@@ -98,6 +100,7 @@ impl CoreSession {
         let session = self.clone();
         let capture = capture.clone();
         tokio::spawn(async move {
+            let _run_attempt = session.begin_core_run_attempt();
             let client = session.client.pin_binding()?;
             {
                 let lease = session.acquire_process_write_lease(&client).await?;
@@ -188,6 +191,7 @@ impl CoreSession {
         }
         client.ensure_binding_current()?;
         self.ensure_not_shutting_down()?;
+        let _run_attempt = self.begin_core_run_attempt();
         match client.owned_core() {
             Some(crate::owned_core::OwnedCore::Local(process)) => {
                 let _mutation = client.lock_runtime_binding().await?;

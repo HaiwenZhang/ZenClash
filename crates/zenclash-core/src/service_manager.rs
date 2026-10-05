@@ -1,13 +1,16 @@
+// Fork integration adapted for ZenClash on 2026-10-05.
+// GPL-3.0-only; see the repository and service-integration NOTICE.md.
 //! Application service intents; native maintenance never owns runtime publication.
 
 use std::{future::Future, path::PathBuf, sync::Arc};
 
 use tokio::sync::{Mutex, watch};
-use zenclash_service::{MaintenanceError, ServiceHealth, service_health};
+use zenclash_service_integration::{health::ServiceHealth, maintenance::MaintenanceError};
 
 use crate::{CoreKind, CoreRuntimeBackend, CoreSession, CoreSessionError, TrafficCaptureSession};
 
 mod backup;
+mod health;
 mod maintenance;
 mod startup;
 mod tun;
@@ -19,7 +22,15 @@ pub use maintenance::{
 pub use backup::PreparedServiceBackupConfig;
 pub use startup::verify_ordinary_local_executable;
 
-pub use zenclash_service::ServiceHealthKind;
+pub use zenclash_service_integration::health::ServiceHealth as ServiceHealthKind;
+
+/// Sets the upstream application IPC budgets once during GUI bootstrap.
+pub async fn configure_service_ipc() {
+    zenclash_service::set_config(Some(
+        zenclash_service_integration::platform::application_ipc_config(),
+    ))
+    .await;
+}
 
 /// Observes approved installation health before choosing a startup backend.
 ///
@@ -27,7 +38,19 @@ pub use zenclash_service::ServiceHealthKind;
 /// This does not acquire ownership or start a kernel. Unreadable or uncertain
 /// state is reported as Unknown and must not authorize a Local fallback.
 pub async fn startup_service_health() -> ServiceHealthKind {
-    service_health().await.kind()
+    match std::env::current_dir() {
+        Ok(home) => health::observe(home, None).await,
+        Err(_) => ServiceHealth::Unknown,
+    }
+}
+
+/// Observes native service health against the application's selected core and resource home.
+/// This probe starts no core and requests no administrator authorization.
+pub async fn startup_service_health_for(
+    home: PathBuf,
+    binary: Option<PathBuf>,
+) -> ServiceHealthKind {
+    health::observe(home, binary).await
 }
 
 /// Application command shared by TUN controls and service maintenance controls.
@@ -140,7 +163,7 @@ pub enum ServiceManagerError {
     Sources(#[source] std::io::Error),
     /// An authenticated service lease could not be acquired or released.
     #[error("service ownership could not be established")]
-    Connection(#[source] zenclash_service::ServiceClientError),
+    Connection(#[source] zenclash_service_integration::ServiceCallError),
     /// A native authorization or installation failure.
     #[error(transparent)]
     Maintenance(#[from] MaintenanceError),
@@ -168,7 +191,7 @@ impl ServiceManagerError {
     pub fn is_native_outcome_unconfirmed(&self) -> bool {
         matches!(
             self,
-            Self::Maintenance(MaintenanceError::OutcomeUnconfirmed { .. }) | Self::Completion(_)
+            Self::Maintenance(MaintenanceError::OutcomeUnconfirmed(_)) | Self::Completion(_)
         )
     }
 }
@@ -253,7 +276,22 @@ impl ServiceManager {
     /// Reads a small prepared snapshot without doing platform work.
     #[must_use]
     pub fn snapshot(&self) -> ServiceManagerSnapshot {
-        self.state.borrow().clone()
+        let mut state = self.state.borrow().clone();
+        let shared = self.session.run_state();
+        if state.health.is_some() || shared.health != ServiceHealth::Unknown {
+            state.health = Some(Arc::new(shared.health));
+        }
+        if self
+            .session
+            .run_state
+            .maintenance_unconfirmed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            state.phase = ServicePhase::Unconfirmed;
+        } else if shared.op_in_flight && !state.is_busy() {
+            state.phase = ServicePhase::Checking;
+        }
+        state
     }
 
     /// Subscribes to prepared state changes for foreground presentation.
@@ -332,7 +370,7 @@ impl ServiceManager {
     /// or `Completion` if the independent observation task ends unexpectedly.
     pub async fn refresh_health(&self) -> Result<ServiceHealth, ServiceManagerError> {
         self.complete(ServiceOperation::Refresh, |manager| async move {
-            let health = service_health().await;
+            let health = manager.observe_health().await;
             manager
                 .state
                 .send_modify(|state| state.health = Some(Arc::new(health.clone())));
@@ -362,6 +400,39 @@ impl ServiceManager {
         Ok(())
     }
 
+    async fn authorize_action<A>(
+        &self,
+        intent: ServiceIntent,
+        action: zenclash_service_integration::health::PendingAction,
+        authorization: A,
+    ) -> Result<(), ServiceManagerError>
+    where
+        A: Future<Output = Result<(), MaintenanceError>> + Send,
+    {
+        self.check_intent(intent)?;
+        let sidecar_was_allowed = self.session.run_state.store.request_action(action);
+        let result = self
+            .authorize_then(intent, authorization, || async { Ok(()) })
+            .await;
+        // A cancelled or failed installer may already have changed registration.
+        // Keep typed authorization errors, and retain pending state if completion is unknown.
+        if !result
+            .as_ref()
+            .err()
+            .is_some_and(ServiceManagerError::is_native_outcome_unconfirmed)
+        {
+            let health = self.observe_health().await;
+            self.state
+                .send_modify(|state| state.health = Some(Arc::new(health)));
+            // Match upstream's failed-action rollback, retaining ZenClash's
+            // binding receipt and unknown-outcome admission protections.
+            if result.is_err() && sidecar_was_allowed && self.check_intent(intent).is_ok() {
+                self.session.run_state.store.restore_sidecar_allowance();
+            }
+        }
+        result
+    }
+
     async fn authorize_then<T, A, C, F>(
         &self,
         intent: ServiceIntent,
@@ -376,17 +447,7 @@ impl ServiceManager {
         self.check_intent(intent)?;
         self.state
             .send_modify(|state| state.phase = ServicePhase::Authorizing);
-        match authorization.await {
-            Err(MaintenanceError::OutcomeUnconfirmed {
-                pending: Some(pending),
-                ..
-            }) => {
-                self.state
-                    .send_modify(|state| state.phase = ServicePhase::Unconfirmed);
-                pending.wait().await?;
-            }
-            result => result?,
-        }
+        authorization.await?;
         self.check_intent(intent)?;
         completion().await
     }
@@ -420,7 +481,38 @@ impl ServiceManager {
         let manager = self.clone();
         let result = tokio::spawn(async move {
             let _guard = guard;
-            let result = completion(manager.clone()).await;
+            let store = manager.session.run_state.store.clone();
+            let result = match store.begin_operation() {
+                Err(_) => Err(ServiceManagerError::Busy),
+                Ok(_operation) => {
+                    if manager
+                        .session
+                        .run_state
+                        .maintenance_unconfirmed
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        Err(ServiceManagerError::Busy)
+                    } else {
+                        let mut scope = ServiceCommandCompletion {
+                            state: manager.session.run_state.clone(),
+                            settled: false,
+                        };
+                        let result = completion(manager.clone()).await;
+                        if result
+                            .as_ref()
+                            .err()
+                            .is_some_and(ServiceManagerError::is_native_outcome_unconfirmed)
+                        {
+                            scope
+                                .state
+                                .maintenance_unconfirmed
+                                .store(true, std::sync::atomic::Ordering::Release);
+                        }
+                        scope.settled = true;
+                        result
+                    }
+                }
+            };
             manager.state.send_modify(|state| {
                 state.phase = match &result {
                     Ok(_) => ServicePhase::Completed,
@@ -428,7 +520,7 @@ impl ServiceManager {
                         MaintenanceError::AuthorizationCancelled,
                     )) => ServicePhase::Cancelled,
                     Err(ServiceManagerError::Maintenance(
-                        MaintenanceError::OutcomeUnconfirmed { .. },
+                        MaintenanceError::OutcomeUnconfirmed(_),
                     )) => ServicePhase::Unconfirmed,
                     Err(_) => ServicePhase::Failed,
                 }
@@ -443,6 +535,22 @@ impl ServiceManager {
                     .send_modify(|state| state.phase = ServicePhase::Unconfirmed);
                 Err(ServiceManagerError::Completion(error))
             }
+        }
+    }
+}
+
+// An unwinding retained task cannot silently reopen native authorization.
+struct ServiceCommandCompletion {
+    state: Arc<crate::core_session::run_state::CoreRunState>,
+    settled: bool,
+}
+
+impl Drop for ServiceCommandCompletion {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.state
+                .maintenance_unconfirmed
+                .store(true, std::sync::atomic::Ordering::Release);
         }
     }
 }
@@ -666,5 +774,188 @@ mod tests {
         ));
         continue_sender.send(()).unwrap();
         first.await.unwrap().unwrap();
+    }
+    #[tokio::test]
+    async fn independent_managers_share_the_retained_operation_slot() {
+        let manager = manager();
+        let independent = manager_for_session(manager.session.clone());
+        let (entered_sender, entered) = tokio::sync::oneshot::channel();
+        let (continue_sender, resume) = tokio::sync::oneshot::channel();
+        let waiter_manager = manager.clone();
+        let first = tokio::spawn(async move {
+            waiter_manager
+                .complete(ServiceOperation::Repair, |_| async move {
+                    entered_sender.send(()).unwrap();
+                    resume.await.unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        entered.await.unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        assert!(independent.snapshot().is_busy());
+        assert!(matches!(
+            independent
+                .complete::<(), _, _>(ServiceOperation::Repair, |_| async {
+                    panic!("an independent manager repeated retained native authorization")
+                })
+                .await,
+            Err(ServiceManagerError::Busy)
+        ));
+        continue_sender.send(()).unwrap();
+        let mut updates = manager.session.subscribe_run_state();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while manager.session.run_state().op_in_flight {
+                updates.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(manager.snapshot().phase(), ServicePhase::Completed);
+        independent
+            .complete(ServiceOperation::Refresh, |_| async { Ok(()) })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_panicking_retained_command_blocks_new_managers_in_the_same_session() {
+        let manager = manager();
+        let independent = manager_for_session(manager.session.clone());
+        let result = manager
+            .complete::<(), _, _>(ServiceOperation::Repair, |_| async {
+                panic!("simulated loss of native maintenance completion")
+            })
+            .await;
+        assert!(matches!(result, Err(ServiceManagerError::Completion(_))));
+        assert_eq!(independent.snapshot().phase(), ServicePhase::Unconfirmed);
+        assert!(matches!(
+            independent
+                .complete::<(), _, _>(ServiceOperation::Repair, |_| async {
+                    panic!("unconfirmed maintenance was resubmitted")
+                })
+                .await,
+            Err(ServiceManagerError::Busy)
+        ));
+    }
+
+    #[tokio::test]
+    async fn unresolved_native_completion_cannot_be_bypassed_by_recreating_a_manager() {
+        let manager = manager();
+        let independent = manager_for_session(manager.session.clone());
+        let error = tokio::spawn(async { panic!("native worker did not return") })
+            .await
+            .unwrap_err();
+        let result = manager
+            .complete::<(), _, _>(ServiceOperation::Uninstall, |_| async move {
+                Err(ServiceManagerError::Maintenance(
+                    MaintenanceError::OutcomeUnconfirmed(error),
+                ))
+            })
+            .await;
+        assert!(result.unwrap_err().is_native_outcome_unconfirmed());
+        assert_eq!(independent.snapshot().phase(), ServicePhase::Unconfirmed);
+        assert!(matches!(
+            independent.refresh_health().await,
+            Err(ServiceManagerError::Busy)
+        ));
+    }
+    #[tokio::test]
+    async fn cancelled_native_authorization_retires_pending_action_without_losing_its_error() {
+        use zenclash_service_integration::health::PendingAction;
+        let manager = manager();
+        let intent = manager.intent();
+        let result = manager
+            .authorize_action(intent, PendingAction::Install, async {
+                assert_eq!(
+                    manager.session.run_state().pending,
+                    Some(PendingAction::Install)
+                );
+                Err(MaintenanceError::AuthorizationCancelled)
+            })
+            .await;
+        assert!(result.unwrap_err().is_authorization_cancelled());
+        assert_eq!(manager.session.run_state().pending, None);
+        assert!(
+            !manager
+                .session
+                .run_state
+                .maintenance_unconfirmed
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_native_authorization_keeps_the_requested_action_pending() {
+        use zenclash_service_integration::health::PendingAction;
+        let manager = manager();
+        let intent = manager.intent();
+        let error = tokio::spawn(async { panic!("unknown native outcome") })
+            .await
+            .unwrap_err();
+        let result = manager
+            .complete::<(), _, _>(ServiceOperation::Repair, move |manager| async move {
+                manager
+                    .authorize_action(intent, PendingAction::ForceReinstall, async move {
+                        Err(MaintenanceError::OutcomeUnconfirmed(error))
+                    })
+                    .await
+            })
+            .await;
+        assert!(result.unwrap_err().is_native_outcome_unconfirmed());
+        assert_eq!(
+            manager.session.run_state().pending,
+            Some(PendingAction::ForceReinstall)
+        );
+        assert_eq!(manager.snapshot().phase(), ServicePhase::Unconfirmed);
+    }
+
+    #[tokio::test]
+    async fn cancelled_native_action_restores_the_same_sessions_previous_sidecar_choice() {
+        use zenclash_service_integration::health::PendingAction;
+        let manager = manager();
+        manager.session.run_state.store.accept_sidecar();
+        let result = manager
+            .complete(ServiceOperation::Repair, |manager| async move {
+                manager
+                    .authorize_action(manager.intent(), PendingAction::ForceReinstall, async {
+                        assert!(!manager.session.run_state().sidecar_allowed);
+                        Err(MaintenanceError::AuthorizationCancelled)
+                    })
+                    .await
+            })
+            .await;
+        assert!(result.unwrap_err().is_authorization_cancelled());
+        assert!(manager.session.run_state().sidecar_allowed);
+        assert_eq!(manager.session.run_state().pending, None);
+        assert!(!manager.session.run_state().service_needs_attention());
+    }
+
+    #[tokio::test]
+    async fn unknown_native_action_cannot_restore_a_previous_sidecar_allowance() {
+        use zenclash_service_integration::health::PendingAction;
+        let manager = manager();
+        manager.session.run_state.store.accept_sidecar();
+        let result = manager
+            .complete(ServiceOperation::Repair, |manager| async move {
+                manager
+                    .authorize_action(manager.intent(), PendingAction::ForceReinstall, async {
+                        let error =
+                            tokio::spawn(async { panic!("native fixture lost completion") })
+                                .await
+                                .unwrap_err();
+                        Err(MaintenanceError::OutcomeUnconfirmed(error))
+                    })
+                    .await
+            })
+            .await;
+        assert!(result.unwrap_err().is_native_outcome_unconfirmed());
+        assert!(!manager.session.run_state().sidecar_allowed);
+        assert_eq!(
+            manager.session.run_state().pending,
+            Some(PendingAction::ForceReinstall)
+        );
+        assert_eq!(manager.snapshot().phase(), ServicePhase::Unconfirmed);
     }
 }

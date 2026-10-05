@@ -681,6 +681,12 @@ impl SystemProxyController {
         Ok(ownership)
     }
 
+    /// Returns the shared PAC owner for the core lifecycle availability bridge.
+    #[must_use]
+    pub fn pac_server(&self) -> PacServer {
+        self.pac_server.clone()
+    }
+
     /// Returns the process-local PAC listener status, when present.
     #[must_use]
     pub fn pac_status(&self) -> Option<PacServerStatus> {

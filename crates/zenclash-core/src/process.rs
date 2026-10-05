@@ -26,6 +26,7 @@ mod tests;
 
 pub use discovery::{MihomoLaunchConfig, MihomoRuntimeResources};
 pub use resources::bundled_recovery_profile;
+pub(crate) use resources::service_core_source;
 
 const MAX_LOG_LINES: usize = 1_000;
 #[cfg(unix)]
@@ -36,7 +37,7 @@ const QUIET_MEOW_PROTOCOL_LOGS: &str = "tokio_tungstenite=warn,tungstenite=warn"
 /// Owned managed Mihomo child process with bounded stdout/stderr history.
 pub struct MihomoProcess {
     child: Mutex<Option<Child>>,
-    execution: Mutex<Option<zenclash_service::CoreExecutionGuard>>,
+    execution: Mutex<Option<zenclash_service_integration::CoreExecutionGuard>>,
     isolated_test_child: bool,
     logs: Arc<RwLock<VecDeque<String>>>,
     last_exit_reason: RwLock<Option<String>>,
@@ -778,13 +779,13 @@ impl Drop for MihomoProcess {
 fn reserve_execution(
     kind: CoreKind,
     isolated_test_child: bool,
-) -> MihomoResult<Option<zenclash_service::CoreExecutionGuard>> {
+) -> MihomoResult<Option<zenclash_service_integration::CoreExecutionGuard>> {
     // Unit fixtures intentionally run many isolated synthetic children in parallel.
     // Native reservation itself is exercised in zenclash-service and real-core tests.
     if kind != CoreKind::Mihomo || cfg!(test) || isolated_test_child {
         return Ok(None);
     }
-    zenclash_service::CoreExecutionGuard::acquire()
+    zenclash_service_integration::CoreExecutionGuard::acquire()
         .map(Some)
         .map_err(|error| MihomoError::Process(error.to_string()))
 }

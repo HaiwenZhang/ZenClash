@@ -107,6 +107,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .build()?,
     );
     let _runtime_guard = runtime.enter();
+    runtime.block_on(zenclash_core::configure_service_ipc());
     let preferences_store = match AppPreferencesStore::discover() {
         Ok(store) => Some(store),
         Err(error) => {
@@ -283,6 +284,7 @@ fn prepare_application(
     let external = std::env::var_os("ZENCLASH_CONTROLLER").is_some();
     let managed_mihomo = !external && requested_core == CoreKind::Mihomo;
     let mut await_service_handoff = false;
+    let mut startup_service_health = None;
     let prepared = (|| -> Result<PreparedStartup, Box<dyn std::error::Error>> {
         let layers = startup::prepare_configuration_layers(
             managed_mihomo,
@@ -307,9 +309,7 @@ fn prepare_application(
             .core_binaries
             .path(requested_core)
             .map(Path::to_path_buf);
-        let mut health = (!external && requested_core == CoreKind::Mihomo)
-            .then(|| runtime.block_on(zenclash_core::startup_service_health()));
-        let resources = if health.is_some() {
+        let resources = if managed_mihomo {
             let root = project_root()?;
             let selected = std::env::var_os("ZENCLASH_CONFIG")
                 .map(PathBuf::from)
@@ -322,6 +322,12 @@ fn prepare_application(
         } else {
             None
         };
+        let mut health = resources.as_ref().map(|resources| {
+            runtime.block_on(zenclash_core::startup_service_health_for(
+                resources.home_dir().to_path_buf(),
+                preferred_binary.clone(),
+            ))
+        });
         let mut tun_enabled = if health.is_some() && !configuration_unknown {
             resources.as_ref().and_then(|resources| {
                 controlled_config_store
@@ -337,12 +343,12 @@ fn prepare_application(
         await_service_handoff = cfg!(windows)
             && tun_enabled == Some(true)
             && !explicit_local
-            && health != Some(ServiceHealthKind::Missing);
+            && health != Some(ServiceHealthKind::NotInstalled);
         if cfg!(windows)
             && tun_enabled == Some(true)
             && !elevated
             && !explicit_local
-            && health != Some(ServiceHealthKind::Missing)
+            && health != Some(ServiceHealthKind::NotInstalled)
         {
             // Match Verge's bounded wait for an automatically starting service.
             if health != Some(ServiceHealthKind::Ready) {
@@ -353,7 +359,15 @@ fn prepare_application(
                         if cancelled.load(Ordering::Acquire) {
                             break;
                         }
-                        health = Some(zenclash_core::startup_service_health().await);
+                        if let Some(resources) = &resources {
+                            health = Some(
+                                zenclash_core::startup_service_health_for(
+                                    resources.home_dir().to_path_buf(),
+                                    preferred_binary.clone(),
+                                )
+                                .await,
+                            );
+                        }
                         if health == Some(ServiceHealthKind::Ready) {
                             break;
                         }
@@ -362,7 +376,7 @@ fn prepare_application(
             }
         }
         ensure_startup_active(&cancelled)?;
-        if (health == Some(ServiceHealthKind::Missing) || explicit_local)
+        if (health == Some(ServiceHealthKind::NotInstalled) || explicit_local)
             && tun_enabled == Some(true)
             && !elevated
         {
@@ -386,10 +400,11 @@ fn prepare_application(
         } else {
             controlled_config_store.clone()
         };
+        startup_service_health = health.clone();
         startup::route_startup_with_policy(
             requested_core,
             external,
-            health,
+            health.clone(),
             tun_enabled,
             explicit_local,
             || {
@@ -397,6 +412,7 @@ fn prepare_application(
                 prepare_service_startup(
                     runtime,
                     resources.as_ref(),
+                    preferred_binary.clone(),
                     &controlled_config_store,
                     &override_paths,
                 )
@@ -405,7 +421,7 @@ fn prepare_application(
                 ensure_startup_active(&cancelled)?;
                 if managed_mihomo {
                     runtime.block_on(zenclash_core::check_sidecar_available())?;
-                    if explicit_local || health != Some(ServiceHealthKind::Missing) {
+                    if explicit_local || health != Some(ServiceHealthKind::NotInstalled) {
                         recovery_notices.push(zenclash_i18n::text(if explicit_local {
                             "startup.local_choice"
                         } else {
@@ -437,6 +453,12 @@ fn prepare_application(
                     .block_on(zenclash_core::check_sidecar_available())
                     .is_ok()
             {
+                if let startup::StartupFailure::Operation(error) = &failure {
+                    // Preserve the readable Start refusal, rather than publishing
+                    // cached Ready health for the resulting Sidecar session.
+                    startup_service_health =
+                        Some(ServiceHealthKind::Unavailable(error.to_string()));
+                }
                 recovery_notices.push(zenclash_i18n::text("startup.local_fallback"));
                 ensure_startup_active(&cancelled).map_err(startup::StartupFailure::Operation)?;
                 return prepare_legacy_startup(
@@ -460,7 +482,20 @@ fn prepare_application(
             }
         })
     })()
-    .or_else(|error| prepare_offline_startup(requested_core, error.to_string()))?;
+    .or_else(|error| {
+        if managed_mihomo {
+            prepare_offline_startup_with_binary(
+                requested_core,
+                error.to_string(),
+                preferences
+                    .core_binaries
+                    .path(requested_core)
+                    .map(Path::to_path_buf),
+            )
+        } else {
+            prepare_disconnected_startup(requested_core, Some(error.to_string()))
+        }
+    })?;
     let PreparedStartup {
         kind: core_kind,
         client,
@@ -470,6 +505,9 @@ fn prepare_application(
         error: startup_error,
         initialization,
     } = prepared;
+    if let Some(health) = startup_service_health {
+        core_session.record_startup_service_health(health);
+    }
     *cleanup.lock() = Some(StartupOwner {
         core: core_session.clone(),
         history: None,
@@ -516,7 +554,7 @@ fn prepare_application(
             traffic_monitor: traffic,
             log_monitor: logs,
             traffic_history_store,
-            traffic_history_session: traffic_history_session.clone(),
+            traffic_history_session,
             profile_path,
             controlled_config_store,
             runtime: runtime_handle,
@@ -538,14 +576,46 @@ struct PreparedStartup {
     initialization: Option<CoreInitializationOutcome>,
 }
 
+#[cfg(test)]
 fn prepare_offline_startup(
     kind: CoreKind,
     error: String,
 ) -> Result<PreparedStartup, Box<dyn std::error::Error>> {
+    prepare_offline_startup_with_binary(kind, error, None)
+}
+
+fn prepare_offline_startup_with_binary(
+    kind: CoreKind,
+    error: String,
+    preferred_binary: Option<PathBuf>,
+) -> Result<PreparedStartup, Box<dyn std::error::Error>> {
     // A blocked service must not start a competing kernel, but the user still
     // needs the window to inspect service health and request maintenance.
     tracing::warn!(%error, "core startup blocked; opening UI without a controller");
-    prepare_disconnected_startup(kind, Some(error))
+    let current = std::env::current_dir()?;
+    let home = MihomoRuntimeResources::recovery_home(&project_root()?);
+    let home = if home.is_absolute() {
+        home
+    } else {
+        current.join(home)
+    };
+    let binary = preferred_binary.map(|path| {
+        if path.is_absolute() {
+            path
+        } else {
+            current.join(path)
+        }
+    });
+    let session = CoreSession::open_offline(kind, home, binary)?;
+    Ok(PreparedStartup {
+        kind,
+        client: session.client().clone(),
+        session,
+        profile: None,
+        notice: None,
+        error: Some(error),
+        initialization: None,
+    })
 }
 
 fn prepare_disconnected_startup(
@@ -712,14 +782,16 @@ fn prepare_legacy_startup(
 fn prepare_service_startup(
     runtime: &tokio::runtime::Runtime,
     resources: Option<&MihomoRuntimeResources>,
+    core_source: Option<PathBuf>,
     store: &ControlledConfigStore,
     overrides: &[PathBuf],
 ) -> Result<PreparedStartup, Box<dyn std::error::Error>> {
     let resources = resources
         .ok_or_else(|| std::io::Error::other(zenclash_i18n::text("core_page.service.unknown")))?;
     let client = runtime
-        .block_on(MihomoClient::connect_service(
+        .block_on(MihomoClient::connect_service_with_core(
             resources.home_dir().to_path_buf(),
+            core_source,
         ))
         .map_err(|error| std::io::Error::other(startup::connection_message(&error)))?;
     let session = CoreSession::open(CoreKind::Mihomo, client.clone())?;
@@ -1264,18 +1336,23 @@ mod tracing_tests {
     #[test]
     fn blocked_service_startup_keeps_the_gui_available_without_a_kernel() {
         for reason in [
-            super::startup::StartupBlocked::Health(ServiceHealthKind::Stopped),
+            super::startup::StartupBlocked::Health(ServiceHealthKind::Unavailable(
+                "service stopped".into(),
+            )),
             super::startup::StartupBlocked::Health(ServiceHealthKind::Unknown),
             super::startup::StartupBlocked::ConfigurationUnknown,
         ] {
-            let prepared =
-                prepare_offline_startup(CoreKind::Mihomo, super::startup::blocked_message(reason))
-                    .unwrap();
+            let prepared = prepare_offline_startup(
+                CoreKind::Mihomo,
+                super::startup::blocked_message(reason.clone()),
+            )
+            .unwrap();
             assert_eq!(
                 prepared.client.endpoint().unwrap().controller,
                 "127.0.0.1:0"
             );
             assert!(!prepared.session.is_managed());
+            assert!(prepared.session.is_offline_recovery());
             assert!(prepared.session.runtime_descriptor().binary().is_none());
             assert!(prepared.profile.is_none());
             assert!(prepared.initialization.is_none());
@@ -1295,6 +1372,40 @@ mod tracing_tests {
             "127.0.0.1:0"
         );
         assert!(prepared.session.runtime_descriptor().binary().is_none());
+    }
+
+    #[test]
+    fn offline_startup_keeps_the_selected_core_for_service_maintenance() {
+        let selected = std::env::temp_dir().join("missing-selected-mihomo");
+        let prepared = super::prepare_offline_startup_with_binary(
+            CoreKind::Mihomo,
+            "invalid profile".into(),
+            Some(selected),
+        )
+        .unwrap();
+        let capture = zenclash_core::TrafficCaptureSession::new(
+            prepared.session.clone(),
+            zenclash_core::ControlledConfigStore::new(
+                std::env::temp_dir().join("offline-unused-controlled"),
+            ),
+            None,
+            None,
+        );
+        let manager = zenclash_core::ServiceManager::new(prepared.session, capture);
+        assert!(
+            manager
+                .request_maintenance(zenclash_core::ServiceOperation::Repair, None)
+                .is_ok()
+        );
+        assert!(manager.request_enable_tun().is_err());
+        assert_eq!(prepared.error.as_deref(), Some("invalid profile"));
+    }
+
+    #[test]
+    fn pending_disconnected_startup_has_no_maintenance_capability() {
+        let prepared = super::prepare_disconnected_startup(CoreKind::Mihomo, None).unwrap();
+        assert!(!prepared.session.is_offline_recovery());
+        assert!(prepared.error.is_none());
     }
 
     #[test]

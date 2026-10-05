@@ -190,13 +190,7 @@ mod tests {
         std::fs::write(store.runtime_path(), "mode: rule\n").unwrap();
         let cache = store.stage_runtime_payload("mode: global\n").unwrap();
         let result = cache
-            .finalize(async {
-                Err(crate::MihomoError::Service(
-                    zenclash_service::ServiceClientError::Rejected(
-                        zenclash_service::ServiceErrorCode::OutcomeUnknown,
-                    ),
-                ))
-            })
+            .finalize(async { Err(crate::MihomoError::RuntimeOutcomeUnknown) })
             .await;
         assert!(result.is_err());
         assert_eq!(

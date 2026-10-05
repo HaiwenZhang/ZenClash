@@ -87,6 +87,11 @@ impl ZenClashApp {
         let capture = self.traffic_capture.clone();
         let profiles = self.profile_service.clone();
         let runtime = self.runtime.clone();
+        let descriptor = core.runtime_descriptor();
+        let Some(home) = descriptor.home_dir().map(PathBuf::from) else {
+            return;
+        };
+        let binary = descriptor.binary().map(PathBuf::from);
         let generation = core.generation();
         let revision = capture.intent_revision();
         cx.spawn(async move |this, cx| {
@@ -101,7 +106,10 @@ impl ZenClashApp {
                     return;
                 }
                 if runtime
-                    .spawn(zenclash_core::startup_service_health())
+                    .spawn(zenclash_core::startup_service_health_for(
+                        home.clone(),
+                        binary.clone(),
+                    ))
                     .await
                     .ok()
                     == Some(zenclash_core::ServiceHealthKind::Ready)

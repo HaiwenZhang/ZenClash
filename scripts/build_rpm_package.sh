@@ -36,6 +36,9 @@ else
   mihomo_path="${work_dir}/mihomo"
   "${script_dir}/download_mihomo.sh" linux amd64 "${mihomo_path}"
 fi
+if [[ -z "${geodata_path}" && -f "${ZENCLASH_DEPENDENCY_LICENSE_DIR:-${project_root}/dist/dependency-licenses}/resources/geoip.metadb" ]]; then
+  geodata_path="${ZENCLASH_DEPENDENCY_LICENSE_DIR:-${project_root}/dist/dependency-licenses}/resources/geoip.metadb"
+fi
 if [[ -n "${geodata_path}" ]]; then
   if [[ ! -f "${geodata_path}" ]]; then
     echo "ZENCLASH_GEODATA_FILE is not a regular file: ${geodata_path}" >&2
@@ -52,7 +55,7 @@ ZENCLASH_VERSION="${version}" \
 ZENCLASH_BUNDLED_MIHOMO_VERSION="${bundled_mihomo_version}" \
 cargo build --release --locked -p zenclash-ui --bin zenclash
 ZENCLASH_VERSION="${version}" \
-cargo build --release --locked -p zenclash-service --features server --bin zenclash-service
+cargo build --release --locked -p zenclash-service --features standalone,client --bin zenclash-service --bin zenclash-service-install --bin zenclash-service-uninstall
 
 service_path="${cargo_output_root}/release/zenclash-service"
 if [[ ! -s "${service_path}" || ! -x "${service_path}" ]]; then
@@ -66,8 +69,15 @@ fi
 
 install -Dm755 "${cargo_output_root}/release/zenclash" "${payload_dir}/zenclash"
 install -Dm755 "${service_path}" "${payload_dir}/zenclash-service"
+for tool in zenclash-service-install zenclash-service-uninstall; do
+  tool_path="${cargo_output_root}/release/${tool}"
+  if [[ ! -s "${tool_path}" || ! -x "${tool_path}" ]]; then
+    echo "Native service maintenance tool is missing or not executable: ${tool_path}" >&2
+    exit 1
+  fi
+  install -Dm755 "${tool_path}" "${payload_dir}/${tool}"
+done
 install -Dm644 "${project_root}/platforms/linux/package-service.sh" "${payload_dir}/package-service.sh"
-install -Dm644 "${project_root}/platforms/linux/zenclash-service.service" "${payload_dir}/zenclash-service.service"
 install -Dm644 "${project_root}/platforms/linux/org.zenclash.service.policy" "${payload_dir}/org.zenclash.service.policy"
 install -Dm755 "${mihomo_path}" "${payload_dir}/mihomo"
 install -Dm644 "${geodata_path}" "${payload_dir}/geoip.metadb"
@@ -75,7 +85,10 @@ install -Dm644 "${profile_path}" "${payload_dir}/profile.yaml"
 install -Dm644 "${project_root}/platforms/common/recovery.yaml" "${payload_dir}/recovery.yaml"
 install -Dm644 "${project_root}/platforms/macos/ZenClash.png" "${payload_dir}/zenclash.png"
 install -Dm644 "${project_root}/platforms/linux/zenclash.desktop" "${payload_dir}/zenclash.desktop"
-install -Dm644 "${project_root}/LICENSE" "${payload_dir}/LICENSE"
+python3 "${script_dir}/stage_release_licenses.py" --project "${project_root}" \
+  --destination "${payload_dir}" --version "${version}" \
+  --dependency-licenses "${ZENCLASH_DEPENDENCY_LICENSE_DIR:-${project_root}/dist/dependency-licenses}" \
+  --mihomo-tag "${MIHOMO_VERSION:-v1.19.30}" --geodata-file "${geodata_path}"
 mkdir -p "${rpmbuild_dir}" "${output_dir}"
 
 rpmbuild -bb "${project_root}/platforms/linux/zenclash.spec" \
@@ -99,7 +112,14 @@ grep -Eq '^/usr/lib/zenclash/recovery.yaml$' "${package_contents_path}"
 grep -Eq '^/usr/share/licenses/zenclash/LICENSE$' "${package_contents_path}"
 grep -Eq '^/usr/lib/zenclash/zenclash-service$' "${package_contents_path}"
 grep -Eq '^/usr/lib/zenclash/package-service.sh$' "${package_contents_path}"
-grep -Eq '^/usr/lib/systemd/system/zenclash-service.service$' "${package_contents_path}"
+grep -Eq '^/usr/lib/zenclash/zenclash-service-install$' "${package_contents_path}"
+grep -Eq '^/usr/lib/zenclash/zenclash-service-uninstall$' "${package_contents_path}"
 grep -Eq '^/usr/share/polkit-1/actions/org.zenclash.service.policy$' "${package_contents_path}"
+
+grep -Fq "/usr/share/licenses/zenclash/NOTICE.md" "${package_contents_path}"
+grep -Fq "/usr/share/licenses/zenclash/CORRESPONDING-SOURCE.md" "${package_contents_path}"
+grep -Fq "/usr/share/licenses/zenclash/licenses/zenclash-service/LICENSE" "${package_contents_path}"
+grep -Fq "/usr/share/licenses/zenclash/licenses/zenclash-service-integration/LICENSE" "${package_contents_path}"
+grep -Fq "/usr/share/licenses/zenclash/licenses/dependencies/MANIFEST.json" "${package_contents_path}"
 
 echo "Built ${package_path}"

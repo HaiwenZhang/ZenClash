@@ -814,7 +814,7 @@ impl CoreSession {
         );
         previous.service_bundle = Some(previous_bundle.clone());
         let prepared = if crate::tun_admission::yaml_enables_tun(update.next_payload())?
-            && !zenclash_service::current_process_elevated()
+            && !crate::current_process_elevated()
         {
             let next =
                 Arc::new(crate::ServiceRuntimeBundle::prepare(update.next_payload(), home).await?);
@@ -1026,7 +1026,7 @@ impl CoreSession {
             )
             .await?;
         if !crate::tun_admission::yaml_enables_tun(update.next_payload())?
-            || zenclash_service::current_process_elevated()
+            || crate::current_process_elevated()
         {
             store
                 .validate_prepared_service_tun(update.clone(), expected_cache.clone())
@@ -1106,6 +1106,7 @@ impl CoreSession {
         self.check_service_tun_admission(&client, prepared.binding, prepared.generation)?;
         let session = self.clone();
         tokio::spawn(async move {
+            let _run_attempt = session.begin_core_run_attempt();
             let _lease = lease;
             let (kind, receipt) = store
                 .apply_frozen_local_update(
@@ -1132,7 +1133,7 @@ impl CoreSession {
     pub(crate) async fn enable_service_tun_admitted(
         &self,
         store: &ControlledConfigStore,
-        service: Option<(Arc<zenclash_service::ServiceClient>, PathBuf)>,
+        service: Option<(Arc<zenclash_service_integration::ServiceSession>, PathBuf)>,
         expected_runtime: (u64, u64),
         fallback_profile: Option<PathBuf>,
         recovery_bundle: Option<Arc<crate::ServiceRuntimeBundle>>,
@@ -1170,6 +1171,7 @@ impl CoreSession {
         self.check_service_tun_admission(&before, expected_binding, expected_generation)?;
         let mut mutation = before.lock_runtime_binding().await?;
         self.check_service_tun_admission(&before, expected_binding, expected_generation)?;
+        let _run_attempt = self.begin_core_run_attempt();
         let result = async {
             if let Some(profile) = &profile_commit {
                 profile.validate(&lease).await?;

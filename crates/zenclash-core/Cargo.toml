@@ -7,8 +7,11 @@ license.workspace = true
 
 [features]
 test-support = []
+# Isolated Fork IPC and simulated core. Never enable for production packaging.
+service-ipc-tests = ["zenclash-service-integration/ipc-tests"]
 
 [dependencies]
+anyhow = "1.0"
 chrono.workspace = true
 cron.workspace = true
 flate2.workspace = true
@@ -30,7 +33,8 @@ tokio-tungstenite = { workspace = true, features = ["connect", "rustls-tls-webpk
 tracing.workspace = true
 zip.workspace = true
 zenclash-i18n.workspace = true
-zenclash-service = { path = "../zenclash-service" }
+zenclash-service = { path = "../zenclash-service", features = ["client"] }
+zenclash-service-integration = { path = "../zenclash-service-integration" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
@@ -40,3 +44,14 @@ libc.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+
+
+[[bin]]
+name = "zenclash-core-integration-test-core"
+path = "tests/support/mock_core.rs"
+required-features = ["service-ipc-tests"]
+
+[[test]]
+name = "native_service_session"
+path = "tests/native_service_session.rs"
+required-features = ["service-ipc-tests"]

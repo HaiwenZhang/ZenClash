@@ -6,6 +6,8 @@ project_root="$(cd "${script_dir}/../.." && pwd)"
 test_root="$(mktemp -d)"
 [[ "${test_root}" == /* && "${test_root}" != / && -d "${test_root}" && ! -L "${test_root}" ]]
 mock_bin="${test_root}/bin"
+export MIHOMO_VERSION=v1.19.30
+export ZENCLASH_DEPENDENCY_LICENSE_DIR="${test_root}/dependency-licenses"
 mock_target="${test_root}/target"
 app_dir="${test_root}/output/ZenClash.app"
 sign_log="${test_root}/codesign.log"
@@ -32,7 +34,7 @@ output="${CARGO_TARGET_DIR}/aarch64-apple-darwin/release"
 mkdir -p "${output}"
 case " $* " in
   *' -p zenclash-service '*)
-    [[ " $* " == *' --features server '* ]]
+    [[ " $* " == *' --features standalone,client '* ]]
     [[ " $* " == *' --bin zenclash-service '* ]]
     [[ " $* " == *' --target aarch64-apple-darwin '* ]]
     case "${MOCK_SERVICE_FAILURE:-}" in
@@ -44,6 +46,10 @@ case " $* " in
       *) printf '#!/usr/bin/env bash\n[[ "${1:-}" == --version ]]\nprintf "zenclash-service fixture\\n"\n' >"${output}/zenclash-service" ;;
     esac
     chmod +x "${output}/zenclash-service"
+    for tool in zenclash-service-install zenclash-service-uninstall; do
+      [[ " $* " == *" --bin ${tool} "* ]]
+      cp "${output}/zenclash-service" "${output}/${tool}"
+    done
     ;;
   *)
     [[ " $* " == *' -p zenclash-ui '* ]]
@@ -61,7 +67,9 @@ if [[ ! -s "${MOCK_APP_DIR}/Contents/MacOS/zenclash-service" || ! -x "${MOCK_APP
   echo 'The staged App is missing an executable service payload' >&2
   exit 1
 fi
-[[ -s "${MOCK_APP_DIR}/Contents/Resources/org.zenclash.service.plist" ]]
+for tool in zenclash-service-install zenclash-service-uninstall; do
+  [[ -s "${MOCK_APP_DIR}/Contents/MacOS/${tool}" && -x "${MOCK_APP_DIR}/Contents/MacOS/${tool}" ]]
+done
 EOF
 cat >"${test_root}/mihomo" <<'EOF'
 #!/usr/bin/env bash
@@ -70,6 +78,7 @@ printf 'Mihomo fixture\n'
 EOF
 chmod +x "${mock_bin}/"* "${test_root}/mihomo"
 printf 'geodata fixture\n' >"${test_root}/geoip.metadb"
+python3 "${script_dir}/license_fixture.py" "${project_root}" "${ZENCLASH_DEPENDENCY_LICENSE_DIR}" "${test_root}/geoip.metadb"
 
 run_build() {
   # The fixed native plist utility is replaced only in this shell; the production
@@ -91,8 +100,13 @@ run_build() {
 assert_payload_and_order() {
   cmp "${mock_target}/aarch64-apple-darwin/release/zenclash-service" \
     "${app_dir}/Contents/MacOS/zenclash-service"
-  cmp "${project_root}/platforms/macos/org.zenclash.service.plist" \
-    "${app_dir}/Contents/Resources/org.zenclash.service.plist"
+  for tool in zenclash-service-install zenclash-service-uninstall; do
+    cmp "${mock_target}/aarch64-apple-darwin/release/${tool}" "${app_dir}/Contents/MacOS/${tool}"
+    grep -Fq -- "--verify --strict --verbose=2 ${app_dir}/Contents/MacOS/${tool}" "${sign_log}"
+  done
+  for name in NOTICE.md CORRESPONDING-SOURCE.md licenses/zenclash-service/LICENSE licenses/zenclash-service-integration/LICENSE licenses/dependencies/MANIFEST.json; do
+    [[ -s "${app_dir}/Contents/Resources/${name}" ]]
+  done
   local helper_sign helper_verify bundle_sign bundle_verify
   helper_sign="$(grep -n -- '--force.*--sign.*Contents/MacOS/zenclash-service$' "${sign_log}" | cut -d: -f1)"
   helper_verify="$(grep -n -- '--verify.*Contents/MacOS/zenclash-service$' "${sign_log}" | cut -d: -f1)"

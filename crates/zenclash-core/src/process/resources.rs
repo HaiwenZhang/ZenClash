@@ -76,6 +76,40 @@ pub(super) fn bundled_core_binary(kind: CoreKind) -> Option<PathBuf> {
     bundled_resource(&name).filter(|candidate| is_core_binary_candidate(candidate))
 }
 
+// Service discovery reads a source only; installation and generation ownership
+// remain with the fork. Do not enqueue another home lease during admitted apply.
+pub(crate) fn service_core_source(home: &Path) -> MihomoResult<PathBuf> {
+    let kind = CoreKind::Mihomo;
+    if let Some(binary) = std::env::var_os("ZENCLASH_CORE_BINARY")
+        .or_else(|| std::env::var_os(kind.binary_environment_variable()))
+    {
+        let binary = PathBuf::from(binary);
+        if !is_core_binary_candidate(&binary) {
+            return Err(MihomoError::InvalidInput(
+                "The configured service core is unavailable".into(),
+            ));
+        }
+        return std::fs::canonicalize(binary)
+            .map_err(|error| MihomoError::Process(error.to_string()));
+    }
+    let name = executable_filename(kind);
+    let binary = [home.join("cores").join(&name), home.join(&name)]
+        .into_iter()
+        .find(|path| is_core_binary_candidate(path))
+        .or_else(|| bundled_core_binary(kind))
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|root| root.join("bin").join(&name))
+                .filter(|path| is_core_binary_candidate(path))
+        })
+        .or_else(|| find_core_binary(kind))
+        .ok_or_else(|| {
+            MihomoError::Process("No selected Mihomo service source is available".into())
+        })?;
+    std::fs::canonicalize(binary).map_err(|error| MihomoError::Process(error.to_string()))
+}
+
 /// Seeds the immutable packaged core into a user-writable managed location.
 /// Existing valid managed cores are preserved so an online update survives an
 /// application restart and never mutates a signed application bundle.

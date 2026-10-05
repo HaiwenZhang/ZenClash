@@ -108,3 +108,8 @@ cargo test --workspace --all-features --locked
 感谢 [Mihomo](https://github.com/MetaCubeX/mihomo)、[GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) 和 [GPUI Kit](https://github.com/longbridge/gpui-kit)。
 
 ZenClash 采用 [GPL-3.0-only](LICENSE) 许可证。Copyright © 2026 Haiwen Zhang。
+
+
+`crates/zenclash-service` Fork 自 [clash-verge-rev/clash-verge-service-ipc](https://github.com/clash-verge-rev/clash-verge-service-ipc) 2.7.5 的本地源码副本，保留上游作者 Tunglies 及其他贡献者的声明和完整 GPL 第 3 版许可证；ZenClash 适配日期为 2026-10-04。来源、修改内容和接入状态见 [服务 README](crates/zenclash-service/README.md)、[修改声明](crates/zenclash-service/NOTICE.md) 和 [原始许可证](crates/zenclash-service/LICENSE)。
+
+分发包含该 Fork 的二进制时，须保留许可证和修改声明，并按 GPL 第 6 节提供与发布版本一致的完整对应源码，包含 ZenClash 的修改和必要构建/安装文件；只链接上游仓库不足以代替对应源码。具体发布操作见 [GPL 分发与对应源码](docs/development/gpl-distribution.md)。主应用打包携带根和 Fork 的许可及修改声明；发布流程从同一干净提交导出对应源码，纳入 Rust/Go 依赖，并将源码附件与安装包一起提供。流程文件已接入；2026-10-05 已在本地生成阶段 Windows 安装包和同版完整对应源码，源码解压后的哈希、锁定依赖离线解析及 GUI/服务编译检查通过。交付文件位于 `dist/gpl-2026-10-05/`；尚未发布正式 Release 或完成三平台实机/TUN 验收。

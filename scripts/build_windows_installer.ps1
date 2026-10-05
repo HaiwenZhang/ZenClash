@@ -71,6 +71,11 @@ try {
     if (-not (Test-Path -Path $MihomoBinary -PathType Leaf)) {
         throw "Set ZENCLASH_MIHOMO_BINARY to a real Mihomo executable"
     }
+    $SourceNotices = if ($env:ZENCLASH_DEPENDENCY_LICENSE_DIR) { $env:ZENCLASH_DEPENDENCY_LICENSE_DIR } else { Join-Path $ProjectRoot "dist/dependency-licenses" }
+    $SourceGeoData = Join-Path $SourceNotices "resources/geoip.metadb"
+    if ([string]::IsNullOrWhiteSpace($GeoDataFile) -and (Test-Path -LiteralPath $SourceGeoData -PathType Leaf)) {
+        $GeoDataFile = $SourceGeoData
+    }
     if ([string]::IsNullOrWhiteSpace($GeoDataFile)) {
         $GeoDataFile = Join-Path $WorkDir "geoip.metadb"
         & (Join-Path $PSScriptRoot "download_mihomo_geodata.ps1") -OutputPath $GeoDataFile -ReleaseTag $GeoDataVersion
@@ -93,7 +98,7 @@ try {
         $env:ZENCLASH_BUNDLED_MIHOMO_VERSION = $BundledMihomoVersion
         cargo build --release --locked -p zenclash-ui --bin zenclash --target x86_64-pc-windows-msvc
         if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
-        cargo build --release --locked -p zenclash-service --features server --bin zenclash-service --target x86_64-pc-windows-msvc
+        cargo build --release --locked -p zenclash-service --features "standalone,client" --bin zenclash-service --bin zenclash-service-install --bin zenclash-service-uninstall --target x86_64-pc-windows-msvc
         if ($LASTEXITCODE -ne 0) { throw "Service cargo build failed" }
     }
     finally {
@@ -105,6 +110,10 @@ try {
     $CargoTargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $ProjectRoot "target" }
     $ZenClashBinary = Join-Path $CargoTargetDir "x86_64-pc-windows-msvc\release\zenclash.exe"
     $ServiceBinary = Join-Path $CargoTargetDir "x86_64-pc-windows-msvc\release\zenclash-service.exe"
+    if (-not (Test-Path -LiteralPath $ZenClashBinary -PathType Leaf) -or
+        (Get-Item -LiteralPath $ZenClashBinary).Length -eq 0) {
+        throw "GUI executable is missing or empty: $ZenClashBinary"
+    }
     if (-not (Test-Path -LiteralPath $ServiceBinary -PathType Leaf) -or
         (Get-Item -LiteralPath $ServiceBinary).Length -eq 0) {
         throw "Service executable is missing or empty: $ServiceBinary"
@@ -135,6 +144,13 @@ public static class ZenClashIconResource
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($ServiceVersion)) {
         throw "The packaged service executable failed its version check"
     }
+    foreach ($HelperName in @("zenclash-service-install.exe", "zenclash-service-uninstall.exe")) {
+        $HelperPath = Join-Path (Split-Path $ServiceBinary) $HelperName
+        if (-not (Test-Path -LiteralPath $HelperPath -PathType Leaf) -or (Get-Item -LiteralPath $HelperPath).Length -eq 0) {
+            throw "Native service maintenance tool is missing or empty: $HelperPath"
+        }
+        Copy-Item -LiteralPath $HelperPath -Destination (Join-Path $StageDir $HelperName)
+    }
     $ResourcesDir = Join-Path $StageDir "resources"
     New-Item -ItemType Directory -Force -Path $ResourcesDir | Out-Null
     Copy-Item $MihomoBinary (Join-Path $ResourcesDir "mihomo.exe")
@@ -143,6 +159,9 @@ public static class ZenClashIconResource
     Copy-Item (Join-Path $ProjectRoot "platforms\common\recovery.yaml") (Join-Path $ResourcesDir "recovery.yaml")
     Copy-Item (Join-Path $ProjectRoot "platforms\macos\ZenClash.png") (Join-Path $ResourcesDir "ZenClash.png")
     Copy-Item (Join-Path $ProjectRoot "LICENSE") (Join-Path $StageDir "LICENSE.txt")
+    $DependencyLicenses = if ($env:ZENCLASH_DEPENDENCY_LICENSE_DIR) { $env:ZENCLASH_DEPENDENCY_LICENSE_DIR } else { Join-Path $ProjectRoot "dist/dependency-licenses" }
+    python (Join-Path $PSScriptRoot "stage_release_licenses.py") --project $ProjectRoot --destination $StageDir --version $Version --dependency-licenses $DependencyLicenses --mihomo-tag $MihomoVersion --geodata-file $GeoDataFile
+    if ($LASTEXITCODE -ne 0) { throw "License and corresponding-source notice staging failed" }
     & (Join-Path $ResourcesDir "mihomo.exe") -v
     if ($LASTEXITCODE -ne 0) {
         throw "The packaged Mihomo executable failed its version check"
@@ -175,7 +194,13 @@ public static class ZenClashIconResource
     Write-Host "Built $Installer"
 }
 finally {
-    if (Test-Path $WorkDir) {
-        Remove-Item -Recurse -Force $WorkDir
+    if (Test-Path -LiteralPath $WorkDir) {
+        $ResolvedWorkDir = [System.IO.Path]::GetFullPath((Resolve-Path -LiteralPath $WorkDir).Path)
+        $TemporaryPrefix = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+        if (-not $ResolvedWorkDir.StartsWith($TemporaryPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+            (Split-Path $ResolvedWorkDir -Leaf) -notlike 'zenclash-package-*') {
+            throw 'Refusing to remove a packaging directory outside the temporary root'
+        }
+        Remove-Item -LiteralPath $ResolvedWorkDir -Recurse -Force
     }
 }

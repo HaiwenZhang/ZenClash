@@ -55,7 +55,7 @@ pub(crate) fn prepare_configuration_layers(
     Ok(layers)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StartupBlocked {
     Health(ServiceHealthKind),
     ConfigurationUnknown,
@@ -90,17 +90,15 @@ impl StartupPlatform {
 /// Windows permits automatic fallback after the separate native idle check.
 pub(crate) fn permits_local_fallback(
     platform: StartupPlatform,
-    health: ServiceHealthKind,
+    health: &ServiceHealthKind,
     explicit: bool,
 ) -> bool {
     match health {
-        ServiceHealthKind::Ready => explicit,
-        ServiceHealthKind::Missing => true,
-        ServiceHealthKind::Stopped
-        | ServiceHealthKind::RepairRequired
-        | ServiceHealthKind::Incompatible
-        | ServiceHealthKind::Unknown => platform == StartupPlatform::Windows || explicit,
-        _ => false,
+        ServiceHealthKind::NotInstalled => true,
+        ServiceHealthKind::Unavailable(_) | ServiceHealthKind::VersionMismatch => {
+            platform == StartupPlatform::Windows || explicit
+        }
+        ServiceHealthKind::Ready | ServiceHealthKind::Unknown => false,
     }
 }
 
@@ -122,7 +120,7 @@ pub(crate) fn route_startup_with_policy<T, E>(
             StartupBlocked::ConfigurationUnknown,
         ));
     }
-    if explicit_local && permits_local_fallback(StartupPlatform::current(), health, true) {
+    if explicit_local && permits_local_fallback(StartupPlatform::current(), &health, true) {
         return local().map_err(StartupFailure::Operation);
     }
     if health == ServiceHealthKind::Ready {
@@ -133,7 +131,7 @@ pub(crate) fn route_startup_with_policy<T, E>(
             StartupBlocked::ConfigurationUnknown,
         ));
     }
-    if permits_local_fallback(StartupPlatform::current(), health, explicit_local) {
+    if permits_local_fallback(StartupPlatform::current(), &health, explicit_local) {
         return local().map_err(StartupFailure::Operation);
     }
     Err(StartupFailure::Blocked(StartupBlocked::Health(health)))
@@ -153,12 +151,8 @@ pub(crate) fn blocked_message(reason: StartupBlocked) -> String {
     let key = match reason {
         StartupBlocked::ConfigurationUnknown => "startup.service_configuration_unconfirmed",
         StartupBlocked::Health(health) => match health {
-            ServiceHealthKind::Stopped => "startup.service_stopped",
-            ServiceHealthKind::RepairRequired => "startup.service_repair_required",
-            ServiceHealthKind::MaintenancePending => "startup.service_pending",
-            ServiceHealthKind::Unauthorized => "startup.service_unauthorized",
-            ServiceHealthKind::Incompatible => "startup.service_incompatible",
-            ServiceHealthKind::UnrecognizedInstallation => "startup.service_unrecognized",
+            ServiceHealthKind::Unavailable(_) => "startup.service_unavailable",
+            ServiceHealthKind::VersionMismatch => "startup.service_incompatible",
             _ => "startup.service_unknown",
         },
     };
@@ -213,7 +207,7 @@ mod tests {
                     let routed = route_startup_with_policy(
                         CoreKind::Mihomo,
                         false,
-                        Some(ServiceHealthKind::Missing),
+                        Some(ServiceHealthKind::NotInstalled),
                         (!layers.unknown).then_some(false),
                         false,
                         || Ok::<(), ()>(()),
@@ -271,18 +265,18 @@ mod tests {
     }
 
     #[test]
-    fn startup_authorization_and_maintenance_blocks_never_run_local_callback() {
+    fn startup_unknown_health_or_configuration_never_runs_local_callback() {
         for (health, tun) in [
-            (ServiceHealthKind::MaintenancePending, Some(false)),
-            (ServiceHealthKind::Unauthorized, Some(false)),
-            (ServiceHealthKind::UnrecognizedInstallation, Some(false)),
-            (ServiceHealthKind::Missing, None),
+            (ServiceHealthKind::Unknown, Some(false)),
+            (ServiceHealthKind::Unknown, Some(true)),
+            (ServiceHealthKind::VersionMismatch, None),
+            (ServiceHealthKind::NotInstalled, None),
         ] {
             let local_starts = Cell::new(0);
             let result = route_startup_with_policy(
                 CoreKind::Mihomo,
                 false,
-                Some(health),
+                Some(health.clone()),
                 tun,
                 false,
                 || Ok::<(), ()>(()),
@@ -306,7 +300,7 @@ mod tests {
         let result = route_startup_with_policy(
             CoreKind::Mihomo,
             false,
-            Some(ServiceHealthKind::Missing),
+            Some(ServiceHealthKind::NotInstalled),
             Some(false),
             false,
             || Err::<(), _>("unexpected Acquire"),
@@ -344,28 +338,22 @@ mod tests {
         ] {
             assert!(permits_local_fallback(
                 platform,
-                ServiceHealthKind::Missing,
+                &ServiceHealthKind::NotInstalled,
                 false
             ));
             for health in [
-                ServiceHealthKind::Stopped,
-                ServiceHealthKind::RepairRequired,
-                ServiceHealthKind::Incompatible,
-                ServiceHealthKind::Unknown,
+                ServiceHealthKind::Unavailable("native transport unavailable".into()),
+                ServiceHealthKind::VersionMismatch,
             ] {
                 assert_eq!(
-                    permits_local_fallback(platform, health, false),
+                    permits_local_fallback(platform, &health, false),
                     platform == StartupPlatform::Windows
                 );
-                assert!(permits_local_fallback(platform, health, true));
+                assert!(permits_local_fallback(platform, &health, true));
             }
-            for health in [
-                ServiceHealthKind::Unauthorized,
-                ServiceHealthKind::MaintenancePending,
-                ServiceHealthKind::UnrecognizedInstallation,
-            ] {
-                assert!(!permits_local_fallback(platform, health, false));
-                assert!(!permits_local_fallback(platform, health, true));
+            for health in [ServiceHealthKind::Unknown, ServiceHealthKind::Ready] {
+                assert!(!permits_local_fallback(platform, &health, false));
+                assert!(!permits_local_fallback(platform, &health, true));
             }
         }
     }
@@ -399,7 +387,7 @@ mod tests {
         );
         assert!(!message.contains("credentials"));
         assert_ne!(
-            blocked_message(StartupBlocked::Health(ServiceHealthKind::Incompatible)),
+            blocked_message(StartupBlocked::Health(ServiceHealthKind::VersionMismatch)),
             message
         );
     }

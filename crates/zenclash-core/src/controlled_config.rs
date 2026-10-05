@@ -424,7 +424,7 @@ impl ControlledConfigStore {
                 let runtime = binding.descriptor();
                 runtime.kind() == CoreKind::Mihomo
                     && runtime.backend() == crate::CoreRuntimeBackend::Local
-                    && !zenclash_service::current_process_elevated()
+                    && !crate::current_process_elevated()
             });
         if !self.startup_tun_disabled && !ordinary {
             return Ok(payload);

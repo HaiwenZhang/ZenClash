@@ -32,6 +32,9 @@ if [[ "$(uname -m)" != "arm64" ]]; then
   exit 1
 fi
 
+if [[ -z "${GEODATA_PATH}" && -f "${ZENCLASH_DEPENDENCY_LICENSE_DIR:-${PROJECT_ROOT}/dist/dependency-licenses}/resources/geoip.metadb" ]]; then
+  GEODATA_PATH="${ZENCLASH_DEPENDENCY_LICENSE_DIR:-${PROJECT_ROOT}/dist/dependency-licenses}/resources/geoip.metadb"
+fi
 if [[ -n "${GEODATA_PATH}" ]]; then
   if [[ ! -f "${GEODATA_PATH}" ]]; then
     echo "ZENCLASH_GEODATA_FILE is not a regular file: ${GEODATA_PATH}" >&2
@@ -71,7 +74,7 @@ ZENCLASH_VERSION="${VERSION}" \
 ZENCLASH_BUNDLED_MIHOMO_VERSION="${bundled_mihomo_version}" \
 cargo build --release --locked -p zenclash-ui --bin zenclash --target "${TARGET_TRIPLE}"
 ZENCLASH_VERSION="${VERSION}" \
-cargo build --release --locked -p zenclash-service --features server --bin zenclash-service --target "${TARGET_TRIPLE}"
+cargo build --release --locked -p zenclash-service --features standalone,client --bin zenclash-service --bin zenclash-service-install --bin zenclash-service-uninstall --target "${TARGET_TRIPLE}"
 
 SERVICE_PATH="${CARGO_OUTPUT_ROOT}/${TARGET_TRIPLE}/release/zenclash-service"
 if [[ ! -f "${SERVICE_PATH}" || ! -s "${SERVICE_PATH}" || ! -x "${SERVICE_PATH}" ]]; then
@@ -83,19 +86,33 @@ if ! service_version="$("${SERVICE_PATH}" --version)" || [[ -z "${service_versio
   exit 1
 fi
 
+for tool in zenclash-service-install zenclash-service-uninstall; do
+  tool_path="${CARGO_OUTPUT_ROOT}/${TARGET_TRIPLE}/release/${tool}"
+  if [[ ! -s "${tool_path}" || ! -x "${tool_path}" ]]; then
+    echo "Native service maintenance tool is missing or not executable: ${tool_path}" >&2
+    exit 1
+  fi
+done
+
 rm -rf "${APP_DIR}"
 mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}"
 cp "${CARGO_OUTPUT_ROOT}/${TARGET_TRIPLE}/release/zenclash" "${MACOS_DIR}/zenclash"
 cp "${SERVICE_PATH}" "${MACOS_DIR}/zenclash-service"
+for tool in zenclash-service-install zenclash-service-uninstall; do
+  cp "${CARGO_OUTPUT_ROOT}/${TARGET_TRIPLE}/release/${tool}" "${MACOS_DIR}/${tool}"
+  chmod 755 "${MACOS_DIR}/${tool}"
+done
 cp "${PROJECT_ROOT}/platforms/macos/Info.plist" "${CONTENTS_DIR}/Info.plist"
-cp "${PROJECT_ROOT}/platforms/macos/org.zenclash.service.plist" "${RESOURCES_DIR}/org.zenclash.service.plist"
 cp "${MIHOMO_PATH}" "${RESOURCES_DIR}/mihomo"
 cp "${GEODATA_PATH}" "${RESOURCES_DIR}/geoip.metadb"
 cp "${PROFILE_PATH}" "${RESOURCES_DIR}/profile.yaml"
 cp "${PROJECT_ROOT}/platforms/common/recovery.yaml" "${RESOURCES_DIR}/recovery.yaml"
 cp "${PROJECT_ROOT}/LICENSE" "${RESOURCES_DIR}/LICENSE.txt"
+python3 "${SCRIPT_DIR}/stage_release_licenses.py" --project "${PROJECT_ROOT}" \
+  --destination "${RESOURCES_DIR}" --version "${VERSION}" \
+  --dependency-licenses "${ZENCLASH_DEPENDENCY_LICENSE_DIR:-${PROJECT_ROOT}/dist/dependency-licenses}" \
+  --mihomo-tag "${MIHOMO_VERSION:-v1.19.30}" --geodata-file "${GEODATA_PATH}"
 chmod 755 "${MACOS_DIR}/zenclash" "${MACOS_DIR}/zenclash-service" "${RESOURCES_DIR}/mihomo"
-chmod 644 "${RESOURCES_DIR}/org.zenclash.service.plist"
 "${RESOURCES_DIR}/mihomo" -v
 
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "${CONTENTS_DIR}/Info.plist"
@@ -107,15 +124,14 @@ elif [[ -f "${PROJECT_ROOT}/examples/clash-party/build/icon.icns" ]]; then
   cp "${PROJECT_ROOT}/examples/clash-party/build/icon.icns" "${RESOURCES_DIR}/ZenClash.icns"
 fi
 
-if [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
-  codesign --force --options runtime --timestamp --sign "${APPLE_SIGNING_IDENTITY}" "${RESOURCES_DIR}/mihomo"
-  codesign --force --options runtime --timestamp --sign "${APPLE_SIGNING_IDENTITY}" "${MACOS_DIR}/zenclash-service"
-else
-  codesign --force --sign - "${RESOURCES_DIR}/mihomo"
-  codesign --force --sign - "${MACOS_DIR}/zenclash-service"
-fi
-
-codesign --verify --strict --verbose=2 "${MACOS_DIR}/zenclash-service"
+for executable in "${RESOURCES_DIR}/mihomo" "${MACOS_DIR}/zenclash-service" "${MACOS_DIR}/zenclash-service-install" "${MACOS_DIR}/zenclash-service-uninstall"; do
+  if [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+    codesign --force --options runtime --timestamp --sign "${APPLE_SIGNING_IDENTITY}" "${executable}"
+  else
+    codesign --force --sign - "${executable}"
+  fi
+  codesign --verify --strict --verbose=2 "${executable}"
+done
 if [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
   codesign --force --options runtime --timestamp --sign "${APPLE_SIGNING_IDENTITY}" "${APP_DIR}"
 else

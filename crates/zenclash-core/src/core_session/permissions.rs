@@ -23,7 +23,7 @@ impl CoreSession {
                             crate::TunPermissionError::InvalidBinary(error.to_string())
                         })?;
                         return Ok(crate::TunPermissionStatus {
-                            granted: zenclash_service::current_process_elevated(),
+                            granted: crate::current_process_elevated(),
                             can_request: false,
                             binary,
                             detail: zenclash_i18n::text("startup.local_tun_authority"),
@@ -71,7 +71,7 @@ impl CoreSession {
         if self.kind == CoreKind::Mihomo
             && self.runtime_descriptor().backend() == crate::CoreRuntimeBackend::Local
         {
-            return if zenclash_service::current_process_elevated() {
+            return if crate::current_process_elevated() {
                 self.ensure_not_shutting_down()
             } else {
                 Err(MihomoError::ServiceRequired.into())

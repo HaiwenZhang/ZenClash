@@ -6,10 +6,7 @@ use std::sync::{
 use futures_util::StreamExt;
 use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::Message;
-use zenclash_service::{
-    LogStreamOptions, ServiceClient, ServiceClientError, ServiceErrorCode, ServiceLogFormat,
-    ServiceLogLevel, ServiceStream, ServiceSubscription,
-};
+use zenclash_service_integration::{NativeSocket, ServiceSession};
 
 use super::{MihomoError, MihomoResult};
 use crate::{
@@ -133,16 +130,24 @@ impl ControllerBinding {
         })
     }
     pub(crate) fn service_binding(
-        client: Arc<ServiceClient>,
+        client: Arc<ServiceSession>,
         source_home: std::path::PathBuf,
+    ) -> Arc<Self> {
+        Self::service_binding_with_core(client, source_home, None)
+    }
+    pub(crate) fn service_binding_with_core(
+        client: Arc<ServiceSession>,
+        source_home: std::path::PathBuf,
+        core_source: Option<std::path::PathBuf>,
     ) -> Arc<Self> {
         let (updates, _) = watch::channel(BindingSnapshot {
             generation: 0,
             kind: crate::CoreKind::Mihomo,
             backend: ControllerBackend::Service {
-                runtime: crate::service_runtime_session::ServiceRuntimeSession::new(
+                runtime: crate::service_runtime_session::ServiceRuntimeSession::with_core_source(
                     client,
                     source_home,
+                    core_source,
                 ),
             },
         });
@@ -264,20 +269,16 @@ impl ControllerBinding {
                     connect_stream(&endpoint, path, query, timeout).await?,
                 ))
             }
-            ControllerBackend::Service { runtime } => StreamBackend::Service(
-                subscribe_service_stream(path, query, |request| async move {
-                    match request {
-                        ServiceStreamRequest::Logs(options) => {
-                            runtime.client.subscribe_logs(options).await
-                        }
-                        ServiceStreamRequest::Standard(kind) => {
-                            runtime.client.subscribe(kind).await
-                        }
-                    }
-                    .map_err(|error| error.to_string())
-                })
-                .await?,
-            ),
+            ControllerBackend::Service { runtime } => {
+                let path = service_stream_path(path, query)?;
+                StreamBackend::Service(Box::new(
+                    runtime
+                        .client
+                        .controller_socket(&path, &runtime.controller_secret())
+                        .await
+                        .map_err(|error| error.to_string())?,
+                ))
+            }
         };
         if !self.is_current(binding.generation) {
             return Err("Controller changed while opening stream".into());
@@ -290,61 +291,42 @@ impl ControllerBinding {
     }
 }
 
-#[derive(Debug)]
-enum ServiceStreamRequest {
-    Logs(LogStreamOptions),
-    Standard(ServiceStream),
-}
-
-async fn subscribe_service_stream<T, F>(
-    path: &str,
-    query: &[(&str, &str)],
-    operation: impl FnOnce(ServiceStreamRequest) -> F + Send,
-) -> Result<T, String>
-where
-    T: Send,
-    F: std::future::Future<Output = Result<T, String>> + Send,
-{
-    let request = match path {
-        "/logs" => ServiceStreamRequest::Logs(log_stream_options(query)?),
-        "/traffic" => ServiceStreamRequest::Standard(ServiceStream::Traffic),
-        "/connections" => ServiceStreamRequest::Standard(ServiceStream::Connections),
-        "/memory" => ServiceStreamRequest::Standard(ServiceStream::Memory),
-        _ => return Err("Unsupported service stream".into()),
-    };
-    operation(request).await
-}
-
-fn log_stream_options(query: &[(&str, &str)]) -> Result<LogStreamOptions, String> {
-    let rejected = || ServiceClientError::Rejected(ServiceErrorCode::InvalidRequest).to_string();
-    let mut level = None;
-    let mut format = None;
-    for &(key, value) in query {
-        match key {
-            "level" if level.is_none() => {
-                level = Some(match value {
-                    "silent" => ServiceLogLevel::Silent,
-                    "error" => ServiceLogLevel::Error,
-                    "warning" => ServiceLogLevel::Warning,
-                    "info" => ServiceLogLevel::Info,
-                    "debug" => ServiceLogLevel::Debug,
-                    _ => return Err(rejected()),
-                });
-            }
-            "format" if format.is_none() => {
-                format = Some(match value {
-                    "plain" => ServiceLogFormat::Plain,
-                    "structured" => ServiceLogFormat::Structured,
-                    _ => return Err(rejected()),
-                });
-            }
-            _ => return Err(rejected()),
-        }
+fn service_stream_path(path: &str, query: &[(&str, &str)]) -> Result<String, String> {
+    if !matches!(path, "/logs" | "/traffic" | "/connections" | "/memory") {
+        return Err("Unsupported native controller stream".into());
     }
-    Ok(LogStreamOptions {
-        level: level.unwrap_or(ServiceLogLevel::Info),
-        format: format.unwrap_or(ServiceLogFormat::Plain),
-    })
+    let mut url = reqwest::Url::parse(&format!("http://localhost{path}"))
+        .map_err(|error| error.to_string())?;
+    if path == "/logs" {
+        let mut level = None;
+        let mut format = None;
+        for &(key, value) in query {
+            match key {
+                "level"
+                    if level.is_none()
+                        && matches!(value, "silent" | "error" | "warning" | "info" | "debug") =>
+                {
+                    level = Some(value)
+                }
+                "format" if format.is_none() && matches!(value, "plain" | "structured") => {
+                    format = Some(value)
+                }
+                _ => return Err("Invalid Mihomo log stream options".into()),
+            }
+        }
+        url.query_pairs_mut().extend_pairs([
+            ("level", level.unwrap_or("info")),
+            ("format", format.unwrap_or("plain")),
+        ]);
+    } else if !query.is_empty() {
+        url.query_pairs_mut().extend_pairs(query.iter().copied());
+    }
+    Ok(format!(
+        "{}{}",
+        url.path(),
+        url.query()
+            .map_or_else(String::new, |query| format!("?{query}"))
+    ))
 }
 
 #[cfg(test)]
@@ -353,7 +335,7 @@ mod service_logs_tests;
 
 enum StreamBackend {
     Direct(Box<MihomoSocket>),
-    Service(ServiceSubscription),
+    Service(Box<NativeSocket>),
 }
 
 pub(crate) struct ControllerStream {
@@ -372,15 +354,10 @@ impl ControllerStream {
                 .next()
                 .await
                 .map(|message| message.map_err(|error| error.to_string())),
-            StreamBackend::Service(stream) => match stream.next().await {
-                Ok(Some(value)) => Some(
-                    serde_json::to_vec(&value)
-                        .map(Message::Binary)
-                        .map_err(|error| error.to_string()),
-                ),
-                Ok(None) => None,
-                Err(error) => Some(Err(error.to_string())),
-            },
+            StreamBackend::Service(stream) => stream
+                .next()
+                .await
+                .map(|message| message.map_err(|error| error.to_string())),
         };
         if !self.binding.is_current(self.generation) {
             return None;

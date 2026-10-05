@@ -120,6 +120,7 @@ impl CoreSession {
         self.lifecycle.write().stop_requested = true;
         let session = self.clone();
         tokio::spawn(async move {
+            let _run_attempt = session.begin_core_run_attempt();
             let _capture = capture;
             let _lease = lease;
             let _transition = transition;

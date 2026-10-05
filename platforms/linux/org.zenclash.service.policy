@@ -2,7 +2,7 @@
 <!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN" "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
   <vendor>ZenClash</vendor>
-  <action id="org.zenclash.service.manage">
+  <action id="org.zenclash.service.install">
     <description>Install or maintain the ZenClash runtime service</description>
     <message>Authentication is required to manage the ZenClash runtime service</message>
     <defaults>
@@ -10,6 +10,16 @@
       <allow_inactive>no</allow_inactive>
       <allow_active>auth_admin</allow_active>
     </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/zenclash/zenclash-service</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/zenclash/zenclash-service-install</annotate>
+  </action>
+  <action id="org.zenclash.service.uninstall">
+    <description>Uninstall the ZenClash runtime service</description>
+    <message>Authentication is required to uninstall the ZenClash runtime service</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/zenclash/zenclash-service-uninstall</annotate>
   </action>
 </policyconfig>

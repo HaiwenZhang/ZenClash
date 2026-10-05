@@ -6,13 +6,15 @@ project_root="$(cd "${script_dir}/../.." && pwd)"
 test_root="$(mktemp -d)"
 trap '[[ -n "${test_root}" && -d "${test_root}/bin" ]] && rm -rf "${test_root}"' EXIT
 mkdir -p "${test_root}/bin" "${test_root}/target/release" "${test_root}/captured"
+export MIHOMO_VERSION=v1.19.30
+export ZENCLASH_DEPENDENCY_LICENSE_DIR="${test_root}/dependency-licenses"
 
 cat >"${test_root}/bin/cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 binary=zenclash
 if [[ " $* " == *" -p zenclash-service "* ]]; then
-  [[ " $* " == *" --features server "* ]]
+  [[ " $* " == *" --features standalone,client "* ]]
   [[ "${MOCK_MISSING_SERVICE:-0}" == 0 ]] || exit 0
   binary=zenclash-service
 fi
@@ -27,6 +29,12 @@ else
   printf '#!/usr/bin/env bash\nprintf "fixture\\n"\n' >"${CARGO_TARGET_DIR}/release/${binary}"
 fi
 chmod +x "${CARGO_TARGET_DIR}/release/${binary}"
+if [[ "${binary}" == zenclash-service ]]; then
+  for tool in zenclash-service-install zenclash-service-uninstall; do
+    [[ " $* " == *" --bin ${tool} "* ]]
+    cp "${CARGO_TARGET_DIR}/release/${binary}" "${CARGO_TARGET_DIR}/release/${tool}"
+  done
+fi
 EOF
 
 cat >"${test_root}/bin/rpmbuild" <<'EOF'
@@ -56,7 +64,7 @@ while IFS= read -r line; do
   [[ "${line}" != '%files' ]] || break
   if [[ "${line}" == '%install' ]]; then in_install=1; continue; fi
   [[ "${in_install}" == 1 && -n "${line}" ]] || continue
-  [[ "${line}" == 'install '* ]]
+  [[ "${line}" == 'install '* || "${line}" == 'cp -a '* ]]
   line="${line//\%\{payload_dir\}/${payload}}"
   line="${line//\%\{buildroot\}/${buildroot}}"
   line="${line//\%\{_bindir\}/\/usr\/bin}"
@@ -67,7 +75,10 @@ while IFS= read -r line; do
 done <"${spec}"
 # Execute the actual spec's install commands; this does not build a native RPM.
 cp "${buildroot}/usr/lib/zenclash/zenclash-service" "${MOCK_CAPTURED}/zenclash-service"
-cp "${buildroot}/usr/lib/systemd/system/zenclash-service.service" "${MOCK_CAPTURED}/unit"
+for tool in zenclash-service-install zenclash-service-uninstall; do
+  [[ -s "${buildroot}/usr/lib/zenclash/${tool}" && -x "${buildroot}/usr/lib/zenclash/${tool}" ]]
+done
+[[ ! -e "${buildroot}/usr/lib/systemd/system/zenclash-service.service" ]]
 cp "${buildroot}/usr/share/polkit-1/actions/org.zenclash.service.policy" "${MOCK_CAPTURED}/policy"
 cp "${buildroot}/usr/lib/zenclash/package-service.sh" "${MOCK_CAPTURED}/package-service.sh"
 find "${buildroot}" -type f | sed "s|^${buildroot}||" >"${topdir}/RPMS/x86_64/zenclash.rpm"
@@ -85,6 +96,7 @@ EOF
 
 printf '#!/usr/bin/env bash\nprintf "Mihomo fixture\\n"\n' >"${test_root}/mihomo"
 printf 'fixture\n' >"${test_root}/geoip.metadb"
+python3 "${script_dir}/license_fixture.py" "${project_root}" "${ZENCLASH_DEPENDENCY_LICENSE_DIR}" "${test_root}/geoip.metadb"
 chmod +x "${test_root}/bin/"* "${test_root}/mihomo"
 export PATH="${test_root}/bin:${PATH}"
 export CARGO_TARGET_DIR="${test_root}/target"
@@ -96,7 +108,6 @@ bash "${project_root}/scripts/build_rpm_package.sh" 9.8.7 "${test_root}/dist"
 package="${test_root}/dist/ZenClash-9.8.7-linux-x86_64.rpm"
 [[ -s "${package}" ]]
 cmp "${CARGO_TARGET_DIR}/release/zenclash-service" "${MOCK_CAPTURED}/zenclash-service"
-cmp "${project_root}/platforms/linux/zenclash-service.service" "${MOCK_CAPTURED}/unit"
 cmp "${project_root}/platforms/linux/org.zenclash.service.policy" "${MOCK_CAPTURED}/policy"
 cmp "${project_root}/platforms/linux/package-service.sh" "${MOCK_CAPTURED}/package-service.sh"
 

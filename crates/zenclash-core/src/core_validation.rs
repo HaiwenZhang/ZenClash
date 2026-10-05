@@ -150,7 +150,10 @@ impl CoreConfigValidator {
         self.validate_file_while_leased(config)
     }
 
-    fn validate_file_while_leased(&self, config: &Path) -> Result<(), CoreConfigValidationError> {
+    pub(crate) fn validate_file_while_leased(
+        &self,
+        config: &Path,
+    ) -> Result<(), CoreConfigValidationError> {
         if !self.kind.capabilities().config_validation {
             return Ok(());
         }

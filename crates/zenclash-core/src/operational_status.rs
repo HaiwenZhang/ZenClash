@@ -232,7 +232,7 @@ impl ProcessStatus {
                         .client()
                         .service_client()
                         .and_then(|client| client.snapshot())
-                        .and_then(|status| status.pid)
+                        .and_then(|status| status.core_pid)
                 }),
             running: snapshot.running.unwrap_or(false),
             generation: snapshot.generation,

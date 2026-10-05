@@ -5,7 +5,7 @@ if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y --no-install-recommends \
-    build-essential clang cmake curl file git gzip jq pkg-config \
+    build-essential clang cmake curl file git gzip jq pkg-config python3 \
     libasound2-dev libfontconfig1-dev libglib2.0-dev libgtk-3-dev \
     libappindicator3-dev libssl-dev libvulkan1 libwayland-dev \
     libx11-xcb-dev libxdo-dev libxkbcommon-x11-dev \
@@ -31,7 +31,7 @@ if command -v dnf >/dev/null 2>&1; then
     alsa-lib-devel clang cmake curl file fontconfig-devel gcc gcc-c++ git \
     glib2-devel gtk3-devel gzip jq libappindicator-gtk3-devel libxcb-devel \
     libxdo-devel libxkbcommon-x11-devel openssl-devel pkgconf-pkg-config \
-    rpm-build tar vulkan-loader wayland-devel
+    rpm-build tar vulkan-loader wayland-devel python3
   exit 0
 fi
 

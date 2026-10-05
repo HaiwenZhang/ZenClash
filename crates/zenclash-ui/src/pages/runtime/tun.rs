@@ -46,17 +46,11 @@ impl RuntimePage {
                 ServicePhase::Restoring => "core_page.service.restoring",
                 ServicePhase::Cancelled => "core_page.service.cancelled",
                 ServicePhase::Failed => "core_page.service.failed",
-                _ => match state.health().map(|health| health.kind()) {
+                _ => match state.health() {
                     Some(ServiceHealthKind::Ready) => "core_page.service.ready",
-                    Some(ServiceHealthKind::Missing) => "core_page.service.missing",
-                    Some(ServiceHealthKind::Stopped) => "core_page.service.stopped",
-                    Some(ServiceHealthKind::RepairRequired) => "core_page.service.repair_required",
-                    Some(ServiceHealthKind::MaintenancePending) => "core_page.service.pending",
-                    Some(ServiceHealthKind::Unauthorized) => "core_page.service.unauthorized",
-                    Some(ServiceHealthKind::Incompatible) => "core_page.service.incompatible",
-                    Some(ServiceHealthKind::UnrecognizedInstallation) => {
-                        "core_page.service.unrecognized"
-                    }
+                    Some(ServiceHealthKind::NotInstalled) => "core_page.service.missing",
+                    Some(ServiceHealthKind::Unavailable(_)) => "core_page.service.unavailable",
+                    Some(ServiceHealthKind::VersionMismatch) => "core_page.service.incompatible",
                     Some(ServiceHealthKind::Unknown) | None => "core_page.service.unknown",
                 },
             }

@@ -105,9 +105,18 @@ impl MihomoClient {
                 if !self.binding.is_current(binding.generation) {
                     return Err(MihomoError::StaleBinding);
                 }
-                let response = runtime.client.api(method.as_str(), &path, body).await?;
+                let response = runtime
+                    .client
+                    .controller_request(
+                        method.as_str(),
+                        &path,
+                        body.as_ref(),
+                        &runtime.controller_secret(),
+                        timeout.unwrap_or(std::time::Duration::from_secs(12)),
+                    )
+                    .await?;
                 if !(200..300).contains(&response.status) {
-                    let payload = serde_json::to_vec(&response.body)?;
+                    let payload = response.body;
                     let mut message =
                         error_message(&payload[..payload.len().min(MAX_ERROR_BODY_BYTES)]);
                     if payload.len() > MAX_ERROR_BODY_BYTES {
@@ -134,7 +143,7 @@ impl MihomoClient {
 
 enum ReplyBody {
     Direct(Response),
-    Service(serde_json::Value),
+    Service(Vec<u8>),
 }
 
 pub(super) struct ApiReply {
@@ -147,7 +156,7 @@ impl ApiReply {
     pub(super) async fn json<T: DeserializeOwned>(self) -> MihomoResult<T> {
         let value = match self.response {
             ReplyBody::Direct(response) => response.json().await?,
-            ReplyBody::Service(value) => serde_json::from_value(value)?,
+            ReplyBody::Service(value) => serde_json::from_slice(&value)?,
         };
         if !self.binding.is_current(self.generation) {
             return Err(MihomoError::StaleTransport);

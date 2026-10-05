@@ -993,14 +993,10 @@ fn service_failure_message(error: ServiceManagerError) -> String {
         ServiceManagerError::ConsentRequired => "core_page.service.install_description",
         ServiceManagerError::Sources(_) => "core_page.service.bundle_missing",
         ServiceManagerError::Health(kind) => match kind {
-            ServiceHealthKind::Missing => "core_page.service.missing",
+            ServiceHealthKind::NotInstalled => "core_page.service.missing",
             ServiceHealthKind::Ready | ServiceHealthKind::Unknown => "core_page.service.unknown",
-            ServiceHealthKind::Stopped => "core_page.service.stopped",
-            ServiceHealthKind::RepairRequired => "core_page.service.repair_required",
-            ServiceHealthKind::MaintenancePending => "core_page.service.pending",
-            ServiceHealthKind::Unauthorized => "core_page.service.unauthorized",
-            ServiceHealthKind::Incompatible => "core_page.service.incompatible",
-            ServiceHealthKind::UnrecognizedInstallation => "core_page.service.unrecognized",
+            ServiceHealthKind::Unavailable(_) => "core_page.service.unavailable",
+            ServiceHealthKind::VersionMismatch => "core_page.service.incompatible",
         },
         ServiceManagerError::Runtime(error) => return error.to_string(),
         ServiceManagerError::Maintenance(_) => "core_page.service.failed",
@@ -1607,17 +1603,17 @@ mod tests {
 
     #[tokio::test]
     async fn delayed_acceptance_does_not_clear_a_newer_unknown_runtime() {
-        assert_delayed_runtime_publication(false, false).await;
+        Box::pin(assert_delayed_runtime_publication(false, false)).await;
     }
 
     #[tokio::test]
     async fn delayed_unknown_does_not_replace_a_newer_accepted_runtime() {
-        assert_delayed_runtime_publication(true, false).await;
+        Box::pin(assert_delayed_runtime_publication(true, false)).await;
     }
 
     #[tokio::test]
     async fn reapplying_the_current_profile_clears_shared_runtime_uncertainty() {
-        assert_delayed_runtime_publication(true, true).await;
+        Box::pin(assert_delayed_runtime_publication(true, true)).await;
     }
 
     async fn assert_delayed_runtime_publication(unknown_first: bool, reapply_current: bool) {

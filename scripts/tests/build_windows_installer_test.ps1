@@ -10,6 +10,10 @@ New-Item -ItemType Directory -Path $TestRoot | Out-Null
 $PreviousTarget = $env:CARGO_TARGET_DIR
 $PreviousFixtureRoot = $env:ZENCLASH_PACKAGE_TEST_ROOT
 $PreviousMode = $env:ZENCLASH_PACKAGE_TEST_MODE
+$PreviousLicenses = $env:ZENCLASH_DEPENDENCY_LICENSE_DIR
+$PreviousMihomoTag = $env:MIHOMO_VERSION
+$env:MIHOMO_VERSION = "v1.19.30"
+$env:ZENCLASH_DEPENDENCY_LICENSE_DIR = Join-Path $TestRoot "dependency-licenses"
 
 try {
     # These ordinary native fixtures exercise packaging only, not Mihomo or SCM.
@@ -30,6 +34,8 @@ fn main() {
     if ($LASTEXITCODE -ne 0) { throw 'Native packaging fixture compilation failed' }
     Copy-Item -LiteralPath (Join-Path $TestRoot 'fixture.exe') -Destination (Join-Path $TestRoot 'mihomo.exe')
     'ordinary packaging fixture' | Set-Content -LiteralPath (Join-Path $TestRoot 'geoip.metadb')
+    python (Join-Path $PSScriptRoot "license_fixture.py") $ProjectRoot $env:ZENCLASH_DEPENDENCY_LICENSE_DIR (Join-Path $TestRoot 'geoip.metadb')
+    if ($LASTEXITCODE -ne 0) { throw "License fixture generation failed" }
 
     # Avoid replacing resources on an executable: icon injection is outside this test.
     Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @'
@@ -47,9 +53,13 @@ public static class ZenClashIconResource {
         $Text = ' ' + ($Arguments -join ' ') + ' '
         $Text | Add-Content -LiteralPath (Join-Path $env:ZENCLASH_PACKAGE_TEST_ROOT 'cargo.log')
         if ($Text.Contains(' -p zenclash-service ')) {
-            if (-not $Text.Contains(' --features server ') -or
+            if (-not $Text.Contains(' --features standalone,client ') -or
                 -not $Text.Contains(' --bin zenclash-service ') -or
                 -not $Text.Contains(' --target x86_64-pc-windows-msvc ')) { throw 'Incorrect service build command' }
+            foreach ($Tool in @('zenclash-service-install', 'zenclash-service-uninstall')) {
+                if (-not $Text.Contains(" --bin $Tool ")) { throw "Build omitted $Tool" }
+                Copy-Item -LiteralPath (Join-Path $env:ZENCLASH_PACKAGE_TEST_ROOT 'fixture.exe') -Destination (Join-Path $Release "$Tool.exe")
+            }
             $Service = Join-Path $Release 'zenclash-service.exe'
             switch ($env:ZENCLASH_PACKAGE_TEST_MODE) {
                 'missing' { }
@@ -58,7 +68,13 @@ public static class ZenClashIconResource {
                 default { Copy-Item -LiteralPath (Join-Path $env:ZENCLASH_PACKAGE_TEST_ROOT 'fixture.exe') -Destination $Service }
             }
         } else {
-            Copy-Item -LiteralPath (Join-Path $env:ZENCLASH_PACKAGE_TEST_ROOT 'fixture.exe') -Destination (Join-Path $Release 'zenclash.exe')
+            $Gui = Join-Path $Release 'zenclash.exe'
+            switch ($env:ZENCLASH_PACKAGE_TEST_MODE) {
+                'gui-missing' { }
+                'gui-empty' { [System.IO.File]::WriteAllBytes($Gui, [byte[]]@()) }
+                'gui-build-failed' { $global:LASTEXITCODE = 7; return }
+                default { Copy-Item -LiteralPath (Join-Path $env:ZENCLASH_PACKAGE_TEST_ROOT 'fixture.exe') -Destination $Gui }
+            }
         }
         $global:LASTEXITCODE = 0
     }
@@ -71,7 +87,26 @@ if (-not (Test-Path -LiteralPath $Helper -PathType Leaf) -or (Get-Item -LiteralP
     throw 'ISCC received no nonempty service payload'
 }
 Copy-Item -LiteralPath $Helper -Destination (Join-Path $env:ZENCLASH_PACKAGE_TEST_ROOT 'packaged-helper.exe')
+foreach ($Tool in @('zenclash-service-install.exe', 'zenclash-service-uninstall.exe')) {
+    $ToolPath = Join-Path $Stage $Tool
+    if (-not (Test-Path -LiteralPath $ToolPath -PathType Leaf) -or (Get-Item -LiteralPath $ToolPath).Length -eq 0) { throw "Missing native tool: $Tool" }
+}
+foreach ($Name in @('LICENSE', 'NOTICE.md', 'CORRESPONDING-SOURCE.md', 'licenses/zenclash-service/LICENSE', 'licenses/zenclash-service-integration/LICENSE', 'licenses/dependencies/MANIFEST.json')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $Stage $Name) -PathType Leaf)) { throw "ISCC received no legal notice: $Name" }
+}
+$Gui = Join-Path $Stage 'zenclash.exe'
+if (-not (Test-Path -LiteralPath $Gui -PathType Leaf) -or (Get-Item -LiteralPath $Gui).Length -eq 0) {
+    throw 'ISCC received no nonempty GUI payload'
+}
+Copy-Item -LiteralPath $Gui -Destination (Join-Path $env:ZENCLASH_PACKAGE_TEST_ROOT 'packaged-gui.exe')
 $Definition = Get-Content -LiteralPath $args[-1] -Raw
+$GuiSource = 'Source: "{#SourceDir}\zenclash.exe"; DestDir: "{app}"'
+$StartMenu = 'Name: "{autoprograms}\ZenClash"; Filename: "{app}\zenclash.exe"'
+$Desktop = 'Name: "{autodesktop}\ZenClash"; Filename: "{app}\zenclash.exe"'
+$Launch = 'Filename: "{app}\zenclash.exe"; Description: "Launch ZenClash"'
+foreach ($RequiredGuiEntry in @($GuiSource, $StartMenu, $Desktop, $Launch)) {
+    if (-not $Definition.Contains($RequiredGuiEntry)) { throw "Installer omitted GUI entry: $RequiredGuiEntry" }
+}
 if ($Definition -notmatch '(?m)^PrivilegesRequired=lowest\r?$' -or
     $Definition -notmatch 'Source: "\{#SourceDir\}\\zenclash-service\.exe"; DestDir: "\{app\}"' -or
     $Definition -match 'Filename: "\{app\}\\zenclash-service\.exe"') {
@@ -84,11 +119,14 @@ $global:LASTEXITCODE = 0
 
     $env:ZENCLASH_PACKAGE_TEST_ROOT = $TestRoot
     $env:CARGO_TARGET_DIR = Join-Path $TestRoot 'target'
-    foreach ($Mode in @('success', 'missing', 'empty', 'build-failed', 'version-failed', 'version-empty')) {
+    foreach ($Mode in @('success', 'missing', 'empty', 'build-failed', 'version-failed', 'version-empty', 'gui-missing', 'gui-empty', 'gui-build-failed')) {
         $env:ZENCLASH_PACKAGE_TEST_MODE = $Mode
         $Release = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release'
         if (Test-Path -LiteralPath (Join-Path $Release 'zenclash-service.exe')) {
             Remove-Item -LiteralPath (Join-Path $Release 'zenclash-service.exe')
+        }
+        if (Test-Path -LiteralPath (Join-Path $Release 'zenclash.exe')) {
+            Remove-Item -LiteralPath (Join-Path $Release 'zenclash.exe')
         }
         $Log = Join-Path $TestRoot 'iscc.log'
         if (Test-Path -LiteralPath $Log) { Remove-Item -LiteralPath $Log }
@@ -102,6 +140,9 @@ $global:LASTEXITCODE = 0
             if ($null -ne $Failure) { throw $Failure }
             if (-not (Test-Path -LiteralPath $Log)) { throw 'ISCC was not called for a valid payload' }
             $OriginalHash = (Get-FileHash -LiteralPath (Join-Path $TestRoot 'fixture.exe')).Hash
+            if ((Get-FileHash -LiteralPath (Join-Path $TestRoot 'packaged-gui.exe')).Hash -ne $OriginalHash) {
+                throw 'Staging changed GUI payload bytes'
+            }
             if ((Get-FileHash -LiteralPath (Join-Path $TestRoot 'packaged-helper.exe')).Hash -ne $OriginalHash) {
                 throw 'Staging changed service payload bytes'
             }
@@ -111,6 +152,8 @@ $global:LASTEXITCODE = 0
             $ExpectedError = switch ($Mode) {
                 { $_ -in 'missing', 'empty' } { 'Service executable is missing or empty:' }
                 'build-failed' { 'Service cargo build failed' }
+                { $_ -in 'gui-missing', 'gui-empty' } { 'GUI executable is missing or empty:' }
+                'gui-build-failed' { 'cargo build failed' }
                 default { 'The packaged service executable failed its version check' }
             }
             if (-not $Failure.Exception.Message.StartsWith($ExpectedError)) {
@@ -119,11 +162,14 @@ $global:LASTEXITCODE = 0
             Write-Host "Rejected $Mode payload before ISCC"
         }
     }
-    Write-Host 'Windows service payload packaging: 6 cases passed'
+    $global:LASTEXITCODE = 0
+    Write-Host 'Windows GUI/service payload packaging: 9 cases passed'
 } finally {
     $env:CARGO_TARGET_DIR = $PreviousTarget
     $env:ZENCLASH_PACKAGE_TEST_ROOT = $PreviousFixtureRoot
     $env:ZENCLASH_PACKAGE_TEST_MODE = $PreviousMode
+    $env:ZENCLASH_DEPENDENCY_LICENSE_DIR = $PreviousLicenses
+    $env:MIHOMO_VERSION = $PreviousMihomoTag
     $ResolvedTestRoot = [System.IO.Path]::GetFullPath($TestRoot)
     $TemporaryPrefix = $TemporaryRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
     if (-not $ResolvedTestRoot.StartsWith($TemporaryPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or

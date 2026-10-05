@@ -1,0 +1,121 @@
+{
+  "repository": "https://github.com/clash-verge-rev/clash-verge-rev",
+  "local_source": "examples/clash-verge-rev/src-tauri/src/core",
+  "manifest_version": "2.5.7",
+  "verified_commit": null,
+  "import_date": "2026-10-04",
+  "authors_from_upstream_manifest": [
+    "zzzgydi",
+    "Tunglies",
+    "wonfen",
+    "MystiPanda"
+  ],
+  "license": "GPL-3.0-only",
+  "files": {
+    "owner_identity.rs": {
+      "sha256": "b5a108a6e0add848b0255b90aed7e588383f9e8ae94ca27e76eb240d0766f17c",
+      "destination": "src/owner_identity.rs"
+    },
+    "runtime_bundle.rs": {
+      "sha256": "a29cf65ebe21ec27c89938ab2d979a4c4a34de586b345f12709fe1638a4815c4",
+      "destination": "src/runtime_bundle.rs"
+    },
+    "runstate/health.rs": {
+      "sha256": "9060add7f09d8f65b66565972293bc818b282221a5eb233b82755eb34f99925a",
+      "destination": "src/health.rs"
+    },
+    "runstate/probe.rs": {
+      "sha256": "16a8ee93a921859531eefb5e40d8bbe05377514f685805cfd86fd27714a574d2",
+      "destination": "src/probe.rs"
+    },
+    "service.rs": {
+      "sha256": "bb2139fe31872453706a83bcefaab5534f2d7ddaa95e36424b98827888e0ea27",
+      "destination": "src/session.rs",
+      "copied_symbols": [
+        "ActiveServiceSession",
+        "generate_service_session_token",
+        "ServiceCapabilities",
+        "session_matches_status",
+        "open_registered_service",
+        "service_stopped",
+        "trusted_service_evidence",
+        "macos_service_install_markers",
+        "ServiceManager::config",
+        "fetch_runtime_file",
+        "decode_hex",
+        "has_settled",
+        "uninstall_service",
+        "install_service",
+        "reinstall_service",
+        "force_reinstall_service",
+        "shell_single_quote",
+        "invoke_service_install",
+        "OwnerRecoveryPolicy",
+        "owner_recovery_policy",
+        "mark_service_unavailable_after_owner_loss"
+      ],
+      "adapted_flows": [
+        "start_with_existing_service",
+        "stage_runtime_by_service",
+        "stop_core_by_service",
+        "update_writer_by_service",
+        "set_system_proxy_by_service_with_session",
+        "native Start/Stage/controller load around ZenClash application-owned persistence and immutable snapshots",
+        "recover_after_owner_loss_while_locked: copied native proxy policy and sustained transport health observation in ZenClash supervisor"
+      ],
+      "additional_destinations": [
+        "src/platform.rs",
+        "../zenclash-core/src/service_runtime_session/cache.rs",
+        "src/maintenance.rs"
+      ]
+    },
+    "manager/mod.rs": {
+      "sha256": "5d8fcabfe61608132d81c6f33a8c21c6191e833dd5f094365e975c1297528237",
+      "destination": "src/running_mode.rs",
+      "copied_symbols": [
+        "RunningMode"
+      ]
+    },
+    "runstate/mod.rs": {
+      "sha256": "75262a5c43f0cca441e9ad6451ead721de0a25fbcc986c5a8221b0f5f3cc7cf9",
+      "destination": "src/runstate/mod.rs"
+    },
+    "runstate/env.rs": {
+      "sha256": "8ca2d9929b1059e72cb3e0071354228d1d554dc257732d05c39ad5e15fabc57c",
+      "destination": "src/runstate/env.rs"
+    },
+    "runstate/owner.rs": {
+      "sha256": "330593569651d1eb494e123d16117006cd8e240594f365ebab73c8ee256cd672",
+      "destination": "src/runstate/owner.rs"
+    }
+  },
+  "fixture_sources": [
+    {
+      "source": "crates/zenclash-service/src/bin/mock_binary.rs",
+      "upstream_repository": "https://github.com/clash-verge-rev/clash-verge-service-ipc",
+      "sha256": "4610a5f9997335afd3e7dcb10fbaf11f6958146544e93618dab3a4c95c70b1d1",
+      "destination": "src/bin/mock_core.rs"
+    }
+  ],
+  "zenclash_adaptations": [
+    {
+      "source": "crates/zenclash-service-bak/src/execution.rs",
+      "sha256": "e0d951f0310b81a14a79669bdb59cfe9d9cc2eb36de8ea93719ca0a92c56ff2e",
+      "symbols": [
+        "CoreExecutionGuard::release_after_exit",
+        "windows::elevated"
+      ],
+      "reason": "retain ZenClash child reaping outside a Tokio runtime while acquiring the real upstream native exclusion"
+    },
+    {
+      "source": "runstate/env.rs",
+      "changes": "RealEnv Tauri effects become NativeEnv<H: RunStateHost>; explicit selected-core requirement, per-CoreSession RunStateStore rather than global; privileged native operation uses spawn_blocking"
+    },
+    {
+      "source": "crates/zenclash-service-bak/src/kernel_transport.rs",
+      "sha256": "ac473a30a01dd1167de73b0ab53f1dbce2544066a686ed49113d5d5cb502d22b",
+      "destination": "src/controller.rs",
+      "changes": "Move native HTTP transport and its byte/deadline/peer tests to application integration; remove legacy service relay policy; native socket WS matches upstream application transport choice. Session validates owner generation before/after calls and binds peer to authenticated core PID."
+    }
+  ]
+}

@@ -68,7 +68,7 @@ pub(crate) fn ensure_local_patch(kind: CoreKind, patch: &serde_json::Value) -> M
 }
 
 fn ensure_disabled(enable: Option<bool>) -> MihomoResult<()> {
-    ensure_native_authority(enable, zenclash_service::current_process_elevated())
+    ensure_native_authority(enable, crate::current_process_elevated())
 }
 
 fn ensure_native_authority(enable: Option<bool>, elevated: bool) -> MihomoResult<()> {

@@ -96,7 +96,7 @@ async fn ordinary_runtime_updates_keep_tun_projection_and_service_preparation_re
         .unwrap();
     assert_eq!(
         crate::tun_admission::yaml_enables_tun(ordinary.next_payload()).unwrap(),
-        zenclash_service::current_process_elevated()
+        crate::current_process_elevated()
     );
     let service = store
         .for_service_runtime()

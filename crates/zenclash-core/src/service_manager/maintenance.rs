@@ -123,13 +123,13 @@ impl ServiceManager {
             }
             let mut request = manager.request_enable_tun_after_recovery(recovery.runtime())?;
             request.expected_capture_revision = Some(recovery.capture_revision());
-            let health = service_health().await;
+            let health = manager.observe_health().await;
             manager
                 .state
                 .send_modify(|state| state.health = Some(Arc::new(health.clone())));
             manager.check_maintenance_preparation(&preparation)?;
-            if health.kind() != ServiceHealthKind::Ready {
-                return Err(ServiceManagerError::Health(health.kind()));
+            if health != ServiceHealth::Ready {
+                return Err(ServiceManagerError::Health(health));
             }
             manager
                 .state
@@ -210,6 +210,9 @@ impl ServiceManager {
         ) {
             return Err(ServiceManagerError::Unsupported);
         }
+        if self.session.is_offline_recovery() {
+            return self.request_maintenance(operation, None);
+        }
         let tun = self.request_enable_tun()?;
         self.ensure_recovery_confirmed()?;
         if self.session.local_recovery_launch().is_some() {
@@ -268,56 +271,66 @@ impl ServiceManager {
         self.complete(preparation.operation(), move |manager| async move {
             manager.check_maintenance_preparation(&preparation)?;
             let request = &preparation.request;
-            let health = service_health().await;
+            let health = manager.observe_health().await;
             manager
                 .state
                 .send_modify(|state| state.health = Some(Arc::new(health.clone())));
             manager.check_maintenance_preparation(&preparation)?;
-            if !matches!(
-                health.kind(),
-                ServiceHealthKind::Ready
-                    | ServiceHealthKind::Stopped
-                    | ServiceHealthKind::RepairRequired
-            ) {
-                return Err(ServiceManagerError::Health(health.kind()));
-            }
-            let helper = super::tun::bundled_helper().await?;
-            let action = match request.operation {
-                ServiceOperation::Repair => zenclash_service::MaintenanceAction::Repair,
-                ServiceOperation::Uninstall => zenclash_service::MaintenanceAction::Uninstall,
-                _ => return Err(ServiceManagerError::Unsupported),
+            let Some(action) = maintenance_action(request.operation, &health)? else {
+                // Already absent: removal is complete without an unnecessary OS prompt.
+                return Ok(());
             };
-            let core = if action == zenclash_service::MaintenanceAction::Repair {
-                let binary = request
-                    .ordinary_launch
-                    .as_ref()
-                    .ok_or(ServiceManagerError::Unsupported)?
-                    .binary
-                    .clone();
-                let source = binary.clone();
-                tokio::task::spawn_blocking(move || verify_ordinary_local_executable(&source))
-                    .await
-                    .map_err(ServiceManagerError::Completion)?
-                    .map_err(|error| ServiceManagerError::Runtime(Box::new(error.into())))?;
-                Some(binary)
+            let core = if request.operation == ServiceOperation::Repair {
+                Some(manager.repair_core_source(request).await?)
             } else {
                 None
             };
+            manager.check_maintenance_preparation(&preparation)?;
+            let helper = super::tun::bundled_helper().await?;
             manager
-                .authorize_then(
+                .authorize_action(
                     request.intent,
-                    zenclash_service::maintain_service(action, &helper, core.as_deref()),
-                    || async {
-                        let health = service_health().await;
-                        manager.state.send_modify(|state| {
-                            state.health = Some(Arc::new(health));
-                        });
-                        Ok(())
-                    },
+                    action,
+                    zenclash_service_integration::maintenance::maintain_service(
+                        action, helper, core,
+                    ),
                 )
                 .await
         })
         .await
+    }
+
+    async fn repair_core_source(
+        &self,
+        request: &ServiceMaintenanceRequest,
+    ) -> Result<PathBuf, ServiceManagerError> {
+        self.check_maintenance_request(request)?;
+        let ordinary = request
+            .ordinary_launch
+            .as_ref()
+            .map(|launch| launch.binary.clone());
+        let offline = self
+            .session
+            .offline_source()
+            .map(|source| (source.home.clone(), source.binary.clone()));
+        let binary = tokio::task::spawn_blocking(move || {
+            let binary = match (ordinary, offline) {
+                (Some(binary), _) | (None, Some((_, Some(binary)))) => binary,
+                (None, Some((home, None))) => crate::process::service_core_source(&home)?,
+                (None, None) => {
+                    return Err(crate::MihomoError::InvalidInput(
+                        "No application-owned service core source".into(),
+                    ));
+                }
+            };
+            verify_ordinary_local_executable(&binary)?;
+            Ok::<_, crate::MihomoError>(binary)
+        })
+        .await
+        .map_err(ServiceManagerError::Completion)?
+        .map_err(|error| ServiceManagerError::Runtime(Box::new(error.into())))?;
+        self.check_maintenance_request(request)?;
+        Ok(binary)
     }
 
     fn check_maintenance_preparation(
@@ -326,7 +339,10 @@ impl ServiceManager {
     ) -> Result<(), ServiceManagerError> {
         self.check_maintenance_request(&preparation.request)?;
         self.ensure_recovery_confirmed()?;
-        if preparation.request.backend != CoreRuntimeBackend::Local {
+        if preparation.request.backend != CoreRuntimeBackend::Local
+            && !(preparation.request.backend == CoreRuntimeBackend::Direct
+                && self.session.is_offline_recovery())
+        {
             return Err(ServiceManagerError::Unsupported);
         }
         if !preparation.ready() {
@@ -359,6 +375,20 @@ impl ServiceManager {
             ServiceOperation::Repair | ServiceOperation::Uninstall
         ) {
             return Err(ServiceManagerError::Unsupported);
+        }
+        if self.session.runtime_descriptor().kind() == CoreKind::Mihomo
+            && self.session.is_offline_recovery()
+        {
+            let request = ServiceMaintenanceRequest {
+                operation,
+                intent: self.intent(),
+                capture_gate: self.session.capture_publication_gate(),
+                backend: CoreRuntimeBackend::Direct,
+                ordinary_launch: None,
+            };
+            self.check_maintenance_request(&request)?;
+            self.ensure_recovery_confirmed()?;
+            return Ok(request);
         }
         let tun = self.request_enable_tun()?;
         self.ensure_recovery_confirmed()?;
@@ -454,6 +484,9 @@ impl ServiceManager {
         if self.session.runtime_descriptor().backend() != request.backend {
             return Err(ServiceManagerError::Stale);
         }
+        if request.backend == CoreRuntimeBackend::Direct && !self.session.is_offline_recovery() {
+            return Err(ServiceManagerError::Unsupported);
+        }
         Ok(())
     }
 
@@ -468,6 +501,29 @@ impl ServiceManager {
             )));
         }
         Ok(())
+    }
+}
+
+fn maintenance_action(
+    operation: ServiceOperation,
+    health: &ServiceHealth,
+) -> Result<Option<zenclash_service_integration::health::PendingAction>, ServiceManagerError> {
+    use zenclash_service_integration::health::PendingAction;
+    match (operation, health) {
+        (ServiceOperation::Uninstall, ServiceHealth::NotInstalled) => Ok(None),
+        (ServiceOperation::Repair, ServiceHealth::NotInstalled) => Ok(Some(PendingAction::Install)),
+        (
+            ServiceOperation::Repair,
+            ServiceHealth::Ready | ServiceHealth::VersionMismatch | ServiceHealth::Unavailable(_),
+        ) => Ok(Some(PendingAction::ForceReinstall)),
+        (
+            ServiceOperation::Uninstall,
+            ServiceHealth::Ready | ServiceHealth::VersionMismatch | ServiceHealth::Unavailable(_),
+        ) => Ok(Some(PendingAction::Uninstall)),
+        (ServiceOperation::Repair | ServiceOperation::Uninstall, _) => {
+            Err(ServiceManagerError::Health(health.clone()))
+        }
+        _ => Err(ServiceManagerError::Unsupported),
     }
 }
 
@@ -492,6 +548,274 @@ mod tests {
         .unwrap();
         let capture = TrafficCaptureSession::new(session.clone(), unused_store(), None, None);
         ServiceManager::new(session, capture)
+    }
+
+    fn offline_manager(kind: CoreKind, binary: Option<PathBuf>) -> ServiceManager {
+        let session = CoreSession::open_offline(
+            kind,
+            std::env::temp_dir().join("offline-maintenance-unused-home"),
+            binary,
+        )
+        .unwrap();
+        let capture = TrafficCaptureSession::new(session.clone(), unused_store(), None, None);
+        ServiceManager::new(session, capture)
+    }
+
+    #[tokio::test]
+    async fn offline_maintenance_prepares_without_core_profile_or_capture_changes() {
+        let manager = offline_manager(
+            CoreKind::Mihomo,
+            Some(std::env::temp_dir().join("missing-selected-mihomo")),
+        );
+        let before = manager.session.runtime_descriptor();
+        let capture_revision = manager.capture.capture_revision();
+        for operation in [ServiceOperation::Repair, ServiceOperation::Uninstall] {
+            let request = manager.request_maintenance(operation, None).unwrap();
+            let prepared = manager
+                .prepare_maintenance(request, &unused_store())
+                .await
+                .unwrap();
+            assert!(prepared.ready());
+            assert!(prepared.recovery().is_none());
+            assert!(prepared.request.ordinary_launch.is_none());
+            assert_eq!(
+                manager.session.runtime_descriptor().backend(),
+                CoreRuntimeBackend::Direct
+            );
+            assert_eq!(
+                manager.session.runtime_descriptor().binding_generation(),
+                before.binding_generation()
+            );
+            assert_eq!(manager.session.generation(), 0);
+            assert_eq!(manager.capture.capture_revision(), capture_revision);
+            assert!(
+                manager
+                    .session
+                    .committed_profile_snapshot()
+                    .profile_path
+                    .is_none()
+            );
+            assert!(matches!(
+                manager.maintain_prepared(&prepared).await,
+                Err(ServiceManagerError::ConsentRequired)
+            ));
+        }
+        assert!(matches!(
+            manager.request_enable_tun(),
+            Err(ServiceManagerError::Unsupported)
+        ));
+    }
+
+    #[test]
+    fn external_controller_cannot_acquire_offline_maintenance_from_endpoint_text() {
+        let client = crate::MihomoClient::new(crate::MihomoEndpoint::new(
+            "127.0.0.1:0",
+            "zenclash-offline",
+        ))
+        .unwrap();
+        let session = CoreSession::open(CoreKind::Mihomo, client).unwrap();
+        assert!(!session.is_offline_recovery());
+        let capture = TrafficCaptureSession::new(session.clone(), unused_store(), None, None);
+        let manager = ServiceManager::new(session, capture);
+        for operation in [ServiceOperation::Repair, ServiceOperation::Uninstall] {
+            assert!(matches!(
+                manager.request_maintenance(operation, None),
+                Err(ServiceManagerError::Unsupported)
+            ));
+        }
+        assert_eq!(manager.snapshot().phase(), ServicePhase::Idle);
+    }
+
+    #[tokio::test]
+    async fn rebinding_offline_session_revokes_maintenance_even_for_the_same_endpoint() {
+        let manager = offline_manager(CoreKind::Mihomo, None);
+        let request = manager
+            .request_maintenance(ServiceOperation::Repair, None)
+            .unwrap();
+        let prepared = manager
+            .prepare_maintenance(request, &unused_store())
+            .await
+            .unwrap();
+        manager
+            .session
+            .switch_to_direct(crate::MihomoEndpoint::new(
+                "127.0.0.1:0",
+                "zenclash-offline",
+            ))
+            .await
+            .unwrap();
+        assert!(!manager.session.is_offline_recovery());
+        assert!(matches!(
+            manager
+                .maintain_prepared(&prepared.with_authorization())
+                .await,
+            Err(ServiceManagerError::Stale)
+        ));
+        assert!(matches!(
+            manager.request_maintenance(ServiceOperation::Repair, None),
+            Err(ServiceManagerError::Unsupported)
+        ));
+    }
+
+    #[tokio::test]
+    async fn offline_preparation_rejects_another_sessions_receipt_before_native_work() {
+        let manager = offline_manager(CoreKind::Mihomo, None);
+        let other = offline_manager(CoreKind::Mihomo, None);
+        let request = manager
+            .request_maintenance(ServiceOperation::Repair, None)
+            .unwrap();
+        let prepared = manager
+            .prepare_maintenance(request, &unused_store())
+            .await
+            .unwrap();
+        assert!(matches!(
+            other
+                .maintain_prepared(&prepared.with_authorization())
+                .await,
+            Err(ServiceManagerError::Stale)
+        ));
+        assert_eq!(other.snapshot().phase(), ServicePhase::Idle);
+    }
+
+    #[tokio::test]
+    async fn offline_discovery_preserves_selected_source_without_parsing_a_profile() {
+        let selected = std::env::temp_dir().join("offline-preferred-mihomo");
+        let manager = offline_manager(CoreKind::Mihomo, Some(selected.clone()));
+        let request = manager
+            .discover_maintenance_request(
+                ServiceOperation::Repair,
+                PathBuf::from("missing-project"),
+                Some(PathBuf::from("another-missing-core")),
+            )
+            .await
+            .unwrap();
+        assert!(request.ordinary_launch.is_none());
+        assert_eq!(
+            manager.session.offline_source().unwrap().binary.as_ref(),
+            Some(&selected)
+        );
+        assert_eq!(manager.snapshot().revision(), 0);
+    }
+
+    #[tokio::test]
+    async fn missing_selected_offline_core_is_rejected_before_authorization_without_fallback() {
+        let selected = std::env::temp_dir().join("missing-offline-selected-core");
+        let manager = offline_manager(CoreKind::Mihomo, Some(selected));
+        let request = manager
+            .request_maintenance(ServiceOperation::Repair, None)
+            .unwrap();
+        assert!(matches!(
+            manager.repair_core_source(&request).await,
+            Err(ServiceManagerError::Runtime(_))
+        ));
+        assert_eq!(manager.snapshot().phase(), ServicePhase::Idle);
+        assert_eq!(manager.session.generation(), 0);
+    }
+
+    #[tokio::test]
+    async fn selected_offline_core_is_verified_without_starting_it() {
+        let source = std::env::temp_dir().join(format!(
+            "zenclash-offline-source-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&source, b"not an executable and must not be started").unwrap();
+        let manager = offline_manager(CoreKind::Mihomo, Some(source.clone()));
+        let request = manager
+            .request_maintenance(ServiceOperation::Repair, None)
+            .unwrap();
+        assert_eq!(manager.repair_core_source(&request).await.unwrap(), source);
+        assert_eq!(
+            manager.session.runtime_descriptor().backend(),
+            CoreRuntimeBackend::Direct
+        );
+        assert_eq!(
+            std::fs::read(&source).unwrap(),
+            b"not an executable and must not be started"
+        );
+        std::fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn unknown_health_never_authorizes_maintenance_and_absent_uninstall_needs_no_prompt() {
+        use zenclash_service_integration::health::PendingAction;
+        assert_eq!(
+            maintenance_action(ServiceOperation::Repair, &ServiceHealth::NotInstalled).unwrap(),
+            Some(PendingAction::Install)
+        );
+        assert_eq!(
+            maintenance_action(ServiceOperation::Uninstall, &ServiceHealth::NotInstalled).unwrap(),
+            None
+        );
+        for operation in [ServiceOperation::Repair, ServiceOperation::Uninstall] {
+            assert!(matches!(
+                maintenance_action(operation, &ServiceHealth::Unknown),
+                Err(ServiceManagerError::Health(ServiceHealth::Unknown))
+            ));
+        }
+        for health in [
+            ServiceHealth::Ready,
+            ServiceHealth::VersionMismatch,
+            ServiceHealth::Unavailable("stopped".into()),
+        ] {
+            assert_eq!(
+                maintenance_action(ServiceOperation::Repair, &health).unwrap(),
+                Some(PendingAction::ForceReinstall)
+            );
+        }
+    }
+
+    #[test]
+    fn offline_maintenance_rejects_experimental_core_and_mismatched_capture_owner() {
+        let experimental = offline_manager(CoreKind::Meow, None);
+        assert!(matches!(
+            experimental.request_maintenance(ServiceOperation::Repair, None),
+            Err(ServiceManagerError::Unsupported)
+        ));
+        let manager = offline_manager(CoreKind::Mihomo, None);
+        let other = offline_manager(CoreKind::Mihomo, None);
+        let mismatched = ServiceManager::new(manager.session, other.capture);
+        assert!(matches!(
+            mismatched.request_maintenance(ServiceOperation::Repair, None),
+            Err(ServiceManagerError::Unsupported)
+        ));
+    }
+
+    #[tokio::test]
+    async fn offline_maintenance_rejects_shutdown_and_changed_generation() {
+        let manager = offline_manager(CoreKind::Mihomo, None);
+        let request = manager
+            .request_maintenance(ServiceOperation::Repair, None)
+            .unwrap();
+        manager.session.mark_runtime_unknown();
+        assert!(matches!(
+            manager.prepare_maintenance(request, &unused_store()).await,
+            Err(ServiceManagerError::Stale)
+        ));
+        manager.session.shutdown().await.unwrap();
+        assert!(matches!(
+            manager.request_maintenance(ServiceOperation::Repair, None),
+            Err(ServiceManagerError::Closed)
+        ));
+    }
+
+    #[test]
+    fn offline_recovery_rejects_relative_source_paths() {
+        assert!(
+            CoreSession::open_offline(CoreKind::Mihomo, PathBuf::from("relative-home"), None)
+                .is_err()
+        );
+        assert!(
+            CoreSession::open_offline(
+                CoreKind::Mihomo,
+                std::env::temp_dir(),
+                Some(PathBuf::from("relative-core"))
+            )
+            .is_err()
+        );
     }
 
     fn unused_store() -> crate::ControlledConfigStore {

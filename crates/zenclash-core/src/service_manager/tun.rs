@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use zenclash_service::{MaintenanceAction, ServiceClient, maintain_service};
+use zenclash_service_integration::{
+    ServiceSession, health::PendingAction, maintenance::maintain_service,
+};
 
 use super::*;
 
@@ -151,17 +153,17 @@ impl ServiceManager {
                 .as_ref()
                 .ok_or(ServiceManagerError::Unsupported)?;
             self.check_intent(request.intent)?;
-            let service = ServiceClient::connect()
+            let service = ServiceSession::connect(source_home)
                 .await
                 .map_err(ServiceManagerError::Connection)?;
             if let Err(error) = self.check_intent(request.intent) {
                 service
-                    .release()
+                    .stop()
                     .await
                     .map_err(ServiceManagerError::Connection)?;
                 return Err(error);
             }
-            Some((service, source_home.clone()))
+            Some((Arc::new(service), source_home.clone()))
         };
         self.state
             .send_modify(|state| state.phase = ServicePhase::Switching);
@@ -183,15 +185,17 @@ impl ServiceManager {
         request: &ServiceTunRequest,
     ) -> Result<(), ServiceManagerError> {
         self.check_intent(request.intent)?;
-        let health = service_health().await;
+        let health = self.observe_health().await;
         self.state
             .send_modify(|state| state.health = Some(Arc::new(health.clone())));
         self.check_intent(request.intent)?;
-        let action = match health.kind() {
-            ServiceHealthKind::Ready => None,
-            ServiceHealthKind::Missing => Some(MaintenanceAction::Install),
-            ServiceHealthKind::Stopped => Some(MaintenanceAction::Start),
-            kind => return Err(ServiceManagerError::Health(kind)),
+        let action = match health {
+            ServiceHealth::Ready => None,
+            ServiceHealth::NotInstalled => Some(PendingAction::Install),
+            ServiceHealth::VersionMismatch | ServiceHealth::Unavailable(_) => {
+                Some(PendingAction::Reinstall)
+            }
+            ServiceHealth::Unknown => return Err(ServiceManagerError::Health(health)),
         };
         if let Some(action) = action {
             if !request.allow_authorization {
@@ -202,17 +206,17 @@ impl ServiceManager {
                 .core_source
                 .as_ref()
                 .ok_or(ServiceManagerError::Unsupported)?;
-            self.authorize_then(
+            self.authorize_action(
                 request.intent,
-                maintain_service(action, &helper, Some(core)),
-                || async { Ok(()) },
+                action,
+                maintain_service(action, helper, Some(core.clone())),
             )
             .await?;
-            let health = service_health().await;
+            let health = self.session.run_state().health;
             self.state
                 .send_modify(|state| state.health = Some(Arc::new(health.clone())));
-            if health.kind() != ServiceHealthKind::Ready {
-                return Err(ServiceManagerError::Health(health.kind()));
+            if health != ServiceHealth::Ready {
+                return Err(ServiceManagerError::Health(health));
             }
         }
         self.check_intent(request.intent)
@@ -244,7 +248,7 @@ fn helper_for_executable(executable: &Path) -> std::io::Result<PathBuf> {
                 "application directory missing",
             )
         })?;
-        Ok(directory.join("zenclash-service.exe"))
+        Ok(directory.join("zenclash-service-install.exe"))
     }
     #[cfg(target_os = "macos")]
     {
@@ -265,11 +269,11 @@ fn helper_for_executable(executable: &Path) -> std::io::Result<PathBuf> {
                 "application service requires its installed bundle",
             ));
         }
-        Ok(directory.join("zenclash-service"))
+        Ok(directory.join("zenclash-service-install"))
     }
     #[cfg(target_os = "linux")]
     {
-        Ok(PathBuf::from("/usr/lib/zenclash/zenclash-service"))
+        Ok(PathBuf::from("/usr/lib/zenclash/zenclash-service-install"))
     }
 }
 

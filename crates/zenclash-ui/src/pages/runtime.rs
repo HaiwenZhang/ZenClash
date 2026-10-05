@@ -201,6 +201,12 @@ pub struct ContinueLocalRequested;
 
 impl EventEmitter<ContinueLocalRequested> for RuntimePage {}
 
+/// Requests normal startup again after confirmed offline service repair.
+#[derive(Clone, Copy, Debug)]
+pub struct ServiceRepairRestartRequested;
+
+impl EventEmitter<ServiceRepairRestartRequested> for RuntimePage {}
+
 /// Event emitted after persisted application preference fields become authoritative.
 #[derive(Clone, Debug)]
 pub struct PreferencesRestored {

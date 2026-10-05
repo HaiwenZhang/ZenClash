@@ -748,10 +748,7 @@ mod tests {
         };
         assert_eq!(quota_percent(&usage), Some(34.2));
         assert_eq!(
-            quota_percent(&SubscriptionUsage {
-                total: 0,
-                ..usage.clone()
-            }),
+            quota_percent(&SubscriptionUsage { total: 0, ..usage }),
             None
         );
         assert_eq!(

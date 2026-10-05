@@ -1,37 +1,37 @@
 use super::*;
-use zenclash_service::{ServiceClientError, ServiceErrorCode};
+use zenclash_service::ServiceErrorCode;
+use zenclash_service_integration::ServiceCallError;
 
 #[test]
-fn startup_native_rejections_keep_facts_without_diagnostic_string_matching() {
+fn native_startup_refusals_preserve_protocol_and_authorization_facts() {
     for (code, expected) in [
         (
-            ServiceErrorCode::Occupied,
-            ServiceStartupRejection::Occupied,
-        ),
-        (
-            ServiceErrorCode::Unauthorized,
+            ServiceErrorCode::UnauthorizedOwner,
             ServiceStartupRejection::Unauthorized,
         ),
         (
-            ServiceErrorCode::Incompatible,
+            ServiceErrorCode::ProtocolMismatch,
             ServiceStartupRejection::Incompatible,
         ),
-        (
-            ServiceErrorCode::MaintenancePending,
-            ServiceStartupRejection::MaintenancePending,
-        ),
     ] {
-        let error = MihomoError::Service(ServiceClientError::Rejected(code));
+        let error = MihomoError::Service(ServiceCallError::Rejected {
+            code: code as u16,
+            message: String::new(),
+        });
         assert_eq!(error.service_startup_rejection(), Some(expected));
     }
+    assert_eq!(
+        MihomoError::Service(ServiceCallError::VersionMismatch("old version".into()))
+            .service_startup_rejection(),
+        Some(ServiceStartupRejection::Incompatible)
+    );
 }
 
 #[test]
-fn startup_lost_acquire_is_not_reported_as_a_definitive_rejection() {
+fn lost_start_acknowledgement_does_not_invent_an_occupied_or_unauthorized_owner() {
     for error in [
-        ServiceClientError::Rejected(ServiceErrorCode::OutcomeUnknown),
-        ServiceClientError::Timeout,
-        ServiceClientError::UnexpectedResponse,
+        ServiceCallError::MissingReply("start proof"),
+        ServiceCallError::OwnerLost,
     ] {
         assert_eq!(
             MihomoError::Service(error).service_startup_rejection(),

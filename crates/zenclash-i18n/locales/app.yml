@@ -230,6 +230,9 @@ startup:
   service_configuration_unconfirmed:
     zh-CN: 无法读取或确认已保存配置中的 TUN 状态。检查并修复配置后重新启动 ZenClash。
     en: The saved configuration could not be read or its TUN state could not be confirmed. Check and repair the configuration, then restart ZenClash.
+  service_unavailable:
+    zh-CN: 后台服务暂不可用。请检查或修复服务后重试。
+    en: The service is unavailable. Check or repair the service, then retry.
   service_stopped:
     zh-CN: 后台服务已停止。启动服务后重新启动 ZenClash。
     en: The service is stopped. Start the service, then restart ZenClash.
@@ -3004,6 +3007,18 @@ core_page:
     enable_with_authorization:
       zh-CN: 开启 TUN…
       en: Enable TUN…
+    repair_enable_title:
+      zh-CN: 修复服务并开启 TUN？
+      en: Repair the service and enable TUN?
+    repair_enable_description:
+      zh-CN: 系统将请求管理员授权以修复服务。修复后会继续开启 TUN；取消授权会保留当前运行状态。
+      en: The system will request administrator authorization to repair the service. After repair, ZenClash will continue enabling TUN. Cancelling authorization keeps the current runtime unchanged.
+    repair_enable:
+      zh-CN: 修复并开启
+      en: Repair and enable
+    unavailable:
+      zh-CN: 服务暂不可用，请检查或修复
+      en: Service unavailable; check or repair it
     repair:
       zh-CN: 修复服务
       en: Repair service
@@ -3022,6 +3037,9 @@ core_page:
     repair_description:
       zh-CN: 修复前会退出 TUN 并恢复本地内核。系统将请求管理员授权；修复或取消后，服务可用且捕获设置未变时尝试恢复原接管方式，否则保留本地内核。
       en: ZenClash will leave TUN and restore the local core before requesting administrator authorization. After repair or cancellation, it will try to restore the previous capture mode if the service is available and capture settings have not changed; otherwise the local core remains in use.
+    offline_repair_description:
+      zh-CN: 系统将请求管理员授权以安装或修复服务。修复成功后 ZenClash 会重新启动，重新尝试加载当前配置；取消或失败会保留此窗口。
+      en: The system will request administrator authorization to install or repair the service. After a successful repair, ZenClash will restart and retry the current configuration. Cancelling or a failed repair keeps this window open.
     repair_action:
       zh-CN: 修复服务…
       en: Repair service…
@@ -4218,6 +4236,16 @@ tray:
       en: An external experimental core cannot reliably apply the full TUN configuration; use a ZenClash-managed core
 
 settings:
+  legal:
+    title:
+      zh-CN: 许可证与来源
+      en: License and attribution
+    rights:
+      zh-CN: 本软件无担保。你可按 GPL 第 3 版复制、修改和再分发；服务与应用集成 Fork 的原作者和修改声明保留在许可说明中。
+      en: This software comes without warranty. You may copy, modify and redistribute it under GPL version 3. Original authors and changes to the service and integration Forks are retained in the notices.
+    read:
+      zh-CN: 阅读许可证与来源
+      en: Read license and notices
   local_data:
     title:
       zh-CN: 本地数据状态

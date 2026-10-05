@@ -133,7 +133,7 @@ fn export_caches(
             return Err(invalid("Local provider cache exceeds its byte budget"));
         }
         let mut bytes = read_asset_with_limit(&path, remaining).map_err(io_error)?;
-        if provider.kind == zenclash_service::ProviderKind::Proxy {
+        if provider.kind == ProviderKind::Proxy {
             let mut value: Value = serde_yaml::from_slice(&bytes)
                 .map_err(|_| invalid("Invalid local proxy provider YAML"))?;
             rewrite_references(&mut value, &references, 0)?;
@@ -333,7 +333,7 @@ fn rewrite_references(
     Ok(())
 }
 
-fn validate_asset_path(path: &str) -> MihomoResult<()> {
+pub(super) fn validate_asset_path(path: &str) -> MihomoResult<()> {
     let parts: Vec<_> = path.split('/').collect();
     if parts.len() != 3
         || parts[0] != "assets"
@@ -405,7 +405,7 @@ fn check_tree(path: &Path, depth: usize, count: &mut usize) -> MihomoResult<()> 
     Ok(())
 }
 
-fn remove_owned_tree(path: &Path) -> MihomoResult<()> {
+pub(super) fn remove_owned_tree(path: &Path) -> MihomoResult<()> {
     check_ancestors(
         path.parent()
             .ok_or_else(|| invalid("Local recovery parent missing"))?,

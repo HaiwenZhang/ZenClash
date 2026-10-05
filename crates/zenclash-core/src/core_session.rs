@@ -33,6 +33,7 @@ const MAX_CORE_RECOVERY_ATTEMPTS: u32 = 3;
 mod automatic;
 mod binding;
 mod permissions;
+pub(crate) mod run_state;
 mod service_recovery;
 mod service_startup;
 pub(crate) mod service_tun;
@@ -328,7 +329,17 @@ pub struct CoreSession {
     shutdown_requested: Arc<AtomicBool>,
     supervisor_started: Arc<AtomicBool>,
     network_suspended: Arc<AtomicBool>,
+    offline_source: Option<Arc<OfflineCoreSource>>,
     lifecycle: Arc<RwLock<CoreLifecycleSnapshot>>,
+    pub(crate) run_state: Arc<run_state::CoreRunState>,
+}
+
+// Offline identity can only be created with an application-owned disconnected client.
+// A caller connecting to an external controller never receives this capability.
+pub(crate) struct OfflineCoreSource {
+    pub(crate) home: PathBuf,
+    pub(crate) binary: Option<PathBuf>,
+    binding: u64,
 }
 
 #[derive(Clone, Default)]
@@ -389,6 +400,7 @@ pub(crate) struct CoreProfileApplication {
     transition_guard: tokio::sync::OwnedMutexGuard<CommittedConfig>,
     overrides: Vec<PathBuf>,
     _write_lease: DataWriteLease,
+    _run_attempt: Option<run_state::CoreRunAttempt>,
 }
 
 enum CoreProfileApplicationState {
@@ -455,6 +467,54 @@ impl CoreProfileApplication {
 }
 
 impl CoreSession {
+    /// Opens an application-owned recovery session without a controller or kernel.
+    /// Selected paths are retained for service health and maintenance only. This
+    /// does not parse profiles, inspect executables, start a core or permit TUN.
+    ///
+    /// # Errors
+    /// Rejects relative source paths or a failed disconnected client construction.
+    pub fn open_offline(
+        kind: CoreKind,
+        home: PathBuf,
+        binary: Option<PathBuf>,
+    ) -> Result<Self, CoreSessionError> {
+        if !home.is_absolute() || binary.as_ref().is_some_and(|path| !path.is_absolute()) {
+            return Err(
+                MihomoError::InvalidInput("Offline source paths must be absolute".into()).into(),
+            );
+        }
+        let client = MihomoClient::new(crate::MihomoEndpoint::new(
+            "127.0.0.1:0",
+            "zenclash-offline",
+        ))?
+        .with_core_kind(kind)?;
+        let mut session = Self::open(kind, client)?;
+        session.offline_source = Some(Arc::new(OfflineCoreSource {
+            home,
+            binary,
+            binding: session.runtime_descriptor().binding_generation(),
+        }));
+        if let Some(source) = &session.offline_source {
+            session.run_state.set_offline_source(source.clone());
+        }
+        Ok(session)
+    }
+
+    /// Reports whether the original application-owned disconnected binding remains active.
+    /// An external controller, including one using the same endpoint, is never offline recovery.
+    #[must_use]
+    pub fn is_offline_recovery(&self) -> bool {
+        self.offline_source().is_some()
+    }
+
+    pub(crate) fn offline_source(&self) -> Option<&OfflineCoreSource> {
+        let source = self.offline_source.as_deref()?;
+        let descriptor = self.runtime_descriptor();
+        (descriptor.backend() == crate::CoreRuntimeBackend::Direct
+            && descriptor.binding_generation() == source.binding)
+            .then_some(source)
+    }
+
     /// Opens a session whose controller binding is the sole runtime owner.
     ///
     /// # Errors
@@ -486,6 +546,7 @@ impl CoreSession {
         let managed = descriptor.backend() != crate::CoreRuntimeBackend::Direct;
         client.mark_runtime_binding_used();
         Ok(Self {
+            run_state: Arc::new(run_state::CoreRunState::new(&client)),
             kind,
             lifecycle: Arc::new(RwLock::new(CoreLifecycleSnapshot::new(managed))),
             client,
@@ -509,6 +570,7 @@ impl CoreSession {
             shutdown_requested: Arc::new(AtomicBool::new(false)),
             supervisor_started: Arc::new(AtomicBool::new(false)),
             network_suspended: Arc::new(AtomicBool::new(false)),
+            offline_source: None,
         })
     }
 
@@ -591,6 +653,7 @@ impl CoreSession {
         let session = self.clone();
         // At most one admitted completion task owns this transition; shutdown waits for it.
         tokio::spawn(async move {
+            let _run_attempt = session.begin_core_run_attempt();
             let _write_lease = _write_lease;
             session
                 .apply_admitted(store, client, active_profile, intent)
@@ -700,6 +763,7 @@ impl CoreSession {
         let session = self.clone();
         let mode = mode.to_owned();
         tokio::spawn(async move {
+            let _run_attempt = session.begin_core_run_attempt();
             let _write_lease = _write_lease;
             session
                 .set_mode_admitted(store, client, active_profile, &mode)
@@ -800,6 +864,7 @@ impl CoreSession {
         {
             return Err(CoreSessionError::from(MihomoError::StaleBinding).into());
         }
+        let run_attempt = apply_runtime.then(|| self.begin_core_run_attempt());
         let active_overrides = overrides.clone();
         let state = if !apply_runtime {
             CoreProfileApplicationState::Validated(
@@ -846,6 +911,7 @@ impl CoreSession {
             transition_guard,
             overrides: active_overrides,
             _write_lease: write_lease,
+            _run_attempt: run_attempt,
         })
     }
 
@@ -887,6 +953,7 @@ impl CoreSession {
         let session = self.clone();
         tokio::spawn(async move {
             let _lease = lease;
+            let _run_attempt = session.begin_core_run_attempt();
             let _transition = transition;
             let _mutation = mutation;
             let result = runtime
@@ -943,6 +1010,7 @@ impl CoreSession {
         let local_observed = before.is_some();
         let session = self.clone();
         tokio::spawn(async move {
+            let _run_attempt = session.begin_core_run_attempt();
             let _transition = transition;
             let _mutation = mutation;
             let result = session
@@ -1067,6 +1135,7 @@ impl CoreSession {
                 return Err(error);
             }
             let _mutation = client.lock_runtime_binding().await?;
+            let _run_attempt = session.begin_core_run_attempt();
             let previous_pid = process.snapshot().pid;
             let previous_phase = session.lifecycle.read().phase;
             let result = service
@@ -1191,6 +1260,7 @@ impl CoreSession {
         self.request_shutdown();
         let session = self.clone();
         tokio::spawn(async move {
+            let _run_attempt = session.begin_core_run_attempt();
             let _backup = session.backup_gate.clone().lock_owned().await;
             let _capture = session.capture_publication_gate().lock_owned().await;
             let _transition = session.transition.clone().lock_owned().await;
@@ -1394,6 +1464,7 @@ impl CoreSession {
         let snapshot = snapshot.clone();
         let session = self.clone();
         tokio::spawn(async move {
+            let _run_attempt = session.begin_core_run_attempt();
             let _lease = lease;
             let _admission = admission;
             let result = session
@@ -1556,7 +1627,10 @@ impl CoreSession {
             Some(crate::owned_core::OwnedCore::Service(runtime)) => (
                 CoreKind::Mihomo,
                 true,
-                runtime.client.snapshot().map(|status| status.running),
+                runtime
+                    .client
+                    .snapshot()
+                    .map(|status| status.is_active && status.core_pid.is_some()),
             ),
             None => (client.binding_snapshot_kind(), false, None),
         };
@@ -1773,6 +1847,8 @@ impl CoreSession {
 
     fn next_generation_with_config(&self, config: Option<CommittedConfig>) -> u64 {
         self.client.invalidate_connections();
+        self.run_state
+            .invalidate_changed_binding(self.runtime_descriptor().binding_generation());
         advance_profile_snapshot(
             &self.generation,
             &self.committed_profile,
@@ -1867,6 +1943,9 @@ async fn supervise_managed_core(
     policy: CoreRecoveryPolicy,
     capture: Option<Arc<dyn CoreRecoveryCapture>>,
 ) {
+    let mut owner_watch = zenclash_service_integration::runstate::OwnerWatch::new();
+    let mut watched_binding = None;
+    let mut service_capture_released = false;
     loop {
         if session.shutdown_requested.load(Ordering::Acquire) {
             return;
@@ -1884,12 +1963,86 @@ async fn supervise_managed_core(
                 .await
                 .ok()
             }
-            Some(crate::owned_core::OwnedCore::Service(runtime)) => runtime
-                .client
-                .status()
-                .await
-                .ok()
-                .map(|status| (status.running, status.exit_reason)),
+            Some(crate::owned_core::OwnedCore::Service(runtime)) => {
+                use zenclash_service_integration::runstate::{OwnerStep, OwnerWatch};
+                let binding = client.runtime_descriptor().binding_generation();
+                if watched_binding != Some(binding) {
+                    watched_binding = Some(binding);
+                    owner_watch = OwnerWatch::new();
+                    service_capture_released = false;
+                }
+                let lifecycle = session.lifecycle.read().clone();
+                if lifecycle.stop_requested
+                    || session.network_suspended.load(Ordering::Acquire)
+                    || !runtime.observation_allowed()
+                {
+                    session.reconcile_run_state();
+                    tokio::time::sleep(policy.interval).await;
+                    continue;
+                }
+                let mut step = owner_watch.observe(runtime.client.owner_sample().await);
+                if matches!(step, OwnerStep::VerifyTransport) {
+                    let available = client.version().await.is_ok();
+                    step = owner_watch.resolve_transport(available);
+                }
+                if client.ensure_binding_current().is_err() || !runtime.observation_allowed() {
+                    continue;
+                }
+                match step {
+                    OwnerStep::Continue => {
+                        if let Some(status) = runtime.client.snapshot() {
+                            let mut lifecycle = session.lifecycle.write();
+                            if !lifecycle.stop_requested {
+                                lifecycle.phase = if status.core_pid.is_some() {
+                                    CoreLifecyclePhase::Stable
+                                } else {
+                                    CoreLifecyclePhase::Recovering
+                                };
+                                lifecycle.exit_reason = status.last_core_exit_reason;
+                            }
+                        }
+                    }
+                    OwnerStep::Recover(reason) => {
+                        {
+                            let mut lifecycle = session.lifecycle.write();
+                            if !lifecycle.stop_requested {
+                                lifecycle.phase = CoreLifecyclePhase::Unknown;
+                                lifecycle.last_error =
+                                    Some(format!("Service owner recovery required: {reason:?}"));
+                            }
+                        }
+                        zenclash_service_integration::runstate::mark_service_unavailable_after_owner_loss(
+                            &session.run_state.store,
+                            reason,
+                        );
+                        session.reconcile_run_state();
+                        let recovery =
+                            zenclash_service_integration::runstate::owner_recovery_policy(
+                                reason,
+                                cfg!(target_os = "macos"),
+                            );
+                        if recovery.reset_system_proxy
+                            && !service_capture_released
+                            && let Some(capture) = capture.as_ref()
+                        {
+                            match capture.release_owned().await {
+                                Ok(()) => service_capture_released = true,
+                                Err(error) => {
+                                    tracing::warn!(%error, "could not release capture after lost service ownership")
+                                }
+                            }
+                        }
+                    }
+                    OwnerStep::VerifyTransport => {
+                        unreachable!("transport check is resolved before dispatch")
+                    }
+                }
+                session.reconcile_run_state();
+                // Native Service owns crash recovery. A displaced app must never
+                // run an automatic Start that takes ownership back from another session.
+                tokio::time::sleep(policy.interval).await;
+                continue;
+            }
             None => {
                 tokio::time::sleep(policy.interval).await;
                 continue;
@@ -1906,6 +2059,7 @@ async fn supervise_managed_core(
             session.kind,
             policy.max_attempts,
         );
+        session.reconcile_run_state();
         let Some((new_exit, retry_exhausted)) = decision else {
             tokio::time::sleep(policy.interval).await;
             continue;
@@ -2040,6 +2194,7 @@ async fn recover_managed_core(session: &CoreSession, policy: CoreRecoveryPolicy)
     if client.owned_core().is_none() {
         return false;
     }
+    let _run_attempt = session.begin_core_run_attempt();
     if session.snapshot().running == Some(true) {
         session.lifecycle.write().phase = CoreLifecyclePhase::Stable;
         return true;

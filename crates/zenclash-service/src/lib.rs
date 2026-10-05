@@ -1,97 +1,87 @@
-//! Authenticated local protocol for the privileged ZenClash runtime service.
+// Modified for the ZenClash fork on 2026-10-04; see NOTICE.md. GPL-3.0-only.
+mod channel;
+mod core;
+#[cfg(any(feature = "client", feature = "standalone"))]
+pub mod execution;
+#[cfg(any(feature = "client", feature = "standalone"))]
+pub mod management;
 
-#![deny(missing_docs)]
-
-#[cfg(feature = "server")]
-mod api;
+#[cfg(feature = "client")]
 mod client;
-mod execution;
-mod frame;
-mod installer;
-#[cfg(feature = "server")]
-mod kernel;
-#[cfg(feature = "server")]
-mod kernel_transport;
-#[cfg(feature = "server")]
-mod maintenance_journal;
-#[cfg(feature = "server")]
-mod maintenance_lock;
-mod metadata;
-#[cfg(feature = "server")]
-mod package_maintenance;
-mod platform;
-mod protocol;
-#[cfg(feature = "server")]
-mod provider_readback;
-#[cfg(feature = "server")]
-mod runtime;
-#[cfg(feature = "server")]
-mod runtime_manifest;
-#[cfg(feature = "server")]
-mod server;
 
-/// Runs the installed native service until its manager requests shutdown.
-///
-/// This blocking entry point is used by the service binary, never the GUI.
-///
-/// # Errors
-/// Reports native registration or dispatch failures, untrusted installation
-/// state, runtime recovery failures and an unsuccessful final kernel cleanup.
-#[cfg(feature = "server")]
-pub fn run_service() -> std::io::Result<()> {
-    #[cfg(windows)]
-    {
-        fn execute(shutdown: tokio::sync::watch::Receiver<bool>) -> std::io::Result<()> {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?
-                .block_on(server::run(shutdown))
-        }
-        platform::dispatch_service(execute)
-    }
-    #[cfg(unix)]
-    {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?
-            .block_on(async {
-                let (sender, receiver) = tokio::sync::watch::channel(false);
-                let signal = tokio::spawn(async move {
-                    let result = platform::shutdown_signal().await;
-                    let _ = sender.send(true);
-                    result
-                });
-                let result = server::run(receiver).await;
-                signal.abort();
-                result
-            })
-    }
-}
-mod session;
+pub use channel::{
+    CHANNEL_IDENTITY, ChannelIdentity, MACOS_APP_BUNDLE_ID, MACOS_SERVICE_ID, SERVICE_DISPLAY_NAME, SERVICE_SLUG,
+    WINDOWS_SERVICE_NAME,
+};
+pub use core::{
+    AuthenticatedRequest, AuthenticatedSessionRequest, ClashConfig, CoreAvailability, CoreConfig, CoreInspection,
+    CoreRequirement, InstallationStatus, IpcCommand, MacosProxyConfig, OWNER_TOKEN_FILE_NAME, OwnerCredentials,
+    OwnerIdentity, OwnerSessionHandle, OwnerSessionProof, ProtocolInfo, ProtocolVersion, ProxyApplyOutcome,
+    RemoteProvider, RuntimeAsset, RuntimeBundle, RuntimeFileOutcome, RuntimeFileRequest, SERVICE_PROTOCOL_HEADER,
+    SESSION_TOKEN_HEX_LEN, ServiceErrorCode, ServiceLifecycleState, ServiceStatusSnapshot, StageRejection,
+    StageRuntimeOutcome, StartClashRequest, StartClashResult, WriterConfig, mihomo_ipc_path, owner_key,
+};
+pub use core::{CORE_DISPLACED_EXTENSION, CORE_STAGING_EXTENSION, OwnerPaths, ServicePaths, service_paths};
 
-pub use client::{ServiceClient, ServiceClientError, ServiceLogs, ServiceSubscription};
-pub use execution::{CoreExecutionGuard, check_sidecar_available, current_process_elevated};
-pub use frame::{FrameError, MAX_FRAME_BYTES, read_frame, write_frame};
-#[cfg(all(feature = "server", target_os = "macos"))]
-pub use installer::query_service_host_pid;
-#[cfg(feature = "server")]
-pub use installer::run_maintenance;
-pub use installer::{
-    MaintenanceAction, MaintenanceError, MaintenancePending, ServiceHealth, ServiceHealthKind,
-    maintain_service, service_health,
+#[cfg(feature = "standalone")]
+pub use core::{
+    ActiveOwnerState, DesiredState, REPAIR_IN_PROGRESS_EXIT_CODE, ServiceOwnerGuard, ServiceRepairGate,
+    acquire_service_owner, acquire_service_repair_gate, cleanup_stale_owner_state, load_active_owner,
+    load_owner_desired_state, prepare_core_install_directory, prepare_service_install_directory,
+    reconcile_service_startup, repair_active_owner_state, require_trusted_core_source, restore_desired_state,
+    run_ipc_server, run_ipc_supervisor_until_shutdown, service_lifecycle_state, set_service_lifecycle_state,
+    stop_ipc_server,
 };
-pub use metadata::{
-    InstalledMetadata, METADATA_SCHEMA_VERSION, MetadataError, read_metadata, write_metadata_atomic,
-};
-#[cfg(feature = "server")]
-pub use package_maintenance::run_package_uninstall;
-pub use protocol::{
-    ApiResponse as ServiceApiResponse, LogStreamOptions,
-    PreparedRuntimePatch as ServicePreparedRuntimePatch,
-    RuntimeCandidate as ServiceRuntimeCandidate,
-    RuntimeCandidateKind as ServiceRuntimeCandidateKind,
-    RuntimeCandidatePhase as ServiceRuntimeCandidatePhase, RuntimeStatus as ServiceRuntimeStatus,
-    ServiceErrorCode, ServiceLogFormat, ServiceLogLevel, StreamKind as ServiceStream,
-};
-pub use protocol::{PROTOCOL_VERSION, ProtocolInfo, SessionProof, SessionToken};
-pub use protocol::{ProviderCacheChunk, ProviderCacheRead, ProviderCacheToken, ProviderKind};
+
+#[cfg(feature = "test")]
+pub use core::test_owner_credentials;
+#[cfg(all(feature = "test", unix))]
+pub use core::test_owner_credentials_for_uid;
+#[cfg(all(feature = "standalone", feature = "test"))]
+pub use core::{CoreWatchdogTestConfig, set_core_watchdog_config_for_tests};
+
+#[cfg(feature = "client")]
+pub use client::*;
+
+#[cfg(all(target_os = "macos", not(feature = "test"), not(feature = "development-channel")))]
+pub static IPC_PATH: &str = "/var/run/zenclash-service/service.sock";
+#[cfg(all(target_os = "macos", not(feature = "test"), feature = "development-channel"))]
+pub static IPC_PATH: &str = "/var/run/zenclash-service-dev/service.sock";
+#[cfg(all(
+    unix,
+    not(target_os = "macos"),
+    not(feature = "test"),
+    not(feature = "development-channel")
+))]
+pub static IPC_PATH: &str = "/run/zenclash-service/service.sock";
+#[cfg(all(
+    unix,
+    not(target_os = "macos"),
+    not(feature = "test"),
+    feature = "development-channel"
+))]
+pub static IPC_PATH: &str = "/run/zenclash-service-dev/service.sock";
+#[cfg(all(windows, not(feature = "test"), not(feature = "development-channel")))]
+pub static IPC_PATH: &str = r"\\.\pipe\zenclash-service";
+#[cfg(all(windows, not(feature = "test"), feature = "development-channel"))]
+pub static IPC_PATH: &str = r"\\.\pipe\zenclash-service-dev";
+
+#[cfg(all(feature = "test", unix))]
+pub static IPC_PATH: &str = "/tmp/zenclash-service-ipc-test/service.sock";
+#[cfg(all(feature = "test", windows))]
+pub static IPC_PATH: &str = r"\\.\pipe\zenclash-service-test";
+
+#[cfg(any(feature = "standalone", feature = "client"))]
+pub static IPC_AUTH_EXPECT: &str =
+    r#"A thing of beauty is a joy for ever. Its loveliness increases; it will never pass into nothingness."#;
+
+pub static VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const PROTOCOL_EPOCH: u16 = 2;
+pub const PROTOCOL_REVISION: u16 = 5;
+pub const MIN_SUPPORTED_CLIENT_REVISION: u16 = 5;
+pub const MIN_REQUIRED_SERVICE_REVISION: u16 = 5;
+/// Revision that introduced `/clash/stage-runtime`.
+/// This is a capability gate, not the minimum compatible service revision.
+pub const MIN_SERVICE_REVISION_FOR_RUNTIME_STAGING: u16 = 2;
+/// Capability revision for `/clash/runtime-file`.
+pub const MIN_SERVICE_REVISION_FOR_RUNTIME_FILE_READ: u16 = 3;

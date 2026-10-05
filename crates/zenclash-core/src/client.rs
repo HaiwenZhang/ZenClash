@@ -52,7 +52,13 @@ pub enum MihomoError {
     Http(#[from] reqwest::Error),
     /// Authenticated native service transport or policy rejection.
     #[error("Mihomo service request failed: {0}")]
-    Service(#[from] zenclash_service::ServiceClientError),
+    Service(#[from] zenclash_service_integration::ServiceCallError),
+    /// An admitted native mutation has no confirmed outcome yet.
+    #[error("service runtime outcome is unconfirmed")]
+    RuntimeOutcomeUnknown,
+    /// Files or a core already changed before a later operation failed.
+    #[error("service runtime changed before confirmation: {0}")]
+    RuntimePartiallyApplied(#[source] Box<MihomoError>),
     /// A response belongs to a backend replaced before the request completed.
     #[error("Mihomo controller changed during the request")]
     StaleTransport,
@@ -86,29 +92,22 @@ impl MihomoError {
     /// Transport loss and timeouts remain unknown; this reader performs no IPC.
     #[must_use]
     pub fn service_startup_rejection(&self) -> Option<ServiceStartupRejection> {
-        fn rejection(
-            error: &zenclash_service::ServiceClientError,
-        ) -> Option<ServiceStartupRejection> {
-            use zenclash_service::{ServiceClientError, ServiceErrorCode};
-            match error {
-                ServiceClientError::Rejected(ServiceErrorCode::Occupied) => {
-                    Some(ServiceStartupRejection::Occupied)
-                }
-                ServiceClientError::Rejected(ServiceErrorCode::Unauthorized) => {
-                    Some(ServiceStartupRejection::Unauthorized)
-                }
-                ServiceClientError::Rejected(ServiceErrorCode::Incompatible) => {
-                    Some(ServiceStartupRejection::Incompatible)
-                }
-                ServiceClientError::Rejected(ServiceErrorCode::MaintenancePending) => {
-                    Some(ServiceStartupRejection::MaintenancePending)
-                }
-                ServiceClientError::Preflight(error) => rejection(error),
-                _ => None,
-            }
-        }
+        use zenclash_service::ServiceErrorCode;
+        use zenclash_service_integration::ServiceCallError;
         match self {
-            Self::Service(error) => rejection(error),
+            Self::Service(ServiceCallError::Rejected { code, .. })
+                if *code == ServiceErrorCode::UnauthorizedOwner as u16 =>
+            {
+                Some(ServiceStartupRejection::Unauthorized)
+            }
+            Self::Service(ServiceCallError::Rejected { code, .. })
+                if *code == ServiceErrorCode::ProtocolMismatch as u16 =>
+            {
+                Some(ServiceStartupRejection::Incompatible)
+            }
+            Self::Service(ServiceCallError::VersionMismatch(_)) => {
+                Some(ServiceStartupRejection::Incompatible)
+            }
             _ => None,
         }
     }
@@ -138,20 +137,30 @@ pub struct MihomoClient {
 }
 
 impl MihomoClient {
-    /// Acquires a verified native service owner using ordinary-user resource paths.
-    ///
-    /// The fallible HTTP-client setup completes before Acquire. After receiving a
-    /// proof, construction is infallible and the returned binding owns that exact
-    /// service session. A lost Acquire acknowledgement is never retried here.
+    /// Verifies the service and loads credentials for the ordinary application root.
+    /// Construction does not acquire a generation or start a core; applying a complete
+    /// runtime performs the native Start operation and retains the returned proof.
     ///
     /// # Errors
     /// Returns client-construction, native identity, authorization, ownership,
     /// incompatible-protocol or transport errors. No local core is started.
     pub async fn connect_service(source_home: std::path::PathBuf) -> MihomoResult<Self> {
+        Self::connect_service_with_core(source_home, None).await
+    }
+
+    /// Connects using the same selected core as installation health detection.
+    ///
+    /// # Errors
+    /// Returns native identity, protocol or transport errors without starting a core.
+    pub async fn connect_service_with_core(
+        source_home: std::path::PathBuf,
+        core_source: Option<std::path::PathBuf>,
+    ) -> MihomoResult<Self> {
         let http = Self::build_http()?;
-        let service = zenclash_service::ServiceClient::connect().await?;
+        let service =
+            Arc::new(zenclash_service_integration::ServiceSession::connect(&source_home).await?);
         Ok(Self::with_http(
-            ControllerBinding::service_binding(service, source_home),
+            ControllerBinding::service_binding_with_core(service, source_home, core_source),
             http,
         ))
     }
@@ -170,7 +179,7 @@ impl MihomoClient {
     /// # Errors
     /// Returns an error if the HTTP client used for future Direct bindings cannot be built.
     pub fn from_service(
-        service: Arc<zenclash_service::ServiceClient>,
+        service: Arc<zenclash_service_integration::ServiceSession>,
         source_home: std::path::PathBuf,
     ) -> MihomoResult<Self> {
         Self::new_binding(ControllerBinding::service_binding(service, source_home))
@@ -405,7 +414,7 @@ impl MihomoClient {
 
     /// Returns the authenticated service owner without exposing its controller.
     #[must_use]
-    pub fn service_client(&self) -> Option<Arc<zenclash_service::ServiceClient>> {
+    pub fn service_client(&self) -> Option<Arc<zenclash_service_integration::ServiceSession>> {
         self.runtime_session().map(|runtime| runtime.client.clone())
     }
 
@@ -425,7 +434,7 @@ impl MihomoClient {
     /// Rejects non-Mihomo clients or exhausted binding generations.
     pub(crate) async fn switch_to_service(
         &self,
-        service: Arc<zenclash_service::ServiceClient>,
+        service: Arc<zenclash_service_integration::ServiceSession>,
         source_home: std::path::PathBuf,
     ) -> MihomoResult<()> {
         if self.current_kind() != CoreKind::Mihomo {
@@ -563,28 +572,11 @@ impl MihomoClient {
         })?
     }
 
-    /// Retains the exact bundle already started and committed by the managed service.
-    /// Callers must supply the original snapshot rather than rereading its source files.
+    /// Finishes application acceptance after configuration was durably saved.
+    /// A pending saved snapshot is reapplied through native staging if necessary.
     ///
     /// # Errors
-    /// Rejects a changed binding, pending candidate, or mismatched service revision.
-    pub async fn adopt_service_runtime(
-        &self,
-        bundle: crate::ServiceRuntimeBundle,
-        revision: u64,
-    ) -> MihomoResult<()> {
-        let client = self.pin_binding()?;
-        let _guard = client.mutation_gate.lock().await;
-        client.ensure_binding_current()?;
-        let runtime = client.runtime_session().ok_or(MihomoError::StaleBinding)?;
-        runtime.adopt(bundle, revision).await
-    }
-
-    /// Confirms a pending service commit after its response was lost.
-    /// Only status and an idempotent commit are used; resources are never reread.
-    ///
-    /// # Errors
-    /// Returns unknown state when the applied revision cannot be confirmed.
+    /// Returns an error if ownership or the actual controller cannot be confirmed.
     pub async fn reconcile_service_runtime(&self) -> MihomoResult<()> {
         let client = self.pin_binding()?;
         let _guard = client.mutation_gate.lock().await;
@@ -621,19 +613,13 @@ impl MihomoError {
     /// Policy/input rejection and failure to establish native IPC are definitive.
     #[must_use]
     pub fn mutation_result_unknown(&self) -> bool {
-        matches!(
-            self,
+        match self {
             Self::Http(_)
-                | Self::StaleTransport
-                | Self::Service(
-                    zenclash_service::ServiceClientError::Frame(_)
-                        | zenclash_service::ServiceClientError::UnexpectedResponse
-                        | zenclash_service::ServiceClientError::Rejected(
-                            zenclash_service::ServiceErrorCode::OutcomeUnknown
-                                | zenclash_service::ServiceErrorCode::Internal
-                                | zenclash_service::ServiceErrorCode::KernelFailed
-                        )
-                )
-        )
+            | Self::StaleTransport
+            | Self::RuntimeOutcomeUnknown
+            | Self::RuntimePartiallyApplied(_) => true,
+            Self::Service(error) => error.mutation_result_unknown(),
+            _ => false,
+        }
     }
 }

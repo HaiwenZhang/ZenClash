@@ -114,7 +114,11 @@ impl RuntimePage {
         let (title, description, confirm) = match operation {
             ServiceOperation::Repair => (
                 "core_page.service.repair_title",
-                "core_page.service.repair_description",
+                if self.core_session.is_offline_recovery() {
+                    "core_page.service.offline_repair_description"
+                } else {
+                    "core_page.service.repair_description"
+                },
                 "core_page.service.repair",
             ),
             ServiceOperation::Uninstall => (
@@ -154,6 +158,8 @@ impl RuntimePage {
         let Some(token) = self.begin_mutation(self.page) else {
             return;
         };
+        let restart_after_repair = request.operation() == ServiceOperation::Repair
+            && self.core_session.is_offline_recovery();
         let profiles = self.profile_service.clone();
         let store = self.controlled_config_store.clone();
         let preferences_store = self.preferences_store.clone();
@@ -199,8 +205,13 @@ impl RuntimePage {
                         };
                         if let Err(error) = maintenance {
                             this.set_page_error(token, error);
-                        } else if let Some(error) = preference_error {
-                            this.set_page_error(token, error);
+                        } else {
+                            if let Some(error) = preference_error {
+                                this.set_page_error(token, error);
+                            }
+                            if restart_after_repair && this.core_session.is_offline_recovery() {
+                                cx.emit(super::super::ServiceRepairRestartRequested);
+                            }
                         }
                     }
                     Err(error) => this.set_page_error(token, error),

@@ -1,52 +1,148 @@
+# Modified for the ZenClash fork on 2026-10-04; see NOTICE.md. GPL-3.0-only.
 [package]
 name = "zenclash-service"
-version.workspace = true
-edition.workspace = true
-authors.workspace = true
-license.workspace = true
+version = "2.7.5+zenclash.1"
+edition = "2024"
+authors = ["Tunglies", "ZenClash contributors"]
+license = "GPL-3.0-only"
+readme = "README.md"
+description = "ZenClash privileged IPC service, forked from clash-verge-service-ipc"
+repository = "https://github.com/HaiwenZhang/ZenClash"
+publish = false
 
-[features]
-default = []
-server = ["dep:futures-util", "dep:url", "dep:serde_yaml", "dep:tokio-tungstenite", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]
+[lib]
+name = "zenclash_service"
+path = "src/lib.rs"
 
 [[bin]]
 name = "zenclash-service"
-required-features = ["server"]
+path = "src/bin/service.rs"
+required-features = ["standalone"]
+
+[[bin]]
+name = "zenclash-service-install"
+path = "src/bin/install_service.rs"
+required-features = ["standalone", "client"]
+
+[[bin]]
+name = "zenclash-service-uninstall"
+path = "src/bin/uninstall_service.rs"
+required-features = ["standalone"]
+
+[[bin]]
+name = "mock_binary"
+path = "src/bin/mock_binary.rs"
+required-features = ["test"]
+
+[[bin]]
+name = "crash_binary"
+path = "src/bin/crash_binary.rs"
+required-features = ["test"]
+
+[[bin]]
+name = "owner_lock_holder"
+path = "src/bin/owner_lock_holder.rs"
+required-features = ["standalone", "test"]
+
+[[bin]]
+name = "service-integration-driver"
+path = "src/bin/service_integration_driver.rs"
+required-features = ["client"]
+
+[features]
+development-channel = []
+standalone = [
+    "kode-bridge",
+    "kode-bridge/client",
+    "http",
+    "tracing",
+    "tracing-subscriber",
+    "tokio",
+    "anyhow",
+    "once_cell",
+    "serde_json",
+    "dep:tracing-estuary",
+    "dep:parking_lot",
+    "flexi_logger",
+    "log",
+    "response",
+    "dep:platform_lib",
+    "dep:nix",
+    "dep:windows-sys",
+]
+client = [
+    "kode-bridge/client",
+    "anyhow",
+    "log",
+    "tokio",
+    "once_cell",
+    "serde_json",
+    "response",
+    "dep:platform_lib",
+    "dep:windows-sys",
+]
+response = []
+test = [
+    "anyhow",
+    "dep:platform_lib",
+    "dep:windows-sys",
+]
+default = []
+
 
 [dependencies]
-getrandom.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util", "net", "process", "signal"] }
-futures-util = { workspace = true, optional = true }
-http-body-util = { workspace = true, optional = true }
-hyper = { workspace = true, optional = true }
-hyper-util = { workspace = true, optional = true }
-serde_yaml = { workspace = true, optional = true }
-sha2.workspace = true
-tokio-tungstenite = { workspace = true, optional = true }
-url = { workspace = true, optional = true }
+kode-bridge = { version = "0.5.2", features = ["server"], optional = true }
+once_cell = { version = "1.21", features = ["parking_lot"], optional = true }
+anyhow = { version = "1.0", optional = true }
+http = { version = "1.3", optional = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", optional = true }
+sha2 = "0.11"
+strum = { version = "0.28" }
+strum_macros = { version = "0.28" }
+tokio = { version = "1.52", features = [
+    "process",
+    "io-util",
+    "rt-multi-thread",
+    "macros",
+    "signal",
+    "fs",
+    "time",
+], optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", optional = true }
+tracing-estuary = { git = "https://github.com/Tunglies/tracing-estuary.git", branch = "main", optional = true }
+flexi_logger = { version = "0.31", optional = true }
+log = { version = "0.4.28", optional = true }
+parking_lot = { version = "0.12", optional = true }
+url = "2.5"
 
-[target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = [
-    "Win32_Security",
-    "Win32_Security_Authorization",
-    "Win32_System_Threading",
-    "Win32_System_Diagnostics_ToolHelp",
-    "Win32_System_Services",
-    "Win32_System_JobObjects",
-    "Win32_System_Pipes",
-    "Win32_System_Memory",
-    "Win32_UI_Shell",
-    "Win32_System_Com",
-    "Win32_System_Registry",
-    "Win32_System_RemoteDesktop",
-    "Win32_System_SystemInformation",
-] }
+[target.'cfg(target_os = "macos")'.dependencies]
+sysproxy = { git = "https://github.com/clash-verge-rev/sysproxy-rs.git", branch = "main", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
-libc.workspace = true
+platform_lib = { package = "libc", version = "0.2", optional = true }
+nix = { version = "0.31", features = ["user"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+platform_lib = { package = "windows-service", version = "0.8", optional = true }
+windows-sys = { version = "0.61.2", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Pipes",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_UI_Shell",
+] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+kode-bridge = { version = "0.5.2", default-features = false, features = [
+    "server",
+    "client",
+] }
+serde_json = "1.0"
+serial_test = "4.0"

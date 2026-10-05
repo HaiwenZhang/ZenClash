@@ -27,7 +27,8 @@ management, runtime configuration and a bundled real Mihomo core.
 install -Dpm0755 %{payload_dir}/zenclash %{buildroot}%{_bindir}/zenclash
 install -Dpm0755 %{payload_dir}/zenclash-service %{buildroot}%{_prefix}/lib/zenclash/zenclash-service
 install -Dpm0644 %{payload_dir}/package-service.sh %{buildroot}%{_prefix}/lib/zenclash/package-service.sh
-install -Dpm0644 %{payload_dir}/zenclash-service.service %{buildroot}%{_prefix}/lib/systemd/system/zenclash-service.service
+install -Dpm0755 %{payload_dir}/zenclash-service-install %{buildroot}%{_prefix}/lib/zenclash/zenclash-service-install
+install -Dpm0755 %{payload_dir}/zenclash-service-uninstall %{buildroot}%{_prefix}/lib/zenclash/zenclash-service-uninstall
 install -Dpm0644 %{payload_dir}/org.zenclash.service.policy %{buildroot}%{_datadir}/polkit-1/actions/org.zenclash.service.policy
 install -Dpm0755 %{payload_dir}/mihomo %{buildroot}%{_prefix}/lib/zenclash/mihomo
 install -Dpm0644 %{payload_dir}/geoip.metadb %{buildroot}%{_prefix}/lib/zenclash/geoip.metadb
@@ -36,13 +37,17 @@ install -Dpm0644 %{payload_dir}/recovery.yaml %{buildroot}%{_prefix}/lib/zenclas
 install -Dpm0644 %{payload_dir}/zenclash.png %{buildroot}%{_datadir}/icons/hicolor/1024x1024/apps/zenclash.png
 install -Dpm0644 %{payload_dir}/zenclash.desktop %{buildroot}%{_datadir}/applications/org.zenclash.ZenClash.desktop
 install -Dpm0644 %{payload_dir}/LICENSE %{buildroot}%{_licensedir}/zenclash/LICENSE
+install -Dpm0644 %{payload_dir}/NOTICE.md %{buildroot}%{_licensedir}/zenclash/NOTICE.md
+install -Dpm0644 %{payload_dir}/CORRESPONDING-SOURCE.md %{buildroot}%{_licensedir}/zenclash/CORRESPONDING-SOURCE.md
+cp -a %{payload_dir}/licenses %{buildroot}%{_licensedir}/zenclash/licenses
 
 %files
 %license %{_licensedir}/zenclash/LICENSE
 %{_bindir}/zenclash
 %{_prefix}/lib/zenclash/zenclash-service
 %{_prefix}/lib/zenclash/package-service.sh
-%{_prefix}/lib/systemd/system/zenclash-service.service
+%{_prefix}/lib/zenclash/zenclash-service-install
+%{_prefix}/lib/zenclash/zenclash-service-uninstall
 %{_datadir}/polkit-1/actions/org.zenclash.service.policy
 %{_prefix}/lib/zenclash/mihomo
 %{_prefix}/lib/zenclash/geoip.metadb

@@ -1,0 +1,46 @@
+# Fork integration adaptation, 2026-10-04; see NOTICE.md. GPL-3.0-only.
+[package]
+name = "zenclash-service-integration"
+version.workspace = true
+edition.workspace = true
+authors = ["zzzgydi", "Tunglies", "wonfen", "MystiPanda", "ZenClash contributors"]
+license.workspace = true
+readme = "README.md"
+publish = false
+
+[features]
+development-channel = ["zenclash-service/development-channel"]
+ipc-tests = ["hyper/server","zenclash-service/standalone", "zenclash-service/test"]
+
+[dependencies]
+anyhow = "1.0"
+arc-swap = "1.9"
+getrandom = { workspace = true, features = ["std"] }
+parking_lot.workspace = true
+futures-util.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+serde_json.workspace = true
+tokio-tungstenite.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zenclash-service = { path = "../zenclash-service", features = ["client"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
+deelevate = "0.2.0"
+runas = "=1.2.0"
+windows-sys = { workspace = true, features = ["Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[[bin]]
+name = "zenclash-integration-test-core"
+path = "src/bin/mock_core.rs"
+required-features = ["ipc-tests"]

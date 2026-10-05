@@ -1,7 +1,7 @@
 #!/bin/sh
 
 zenclash_remove_service() {
-  /usr/lib/zenclash/zenclash-service --package-uninstall
+  /usr/lib/zenclash/zenclash-service-uninstall
 }
 
 zenclash_package_pre_remove() {

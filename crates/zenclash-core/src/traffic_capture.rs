@@ -482,7 +482,7 @@ impl TrafficCaptureSession {
     /// or failures before a recoverable native transition. Saved or uncertain results carry capture facts.
     pub async fn enable_service_tun(
         &self,
-        service: Option<(Arc<zenclash_service::ServiceClient>, PathBuf)>,
+        service: Option<(Arc<zenclash_service_integration::ServiceSession>, PathBuf)>,
         expected_binding: u64,
         expected_generation: u64,
     ) -> Result<ServiceTunOutcome, crate::CoreSessionError> {
@@ -500,7 +500,7 @@ impl TrafficCaptureSession {
 
     pub(crate) async fn enable_service_tun_with_bundle(
         &self,
-        service: Option<(Arc<zenclash_service::ServiceClient>, PathBuf)>,
+        service: Option<(Arc<zenclash_service_integration::ServiceSession>, PathBuf)>,
         expected_binding: u64,
         expected_generation: u64,
         recovery_bundle: Option<Arc<crate::ServiceRuntimeBundle>>,
@@ -527,7 +527,7 @@ impl TrafficCaptureSession {
                 && let Some(acquired) = acquired
                 && !session.backend.owns_service(&acquired)
             {
-                acquired.release().await.map_err(crate::MihomoError::from)?;
+                acquired.stop().await.map_err(crate::MihomoError::from)?;
             }
             result
         })
@@ -537,7 +537,7 @@ impl TrafficCaptureSession {
 
     async fn enable_service_tun_admitted(
         &self,
-        service: Option<(Arc<zenclash_service::ServiceClient>, PathBuf)>,
+        service: Option<(Arc<zenclash_service_integration::ServiceSession>, PathBuf)>,
         expected_binding: u64,
         expected_generation: u64,
         recovery_bundle: Option<Arc<crate::ServiceRuntimeBundle>>,
@@ -883,7 +883,7 @@ trait CaptureBackend: Send + Sync {
         None
     }
 
-    fn owns_service(&self, _service: &Arc<zenclash_service::ServiceClient>) -> bool {
+    fn owns_service(&self, _service: &Arc<zenclash_service_integration::ServiceSession>) -> bool {
         false
     }
     fn validate_service_tun_request(
@@ -896,7 +896,7 @@ trait CaptureBackend: Send + Sync {
 
     fn enable_service_tun(
         &self,
-        _service: Option<(Arc<zenclash_service::ServiceClient>, PathBuf)>,
+        _service: Option<(Arc<zenclash_service_integration::ServiceSession>, PathBuf)>,
         _expected_binding: u64,
         _expected_generation: u64,
         _recovery_bundle: Option<Arc<crate::ServiceRuntimeBundle>>,
@@ -940,7 +940,7 @@ impl CaptureBackend for ProductionCaptureBackend {
         Some(self.controlled.clone())
     }
 
-    fn owns_service(&self, service: &Arc<zenclash_service::ServiceClient>) -> bool {
+    fn owns_service(&self, service: &Arc<zenclash_service_integration::ServiceSession>) -> bool {
         self.core_session
             .client()
             .service_client()
@@ -962,7 +962,7 @@ impl CaptureBackend for ProductionCaptureBackend {
 
     fn enable_service_tun(
         &self,
-        service: Option<(Arc<zenclash_service::ServiceClient>, PathBuf)>,
+        service: Option<(Arc<zenclash_service_integration::ServiceSession>, PathBuf)>,
         expected_binding: u64,
         expected_generation: u64,
         recovery_bundle: Option<Arc<crate::ServiceRuntimeBundle>>,
@@ -1896,7 +1896,7 @@ mod tests {
     impl CaptureBackend for FakeBackend {
         fn enable_service_tun(
             &self,
-            _service: Option<(Arc<zenclash_service::ServiceClient>, PathBuf)>,
+            _service: Option<(Arc<zenclash_service_integration::ServiceSession>, PathBuf)>,
             _binding: u64,
             _generation: u64,
             _recovery_bundle: Option<Arc<crate::ServiceRuntimeBundle>>,
@@ -2080,12 +2080,7 @@ mod tests {
                 }),
                 commit_pending: true,
                 recovery_warning: None,
-                failure: Some(
-                    crate::MihomoError::Service(zenclash_service::ServiceClientError::Rejected(
-                        zenclash_service::ServiceErrorCode::OutcomeUnknown,
-                    ))
-                    .into(),
-                ),
+                failure: Some(crate::MihomoError::RuntimeOutcomeUnknown.into()),
                 restored: false,
             });
         let capture = TrafficCaptureSession::with_backend(backend.clone());

@@ -260,6 +260,7 @@ impl ZenClashApp {
         let app_profile_path = profile_path.clone();
         let app_controlled_config_store = controlled_config_store.clone();
         let system_proxy_controller = SystemProxyController::default();
+        core_session.attach_pac_server(system_proxy_controller.pac_server());
         let system_proxy_session = preferences_store
             .clone()
             .map(|store| SystemProxySession::new(store, system_proxy_controller.clone()));
@@ -279,10 +280,12 @@ impl ZenClashApp {
             log_monitor.clone(),
         );
         let service_manager = ServiceManager::new(core_session.clone(), traffic_capture.clone());
-        let service_health = service_manager.clone();
-        runtime.spawn(async move {
-            let _ = service_health.refresh_health().await;
-        });
+        if core_session.run_state().health == zenclash_core::ServiceHealthKind::Unknown {
+            let service_health = service_manager.clone();
+            runtime.spawn(async move {
+                let _ = service_health.refresh_health().await;
+            });
+        }
         let profile_service =
             crate::ProfileService::new(core_session.clone(), override_store.clone())
                 .with_service_manager(service_manager);
@@ -327,6 +330,17 @@ impl ZenClashApp {
             |this, _, _: &crate::pages::runtime::ContinueLocalRequested, cx| {
                 match std::env::current_exe() {
                     Ok(executable) => this.begin_quit_mode(Some(executable), true, cx),
+                    Err(error) => this.runtime_page.update(cx, |page, cx| {
+                        page.report_system_proxy_reconcile_error(&error.to_string(), cx)
+                    }),
+                }
+            },
+        );
+        let repair_subscription = cx.subscribe(
+            &runtime_page,
+            |this, _, _: &crate::pages::runtime::ServiceRepairRestartRequested, cx| {
+                match std::env::current_exe() {
+                    Ok(executable) => this.begin_quit(Some(executable), cx),
                     Err(error) => this.runtime_page.update(cx, |page, cx| {
                         page.report_system_proxy_reconcile_error(&error.to_string(), cx)
                     }),
@@ -389,6 +403,7 @@ impl ZenClashApp {
                 runtime_config_subscription,
                 preferences_subscription,
                 local_subscription,
+                repair_subscription,
                 appearance_subscription,
             ],
         };
@@ -610,12 +625,14 @@ impl ZenClashApp {
         let mut mode_updates = mode.subscribe();
         let core = self.core_session.clone();
         let mut operational_updates = self.operational_status.subscribe();
+        let mut run_state_updates = core.subscribe_run_state();
         let mut observed_process_running = None;
         let mut initialize = true;
         cx.spawn(async move |this, cx| {
             loop {
                 let (mut traffic_changed, mut mode_changed, mut process_changed) =
                     (initialize, initialize, initialize);
+                let mut run_state_changed = initialize;
                 if initialize {
                     initialize = false;
                 } else {
@@ -632,6 +649,10 @@ impl ZenClashApp {
                             }
                             mode_changed = true;
                         }
+                        result = run_state_updates.changed() => {
+                            if result.is_err() { break; }
+                            run_state_changed = true;
+                        }
                         result = operational_updates.changed() => {
                             if result.is_err() {
                                 break;
@@ -641,6 +662,10 @@ impl ZenClashApp {
                     }
                 }
 
+                run_state_changed |= run_state_updates.has_changed().unwrap_or(false);
+                if run_state_changed {
+                    run_state_updates.borrow_and_update();
+                }
                 traffic_changed |= traffic_updates.has_changed().unwrap_or(false);
                 mode_changed |= mode_updates.has_changed().unwrap_or(false);
                 process_changed |= operational_updates.has_changed().unwrap_or(false);
@@ -671,6 +696,10 @@ impl ZenClashApp {
                 if this
                     .update(cx, |this, cx| {
                         let mut refresh_tray = false;
+                        if run_state_changed {
+                            this.runtime_page.update(cx, |_, cx| cx.notify());
+                            cx.notify();
+                        }
                         if let Some(indicator) = controller_indicator
                             && indicator != this.controller_indicator
                         {

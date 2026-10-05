@@ -142,9 +142,52 @@ jobs:
           ZENCLASH_CONFIG: ${{ runner.temp }}/real-profile.yaml
         run: cargo test --locked -p zenclash-core --test real_mihomo -- --ignored --nocapture
 
+  corresponding-source:
+    name: GPL corresponding source and dependency notices
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out the same release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Prepare Rust and Go source tooling
+        run: |
+          rustup update stable
+          rustup default stable
+          python3 --version
+          go version
+
+      - name: Test license staging and source snapshot boundaries
+        run: python3 -m unittest discover -s scripts/tests -p test_release_licenses.py -v
+
+      - name: Export corresponding source and actual dependency license files
+        env:
+          GOTOOLCHAIN: auto
+        run: >-
+          python3 scripts/build_corresponding_source.py
+          --version "${{ needs.prepare.outputs.version }}"
+          --mihomo-tag "${MIHOMO_VERSION}" --geodata-tag "${MIHOMO_GEODATA_VERSION}" --output dist
+
+      - name: Upload corresponding source for the binary release
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: zenclash-corresponding-source
+          path: dist/ZenClash-${{ needs.prepare.outputs.version }}-corresponding-source.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload matching notices for all platform installers
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dependency-licenses
+          path: dist/dependency-licenses
+          if-no-files-found: error
+          include-hidden-files: true
+
   macos:
     name: macOS 15 Apple Silicon DMG
-    needs: [prepare, verify]
+    needs: [prepare, verify, corresponding-source]
     runs-on: macos-15
     timeout-minutes: 60
     steps:
@@ -162,6 +205,12 @@ jobs:
       - name: Test macOS helper payload packaging behavior
         run: bash scripts/tests/build_macos_app_test.sh
 
+      - name: Download matching GPL dependency notices
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dependency-licenses
+          path: dist/dependency-licenses
+
       - name: Build DMG
         env:
           GH_TOKEN: ${{ github.token }}
@@ -178,7 +227,7 @@ jobs:
 
   windows:
     name: Windows x64 installer
-    needs: [prepare, verify]
+    needs: [prepare, verify, corresponding-source]
     runs-on: windows-2022
     timeout-minutes: 60
     steps:
@@ -201,6 +250,12 @@ jobs:
         shell: pwsh
         run: scripts/tests/service_authorization_test.ps1
 
+      - name: Download matching GPL dependency notices
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dependency-licenses
+          path: dist/dependency-licenses
+
       - name: Build Inno Setup installer
         shell: pwsh
         env:
@@ -217,7 +272,7 @@ jobs:
 
   ubuntu:
     name: Ubuntu 24.04+ DEB
-    needs: [prepare, verify]
+    needs: [prepare, verify, corresponding-source]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -231,6 +286,12 @@ jobs:
 
       - name: Install Linux dependencies
         run: sudo scripts/install_linux_build_deps.sh
+
+      - name: Download matching GPL dependency notices
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dependency-licenses
+          path: dist/dependency-licenses
 
       - name: Build Debian package
         env:
@@ -248,7 +309,7 @@ jobs:
 
   rpm:
     name: ${{ matrix.label }} RPM
-    needs: [prepare, verify]
+    needs: [prepare, verify, corresponding-source]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     container:
@@ -282,6 +343,12 @@ jobs:
           sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable
           printf '%s\n' "${HOME}/.cargo/bin" >>"${GITHUB_PATH}"
 
+      - name: Download matching GPL dependency notices
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dependency-licenses
+          path: dist/dependency-licenses
+
       - name: Build RPM
         env:
           CARGO_TARGET_DIR: /tmp/zenclash-target
@@ -301,7 +368,7 @@ jobs:
   release:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [prepare, macos, windows, ubuntu, rpm]
+    needs: [prepare, corresponding-source, macos, windows, ubuntu, rpm]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -309,17 +376,19 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - name: Download all installers
+      - name: Download installers and their corresponding source
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist
           merge-multiple: true
+          pattern: zenclash-*
 
       - name: Generate SHA-256 checksums
         shell: bash
         run: |
           set -euo pipefail
           cd dist
+          test -s "ZenClash-${{ needs.prepare.outputs.version }}-corresponding-source.tar.gz"
           sha256sum ./* >SHA256SUMS
 
       - name: Attest release artifacts
@@ -343,4 +412,12 @@ jobs:
               --verify-tag \
               --generate-notes \
               --title "ZenClash ${RELEASE_TAG}"
+          fi
+          # Keep the exact source attachment visible next to binary downloads.
+          notes_file="${RUNNER_TEMP}/zenclash-release-notes.md"
+          gh release view "${RELEASE_TAG}" --json body --jq '.body' >"${notes_file}"
+          if ! grep -Fq '<!-- zenclash-corresponding-source -->' "${notes_file}"; then
+            printf '\n<!-- zenclash-corresponding-source -->\nGPL-3.0 corresponding source: [download the source and vendored dependencies](https://github.com/%s/releases/download/%s/ZenClash-%s-corresponding-source.tar.gz). License, attribution, build and installation instructions are included.\n' \
+              "${GH_REPO}" "${RELEASE_TAG}" "${RELEASE_TAG#v}" >>"${notes_file}"
+            gh release edit "${RELEASE_TAG}" --notes-file "${notes_file}"
           fi

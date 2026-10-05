@@ -1,3 +1,5 @@
+// PAC inactivity behavior adapted from Clash Verge Rev on 2026-10-05.
+// GPL-3.0-only; see the repository NOTICE.md for upstream attribution.
 use std::{
     fmt,
     io::{Read, Write},
@@ -49,6 +51,19 @@ impl fmt::Debug for PacServer {
 struct PacServerInner {
     running: Mutex<Option<RunningPacServer>>,
     retained: Mutex<Option<RunningPacServer>>,
+    availability: PacAvailability,
+}
+
+// Workers own only this atomic, never PacServerInner; dropping the last owner
+// must still stop and join every current or retained listener.
+struct PacAvailability(Arc<AtomicBool>);
+
+impl Default for PacAvailability {
+    fn default() -> Self {
+        // Standalone and external-controller users retain their existing behavior.
+        // Lifecycle integration must close the endpoint before managed startup.
+        Self(Arc::new(AtomicBool::new(true)))
+    }
 }
 
 impl Drop for PacServerInner {
@@ -131,10 +146,11 @@ impl PacServer {
         };
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = shutdown.clone();
+        let availability = self.inner.availability.0.clone();
         let script: Arc<[u8]> = script.into();
         let thread = thread::Builder::new()
             .name("zenclash-pac".into())
-            .spawn(move || run_server(&listener, &script, &worker_shutdown))
+            .spawn(move || run_server(&listener, &script, &worker_shutdown, &availability))
             .map_err(|error| MihomoError::Process(format!("无法启动 PAC 服务线程：{error}")))?;
         Ok(RunningPacServer {
             status,
@@ -171,6 +187,25 @@ impl PacServer {
                 .lock()
                 .as_ref()
                 .is_some_and(|server| server.status.url == url)
+    }
+
+    /// Controls whether requests may receive the configured PAC document.
+    ///
+    /// Inactive GET/HEAD requests to `/pac` return HTTP 503, as in Clash Verge
+    /// Rev. This only changes an atomic flag: the URL, listener, configured
+    /// script and OS proxy settings remain unchanged. Every clone, replacement
+    /// and listener retained for recovery observes the same flag.
+    pub fn set_available(&self, available: bool) {
+        self.inner
+            .availability
+            .0
+            .store(available, Ordering::Release);
+    }
+
+    /// Reports configured availability without filesystem, platform or socket I/O.
+    #[must_use]
+    pub fn is_available(&self) -> bool {
+        self.inner.availability.0.load(Ordering::Acquire)
     }
 
     /// Stops the current PAC service. Calling this repeatedly is harmless.
@@ -231,12 +266,17 @@ pub fn normalize_pac_script(script: &str) -> MihomoResult<String> {
     Ok(format!("{script}\n"))
 }
 
-fn run_server(listener: &TcpListener, script: &[u8], shutdown: &AtomicBool) {
+fn run_server(
+    listener: &TcpListener,
+    script: &[u8],
+    shutdown: &AtomicBool,
+    availability: &AtomicBool,
+) {
     while !shutdown.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((_stream, _)) if shutdown.load(Ordering::Acquire) => break,
             Ok((stream, _)) => {
-                if let Err(error) = serve_connection(stream, script) {
+                if let Err(error) = serve_connection(stream, script, availability) {
                     tracing::warn!(%error, "PAC request failed");
                 }
             }
@@ -251,7 +291,11 @@ fn run_server(listener: &TcpListener, script: &[u8], shutdown: &AtomicBool) {
     }
 }
 
-fn serve_connection(mut stream: TcpStream, script: &[u8]) -> std::io::Result<()> {
+fn serve_connection(
+    mut stream: TcpStream,
+    script: &[u8],
+    availability: &AtomicBool,
+) -> std::io::Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
@@ -274,16 +318,20 @@ fn serve_connection(mut stream: TcpStream, script: &[u8]) -> std::io::Result<()>
         .next()
         .is_some_and(|method| method == "GET" || method == "HEAD")
         && request_line.split_whitespace().nth(1) == Some("/pac");
-    let body = if serves_pac { script } else { b"Not Found" };
-    let status = if serves_pac {
-        "200 OK"
+    let (status, body, content_type) = if !serves_pac {
+        (
+            "404 Not Found",
+            b"Not Found".as_slice(),
+            "text/plain; charset=utf-8",
+        )
+    } else if availability.load(Ordering::Acquire) {
+        ("200 OK", script, "application/x-ns-proxy-autoconfig")
     } else {
-        "404 Not Found"
-    };
-    let content_type = if serves_pac {
-        "application/x-ns-proxy-autoconfig"
-    } else {
-        "text/plain; charset=utf-8"
+        (
+            "503 Service Unavailable",
+            b"PAC endpoint is inactive".as_slice(),
+            "text/plain; charset=utf-8",
+        )
     };
     write!(
         stream,
@@ -358,6 +406,169 @@ mod tests {
 
         assert_ne!(first.address, second.address);
         assert_eq!(server.status().unwrap(), second);
+    }
+
+    fn request(address: std::net::SocketAddr, request: &[u8]) -> String {
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .unwrap();
+        stream.write_all(request).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    #[test]
+    fn inactive_pac_returns_503_without_exposing_the_configured_script() {
+        let server = PacServer::default();
+        server.set_available(false);
+        let status = server
+            .start("127.0.0.1", default_pac_script(), 17_890)
+            .unwrap();
+        let response = request(status.address, b"GET /pac HTTP/1.1\r\n\r\n");
+        assert!(
+            response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
+            "{response}"
+        );
+        assert!(
+            response.ends_with("\r\n\r\nPAC endpoint is inactive"),
+            "{response}"
+        );
+        assert!(!response.contains("FindProxyForURL"), "{response}");
+        assert!(
+            response.contains("Cache-Control: no-store\r\n"),
+            "{response}"
+        );
+    }
+
+    #[test]
+    fn pac_can_pause_and_resume_at_the_same_url_through_an_owner_clone() {
+        let server = PacServer::default();
+        let status = server
+            .start("127.0.0.1", default_pac_script(), 17_890)
+            .unwrap();
+        let cloned = server.clone();
+        cloned.set_available(false);
+        assert!(!server.is_available());
+        assert!(request(status.address, b"GET /pac HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 503"));
+        cloned.set_available(true);
+        let resumed = request(status.address, b"GET /pac HTTP/1.1\r\n\r\n");
+        assert!(resumed.starts_with("HTTP/1.1 200 OK\r\n"), "{resumed}");
+        assert!(resumed.contains("PROXY 127.0.0.1:17890"), "{resumed}");
+        assert_eq!(server.status(), Some(status));
+    }
+
+    #[test]
+    fn replacement_listener_preserves_inactivity() {
+        let server = PacServer::default();
+        server.set_available(false);
+        let first = server
+            .start("127.0.0.1", default_pac_script(), 17_890)
+            .unwrap();
+        let replacement = server
+            .start("127.0.0.1", default_pac_script(), 17_891)
+            .unwrap();
+        assert_ne!(first.address, replacement.address);
+        assert!(
+            request(replacement.address, b"GET /pac HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 503")
+        );
+    }
+
+    #[test]
+    fn retained_listener_shares_availability_with_the_current_listener() {
+        let server = PacServer::default();
+        let current = server
+            .start("127.0.0.1", default_pac_script(), 17_890)
+            .unwrap();
+        let candidate = server
+            .prepare("127.0.0.1", default_pac_script(), 17_891)
+            .unwrap();
+        let candidate_address = candidate.status().address;
+        server.retain_for_recovery(candidate);
+        server.set_available(false);
+        assert!(request(current.address, b"GET /pac HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 503"));
+        assert!(
+            request(candidate_address, b"GET /pac HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 503")
+        );
+        server.set_available(true);
+        assert!(
+            request(candidate_address, b"GET /pac HTTP/1.1\r\n\r\n")
+                .contains("PROXY 127.0.0.1:17891")
+        );
+    }
+
+    #[test]
+    fn inactive_head_reports_the_error_body_length_without_sending_a_body() {
+        let server = PacServer::default();
+        server.set_available(false);
+        let status = server
+            .start("127.0.0.1", default_pac_script(), 17_890)
+            .unwrap();
+        let response = request(status.address, b"HEAD /pac HTTP/1.1\r\n\r\n");
+        assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+        assert!(response.contains("Content-Length: 24\r\n"), "{response}");
+        assert!(response.ends_with("\r\n\r\n"), "{response}");
+    }
+
+    #[test]
+    fn inactive_pac_keeps_unknown_routes_as_not_found() {
+        let server = PacServer::default();
+        server.set_available(false);
+        let status = server
+            .start("127.0.0.1", default_pac_script(), 17_890)
+            .unwrap();
+        let response = request(status.address, b"GET /other HTTP/1.1\r\n\r\n");
+        assert!(
+            response.starts_with("HTTP/1.1 404 Not Found\r\n"),
+            "{response}"
+        );
+    }
+
+    #[test]
+    fn a_partial_request_uses_availability_when_its_request_line_finishes() {
+        let server = PacServer::default();
+        let status = server
+            .start("127.0.0.1", default_pac_script(), 17_890)
+            .unwrap();
+        let mut stream = TcpStream::connect(status.address).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .unwrap();
+        stream.write_all(b"GET /pac HTTP/1.1").unwrap();
+        server.set_available(false);
+        stream.write_all(b"\r\n\r\n").unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+    }
+
+    #[test]
+    fn stopping_and_starting_again_cannot_reopen_an_inactive_endpoint() {
+        let server = PacServer::default();
+        server
+            .start("127.0.0.1", default_pac_script(), 17_890)
+            .unwrap();
+        server.set_available(false);
+        server.stop();
+        let restarted = server
+            .start("127.0.0.1", default_pac_script(), 17_891)
+            .unwrap();
+        assert!(
+            request(restarted.address, b"GET /pac HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 503")
+        );
+    }
+
+    #[test]
+    fn dropping_the_final_owner_closes_a_retained_listener_without_a_reference_cycle() {
+        let server = PacServer::default();
+        let candidate = server
+            .prepare("127.0.0.1", default_pac_script(), 17_890)
+            .unwrap();
+        let address = candidate.status().address;
+        server.retain_for_recovery(candidate);
+        drop(server);
+        assert!(TcpStream::connect_timeout(&address, std::time::Duration::from_secs(1)).is_err());
     }
 
     #[test]

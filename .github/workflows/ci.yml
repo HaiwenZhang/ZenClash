@@ -84,6 +84,10 @@ jobs:
         if: runner.os == 'macOS'
         run: bash scripts/tests/build_macos_app_test.sh
 
+      - name: Test GPL notice staging and corresponding-source snapshots
+        if: runner.os == 'Linux'
+        run: python3 -m unittest discover -s scripts/tests -p test_release_licenses.py -v
+
       - name: Run Clippy
         run: >-
           cargo clippy --workspace --all-targets --all-features --locked --

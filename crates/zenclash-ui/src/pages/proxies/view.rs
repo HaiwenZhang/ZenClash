@@ -316,9 +316,11 @@ impl ProxiesPage {
             )
             .when_some(node.zip(id.as_ref()), |this, (node, id)| {
                 let node_name = node.name.clone();
-                let history = node.history.iter().rev().take(10).collect::<Vec<_>>();
-                let points = history
-                    .into_iter()
+                let points = node
+                    .history
+                    .iter()
+                    .rev()
+                    .take(10)
                     .rev()
                     .enumerate()
                     .filter(|(_, point)| point.delay > 0)

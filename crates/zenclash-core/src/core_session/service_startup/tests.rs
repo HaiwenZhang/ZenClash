@@ -1,9 +1,12 @@
 use super::*;
-use std::sync::atomic::AtomicBool;
+use crate::service_runtime::FrozenRuntime;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use tokio::sync::Notify;
 use zenclash_service::{
-    ServiceClientError, ServiceErrorCode, ServicePreparedRuntimePatch, ServiceRuntimeStatus,
+    RuntimeFileOutcome, RuntimeFileRequest, ServiceLifecycleState, ServiceStatusSnapshot,
+    StageRuntimeOutcome,
 };
+use zenclash_service_integration::NativeHttpResponse;
 
 #[derive(Default)]
 struct Service {
@@ -12,98 +15,106 @@ struct Service {
     lose_commit: AtomicBool,
     lose_status: AtomicBool,
     block_commit: AtomicBool,
+    get_count: AtomicUsize,
     commit_entered: Notify,
     commit_continue: Notify,
     calls: parking_lot::Mutex<Vec<&'static str>>,
 }
 
 fn unknown() -> MihomoError {
-    MihomoError::Service(ServiceClientError::Rejected(
-        ServiceErrorCode::OutcomeUnknown,
-    ))
+    MihomoError::RuntimeOutcomeUnknown
 }
 
 impl RuntimeTransport for Service {
-    async fn read_cache(
+    async fn prepare_snapshot(
         &self,
-        _revision: u64,
-        _kind: zenclash_service::ProviderKind,
-        _name: &str,
-    ) -> crate::MihomoResult<Option<Vec<u8>>> {
-        panic!("initial startup must not export provider caches")
+        bundle: Arc<crate::ServiceRuntimeBundle>,
+        home: PathBuf,
+        core: Option<PathBuf>,
+    ) -> crate::MihomoResult<FrozenRuntime> {
+        self.calls.lock().push("prepare");
+        let binary =
+            core.unwrap_or_else(|| home.join(format!("mihomo{}", std::env::consts::EXE_SUFFIX)));
+        std::fs::write(&binary, b"test core").unwrap();
+        FrozenRuntime::prepare(bundle, home, Some(binary), false).await
     }
-    async fn stage(&self, _bundle: &crate::ServiceRuntimeBundle) -> crate::MihomoResult<u64> {
-        self.calls.lock().push("stage");
-        Ok(1)
-    }
-    async fn validate(&self, _revision: u64) -> crate::MihomoResult<()> {
-        self.calls.lock().push("validate");
-        Ok(())
-    }
-    async fn start(&self, revision: u64) -> crate::MihomoResult<()> {
-        assert_eq!(revision, 1);
+    async fn start(&self, _runtime: zenclash_service::RuntimeBundle) -> crate::MihomoResult<()> {
         assert!(!self.running.swap(true, Ordering::SeqCst));
         self.calls.lock().push("start");
         Ok(())
     }
-    async fn reload(&self, _revision: u64, _force: bool) -> crate::MihomoResult<()> {
-        panic!("initial startup must never reload")
+    async fn stage_runtime(
+        &self,
+        _runtime: &zenclash_service::RuntimeBundle,
+    ) -> crate::MihomoResult<StageRuntimeOutcome> {
+        self.calls.lock().push("stage");
+        Ok(StageRuntimeOutcome::Staged {
+            config_path: "fixture-runtime.yaml".into(),
+        })
     }
-    async fn commit(&self, revision: u64) -> crate::MihomoResult<()> {
-        assert_eq!(revision, 1);
-        self.calls.lock().push("commit");
-        self.commit_entered.notify_one();
-        if self.block_commit.load(Ordering::SeqCst) {
-            self.commit_continue.notified().await;
+    async fn request(
+        &self,
+        method: &str,
+        _path: &str,
+        _body: Option<&serde_json::Value>,
+        _secret: &str,
+    ) -> crate::MihomoResult<NativeHttpResponse> {
+        if method == "GET" {
+            let call = self.get_count.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == 2 {
+                // The second confirmation follows durable cache/source publication.
+                self.calls.lock().push("confirm_saved");
+                self.commit_entered.notify_one();
+                if self.block_commit.load(Ordering::SeqCst) {
+                    self.commit_continue.notified().await;
+                }
+                self.committed.store(true, Ordering::SeqCst);
+                if self.lose_commit.load(Ordering::SeqCst) {
+                    return Err(unknown());
+                }
+            }
         }
-        self.committed.store(true, Ordering::SeqCst);
-        if self.lose_commit.load(Ordering::SeqCst) {
-            Err(unknown())
-        } else {
-            Ok(())
-        }
+        Ok(NativeHttpResponse {
+            status: if method == "GET" { 200 } else { 204 },
+            body: b"{}".to_vec(),
+        })
     }
-    async fn status(&self) -> crate::MihomoResult<ServiceRuntimeStatus> {
+    async fn status(&self) -> crate::MihomoResult<ServiceStatusSnapshot> {
         self.calls.lock().push("status");
         if self.lose_status.load(Ordering::SeqCst) {
             return Err(unknown());
         }
         let running = self.running.load(Ordering::SeqCst);
-        Ok(ServiceRuntimeStatus {
-            running,
-            pid: running.then_some(123),
-            exit_reason: None,
-            applied_revision: running.then_some(1),
-            committed_revision: self.committed.load(Ordering::SeqCst).then_some(1),
-            candidate: None,
+        Ok(ServiceStatusSnapshot {
+            is_active: running,
+            active_generation: running.then_some(1),
+            core_pid: running.then_some(123),
+            service_state: ServiceLifecycleState::Running,
+            core_started_at: None,
+            last_core_exit_reason: None,
+            restart_count: 0,
+            last_recovery_at: None,
+            desired_core_should_be_running: running,
+            desired_generation: 1,
+            desired_updated_at: 0,
         })
     }
-    async fn revisions(&self) -> crate::MihomoResult<(Option<u64>, Option<u64>)> {
-        let status = self.status().await?;
-        Ok((status.applied_revision, status.committed_revision))
+    fn owns_status(&self, status: &ServiceStatusSnapshot) -> bool {
+        status.is_active && status.active_generation == Some(1)
+    }
+    fn active_generation(&self) -> Option<u64> {
+        self.running.load(Ordering::SeqCst).then_some(1)
     }
     async fn stop(&self) -> crate::MihomoResult<()> {
         self.calls.lock().push("stop");
         self.running.store(false, Ordering::SeqCst);
         Ok(())
     }
-    async fn release(&self) -> crate::MihomoResult<()> {
-        self.calls.lock().push("release");
-        self.running.store(false, Ordering::SeqCst);
-        Ok(())
-    }
-    async fn prepare_patch(
+    async fn read_runtime_file(
         &self,
-        _base: u64,
-        _patch: &serde_json::Value,
-    ) -> crate::MihomoResult<ServicePreparedRuntimePatch> {
-        panic!("startup must not prepare partial patches")
-    }
-    async fn apply_patch(&self, _revision: u64) -> crate::MihomoResult<()> {
-        panic!("startup must not apply partial patches")
-    }
-    async fn restore_patch(&self, _revision: u64) -> crate::MihomoResult<()> {
-        panic!("startup must not restore partial patches")
+        _request: &RuntimeFileRequest,
+    ) -> crate::MihomoResult<RuntimeFileOutcome> {
+        panic!("initial startup must not export provider caches")
     }
 }
 
@@ -264,7 +275,7 @@ async fn startup_unconfirmed_commit_rejects_network_stop_but_can_release_on_exit
     assert!(fixture.service.running.load(Ordering::SeqCst));
     fixture.runtime.release_owned().await.unwrap();
     assert!(!fixture.service.running.load(Ordering::SeqCst));
-    assert!(fixture.service.calls.lock().contains(&"release"));
+    assert!(fixture.service.calls.lock().contains(&"stop"));
 }
 
 #[tokio::test]
@@ -435,7 +446,7 @@ async fn startup_shutdown_after_start_restores_cache_without_accepting_source() 
             .profile_path
             .is_none()
     );
-    assert!(!fixture.service.calls.lock().contains(&"commit"));
+    assert!(!fixture.service.calls.lock().contains(&"confirm_saved"));
 }
 
 #[tokio::test]
