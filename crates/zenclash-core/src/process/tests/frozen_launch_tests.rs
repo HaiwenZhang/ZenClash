@@ -8,6 +8,39 @@ struct Fixture {
     launch: MihomoLaunchConfig,
 }
 
+#[test]
+fn owned_process_uptime_tracks_spawn_restart_and_stop() {
+    let fixture = Fixture::new("uptime");
+    fs::write(fixture.launch.home_dir.join("read-1"), "").unwrap();
+    fs::write(fixture.launch.home_dir.join("read-2"), "").unwrap();
+    fs::write(fixture.launch.home_dir.join("allow-check"), "").unwrap();
+    let before = unix_timestamp_secs();
+    let process = MihomoProcess::spawn(fixture.launch.clone()).unwrap();
+    let first = process.snapshot();
+    assert!(
+        first
+            .started_at_secs
+            .is_some_and(|started| started >= before)
+    );
+    assert!(first.running);
+    fixture.wait("observed-1");
+    // Represent an older generation without delaying the test for clock ticks.
+    process.started_at_secs.store(1, Ordering::Relaxed);
+    process.restart().unwrap();
+    fixture.wait("observed-2");
+    let restarted = process.snapshot();
+    assert!(
+        restarted
+            .started_at_secs
+            .is_some_and(|started| started >= before)
+    );
+    assert!(restarted.running);
+    process.stop().unwrap();
+    let stopped = process.snapshot();
+    assert!(!stopped.running);
+    assert_eq!(stopped.started_at_secs, None);
+}
+
 impl Fixture {
     fn new(label: &str) -> Self {
         let root = std::env::temp_dir().join(format!(

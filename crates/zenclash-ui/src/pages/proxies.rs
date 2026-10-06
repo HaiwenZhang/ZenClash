@@ -4,17 +4,22 @@ use std::{
 };
 
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Icon, IconName, Sizable, button::Button, h_flex, progress::Progress,
-    scroll::ScrollableElement, switch::Switch, v_flex,
+    ActiveTheme, Disableable, Icon, IconName, Sizable, button::Button, h_flex,
+    scroll::ScrollableElement, v_flex,
 };
 use gpui_kit::{
     App, Context, Focusable, InteractiveElement, IntoElement, ParentElement, Render, Styled,
-    Window, div, prelude::FluentBuilder, px,
+    Window, div, prelude::FluentBuilder,
 };
 use zenclash_core::{
     ConnectionPolicy, DelayHistory, MihomoClient, ProxyCatalog, ProxyDelayTarget, ProxyGroup,
     ProxyGroupBehavior, ProxyNode, ProxyNodeId, ProxyOperations, ProxyVisibility,
 };
+
+use crate::components::mint_switch::MintSwitch as Switch;
+
+#[cfg(test)]
+use gpui_kit::px;
 
 mod actions;
 mod presentation;
@@ -29,6 +34,8 @@ pub struct ProxiesPage {
     client: MihomoClient,
     runtime: tokio::runtime::Handle,
     catalog: Option<Arc<ProxyCatalog>>,
+    active_profile: Option<(String, bool)>,
+    node_summary: presentation::NodeSummary,
     visible_group_indices: Vec<usize>,
     group_page_index: usize,
     outbound_mode: String,
@@ -72,33 +79,66 @@ impl ProxiesPage {
         runtime: tokio::runtime::Handle,
         cx: &mut Context<Self>,
     ) -> Self {
-        let nodes = (0..9)
+        let nodes = (0..36)
             .map(|index| ProxyNode {
                 name: format!("Hong Kong {:02}", index + 1),
-                kind: "Shadowsocks".into(),
-                history: vec![DelayHistory {
-                    delay: 28 + index * 9,
-                    ..Default::default()
-                }],
+                kind: ["Shadowsocks", "VLESS", "Trojan"][index as usize % 3].into(),
+                udp: index % 3 == 0,
+                history: [44, 30, 36, 72, 54, 26, 44, 66, 52, 28]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(sample, delay)| DelayHistory {
+                        delay: delay + index * 9,
+                        time: format!("2026-10-06T15:{:02}:00+08:00", 32 + sample),
+                        ..Default::default()
+                    })
+                    .collect(),
                 ..Default::default()
+            })
+            .enumerate()
+            .map(|(index, mut node)| {
+                if matches!(index, 6 | 19) {
+                    node.history.last_mut().unwrap().delay = 0;
+                } else if matches!(index, 7 | 8 | 33..=35) {
+                    node.history.clear();
+                }
+                node
             })
             .collect::<Vec<_>>();
         let catalog = ProxyCatalog::from_group_nodes(
-            ["PROXY", "AUTO"]
-                .into_iter()
-                .map(|name| {
-                    (
-                        ProxyGroup {
-                            name: name.into(),
-                            kind: "Selector".into(),
-                            behavior: ProxyGroupBehavior::Selector,
-                            now: nodes[0].name.clone(),
-                            ..Default::default()
+            [
+                "节点选择",
+                "自动选择",
+                "流媒体",
+                "备用线路",
+                "国内网站",
+                "负载均衡",
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| {
+                (
+                    ProxyGroup {
+                        name: name.into(),
+                        kind: match index {
+                            1 => "URLTest",
+                            3 => "Fallback",
+                            5 => "LoadBalance",
+                            _ => "Selector",
+                        }
+                        .into(),
+                        behavior: match index {
+                            1 | 3 => ProxyGroupBehavior::Automatic { fixed: false },
+                            5 => ProxyGroupBehavior::LoadBalance,
+                            _ => ProxyGroupBehavior::Selector,
                         },
-                        nodes.clone(),
-                    )
-                })
-                .collect(),
+                        now: nodes[0].name.clone(),
+                        ..Default::default()
+                    },
+                    nodes.clone(),
+                )
+            })
+            .collect(),
             nodes.len(),
         );
         Self::design_validation_catalog(client, runtime, catalog, "rule".into(), cx)
@@ -128,6 +168,8 @@ impl ProxiesPage {
             client,
             runtime,
             catalog: None,
+            active_profile: None,
+            node_summary: Default::default(),
             visible_group_indices: Vec::new(),
             group_page_index: 0,
             outbound_mode: "rule".into(),
@@ -341,6 +383,20 @@ impl Focusable for ProxiesPage {
     }
 }
 
+impl ProxiesPage {
+    pub(crate) fn set_active_profile(
+        &mut self,
+        profile: Option<&zenclash_core::ProfileRecord>,
+        cx: &mut Context<Self>,
+    ) {
+        let identity = profile.map(|profile| (profile.name.clone(), profile.is_remote()));
+        if self.active_profile != identity {
+            self.active_profile = identity;
+            cx.notify();
+        }
+    }
+}
+
 impl Render for ProxiesPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_search_input(window, cx);
@@ -353,18 +409,15 @@ impl Render for ProxiesPage {
         v_flex()
             .track_focus(&self.focus_handle)
             .size_full()
-            .bg(theme.background)
+            .bg(crate::design::workspace_background(&theme))
             .child(self.render_header(&theme, cx))
-            .when(groups.count > 1, |this| {
-                this.child(self.render_group_pagination(groups, &theme, cx))
-            })
             .child(
                 v_flex()
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scrollbar()
                     .gap_4()
-                    .px_6()
+                    .px_8()
                     .py_3()
                     .when_some(catalog, |this, catalog| {
                         this.child(self.render_summary(catalog, &theme))
@@ -679,16 +732,35 @@ mod tests {
                 2,
             );
             let (window, page, runtime) = open_catalog(cx, catalog);
+            let search_guard = cx
+                .update(|cx| page.read(cx).search_gate.clone())
+                .try_lock_owned()
+                .expect("search must be idle before input");
+            let panel_top = cx
+                .update_window(window, |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click("proxy-node-search", cx);
+                    let panel_top = window.find("proxy-node-panel").bounds().top();
+                    window.input("TOKYO", cx);
+                    panel_top
+                })
+                .unwrap();
+            cx.run_until_parked();
             cx.update_window(window, |_, window, cx| {
                 window.render_frame(cx);
-                window.click("proxy-node-search", cx);
-                window.input("TOKYO", cx);
+                assert!(page.read(cx).search_projection.is_none());
+                assert_eq!(window.find("proxy-node-panel").bounds().top(), panel_top);
+                assert!(
+                    window.find("proxy-search-feedback").bounds().top() > panel_top,
+                    "search feedback must stay inside the node panel"
+                );
                 assert_eq!(
                     Arc::strong_count(page.read(cx).catalog.as_ref().unwrap()),
                     1
                 );
             })
             .unwrap();
+            drop(search_guard);
             for _ in 0..200 {
                 if cx.update(|cx| page.read(cx).search_projection.is_some()) {
                     break;
@@ -884,10 +956,8 @@ mod tests {
             cx.update_window(window, |_, window, cx| {
                 assert_eq!(page.read(cx).catalog.as_ref().unwrap().groups()[0].now, "b");
                 window.render_frame(cx);
-                assert_eq!(
-                    window.find(select_b).label(),
-                    Some(zenclash_i18n::text("proxies.actions.current").as_str())
-                );
+                assert!(window.try_find(select_b).is_none());
+                window.find(id("current-proxy", "b", "Airport B"));
                 window.click(test_a, cx);
                 window.click(test_b, cx);
                 let page = page.read(cx);
@@ -1085,6 +1155,97 @@ mod tests {
             Root::new(view, window, cx)
         });
         (window.into(), page.unwrap(), runtime)
+    }
+
+    #[gpui_kit::test]
+    fn node_sort_menu_cancels_and_applies_keyboard_selection(cx: &mut TestAppContext) {
+        let (window, page, _runtime) = open_catalog(
+            cx,
+            ProxyCatalog::from_group_nodes(
+                vec![(
+                    ProxyGroup {
+                        name: "group".into(),
+                        ..Default::default()
+                    },
+                    vec![ProxyNode {
+                        name: "node".into(),
+                        ..Default::default()
+                    }],
+                )],
+                1,
+            ),
+        );
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("sort-proxies-by-latency", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("escape", cx);
+            assert!(!page.read(cx).sort_by_latency);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("sort-proxies-by-latency", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("down", cx);
+            window.press("down", cx);
+            window.press("enter", cx);
+            assert!(page.read(cx).sort_by_latency);
+            window.remove_window();
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn numbered_node_pages_show_the_requested_members(cx: &mut TestAppContext) {
+        let (window, page, _runtime) = open_catalog(
+            cx,
+            ProxyCatalog::from_group_nodes(
+                vec![(
+                    ProxyGroup {
+                        name: "group".into(),
+                        behavior: ProxyGroupBehavior::Selector,
+                        ..Default::default()
+                    },
+                    (0..27)
+                        .map(|index| ProxyNode {
+                            name: format!("node-{index}"),
+                            ..Default::default()
+                        })
+                        .collect(),
+                )],
+                27,
+            ),
+        );
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("proxy-page:group:2", cx);
+            window.render_frame(cx);
+            assert_eq!(page.read(cx).proxy_pages.get("group"), Some(&2));
+            let id = ProxyNodeId::new("node-18".into(), None);
+            window.find(super::view::proxy_element_id("select-proxy", "group", &id));
+            let previous = ProxyNodeId::new("node-0".into(), None);
+            assert!(
+                window
+                    .try_find(super::view::proxy_element_id(
+                        "select-proxy",
+                        "group",
+                        &previous
+                    ))
+                    .is_none()
+            );
+            window.remove_window();
+        })
+        .unwrap();
     }
 
     fn assert_delayed_catalog_mode(
@@ -1297,6 +1458,10 @@ mod tests {
                         (first..last).contains(&index)
                     );
                 }
+                window.find((
+                    gpui_kit::ElementId::from("test-group"),
+                    format!("group-{first}"),
+                ));
             })
             .unwrap();
         }
@@ -1527,8 +1692,8 @@ mod tests {
             }
             for (group, node, expected) in [
                 ("Proxy", "HK", "proxies.actions.testing"),
-                ("Proxy", "JP", "proxies.actions.test_all"),
-                ("Proxy Auto", "HK", "proxies.actions.test_all"),
+                ("Proxy", "JP", "proxies.actions.test_selected_group"),
+                ("Proxy Auto", "HK", "proxies.actions.test_selected_group"),
             ] {
                 page.update(cx, |page, cx| {
                     let token = DelayTaskToken(page.delay_generation);
@@ -1591,7 +1756,7 @@ mod tests {
                 window
                     .find((gpui_kit::ElementId::from("test-group"), "Proxy"))
                     .label(),
-                Some(zenclash_i18n::text("proxies.actions.test_all").as_str())
+                Some(zenclash_i18n::text("proxies.actions.test_selected_group").as_str())
             );
             page.update(cx, |page, _| page.suspend());
             window.remove_window();

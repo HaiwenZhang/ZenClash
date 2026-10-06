@@ -181,6 +181,102 @@ pub(super) fn open(
 }
 
 #[gpui_kit::test]
+fn subscription_form_focuses_name_and_escape_preserves_draft(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (window, page) = open(cx, &fixture, Page::Profiles);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("toggle-add-subscription", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let input = page.read(cx).profiles.forms.subscription_name.clone();
+        assert!(input.focus_handle(cx).is_focused(window));
+        input.update(cx, |input, cx| {
+            input.set_value("unfinished draft", window, cx)
+        });
+        window.press("escape", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(!page.read(cx).profiles.forms.adding_subscription);
+        assert!(page.read(cx).focus_handle.is_focused(window));
+        window.click("toggle-add-subscription", cx);
+        window.render_frame(cx);
+        assert_eq!(
+            page.read(cx)
+                .profiles
+                .forms
+                .subscription_name
+                .read(cx)
+                .value(),
+            "unfinished draft"
+        );
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn request_editor_focuses_name_and_escape_cancels_without_saving(cx: &mut TestAppContext) {
+    let controller = ControllerFixture::new(false);
+    let fixture = Fixture::with_controller(controller.url.clone());
+    let remote = fixture
+        .runtime
+        .as_ref()
+        .unwrap()
+        .block_on(fixture.profiles.add_remote(
+            "Request settings fixture",
+            &format!("{}/subscription", controller.url),
+            "clash.meta",
+        ))
+        .unwrap();
+    let (window, page) = open(cx, &fixture, Page::Profiles);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(format!("inspect-profile:{}", remote.id), cx);
+        window.render_frame(cx);
+        window.click(format!("inspector-edit-profile-request:{}", remote.id), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let input = page.read(cx).profiles.forms.request_name.clone();
+        assert!(input.focus_handle(cx).is_focused(window));
+        input.update(cx, |input, cx| {
+            input.set_value("Unsaved request change", window, cx)
+        });
+        window.press("escape", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(page.read(cx).profiles.forms.editing_profile_id.is_none());
+        assert!(page.read(cx).focus_handle.is_focused(window));
+        window.remove_window();
+    })
+    .unwrap();
+    let persisted = fixture.profiles.load().unwrap();
+    assert_eq!(
+        persisted
+            .profiles
+            .iter()
+            .find(|profile| profile.id == remote.id)
+            .unwrap()
+            .name,
+        "Request settings fixture"
+    );
+}
+
+#[gpui_kit::test]
 fn collapsing_subscription_form_restores_focus(cx: &mut TestAppContext) {
     let fixture = Fixture::new();
     let (window, page) = open(cx, &fixture, Page::Profiles);
@@ -627,7 +723,10 @@ fn home_service_tun_consent_cancel_preserves_local_owner_and_configuration(
         window.press("space", cx);
         assert!(window.has_active_dialog(cx));
         window.press("escape", cx);
-        assert_eq!(window.find("home-tun").checked(), Some(false));
+        assert_eq!(
+            window.find("home-tun").label(),
+            Some(zenclash_i18n::text("home.controls.tun_enable").as_str()),
+        );
         assert_eq!(fixture.core.generation(), generation);
         assert_eq!(local.snapshot().pid, pid);
         assert_eq!(
@@ -1113,6 +1212,270 @@ fn saving_yaml_after_navigation_still_invalidates_business_state(cx: &mut TestAp
 }
 
 #[gpui_kit::test]
+fn log_collection_menu_updates_controlled_configuration_and_monitor(cx: &mut TestAppContext) {
+    let controller = ControllerFixture::new(false);
+    let fixture = Fixture::with_controller(controller.url.clone());
+    let original = fs::read_to_string(&fixture.profile).unwrap();
+    let (window, page) = open(cx, &fixture, Page::Logs);
+    fixture.settle(cx, &page, |page| {
+        !page.persistent_loading && !page.config_inputs_loading
+    });
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("log-collection-level", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("down", cx);
+        window.press("down", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| {
+        !page.core_busy()
+            && page.log_monitor.level() == MihomoLogLevel::Warning
+            && page.effective_config["log-level"].as_str() == Some("warning")
+    });
+    assert_eq!(fs::read_to_string(&fixture.profile).unwrap(), original);
+    assert_eq!(fixture.logs.level(), MihomoLogLevel::Warning);
+    assert_eq!(
+        controller
+            .apply_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    cx.update_window(window, |_, window, _| window.remove_window())
+        .unwrap();
+}
+
+#[gpui_kit::test]
+fn subscription_interval_menu_cancels_without_writing_and_saves_keyboard_selection(
+    cx: &mut TestAppContext,
+) {
+    let controller = ControllerFixture::new(false);
+    let fixture = Fixture::with_controller(controller.url.clone());
+    let remote = fixture
+        .runtime
+        .as_ref()
+        .unwrap()
+        .block_on(fixture.profiles.add_remote(
+            "Scheduled subscription",
+            &format!("{}/subscription", controller.url),
+            "clash.meta",
+        ))
+        .unwrap();
+    fixture
+        .profiles
+        .set_update_policy(&remote.id, true, 1_440)
+        .unwrap();
+    let (window, page) = open(cx, &fixture, Page::Profiles);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    let trigger = format!("profile-update-interval:{}", remote.id);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(format!("inspect-profile:{}", remote.id), cx);
+        window.render_frame(cx);
+        window.click(trigger.clone(), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("escape", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        fixture
+            .profiles
+            .load()
+            .unwrap()
+            .profiles
+            .iter()
+            .find(|profile| profile.id == remote.id)
+            .unwrap()
+            .update_interval_minutes,
+        1_440
+    );
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(trigger, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("down", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| {
+        page.profiles
+            .catalog
+            .profiles
+            .iter()
+            .any(|profile| profile.id == remote.id && profile.update_interval_minutes == 360)
+    });
+    let catalog = fixture.profiles.load().unwrap();
+    let saved = catalog
+        .profiles
+        .iter()
+        .find(|profile| profile.id == remote.id)
+        .unwrap();
+    assert!(saved.auto_update);
+    assert_eq!(saved.update_interval_minutes, 360);
+    assert_eq!(
+        controller
+            .apply_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    cx.update_window(window, |_, window, _| window.remove_window())
+        .unwrap();
+}
+
+#[gpui_kit::test]
+fn subscription_download_policy_controls_preserve_credentials_and_schedule(
+    cx: &mut TestAppContext,
+) {
+    let controller = ControllerFixture::new(false);
+    let fixture = Fixture::with_controller(controller.url.clone());
+    let url = format!("{}/subscription", controller.url);
+    let remote = fixture
+        .runtime
+        .as_ref()
+        .unwrap()
+        .block_on(
+            fixture
+                .profiles
+                .add_remote("Policy subscription", &url, "clash.meta"),
+        )
+        .unwrap();
+    let options = RemoteProfileOptions::new("Bearer test-fixture", false)
+        .unwrap()
+        .with_download_policy(45, true)
+        .unwrap();
+    fixture
+        .profiles
+        .set_remote_request_settings(
+            &remote.id,
+            &remote.name,
+            &url,
+            "clash.meta",
+            options.clone(),
+            Some("0 */6 * * *".into()),
+        )
+        .unwrap();
+    let (window, page) = open(cx, &fixture, Page::Profiles);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(format!("inspect-profile:{}", remote.id), cx);
+        window.render_frame(cx);
+        window.click(format!("profile-download-fallback:{}", remote.id), cx);
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| !page.core_busy() && page.profiles.catalog.profiles.iter().any(|profile| profile.id == remote.id && matches!(&profile.source, zenclash_core::ProfileSource::Remote { options, .. } if options.route() == RemoteProfileRoute::Direct)));
+    let catalog = fixture.profiles.load().unwrap();
+    let saved = catalog
+        .profiles
+        .iter()
+        .find(|profile| profile.id == remote.id)
+        .unwrap();
+    assert_eq!(saved.name, remote.name);
+    assert_eq!(saved.update_cron.as_deref(), Some("0 */6 * * *"));
+    let zenclash_core::ProfileSource::Remote {
+        url: saved_url,
+        user_agent,
+        options: saved_options,
+    } = &saved.source
+    else {
+        panic!("expected remote profile");
+    };
+    assert_eq!(saved_url, &url);
+    assert_eq!(user_agent, "clash.meta");
+    assert_eq!(
+        saved_options,
+        &options.clone().with_route(RemoteProfileRoute::Direct)
+    );
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(format!("profile-download-route:{}", remote.id), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| !page.core_busy() && page.profiles.catalog.profiles.iter().any(|profile| profile.id == remote.id && matches!(&profile.source, zenclash_core::ProfileSource::Remote { options, .. } if options.route() == RemoteProfileRoute::Mihomo)));
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(format!("profile-download-fallback:{}", remote.id), cx);
+        assert!(matches!(&page.read(cx).profiles.catalog.profiles.iter().find(|profile| profile.id == remote.id).unwrap().source, zenclash_core::ProfileSource::Remote { options, .. } if options.route() == RemoteProfileRoute::Mihomo));
+        window.remove_window();
+    })
+    .unwrap();
+    assert_eq!(
+        controller
+            .apply_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+}
+
+#[gpui_kit::test]
+fn network_target_form_cancel_preserves_input_and_restores_focus(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (window, page) = open(cx, &fixture, Page::Network);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    cx.update_window(window, |_, window, cx| {
+        page.update(cx, |page, cx| {
+            page.invalidate_page_load();
+            page.error = None;
+            page.data = RuntimeData::Network {
+                config: RuntimeConfig::default(),
+                system: zenclash_core::SystemNetworkSnapshot::default(),
+            };
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("cancel-network-target").is_none());
+        window.click("add-network-latency-target", cx);
+        window.render_frame(cx);
+        let input = page.read(cx).network_probe.latency_name.clone();
+        input.update(cx, |input, cx| {
+            input.set_value("Retained target", window, cx)
+        });
+        window.focus(&input.focus_handle(cx), cx);
+        window.render_frame(cx);
+        window.click("cancel-network-target", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(page.read(cx).focus_handle.is_focused(window));
+        assert!(window.try_find("cancel-network-target").is_none());
+        window.click("add-network-latency-target", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("cancel-network-target").is_some());
+        assert_eq!(
+            page.read(cx).network_probe.latency_name.read(cx).value(),
+            "Retained target"
+        );
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn cancelling_a_network_probe_aborts_the_owned_task_and_rejects_old_publication(
     cx: &mut TestAppContext,
 ) {
@@ -1221,6 +1584,7 @@ fn network_probe_stops_when_blurred_or_hidden_during_a_mutation(cx: &mut TestApp
 
 #[gpui_kit::test]
 fn connection_transport_buttons_filter_rows_with_pointer_and_keyboard(cx: &mut TestAppContext) {
+    use gpui_kit::component::WindowExt;
     let fixture = Fixture::new();
     let (window, page) = open(cx, &fixture, Page::Connections);
     fixture.settle(cx, &page, |page| !page.persistent_loading && !page.loading);
@@ -1307,6 +1671,12 @@ fn connection_transport_buttons_filter_rows_with_pointer_and_keyboard(cx: &mut T
             );
         });
         window.render_frame(cx);
+        window.find(row("UDP"));
+        assert!(window.try_find(row("latest")).is_none());
+        window.click("close-all-connections", cx);
+        assert!(window.has_active_dialog(cx));
+        window.press("escape", cx);
+        assert!(!window.has_active_dialog(cx));
         window.find(row("UDP"));
         assert!(window.try_find(row("latest")).is_none());
         window.click(("connection-transport", 0usize), cx);
@@ -1470,11 +1840,9 @@ fn offline_pages_render_local_content_and_delete_a_disabled_override(cx: &mut Te
         window.render_frame(cx);
         let profile = fixture.profiles.load().unwrap().profiles.remove(0);
         assert_eq!(
-            window
-                .find(format!("delete-profile:{}", profile.id))
-                .label(),
+            window.find(format!("profile-more:{}", profile.id)).label(),
             Some(
-                zenclash_i18n::text_with("profiles.actions.delete", &[("name", profile.name)])
+                zenclash_i18n::text_with("profiles.actions.more", &[("name", profile.name)])
                     .as_str()
             )
         );
@@ -1498,6 +1866,55 @@ fn offline_pages_render_local_content_and_delete_a_disabled_override(cx: &mut Te
         window.remove_window();
     })
     .unwrap();
+}
+
+#[gpui_kit::test]
+fn profile_more_menu_cancels_and_deletes_only_the_inactive_profile(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let source = fixture.root.join("secondary.yaml");
+    fs::write(&source, "proxies: []\nrules: [MATCH,DIRECT]\n").unwrap();
+    let secondary = fixture.profiles.import_local(&source).unwrap();
+    let active = fixture.profiles.load().unwrap().active.unwrap();
+    let (window, page) = open(cx, &fixture, Page::Profiles);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    for id in [&active, &secondary.id] {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(format!("profile-more:{id}"), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            if id == &active {
+                window.press("down", cx);
+                window.press("enter", cx);
+            }
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(fixture.profiles.load().unwrap().profiles.len(), 2);
+    }
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(format!("profile-more:{}", secondary.id), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| page.profiles.catalog.profiles.len() == 1);
+    let saved = fixture.profiles.load().unwrap();
+    assert_eq!(saved.active.as_deref(), Some(active.as_str()));
+    assert_eq!(saved.profiles[0].id, active);
+    assert!(source.exists());
+    cx.update_window(window, |_, window, _| window.remove_window())
+        .unwrap();
 }
 
 #[gpui_kit::test]
@@ -1562,31 +1979,64 @@ fn actual_rule_filter_input_publishes_the_matching_projection(cx: &mut TestAppCo
         page.update(cx, |page, cx| {
             page.ui_visibility = lifecycle::UiVisibility::new(true);
             page.invalidate_page_load();
-            let data = RuntimeData::Rules(Arc::new(RuleCatalog {
-                rules: vec![
-                    zenclash_core::Rule {
-                        payload: "alpha.example".into(),
-                        ..Default::default()
-                    },
-                    zenclash_core::Rule {
-                        payload: "beta.example".into(),
-                        index: Some(1),
-                        extra: Some(Default::default()),
-                        ..Default::default()
-                    },
-                ],
-            }));
+            let data = RuntimeData::Rules {
+                proxies: None,
+                config: None,
+                catalog: Arc::new(RuleCatalog {
+                    rules: vec![
+                        zenclash_core::Rule {
+                            payload: "alpha.example".into(),
+                            ..Default::default()
+                        },
+                        zenclash_core::Rule {
+                            payload: "beta.example".into(),
+                            index: Some(1),
+                            extra: Some(Default::default()),
+                            ..Default::default()
+                        },
+                    ],
+                }),
+            };
             page.replace_page_data(page.page_task_token_for(Page::Rules), data, cx);
         });
     })
     .unwrap();
     fixture.settle(cx, &page, |page| !page.rules.projecting);
+    let search_guard = cx.update(|cx| page.read(cx).rules.hold_projection());
+    let panel_top = cx
+        .update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.find("rules-table-panel").bounds().top()
+        })
+        .unwrap();
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
         window.click(("input", page.read(cx).rules.filter.entity_id()), cx);
         window.input("beta", cx);
     })
     .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(page.read(cx).rules.projecting);
+        assert_eq!(window.find("rules-table-panel").bounds().top(), panel_top);
+        assert!(window.try_find("rule-inspector").is_some());
+        assert!(window.try_find(("rule-row", 0usize)).is_none());
+        assert!(window.try_find(("rule-row", 1usize)).is_none());
+        window.press("secondary-a", cx);
+        window.press("backspace", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(!page.read(cx).rules.projecting);
+        assert!(window.try_find(("rule-row", 0usize)).is_some());
+        assert!(window.try_find(("rule-row", 1usize)).is_some());
+        window.input("beta", cx);
+    })
+    .unwrap();
+    drop(search_guard);
     fixture.settle(cx, &page, |page| !page.rules.projecting);
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
@@ -1630,12 +2080,16 @@ fn blurring_preserves_loaded_rules_until_the_window_is_hidden(cx: &mut TestAppCo
             page.invalidate_page_load();
             page.replace_page_data(
                 page.page_task_token_for(Page::Rules),
-                RuntimeData::Rules(Arc::new(RuleCatalog {
-                    rules: vec![zenclash_core::Rule {
-                        payload: "loaded.example".into(),
-                        ..Default::default()
-                    }],
-                })),
+                RuntimeData::Rules {
+                    proxies: None,
+                    config: None,
+                    catalog: Arc::new(RuleCatalog {
+                        rules: vec![zenclash_core::Rule {
+                            payload: "loaded.example".into(),
+                            ..Default::default()
+                        }],
+                    }),
+                },
                 cx,
             );
         });
@@ -1887,6 +2341,7 @@ impl ControllerFixture {
         let blocked = blocked_apply.clone();
         let server = std::thread::spawn(move || {
             let mut mode = "rule".to_owned();
+            let mut log_level = "info".to_owned();
             while !server_stop.load(std::sync::atomic::Ordering::Acquire) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
@@ -1938,13 +2393,29 @@ impl ControllerFixture {
                         if request.starts_with(b"PATCH /configs") {
                             let patch: serde_json::Value =
                                 serde_json::from_slice(&payload).unwrap();
-                            mode = patch["mode"].as_str().unwrap().to_owned();
+                            if let Some(value) = patch["mode"].as_str() {
+                                mode = value.to_owned();
+                            }
+                            if let Some(value) = patch["log-level"].as_str() {
+                                log_level = value.to_owned();
+                            }
+                        }
+                        if request.starts_with(b"PUT /configs") {
+                            let request: serde_json::Value =
+                                serde_json::from_slice(&payload).unwrap();
+                            if let Some(source) = request["payload"].as_str() {
+                                let config: serde_yaml::Value =
+                                    serde_yaml::from_str(source).unwrap();
+                                if let Some(value) = config["log-level"].as_str() {
+                                    log_level = value.to_owned();
+                                }
+                            }
                         }
                         let response = if is_apply {
                             "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n".to_owned()
                         } else if request.starts_with(b"GET /configs ") {
                             let body =
-                                serde_json::json!({"mixed-port":7892,"mode":mode}).to_string();
+                                serde_json::json!({"mixed-port":7892,"mode":mode,"log-level":log_level}).to_string();
                             format!(
                                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                                 body.len()

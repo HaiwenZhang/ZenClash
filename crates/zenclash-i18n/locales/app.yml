@@ -93,6 +93,12 @@ common:
 
 app:
   status:
+    running:
+      zh-CN: 运行中
+      en: Running
+    uptime:
+      zh-CN: 运行时间 %{time}
+      en: Uptime %{time}
     controller_connected:
       zh-CN: 内核控制器已连接
       en: Core controller connected
@@ -111,6 +117,9 @@ app:
   description:
     zh-CN: Mihomo 客户端
     en: Mihomo Client
+  desktop_description:
+    zh-CN: Mihomo 桌面客户端
+    en: Mihomo Desktop Client
   window:
     minimize:
       zh-CN: 最小化窗口
@@ -386,7 +395,7 @@ navigation:
       zh-CN: 订阅
       en: Profiles
     title:
-      zh-CN: 订阅与配置
+      zh-CN: 订阅
       en: Profiles and configuration
     subtitle:
       zh-CN: 管理订阅来源、更新配置，选择当前网络方案
@@ -590,8 +599,11 @@ runtime:
 home:
   history:
     title:
-      zh-CN: 进程流量 · 最近24小时
-      en: Process traffic · last 24h
+      zh-CN: 进程流量
+      en: Process traffic
+    period:
+      zh-CN: 最近 24 小时
+      en: Last 24h
     scope:
       zh-CN: 最近24小时已记录样本 · 不保证完整覆盖
       en: Recorded samples in last 24h · coverage may be incomplete
@@ -617,11 +629,23 @@ home:
       zh-CN: 最近24小时没有已记录样本
       en: No recorded samples in the last 24h
   flow:
+    host:
+      zh-CN: 域名
+      en: Host
+    process:
+      zh-CN: 进程
+      en: Process
+    route:
+      zh-CN: 连接方式
+      en: Route
+    bytes:
+      zh-CN: 流量
+      en: Traffic
     processes:
       zh-CN: 进程流量
       en: Process traffic
     routes:
-      zh-CN: 活跃连接分流
+      zh-CN: 当前活动
       en: Active connection routes
     recent:
       zh-CN: 最近连接
@@ -659,38 +683,38 @@ home:
       en: View Update
   evidence:
     core_running:
-      zh-CN: L1 内核运行中
-      en: L1 Core Running
+      zh-CN: 正在运行
+      en: Core Running
     core_unavailable:
-      zh-CN: L1 内核不可用
-      en: L1 Core Unavailable
+      zh-CN: 内核不可用
+      en: Core Unavailable
     core_recovering:
-      zh-CN: L1 内核恢复中（第 %{attempt} 次）
-      en: L1 Core Recovering (attempt %{attempt})
+      zh-CN: 内核恢复中（第 %{attempt} 次）
+      en: Core Recovering (attempt %{attempt})
     core_recovery_failed:
-      zh-CN: L1 内核恢复失败（已尝试 %{attempt} 次）
-      en: L1 Core Recovery Failed (%{attempt} attempts)
+      zh-CN: 内核恢复失败（已尝试 %{attempt} 次）
+      en: Core Recovery Failed (%{attempt} attempts)
     core_recovered:
-      zh-CN: L1 内核已恢复（第 %{attempt} 次）
-      en: L1 Core Recovered (attempt %{attempt})
+      zh-CN: 内核已恢复（第 %{attempt} 次）
+      en: Core Recovered (attempt %{attempt})
     core_stopped:
-      zh-CN: L1 内核已停止
-      en: L1 Core Stopped
+      zh-CN: 内核已停止
+      en: Core Stopped
     core_exit_reason:
       zh-CN: 最近退出：%{reason}
       en: "Last exit: %{reason}"
     controller_verified:
-      zh-CN: L2 控制器已验证
-      en: L2 Controller Verified
+      zh-CN: 控制器已验证
+      en: Controller Verified
     controller_unverified:
-      zh-CN: L2 控制器未验证
-      en: L2 Controller Unverified
+      zh-CN: 控制器未验证
+      en: Controller Unverified
     path_observed:
-      zh-CN: L4 路径已有观测
-      en: L4 Path Observed
+      zh-CN: 路径已有观测
+      en: Path Observed
     path_unknown:
-      zh-CN: L4 路径待验证
-      en: L4 Path Unverified
+      zh-CN: 路径待验证
+      en: Path Unverified
   profile:
     all:
       zh-CN: 全部订阅
@@ -722,6 +746,9 @@ home:
     used:
       zh-CN: 已用 %{used}
       en: "%{used} used"
+    expiry_date:
+      zh-CN: "%{date} 到期"
+      en: "Expires %{date}"
     expiry_unavailable:
       zh-CN: 到期时间未提供
       en: Expiry unavailable
@@ -732,6 +759,12 @@ home:
       zh-CN: 剩余 %{days} 天
       en: "%{days} days remaining"
   proxy:
+    current:
+      zh-CN: 当前
+      en: Current
+    switch:
+      zh-CN: 切换
+      en: Switch
     title:
       zh-CN: 当前节点
       en: Active Node
@@ -836,8 +869,14 @@ home:
       zh-CN: 代理设置
       en: Proxy Settings
     tun:
-      zh-CN: TUN
-      en: TUN
+      zh-CN: TUN 模式
+      en: TUN mode
+    tun_enable:
+      zh-CN: 开启
+      en: Enable
+    tun_disable:
+      zh-CN: 关闭
+      en: Disable
     tun_on:
       zh-CN: TUN 已启用并验证
       en: TUN is enabled and verified
@@ -882,14 +921,20 @@ home:
       en: Connect directly without using proxy nodes
   traffic:
     title:
-      zh-CN: 实时流量
+      zh-CN: 流量趋势
       en: Live Traffic
     range_60:
       zh-CN: 60秒
       en: 60s
     range_300:
-      zh-CN: 5分钟
+      zh-CN: 最近 5 分钟
       en: 5m
+    peak:
+      zh-CN: "峰值 %{value}"
+      en: "Peak %{value}"
+    realtime_speed:
+      zh-CN: 实时速度
+      en: Live speed
     pause:
       zh-CN: 暂停曲线
       en: Pause chart
@@ -941,6 +986,45 @@ home:
 
 profiles:
   design:
+    usage_percent:
+      zh-CN: 已用 %{percent}%
+      en: "%{percent}% used"
+    no_quota:
+      zh-CN: 无订阅额度
+      en: No subscription quota
+    remaining_days:
+      zh-CN: 剩余 %{days} 天
+      en: "%{days} days remaining"
+    expiry_date:
+      zh-CN: 到期时间
+      en: Expiry date
+    source_link:
+      zh-CN: 来源链接
+      en: Source link
+    hidden:
+      zh-CN: 已隐藏
+      en: Hidden
+    download_route:
+      zh-CN: 下载路径
+      en: Download route
+    open_editor:
+      zh-CN: 打开编辑器…
+      en: Open editor…
+    source_type:
+      zh-CN: 配置来源
+      en: Source type
+    last_updated:
+      zh-CN: 最近更新
+      en: Last updated
+    overrides:
+      zh-CN: 配置覆写
+      en: Configuration overrides
+    overrides_note:
+      zh-CN: 独立托管 · 保留源文件
+      en: Managed separately · Source preserved
+    manage_overrides:
+      zh-CN: 管理覆写…
+      en: Manage overrides…
     filter_all:
       zh-CN: 全部
       en: All
@@ -1010,6 +1094,9 @@ profiles:
     collapse_form:
       zh-CN: 收起订阅表单
       en: Hide Subscription Form
+    more:
+      zh-CN: "%{name} 的更多操作"
+      en: "More actions for %{name}"
     edit_yaml:
       zh-CN: 配置编辑…
       en: Configuration editor…
@@ -1017,10 +1104,10 @@ profiles:
       zh-CN: 请先应用此配置，再打开编辑工作台
       en: Apply this profile before opening the configuration editor
     add_remote:
-      zh-CN: 添加在线订阅
+      zh-CN: 添加订阅…
       en: Add Subscription
     import_local:
-      zh-CN: 导入本地 YAML
+      zh-CN: 导入 YAML…
       en: Import Local YAML
     download_enable:
       zh-CN: 下载并启用
@@ -1041,8 +1128,8 @@ profiles:
       zh-CN: 使用中
       en: Active
     activate:
-      zh-CN: 切换
-      en: Activate
+      zh-CN: 应用
+      en: Apply
     cancel:
       zh-CN: 取消
       en: Cancel
@@ -1093,8 +1180,11 @@ profiles:
       zh-CN: 例如：0 */6 * * *（分 时 日 月 周）
       en: "Example: 0 */6 * * * (minute hour day month weekday)"
   current:
+    mixed_port:
+      zh-CN: 混合端口
+      en: Mixed port
     title:
-      zh-CN: 当前真实配置
+      zh-CN: 当前配置
       en: Active Runtime Profile
     unspecified:
       zh-CN: 未指定
@@ -1113,7 +1203,7 @@ profiles:
       en: "%{managed} managed profiles · %{remote} online subscriptions"
   catalog:
     title:
-      zh-CN: 配置仓库
+      zh-CN: 订阅与配置
       en: Profile Library
     empty:
       zh-CN: 还没有托管配置；可下载在线订阅或导入本地 YAML
@@ -1127,9 +1217,9 @@ profiles:
     auto_update:
       zh-CN: 自动更新
       en: Auto Update
-    interval_hint:
-      zh-CN: 点击间隔可在 1 / 6 / 12 / 24 小时之间切换
-      en: Click the interval to cycle through 1 / 6 / 12 / 24 hours
+    update_interval:
+      zh-CN: 更新间隔
+      en: Update interval
     every_days:
       zh-CN: 每 %{count} 天
       en: Every %{count} days
@@ -1140,7 +1230,7 @@ profiles:
       zh-CN: 每 %{count} 分钟
       en: Every %{count} minutes
     current:
-      zh-CN: 当前使用
+      zh-CN: 已应用
       en: Current
   source:
     local:
@@ -1382,7 +1472,78 @@ profiles:
       en: "The profile repository task ended unexpectedly: %{error}"
 
 proxies:
+  columns:
+    node:
+      zh-CN: 节点
+      en: Node
+    protocol:
+      zh-CN: 协议
+      en: Protocol
+    latency:
+      zh-CN: 延迟
+      en: Latency
+    actions:
+      zh-CN: 操作
+      en: Actions
   design:
+    manual:
+      zh-CN: 手动选择
+      en: Manual
+    current:
+      zh-CN: 当前
+      en: Current
+    untested:
+      zh-CN: 未测试
+      en: Untested
+    automatic:
+      zh-CN: 自动
+      en: Automatic
+    fixed:
+      zh-CN: 已固定
+      en: Pinned
+    multiple:
+      zh-CN: 多节点
+      en: Multiple
+    group:
+      zh-CN: 所属代理组
+      en: Group
+    source:
+      zh-CN: 来源
+      en: Source
+    udp:
+      zh-CN: UDP
+      en: UDP
+    supported:
+      zh-CN: 支持
+      en: Supported
+    unsupported:
+      zh-CN: 不支持
+      en: Unsupported
+    last_test:
+      zh-CN: 最后测试
+      en: Last test
+    automatic_title:
+      zh-CN: 自动选择
+      en: Automatic selection
+    automatic_only:
+      zh-CN: 仅自动组可用
+      en: Automatic groups only
+    scope:
+      zh-CN: 适用范围
+      en: Scope
+    automatic_scope:
+      zh-CN: 当前组为自动选择时生效
+      en: Applies to automatic groups
+    state:
+      zh-CN: 当前状态
+      en: State
+    explanation:
+      zh-CN: 说明
+      en: Explanation
+    automatic_description:
+      zh-CN: 测试节点延迟并恢复自动选择
+      en: Test node latency and restore automatic selection
+
     search:
       zh-CN: 搜索名称或协议
       en: Search name or protocol
@@ -1395,6 +1556,12 @@ proxies:
     latency_history:
       zh-CN: 延迟历史
       en: Latency history
+    history_window:
+      zh-CN: 最近 10 次测试
+      en: Last 10 tests
+    selected:
+      zh-CN: 已选中
+      en: Selected
   header:
     title:
       zh-CN: 代理组
@@ -1403,17 +1570,30 @@ proxies:
       zh-CN: 新连接使用所选节点；现有连接保持原链路。可查看协议能力并执行真实延迟测试。
       en: New connections use the selected node; existing connections keep their current chains. Review capabilities and run live delay tests.
   actions:
+    test_selected_group:
+      zh-CN: 测试本组
+      en: Test group
+
     testing_progress:
       zh-CN: "测速中 %{done}/%{total}"
       en: "Testing %{done}/%{total}"
     sort_latency:
       zh-CN: 按延迟排序
       en: Sort by latency
+    sort_menu:
+      zh-CN: 延迟排序
+      en: Node order
+    test_current:
+      zh-CN: 测试当前节点
+      en: Test current node
+    original_order:
+      zh-CN: 原始顺序
+      en: Original order
     hide_unavailable:
-      zh-CN: 隐藏不可用节点
+      zh-CN: 隐藏不可用
       en: Hide unavailable
     refresh:
-      zh-CN: 刷新状态
+      zh-CN: 刷新
       en: Refresh
     test_all:
       zh-CN: 全部测速
@@ -1458,6 +1638,18 @@ proxies:
       zh-CN: 测速并恢复自动
       en: Test & Restore Auto
   summary:
+    group_count:
+      zh-CN: "%{count} 个代理组"
+      en: "%{count} groups"
+    node_count:
+      zh-CN: "%{count} 个节点"
+      en: "%{count} nodes"
+    available:
+      zh-CN: 可用
+      en: Available
+    unavailable:
+      zh-CN: 不可用
+      en: Unavailable
     visible_groups:
       zh-CN: 可见策略组
       en: Visible Groups
@@ -1481,8 +1673,8 @@ proxies:
       en: "Unknown group type %{type} · %{count} nodes"
   pagination:
     summary:
-      zh-CN: 第 %{current} / %{total} 页 · 显示 %{first}–%{last}，共 %{count} 个节点
-      en: "Page %{current} of %{total} · Showing %{first}–%{last} of %{count} nodes"
+      zh-CN: 显示 %{first}–%{last} / %{count} 个节点
+      en: "%{first}–%{last} / %{count} nodes"
     groups_summary:
       zh-CN: 第 %{current} / %{total} 页 · 显示 %{first}–%{last}，共 %{count} 个组
       en: "Page %{current} of %{total} · Showing %{first}–%{last} of %{count} groups"
@@ -1555,6 +1747,70 @@ proxies:
       en: "%{count} node delay tests failed"
 
 logs:
+  ui:
+    core:
+      zh-CN: 内核
+      en: Core
+    local:
+      zh-CN: 本地接收
+      en: Local
+    time_source:
+      zh-CN: 时间来源
+      en: Time source
+    export_description:
+      zh-CN: 导出当前缓冲中全部日志的消息正文和结构化字段。
+      en: Export message bodies and structured fields for all entries in the current buffer.
+    latest:
+      zh-CN: 最近消息优先
+      en: Newest first
+    oldest:
+      zh-CN: 最早消息优先
+      en: Oldest first
+    persistence:
+      zh-CN: 日志落盘
+      en: Log persistence
+    writing:
+      zh-CN: 写入正常
+      en: Writing normally
+    paused:
+      zh-CN: 已暂停
+      en: Paused
+    pending:
+      zh-CN: 待写队列
+      en: Pending writes
+    current_file:
+      zh-CN: 当前文件
+      en: Current file
+    dropped:
+      zh-CN: 丢弃
+      en: Dropped
+    path:
+      zh-CN: 文件路径
+      en: File path
+    hidden:
+      zh-CN: 已隐藏
+      en: Hidden
+    export_complete:
+      zh-CN: 导出完整日志…
+      en: Export full logs…
+    updated:
+      zh-CN: 最近更新
+      en: Latest entry
+    clear_title:
+      zh-CN: 清空日志缓冲？
+      en: Clear the log buffer?
+    clear_description:
+      zh-CN: 清空当前内存中的日志。日志采集和磁盘写入继续运行，已有日志文件保留。
+      en: Clear the current in-memory entries. Capture and disk writes continue, and existing log files are retained.
+    clear_confirm:
+      zh-CN: 清空缓冲
+      en: Clear buffer
+  collection_level:
+    zh-CN: 采集级别
+    en: Collection level
+  collection_level_updated:
+    zh-CN: 日志采集级别已更新
+    en: Log collection level updated
   display_pause_description:
     zh-CN: 暂停列表更新，仍可筛选；日志采集与文件写入继续运行。
     en: Pause list updates while allowing filters. Log capture and file writes continue.
@@ -1584,17 +1840,17 @@ logs:
       en: Source
   actions:
     export:
-      zh-CN: 导出
-      en: Export
+      zh-CN: 导出…
+      en: Export…
     inspect:
       zh-CN: 查看日志详情
       en: Inspect log
     copy_safe:
-      zh-CN: 安全复制
-      en: Safe Copy
+      zh-CN: 脱敏复制
+      en: Redacted Copy
     clear:
-      zh-CN: 清空
-      en: Clear
+      zh-CN: 清空缓冲…
+      en: Clear buffer…
   persistence:
     title:
       zh-CN: 持续日志文件
@@ -1695,8 +1951,8 @@ logs:
       en: No matching log entries
   metrics:
     entries:
-      zh-CN: 日志条目
-      en: Log Entries
+      zh-CN: 当前缓冲
+      en: Current buffer
     filtered:
       zh-CN: 过滤结果
       en: Filtered Results
@@ -1708,8 +1964,8 @@ logs:
       en: Disabled
   stream:
     connected:
-      zh-CN: 实时流已连接
-      en: Live stream connected
+      zh-CN: 日志流已连接
+      en: Log stream connected
     reconnecting:
       zh-CN: 正在重连
       en: Reconnecting
@@ -2423,8 +2679,20 @@ sniffer:
 
 network:
   diagnostics:
+    last_checked:
+      zh-CN: "最近检测 %{time}"
+      en: "Last checked %{time}"
+    show_details:
+      zh-CN: 展开补充检查
+      en: Show additional checks
+    hide_details:
+      zh-CN: 收起补充检查
+      en: Hide additional checks
+    start:
+      zh-CN: 开始诊断
+      en: Start diagnostics
     title:
-      zh-CN: 分层诊断与支持
+      zh-CN: 连接诊断
       en: Layered Diagnostics & Support
     dns_name:
       zh-CN: DNS 查询名称
@@ -2455,7 +2723,7 @@ network:
       en: Copy Redacted Support Bundle
     steps:
       controller:
-        zh-CN: Controller
+        zh-CN: 控制器连接
         en: Controller
       capture:
         zh-CN: 流量接管
@@ -2534,8 +2802,11 @@ network:
       zh-CN: 统一延迟
       en: Unified Delay
   public_ip:
+    updated_at:
+      zh-CN: 更新时间
+      en: Updated at
     title:
-      zh-CN: 公网出口画像
+      zh-CN: 公网信息
       en: Public Exit Profile
     probing:
       zh-CN: 探测中
@@ -2568,9 +2839,27 @@ network:
       zh-CN: 未识别为代理或 VPN
       en: Not identified as a proxy or VPN
   latency:
+    retest:
+      zh-CN: 重新测试
+      en: Test again
     title:
-      zh-CN: 独立延迟探测
-      en: Independent Latency Probes
+      zh-CN: 延迟测试
+      en: Latency tests
+    column_target:
+      zh-CN: 目标
+      en: Target
+    column_address:
+      zh-CN: 地址
+      en: Address
+    column_latency:
+      zh-CN: 延迟
+      en: Latency
+    column_status:
+      zh-CN: 状态
+      en: Status
+    succeeded:
+      zh-CN: 正常
+      en: Healthy
     through_core:
       zh-CN: 通过 Mihomo 探测
       en: Probe Through Mihomo
@@ -2597,7 +2886,7 @@ network:
       en: Request failed
   system:
     title:
-      zh-CN: 默认网络路径
+      zh-CN: 系统网络
       en: Default Network Path
     interface:
       zh-CN: 接口
@@ -3891,6 +4180,34 @@ backup:
       en: "%{reason}; original disk data was restored, but restoring the core runtime configuration failed: %{error}"
 
 connections:
+  ui:
+    upload:
+      zh-CN: 上传
+      en: Upload
+    download:
+      zh-CN: 下载
+      en: Download
+    process_hint:
+      zh-CN: 当前连接按进程统计 · 前 5 类
+      en: Current connections by process · Top 5
+    protocol_hint:
+      zh-CN: 当前连接按协议统计
+      en: Current connections by protocol
+    local:
+      zh-CN: 本机
+      en: Local
+    close_title:
+      zh-CN: 关闭此连接？
+      en: Close this connection?
+    close_all_title:
+      zh-CN: 关闭全部活动连接？
+      en: Close all active connections?
+    close_description:
+      zh-CN: 正在传输的请求会被中断。应用可能会自动重新建立连接。
+      en: Requests in progress will be interrupted. Applications may reconnect automatically.
+    close_confirm:
+      zh-CN: 关闭连接
+      en: Close connections
   display_pause_description:
     zh-CN: 冻结当前连接快照，仍可筛选；恢复或成功关闭连接后展示最新状态。
     en: Freeze the current connection snapshot while allowing filters. Resume or successfully close connections to display the latest state.
@@ -3925,8 +4242,8 @@ connections:
     en: Updating connections…
   transport:
     all:
-      zh-CN: 全部协议
-      en: All protocols
+      zh-CN: 全部
+      en: All
     tcp:
       zh-CN: TCP
       en: TCP
@@ -3967,18 +4284,18 @@ connections:
       zh-CN: 累计下载
       en: Total Download
     memory:
-      zh-CN: 内存
-      en: Memory
+      zh-CN: 内核内存
+      en: Core memory
   refresh_hint:
     zh-CN: 连接数据每秒从真实控制器刷新
     en: Connection data refreshes from the live controller every second
   actions:
     close_all:
-      zh-CN: 关闭全部
-      en: Close All
+      zh-CN: 关闭全部连接…
+      en: Close all connections…
     close:
-      zh-CN: 关闭
-      en: Close
+      zh-CN: 关闭此连接…
+      en: Close this connection…
     show_details:
       zh-CN: 查看详情
       en: Show Details
@@ -3998,6 +4315,12 @@ connections:
     rule:
       zh-CN: 匹配规则
       en: Matched Rule
+    rule_type:
+      zh-CN: 类型
+      en: Type
+    rule_content:
+      zh-CN: 规则内容
+      en: Rule content
     route:
       zh-CN: 代理链
       en: Proxy Chain
@@ -4033,12 +4356,57 @@ rules:
       zh-CN: 规则类型分布
       en: Rule type distribution
     hits:
-      zh-CN: 命中策略
-      en: Matched policies
+      zh-CN: 命中策略分布
+      en: Matched policy distribution
     reported_hits:
       zh-CN: 前五项策略内的命中占比
       en: Hit share within the top five policies
   details:
+    match_kind:
+      zh-CN: 匹配类型
+      en: Match type
+    policy:
+      zh-CN: 当前策略
+      en: Current policy
+    enabled:
+      zh-CN: 启用状态
+      en: Enabled state
+    flow:
+      zh-CN: 匹配流程
+      en: Matching flow
+    match:
+      zh-CN: 规则匹配
+      en: Rule match
+    outlet:
+      zh-CN: 当前出口
+      en: Current exit
+    matches:
+      zh-CN: 匹配次数
+      en: Matches
+    last_hit:
+      zh-CN: 最近命中
+      en: Last hit
+    notes:
+      zh-CN: 备注
+      en: Notes
+    order_note:
+      zh-CN: 规则按配置顺序依次匹配。
+      en: Rules are matched in configuration order.
+    stats_note:
+      zh-CN: 未返回的命中统计显示“—”。
+      en: Unreported hit statistics are shown as “—”.
+    overrides:
+      zh-CN: 配置覆写…
+      en: Configuration overrides…
+    select:
+      zh-CN: 选择一条规则查看详情
+      en: Select a rule to view its details
+    resources:
+      zh-CN: 规则资源…
+      en: Rule resources…
+    statistics:
+      zh-CN: 统计信息
+      en: Statistics
     title:
       zh-CN: 规则详情
       en: Rule details
@@ -4086,9 +4454,18 @@ rules:
       zh-CN: "规则 #%{index} 已禁用并通过状态回读"
       en: "Rule #%{index} was disabled and verified"
   summary:
+    mode:
+      zh-CN: 当前模式
+      en: Current mode
+    statistics:
+      zh-CN: 命中统计
+      en: Hit statistics
+    from_core:
+      zh-CN: 来自内核
+      en: Reported by core
     runtime:
-      zh-CN: 运行时规则
-      en: Runtime Rules
+      zh-CN: 规则总数
+      en: Total rules
     filtered:
       zh-CN: 过滤结果
       en: Filtered Results

@@ -190,7 +190,10 @@ impl RuntimePage {
         cx.notify();
     }
 
-    pub(super) fn copy_network_support_bundle(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::pages::runtime) fn copy_network_support_bundle(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
         let Some(report) = self.network_probe.report.as_ref() else {
             return;
         };

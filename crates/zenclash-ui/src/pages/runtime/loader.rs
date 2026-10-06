@@ -61,11 +61,18 @@ pub(super) async fn load_page_with_core(
             .await
             .map(|data| RuntimeData::Connections(std::sync::Arc::new(data)))
             .map_err(|error| error.to_string()),
-        Page::Rules => client
-            .rule_catalog()
-            .await
-            .map(|catalog| RuntimeData::Rules(std::sync::Arc::new(catalog)))
-            .map_err(|error| error.to_string()),
+        Page::Rules => {
+            let catalog = client
+                .rule_catalog()
+                .await
+                .map_err(|error| error.to_string())?;
+            let (config, proxies) = tokio::join!(client.runtime_config(), client.proxy_catalog());
+            Ok(RuntimeData::Rules {
+                catalog: std::sync::Arc::new(catalog),
+                config: config.ok(),
+                proxies: proxies.ok(),
+            })
+        }
         Page::Resources => {
             let (config, proxy, rules) = tokio::try_join!(
                 client.runtime_config(),
@@ -203,6 +210,63 @@ async fn load_settings(client: MihomoClient) -> Result<RuntimeData, String> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn rules_read_runtime_mode_without_discarding_catalog_on_config_failure() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for config_available in [true, false] {
+            let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .await
+                .unwrap();
+            let client = super::MihomoClient::new(zenclash_core::MihomoEndpoint::new(
+                format!("http://{}", listener.local_addr().unwrap()),
+                "",
+            ))
+            .unwrap();
+            let server = tokio::spawn(async move {
+                for _ in 0..3 {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        request.push(stream.read_u8().await.unwrap());
+                    }
+                    let request = String::from_utf8(request).unwrap();
+                    let expected_path = request.split_whitespace().nth(1).unwrap();
+                    assert!(["/rules", "/configs", "/proxies"].contains(&expected_path));
+                    let (status, body) = if expected_path == "/rules" {
+                        (
+                            "200 OK",
+                            r#"{"rules":[{"type":"MATCH","payload":"","proxy":"DIRECT"}]}"#,
+                        )
+                    } else if expected_path == "/proxies" {
+                        ("500 Internal Server Error", "{}")
+                    } else if config_available {
+                        ("200 OK", r#"{"mode":"global","mixed-port":7890}"#)
+                    } else {
+                        ("500 Internal Server Error", "{}")
+                    };
+                    stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                }
+            });
+            let data = super::load_page(client, super::Page::Rules).await.unwrap();
+            let super::RuntimeData::Rules {
+                catalog,
+                config,
+                proxies,
+            } = data
+            else {
+                panic!("expected rules")
+            };
+            assert_eq!(catalog.rules.len(), 1);
+            assert!(proxies.is_none());
+            assert_eq!(
+                config.as_ref().map(|config| config.mode.as_str()),
+                config_available.then_some("global")
+            );
+            server.await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn controller_failure_does_not_discard_local_settings() {
         let client =

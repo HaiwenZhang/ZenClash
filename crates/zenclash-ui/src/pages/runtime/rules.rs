@@ -7,8 +7,8 @@ mod projection;
 use super::{
     AppContext, Button, Context, Disableable, Entity, FluentBuilder, IconName, Input, InputEvent,
     InputState, InteractiveElement, IntoElement, Page, ParentElement, RuntimeData, RuntimePage,
-    Sizable, Styled, Subscription, Switch, Window, contains_ascii_case_insensitive, div,
-    empty_state, h_flex, list_page, message_banner, pagination_summary, v_flex,
+    Sizable, Styled, Subscription, Window, contains_ascii_case_insensitive, div, empty_state,
+    h_flex, list_page, message_banner, pagination_summary, v_flex,
 };
 
 const RULES_PER_PAGE: usize = 100;
@@ -26,6 +26,11 @@ pub(super) struct RulesUiState {
 }
 
 impl RulesUiState {
+    #[cfg(test)]
+    pub(super) fn hold_projection(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.worker.hold_projection()
+    }
+
     pub(super) fn new(window: &mut Window, cx: &mut Context<RuntimePage>) -> (Self, Subscription) {
         let filter = cx.new(|cx| {
             InputState::new(window, cx)
@@ -72,7 +77,10 @@ impl RulesUiState {
 
 impl RuntimePage {
     pub(super) fn update_rule_presentation(&mut self, cx: &mut Context<Self>) {
-        let RuntimeData::Rules(snapshot) = &self.data else {
+        let RuntimeData::Rules {
+            catalog: snapshot, ..
+        } = &self.data
+        else {
             self.rules.release_presentation();
             return;
         };
@@ -83,7 +91,16 @@ impl RuntimePage {
             std::sync::Arc::ptr_eq(&projection.snapshot, snapshot)
                 && projection.query == self.rules.query
         }) {
+            self.rules.cancel_projection();
             return;
+        }
+        if self
+            .rules
+            .projection
+            .as_ref()
+            .is_some_and(|projection| !std::sync::Arc::ptr_eq(&projection.snapshot, snapshot))
+        {
+            self.rules.projection = None;
         }
         let source = snapshot.clone();
         let (generation, task) =
@@ -91,12 +108,11 @@ impl RuntimePage {
                 .worker
                 .start(&self.runtime, source.clone(), self.rules.query.clone());
         self.rules.projecting = true;
-        self.rules.projection = None;
         cx.spawn(async move |this, cx| {
             let result = task.await.map_err(|error| error.to_string()).and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 if !this.rules.worker.is_current(generation)
-                    || !matches!(&this.data, RuntimeData::Rules(current) if std::sync::Arc::ptr_eq(current, &source)) { return; }
+                    || !matches!(&this.data, RuntimeData::Rules { catalog: current, .. } if std::sync::Arc::ptr_eq(current, &source)) { return; }
                 this.rules.projecting = false;
                 match result {
                     Ok(Some(projection)) => this.rules.projection = Some(projection),

@@ -5,7 +5,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -37,6 +37,7 @@ const QUIET_MEOW_PROTOCOL_LOGS: &str = "tokio_tungstenite=warn,tungstenite=warn"
 /// Owned managed Mihomo child process with bounded stdout/stderr history.
 pub struct MihomoProcess {
     child: Mutex<Option<Child>>,
+    started_at_secs: AtomicU64,
     execution: Mutex<Option<zenclash_service_integration::CoreExecutionGuard>>,
     isolated_test_child: bool,
     logs: Arc<RwLock<VecDeque<String>>>,
@@ -88,6 +89,8 @@ pub struct MihomoProcessSnapshot {
     pub running: bool,
     /// Live process identifier, absent after exit or stop.
     pub pid: Option<u32>,
+    /// Unix timestamp of the current live child's successful spawn.
+    pub started_at_secs: Option<u64>,
     /// Last unexpected child exit status observed through the owned handle.
     pub exit_reason: Option<String>,
     /// Executable used to launch the child.
@@ -110,6 +113,7 @@ impl MihomoProcess {
     pub fn prepare_stopped(config: MihomoLaunchConfig) -> Arc<Self> {
         Arc::new(Self {
             child: Mutex::new(None),
+            started_at_secs: AtomicU64::new(0),
             execution: Mutex::new(None),
             isolated_test_child: false,
             logs: Arc::new(RwLock::new(VecDeque::new())),
@@ -159,6 +163,7 @@ impl MihomoProcess {
 
         Ok(Arc::new(Self {
             child: Mutex::new(Some(child)),
+            started_at_secs: AtomicU64::new(unix_timestamp_secs()),
             execution: Mutex::new(execution),
             isolated_test_child,
             logs,
@@ -265,6 +270,8 @@ impl MihomoProcess {
             self.recovery_asset_root.read().as_deref(),
         )?;
         *self.last_exit_reason.write() = None;
+        self.started_at_secs
+            .store(unix_timestamp_secs(), Ordering::Relaxed);
         *child_slot = Some(child);
         Ok(())
     }
@@ -489,32 +496,42 @@ impl MihomoProcess {
     pub fn snapshot(&self) -> MihomoProcessSnapshot {
         self.try_snapshot().unwrap_or_else(|error| {
             tracing::warn!(%error, "failed to snapshot Mihomo process status");
-            self.observed_snapshot(false, None)
+            self.observed_snapshot(false, None, None)
         })
     }
 
     pub(crate) fn try_snapshot(&self) -> std::io::Result<MihomoProcessSnapshot> {
-        let (running, pid) = {
+        let (running, pid, started_at_secs) = {
             let mut child = self.child.lock();
             match child.as_mut() {
                 Some(process) => match process.try_wait()? {
-                    None => (true, Some(process.id())),
+                    None => (
+                        true,
+                        Some(process.id()),
+                        Some(self.started_at_secs.load(Ordering::Relaxed)).filter(|time| *time > 0),
+                    ),
                     Some(status) => {
                         *self.last_exit_reason.write() = Some(format!("内核退出状态：{status}"));
-                        (false, None)
+                        (false, None, None)
                     }
                 },
-                None => (false, None),
+                None => (false, None, None),
             }
         };
-        Ok(self.observed_snapshot(running, pid))
+        Ok(self.observed_snapshot(running, pid, started_at_secs))
     }
 
-    fn observed_snapshot(&self, running: bool, pid: Option<u32>) -> MihomoProcessSnapshot {
+    fn observed_snapshot(
+        &self,
+        running: bool,
+        pid: Option<u32>,
+        started_at_secs: Option<u64>,
+    ) -> MihomoProcessSnapshot {
         MihomoProcessSnapshot {
             kind: self.config.kind,
             running,
             pid,
+            started_at_secs,
             exit_reason: self.last_exit_reason.read().clone(),
             binary: self.config.binary.clone(),
             config_file: self.config.config_file.clone(),
@@ -547,6 +564,12 @@ impl MihomoProcess {
             .await
             .map_err(|error| MihomoError::Process(format!("内核停止后台任务异常结束：{error}")))?
     }
+}
+
+fn unix_timestamp_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 fn launch_write_scopes(config: &MihomoLaunchConfig) -> Vec<PathBuf> {

@@ -1,0 +1,577 @@
+Current fidelity audit — 2026-10-06
+Status: INCOMPLETE. Earlier "Final implementation verification" below is historical and does not prove visual fidelity.
+Actual debug-window observations contradict its broad completion claim:
+- Overview: runtime orb, card height, profile identity, chart proportions and axis were different from the approved image.
+- Proxies: column widths, filters, latency action lane and inspector order were different.
+Current changes: fixed 5-minute frame with blank unobserved history; 64/36 traffic/subscription growth ratio; compact quota identity/footer; unified mode control; mint switch presentation over framework behavior; narrower node action lane and reordered inspector.
+Validation after the current edits: 334 UI/library tests passed (1 native test ignored); Clippy passed with warnings denied. The explicitly authorized live-subscription native test passed at 1536x1024 and 1280x820: 6/6 delay requests succeeded, node-selection readback verified, proxy HTTP 204, live connection snapshot populated. System proxy unchanged; TUN disabled. Fixed narrow Rules charts wrapping above the list and adjusted result/inspector sizing. Latest normal executable build passed. Visible debug-window checks confirmed fresh Home telemetry, ikuu applied state, quota totals, subscription menu opening/Escape dismissal and Profiles source/applied badges. The initial hidden preview left its owned core running; verified its parent PID and executable before stopping that preview core, then reopened normally. The normal debug app still reports its existing preferred-core discovery fallback warning; do not hide that real warning for design comparison.
+Subscription catalog identities now include source badges separately from applied state. Home quota identity uses a compact name/source row. Speed cards show the live indicator only with fresh generation-matched telemetry.
+The live renderer uses a temporary local import, so subscription quota metadata is deliberately unknown in those screenshots. Harmless fixture renders cover percentage/used/remaining presentation; latest native rerun passed after correcting the two-line catalog identity button height. Clippy passed again. Authorized temporary subscription/source-address copies were removed after live validation. Native test success establishes reachability and rendering, not one-to-one visual completion.
+Current Proxies fidelity pass:
+- Removed the separate full-width group paginator above the summary; moved group paging to the navigation footer.
+- Summary now uses the active profile name/source from the shell's generation-checked profile catalog plus deduplicated physical node availability counts. Counters are prepared with the catalog and updated per measured node; inactive page release frees the projection.
+- Header group-test target now uses the visible group page, rather than an expanded group on another page.
+- Sort is a keyboard-accessible menu with original-order/latency choices; Escape leaves order unchanged. Added bounded numeric node-page buttons.
+- History axis and last-test metadata now use real sample timestamps; no sample number is presented as a time. Node source uses its provider or current profile identity.
+- Updated selected-node status, group behavior icons, button sizes and summary/header vertical geometry.
+- 337 tests passed; 1 native renderer ignored in the library suite. Sorting-menu cancellation/keyboard selection, numeric node paging, visible-group test scope and deduplicated counters are covered. Latest native render passed at 1536x1024 and 1280x820. The 1536-wide measured bounds are summary (264,80,1240,64), navigation (264,160,272,784), node panel (548,160,512,784), inspector (1072,160,432,560); all three workspace tops align within one physical pixel. Visible maximized-app checks confirmed sorting-menu opening/Escape dismissal, numbered node page 2 with members 10–18, and navigation page 2 with its matching displayed group/inspector. Short current-row label now renders fully. Empty latency history reserves the same 160px chart slot, preventing metadata from moving up. Normal executable was rebuilt for this revision. Latest visible 1280-wide app shows full current/untested labels; scrolling reaches the wrapped inspector, its test action and automatic-selection card. The latest app remains open for review.
+Current Rules fidelity pass:
+- Detail inspector now has a compact metadata spine, order badge, a second enabled switch over the existing confirmed/pending rule state, three-step matching flow, three separated statistics and a working overrides command.
+- Rules page read obtains a proxy catalog in the same generation-checked response; nested selectors/automatic groups resolve to the reported member identity (including providers). Missing catalogs, cycles and load balancing do not invent one current exit. DIRECT/REJECT are explicit terminal policies.
+- Last-hit display accepts reported RFC3339 or clock times; missing or malformed values remain unknown.
+- Added bounded numeric rule paging, widened the type lane and search field, changed graph proportions and reserved chart heights. At 1280px the collection stays full width and the inspector wraps below, avoiding a clipped toggle lane.
+- Final library suite passed 339 tests (1 native test ignored). Nested provider identities and malformed timestamp behavior passed targeted checks. Clippy passed before the final button appearance correction.
+- Native rendering caught a duplicate-hover panic; replaced the duplicate style with the framework custom variant. A second capture showed an incorrect background color setter; changed it to foreground. Final native render passed at 1536x1024 and 1280x820; selected-row text now has no separate button fill. Clippy passed with warnings denied. Latest normal build passed. Visible app with ikuu confirmed row selection updates metadata and the three-step flow, resolving the reported media group to DIRECT. Numeric page 2 displayed rules 101–200; restored page 1 and left the app open. Individual rule toggles were not changed in the user subscription.
+Current Logs fidelity pass:
+- Reworked action sizes and matched clipboard/upload/trash icons via the selective GPUI Kit asset bundle. Clearing memory opens a cancellable confirmation; collection and disk writes continue. Settings controls and page remain unchanged.
+- Expanded the table and right-hand cards to the approved proportions, made rows 40px, kept the source column single-line, and moved inspection to the message itself. Native compact capture caught centered short messages; replaced the label with a full-width left-aligned child while preserving the accessible button and keyboard activation.
+- Added controlled newest/oldest ordering to the existing generation-checked projection worker; filtering and new snapshots preserve the chosen order, including while display is paused.
+- Normalized WARN to WARNING, converted valid core and local timestamps to clock time, retained full pretty-printed structured fields in a bounded scrolling pane, and used the newest prepared entry for the latest-entry clock.
+- Added the actual pending disk-entry count, including the in-flight write. RAII releases it after completion, rejection, queue drop and disconnection. No placeholder queue count is shown as a measurement. Level bars represent each severity's share of the whole buffer.
+- Latest full library suite passed 336 tests (1 native renderer ignored). Four obsolete truncation-tool tests and one obsolete disk-usage display test were removed with their unused helpers; two meaningful log projection/detail tests were added. Existing pause/filter UI test now verifies Escape cancels clearing and ordering without changing frozen entries. All 10 file-writer tests passed, including full/disconnected queue counter release. Clippy passed with warnings denied.
+- Final native render passed at 1536x1024 and 1280x820. Visible normal app confirmed menu opening, oldest/newest selection, pause/resume and ERROR/ALL filtering, plus scrolling to wrapped detail and persistence cards at 1280px. Current real buffer was empty; selected entry and confirmation behavior were tested using isolated fixture data, not represented as manual live-log validation. Final executable rebuild passed. App was closed gracefully, restarted through the GUI and left open on Logs with default latest-first ordering, ALL severity and live display enabled.
+Current Connections fidelity pass:
+- Four metric cards now use bounded, generation-matched observed snapshot history. Refiltering the same snapshot does not append samples; core changes and counter resets clear history. No illustrative curves are inserted.
+- Matched filter group, toolbar and row density, fixed table/inspector bottom alignment, enlarged the protocol ring and restored the four-card row at 1280px. A bounded native-layout assertion checks these edges at all captured sizes.
+- Inspector has a metadata spine and a local/group/node/target diagram; reported Mihomo chain order is reversed only for traffic-direction presentation. Unknown addresses, duration and rule fields remain unknown.
+- Single and all-connection close actions open a cancellable confirmation guarded against changing the current page, profile or core generation. Pointer/keyboard filter test verifies Escape cancels without closing fixture connections.
+- Full serial library suite passed 338 tests (1 native renderer ignored). An earlier parallel run had two temporary backup fixture IO/timing failures; both targeted serial retry and the full serial rerun passed.
+Current Network fidelity pass:
+- Added page-local light card styling (shared Settings cards unchanged), adjusted summary height and left/right proportions, and standardized network action heights.
+- Diagnostic statuses now have an icon/status line and a bounded summary line; full failure text remains available on hover. Failed supplemental checks stay visible.
+- Native validation caught the collapse control moving below the viewport after expansion. Moved it above results; expansion/collapse native validation subsequently passed.
+- Added the design's latency-area retry action using the existing probe pipeline and corrected its localized label. This action reruns the network probe; it does not invent cached measurements.
+- Native capture now also uses 1513 x 1008 content pixels (the 1040px draft includes its title bar). Remaining differences still require the whole-page visual audit; passing tests do not establish pixel equality.
+- Final native renderer passed at 1536 x 1024, 1280 x 820 and approximately 1513 x 1008 (physical pixel rounding at scale 1.5). Four metric cards remain aligned at 1280px; table/inspector bottoms align at both wide sizes. Final Clippy with warnings denied and normal executable build passed.
+- Visible rebuilt app verified pause/resume, UDP/ALL, sort-menu Escape, diagnostic expansion/collapse, scrolling to the add-target form and cancelling it without saving, and retry entering a real probe/loading state. Real DNS failures report that the current core DNS section is disabled; this was not hidden or changed. Actual connection list was empty, so selected details/close cancellation were verified with isolated fixtures. App remains open on Network; probe preferences, system proxy and TUN were not edited.
+
+Further Overview fidelity pass:
+- Reduced speed-card vertical gaps so the three-card first band measures 186.67px in the matched-width native capture, down from approximately 202px. Recorded actual runtime/speed card bounds in native metadata; both speed cards and the runtime card share the same top/bottom.
+- Healthy runtime orb uses the design's mint chart token; offline/error orb still uses its actual status color. Added the quota statistics separator and enlarged the profile identity icon/frame while retaining its dropdown behavior.
+- Activity legend uses the approved mint/blue/purple chart palette and count/share notation. Process-history title and Last 24h caption now have separate typographic levels.
+- Non-Settings sidebar selection uses the draft's thin mint leading border. This intentionally follows the user's explicit raster-fidelity request over the design guide's default preference against a leading bar. Settings selection styling is unchanged.
+- Full serial UI regression passed 338 tests (1 native renderer ignored); final native renderer passed at all three captured sizes. Clippy with warnings denied and diff whitespace check passed. Matched first-band height is 186.67px; compact first band is 190px with all three peer cards aligned. Final normal build passed. Visible rebuilt 1280px app confirmed fresh real telemetry, mint running orb, quota separator, selected ikuu menu/checkmark, Escape dismissal and Details opening the applied ikuu inspector (63 proxies, 12 groups, 9816 rules). Returned to Home and maximized for review. No profile, mode, proxy or TUN change was submitted. Objective is still incomplete.
+
+Settings remains excluded. Approved raster designs are unchanged in this continuation.
+Remaining: review every non-Settings screen and overlays against its design at matched dimensions; validate narrow-window layouts; verify current subscription switching and node selection readback; finish missing runtime/inspector metadata without invented values.
+
+2026-10-06 Light UI implementation — active, incomplete
+
+Scope: reproduce final docs/ui-design/zenclash-desktop-*.png for Overview,
+Proxies, Profiles, Connections, Rules, Network diagnostics and Logs.
+Settings page is excluded. Preserve real data, existing commands and service logic.
+The supplied private subscription URL must not be persisted in source or this file.
+
+First step implemented:
+- components/wave_percentage.rs: controlled public WavePercentage component,
+  native canvas, double water wave, semantic theme colors, rem diameter,
+  progress accessibility, reduced-motion handling, bounded 30fps animation.
+- Subscription detail uses the component instead of PieChart.
+- Five component tests passed, including reduced-motion frame scheduling.
+
+In progress:
+- Network form test session 95138 failed before interaction: fixture supplied no
+  Network data, only refresh header rendered. Added explicit isolated Network data
+  after cancelling page load; rerun started. This does not yet prove interaction.
+- Network target Cancel now restores page focus. Added pointer-driven regression
+  for expand/cancel/reopen, retained input and focus restoration. Test compiling
+  in live exec session 95138; poll before restarting. No result yet.
+- Network custom latency target form now collapsed by default; Add reveals it,
+  subsequent Add uses existing validated save flow, Cancel hides without clearing
+  input. Clippy passed. New interaction still needs keyboard/pointer regression.
+- Network metrics merged into continuous summary strip using a shared summary
+  metric helper with Profiles. Existing settings metric helper untouched.
+- Network information rows now use compact left-label/right-value layout local
+  to Network (settings row helper unchanged). Added Start diagnostics button wired
+  to existing refresh_network_probe with loading/busy guards. Clippy passed.
+- Native render 76287 passed, now includes network-light and compact PNGs.
+  Inspected Network: two-column geometry works, but large settings-style rows,
+  always-visible target form and missing diagnostic command prevent fidelity.
+- Removed redundant generic refresh buttons from Home, Profiles and Connections
+  headers to match approved page commands. Other refresh paths retained.
+- Home subscription details action moved to title row; removed bottom action row.
+  Clippy passed. Started new native render including Network and latest edits;
+  poll the live exec session reported in the conversation before restarting.
+- Native render session 58035 passed. Confirmed top metric alignment and reduced
+  heights; Home remains taller than reference and requires further composition.
+- Home heading now shows fresh, generation-matched process evidence instead of
+  generic quick-controls heading. Memory compact at header right; mode explanations
+  moved to tooltips except pending transition message. Clippy passed.
+- Profiles runtime preview replaced numbered YAML-style rows with localized field
+  rows. Native visual validator now includes Network fixtures (not rendered yet).
+- Home system-proxy/TUN controls now share a wrapping row and speed cards align
+  to the top. Compilation passed; new native render run started for comparison.
+- Native renderer session 10939 passed; fresh PNGs at target/ui-design-validation.
+  Inspected home-light.png: runtime card too tall, metric cards vertically centered,
+  subscription/activity heights inflated by inherited vertical flex_basis.
+  Removed card-level bases on subscription, routes, process history and recent rows.
+  This is genuine render evidence of incomplete fidelity; must regenerate/review.
+- Network diagnostics now uses 40:28 two-column composition: diagnostics/latency
+  left, public IP/system/capabilities right. Clippy passed. Summary strip, density
+  and real window comparison are still incomplete.
+- Logs detail/statistics column widened to 26rem with max-width containment;
+  rows have 2.5rem minimum height, INFO/DEBUG use blue shades from reference.
+  Clippy passed; actual rendered density and all-page visual audit remain pending.
+- Rules type/policy statistics now use 36:26 basis and wrap at narrow widths;
+  mint type bars and 28rem details panel match reference proportions more closely.
+  Clippy passed including the connection host fallback. Live comparison pending.
+- Connections protocol donut now includes total and per-protocol percentages,
+  blue palette, 28rem panel; detail panel widened to 25rem and uses destination
+  IP when host is absent. Clippy passed before the host fallback edit.
+- Proxy list flex basis increased to 30rem and inspector width to 24rem;
+  current-node inspector now uses the correct current-node heading.
+- Proxy regression session 47691 finished: all 46 pages::proxies tests passed,
+  including search, paging, selection, delays and narrow-window controls.
+- Profiles summary changed to one continuous strip; inspector widened to 28rem.
+  Clippy passed after this edit.
+- Full UI suite session 44707 finished: 325 passed, 0 failed, 1 ignored.
+  The ignored test is an existing native render-to-image test with isolated fixtures;
+  started separately for visual evidence. It omits Network and includes Settings/dark,
+  so its coverage alone cannot prove this task complete.
+- Proxy group nodes changed from 3-column cards to rows with bilingual headings
+  (node/protocol/latency/actions). Removed duplicate latency-comparison chart;
+  retained real node tests, selection handlers and current-node history.
+  Column widths, narrow-window fit and group header still require visual review.
+- Native computer-use setup verified: @oai/sky imports and lists apps successfully.
+  No running ZenClash window; installed binary is not the edited development build.
+- Development executable build succeeded: cargo build -p zenclash-ui --bin zenclash
+  --locked (1m43s); session 33445 finished. Native launch request returned
+  'Computer Use app approval timed out'; live visual verification remains pending.
+- Upload/download metric mapping simplified; purple upload and blue download.
+  Node rows now omit delay bars and highlight the current node.
+- Top runtime controls and two upload/download cards now share a row; metric
+  sparklines expanded. Memory shown in runtime controls from current generation.
+- Activity total replaces route donut. Activity/process and current-node/node-list
+  grouped into two columns; internal card borders/density still need refinement.
+- Overview subscription moved alongside traffic chart; WavePercentage now shows
+  real quota, with separate used/remaining/total figures and unknown-state dashes.
+- Recent connections now occupies a full row. Runtime controls moved to top,
+  still needs compact composition with upload/download metric cards.
+- Header breadcrumbs/subtitles removed outside Settings.
+- Footer retained only on Settings.
+- Overview traffic window fixed to five minutes; old pause/range controls removed.
+  Related pure tests updated; latest full checks still required.
+
+Remaining, not verified:
+- Overview compact top runtime card + upload/download, activity + current node;
+  refine chart/subscription alignment and recent-connections table fidelity.
+- Match all seven pages' layout, spacing, tables, commands and colors to final PNGs.
+- Keep settings content unchanged; shared-shell changes may affect its surroundings.
+- Subscription validation with private user-provided source, without leaking URL/data.
+- Real window screenshots at design size and a narrow window; compare each page.
+- Component animation/value/visibility/accessibility tests, relevant behavioral
+  regressions, full UI tests, cargo check and clippy, scoped formatting checks.
+
+Build notes:
+Windows resource compilation and rustfmt fail with permission denied in sandbox;
+approved require_escalated cargo/rustfmt calls work. Do not weaken build checks.
+Latest component test: cargo test -p zenclash-ui --lib --all-features --locked
+components::wave_percentage -- --test-threads=1 : 5 passed.
+Follow-up current verification: cargo check -p zenclash-ui --all-targets
+--all-features --locked passed. cargo clippy with same scope and -D warnings passed.
+Three pages::runtime::home::traffic tests passed after fixed-five-minute changes.
+git diff --check passed. No live build/test process remains from this milestone.
+
+2026-10-06 network and Overview verification:
+- Network target form cancellation retains input and restores page focus after
+  GPUI deferred updates: focused interaction test passed (1 test).
+- Overview recent connections now share header/row column widths.
+- Network diagnostic input and start command share one wrapping row.
+- Native page rendering passed at both configured window sizes (1 ignored test
+  explicitly run); inspected network light and compact screenshots.
+- Sandbox run failed on fixture filesystem permissions; approved local rerun
+  passed. No test process remains active.
+- Remaining visual differences are material: network result tables and copy,
+  compact layout, page colors, connection detail sections and metric sparklines.
+  Full seven-page fidelity and real subscription validation remain incomplete.
+
+Connection detail fidelity follow-up:
+- Increased destination heading emphasis; matched-rule type and content now
+  occupy a separate divided section with localized labels.
+- Proxy chain now wraps as individual outlined steps connected by arrows.
+- Detail duration uses the same projected duration as the connection table.
+- Native rendering test passed; inspected the light connection page screenshot.
+  git diff --check passed. No test/build session remains active.
+- Still incomplete: metric sparklines, exact palette/density, chain icons/endpoints,
+  realistic fixture coverage and the other previously listed fidelity work.
+
+Network latency table follow-up:
+- Replaced stacked target/address rows with aligned target, address, latency and
+  status columns. Kept full failure reasons and custom-target removal actions.
+- Added isolated render fixtures for successful probes, a long URL and timeout.
+- All-target/all-feature cargo check passed; native render test passed and the
+  light screenshot confirms long URL and failure text wrap within their columns.
+- Full design fidelity remains incomplete; no live build/test session remains.
+
+Shared visual alignment follow-up:
+- Light canvas/sidebar and active surfaces now use the approved mint direction;
+  accessible text/control foregrounds retained. Wave fills use chart_3 mint.
+- Added sidebar appearance command through existing app actions and status divider.
+- Empty runtime status containers no longer reserve an extra inter-item gap;
+  Settings retains its existing status layout.
+- Theme tests: 8 passed. Full UI suite: 326 passed, 1 ignored. Subsequent list
+  selection token normalization passed the explicitly run native render test.
+- Inspected updated light Overview render: wave and canvas improved; Home remains
+  too tall and has duplicate empty-node actions. Sidebar appearance content is
+  centered rather than aligned with navigation. These remain follow-up work.
+- Shared colors affect Settings appearance; its layout and functionality were
+  not redesigned. No live build/test process remains.
+
+Overview composition follow-up:
+- Combined current activity and 24-hour process traffic inside one bordered card.
+- Made subscription total quota a compact secondary line beside the wave.
+- Removed the extra plot inset and reduced chart body gaps.
+- Removed duplicate node empty text and secondary proxy-details action; retained
+  the current-node header action and all node switching controls.
+- Moved all-connections command into the recent-connections heading.
+- Sidebar appearance icon/label now aligns with navigation labels.
+- Native render test passed and updated light Overview screenshot inspected.
+  Offline fixture now brings the recent-connections card fully into view.
+- Live subscription coverage is still outstanding. No Mihomo binary was found
+  through PATH or target/debug/resources; inspected installer script supports
+  obtaining a real binary and geodata. No live build/test session remains.
+
+Real subscription validation (2026-10-06):
+- Used installed Mihomo v1.19.30 with isolated temporary home/configuration.
+- Subscription loaded 46 physical nodes, 12 strategy groups and 9,816 rules.
+- All 6 sampled latency probes succeeded. Changed selection and verified readback.
+- HTTP proxy request returned 204; held 3 CONNECT sessions and confirmed them in
+  the controller connection snapshot. System proxy unchanged; TUN disabled.
+- Native real-data page render test passed. Inspected Home and Proxies light PNGs.
+  Subscription usage/remaining quota is now verified against imported metadata.
+- Private source and render artifacts are under the temporary validation folder
+  zenclash-live-ui-79cee9669b894ad6bdc3c2d173601593 (not in repository).
+- Real Home exposed omitted current node when selection was after first four
+  candidates. Updated projection to put the current member first without
+  duplication, then retain other candidates up to the four-row limit.
+
+Subscription page density follow-up:
+- Aligned catalog title and filters on one row; removed per-card file sizes.
+- Active profiles no longer render a redundant disabled activate button.
+- Card request-settings action keeps an accessible name/tooltip with compact
+  icon; inspector retains labeled action. Delete safeguards remain unchanged.
+- Auto-update and update interval now occupy aligned field rows; replaced cyclic
+  interval clicking with an explicit checked popup menu (1/6/12/24 hours).
+- Usage bars and selected cards use mint theme colors.
+- All-target check, native rendering, and 4 subscription formatting/quota tests
+  passed. Inspected updated light Profiles render. Menu interaction still needs
+  focused validation; runtime-config section and overflow action fidelity remain.
+- Previous current-node correction: 3 dashboard tests passed. No live process.
+
+Subscription menu and configuration validation:
+- New interaction test imports a remote profile from the isolated local fixture,
+  opens its inspector, cancels the interval menu without changing 24-hour policy,
+  then selects 6 hours with keyboard and verifies persisted catalog state.
+  It also confirms no core configuration apply request was made. Test passed.
+- Current configuration summary no longer repeats mode/log level/path below the
+  field list. Editor and reload remain in the header; path remains on tooltip.
+- Native renderer passed and light Profiles screenshot inspected; current
+  configuration panel now fits fully within the standard screenshot viewport.
+- No live build/test process remains. Full objective is still incomplete.
+
+Logs and rules validation:
+- Log collection menu interaction passed: controlled configuration and monitor
+  update together, source profile unchanged, one core apply request.
+- Full UI library suite passed: 327 passed, 1 ignored (native renderer).
+- Rules summary now shows mode and actual core statistics availability;
+  chart bars use mint tokens and detail hit/miss metrics share one row.
+- Native renderer passed after rules changes; standard light screenshot reviewed.
+- No live build/test process remains. Overall fidelity work is still incomplete.
+
+Rules runtime source and alignment:
+- Rules RuntimeData now carries optional live runtime configuration. Mode reads
+  the controller response, not the editable config-input subset (which omits mode).
+- Added loader coverage for live global mode and config failure preserving rules.
+  Targeted rules tests passed (2); native multi-page renderer passed afterward.
+- Summary icons/dividers and larger values now follow the final design hierarchy.
+  Rule payload commands align left, with selection expressed by the entire row.
+- No live test process remains; full seven-page fidelity audit still outstanding.
+
+Profiles detail refinement:
+- Added the design's configuration overrides card beneath the inspector, linked
+  to the existing Override navigation action without changing Settings layout.
+- Quota amounts now use aligned label/value rows. Source type and last update
+  use compact labeled rows with section dividers.
+- Native page renderer passed; latest light Profiles screenshot inspected.
+- Catalog action overflow, remaining page fidelity and final live audit remain.
+
+Profiles card actions:
+- Secondary card actions now live in a named overflow menu; update/apply remain
+  direct outline actions. Inspector retains explicit request settings.
+- Menu resolves current active/busy state on open. Keyboard interaction test
+  passed for cancel, active deletion protection and inactive deletion, preserving
+  original imported YAML. Offline page regression and native renderer passed.
+- Latest light Profiles render reviewed. No running process remains.
+- Full objective remains incomplete; continue page fidelity and final live audit.
+
+Overview runtime card:
+- Reorganized runtime status and mode controls into the top row, added status
+  orb, and moved memory alongside system proxy/TUN under a divider.
+- Upload/download metric cards stretch to the runtime card's row height.
+- Original capture actions, pending states and errors retained. Native renderer
+  passed after both changes; latest light Home screenshot reviewed.
+- Home fixture remains disconnected; final live-data density audit is required.
+- No running process remains. Full goal is still incomplete.
+
+Latest real-subscription audit:
+- Full UI regression before the following display fixes: 329 passed, 1 ignored.
+- Isolated live native rendering passed against Mihomo v1.19.30: 46 physical
+  nodes, 64 proxy objects, 12 groups, 9816 rules; 6/6 latency probes, confirmed
+  node selection, HTTP 204, and 3 held connections reflected by controller.
+- System proxy and TUN were not modified. Private artifacts remain in temp only.
+- Reviewed real Home, Connections, Rules, Proxies and Profiles screenshots.
+  Home content is still too tall; recent connections fall below initial viewport.
+  Proxy group pagination sits above the summary; inspector density differs.
+  Rules live 100-row page needs a bounded table viewport for usable pagination.
+- Fixed missing destination IP display by falling back to hostname; endpoint
+  formatter handles missing address/port and bracketed IPv6. Unit test passed.
+- Zero-hit rules now show never-hit rather than the core's epoch timestamp.
+- Live renderer screenshots predate these final two display fixes. No running
+  test process remains. Full fidelity objective has not passed completion audit.
+
+Dense rules and Overview activity:
+- Rule rows now scroll inside a 20-rem viewport, with search/header/pagination
+  outside the scroller. Page-specific viewport identity resets page scroll.
+- Native fixture now uses 128 rules instead of 8; render passed, pagination is
+  visible below the bounded body. Real subscription renderer also passed.
+- Home activity heading, total and route legend now share one compact row;
+  zero unknown count is omitted, nonzero unknown and stale/error states remain.
+- Real Home render inspected. Current node height and chart/header density still
+  leave recent connections near the fold; further visual refinement required.
+- No live build/test session remains. Goal still incomplete.
+
+Overview node and chart density:
+- Node heading now combines protocol and group into one metadata line; candidate
+  rows retain all four nodes and actions with reduced vertical padding/gaps.
+- Traffic chart height reduced from 13 to 11 rem to approach final draft.
+- Real-subscription native renderer passed; latest Home screenshot inspected.
+- No live test session. Final page fidelity audit and remaining polish are open.
+
+Network page refinement:
+- Replaced the route switch/long help row with two explicit route choices;
+  existing preference persistence and refresh pipeline retained, busy states
+  disable both choices. Help remains on the controls' tooltip.
+- Chinese card titles now match Connection diagnostics / Public information /
+  System network terminology from the final draft.
+- Native renderer passed and Network light screenshot inspected; 4 network
+  model tests passed. Full diagnostic-result fixture and remaining visual
+  differences still need attention. No live process remains.
+
+Complete diagnostic fixture:
+- Native Network fixture now includes all eight diagnostic steps and a long DNS
+  error; previously only latency targets were populated.
+- Diagnostic rows use a fixed label column and flexible result column, keeping
+  long errors within the card. Native multi-size renderer passed and inspected.
+- Full report is taller than the four-step design; layout needs a deliberate
+  compact primary/secondary result presentation before final fidelity approval.
+- No running process remains. Objective remains active and incomplete.
+
+Final implementation verification (2026-10-06):
+- Overview, Proxies, Profiles, Connections, Rules, Network and Logs use the final light design's navigation, cards, tables, charts and inspectors.
+- WavePercentage is a reusable controlled component shared by Overview and Profiles. Tests cover unknown/non-finite values, clamping, circular clipping, endpoints and reduced motion.
+- Overview retains a single five-minute traffic range. Subscription quota is prominent beside the traffic chart, with used/remaining/total values and a separate expiry footer.
+- Settings page source has no diff. Shared light palette and navigation apply across the application.
+- Network secondary successful checks can expand/collapse; failed checks stay visible. Native pointer expansion/collapse validation passes.
+- Rules, Logs and Connections have bounded scrolling bodies with independent pagination. Log fixture covers 128 entries; rule fixture covers 128 rules.
+- Latest full UI suite: 330 passed, 1 explicitly ignored native test. Subsequent connection pointer/keyboard test passed. Latest native multi-size rendering test passed independently; Clippy all targets/all features with -D warnings passed; git diff --check passed.
+- Real subscription validation: 46 physical nodes, 12 groups, 9816 rules; 6/6 delay probes succeeded; selection readback verified; proxy HTTP 204; 3 active connections. System proxy and TUN were not modified.
+- Rendering outputs: target/ui-design-validation. Approved design images remain in docs/ui-design.
+- Fidelity limits: real data and empty/error states differ from illustrative data; existing diagnostic/support actions remain available. Native fonts, controls and chart rendering are not pixel-identical to the raster mockups. Settings layout was not redesigned.
+
+
+Further Proxies fidelity pass (2026-10-06):
+- Node search uses the native large (44px) single-line input; Input.h only applies to multiline inputs. Sort height is also 44px.
+- Inspector server circle is 64px with a thin border, metadata is 14px, and latency history has the last-10-tests caption.
+- Latency history composes a passive filled AreaChart and interactive dotted LineChart with matching axes. Native matched-size screenshot confirms alignment; x labels are bounded to six ticks.
+- Automatic-only label uses an outline badge; measure-and-restore action is 40px high.
+- Isolated native fixture now has ten timestamped delay observations. Production history is unchanged; missing tests remain unknown.
+- Clippy all targets/all features with -D warnings passed. Full UI suite: 338 passed, 1 ignored. Native multi-size renderer passed; matched and compact light Proxies screenshots inspected. Diff whitespace check passed.
+- Remaining: compact inspector wraps below the list; automatic metadata/capability badges and behavior-specific fixture coverage still need further fidelity work. Overall goal remains INCOMPLETE.
+
+- Desktop binary rebuilt successfully after this pass. Sky launch returned successfully and list_windows exposed the new ZenClash window (id 8717856). Post-launch activation/state capture failed twice with "foreground window did not report a process id" after refreshing the returned window; no further stale-coordinate input was sent. Real menu/test-current validation of this new binary remains outstanding. App was left launched.
+
+Further Proxies state/layout pass (2026-10-06):
+- UDP capability and automatic-group mode use short state labels. Supported/automatic states use the mint selection token; unsupported/manual states stay neutral. The explanation shares the inspector's 96px metadata label spine.
+- Native fixture now covers six groups, automatic/fallback/load-balancing behavior, 36 unique nodes, mixed protocols, 29 available/2 timed out/5 untested, and four node pages. These are isolated fixture values, not production subscription data.
+- Richer native capture revealed a real pagination overflow. Shortened the summary, reduced control gaps, removed redundant arrow icons, and made pagination actions 40px high. Pagination can wrap on constrained widths.
+- Added native geometry validation that the pagination controls remain within their parent region. Final multi-size native renderer passed (18.16s); matched-size screenshot inspected and all four page buttons plus Previous/Next are visible.
+- Final Proxies tests: 49 passed. Final Clippy all targets/all features with -D warnings passed; no business model or network preference changes.
+- Sky still reports "foreground window did not report a process id" on reading the returned main window. Live menu and test-current verification remains unproven. The final executable build is being updated separately; overall objective remains INCOMPLETE.
+
+- Final normal executable update did NOT complete: Cargo could not remove target/debug/zenclash.exe (access denied). Escalated read-only process check confirmed ZenClash PID 9696, MainWindowTitle ZenClash, Responding true; LockApp PID 14524 is also present. The sandbox-only process check had returned no process, so that result was not evidence that the application stopped.
+- Existing app was not force-terminated. Asked whether Windows is locked/unlocked to recover the UI session. Source and isolated native screenshots contain this pass; the running executable still belongs to the preceding successful build. Live UI checks and final executable update remain pending.
+
+Next-page audit evidence:
+- Compared the final Profiles draft with the newly generated matched-size native Profiles capture. Catalog source badges still sit under profile names instead of inline; catalog and header actions are shorter than the draft; catalog expiry/update metadata uses separate lines, making cards taller. Configuration card therefore starts lower than in the draft. These visible mismatches should be fixed next, preserving truthful expiry/unknown/error states and source/applied identities.
+
+Further Profiles fidelity pass (2026-10-06):
+- Catalog profile name and source badge share one heading row at matched width; source/applied badges use rectangular corners and normal 14px text. Selected outline uses the design mint token. Full profile names remain available through the heading tooltip.
+- Card quota block reserves space for missing quota metadata. Local configurations explicitly display no subscription quota; remote missing metadata remains unavailable. Updated age and remaining days share a metadata row; full expiry date/UTC remains in the expiry tooltip and inspector date field.
+- Catalog/card/header/editor/override actions are 40px high; filters are 32px. Inactive card actions follow Apply, Update/Edit, More order. Application callbacks and source/applied distinction remain unchanged.
+- Inspector quota statistics now have a left separator with regular-value typography. Removed repeated expiry caption above the existing expiry date field; inspector and update-policy metadata use 14px text, and update interval action is 40px high.
+- Empty runtime mode/log-level values now show an unknown dash instead of blank cells.
+- Compact native screenshot exposed profile names collapsing to a single letter. Heading now allows source wrapping below a minimum-width name, with automatic height; matched width retains its one-line arrangement. Final matched and compact light screenshots inspected after this fix.
+- Full serial UI regression: 338 passed, 1 ignored (before the final action-order/header-wrap-only adjustments). Following action order changes, More-menu cancellation/deletion guarding and actual configuration-editor dispatch tests passed. Final native renderer passed at all three sizes (18.56s); final Clippy all targets/all features with -D warnings passed. Whitespace check passed.
+- Runtime executable update and live-window interaction checks remain pending the existing Windows foreground-process failure and prior lock-state question. Settings layout and authoritative raster drafts were not changed. Overall goal remains INCOMPLETE; continue whole-page/overlay audit and live subscription/node readback.
+
+- Final normal build now succeeded (53.46s) after an escalated process check confirmed the former app no longer existed. Started the new binary through Sky; returned window id 8259104. Escalated read-only check confirms new ZenClash PID 31112, title ZenClash, Responding true. This supersedes the earlier executable-lock limitation.
+- Actual window capture still fails with "foreground window did not report a process id", including one retry after refreshing the returned window. No stale-coordinate input was attempted. New executable remains launched; live-window operation checks remain outstanding. More-menu pointer/cancel guarding passed again after the compact heading-wrap change.
+
+2026-10-06 Rules detail fidelity pass (goal remains INCOMPLETE):
+- Search now uses the supported Large input size; an attempted custom Size caused enlarged input text and was reverted after native screenshot inspection.
+- Table and inspector stretch to the same bottom edge in the reference viewport; the table retains an independently scrollable body and a 34rem minimum height.
+- Pagination uses 40px text controls and wraps its summary/controls when needed. Policy chart legends use colored dots and plain labels; the top-five percentage scope is available on the title tooltip. Rule policy pills retain intrinsic width.
+- Native capture passed at all three configured viewports; reference and compact Rules screenshots were inspected. Compact layout still stacks the inspector below the table, so full fidelity at narrow sizes is not claimed.
+- 11 Rules-related regression tests passed; Clippy all targets/features with warnings denied passed; diff whitespace check passed. These final Rules changes are in source/native captures, not yet rebuilt into the running desktop binary.
+- Actual desktop capture remains unresolved (foreground process-id error from the prior attempt); no claim of complete real-window or operation acceptance.
+
+2026-10-06 Rules typography/state follow-up (goal remains INCOMPLETE):
+- Section headings use 18px-equivalent typography; inspector title has the draft hairline. Matched-policy heading now matches the Chinese draft wording. Table labels and values share the body type scale; the hit-count column was widened after native capture exposed a wrapped heading. Policy legend markers use 12px-equivalent circles.
+- Isolated native fixture now covers five rule kinds, three policies, disabled rules, absent runtime metadata, and valid/missing hit timestamps. No production statistics were replaced with fixture values.
+- Added native geometry verification for Rules table/inspector bottom alignment at reference/wide viewports. Final native capture passed all three viewports (18.68s), and final reference image was inspected; hit-count header is single-line.
+- Final Rules regression: 11 passed. Final Clippy all targets/features with warnings denied passed.
+- Actual-window retry still failed with foreground-process-id error. Elevated read-only process inspection confirmed PID 31112 (ZenClash) responding; it was not replaced or force-stopped. Latest Rules source changes remain unbuilt in that running binary. Complete real-window/operation acceptance and full non-Settings fidelity remain outstanding.
+
+2026-10-06 Network result-surface fidelity pass (goal remains INCOMPLETE):
+- Compared network draft with current native reference screenshot. Diagnostic results and latency table now use 16px-equivalent inset bordered surfaces instead of touching card edges. Latency header uses table-head background/body labels; latency title and diagnostic row headings follow the draft hierarchy.
+- Diagnostic and latency outcomes use filled semantic circles with text; errors retain full tooltip detail and failed supplemental checks remain visible. DNS/Fake-IP cache commands now use the bundled trash glyph; existing confirmation callbacks are unchanged.
+- Summary metrics have bounded vertical separators. Native compact inspection exposed a clipped automatic-interface button; interface footer now wraps its label/actions, with both controls visible in the final compact capture.
+- Native capture passed all three viewports (final 19.51s). Reference and compact images were inspected during the pass. Eight network-related regression tests passed; final Clippy all targets/features with warnings denied passed.
+- Remaining design differences include additional truthful diagnostic/provider/interface controls and overall vertical density. No claim of full non-Settings one-to-one fidelity or real-window operation acceptance. Latest source remains ahead of the running binary; actual-window process-id capture issue remains unresolved. Settings UI was not edited.
+
+2026-10-06 Overview heading/legend/node fidelity pass (goal remains INCOMPLETE):
+- Compared Overview draft and current native reference. Traffic, subscription, activity, node, and recent-connection headings now use the 18px-equivalent section scale. Traffic legend uses colored direction arrows and labels, with the current rate preserved on hover rather than duplicated in the legend.
+- Native-only Home catalog now includes four nodes covering current/success/timeout/unmeasured states. It does not fabricate a running core, traffic, connection counters, or production observations.
+- Native inspection exposed the current node appearing as a faded disabled command and unequal action widths. Current node now has a check-mark Current status; alternative nodes have equal-width Switch commands. Existing mutation guards and controller-readback behavior remain intact.
+- Final native capture passed all three viewports (20.47s); reference image inspected. Home regression: 39 passed, including selection readback, mode/capture transitions, generation cancellation, and real history aggregation.
+- Actual window capture retry still failed with foreground-process-id error, on the same discoverable ZenClash window (8259104). Full visual/operation acceptance remains outstanding; latest changes are source/native captures, not the running desktop binary. Settings UI unchanged.
+
+2026-10-06 Logs hierarchy and live-window recovery (goal remains INCOMPLETE):
+- Log detail, level distribution and persistence titles use the 18px-equivalent section scale. Detail metadata/structured fields and table headings use the body scale; selected full messages have a stronger hierarchy. Buffer summary emphasizes the actual count and retains separate status/updated fields.
+- Native-only log fixture covers INFO/WARNING/ERROR/DEBUG, structured and absent fields, timestamps and longer messages. No production log entries were fabricated.
+- Logs regression filter: 22 passed. Native captures passed all three viewports (19.49s); reference capture inspected. Clippy all targets/features with warnings denied and whitespace checks passed.
+- Updated computer-use component recovered actual window capture. Elevated read-only process inspection confirmed the previous executable had exited, then the latest app was built and launched. Actual window 1115704 was maximized and captured successfully; this supersedes the earlier foreground-process-id limitation.
+- Actual Logs showed a connected stream, zero buffered entries and normal disk writing. Pause/resume worked; latest/earliest sort menu opened and Escape dismissed it. Clear/copy/export correctly remained disabled with an empty buffer. Populated production log detail, export and clear confirmation are not claimed as accepted.
+
+2026-10-06 Network two-column follow-up (goal remains INCOMPLETE):
+- Actual screenshot comparison exposed a weak public-IP value and diagnostic results crowded next to titles. Public-IP value now has the draft's large semibold emphasis; diagnostic names and outcomes share balanced columns, with body-size route/time and result metadata. Missing IP remains an unknown dash; full error detail stays available on hover.
+- Actual running app verified supplemental checks expanding/collapsing and target form opening/cancelling. DNS-disabled failures remained visible; no cache deletion, interface mutation, proxy/TUN toggle or provider preference change was performed.
+- Native captures passed all three viewports (21.00s); reference and compact Network captures inspected. Eight network regression tests passed; final Clippy all targets/features with warnings denied and whitespace checks passed.
+- Full non-Settings fidelity is still outstanding, including Network system-status composition, additional control density and remaining page/overlay comparison. Settings UI and authoritative raster drafts were not edited.
+- Final executable build succeeded (37.02s). Launched window 1443384 and inspected actual compact Network results: public IP is emphasized and diagnostic outcomes occupy the right column. The current ikuu configuration's DNS-disabled errors remain truthful. Latest Logs and Network changes are now included in the running executable.
+
+2026-10-06 Network system/capability composition (goal remains INCOMPLETE):
+- Compared the current actual Network window with the authoritative draft. Network capability flags now use a green check for enabled and neutral circular minus for disabled, with accompanying text. These states use actual runtime configuration rather than draft sample values.
+- System Network now begins with system proxy and TUN status rows, then DNS, interface and local address. Capture values come from the successful local diagnostic step; unavailable/unverified capture remains Unknown. Gateway remains available with supplemental checks expanded. Existing interface commands and cache confirmation guards remain intact.
+- Connection Diagnostics header shows the actual latest completed-step time, localized to the machine timezone; absent/invalid timestamps omit the caption. Chinese controller heading now reads Controller connection.
+- Native fixture covers enabled/disabled capability flags and unknown capture states. Final native captures passed all three viewports (19.62s); reference and compact light captures inspected. Eight Network regression tests and final Clippy all targets/features with warnings denied passed.
+- Settings UI and authoritative drafts were not edited. Remaining differences include provider/interface controls, actual source-dependent content and overall vertical density. Complete page/overlay acceptance is not claimed.
+- Final executable build passed (52.89s); launched actual window 16842930 and captured the maximized Network page. Actual observations show system proxy active, TUN inactive, IPv6/unified delay enabled and LAN/TCP concurrency disabled; corresponding icon/text states and actual latest-check timestamp render correctly. No capture or runtime preference was changed.
+- Actual supplemental expansion revealed the gateway row; collapse restored the default five system rows. Current IP.SB request failed while the three latency targets succeeded; errors remain visible. The summary still says Waiting when the public-IP request has completed with an error, which is a remaining state-copy defect to address next.
+
+2026-10-06 Subscription quota details and keyboard dismissal (goal remains INCOMPLETE):
+- Matched Profiles inspector quota labels to the draft: used has a filled mint dot, remaining a hollow mint dot, and total a separate divider. Summary values use the 24px-equivalent emphasis. Real quota values and applied/source identity remain unchanged.
+- Public-exit summary now distinguishes initial waiting, retry/probing, completed failure, completed unavailable response and successful IP. Existing successful observations remain visible during refresh. Nine Network regression tests passed, including failure/retry/recovery.
+- Opening Add subscription now focuses the name input. Escape collapses the inline form and restores page focus without discarding entered draft text; the same close command serves the header. Busy mutation prevents dismissal. Two actual GPUI input/focus tests passed.
+- Final native renderer passed all three sizes (22.05s); Profiles reference/compact and Network reference captures inspected. Clippy all targets/features with warnings denied and whitespace checks passed. Updated normal binary built successfully (1m07s).
+- Launched actual window 1508926. Compact Profiles verified larger summary values, quota dot/divider geometry, automatic input focus and Escape dismissal. Active configuration remains ikuu; selecting the inactive subscription changes only inspector details. Previously verified menu disables deletion of the active profile.
+- Actual Network refresh returned a successful public IP and populated the summary correctly; DNS-disabled failures remain truthful. Failure/retry copy is covered by regression tests, not claimed as an observed failure in this run. No proxy/TUN or profile activation preference was changed.
+- Authorized isolated real-subscription acceptance remains recorded above; temporary private subscription copies were cleaned. Settings and authoritative design PNGs unchanged. Full non-Settings page/overlay fidelity remains incomplete.
+
+2026-10-06 Proxies row, inspector and search alignment (goal remains INCOMPLETE):
+- Compared the authoritative Proxies draft, native reference/compact captures and the actual maximized app. Current node is now a clear mint noninteractive status; ordinary table rows use continuous hairline separators. Headings, protocol text, server emblem, node name and latency emphasis follow the draft hierarchy. Healthy/warning/failure/unmeasured latency colors remain derived from actual observations.
+- Bundled the missing ArrowDownUp glyph. Sort caption now follows the selected order instead of claiming delay order while Original order is selected. Chinese hide-unavailable caption shortened to match available toolbar space.
+- Delay history line and area share a rounded 30ms upper domain with zero padding; the native fixture now shows 0/30/60/90 rather than 0/32/65/97. Actual history and timestamps remain unchanged.
+- Actual search exposed pending/no-match feedback shifting the center panel below its neighbors. Feedback now lives inside the table below the header. Regression holds the search worker deterministically and checks that the center panel top stays fixed while loading.
+- 49 Proxies regression tests passed, including real controller readback and provider identity. Native captures passed three viewports (21.65s); final reference/compact Proxies captures inspected. Clippy all targets/features with warnings denied and whitespace checks passed before the final empty-range copy adjustment.
+- Updated binary built (51.12s) and actual window 6554914 verified current status, table rules, toolbar glyph and neutral unmeasured inspector. Pending and completed no-match screenshots both retain aligned panel tops; clearing restores all 46 group entries. Actual sorting selection updates the button caption from Original order to Delay order. No real node/profile activation or proxy/TUN change occurred.
+- An additional actual empty-result range issue (1-0) was found and changed to 0-0; final targeted verification and binary refresh follow below. Settings UI and authoritative drafts remain unchanged. Full seven-page/overlay acceptance remains incomplete.
+- Final empty-range adjustment: 32 targeted Proxies tests passed after recompilation (30.51s). Normal build initially encountered the running executable lock; graceful Ctrl+Q released it and the retry succeeded (5.73s). Launched window 1836624 and verified actual no-match footer reads 0-0 / 0 with all three panel tops aligned. Search then cleared for review. Final whitespace check passed.
+
+2026-10-06 Connections table and hierarchy follow-up (goal remains INCOMPLETE):
+- Compared the authoritative Connections draft, current native reference capture and actual window 1836624. Process/protocol section titles and inspector title now use the 18px scale; endpoint uses 20px. Process chart labels/counts, protocol legend and table header/process metadata now use 14px. Metric icon frames are 44px; protocol legend dots follow the draft's 16px scale.
+- Search toolbar now has a 12px separation before the header. Ordinary rows use straight hairline separators; only the selected row has mint fill and rounded corners. Current runtime values, connection IDs, filters, detail selection and destructive command guards remain unchanged.
+- Native geometry verification initially caught differing table/inspector bottoms after typography changes. The shared row now stretches both regions, and the table wrapper stretches its child rather than relying on two independent minimum heights. Re-run passed all three window sizes (20.24s); reference and compact light captures inspected. At compact size the inspector wraps below the table and remains reachable through page scrolling.
+- Sixteen connection-related regression tests passed, including actual GPUI pointer/keyboard protocol filtering, ordering identity, search cancellation, timestamp sorting and bounded observed metric history. Clippy all targets/features with warnings denied and whitespace check passed.
+- Actual pre-update empty state and sorting menu inspected; Escape dismisses without changing Default order. No real connection was closed. Full seven-page/overlay acceptance remains incomplete; Settings UI and authoritative raster drafts unchanged. Final normal executable update and live visual check follow below.
+- Final normal build passed (35.07s). Launched window 24772796 and inspected the maximized actual Connections page after loading. New section/header hierarchy, larger metric icon frames, toolbar/header gap and table/inspector bottom alignment are visible. Pause changes the command to Resume; Resume restores live presentation without losing the empty layout. Runtime currently has zero active connections, so populated detail presentation is verified by native captures rather than claimed as observed live traffic.
+
+2026-10-06 Rules typography, table detail and search stability (goal remains INCOMPLETE):
+- Compared the authoritative Rules draft, native reference/compact captures and maximized actual window 26543136. Summary now uses the matching file/stack/list/chart glyphs at 32px. Order/type columns are wider, payload buttons align with the header, and search has a 12px gap before the table header. Ordinary rows have straight hairlines; only the selected row keeps rounded mint fill. Distribution labels/counts and detail/flow metadata use body-size text.
+- Actual first-rule selection showed the correct payload, policy, core-reported zero counters and DIRECT outlet. No rule enable state, active profile, proxy/TUN preference or actual traffic was changed. Current ikuu has 9816 rules; draft sample totals and hit percentages were not copied into runtime data.
+- Actual typing exposed the whole Rules page collapsing to a bare loading prompt. Search now retains the same-catalog summary, charts and inspector, hides stale rows behind table-local feedback and disables pagination while pending. Reverting to the retained query cancels pending work; changed catalogs discard the previous projection. Failed queries cannot expose stale rows as matching results.
+- Extended the actual GPUI filter test with a deterministic held worker: table top remains fixed, inspector remains present, stale rows are hidden, clearing while pending restores both rows, and resumed filtering publishes only the matching row. Fourteen rule-related regression tests passed (4.43s); final native captures passed all three viewports (21.23s), and reference/compact light captures were inspected. Final Clippy all targets/features with warnings denied (2.75s) and whitespace checks passed.
+- Full seven-page/overlay acceptance remains incomplete. Rules pagination selected-color and segmented-hit-bar geometry remain visual follow-ups; initial-load layout and compact inspector placement should be considered in the next broader audit. Settings UI and authoritative design PNGs were not edited in this pass. Final executable update and actual search/pagination check follow below.
+- Final normal build passed (1m10s). Launched actual window 21431916 and verified numbered page 2 displays rules 101-200. Typing a no-match query showed loading inside the table with summary/distribution/inspector positions preserved; the completed empty state reports 0-0 / 0. Clearing restored all 9816 rules at page 1. The current app is left open with the first rule selected for review; no persistent rule/runtime preference was changed.
+
+2026-10-06 Rules selected pagination and segmented distribution polish (goal remains INCOMPLETE):
+- Compared the authoritative Rules draft and final native reference capture. Selected numbered pages now use a mint surface/green label through the framework Button custom variant while retaining selected and disabled behavior. Summary captions use 14px, inspector title 20px and matching-flow headings 16px.
+- Hit distribution bar now has 28px height, rounded first/last positive segments and light separators. Zero-count segments do not consume width or the outer corners; legend still reports those actual values. Legend dots use 16px. Production hit counts and unknown-data handling remain unchanged.
+- Final native renderer passed all three sizes (22.98s); reference capture inspected, including populated distribution, selected page and unknown rule stats. Clippy all targets/features with warnings denied passed (2.45s). No mirrored style-only tests added; existing native geometry and framework interaction checks remain applicable.
+- Design gallery copy corrected: it now says non-Settings pages are being implemented and verified, instead of claiming no app implementation exists. Authoritative raster drafts and Settings UI remain unchanged.
+- Full seven-page/overlay fidelity remains incomplete. Final normal build/live pagination check follows below.
+- Final normal build passed (53.10s). Actual maximized window 27132960 verified mint selection on pages 1 and 2; page 2 correctly displays rows 101-200 of 9816. Restored page 1 and selected the first payload; selected row and detail/flow typography are visible. No rule enable state was changed.
+
+2026-10-06 Overview populated-state acceptance follow-up (goal remains INCOMPLETE):
+- Found that prior native Home captures were not sufficient evidence for populated flow/history/traffic layout. Added Windows test-only presentation inputs: a complete five-minute series, 128 connections aggregated through the existing flow reducer, four process history rows and connected process/controller observations. Production runtime values and subscription sources are unchanged; these inputs are excluded from normal builds.
+- First native run passed all three sizes (22.16s). Populated reference capture inspected: trend, quota, activities, process rankings and two recent connections are visible. Discovered metric cards still read the real monitor while the test chart used fixtures; both now read through the same Home presentation snapshot accessor. This accessor always reads actual monitors in normal builds.
+- Snapshot override is cleared with Home presentation release. Native pointer is moved to the shell before capture to prevent previous navigation hover from looking like a second selected page.
+- Compared Overview draft and populated capture: runtime status and quota numbers now use 26px, current speed uses 32px and active count 36px. Rate captions, activity legend/count metadata and process byte totals use body-size text; activity legend dots are 12px.
+- Final re-render, Home regression tests, Clippy and normal build/live check follow below. Full seven-page/overlay fidelity remains incomplete; Settings UI and authoritative raster drafts are unchanged.
+- Final native re-render passed all three sizes (25.22s). Reference capture inspected: only Home is selected, chart tooltip is absent, current speed matches seeded chart frames and the activity/process figures are legible. Thirty-nine Home-related regression tests passed (0.72s); final Clippy passed (2.71s). Actual Home subscription picker showed current ikuu checked and alternate profile reachable; Escape dismissed it without changing the active subscription. Normal build follows.
+- Final normal build passed (1m04s). Latest actual window 20447410 is open and maximized on Home. Larger runtime status, current speed and quota values are visible; active profile remains ikuu, current traffic is 0 B/s and no active connections are reported. Known preferred-core fallback startup notice remains visible and was not hidden. Populated layout evidence comes from the explicitly marked native test capture, not fabricated runtime values. Remaining work includes populated Overview density/bottom visibility at the reference viewport and further full-page/overlay comparison.
+
+2026-10-06 Overview reference geometry and bottom visibility (goal remains INCOMPLETE):
+- Last goal turn made progress: populated native fixtures, overview hierarchy changes, 39 Home regressions and actual running-window acceptance. No blocker recurred.
+- Overview title now uses 28px with tighter leading and header spacing. Rate figures retain 32px with 1.25 leading; sparklines are 48px. Subscription quota uses tighter leading and 14px metadata, with larger top inset and smaller gaps between totals. Activity heading now aligns to the top of count/legend rather than being vertically centered. Process bars are 12px and process section title 16px.
+- Added observable regions for all Home rows/panels. Native validation now checks paired panel top/bottom alignment and requires populated recent connections to fit entirely in a reference viewport. All three sizes passed (26.68s). Reference geometry: first row y62.67 before window chrome, height187.33; traffic/subscription y262, height300.67; activity/node y574.67, height245.33; recent connections y832, height135.33. Adding the normal 32px title bar places the first row at94.67, close to the draft94.
+- Recent connection rows now have continuous separators, body-size headers and tighter leading; final re-render follows. Settings UI and authoritative raster drafts remain unchanged. Full seven-page/overlay fidelity remains incomplete. Network comparison still shows more primary diagnostic rows/extra controls than the four-row draft; that needs a dedicated state-preserving follow-up rather than hiding a failed result.
+- Final recent-row re-render passed all three sizes (26.73s). Reference capture inspected; recent connections height is now128px and bottom y960px within the1008px native reference viewport. Both visible rows have continuous separators and legible body-size headers. Paired second/third-row panels share top and bottom edges. Final Clippy passed (2.76s) and whitespace check passed. Normal executable update/live check follows.
+- Normal build passed (1m03s). Latest actual window4720206 is open and maximized on Home. Verified 28px page title, tighter first row, equal trend/subscription heights, larger subscription metadata and continuous recent-connection table. Current subscription remains ikuu; real traffic is zero and active connections are empty. Known preferred-core fallback notice remains visible. Full populated reference evidence is provided by marked native fixture captures; full seven-page fidelity is still incomplete.
+
+2026-10-06 Network default density and expandable details (goal remains INCOMPLETE):
+- Compared the authoritative Network draft with native default, expanded and partial-failure reference captures. Healthy collapsed diagnostics retain the four primary results; any failed supplementary step remains visible automatically. The earlier fifth row was an intentional AAAA failure, not an extra healthy primary result to hide.
+- Moved the details command into the existing DNS/start row as an accessible chevron. It remains reachable even without a report or when the expanded list is taller than the viewport. Public-IP provider selection/reprobe and pinned-interface controls now live in the expanded area; existing header refresh remains available in the default view.
+- Public IP now displays a parsed IPv4/IPv6 badge and the matching successful report timestamp. Missing, failed, different-address or different-route reports cannot supply the displayed timestamp; no current clock is fabricated as a measurement time. Added Chinese and English copy.
+- Native validation now checks successful supplementary rows/provider controls hidden by default, visible after expansion, hidden after collapse, and failed AAAA visible while collapsed. Extra expanded and partial-failure PNGs are saved per viewport/theme. Final native run passed all three sizes (25.05s); default and partial-failure light reference captures inspected.
+- Six Network model tests passed, including stale-address/route, absent-report and failed-step timestamp rejection. Clippy all targets/features with warnings denied passed (5.68s); whitespace check passed. Normal executable build and actual-window acceptance follow below.
+- Settings UI and authoritative raster drafts remain unchanged. Full seven-page/overlay fidelity remains incomplete; no blocking condition recurred this turn.
+- Final normal build passed (55.60s). Launched actual window6096500, maximized and inspected Network with real controller data. Public IP badge and matching time are visible; three Mihomo latency targets succeeded. Existing DNS-disabled HTTP500 results for A and AAAA remain explicit, so the collapsed actual list contains five rows. Expansion reveals DIRECT/provider results, public-IP query choices and pinned-interface controls; a second click restores the compact default. No provider, interface, proxy/TUN preference or cache contents were changed. Full seven-page/overlay acceptance remains incomplete; next review includes Logs populated/detail presentation and remaining overlay comparisons.
+
+2026-10-06 Logs table density and actual populated interaction (goal remains INCOMPLETE):
+- Previous goal turn made progress on Network density, timestamp correctness, three-size captures and actual expansion/collapse. No blocker recurred.
+- Compared the authoritative Logs draft to native populated reference/compact captures. Ordinary rows now have straight hairline separators; selected rows retain mint fill and rounded corners. Removed the gap between header and first row, preserved the 12px search/header separation, and added the draft footer boundary with body-size pagination copy.
+- Reduced level-distribution row gaps to 8px so the persistence panel sits closer to the draft. The existing full payload, source timestamp and structured JSON details are retained. Clear-buffer confirmation now uses the danger variant rather than a normal primary confirmation.
+- Twenty-two log-related regression tests passed (0.34s). Native validation passed all three sizes (29.49s); updated reference and compact captures inspected. Clippy passed (2.54s) before the final single danger-variant adjustment; final executable and check follow below.
+- Actual pre-update window6096500 contained five genuine INFO messages generated by Network probes. Selected a long TCP message; full payload, INFO level, core time and received structured fields were visible in the inspector. Persistence was writing normally. Opened clear-buffer confirmation, inspected scope copy and dismissed with Escape; all five messages and selection remained. Opened native local export chooser and canceled with Escape; export command recovered and selection remained. No real log deletion or export occurred.
+- Full seven-page/overlay fidelity remains incomplete. Settings UI and authoritative raster drafts are unchanged. Final latest-binary acceptance follows.
+- Final normal build passed (34.73s), Clippy passed after the danger variant (2.74s), and whitespace check passed. Latest actual window6227572 is open and maximized on Logs with five real INFO events. Verified straight table separators, no header/first-row gap, footer boundary/body-size summary, and tighter distribution spacing. The actual clear confirmation now shows a danger-colored command; Escape dismissed it without deletion. Remaining audit includes shared navigation/icon/copy fidelity and other operation overlays across the seven non-Settings pages.
+
+2026-10-06 Shared sidebar icon and brand-copy fidelity (goal remains INCOMPLETE):
+- Previous goal turn made progress: Logs density and clear-confirmation danger styling, 22 regressions, three-size native capture, actual populated inspector and cancel behavior. No blocker recurred.
+- Compared shared sidebar symbols against the authoritative raster drafts. Non-Settings destinations now show NotebookTabs for Profiles, Activity for Network and FileText for Logs, using the existing GPUI Kit Lucide asset system. Existing Home/group/chain/shield mappings remain.
+- Non-Settings brand description now reads Mihomo Desktop Client (localized Chinese copy) at the 12px metadata scale; it fits beside the collapse command. Settings preserves its previous description, scale and icon presentation through an explicit page branch.
+- Native render passed all three sizes (29.50s); updated light reference inspected for new symbols and unclipped description. Five sidebar tests passed, including actual GPUI collapsed accessible names and keyboard navigation. Clippy all targets/features passed (5.48s). Normal build and actual collapse/navigation acceptance follow below.
+- Full seven-page/overlay acceptance remains incomplete. Shared footer currently reflects controller connectivity rather than the draft runtime/uptime view; any follow-up must derive real process timing instead of a fake running label. Settings UI and authoritative raster drafts remain unchanged.
+- Actual window 6555252 (1283 x 820, normal debug build): collapsed the sidebar through its visible toggle, navigated to Network using the Activity icon, then expanded it. The Network selection remained correct; NotebookTabs, Activity, and FileText assets rendered in both widths, and the 12 px brand description fit beside the toggle. Returned to Home and left the latest app open.
+- Footer timing investigation: ProcessStatus currently has no start timestamp; local MihomoProcessSnapshot has no timestamp either. The service publishes core_started_at, but this is not forwarded by the operational process model. A truthful elapsed-time implementation must carry local spawn/restart timestamps and service timestamps through the process observation, reject stale generations, and represent external/unknown time as unavailable. No UI-startup timer or example duration has been substituted.
+- Sidebar fidelity increment accepted in actual interactions; the full goal remains INCOMPLETE, with the runtime footer/time data seam and remaining final cross-page review outstanding. No repeated blocker; meaningful progress this turn.
+
+2026-10-06 Runtime timing fidelity (goal remains INCOMPLETE):
+- Previous turn made progress: shared sidebar symbols/brand metadata and actual collapse -> Network navigation -> expand acceptance. No blocker recurred.
+- Added current live local child spawn time to MihomoProcessSnapshot. Successful restart replaces the time while holding the same child lock used to capture PID/liveness; stopped/exited/unknown snapshots expose no start timestamp. ProcessStatus forwards local and existing service start times.
+- Added elapsed-time validity checks: live managed owner, positive known start, and non-backward clock. External attachment, stopped process, unknown timestamp and clock reversal never fabricate elapsed time. Home and app sidebar additionally reject stale observations/old generations.
+- Non-Settings Home runtime metadata and sidebar now display localized uptime from the same process fact. Sidebar first line shows core and actual running state with draft mint color; controller problems still take precedence in the detail line. Settings preserves its original footer branch.
+- Reference Home runtime metadata uses 14px. Compact windows below 1400 logical px use 12px to keep the time on one line; native reference/compact screenshots inspected. Design-validation-only Home fixture includes known elapsed time; production monitors retain real data.
+- Actual isolated child test passed (0.26s): successful spawn timestamp, restart replaces an earlier timestamp, stop removes it. Model test passed: zero elapsed, elapsed duration, future start, stopped/external/zero/missing timestamp. Native three-size suite passed (25.30s after compact adjustment); Clippy all targets/features passed (2.69s). Final normal build and actual app acceptance follow.
+- Full goal still needs final cross-page/operation overlay review. Authoritative PNGs and Settings screen were not changed.
+- Final normal debug build passed (1m23s). Actual latest app window10814618: at 1283 x 820 Home and sidebar both displayed 00:00:08 without wrapping; after maximizing both displayed 00:00:32. Navigated to Profiles and observed continued footer time 00:00:44, then returned to Home and checked the two values again. No real core restart or profile mutation was needed; synthetic child test covers restart/stop behavior. Latest app is left open on Home.
+- Timing increment is accepted. Remaining full-scope work is the final fresh comparison of all seven raster drafts/native pages and their operation surfaces; no blocker and no claim of whole-goal completion.
+
+2026-10-06 Final cross-page review and operation acceptance:
+- Reviewed all seven main-page raster/native comparisons. Unified non-Settings titles at 28 px; corrected Logs title/toolbar/status vertical placement. Settings keeps its previous branch.
+- Actual Proxies sort menu opened and dismissed with Escape without changing node selection. Actual Profiles request editor exposed a missing initial focus/Escape cancellation path; repaired both and added a meaningful unsaved-edit regression.
+- All 342 UI regressions passed (6.10s), including existing overlay and TUN-consent cancellation. Targeted request-editor regression passed (0.47s). Actual window11076762 confirmed name-field focus, Escape closes the editor, and ikuu stays applied. No request settings were saved.
+- Added the subtle light canvas gradient using existing semantic theme tokens. Dark and Settings backgrounds keep their previous rendering. Final three-size native render passed (26.62s); Home and Profiles reference captures inspected. Final Clippy passed (2.60s), whitespace check passed, normal build passed (41.96s).
+- Final executable opened as actual window18942006. Inspected the gradient in actual Proxies and Profiles. User navigation was detected during acceptance; retained their current page instead of overriding it. Latest app remains open.
+- Final review record: docs/development/light-ui-acceptance.md. Seven-page layout and operation acceptance is complete; authoritative raster drafts remain unchanged. Real-data/OS rendering differences are documented, not filled with example data. No required work remains in the requested non-Settings scope.

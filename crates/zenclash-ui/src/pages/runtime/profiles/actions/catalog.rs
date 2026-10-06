@@ -1,3 +1,4 @@
+use gpui_kit::Focusable;
 use zenclash_core::ProfileSource;
 
 use super::{Context, Page, RemoteProfileOptions, RuntimePage, Window, workflow};
@@ -67,12 +68,18 @@ impl RuntimePage {
         self.profiles.forms.editing_route = options.route();
         self.profiles.forms.editing_fixed_update_interval = options.fixed_update_interval;
         self.profiles.forms.editing_profile_id = Some(id);
+        self.profiles
+            .forms
+            .request_name
+            .focus_handle(cx)
+            .focus(window, cx);
         self.error = None;
         cx.notify();
     }
 
-    pub(in super::super) fn cancel_edit_remote_profile(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::pages::runtime) fn cancel_edit_remote_profile(&mut self, cx: &mut Context<Self>) {
         self.profiles.forms.editing_profile_id = None;
+        self.restore_page_focus(Page::Profiles, cx);
         cx.notify();
     }
 
@@ -175,6 +182,76 @@ impl RuntimePage {
                             this.notice =
                                 Some(zenclash_i18n::text("profiles.notices.request_saved"));
                         }
+                    }
+                    Err(error) => {
+                        this.synchronize_profile_recovery();
+                        this.set_page_error(token, error);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(in super::super) fn set_profile_download_route(
+        &mut self,
+        id: String,
+        route: zenclash_core::RemoteProfileRoute,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(store) = self.profiles.store.clone() else {
+            return;
+        };
+        let Some(profile) = self
+            .profiles
+            .catalog
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        let ProfileSource::Remote {
+            url,
+            user_agent,
+            options,
+        } = profile.source
+        else {
+            return;
+        };
+        let Some(token) = self.begin_mutation(Page::Profiles) else {
+            return;
+        };
+        let task = self.runtime.spawn_blocking(move || {
+            store
+                .set_remote_request_settings(
+                    &id,
+                    &profile.name,
+                    &url,
+                    &user_agent,
+                    options.with_route(route),
+                    profile.update_cron,
+                )
+                .map_err(|error| error.to_string())
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "profiles.errors.request_task",
+                        &[("error", error.to_string())],
+                    )
+                })
+                .and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                this.finish_mutation(token);
+                match result {
+                    Ok(()) => {
+                        this.reload_profile_catalog(cx);
                     }
                     Err(error) => {
                         this.synchronize_profile_recovery();

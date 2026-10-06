@@ -99,12 +99,14 @@ enum LogFileCommand {
 
 struct LogByteReservation {
     queued_bytes: Arc<AtomicUsize>,
+    queued_entries: Arc<AtomicUsize>,
     bytes: usize,
 }
 
 impl Drop for LogByteReservation {
     fn drop(&mut self) {
         self.queued_bytes.fetch_sub(self.bytes, Ordering::AcqRel);
+        self.queued_entries.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -114,6 +116,7 @@ pub(super) struct LogFileSender {
     settings: Arc<RwLock<Option<LogFileConfig>>>,
     status: Arc<RwLock<LogPersistenceStatus>>,
     queued_bytes: Arc<AtomicUsize>,
+    queued_entries: Arc<AtomicUsize>,
 }
 
 impl LogFileSender {
@@ -144,8 +147,10 @@ impl LogFileSender {
             self.record_full_queue();
             return;
         }
+        self.queued_entries.fetch_add(1, Ordering::AcqRel);
         let reservation = LogByteReservation {
             queued_bytes: self.queued_bytes.clone(),
+            queued_entries: self.queued_entries.clone(),
             bytes,
         };
         match self
@@ -185,6 +190,7 @@ impl LogFileWorker {
             settings: settings.clone(),
             status: status.clone(),
             queued_bytes,
+            queued_entries: Arc::default(),
         };
         let thread_settings = settings;
         let thread_status = status.clone();
@@ -269,6 +275,10 @@ impl LogFileWorker {
         // A full queue already wakes the worker; periodic refresh is the fallback.
         let _ = self.sender.sender.try_send(LogFileCommand::Refresh);
         Ok(())
+    }
+
+    pub(super) fn pending_entries(&self) -> usize {
+        self.sender.queued_entries.load(Ordering::Acquire)
     }
 
     pub(super) fn status(&self) -> LogPersistenceStatus {
@@ -442,6 +452,7 @@ mod tests {
                 )))),
                 status: Arc::default(),
                 queued_bytes: Arc::default(),
+                queued_entries: Arc::default(),
             },
             receiver,
         )
@@ -450,6 +461,25 @@ mod tests {
     fn append_entry(sender: &LogFileSender, entry: Arc<LogEntry>) {
         let bytes = super::super::log_entry_bytes(&entry);
         sender.append(entry, bytes);
+    }
+
+    #[test]
+    fn pending_entries_include_inflight_and_release_on_full_and_disconnect() {
+        let (sender, receiver) = queue_fixture(1);
+        let message = Arc::new(entry("queued", 1));
+        append_entry(&sender, message.clone());
+        assert_eq!(sender.queued_entries.load(Ordering::Acquire), 1);
+        append_entry(&sender, message.clone());
+        assert_eq!(sender.queued_entries.load(Ordering::Acquire), 1);
+        let inflight = receiver.try_recv().unwrap();
+        assert_eq!(sender.queued_entries.load(Ordering::Acquire), 1);
+        drop(inflight);
+        assert_eq!(sender.queued_entries.load(Ordering::Acquire), 0);
+        append_entry(&sender, message.clone());
+        drop(receiver);
+        assert_eq!(sender.queued_entries.load(Ordering::Acquire), 0);
+        append_entry(&sender, message);
+        assert_eq!(sender.queued_entries.load(Ordering::Acquire), 0);
     }
 
     #[test]

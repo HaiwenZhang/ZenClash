@@ -16,11 +16,31 @@ use crate::{
         NavigateConnections, NavigateDns, NavigateHome, NavigateLogs, NavigateMihomo,
         NavigateNetwork, NavigateOverride, NavigateProfiles, NavigateProxies, NavigateResources,
         NavigateRules, NavigateSettings, NavigateSniffer, NavigateSystemProxy, NavigateTraffic,
-        NavigateTun, ToggleSidebar,
+        NavigateTun, SetDarkTheme, SetLightTheme, ToggleSidebar,
     },
     assets::{AppIcon, GROUP_ICON_PATH, RADIO_ICON_PATH, RULER_ICON_PATH, ZENCLASH_MARK_PATH},
     pages::Page,
 };
+
+pub(crate) fn runtime_uptime(process: Option<&zenclash_core::ProcessStatus>) -> Option<String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let seconds = process?.uptime_secs_at(now)?;
+    Some(zenclash_i18n::text_with(
+        "app.status.uptime",
+        &[(
+            "time",
+            format!(
+                "{:02}:{:02}:{:02}",
+                seconds / 3600,
+                seconds / 60 % 60,
+                seconds % 60
+            ),
+        )],
+    ))
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 /// Mihomo's mutually exclusive outbound routing modes.
@@ -171,12 +191,33 @@ impl RenderOnce for SidebarNavigation {
                             .active(cx.theme().sidebar_accent),
                     )
                     .selected(active)
+                    .when(active && self.current_page != Page::Settings, |button| {
+                        button.border_l_1().border_color(cx.theme().chart_3)
+                    })
                     .child(
                         h_flex()
                             .w_full()
                             .gap_3()
                             .when(self.collapsed, |this| this.justify_center())
-                            .child(sidebar_icon(page).size(rems(1.25)))
+                            .child(
+                                if self.current_page == Page::Settings {
+                                    sidebar_icon(page)
+                                } else {
+                                    match page {
+                                        Page::Profiles => {
+                                            Icon::new(gpui_kit::assets::IconName::NotebookTabs)
+                                        }
+                                        Page::Network => {
+                                            Icon::new(gpui_kit::assets::IconName::Activity)
+                                        }
+                                        Page::Logs => {
+                                            Icon::new(gpui_kit::assets::IconName::FileText)
+                                        }
+                                        _ => sidebar_icon(page),
+                                    }
+                                }
+                                .size(rems(1.25)),
+                            )
                             .when(!self.collapsed, |this| {
                                 this.child(div().min_w_0().text_ellipsis().child(page.label()))
                             }),
@@ -190,6 +231,7 @@ impl RenderOnce for SidebarNavigation {
 impl RenderOnce for Sidebar {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
+        let dark = theme.mode.is_dark();
         let navigation = std::iter::once(Page::Home).chain(Page::PRIMARY);
         let toggle_icon = if self.collapsed {
             IconName::PanelLeftOpen
@@ -203,7 +245,11 @@ impl RenderOnce for Sidebar {
         });
 
         GpuiSidebar::new("main-sidebar")
-            .w(rems(14.))
+            .w(if self.current_page == Page::Settings {
+                rems(14.)
+            } else {
+                rems(14.5)
+            })
             .collapsible(true)
             .collapsed(self.collapsed)
             .header(
@@ -226,7 +272,13 @@ impl RenderOnce for Sidebar {
                                             Icon::empty()
                                                 .path(ZENCLASH_MARK_PATH)
                                                 .size(rems(2.5))
-                                                .text_color(theme.primary),
+                                                .text_color(
+                                                    if self.current_page == Page::Settings {
+                                                        theme.primary
+                                                    } else {
+                                                        theme.chart_3
+                                                    },
+                                                ),
                                         ),
                                 )
                                 .child(
@@ -243,8 +295,18 @@ impl RenderOnce for Sidebar {
                                         .child(
                                             div()
                                                 .text_sm()
+                                                .when(
+                                                    self.current_page != Page::Settings,
+                                                    |label| label.text_xs(),
+                                                )
                                                 .text_color(theme.muted_foreground)
-                                                .child(zenclash_i18n::text("app.description")),
+                                                .child(zenclash_i18n::text(
+                                                    if self.current_page == Page::Settings {
+                                                        "app.description"
+                                                    } else {
+                                                        "app.desktop_description"
+                                                    },
+                                                )),
                                         ),
                                 ),
                         )
@@ -268,15 +330,67 @@ impl RenderOnce for Sidebar {
                     .w_full()
                     .gap_3()
                     .child(SidebarNavigation::new(self.current_page, [Page::Settings]))
+                    .child(
+                        Button::new("sidebar-appearance")
+                            .w_full()
+                            .h(rems(2.75))
+                            .ghost()
+                            .justify_start()
+                            .when(self.collapsed, |this| this.justify_center())
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .gap_3()
+                                    .when(self.collapsed, |this| this.justify_center())
+                                    .child(
+                                        Icon::new(if dark {
+                                            IconName::Moon
+                                        } else {
+                                            IconName::Sun
+                                        })
+                                        .size(rems(1.25)),
+                                    )
+                                    .when(!self.collapsed, |this| {
+                                        this.child(zenclash_i18n::text(if dark {
+                                            "settings.appearance.dark"
+                                        } else {
+                                            "settings.appearance.light"
+                                        }))
+                                    }),
+                            )
+                            .accessibility_label(zenclash_i18n::text(if dark {
+                                "settings.appearance.light"
+                            } else {
+                                "settings.appearance.dark"
+                            }))
+                            .tooltip(zenclash_i18n::text(if dark {
+                                "settings.appearance.light"
+                            } else {
+                                "settings.appearance.dark"
+                            }))
+                            .on_click(move |_, window, cx| {
+                                if dark {
+                                    window.dispatch_action(Box::new(SetLightTheme), cx);
+                                } else {
+                                    window.dispatch_action(Box::new(SetDarkTheme), cx);
+                                }
+                            }),
+                    )
                     .when_some(self.status, |footer, (core, status, connected)| {
                         footer.child(
                             h_flex()
+                                .border_t_1()
+                                .border_color(theme.sidebar_border)
                                 .px_3()
                                 .py_2()
                                 .gap_3()
                                 .child(div().size_2p5().flex_shrink_0().rounded_full().bg(
                                     if connected {
-                                        theme.success
+                                        if self.current_page == Page::Settings {
+                                            theme.success
+                                        } else {
+                                            theme.chart_3
+                                        }
                                     } else {
                                         theme.muted_foreground
                                     },
@@ -286,7 +400,16 @@ impl RenderOnce for Sidebar {
                                         v_flex()
                                             .min_w_0()
                                             .gap_1()
-                                            .child(div().text_sm().child(core))
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .when(
+                                                        self.current_page != Page::Settings
+                                                            && connected,
+                                                        |label| label.text_color(theme.primary),
+                                                    )
+                                                    .child(core),
+                                            )
                                             .child(
                                                 div()
                                                     .text_xs()

@@ -78,6 +78,22 @@ pub(super) struct HomeHistoryState {
     summary: Option<HistorySummary>,
 }
 impl HomeHistoryState {
+    #[cfg(all(test, target_os = "windows"))]
+    pub(super) fn prepare_design_validation(&mut self) {
+        self.release();
+        self.status = HistoryStatus::Ready;
+        self.summary = Some(HistorySummary {
+            ranks: ["browser.exe", "ChatGPT.exe", "terminal.exe", "explorer.exe"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, label)| HistoryRank {
+                    label: Some(label.into()),
+                    bytes: (4 - index) as u64 * 64 * 1024 * 1024,
+                })
+                .collect(),
+        });
+    }
+
     pub(super) fn release(&mut self) {
         self.epoch.fetch_add(1, Ordering::AcqRel);
         self.task.cancel();
@@ -198,14 +214,17 @@ impl RuntimePage {
             HistoryStatus::Stale => "home.history.stale",
         };
         let mut content = v_flex()
-            .p_4()
-            .gap_3()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(zenclash_i18n::text(status)),
-            )
+            .px_4()
+            .py_2()
+            .gap_1()
+            .when(!matches!(state.status, HistoryStatus::Ready), |content| {
+                content.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(zenclash_i18n::text(status)),
+                )
+            })
             .when(!self.preferences.traffic_history_enabled, |content| {
                 content.child(
                     div()
@@ -240,15 +259,15 @@ impl RuntimePage {
                         .child(
                             div().flex_1().min_w_0().child(
                                 Progress::new(("home-process-history", index))
-                                    .h_2()
+                                    .h_3()
                                     .value(rank.bytes as f32 / maximum as f32 * 100.)
-                                    .color(theme.primary),
+                                    .color(theme.chart_3),
                             ),
                         )
                         .child(
                             div()
                                 .w_20()
-                                .text_xs()
+                                .text_sm()
                                 .text_right()
                                 .child(format_bytes(rank.bytes)),
                         ),
@@ -262,9 +281,29 @@ impl RuntimePage {
                 );
             }
         }
-        home_card(zenclash_i18n::text("home.history.title"), theme)
-            .flex_basis(rems(19.))
+        v_flex()
+            .line_height(gpui_kit::relative(1.4))
             .min_w_0()
+            .border_t_1()
+            .border_color(theme.border)
+            .child(
+                h_flex()
+                    .px_4()
+                    .pt_3()
+                    .gap_4()
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child(zenclash_i18n::text("home.history.title")),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(zenclash_i18n::text("home.history.period")),
+                    ),
+            )
             .child(content)
     }
 }

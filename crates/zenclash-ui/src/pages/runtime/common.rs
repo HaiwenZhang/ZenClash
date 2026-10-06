@@ -329,33 +329,6 @@ pub(super) fn normalized_fraction(value: u64, maximum: u64) -> f32 {
     f32::from(u16::try_from(thousandths).unwrap_or(1_000)) / 1_000.0
 }
 
-pub(super) fn compact_text(value: &str, maximum: usize) -> String {
-    let character_count = value.chars().count();
-    if character_count <= maximum {
-        return value.into();
-    }
-    if maximum == 0 {
-        return String::new();
-    }
-    if maximum == 1 {
-        return "…".into();
-    }
-
-    let content_characters = maximum - 1;
-    let prefix_characters = content_characters.div_ceil(2);
-    let suffix_characters = content_characters / 2;
-    let prefix_end = value
-        .char_indices()
-        .nth(prefix_characters)
-        .map_or(value.len(), |(index, _)| index);
-    let suffix_start = value
-        .char_indices()
-        .rev()
-        .nth(suffix_characters - 1)
-        .map_or(0, |(index, _)| index);
-    format!("{}…{}", &value[..prefix_end], &value[suffix_start..])
-}
-
 pub(super) fn format_profile_age(updated_at: u64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -397,7 +370,7 @@ pub(super) fn yes_no(value: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{compact_text, contains_ascii_case_insensitive, list_page};
+    use super::{contains_ascii_case_insensitive, list_page};
 
     #[test]
     fn list_page_clamps_a_stale_page_after_the_collection_shrinks() {
@@ -430,25 +403,5 @@ mod tests {
         assert!(contains_ascii_case_insensitive("Example.COM", "example"));
         assert!(contains_ascii_case_insensitive("节点-A", "节点"));
         assert!(!contains_ascii_case_insensitive("DIRECT", "proxy"));
-    }
-
-    #[test]
-    fn compact_text_preserves_a_value_within_the_limit() {
-        assert_eq!(compact_text("节点-A", 4), "节点-A");
-    }
-
-    #[test]
-    fn compact_text_returns_empty_for_a_zero_character_limit() {
-        assert_eq!(compact_text("abcdef", 0), "");
-    }
-
-    #[test]
-    fn compact_text_returns_an_ellipsis_for_a_one_character_limit() {
-        assert_eq!(compact_text("abcdef", 1), "…");
-    }
-
-    #[test]
-    fn compact_text_keeps_unicode_boundaries_and_exact_width() {
-        assert_eq!(compact_text("订阅地址很长.example", 7), "订阅地…ple");
     }
 }

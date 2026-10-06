@@ -3,7 +3,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex, v_flex,
 };
-use gpui_kit::{App, IntoElement, ParentElement, Styled, div};
+use gpui_kit::{App, IntoElement, ParentElement, Styled, div, prelude::FluentBuilder};
 
 use crate::{
     app::{SetDarkTheme, SetLightTheme},
@@ -58,15 +58,22 @@ pub(crate) fn title(page: Page, cx: &mut App) -> impl IntoElement {
         .child(
             div()
                 .text_2xl()
+                .when(page != Page::Settings, |title| {
+                    title
+                        .text_size(gpui_kit::px(28.))
+                        .line_height(gpui_kit::relative(1.25))
+                })
                 .font_weight(gpui_kit::FontWeight::BOLD)
                 .child(page.title()),
         )
-        .child(
-            div()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child(page.subtitle()),
-        )
+        .when(page == Page::Settings, |this| {
+            this.child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(page.subtitle()),
+            )
+        })
 }
 
 #[cfg(test)]

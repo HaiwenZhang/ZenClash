@@ -21,32 +21,50 @@ impl RuntimePage {
             }))
             .small()
             .h_8()
+            .when(matches!(self.page, Page::Rules | Page::Network), |button| {
+                button.h_10()
+            })
             .outline()
             .loading(self.loading)
             .disabled(self.core_busy())
             .on_click(cx.listener(|this, _, _, cx| this.refresh(cx)));
         let commands = match self.page {
+            Page::Home => div().into_any_element(),
             Page::Profiles => h_flex()
                 .gap_2()
                 .flex_wrap()
-                .child(refresh)
                 .child(self.render_profile_commands(cx))
                 .into_any_element(),
             Page::Logs => self.render_log_actions(cx).into_any_element(),
             Page::Connections => h_flex()
                 .gap_2()
-                .child(refresh)
                 .child(self.render_connection_pause(cx))
                 .child(self.render_connection_close_all(cx))
+                .into_any_element(),
+            Page::Network => h_flex()
+                .gap_2()
+                .child(refresh)
+                .child(
+                    Button::new("copy-support-bundle")
+                        .icon(gpui_kit::component::IconName::Copy)
+                        .label(zenclash_i18n::text("network.diagnostics.copy_support"))
+                        .small()
+                        .h_10()
+                        .outline()
+                        .disabled(self.network_probe.report.is_none())
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.copy_network_support_bundle(cx)),
+                        ),
+                )
                 .into_any_element(),
             Page::Rules => h_flex()
                 .gap_2()
                 .child(refresh)
                 .child(
                     Button::new("rules-resources")
-                        .label(zenclash_i18n::text("navigation.resources.label"))
+                        .label(zenclash_i18n::text("rules.details.resources"))
                         .small()
-                        .h_8()
+                        .h_10()
                         .outline()
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(crate::app::NavigateResources), cx)
@@ -57,17 +75,26 @@ impl RuntimePage {
         };
         v_flex()
             .px_6()
+            .when(self.page != Page::Settings, |view| view.px_8())
             .pt_3()
             .pb_2()
+            .when(self.page == Page::Home, |view| view.pb_1())
+            .when(self.page == Page::Logs, |view| view.pb_0())
             .gap_3()
-            .child(workspace::breadcrumb(self.page, cx))
+            .when(self.page == Page::Settings, |this| {
+                this.child(workspace::breadcrumb(self.page, cx))
+            })
             .child(
                 h_flex()
                     .gap_3()
                     .flex_wrap()
                     .items_end()
                     .justify_between()
-                    .child(workspace::title(self.page, cx))
+                    .child(
+                        div()
+                            .when(self.page == Page::Logs, |title| title.pb_10())
+                            .child(workspace::title(self.page, cx)),
+                    )
                     .child(commands),
             )
     }
@@ -90,6 +117,7 @@ impl RuntimePage {
     fn render_body(
         &mut self,
         theme: &gpui_kit::component::Theme,
+        compact: bool,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         // Installation remains reachable when the current controller cannot provide
@@ -134,7 +162,7 @@ impl RuntimePage {
             .into_any_element();
         }
         if self.page == Page::Home {
-            return self.render_home(theme, cx);
+            return self.render_home(theme, compact, cx);
         }
         if matches!(self.data, RuntimeData::Empty)
             && !matches!(
@@ -185,12 +213,29 @@ impl Focusable for RuntimePage {
 }
 
 impl Render for RuntimePage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         v_flex()
             .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(|this, event: &gpui_kit::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape"
+                    && this.page == Page::Profiles
+                    && !this.core_busy()
+                {
+                    if this.profiles.forms.editing_profile_id.is_some() {
+                        this.cancel_edit_remote_profile(cx);
+                        cx.stop_propagation();
+                    } else if this.profiles.forms.adding_subscription {
+                        this.close_subscription_form(cx);
+                        cx.stop_propagation();
+                    }
+                }
+            }))
             .size_full()
             .bg(theme.background)
+            .when(self.page != Page::Settings, |page| {
+                page.bg(crate::design::workspace_background(&theme))
+            })
             .child(self.render_header(&theme, cx))
             .child(
                 h_flex()
@@ -222,10 +267,21 @@ impl Render for RuntimePage {
                                     .min_w_0()
                                     .gap_4()
                                     .px_6()
+                                    .when(self.page != Page::Settings, |view| view.px_8())
                                     .py_3()
                                     .when(self.page == Page::Settings, |body| body.pl_0())
-                                    .child(self.render_status(&theme))
-                                    .child(self.render_body(&theme, cx)),
+                                    .when(
+                                        self.page == Page::Settings
+                                            || self.startup_error.is_some()
+                                            || self.error.is_some()
+                                            || self.notice.is_some(),
+                                        |body| body.child(self.render_status(&theme)),
+                                    )
+                                    .child(self.render_body(
+                                        &theme,
+                                        window.viewport_size().width < gpui_kit::px(1400.),
+                                        cx,
+                                    )),
                             )
                             .vertical_scrollbar(&self.settings_navigation.scroll),
                     ),

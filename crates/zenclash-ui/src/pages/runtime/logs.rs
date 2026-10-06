@@ -9,9 +9,9 @@ use std::{
 use super::{
     AppContext, Button, ClipboardItem, Context, Disableable, Entity, FluentBuilder, IconName,
     Input, InputEvent, InputState, IntoElement, LogTimeSource, MihomoLogLevel, Page, ParentElement,
-    RuntimePage, Selectable, Sizable, Styled, Subscription, Window, compact_text,
-    contains_ascii_case_insensitive, div, empty_state, format_bytes, format_log_entries,
-    format_log_entries_support_safe, h_flex, info_row, list_page, pagination_summary, v_flex,
+    RuntimePage, Selectable, Sizable, Styled, Subscription, Window,
+    contains_ascii_case_insensitive, div, empty_state, format_log_entries,
+    format_log_entries_support_safe, h_flex, list_page, pagination_summary, v_flex,
 };
 
 const LOGS_PER_PAGE: usize = 100;
@@ -29,9 +29,11 @@ pub(super) struct LogUiState {
     connected: bool,
     level: Option<MihomoLogLevel>,
     persistence: zenclash_core::LogPersistenceStatus,
+    pending_entries: usize,
     copying: bool,
     exporting: bool,
     level_filter: Option<String>,
+    oldest_first: bool,
     selected: Option<(Arc<zenclash_core::LogEntry>, LogRow)>,
     paused: bool,
 }
@@ -45,6 +47,7 @@ struct LogPresentation {
     matches: Vec<usize>,
     level_counts: Vec<(String, u64)>,
     level_filter: Option<String>,
+    oldest_first: bool,
 }
 
 #[derive(Clone)]
@@ -53,29 +56,40 @@ struct LogRow {
     payload: gpui_kit::SharedString,
     time: gpui_kit::SharedString,
     time_source: LogTimeSource,
-    fields: Option<gpui_kit::SharedString>,
 }
 
 impl From<&zenclash_core::LogEntry> for LogRow {
     fn from(entry: &zenclash_core::LogEntry) -> Self {
         Self {
-            level: entry.level.to_uppercase().into(),
+            level: normalized_level(&entry.level).into(),
             payload: entry.payload.clone().into(),
-            time: entry
-                .core_time
-                .clone()
-                .unwrap_or_else(|| entry.timestamp_ms.to_string())
-                .into(),
+            time: format_log_time(entry).into(),
             time_source: entry.time_source,
-            fields: (!entry.fields.is_null()).then(|| {
-                compact_text(
-                    &serde_json::to_string(&entry.fields).unwrap_or_else(|_| "{}".into()),
-                    180,
-                )
-                .into()
-            }),
         }
     }
+}
+
+fn format_log_time(entry: &zenclash_core::LogEntry) -> String {
+    if let Some(time) = &entry.core_time {
+        if let Ok(time) = chrono::DateTime::parse_from_rfc3339(time) {
+            return time
+                .with_timezone(&chrono::Local)
+                .format("%H:%M:%S")
+                .to_string();
+        }
+        if chrono::NaiveTime::parse_from_str(time, "%H:%M:%S").is_ok() {
+            return time.clone();
+        }
+    }
+    i64::try_from(entry.timestamp_ms)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|time| {
+            time.with_timezone(&chrono::Local)
+                .format("%H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|| "—".into())
 }
 
 impl LogPresentation {
@@ -115,6 +129,16 @@ impl LogPresentation {
                 })
                 .map(|(index, _)| index)
                 .collect();
+            if self.oldest_first {
+                self.matches.reverse();
+            }
+        }
+    }
+
+    fn set_order(&mut self, oldest_first: bool) {
+        if self.oldest_first != oldest_first {
+            self.matches.reverse();
+            self.oldest_first = oldest_first;
         }
     }
 
@@ -133,6 +157,9 @@ impl LogPresentation {
             })
             .map(|(index, _)| index)
             .collect();
+        if self.oldest_first {
+            self.matches.reverse();
+        }
     }
 }
 
@@ -142,6 +169,7 @@ struct LogSnapshot {
     connected: bool,
     level: MihomoLogLevel,
     persistence: zenclash_core::LogPersistenceStatus,
+    pending_entries: usize,
 }
 
 struct PreparedLogView {
@@ -149,6 +177,7 @@ struct PreparedLogView {
     connected: bool,
     level: MihomoLogLevel,
     persistence: zenclash_core::LogPersistenceStatus,
+    pending_entries: usize,
 }
 
 #[derive(Default)]
@@ -179,7 +208,7 @@ impl LogProjectionWorker {
         u64,
         tokio::task::JoinHandle<Result<Option<PreparedLogView>, String>>,
     ) {
-        self.start_filtered(runtime, previous, query, None, source)
+        self.start_filtered(runtime, previous, query, None, false, source)
     }
 
     fn start_filtered(
@@ -188,6 +217,7 @@ impl LogProjectionWorker {
         previous: Arc<LogPresentation>,
         query: String,
         level_filter: Option<String>,
+        oldest_first: bool,
         source: impl FnOnce() -> LogSnapshot + Send + 'static,
     ) -> (
         u64,
@@ -212,6 +242,7 @@ impl LogProjectionWorker {
                 let presentation = if previous.revision == Some(snapshot.revision)
                     && previous.query == query
                     && previous.level_filter == level_filter
+                    && previous.oldest_first == oldest_first
                 {
                     previous
                 } else {
@@ -222,6 +253,7 @@ impl LogProjectionWorker {
                     if presentation.level_filter != level_filter {
                         presentation.set_level_filter(level_filter);
                     }
+                    presentation.set_order(oldest_first);
                     Arc::new(presentation)
                 };
                 (current.load(Ordering::Acquire) == generation).then_some(PreparedLogView {
@@ -229,6 +261,7 @@ impl LogProjectionWorker {
                     connected: snapshot.connected,
                     level: snapshot.level,
                     persistence: snapshot.persistence,
+                    pending_entries: snapshot.pending_entries,
                 })
             })
             .await
@@ -256,8 +289,14 @@ impl LogUiState {
 
     #[cfg(test)]
     pub(super) fn prepare_design_validation(&mut self) {
-        let entries = ["info", "warning", "error", "debug"].into_iter().enumerate().map(|(index, level)| {
-            Arc::new(zenclash_core::LogEntry { level: level.into(), payload: format!("[TCP] 127.0.0.1:5000 --> example.com:443 via PROXY / Hong Kong 01 ({index})"), core_time: Some("12:34:56".into()), ..Default::default() })
+        let entries = ["info", "error", "debug", "warning"].into_iter().cycle().take(128).enumerate().map(|(index, level)| {
+            let (payload, fields) = match index % 4 {
+                0 => (format!("[TCP] example.com:443 → PROXY ({index})"), serde_json::json!({"network": "tcp", "group": "PROXY"})),
+                1 => ("规则资源请求失败，可重试".into(), serde_json::json!({"type": "rule-provider", "error": "request failed"})),
+                2 => (format!("DNS 查询完成 · service-{index}.example.com"), serde_json::Value::Null),
+                _ => ("节点延迟测试超时".into(), serde_json::json!({"type": "healthcheck", "proxy": "fixture-node", "timeout": "5000ms"})),
+            };
+            Arc::new(zenclash_core::LogEntry { level: level.into(), payload, core_time: Some(format!("12:{:02}:{:02}", 32 + index / 60, index % 60)), time_source: LogTimeSource::Core, fields, ..Default::default() })
         }).collect();
         let mut presentation = LogPresentation::default();
         presentation.refresh(0, String::new(), || entries);
@@ -282,6 +321,7 @@ impl LogUiState {
         self.last_refresh = None;
         self.level = None;
         self.persistence = zenclash_core::LogPersistenceStatus::default();
+        self.pending_entries = 0;
         self.selected = None;
         self.paused = false;
     }
@@ -312,9 +352,11 @@ impl LogUiState {
                 connected: false,
                 level: None,
                 persistence: zenclash_core::LogPersistenceStatus::default(),
+                pending_entries: 0,
                 copying: false,
                 exporting: false,
                 level_filter: None,
+                oldest_first: false,
                 selected: None,
                 paused: false,
             },
@@ -338,6 +380,7 @@ impl RuntimePage {
         if previous.revision == Some(revision)
             && previous.query == self.logs.query
             && previous.level_filter == self.logs.level_filter
+            && previous.oldest_first == self.logs.oldest_first
             && self
                 .logs
                 .last_refresh
@@ -352,6 +395,7 @@ impl RuntimePage {
             previous,
             self.logs.query.clone(),
             self.logs.level_filter.clone(),
+            self.logs.oldest_first,
             move || {
                 let revision = if paused { revision } else { monitor.revision() };
                 LogSnapshot {
@@ -361,6 +405,7 @@ impl RuntimePage {
                     connected: monitor.connected(),
                     level: monitor.level(),
                     persistence: monitor.persistence_status(),
+                    pending_entries: monitor.pending_persistence_entries(),
                 }
             },
         );
@@ -382,11 +427,13 @@ impl RuntimePage {
                         let changed = !Arc::ptr_eq(&this.logs.presentation, &view.presentation)
                             || this.logs.connected != view.connected
                             || this.logs.level != Some(view.level)
-                            || this.logs.persistence != view.persistence;
+                            || this.logs.persistence != view.persistence
+                            || this.logs.pending_entries != view.pending_entries;
                         this.logs.presentation = view.presentation;
                         this.logs.connected = view.connected;
                         this.logs.level = Some(view.level);
                         this.logs.persistence = view.persistence;
+                        this.logs.pending_entries = view.pending_entries;
                         if changed {
                             cx.notify();
                         }
@@ -501,131 +548,6 @@ impl RuntimePage {
                     .text_color(theme.muted_foreground)
                     .child(zenclash_i18n::text("logs.persistence.enabled.description")),
             )
-    }
-
-    fn render_log_persistence(
-        &self,
-        theme: &gpui_kit::component::Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui_kit::Div {
-        use gpui_kit::component::{
-            menu::{DropdownMenu, PopupMenuItem},
-            switch::Switch,
-        };
-        let status = &self.logs.persistence;
-        let ready = self.logs.presentation.revision.is_some();
-        let state = status.last_error.clone().unwrap_or_else(|| {
-            zenclash_i18n::text(if !ready {
-                "runtime.empty.loading"
-            } else if status.enabled {
-                "logs.persistence.writing"
-            } else {
-                "logs.persistence.paused"
-            })
-        });
-        let owner = cx.entity().downgrade();
-        let busy = self.mutation_busy(crate::pages::runtime::busy::MutationDomain::Logs);
-        v_flex()
-            .gap_3()
-            .p_4()
-            .border_1()
-            .border_color(theme.border)
-            .rounded(theme.radius)
-            .bg(theme.group_box)
-            .child(
-                h_flex()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(zenclash_i18n::text("logs.persistence.title")),
-                    )
-                    .child(
-                        Switch::new("logs-file-enabled")
-                            .accessibility_label(zenclash_i18n::text(
-                                "logs.persistence.enabled.title",
-                            ))
-                            .small()
-                            .checked(self.preferences.log_file_enabled)
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, checked, _, cx| {
-                                this.set_log_file_enabled(*checked, cx)
-                            })),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_3()
-                    .text_xs()
-                    .child(
-                        div()
-                            .w_20()
-                            .text_color(theme.muted_foreground)
-                            .child(zenclash_i18n::text("logs.persistence.state")),
-                    )
-                    .child(div().flex_1().min_w_0().child(state)),
-            )
-            .child(
-                h_flex()
-                    .gap_3()
-                    .text_xs()
-                    .child(
-                        div()
-                            .w_20()
-                            .text_color(theme.muted_foreground)
-                            .child(zenclash_i18n::text("logs.persistence.usage")),
-                    )
-                    .child(div().flex_1().child(if ready {
-                        format_log_disk_usage(status)
-                    } else {
-                        zenclash_i18n::text("runtime.empty.loading")
-                    })),
-            )
-            .child(
-                h_flex()
-                    .gap_3()
-                    .text_xs()
-                    .child(
-                        div()
-                            .w_20()
-                            .text_color(theme.muted_foreground)
-                            .child(zenclash_i18n::text("logs.persistence.dropped")),
-                    )
-                    .child(div().flex_1().child(status.dropped_entries.to_string())),
-            )
-            .child(
-                Button::new("log-file-limit")
-                    .label(format!(
-                        "{} · {} MiB",
-                        zenclash_i18n::text("logs.persistence.limit"),
-                        self.preferences.log_file_max_mebibytes
-                    ))
-                    .small()
-                    .outline()
-                    .disabled(busy || !self.preferences.log_file_enabled)
-                    .dropdown_caret(true)
-                    .dropdown_menu(move |mut menu, _, _| {
-                        for mebibytes in [5_u16, 10, 25, 50] {
-                            let owner = owner.clone();
-                            menu =
-                                menu.item(PopupMenuItem::new(format!("{mebibytes} MiB")).on_click(
-                                    move |_, _, cx| {
-                                        let _ = owner.update(cx, |page, cx| {
-                                            page.set_log_file_limit(mebibytes, cx)
-                                        });
-                                    },
-                                ));
-                        }
-                        menu
-                    }),
-            )
-            .child(div().text_xs().text_color(theme.muted_foreground).child(
-                self.logs.level.map_or_else(
-                    || zenclash_i18n::text("runtime.empty.loading"),
-                    log_level_description,
-                ),
-            ))
     }
 
     fn set_log_file_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -917,7 +839,7 @@ fn render_log_header(
     filtered_entries: usize,
     query_is_empty: bool,
     connected: Option<bool>,
-    _persistence: &zenclash_core::LogPersistenceStatus,
+    latest_time: Option<gpui_kit::SharedString>,
     theme: &gpui_kit::component::Theme,
 ) -> gpui_kit::Div {
     let color = match connected {
@@ -931,12 +853,14 @@ fn render_log_header(
         .p_4()
         .border_1()
         .border_color(theme.border)
-        .rounded(theme.radius)
+        .rounded(theme.radius_lg)
+        .min_h(gpui_kit::rems(4.))
         .bg(theme.group_box)
         .child(
             h_flex()
                 .gap_2()
                 .text_sm()
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .text_color(color)
                 .child(div().size_2().rounded_full().bg(color))
                 .child(zenclash_i18n::text(match connected {
@@ -945,30 +869,41 @@ fn render_log_header(
                     None => "runtime.empty.loading",
                 })),
         )
-        .child(div().text_sm().child(format!(
-            "{}   {}",
-            zenclash_i18n::text(if query_is_empty {
-                "logs.metrics.entries"
-            } else {
-                "logs.metrics.filtered"
-            }),
-            if query_is_empty {
-                total_entries.to_string()
-            } else {
-                format!("{filtered_entries} / {total_entries}")
-            }
-        )))
-}
-
-fn format_log_disk_usage(persistence: &zenclash_core::LogPersistenceStatus) -> String {
-    if persistence.max_bytes == 0 {
-        return format_bytes(persistence.size_bytes);
-    }
-    format!(
-        "{} / {}",
-        format_bytes(persistence.size_bytes),
-        format_bytes(persistence.max_bytes)
-    )
+        .child(
+            h_flex()
+                .gap_3()
+                .pl_4()
+                .border_l_1()
+                .border_color(theme.border)
+                .child(div().text_sm().text_color(theme.muted_foreground).child(
+                    zenclash_i18n::text(if query_is_empty {
+                        "logs.metrics.entries"
+                    } else {
+                        "logs.metrics.filtered"
+                    }),
+                ))
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .child(if query_is_empty {
+                            total_entries.to_string()
+                        } else {
+                            format!("{filtered_entries} / {total_entries}")
+                        }),
+                ),
+        )
+        .child(
+            h_flex()
+                .gap_3()
+                .pl_4()
+                .border_l_1()
+                .border_color(theme.border)
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(zenclash_i18n::text("logs.ui.updated"))
+                .child(latest_time.unwrap_or_else(|| "—".into())),
+        )
 }
 
 fn normalized_level(level: &str) -> String {
@@ -1027,6 +962,7 @@ fn json_value_matches(value: &serde_json::Value, query: &str) -> bool {
 #[cfg(test)]
 pub(in crate::pages::runtime) mod tests {
     use super::*;
+    use gpui_kit::component::WindowExt;
     use gpui_kit::test::TestWindowExt;
 
     #[gpui_kit::test]
@@ -1062,6 +998,15 @@ pub(in crate::pages::runtime) mod tests {
             });
             window.render_frame(cx);
             window.click("pause-logs-display", cx);
+            window.click("clear-logs", cx);
+            assert!(window.has_active_dialog(cx));
+            window.press("escape", cx);
+            assert!(!window.has_active_dialog(cx));
+            assert_eq!(page.read(cx).logs.presentation.entries.len(), 2);
+            assert!(page.read(cx).logs.paused);
+            window.click("log-display-order", cx);
+            window.press("escape", cx);
+            assert!(!page.read(cx).logs.oldest_first);
             page.update(cx, |page, cx| {
                 page.log_monitor.clear();
                 page.log_monitor.set_level(MihomoLogLevel::Warning);
@@ -1448,6 +1393,7 @@ pub(in crate::pages::runtime) mod tests {
             previous,
             String::new(),
             Some("DEBUG".into()),
+            false,
             || snapshot(1, None),
         );
         let filtered = task.await.unwrap().unwrap().unwrap().presentation;
@@ -1469,6 +1415,7 @@ pub(in crate::pages::runtime) mod tests {
             connected: true,
             level: MihomoLogLevel::Info,
             persistence: zenclash_core::LogPersistenceStatus::default(),
+            pending_entries: 0,
         }
     }
 
@@ -1563,7 +1510,7 @@ pub(in crate::pages::runtime) mod tests {
     }
 
     #[test]
-    fn prepared_log_rows_keep_the_full_export_source_and_bound_structured_display_text() {
+    fn prepared_log_rows_keep_the_full_export_source_and_structured_fields() {
         let entry = Arc::new(zenclash_core::LogEntry {
             level: "warning".into(),
             payload: "prepared payload".into(),
@@ -1575,15 +1522,7 @@ pub(in crate::pages::runtime) mod tests {
 
         assert_eq!(presentation.rows[0].level.as_ref(), "WARNING");
         assert_eq!(presentation.rows[0].payload.as_ref(), "prepared payload");
-        assert!(
-            presentation.rows[0]
-                .fields
-                .as_ref()
-                .unwrap()
-                .chars()
-                .count()
-                <= 181
-        );
+        assert_eq!(presentation.entries[0].fields, entry.fields);
         assert!(Arc::ptr_eq(&presentation.entries[0], &entry));
         assert_eq!(
             presentation.entries[0].fields["detail"]
@@ -1650,6 +1589,50 @@ pub(in crate::pages::runtime) mod tests {
     }
 
     #[test]
+    fn chronological_order_survives_filters_and_new_snapshots() {
+        let mut presentation = LogPresentation::default();
+        presentation.refresh(1, String::new(), || {
+            vec![log_fixture("old"), log_fixture("new")]
+        });
+        presentation.set_order(true);
+        assert_eq!(presentation.matches, [0, 1]);
+        presentation.set_level_filter(Some(String::new()));
+        assert_eq!(presentation.matches, [0, 1]);
+        presentation.refresh(2, String::new(), || {
+            vec![
+                log_fixture("old"),
+                log_fixture("new"),
+                log_fixture("latest"),
+            ]
+        });
+        assert_eq!(presentation.matches, [0, 1, 2]);
+        presentation.set_order(false);
+        assert_eq!(presentation.matches, [2, 1, 0]);
+    }
+
+    #[test]
+    fn log_rows_normalize_time_and_warning() {
+        let mut entry = zenclash_core::LogEntry {
+            level: "warn".into(),
+            core_time: Some("12:34:56".into()),
+            ..Default::default()
+        };
+        let row = LogRow::from(&entry);
+        assert_eq!(row.level.as_ref(), "WARNING");
+        assert_eq!(row.time.as_ref(), "12:34:56");
+        entry.core_time = Some("invalid".into());
+        entry.timestamp_ms = u64::MAX;
+        assert_eq!(format_log_time(&entry), "—");
+        entry.timestamp_ms = 1_728_000_000_000;
+        let expected = chrono::DateTime::from_timestamp_millis(1_728_000_000_000)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%H:%M:%S")
+            .to_string();
+        assert_eq!(format_log_time(&entry), expected);
+    }
+
+    #[test]
     fn log_rotation_and_clear_replace_filtered_indices() {
         let mut presentation = LogPresentation::default();
         presentation.refresh(1, "match".into(), || {
@@ -1692,17 +1675,6 @@ pub(in crate::pages::runtime) mod tests {
         assert!(log_matches(&entry, "network"));
         assert!(log_matches(&entry, "tcp"));
         assert!(!log_matches(&entry, "udp"));
-    }
-
-    #[test]
-    fn disk_usage_always_includes_the_configured_limit() {
-        let status = zenclash_core::LogPersistenceStatus {
-            size_bytes: 2_621_440,
-            max_bytes: 5_242_880,
-            ..Default::default()
-        };
-
-        assert_eq!(format_log_disk_usage(&status), "2.5 MiB / 5.0 MiB");
     }
 
     #[test]

@@ -3,6 +3,10 @@ use zenclash_core::TrafficSnapshot;
 
 const HOME_CHART_SAMPLE_LIMIT: usize = 300;
 
+pub(super) fn observed_span_fraction(seconds: u64) -> f32 {
+    (seconds.min(300) as f32 / 300.).max(1. / 300.)
+}
+
 #[derive(Clone, Copy)]
 struct TimedSample {
     at_ms: u64,
@@ -21,18 +25,34 @@ pub(super) struct HomeChartState {
     connection_samples: VecDeque<ConnectionSample>,
     generation: u64,
     samples: VecDeque<TimedSample>,
-    paused: Option<VecDeque<TimedSample>>,
-    five_minutes: bool,
 }
 
 impl HomeChartState {
+    #[cfg(all(test, target_os = "windows"))]
+    pub(super) fn prepare_design_validation(&mut self, generation: u64) -> TrafficSnapshot {
+        *self = Self::default();
+        let mut snapshot = TrafficSnapshot::default();
+        for index in 0..=60 {
+            let wave = ((index as f64 * 0.45).sin() + 1.) * 0.5;
+            snapshot = TrafficSnapshot {
+                generation,
+                updated_at_ms: 1_700_000_000_000 + index * 5_000,
+                upload: 20_000 + (wave * 60_000.) as u64,
+                download: 80_000 + (wave * 160_000.) as u64,
+                connected: true,
+                ..Default::default()
+            };
+            self.observe(&snapshot, generation);
+        }
+        snapshot
+    }
+
     fn observe(&mut self, snapshot: &TrafficSnapshot, generation: u64) -> bool {
         let generation_changed = self.generation != generation;
         if self.generation != generation {
             self.generation = generation;
             self.samples.clear();
             self.connection_samples.clear();
-            self.paused = None;
         }
         if snapshot.generation != generation || snapshot.updated_at_ms == 0 {
             return generation_changed;
@@ -117,20 +137,12 @@ impl HomeChartState {
     }
 
     fn displayed(&self) -> impl Iterator<Item = &TimedSample> {
-        let samples = self.paused.as_ref().unwrap_or(&self.samples);
+        let samples = &self.samples;
         let end = samples.back().map_or(0, |sample| sample.at_ms);
-        let duration = if self.five_minutes { 300_000 } else { 60_000 };
+        let duration = 300_000;
         samples
             .iter()
             .filter(move |sample| sample.at_ms >= end.saturating_sub(duration))
-    }
-
-    fn toggle_pause(&mut self) {
-        self.paused = if self.paused.is_some() {
-            None
-        } else {
-            Some(self.samples.clone())
-        };
     }
 
     pub(super) fn points(&self, generation: u64) -> (Vec<TrafficChartPoint>, u64) {
@@ -147,8 +159,10 @@ impl HomeChartState {
             .map(|sample| TrafficChartPoint {
                 label: if sample.at_ms == end {
                     zenclash_i18n::text("home.traffic.now").into()
+                } else if end.saturating_sub(sample.at_ms) < 60_000 {
+                    format!("−{}s", end.saturating_sub(sample.at_ms).div_ceil(1_000)).into()
                 } else {
-                    format!("−{:.1}s", end.saturating_sub(sample.at_ms) as f64 / 1_000.).into()
+                    format!("−{:.1}m", end.saturating_sub(sample.at_ms) as f64 / 60_000.).into()
                 },
                 upload: chart_value(sample.value.upload),
                 download: chart_value(sample.value.download),
@@ -188,47 +202,6 @@ impl RuntimePage {
                 .value(),
         );
         generation_changed || traffic_changed || connections_changed
-    }
-
-    pub(super) fn render_home_chart_controls(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
-        h_flex()
-            .gap_2()
-            .child(
-                Button::new("home-chart-60s")
-                    .small()
-                    .outline()
-                    .label(zenclash_i18n::text("home.traffic.range_60"))
-                    .selected(!self.home.chart.five_minutes)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.home.chart.five_minutes = false;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("home-chart-5m")
-                    .small()
-                    .outline()
-                    .label(zenclash_i18n::text("home.traffic.range_300"))
-                    .selected(self.home.chart.five_minutes)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.home.chart.five_minutes = true;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("home-chart-pause")
-                    .small()
-                    .outline()
-                    .label(zenclash_i18n::text(if self.home.chart.paused.is_some() {
-                        "home.traffic.resume"
-                    } else {
-                        "home.traffic.pause"
-                    }))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.home.chart.toggle_pause();
-                        cx.notify();
-                    })),
-            )
     }
 }
 
@@ -271,6 +244,13 @@ mod tests {
     }
 
     #[test]
+    fn short_history_occupies_only_its_observed_part_of_the_five_minute_frame() {
+        assert_eq!(observed_span_fraction(60), 0.2);
+        assert_eq!(observed_span_fraction(300), 1.);
+        assert_eq!(observed_span_fraction(600), 1.);
+    }
+
+    #[test]
     fn chart_windows_use_actual_timestamps_and_do_not_duplicate_frames() {
         let mut state = HomeChartState::default();
         for seconds in 1..=400 {
@@ -278,25 +258,19 @@ mod tests {
         }
         state.observe(&frame(400_000), 1);
         assert_eq!(state.samples.len(), 300);
-        assert_eq!(state.points(1).1, 60);
-        assert_eq!(state.points(1).0.len(), 61);
-        state.five_minutes = true;
         assert_eq!(state.points(1).0.len(), 300);
         assert_eq!(state.points(1).1, 299);
     }
     #[test]
-    fn pausing_freezes_only_the_display_and_generation_change_clears_old_samples() {
+    fn generation_change_clears_old_samples() {
         let mut state = HomeChartState::default();
         state.observe(&frame(1_000), 1);
-        state.toggle_pause();
         state.observe(&frame(2_000), 1);
         assert_eq!(state.points(1).0[0].upload, 1_000.);
         assert_eq!(state.samples.len(), 2);
-        state.toggle_pause();
         assert_eq!(state.points(1).0.len(), 2);
         state.observe(&frame(3_000), 2);
         assert!(state.samples.is_empty());
-        assert!(state.paused.is_none());
         assert!(state.points(1).0.is_empty());
     }
 }

@@ -53,11 +53,42 @@ impl IconNamed for AppIcon {
     }
 }
 
+gpui_kit::assets::icon_assets!(
+    LogActionAssets,
+    [
+        Clipboard,
+        Upload,
+        Trash,
+        Laptop,
+        Server,
+        Globe,
+        Pause,
+        Play,
+        Square,
+        ArrowDownUp,
+        FileText,
+        NotebookTabs,
+        Activity,
+        Layers,
+        List,
+        ChartColumn
+    ]
+);
+
 /// Combined application and GPUI Kit asset source.
 pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        let diagnostic_icon: Option<&'static [u8]> = match path {
+            "icons/server.svg" => Some(include_bytes!("../assets/icons/server.svg")),
+            "icons/clock.svg" => Some(include_bytes!("../assets/icons/clock.svg")),
+            "icons/network.svg" => Some(include_bytes!("../assets/icons/network.svg")),
+            _ => None,
+        };
+        if let Some(bytes) = diagnostic_icon {
+            return Ok(Some(Cow::Borrowed(bytes)));
+        }
         if path == ZENCLASH_MARK_PATH {
             return Ok(Some(Cow::Borrowed(include_bytes!(
                 "../assets/icons/zenclash-mark.svg"
@@ -104,12 +135,19 @@ impl AssetSource for Assets {
             ))));
         }
 
+        if let Some(asset) = LogActionAssets.load(path)? {
+            return Ok(Some(asset));
+        }
         ComponentAssets.load(path)
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut assets = ComponentAssets.list(path)?;
+        assets.extend(LogActionAssets.list(path)?);
         for app_asset in [
+            "icons/server.svg",
+            "icons/clock.svg",
+            "icons/network.svg",
             ZENCLASH_MARK_PATH,
             GROUP_ICON_PATH,
             RADIO_ICON_PATH,

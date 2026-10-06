@@ -257,6 +257,47 @@ impl Render for ZenClashApp {
         };
         let connected = self.controller_indicator == ControllerIndicator::Connected;
         let status_key = self.controller_indicator.key();
+        let operational = self.operational_status.snapshot();
+        let process = operational
+            .process
+            .is_fresh()
+            .then(|| operational.process.value())
+            .flatten()
+            .filter(|process| process.generation == self.core_session.generation());
+        let (sidebar_core, sidebar_detail, sidebar_live) = if self.current_page == Page::Settings {
+            (
+                self.core_kind.display_name().to_owned(),
+                zenclash_i18n::text(status_key),
+                connected,
+            )
+        } else {
+            let live = process.is_some_and(|process| process.running);
+            let state = match process {
+                Some(process) if process.running => "app.status.running",
+                Some(process)
+                    if process.recovery == zenclash_core::ProcessRecoveryStatus::Stopped =>
+                {
+                    "home.evidence.core_stopped"
+                }
+                Some(_) => "home.evidence.core_unavailable",
+                None => "common.status.unknown",
+            };
+            let detail = if connected {
+                crate::components::sidebar::runtime_uptime(process)
+                    .unwrap_or_else(|| zenclash_i18n::text(status_key))
+            } else {
+                zenclash_i18n::text(status_key)
+            };
+            (
+                format!(
+                    "{} · {}",
+                    self.core_kind.display_name(),
+                    zenclash_i18n::text(state)
+                ),
+                detail,
+                live,
+            )
+        };
 
         v_flex()
             .id("zenclash-app")
@@ -307,11 +348,7 @@ impl Render for ZenClashApp {
                     .child(
                         Sidebar::new(self.current_page)
                             .collapsed(self.sidebar_collapsed)
-                            .status(
-                                self.core_kind.display_name().to_owned(),
-                                zenclash_i18n::text(status_key),
-                                connected,
-                            ),
+                            .status(sidebar_core, sidebar_detail, sidebar_live),
                     )
                     .child(
                         v_flex()
@@ -319,30 +356,37 @@ impl Render for ZenClashApp {
                             .h_full()
                             .min_w_0()
                             .child(div().flex_1().min_h_0().child(content))
-                            .child(
-                                h_flex()
-                                    .id("main-window-status-bar")
-                                    .min_h_6()
-                                    .flex_shrink_0()
-                                    .px_4()
-                                    .gap_3()
-                                    .justify_between()
-                                    .border_t_1()
-                                    .border_color(theme.border)
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(
-                                        h_flex()
-                                            .gap_2()
-                                            .child(div().size_2().rounded_full().bg(if connected {
-                                                theme.success
-                                            } else {
-                                                theme.muted_foreground
-                                            }))
-                                            .child(zenclash_i18n::text(status_key)),
-                                    )
-                                    .child(format!("ZenClash {}", env!("ZENCLASH_BUILD_VERSION"))),
-                            ),
+                            .when(self.current_page == Page::Settings, |this| {
+                                this.child(
+                                    h_flex()
+                                        .id("main-window-status-bar")
+                                        .min_h_6()
+                                        .flex_shrink_0()
+                                        .px_4()
+                                        .gap_3()
+                                        .justify_between()
+                                        .border_t_1()
+                                        .border_color(theme.border)
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(
+                                            h_flex()
+                                                .gap_2()
+                                                .child(div().size_2().rounded_full().bg(
+                                                    if connected {
+                                                        theme.success
+                                                    } else {
+                                                        theme.muted_foreground
+                                                    },
+                                                ))
+                                                .child(zenclash_i18n::text(status_key)),
+                                        )
+                                        .child(format!(
+                                            "ZenClash {}",
+                                            env!("ZENCLASH_BUILD_VERSION")
+                                        )),
+                                )
+                            }),
                     ),
             )
     }

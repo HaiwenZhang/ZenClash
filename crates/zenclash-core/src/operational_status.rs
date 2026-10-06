@@ -186,6 +186,9 @@ pub struct ProcessStatus {
     pub managed: bool,
     /// Last observed live process identifier for a managed core.
     pub pid: Option<u32>,
+    /// Unix timestamp of the observed live managed core's successful start.
+    /// External attachments and unavailable observations have no start time.
+    pub started_at_secs: Option<u64>,
     /// Whether the process or external attachment is currently running.
     pub running: bool,
     /// Last successful runtime transition generation.
@@ -218,6 +221,17 @@ pub enum ProcessRecoveryStatus {
 }
 
 impl ProcessStatus {
+    /// Returns elapsed seconds only for a live managed core with a valid start time.
+    #[must_use]
+    pub fn uptime_secs_at(&self, now_secs: u64) -> Option<u64> {
+        if !self.managed || !self.running {
+            return None;
+        }
+        self.started_at_secs
+            .filter(|started| *started > 0)
+            .and_then(|started| now_secs.checked_sub(started))
+    }
+
     fn from_snapshot(session: &CoreSession, snapshot: CoreSessionSnapshot) -> Self {
         let process = session.managed_process_snapshot();
         let lifecycle = session.lifecycle_snapshot();
@@ -235,6 +249,18 @@ impl ProcessStatus {
                         .and_then(|status| status.core_pid)
                 }),
             running: snapshot.running.unwrap_or(false),
+            started_at_secs: snapshot.running.filter(|running| *running).and_then(|_| {
+                process
+                    .as_ref()
+                    .and_then(|process| process.started_at_secs)
+                    .or_else(|| {
+                        session
+                            .client()
+                            .service_client()
+                            .and_then(|client| client.snapshot())
+                            .and_then(|status| status.core_started_at)
+                    })
+            }),
             generation: snapshot.generation,
             exit_reason: lifecycle.exit_reason.or_else(|| {
                 process
@@ -1328,6 +1354,26 @@ mod tests {
         assert!(!same_generation(expected, current));
     }
 
+    #[test]
+    fn uptime_requires_a_live_managed_process_and_a_valid_clock() {
+        let snapshot = controllable_snapshot();
+        let mut process = snapshot.process.value().unwrap().clone();
+        process.started_at_secs = Some(100);
+        assert_eq!(process.uptime_secs_at(100), Some(0));
+        assert_eq!(process.uptime_secs_at(3_761), Some(3_661));
+        assert_eq!(process.uptime_secs_at(99), None);
+        process.running = false;
+        assert_eq!(process.uptime_secs_at(200), None);
+        process.running = true;
+        process.managed = false;
+        assert_eq!(process.uptime_secs_at(200), None);
+        process.managed = true;
+        process.started_at_secs = Some(0);
+        assert_eq!(process.uptime_secs_at(200), None);
+        process.started_at_secs = None;
+        assert_eq!(process.uptime_secs_at(200), None);
+    }
+
     fn controllable_snapshot() -> OperationalSnapshot {
         OperationalSnapshot {
             process: Observation::Fresh {
@@ -1335,6 +1381,7 @@ mod tests {
                     kind: CoreKind::Mihomo,
                     managed: true,
                     pid: None,
+                    started_at_secs: None,
                     running: true,
                     generation: 7,
                     exit_reason: None,

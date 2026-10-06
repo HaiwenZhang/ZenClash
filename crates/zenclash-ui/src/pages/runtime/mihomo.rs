@@ -538,6 +538,7 @@ mod owner_status_tests {
             kind: CoreKind::Mihomo,
             managed: true,
             pid: None,
+            started_at_secs: None,
             running: true,
             generation: 2,
             exit_reason: None,

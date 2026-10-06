@@ -349,6 +349,12 @@ impl LogMonitor {
         self.file.status()
     }
 
+    /// Returns entries awaiting completion of a disk write, including the in-flight entry.
+    #[must_use]
+    pub fn pending_persistence_entries(&self) -> usize {
+        self.file.pending_entries()
+    }
+
     /// Returns whether the log WebSocket is currently connected.
     #[must_use]
     pub fn connected(&self) -> bool {

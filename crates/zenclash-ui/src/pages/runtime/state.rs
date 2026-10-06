@@ -25,7 +25,11 @@ pub(super) enum RuntimeData {
         rule_count: Option<usize>,
     },
     Connections(std::sync::Arc<ConnectionsSnapshot>),
-    Rules(std::sync::Arc<RuleCatalog>),
+    Rules {
+        catalog: std::sync::Arc<RuleCatalog>,
+        config: Option<RuntimeConfig>,
+        proxies: Option<ProxyCatalog>,
+    },
     Resources {
         config: RuntimeConfig,
         proxy: ProviderCatalog,

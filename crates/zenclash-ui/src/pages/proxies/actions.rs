@@ -231,6 +231,7 @@ impl ProxiesPage {
         self.cancel_search();
         self.test_failures.clear();
         self.group_orders.prepare_current(&catalog);
+        self.node_summary = super::presentation::NodeSummary::new(&catalog);
         self.search_index = Some(std::sync::Arc::new(super::presentation::SearchIndex::new(
             &catalog,
             &self.test_failures,
@@ -276,6 +277,7 @@ impl ProxiesPage {
         self.switching.clear();
         self.group_orders.clear();
         self.catalog = None;
+        self.node_summary = Default::default();
         self.group_orders.release_current();
         self.visible_group_indices = Vec::new();
         self.group_page_index = 0;
@@ -301,6 +303,7 @@ impl ProxiesPage {
     /// Releases a stale profile catalog without fetching it for an inactive page.
     pub(crate) fn profile_invalidated(&mut self) {
         self.suspend();
+        self.active_profile = None;
         self.show_hidden = false;
     }
 
@@ -867,6 +870,7 @@ impl ProxiesPage {
             return;
         };
         append_delay(node, delay, mean_delay);
+        self.node_summary.record(id, node.latest_delay());
         if let Some(index) = &self.search_index {
             index.update(id, node, failure.is_some());
         }

@@ -15,9 +15,9 @@ const DARK_RAISED: u32 = 0x0021_3342;
 const DARK_BORDER: u32 = 0x002E_475A;
 const DARK_FOREGROUND: u32 = 0x00EC_F2F8;
 const DARK_MUTED_FOREGROUND: u32 = 0x00A8_B7C6;
-const LIGHT_CANVAS: u32 = 0x00F4_F9FB;
+const LIGHT_CANVAS: u32 = 0x00F0_FCF7;
 pub(crate) const LIGHT_PANEL: u32 = 0x00FF_FFFF;
-const LIGHT_RAISED: u32 = 0x00EC_F3F8;
+const LIGHT_RAISED: u32 = 0x00F1_F7F9;
 const LIGHT_BORDER: u32 = 0x00DF_E9F1;
 const LIGHT_INK: u32 = 0x000D_1B43;
 const LIGHT_MUTED_INK: u32 = 0x0057_6B93;
@@ -25,12 +25,26 @@ const LIGHT_SIGNAL: u32 = 0x000B_7A71;
 const LIGHT_UPLINK: u32 = 0x009B_650E;
 const LIGHT_SUCCESS: u32 = 0x0016_7956;
 const LIGHT_DANGER: u32 = 0x00BD_3F3F;
-const LIGHT_SIDEBAR: u32 = 0x00E8_F4F2;
+const LIGHT_SIDEBAR: u32 = 0x00F7_FDFB;
+const LIGHT_MINT: u32 = 0x0000_CFA6;
 
 /// Converts a packed RGB value into GPUI's HSLA representation.
 #[must_use]
 pub fn color(hex: u32) -> Hsla {
     rgb(hex).into()
+}
+
+/// Subtle light canvas transition used by the approved desktop drafts.
+pub(crate) fn workspace_background(theme: &Theme) -> gpui_kit::Background {
+    if theme.mode.is_dark() {
+        theme.background.into()
+    } else {
+        gpui_kit::linear_gradient(
+            135.,
+            gpui_kit::linear_color_stop(theme.sidebar, 0.),
+            gpui_kit::linear_color_stop(theme.background, 1.),
+        )
+    }
 }
 
 /// Maps combined throughput to the zero-to-100 activity scale used by
@@ -65,7 +79,7 @@ pub fn apply_zen_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut Ap
         let coral = color(if dark { FAULT_CORAL } else { LIGHT_DANGER });
         let success = color(if dark { 0x0043_C98B } else { LIGHT_SUCCESS });
         let sidebar = color(if dark { 0x0013_1C23 } else { LIGHT_SIDEBAR });
-        let sidebar_accent = color(if dark { 0x0016_3B3B } else { 0x00D3_EBE6 });
+        let sidebar_accent = color(if dark { 0x0016_3B3B } else { 0x00DA_F9EC });
 
         configure_theme_metrics(theme);
 
@@ -125,14 +139,22 @@ pub fn apply_zen_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut Ap
         colors.list_head = raised;
         colors.list_even = background.opacity(0.36);
         colors.list_hover = raised;
-        colors.list_active = signal.opacity(0.14);
+        colors.list_active = if dark {
+            signal.opacity(0.14)
+        } else {
+            sidebar_accent
+        };
         colors.list_active_border = signal;
         colors.table = panel;
         colors.table_head = raised;
         colors.table_head_foreground = muted_foreground;
         colors.table_even = background.opacity(0.36);
         colors.table_hover = raised;
-        colors.table_active = signal.opacity(0.14);
+        colors.table_active = if dark {
+            signal.opacity(0.14)
+        } else {
+            sidebar_accent
+        };
         colors.table_active_border = signal;
         colors.table_row_border = border;
         colors.switch = border;
@@ -151,8 +173,8 @@ pub fn apply_zen_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut Ap
         colors.scrollbar_thumb_hover = muted_foreground;
         colors.selection = signal.opacity(0.28);
         colors.chart_1 = color(if dark { 0x0062_A8FF } else { 0x003B_82F6 });
-        colors.chart_2 = color(if dark { 0x0084_A0FF } else { 0x0024_4FE5 });
-        colors.chart_3 = signal;
+        colors.chart_2 = color(if dark { 0x0084_A0FF } else { 0x0095_45FF });
+        colors.chart_3 = if dark { signal } else { color(LIGHT_MINT) };
         colors.chart_4 = coral;
         colors.chart_5 = color(if dark { 0x00A7_8BFA } else { 0x008B_5CF6 });
     });

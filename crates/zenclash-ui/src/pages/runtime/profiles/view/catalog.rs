@@ -1,13 +1,19 @@
+use gpui_kit::{InteractiveElement, StatefulInteractiveElement};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gpui_kit::component::{Selectable, chart::PieChart, progress::Progress};
-use zenclash_core::{ProfileRecord, ProfileSource, SubscriptionUsage};
+use gpui_kit::component::{
+    menu::{DropdownMenu, PopupMenuItem},
+    progress::Progress,
+};
+use zenclash_core::{ProfileRecord, ProfileSource, RemoteProfileRoute, SubscriptionUsage};
 
 use super::super::super::{
-    Button, ButtonVariants, Context, Disableable, FluentBuilder, IconName, IntoElement,
-    ParentElement, RemoteProfileRoute, RuntimePage, Sizable, Styled, Switch, compact_text, div,
-    empty_state, format_bytes, format_profile_age, h_flex, setting_card, v_flex,
+    Button, ButtonVariants, Context, Disableable, FluentBuilder, Icon, IconName, IntoElement,
+    ParentElement, RuntimePage, Sizable, Styled, div, empty_state, format_bytes,
+    format_profile_age, h_flex, setting_card, v_flex,
 };
+
+use crate::components::mint_switch::MintSwitch as Switch;
 
 const UPDATE_INTERVALS: [u32; 4] = [60, 6 * 60, 12 * 60, 24 * 60];
 
@@ -17,7 +23,11 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
-        let mut card = setting_card(zenclash_i18n::text("profiles.catalog.title"), theme);
+        let mut card = v_flex()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.group_box);
         if !self
             .profiles
             .forms
@@ -38,28 +48,54 @@ impl RuntimePage {
 
         use super::super::state::ProfileFilter;
         card = card.child(
-            h_flex().px_3().py_2().justify_end().gap_2().children(
-                [
-                    (ProfileFilter::All, "profiles.design.filter_all"),
-                    (ProfileFilter::Remote, "profiles.source.remote"),
-                    (ProfileFilter::Local, "profiles.source.local"),
-                ]
-                .into_iter()
-                .map(|(filter, key)| {
-                    Button::new(format!("profile-filter:{filter:?}"))
-                        .label(zenclash_i18n::text(key))
-                        .small()
-                        .outline()
-                        .selected(self.profiles.forms.catalog_view.filter == filter)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.profiles
-                                .forms
-                                .catalog_view
-                                .set_filter(filter, &this.profiles.catalog);
-                            cx.notify();
-                        }))
-                }),
-            ),
+            h_flex()
+                .px_3()
+                .pt_3()
+                .justify_between()
+                .gap_2()
+                .flex_wrap()
+                .child(
+                    div()
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .child(zenclash_i18n::text("profiles.catalog.title")),
+                )
+                .child(
+                    h_flex()
+                        .gap_0()
+                        .p_0p5()
+                        .border_1()
+                        .border_color(theme.border)
+                        .rounded(theme.radius)
+                        .bg(theme.muted.opacity(0.4))
+                        .children(
+                            [
+                                (ProfileFilter::All, "profiles.design.filter_all"),
+                                (ProfileFilter::Remote, "profiles.source.remote"),
+                                (ProfileFilter::Local, "profiles.source.local"),
+                            ]
+                            .into_iter()
+                            .map(|(filter, key)| {
+                                Button::new(format!("profile-filter:{filter:?}"))
+                                    .label(zenclash_i18n::text(key))
+                                    .small()
+                                    .h_8()
+                                    .ghost()
+                                    .when(
+                                        self.profiles.forms.catalog_view.filter == filter,
+                                        |button| {
+                                            button.bg(theme.list_active).text_color(theme.primary)
+                                        },
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.profiles
+                                            .forms
+                                            .catalog_view
+                                            .set_filter(filter, &this.profiles.catalog);
+                                        cx.notify();
+                                    }))
+                            }),
+                        ),
+                ),
         );
         let grid = div().grid().grid_cols(2).gap_3().p_3().children(
             self.profiles
@@ -155,36 +191,82 @@ impl RuntimePage {
             );
         };
         let active = self.profiles.catalog.active.as_deref() == Some(profile.id.as_str());
-        setting_card(profile.name.clone(), theme).child(
-            v_flex()
-                .p_4()
-                .gap_4()
-                .when_some(profile.subscription.usage.as_ref(), |this, usage| {
-                    this.child(subscription_quota_chart(profile, usage, theme))
-                })
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(profile.source_label()),
-                )
-                .child(div().text_xs().text_color(theme.muted_foreground).child(
-                    zenclash_i18n::text_with(
-                        "profiles.catalog.updated",
-                        &[("age", format_profile_age(profile.updated_at))],
-                    ),
-                ))
-                .when(profile.is_remote(), |this| {
-                    this.child(self.render_profile_update_policy(profile, theme, cx))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(profile_source(&profile.source)),
-                        )
-                })
-                .child(self.render_profile_actions(profile, active, "inspector-", cx)),
-        )
+        v_flex()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.secondary)
+            .child(
+                h_flex()
+                    .px_4()
+                    .pt_3()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child(profile.name.clone()),
+                    )
+                    .when(active, |row| {
+                        row.child(profile_heading(profile, true, theme))
+                    }),
+            )
+            .child(
+                v_flex()
+                    .p_4()
+                    .gap_4()
+                    .when_some(profile.subscription.usage.as_ref(), |this, usage| {
+                        this.child(subscription_quota_chart(profile, usage, theme))
+                    })
+                    .child(
+                        v_flex()
+                            .gap_3()
+                            .py_3()
+                            .border_y_1()
+                            .border_color(theme.border)
+                            .child(profile_detail_row(
+                                "profiles.design.expiry_date",
+                                profile
+                                    .subscription
+                                    .usage
+                                    .as_ref()
+                                    .and_then(|usage| i64::try_from(usage.expire).ok())
+                                    .and_then(|timestamp| {
+                                        chrono::DateTime::<chrono::Utc>::from_timestamp(
+                                            timestamp, 0,
+                                        )
+                                    })
+                                    .filter(|_| {
+                                        profile
+                                            .subscription
+                                            .usage
+                                            .as_ref()
+                                            .is_some_and(|usage| usage.expire != 0)
+                                    })
+                                    .map_or_else(
+                                        || "—".into(),
+                                        |date| date.format("%Y-%m-%d").to_string(),
+                                    ),
+                                theme,
+                            ))
+                            .child(profile_detail_row(
+                                "profiles.design.last_updated",
+                                format_profile_age(profile.updated_at),
+                                theme,
+                            ))
+                            .when(profile.is_remote(), |this| {
+                                this.child(profile_detail_row(
+                                    "profiles.design.source_link",
+                                    zenclash_i18n::text("profiles.design.hidden"),
+                                    theme,
+                                ))
+                            }),
+                    )
+                    .when(profile.is_remote(), |this| {
+                        this.child(self.render_profile_update_policy(profile, theme, cx))
+                    })
+                    .child(self.render_profile_actions(profile, active, "inspector-", cx)),
+            )
     }
 
     pub(super) fn render_profile_recovery(
@@ -259,58 +341,101 @@ impl RuntimePage {
         let active = self.profiles.catalog.active.as_deref() == Some(profile.id.as_str());
         let selected = self.profiles.forms.catalog_view.is_selected(&profile.id);
         let show_id = profile.id.clone();
+        let expiry_hint = profile.subscription.usage.as_ref().map_or_else(
+            || "—".into(),
+            |usage| format_subscription_expiry(usage.expire),
+        );
 
         v_flex()
             .flex_grow_1()
             .min_w_0()
             .w_full()
             .max_w_full()
+            .min_h(gpui_kit::rems(14.))
             .p_4()
             .gap_3()
             .rounded(theme.radius_lg)
             .border_1()
             .border_color(if selected {
-                theme.primary
+                theme.chart_3
             } else {
                 theme.border
             })
             .bg(if selected {
-                theme.primary.opacity(0.06)
+                theme.list_active.opacity(0.45)
             } else {
                 theme.group_box
             })
             .child(
                 h_flex()
                     .gap_2()
-                    .child(profile_heading(profile, active, theme).flex_1().min_w_0())
                     .child(
                         Button::new(format!("inspect-profile:{}", profile.id))
-                            .label(zenclash_i18n::text("profiles.design.details"))
+                            .accessibility_label(profile.name.clone())
+                            .tooltip(profile.name.clone())
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .gap_2()
+                                    .child(Icon::new(IconName::File).size_6())
+                                    .child(
+                                        h_flex()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .gap_2()
+                                            .flex_wrap()
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w(gpui_kit::rems(6.))
+                                                    .max_w_full()
+                                                    .text_lg()
+                                                    .truncate()
+                                                    .child(profile.name.clone()),
+                                            )
+                                            .child(
+                                                profile_heading(profile, false, theme)
+                                                    .flex_shrink_0(),
+                                            ),
+                                    ),
+                            )
                             .small()
+                            .h_auto()
+                            .min_h_10()
                             .ghost()
+                            .flex_1()
+                            .min_w_0()
+                            .justify_start()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.profiles.forms.catalog_view.select(&show_id);
                                 cx.notify();
                             })),
-                    ),
+                    )
+                    .when(active, |row| {
+                        row.child(profile_heading(profile, true, theme))
+                    }),
             )
-            .when_some(profile.subscription.usage.as_ref(), |this, usage| {
-                this.child(render_subscription_usage(
-                    usage,
-                    format!("catalog-quota:{}", profile.id),
-                    theme,
-                ))
-            })
-            .when_some(
-                profile.subscription.home_url.as_deref(),
-                |this, home_url| {
-                    this.child(div().text_xs().text_color(theme.muted_foreground).child(
-                        zenclash_i18n::text_with(
-                            "profiles.catalog.homepage",
-                            &[("url", compact_text(home_url, 90))],
-                        ),
-                    ))
-                },
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_12()
+                    .when_some(profile.subscription.usage.as_ref(), |this, usage| {
+                        this.child(render_subscription_usage(
+                            usage,
+                            format!("catalog-quota:{}", profile.id),
+                            theme,
+                        ))
+                    })
+                    .when(profile.subscription.usage.is_none(), |this| {
+                        this.child(div().text_sm().text_color(theme.muted_foreground).child(
+                            zenclash_i18n::text(if profile.is_remote() {
+                                "home.profile.usage_unavailable"
+                            } else {
+                                "profiles.design.no_quota"
+                            }),
+                        ))
+                    }),
             )
             .child(
                 h_flex()
@@ -323,8 +448,25 @@ impl RuntimePage {
                             &[("age", format_profile_age(profile.updated_at))],
                         ),
                     ))
-                    .child(self.render_profile_actions(profile, active, "", cx)),
+                    .child(
+                        div()
+                            .id((
+                                gpui_kit::ElementId::from("profile-expiry"),
+                                profile.id.clone(),
+                            ))
+                            .tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(expiry_hint.clone())
+                                    .build(window, cx)
+                            })
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(profile.subscription.usage.as_ref().map_or_else(
+                                || "—".into(),
+                                |usage| format_subscription_remaining(usage.expire),
+                            )),
+                    ),
             )
+            .child(self.render_profile_actions(profile, active, "", cx))
     }
 
     fn render_profile_actions(
@@ -337,12 +479,76 @@ impl RuntimePage {
         let activate_id = profile.id.clone();
         let update_id = profile.id.clone();
         let edit_id = profile.id.clone();
-        let delete_id = profile.id.clone();
+        let menu_id = profile.id.clone();
+        let menu_name = profile.name.clone();
+        let remote = profile.is_remote();
+        let menu_owner = cx.entity().downgrade();
+        if scope == "inspector-" && remote {
+            return h_flex()
+                .w_full()
+                .gap_2()
+                .flex_wrap()
+                .child(
+                    Button::new(format!("{scope}update-profile:{}", profile.id))
+                        .icon(crate::assets::AppIcon::RefreshCw)
+                        .label(zenclash_i18n::text("profiles.actions.update"))
+                        .primary()
+                        .flex_1()
+                        .h_10()
+                        .disabled(self.core_busy())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.update_managed_profile(update_id.clone(), cx)
+                        })),
+                )
+                .child(
+                    Button::new(format!("{scope}edit-profile-request:{}", profile.id))
+                        .icon(IconName::Settings2)
+                        .label(zenclash_i18n::text("profiles.actions.request_settings"))
+                        .outline()
+                        .h_10()
+                        .disabled(self.core_busy())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.profiles.forms.catalog_view.select(&edit_id);
+                            this.begin_edit_remote_profile(edit_id.clone(), window, cx);
+                        })),
+                )
+                .when(!active, |row| {
+                    row.child(
+                        Button::new(format!("{scope}activate-profile:{}", profile.id))
+                            .icon(IconName::ArrowRight)
+                            .label(zenclash_i18n::text("profiles.actions.activate"))
+                            .outline()
+                            .h_10()
+                            .disabled(self.core_busy())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.activate_managed_profile(activate_id.clone(), cx)
+                            })),
+                    )
+                });
+        }
         h_flex()
             .w_full()
             .min_w_0()
             .gap_2()
             .flex_wrap()
+            .when(!active, |this| {
+                this.child(
+                    Button::new(format!("{scope}activate-profile:{}", profile.id))
+                        .icon(IconName::Play)
+                        .label(if active {
+                            zenclash_i18n::text("profiles.actions.active")
+                        } else {
+                            zenclash_i18n::text("profiles.actions.activate")
+                        })
+                        .small()
+                        .h_10()
+                        .outline()
+                        .disabled(active || self.core_busy())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.activate_managed_profile(activate_id.clone(), cx);
+                        })),
+                )
+            })
             .when(!profile.is_remote(), |this| {
                 this.child(super::forms::configuration_edit_button(
                     format!("{scope}edit-profile-config:{}", profile.id),
@@ -350,23 +556,34 @@ impl RuntimePage {
                 ))
             })
             .when(profile.is_remote(), |this| {
-                this.child(
-                    Button::new(format!("{scope}edit-profile-request:{}", profile.id))
-                        .icon(IconName::Settings2)
-                        .label(zenclash_i18n::text("profiles.actions.request_settings"))
-                        .small()
-                        .ghost()
-                        .disabled(self.core_busy())
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.profiles.forms.catalog_view.select(&edit_id);
-                            this.begin_edit_remote_profile(edit_id.clone(), window, cx);
-                        })),
-                )
+                this.when(!scope.is_empty(), |this| {
+                    this.child(
+                        Button::new(format!("{scope}edit-profile-request:{}", profile.id))
+                            .icon(IconName::Settings2)
+                            .when(!scope.is_empty(), |button| {
+                                button
+                                    .label(zenclash_i18n::text("profiles.actions.request_settings"))
+                            })
+                            .accessibility_label(zenclash_i18n::text(
+                                "profiles.actions.request_settings",
+                            ))
+                            .tooltip(zenclash_i18n::text("profiles.actions.request_settings"))
+                            .small()
+                            .h_10()
+                            .ghost()
+                            .disabled(self.core_busy())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.profiles.forms.catalog_view.select(&edit_id);
+                                this.begin_edit_remote_profile(edit_id.clone(), window, cx);
+                            })),
+                    )
+                })
                 .child(
                     Button::new(format!("{scope}update-profile:{}", profile.id))
                         .icon(crate::assets::AppIcon::RefreshCw)
                         .label(zenclash_i18n::text("profiles.actions.update"))
                         .small()
+                        .h_10()
                         .outline()
                         .disabled(self.core_busy())
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -374,36 +591,63 @@ impl RuntimePage {
                         })),
                 )
             })
-            .child(
-                Button::new(format!("{scope}activate-profile:{}", profile.id))
-                    .icon(IconName::ArrowRight)
-                    .label(if active {
-                        zenclash_i18n::text("profiles.actions.active")
-                    } else {
-                        zenclash_i18n::text("profiles.actions.activate")
-                    })
-                    .small()
-                    .primary()
-                    .disabled(active || self.core_busy())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.activate_managed_profile(activate_id.clone(), cx);
-                    })),
-            )
-            .child(
-                Button::new(format!("{scope}delete-profile:{}", profile.id))
-                    .accessibility_label(zenclash_i18n::text_with(
-                        "profiles.actions.delete",
-                        &[("name", profile.name.clone())],
-                    ))
-                    .icon(IconName::Delete)
-                    .small()
-                    .ghost()
-                    .danger()
-                    .disabled(active || self.core_busy())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.delete_managed_profile(delete_id.clone(), cx);
-                    })),
-            )
+            .when(scope.is_empty(), |this| {
+                this.child(div().flex_1()).child(
+                    Button::new(format!("profile-more:{}", profile.id))
+                        .label("⋯")
+                        .accessibility_label(zenclash_i18n::text_with(
+                            "profiles.actions.more",
+                            &[("name", profile.name.clone())],
+                        ))
+                        .small()
+                        .h_10()
+                        .outline()
+                        .disabled(self.core_busy())
+                        .dropdown_menu(move |mut menu, _, cx| {
+                            let can_delete = menu_owner.upgrade().is_some_and(|page| {
+                                let page = page.read(cx);
+                                !page.core_busy()
+                                    && page.profiles.catalog.active.as_deref()
+                                        != Some(menu_id.as_str())
+                            });
+                            if remote {
+                                let owner = menu_owner.clone();
+                                let id = menu_id.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new(zenclash_i18n::text(
+                                        "profiles.actions.request_settings",
+                                    ))
+                                    .on_click(
+                                        move |_, window, cx| {
+                                            let _ = owner.update(cx, |page, cx| {
+                                                page.profiles.forms.catalog_view.select(&id);
+                                                page.begin_edit_remote_profile(
+                                                    id.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        },
+                                    ),
+                                );
+                            }
+                            let owner = menu_owner.clone();
+                            let id = menu_id.clone();
+                            menu.item(
+                                PopupMenuItem::new(zenclash_i18n::text_with(
+                                    "profiles.actions.delete",
+                                    &[("name", menu_name.clone())],
+                                ))
+                                .disabled(!can_delete)
+                                .on_click(move |_, _, cx| {
+                                    let _ = owner.update(cx, |page, cx| {
+                                        page.delete_managed_profile(id.clone(), cx)
+                                    });
+                                }),
+                            )
+                        }),
+                )
+            })
     }
 
     fn render_profile_update_policy(
@@ -412,67 +656,112 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
+        let download_route = match &profile.source {
+            ProfileSource::Remote { options, .. } => options.route(),
+            _ => RemoteProfileRoute::Direct,
+        };
+        let route_id = profile.id.clone();
+        let fallback_id = profile.id.clone();
+        let route_owner = cx.entity().downgrade();
         let interval_minutes = profile.update_interval_minutes;
         let update_cron = profile.update_cron.clone();
         let auto_update = profile.auto_update;
         let policy_id = profile.id.clone();
         let interval_id = profile.id.clone();
-        h_flex()
+        let runtime_page = cx.entity().downgrade();
+        v_flex()
             .gap_3()
-            .flex_wrap()
             .child(
-                Switch::new(format!("auto-update-profile:{}", profile.id))
-                    .accessibility_label(zenclash_i18n::text("profiles.catalog.auto_update"))
-                    .checked(auto_update)
-                    .disabled(self.core_busy())
-                    .on_click(cx.listener(move |this, enabled, _, cx| {
-                        this.set_profile_update_policy(
-                            policy_id.clone(),
-                            *enabled,
-                            interval_minutes,
-                            cx,
-                        );
-                    })),
+                h_flex()
+                    .gap_3()
+                    .child(
+                        div()
+                            .w_24()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(zenclash_i18n::text("profiles.catalog.auto_update")),
+                    )
+                    .child(
+                        Switch::new(format!("auto-update-profile:{}", profile.id))
+                            .accessibility_label(zenclash_i18n::text(
+                                "profiles.catalog.auto_update",
+                            ))
+                            .checked(auto_update)
+                            .disabled(self.core_busy())
+                            .on_click(cx.listener(move |this, enabled, _, cx| {
+                                this.set_profile_update_policy(
+                                    policy_id.clone(),
+                                    *enabled,
+                                    interval_minutes,
+                                    cx,
+                                );
+                            })),
+                    ),
             )
             .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(zenclash_i18n::text("profiles.catalog.auto_update")),
+                h_flex()
+                    .gap_3()
+                    .child(
+                        div()
+                            .w_24()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(zenclash_i18n::text("profiles.catalog.update_interval")),
+                    )
+                    .child(
+                        Button::new(format!("profile-update-interval:{}", profile.id))
+                            .label(update_cron.as_deref().map_or_else(
+                                || format_update_interval(interval_minutes),
+                                |expression| format!("Cron {expression}"),
+                            ))
+                            .small()
+                            .h_10()
+                            .outline()
+                            .icon(IconName::ChevronDown)
+                            .disabled(!auto_update || self.core_busy())
+                            .dropdown_menu(move |mut menu, _, _| {
+                                for minutes in UPDATE_INTERVALS {
+                                    let runtime_page = runtime_page.clone();
+                                    let id = interval_id.clone();
+                                    menu = menu.item(
+                                        PopupMenuItem::new(format_update_interval(minutes))
+                                            .checked(
+                                                update_cron.is_none()
+                                                    && minutes == interval_minutes,
+                                            )
+                                            .on_click(move |_, _, cx| {
+                                                let _ = runtime_page.update(cx, |page, cx| {
+                                                    page.set_profile_update_policy(
+                                                        id.clone(),
+                                                        true,
+                                                        minutes,
+                                                        cx,
+                                                    );
+                                                });
+                                            }),
+                                    );
+                                }
+                                menu
+                            }),
+                    ),
             )
-            .child(
-                Button::new(format!("profile-update-interval:{}", profile.id))
-                    .label(update_cron.as_deref().map_or_else(
-                        || format_update_interval(interval_minutes),
-                        |expression| format!("Cron {expression}"),
-                    ))
-                    .xsmall()
-                    .outline()
-                    .disabled(!auto_update || self.core_busy())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_profile_update_policy(
-                            interval_id.clone(),
-                            true,
-                            next_update_interval(interval_minutes),
-                            cx,
-                        );
-                    })),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(zenclash_i18n::text("profiles.catalog.interval_hint")),
-            )
+            .child(h_flex().gap_3().child(div().w_24().text_sm().text_color(theme.muted_foreground).child(zenclash_i18n::text("profiles.design.download_route"))).child(
+                Button::new(format!("profile-download-route:{}", profile.id)).label(zenclash_i18n::text(if download_route == RemoteProfileRoute::Mihomo { "profiles.route.proxy" } else { "profiles.route.direct" })).small().ghost().disabled(self.core_busy()).dropdown_menu(move |mut menu, _, _| {
+                    for (route, key) in [(RemoteProfileRoute::Mihomo, "profiles.route.proxy"), (RemoteProfileRoute::Direct, "profiles.route.direct")] {
+                        let owner = route_owner.clone(); let id = route_id.clone();
+                        menu = menu.item(PopupMenuItem::new(zenclash_i18n::text(key)).checked(download_route == route || (route == RemoteProfileRoute::Direct && download_route == RemoteProfileRoute::DirectWithMihomoFallback)).on_click(move |_, _, cx| {
+                            let _ = owner.update(cx, |page, cx| page.set_profile_download_route(id.clone(), route, cx));
+                        }));
+                    }
+                    menu
+                })
+            ))
+            .child(h_flex().gap_3().child(div().w_24().text_sm().text_color(theme.muted_foreground).child(zenclash_i18n::text("profiles.form.fallback"))).child(
+                Switch::new(format!("profile-download-fallback:{}", profile.id)).accessibility_label(zenclash_i18n::text("profiles.form.fallback")).checked(download_route == RemoteProfileRoute::DirectWithMihomoFallback).disabled(self.core_busy() || download_route == RemoteProfileRoute::Mihomo).on_click(cx.listener(move |this, checked, _, cx| {
+                    this.set_profile_download_route(fallback_id.clone(), if *checked { RemoteProfileRoute::DirectWithMihomoFallback } else { RemoteProfileRoute::Direct }, cx);
+                }))
+            ))
     }
-}
-
-fn next_update_interval(current: u32) -> u32 {
-    UPDATE_INTERVALS
-        .iter()
-        .copied()
-        .find(|interval| *interval > current)
-        .unwrap_or(UPDATE_INTERVALS[0])
 }
 
 fn format_update_interval(minutes: u32) -> String {
@@ -494,65 +783,46 @@ fn format_update_interval(minutes: u32) -> String {
     }
 }
 
-fn profile_source(source: &ProfileSource) -> String {
-    match source {
-        ProfileSource::Local { original_path } => compact_text(original_path, 76),
-        ProfileSource::Remote {
-            url: _,
-            user_agent,
-            options,
-        } => {
-            let route = match options.route() {
-                RemoteProfileRoute::Direct => zenclash_i18n::text("profiles.route.direct"),
-                RemoteProfileRoute::DirectWithMihomoFallback => {
-                    zenclash_i18n::text("profiles.route.fallback")
-                }
-                RemoteProfileRoute::Mihomo => zenclash_i18n::text("profiles.route.proxy"),
-            };
-            let authorization = if options.authorization.is_some() {
-                zenclash_i18n::text("profiles.route.authorization")
-            } else {
-                String::new()
-            };
-            format!("UA {user_agent} · {route}{authorization}")
-        }
-    }
-}
-
 fn render_subscription_usage(
     usage: &SubscriptionUsage,
     id: String,
     theme: &gpui_kit::component::Theme,
 ) -> gpui_kit::AnyElement {
-    let quota = if usage.total == 0 {
-        zenclash_i18n::text_with(
-            "profiles.usage.no_total",
-            &[("used", format_bytes(usage.used()))],
-        )
-    } else {
-        let percent = u128::from(usage.used().min(usage.total)) * 100 / u128::from(usage.total);
-        zenclash_i18n::text_with(
-            "profiles.usage.quota",
-            &[
-                ("used", format_bytes(usage.used())),
-                ("total", format_bytes(usage.total)),
-                ("percent", percent.to_string()),
-            ],
-        )
-    };
+    let quota = quota_percent(usage).map_or_else(
+        || {
+            zenclash_i18n::text_with(
+                "profiles.usage.no_total",
+                &[("used", format_bytes(usage.used()))],
+            )
+        },
+        |percent| {
+            zenclash_i18n::text_with(
+                "profiles.design.usage_percent",
+                &[("percent", format!("{percent:.1}"))],
+            )
+        },
+    );
     let percent = quota_percent(usage);
     v_flex()
         .gap_2()
         .child(div().text_sm().child(quota))
         .when_some(percent, |this, percent| {
-            this.child(Progress::new(id).h_2().color(theme.primary).value(percent))
+            this.child(
+                h_flex()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(Progress::new(id).h_2().color(theme.chart_3).value(percent)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("{percent:.1}%")),
+                    ),
+            )
         })
-        .child(
-            div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(format_subscription_expiry(usage.expire)),
-        )
         .into_any_element()
 }
 
@@ -576,41 +846,26 @@ fn subscription_quota_chart(
             theme,
         ));
     };
-    let used_color = theme.chart_1;
-    let remaining_color = theme.chart_1.opacity(0.18);
-    let chart = PieChart::new([(percent, true), (100. - percent, false)])
-        .id(format!("profile-quota:{}", profile.id))
-        .outer_radius(f32::from(theme.font_size) * 3.)
-        .inner_radius(f32::from(theme.font_size) * 2.1)
-        .value(|point| point.0)
-        .color(move |point| if point.1 { used_color } else { remaining_color });
-    v_flex()
-        .gap_3()
-        .child(
-            h_flex()
-                .gap_3()
-                .child(
-                    div()
-                        .relative()
-                        .size(gpui_kit::rems(7.))
-                        .flex_shrink_0()
-                        .child(chart)
-                        .child(
-                            v_flex()
-                                .absolute()
-                                .inset_0()
-                                .items_center()
-                                .justify_center()
-                                .child(
-                                    div()
-                                        .text_lg()
-                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                        .child(format!("{percent:.1}%")),
-                                ),
-                        ),
+    v_flex().gap_3().child(
+        h_flex()
+            .gap_3()
+            .child(
+                crate::components::wave_percentage::WavePercentage::new(
+                    format!("profile-quota:{}", profile.id),
+                    zenclash_i18n::text("profiles.design.used"),
                 )
-                .child(
-                    v_flex().flex_1().min_w_0().gap_3().children(
+                .value(Some(percent))
+                .diameter(11.),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .pl_4()
+                    .border_l_1()
+                    .border_color(theme.border)
+                    .gap_3()
+                    .children(
                         [
                             ("profiles.design.used", usage.used()),
                             (
@@ -621,30 +876,74 @@ fn subscription_quota_chart(
                         ]
                         .into_iter()
                         .map(|(key, bytes)| {
-                            v_flex()
-                                .gap_0p5()
+                            h_flex()
+                                .gap_2()
+                                .justify_between()
+                                .when(key == "profiles.design.total", |this| {
+                                    this.pt_3().border_t_1().border_color(theme.border)
+                                })
                                 .child(
-                                    div()
-                                        .text_xs()
+                                    h_flex()
+                                        .gap_2()
+                                        .text_sm()
                                         .text_color(theme.muted_foreground)
+                                        .when(key != "profiles.design.total", |this| {
+                                            this.child(
+                                                div()
+                                                    .size_3()
+                                                    .flex_shrink_0()
+                                                    .rounded_full()
+                                                    .border_1()
+                                                    .border_color(theme.chart_3)
+                                                    .when(key == "profiles.design.used", |this| {
+                                                        this.bg(theme.chart_3)
+                                                    }),
+                                            )
+                                        })
                                         .child(zenclash_i18n::text(key)),
                                 )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_family(theme.mono_font_family.clone())
-                                        .child(format_bytes(bytes)),
-                                )
+                                .child(div().text_base().child(format_bytes(bytes)))
                         }),
                     ),
-                ),
-        )
+            ),
+    )
+}
+
+fn profile_detail_row(
+    key: &str,
+    value: String,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Div {
+    h_flex()
+        .gap_3()
+        .text_sm()
         .child(
             div()
-                .text_xs()
+                .w_24()
+                .flex_shrink_0()
                 .text_color(theme.muted_foreground)
-                .child(format_subscription_expiry(usage.expire)),
+                .child(zenclash_i18n::text(key)),
         )
+        .child(div().flex_1().min_w_0().child(value))
+}
+
+fn format_subscription_remaining(expire: u64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    let valid = i64::try_from(expire)
+        .ok()
+        .and_then(|timestamp| chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0))
+        .is_some();
+    if expire > now && valid {
+        let days = expire.saturating_sub(now).saturating_add(86_399) / 86_400;
+        zenclash_i18n::text_with(
+            "profiles.design.remaining_days",
+            &[("days", days.to_string())],
+        )
+    } else {
+        format_subscription_expiry_at(expire, now)
+    }
 }
 
 fn format_subscription_expiry(expire: u64) -> String {
@@ -680,61 +979,38 @@ fn profile_heading(
     active: bool,
     theme: &gpui_kit::component::Theme,
 ) -> gpui_kit::Div {
-    h_flex()
-        .gap_2()
-        .flex_wrap()
-        .child(
-            div()
-                .size_2()
-                .rounded_full()
-                .bg(if active { theme.success } else { theme.primary }),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                .child(profile.name.clone()),
-        )
-        .child(
-            div()
-                .px_2()
-                .py_0p5()
-                .rounded_full()
-                .bg(if active {
-                    theme.success.opacity(0.14)
-                } else {
-                    theme.muted.opacity(0.5)
-                })
-                .text_xs()
-                .text_color(if active {
-                    theme.success
-                } else {
-                    theme.muted_foreground
-                })
-                .child(if active {
-                    zenclash_i18n::text("profiles.catalog.current")
-                } else {
-                    profile.source_label()
-                }),
-        )
-        .child(
-            div()
-                .font_family(theme.mono_font_family.clone())
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(format_bytes(profile.size_bytes)),
-        )
+    h_flex().gap_2().flex_wrap().child(
+        div()
+            .px_2()
+            .py_0p5()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(theme.border)
+            .bg(if active || profile.is_remote() {
+                theme.list_active
+            } else {
+                theme.chart_1.opacity(0.08)
+            })
+            .text_sm()
+            .font_weight(gpui_kit::FontWeight::NORMAL)
+            .text_color(if active || profile.is_remote() {
+                theme.primary
+            } else {
+                theme.muted_foreground
+            })
+            .child(if active {
+                zenclash_i18n::text("profiles.catalog.current")
+            } else {
+                profile.source_label()
+            }),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         format_subscription_expiry, format_subscription_expiry_at, format_update_interval,
-        next_update_interval, quota_percent,
+        quota_percent,
     };
     use zenclash_core::SubscriptionUsage;
 
@@ -760,12 +1036,6 @@ mod tests {
             }),
             Some(100.)
         );
-    }
-
-    #[test]
-    fn update_interval_cycle_wraps_after_one_day() {
-        assert_eq!(next_update_interval(60), 360);
-        assert_eq!(next_update_interval(1_440), 60);
     }
 
     #[test]

@@ -147,6 +147,12 @@ impl ZenClashApp {
         self.outbound_mode
             .synchronize(OutboundMode::from_api(&config.mode), mode_generation);
         let mixed_port = config.system_proxy_port().unwrap_or_default();
+        let active_profile = profile_catalog
+            .as_ref()
+            .ok()
+            .and_then(|catalog| catalog.active_profile());
+        self.proxies_page
+            .update(cx, |page, cx| page.set_active_profile(active_profile, cx));
         let (profile_name, profiles) = profile_catalog.map_or_else(
             |error| {
                 tracing::warn!(%error, "failed to read managed profiles for tray menu");

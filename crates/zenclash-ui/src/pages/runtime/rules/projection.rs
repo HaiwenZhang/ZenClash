@@ -23,6 +23,14 @@ pub(super) struct ProjectionWorker {
 }
 
 impl ProjectionWorker {
+    #[cfg(test)]
+    pub(super) fn hold_projection(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.gate
+            .clone()
+            .try_lock_owned()
+            .expect("projection must be idle")
+    }
+
     pub(super) fn cancel(&mut self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.task.cancel();

@@ -2,9 +2,11 @@ use zenclash_core::RuntimeConfig;
 
 use super::super::super::{
     Button, ButtonVariants, Context, Disableable, FluentBuilder, Icon, IconName, Input,
-    ParentElement, RemoteProfileRoute, RuntimePage, Sizable, Styled, Switch, div, h_flex, info_row,
-    message_banner, px, setting_card, v_flex,
+    ParentElement, RemoteProfileRoute, RuntimePage, Sizable, Styled, div, h_flex, message_banner,
+    px, setting_card, v_flex,
 };
+
+use crate::components::mint_switch::MintSwitch as Switch;
 
 impl RuntimePage {
     pub(super) fn render_subscription_form(
@@ -174,53 +176,40 @@ impl RuntimePage {
             || zenclash_i18n::text("profiles.current.unspecified"),
             |path| path.display().to_string(),
         );
-        let remote_count = self.profiles.forms.catalog_view.remote_count;
-
-        setting_card(zenclash_i18n::text("profiles.current.title"), theme)
-            .child(runtime_config_preview(config, theme))
-            .child(info_row(
-                zenclash_i18n::text("profiles.current.path"),
-                &path,
-                theme,
-            ))
-            .child(info_row(
-                zenclash_i18n::text("profiles.current.mode"),
-                &config.mode,
-                theme,
-            ))
-            .child(info_row(
-                zenclash_i18n::text("profiles.current.log_level"),
-                &config.log_level,
-                theme,
-            ))
+        v_flex()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.group_box)
             .child(
                 h_flex()
-                    .justify_end()
+                    .justify_between()
                     .gap_2()
                     .p_3()
                     .flex_wrap()
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(
-                        zenclash_i18n::text_with(
-                            "profiles.current.counts",
-                            &[
-                                ("managed", self.profiles.catalog.profiles.len().to_string()),
-                                ("remote", remote_count.to_string()),
-                            ],
-                        ),
-                    ))
-                    .child(configuration_edit_button(
-                        "edit-current-profile-config",
-                        true,
-                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child(zenclash_i18n::text("profiles.current.title")),
+                    )
+                    .child(
+                        configuration_edit_button("edit-current-profile-config", true)
+                            .label(zenclash_i18n::text("profiles.design.open_editor"))
+                            .tooltip(path),
+                    )
                     .child(
                         Button::new("reload-profile")
                             .icon(crate::assets::AppIcon::RefreshCw)
                             .label(zenclash_i18n::text("profiles.actions.reload"))
-                            .primary()
+                            .small()
+                            .h_10()
+                            .outline()
                             .loading(self.core_busy())
                             .on_click(cx.listener(|this, _, _, cx| this.reload_profile(cx))),
                     ),
             )
+            .child(runtime_config_preview(config, theme))
     }
 }
 
@@ -232,6 +221,7 @@ pub(super) fn configuration_edit_button(
         .icon(IconName::Settings2)
         .label(zenclash_i18n::text("profiles.actions.edit_yaml"))
         .small()
+        .h_10()
         .outline()
         .disabled(!enabled)
         .when(!enabled, |this| {
@@ -264,37 +254,36 @@ fn runtime_config_preview(
     theme: &gpui_kit::component::Theme,
 ) -> gpui_kit::Div {
     let fields = [
-        ("mixed-port", config.mixed_port.to_string()),
-        ("mode", config.mode.clone()),
-        ("log-level", config.log_level.clone()),
-        ("ipv6", config.ipv6.to_string()),
-        ("tun.enable", config.tun.enable.to_string()),
+        (
+            zenclash_i18n::text("profiles.current.mixed_port"),
+            config.mixed_port.to_string(),
+        ),
+        (
+            zenclash_i18n::text("profiles.current.mode"),
+            super::super::super::empty_dash(&config.mode),
+        ),
+        (
+            zenclash_i18n::text("profiles.current.log_level"),
+            super::super::super::empty_dash(&config.log_level),
+        ),
+        ("IPv6".to_owned(), super::super::super::yes_no(config.ipv6)),
+        (
+            zenclash_i18n::text("home.controls.tun"),
+            super::super::super::yes_no(config.tun.enable),
+        ),
     ];
     v_flex()
         .m_3()
         .p_3()
         .gap_2()
         .rounded(theme.radius)
-        .bg(theme.muted.opacity(0.5))
-        .child(
-            div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(zenclash_i18n::text("profiles.design.runtime_preview")),
-        )
-        .children(fields.into_iter().enumerate().map(|(index, (key, value))| {
+        .border_1()
+        .border_color(theme.border)
+        .children(fields.into_iter().map(|(key, value)| {
             h_flex()
                 .gap_3()
                 .text_sm()
-                .font_family(theme.mono_font_family.clone())
-                .child(
-                    div()
-                        .w_6()
-                        .text_right()
-                        .text_color(theme.muted_foreground)
-                        .child((index + 1).to_string()),
-                )
-                .child(div().text_color(theme.chart_1).child(format!("{key}:")))
+                .child(div().w_32().text_color(theme.muted_foreground).child(key))
                 .child(div().text_color(theme.foreground).child(value))
         }))
 }

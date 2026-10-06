@@ -1,12 +1,14 @@
 use std::collections::HashSet;
 
+use gpui_kit::component::WindowExt;
+use gpui_kit::component::button::{ButtonGroup, ButtonVariant};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 
 use super::{
     AppContext, Button, ButtonVariants, Context, Disableable, Entity, FluentBuilder, IconName,
     Input, InputEvent, InputState, IntoElement, Page, ParentElement, RuntimeData, RuntimePage,
     Sizable, Styled, Subscription, Window, contains_ascii_case_insensitive, div, empty_state,
-    format_bytes, h_flex, list_page, message_banner, metric, pagination_summary, v_flex,
+    format_bytes, h_flex, list_page, message_banner, pagination_summary, v_flex,
 };
 
 mod dashboard;
@@ -26,6 +28,61 @@ pub(super) struct ConnectionsUiState {
     worker: projection::ProjectionWorker,
     pub(super) projecting: bool,
     frozen: Option<std::sync::Arc<zenclash_core::ConnectionsSnapshot>>,
+    history: ConnectionMetricHistory,
+}
+
+#[derive(Default)]
+struct ConnectionMetricHistory {
+    generation: Option<u64>,
+    last_snapshot: Option<std::sync::Weak<zenclash_core::ConnectionsSnapshot>>,
+    samples: std::collections::VecDeque<[u64; 4]>,
+}
+
+impl ConnectionMetricHistory {
+    fn observe(
+        &mut self,
+        generation: u64,
+        snapshot: &std::sync::Arc<zenclash_core::ConnectionsSnapshot>,
+    ) {
+        if self.generation != Some(generation) {
+            *self = Self::default();
+            self.generation = Some(generation);
+        }
+        if self
+            .last_snapshot
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .is_some_and(|last| std::sync::Arc::ptr_eq(&last, snapshot))
+        {
+            return;
+        }
+        let sample = [
+            snapshot.connections.len() as u64,
+            snapshot.upload_total,
+            snapshot.download_total,
+            snapshot.memory,
+        ];
+        if self
+            .samples
+            .back()
+            .is_some_and(|last| sample[1] < last[1] || sample[2] < last[2])
+        {
+            self.samples.clear();
+        }
+        self.last_snapshot = Some(std::sync::Arc::downgrade(snapshot));
+        self.samples.push_back(sample);
+        if self.samples.len() > 60 {
+            self.samples.pop_front();
+        }
+    }
+
+    fn points(&self, metric: usize) -> Vec<(gpui_kit::SharedString, f64)> {
+        self.samples
+            .iter()
+            .enumerate()
+            .map(|(index, sample)| (index.to_string().into(), sample[metric] as f64))
+            .collect()
+    }
 }
 
 impl ConnectionsUiState {
@@ -34,6 +91,7 @@ impl ConnectionsUiState {
         self.projection = None;
         self.projecting = false;
         self.frozen = None;
+        self.history = ConnectionMetricHistory::default();
     }
 
     pub(super) fn new(window: &mut Window, cx: &mut Context<RuntimePage>) -> (Self, Subscription) {
@@ -65,6 +123,7 @@ impl ConnectionsUiState {
                 worker: projection::ProjectionWorker::default(),
                 projecting: false,
                 frozen: None,
+                history: ConnectionMetricHistory::default(),
             },
             subscription,
         )
@@ -116,7 +175,12 @@ impl RuntimePage {
                 }
                 this.connections.projecting = false;
                 match result {
-                    Ok(Some(projection)) => this.connections.projection = Some(projection),
+                    Ok(Some(projection)) => {
+                        this.connections
+                            .history
+                            .observe(this.core_session.generation(), &projection.snapshot);
+                        this.connections.projection = Some(projection);
+                    }
                     Ok(None) => {}
                     Err(error) => {
                         this.error = Some(zenclash_i18n::text_with(
@@ -136,6 +200,11 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> Button {
         Button::new("pause-connections-display")
+            .icon(if self.connections.frozen.is_some() {
+                gpui_kit::assets::IconName::Play
+            } else {
+                gpui_kit::assets::IconName::Pause
+            })
             .label(zenclash_i18n::text(if self.connections.frozen.is_some() {
                 "common.actions.resume_display"
             } else {
@@ -143,6 +212,7 @@ impl RuntimePage {
             }))
             .tooltip(zenclash_i18n::text("connections.display_pause_description"))
             .small()
+            .h_10()
             .outline()
             .disabled(self.connections.projection.is_none())
             .on_click(cx.listener(|this, _, _, cx| {
@@ -168,24 +238,32 @@ impl RuntimePage {
         h_flex()
             .gap_2()
             .flex_wrap()
-            .children(ConnectionTransport::ALL.into_iter().map(|value| {
-                use gpui_kit::component::Selectable as _;
-                Button::new(("connection-transport", value as usize))
-                    .label(zenclash_i18n::text(value.label()))
-                    .small()
+            .child(
+                ButtonGroup::new("connection-transport-group")
                     .outline()
-                    .selected(value == transport)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.connections.transport = value;
-                        this.connections.page = 0;
-                        this.update_connection_presentation(cx);
-                        cx.notify();
-                    }))
-            }))
+                    .children(ConnectionTransport::ALL.into_iter().map(|value| {
+                        use gpui_kit::component::Selectable as _;
+                        Button::new(("connection-transport", value as usize))
+                            .label(zenclash_i18n::text(value.label()))
+                            .small()
+                            .h_10()
+                            .min_w(gpui_kit::rems(4.))
+                            .outline()
+                            .selected(value == transport)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.connections.transport = value;
+                                this.connections.page = 0;
+                                this.update_connection_presentation(cx);
+                                cx.notify();
+                            }))
+                    })),
+            )
             .child(
                 Button::new("connection-sort")
                     .label(zenclash_i18n::text(sort.label()))
                     .small()
+                    .h_10()
+                    .min_w(gpui_kit::rems(8.))
                     .outline()
                     .dropdown_caret(true)
                     .dropdown_menu(move |mut menu, _, _| {
@@ -221,6 +299,51 @@ impl RuntimePage {
     fn set_connections_page(&mut self, page: usize, cx: &mut Context<Self>) {
         self.connections.page = page;
         cx.notify();
+    }
+
+    fn confirm_connection_close(
+        &mut self,
+        id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if window.focused(cx).is_none() {
+            window.focus(&self.focus_handle, cx);
+        }
+        let owner = cx.entity().downgrade();
+        let generation = self.core_session.generation();
+        let profile = self.profile_path.clone();
+        window.open_alert_dialog(cx, move |dialog, _, _| {
+            let owner = owner.clone();
+            let id = id.clone();
+            let profile = profile.clone();
+            dialog
+                .confirm()
+                .title(zenclash_i18n::text(if id.is_some() {
+                    "connections.ui.close_title"
+                } else {
+                    "connections.ui.close_all_title"
+                }))
+                .description(zenclash_i18n::text("connections.ui.close_description"))
+                .ok_text(zenclash_i18n::text("connections.ui.close_confirm"))
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, _, cx| {
+                    let _ = owner.update(cx, |page, cx| {
+                        if page.page != Page::Connections
+                            || page.core_session.generation() != generation
+                            || page.profile_path != profile
+                        {
+                            return;
+                        }
+                        if let Some(id) = &id {
+                            page.close_connection(id.clone(), cx);
+                        } else {
+                            page.close_all_connections(cx);
+                        }
+                    });
+                    true
+                })
+        });
     }
 
     fn close_all_connections(&mut self, cx: &mut Context<Self>) {
@@ -431,9 +554,15 @@ fn connection_detail(
 ) -> gpui_kit::Div {
     h_flex()
         .gap_3()
-        .text_xs()
-        .child(div().w_24().text_color(theme.muted_foreground).child(label))
-        .child(div().min_w_0().child(if value.is_empty() {
+        .text_sm()
+        .child(
+            div()
+                .w_24()
+                .flex_shrink_0()
+                .text_color(theme.muted_foreground)
+                .child(label),
+        )
+        .child(div().flex_1().min_w_0().child(if value.is_empty() {
             "—".into()
         } else {
             value
@@ -632,5 +761,61 @@ mod tests {
             connection_summary(&connection),
             "Browser · DomainSuffix · Hong Kong"
         );
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::ConnectionMetricHistory;
+    use std::sync::Arc;
+    use zenclash_core::{Connection, ConnectionsSnapshot};
+
+    fn snapshot(upload: u64) -> Arc<ConnectionsSnapshot> {
+        Arc::new(ConnectionsSnapshot {
+            connections: vec![Connection::default()],
+            upload_total: upload,
+            download_total: upload * 2,
+            memory: 1024,
+        })
+    }
+
+    #[test]
+    fn metric_history_deduplicates_filtered_snapshots_and_resets_on_core_or_counter_change() {
+        let mut history = ConnectionMetricHistory::default();
+        let first = snapshot(100);
+        history.observe(1, &first);
+        history.observe(1, &first);
+        assert_eq!(history.samples.len(), 1);
+        history.observe(1, &snapshot(200));
+        assert_eq!(
+            history
+                .points(1)
+                .iter()
+                .map(|point| point.1)
+                .collect::<Vec<_>>(),
+            [100., 200.]
+        );
+        history.observe(2, &snapshot(300));
+        assert_eq!(history.samples.len(), 1);
+        history.observe(2, &snapshot(10));
+        assert_eq!(history.samples.len(), 1);
+        assert_eq!(history.samples[0], [1, 10, 20, 1024]);
+    }
+
+    #[test]
+    fn metric_history_retains_only_observed_recent_samples_without_retaining_connection_snapshots()
+    {
+        let mut history = ConnectionMetricHistory::default();
+        let first = snapshot(1);
+        let old = Arc::downgrade(&first);
+        history.observe(1, &first);
+        drop(first);
+        for upload in 2..=120 {
+            history.observe(1, &snapshot(upload));
+        }
+        assert!(old.upgrade().is_none());
+        assert_eq!(history.samples.len(), 60);
+        assert_eq!(history.samples.front().unwrap()[1], 61);
+        assert_eq!(history.samples.back().unwrap()[1], 120);
     }
 }

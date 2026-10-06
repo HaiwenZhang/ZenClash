@@ -61,7 +61,10 @@ fn exited_process_snapshot_does_not_expose_a_stale_pid() {
     child.wait().unwrap();
     let process = MihomoProcess {
         drop_gate: Mutex::new(None),
+        started_at_secs: AtomicU64::new(0),
         child: Mutex::new(Some(child)),
+        execution: Mutex::new(None),
+        isolated_test_child: true,
         logs: Arc::new(RwLock::new(VecDeque::new())),
         last_exit_reason: RwLock::new(None),
         recovery_asset_root: RwLock::new(None),
@@ -100,7 +103,10 @@ async fn unobservable_local_restart_rejection_invalidates_the_lifecycle() {
     let pid = child.id() as libc::pid_t;
     let process = Arc::new(MihomoProcess {
         drop_gate: Mutex::new(None),
+        started_at_secs: AtomicU64::new(0),
         child: Mutex::new(Some(child)),
+        execution: Mutex::new(None),
+        isolated_test_child: true,
         logs: Arc::new(RwLock::new(VecDeque::new())),
         last_exit_reason: RwLock::new(None),
         recovery_asset_root: RwLock::new(None),
@@ -321,6 +327,7 @@ fn ui_metadata_and_logs_remain_available_while_lifecycle_lock_is_held() {
     let process = MihomoProcess {
         drop_gate: Mutex::new(None),
         child: parking_lot::Mutex::new(None),
+        started_at_secs: AtomicU64::new(0),
         execution: parking_lot::Mutex::new(None),
         isolated_test_child: true,
         logs: std::sync::Arc::new(parking_lot::RwLock::new(VecDeque::from(["ready".into()]))),

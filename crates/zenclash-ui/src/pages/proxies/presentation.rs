@@ -5,6 +5,62 @@ use std::{
     rc::Rc,
 };
 
+#[derive(Default)]
+pub(super) struct NodeSummary {
+    states: HashMap<ProxyNodeId, usize>,
+    counts: [usize; 3],
+}
+
+impl NodeSummary {
+    pub(super) fn new(catalog: &ProxyCatalog) -> Self {
+        let groups = catalog
+            .groups()
+            .iter()
+            .map(|group| group.name.as_str())
+            .collect::<HashSet<_>>();
+        let mut summary = Self::default();
+        for id in catalog.groups().iter().flat_map(|group| group.all.iter()) {
+            let Some(node) = catalog.node(id) else {
+                continue;
+            };
+            if groups.contains(node.name.as_str())
+                || matches!(
+                    node.kind.as_str(),
+                    "Direct" | "Reject" | "Compatible" | "Pass"
+                )
+                || summary.states.contains_key(id)
+            {
+                continue;
+            }
+            let state = Self::state(node.latest_delay());
+            summary.states.insert(id.clone(), state);
+            summary.counts[state] += 1;
+        }
+        summary
+    }
+
+    fn state(delay: Option<u32>) -> usize {
+        match delay {
+            Some(1..) => 0,
+            Some(0) => 1,
+            None => 2,
+        }
+    }
+
+    pub(super) fn record(&mut self, id: &ProxyNodeId, delay: Option<u32>) {
+        if let Some(previous) = self.states.get_mut(id) {
+            let state = Self::state(delay);
+            self.counts[*previous] -= 1;
+            self.counts[state] += 1;
+            *previous = state;
+        }
+    }
+
+    pub(super) fn counts(&self) -> [usize; 3] {
+        self.counts
+    }
+}
+
 pub(super) fn visible_group_indices(
     catalog: &ProxyCatalog,
     mode: &str,
@@ -333,6 +389,65 @@ pub(super) fn search_node_orders(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_summary_counts_shared_nodes_once_and_updates_measurements() {
+        let nodes = vec![
+            super::super::ProxyNode {
+                name: "fast".into(),
+                kind: "Shadowsocks".into(),
+                history: vec![super::super::DelayHistory {
+                    delay: 28,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            super::super::ProxyNode {
+                name: "failed".into(),
+                kind: "Shadowsocks".into(),
+                history: vec![super::super::DelayHistory::default()],
+                ..Default::default()
+            },
+            super::super::ProxyNode {
+                name: "new".into(),
+                kind: "Shadowsocks".into(),
+                ..Default::default()
+            },
+            super::super::ProxyNode {
+                name: "DIRECT".into(),
+                kind: "Direct".into(),
+                ..Default::default()
+            },
+            super::super::ProxyNode {
+                name: "group".into(),
+                kind: "Selector".into(),
+                ..Default::default()
+            },
+        ];
+        let catalog = ProxyCatalog::from_group_nodes(
+            ["group", "other"]
+                .into_iter()
+                .map(|name| {
+                    (
+                        ProxyGroup {
+                            name: name.into(),
+                            ..Default::default()
+                        },
+                        nodes.clone(),
+                    )
+                })
+                .collect(),
+            7,
+        );
+        let mut summary = NodeSummary::new(&catalog);
+        assert_eq!(summary.counts(), [1, 1, 1]);
+        summary.record(&ProxyNodeId::new("new".into(), None), Some(50));
+        assert_eq!(summary.counts(), [2, 1, 0]);
+        summary.record(&ProxyNodeId::new("new".into(), None), Some(0));
+        assert_eq!(summary.counts(), [1, 2, 0]);
+        summary.record(&ProxyNodeId::new("DIRECT".into(), None), Some(1));
+        assert_eq!(summary.counts(), [1, 2, 0]);
+    }
     use zenclash_core::{DelayHistory, ProxyNode};
 
     #[test]

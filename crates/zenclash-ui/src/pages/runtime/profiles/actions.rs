@@ -9,6 +9,15 @@ use super::{
 mod catalog;
 
 impl RuntimePage {
+    pub(in crate::pages::runtime) fn close_subscription_form(&mut self, cx: &mut Context<Self>) {
+        if !self.profiles.forms.adding_subscription || self.core_busy() {
+            return;
+        }
+        self.profiles.forms.adding_subscription = false;
+        self.restore_page_focus(Page::Profiles, cx);
+        cx.notify();
+    }
+
     pub(super) fn confirm_service_profile(&mut self, version: u64, cx: &mut Context<Self>) {
         let Some(token) = self.begin_mutation(Page::Profiles) else {
             return;

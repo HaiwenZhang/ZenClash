@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
 use zenclash_core::{
-    DEFAULT_NETWORK_LATENCY_TARGETS, NetworkLatencyTarget, NetworkProbeRoute, NetworkProbeSnapshot,
-    ObservedPathRoute, PathStatus, RuntimeConfig,
+    DEFAULT_NETWORK_LATENCY_TARGETS, DiagnosticData, DiagnosticReport, NetworkLatencyTarget,
+    NetworkProbeRoute, NetworkProbeSnapshot, ObservedPathRoute, PathStatus, RuntimeConfig,
 };
 
 pub(super) fn network_probe_route(
@@ -49,6 +49,41 @@ pub(super) fn average_latency(snapshot: &NetworkProbeSnapshot) -> Option<u64> {
     } else {
         Some(values.iter().sum::<u64>() / u64::try_from(values.len()).unwrap_or(1))
     }
+}
+
+pub(super) fn public_ip_checked_at(
+    snapshot: &NetworkProbeSnapshot,
+    report: Option<&DiagnosticReport>,
+) -> Option<u64> {
+    let info = snapshot.public_ip.as_ref()?;
+    report?
+        .steps
+        .iter()
+        .filter_map(|step| {
+            let Ok(DiagnosticData::Network(observed)) = &step.outcome else {
+                return None;
+            };
+            (observed.route == snapshot.route
+                && observed.public_ip.as_ref() == Some(info)
+                && step.completed_at_ms > 0)
+                .then_some(step.completed_at_ms)
+        })
+        .max()
+}
+
+pub(super) fn public_exit_label(snapshot: Option<&NetworkProbeSnapshot>, loading: bool) -> String {
+    if let Some(info) = snapshot.and_then(|snapshot| snapshot.public_ip.as_ref()) {
+        return info.ip.clone();
+    }
+    zenclash_i18n::text(if loading {
+        "network.public_ip.probing"
+    } else if snapshot.is_some_and(|snapshot| snapshot.public_ip_error.is_some()) {
+        "network.latency.failed"
+    } else if snapshot.is_some() {
+        "common.status.unavailable"
+    } else {
+        "network.metrics.waiting"
+    })
 }
 
 pub(super) fn path_observation(
@@ -141,6 +176,77 @@ mod tests {
     use zenclash_core::NetworkLatencyResult;
 
     use super::*;
+
+    #[test]
+    fn public_ip_time_requires_the_displayed_address_and_route() {
+        use zenclash_core::{DiagnosticRoute, DiagnosticStep, DiagnosticStepKind, PublicIpInfo};
+        let snapshot = NetworkProbeSnapshot {
+            route: "Mihomo".into(),
+            public_ip: Some(PublicIpInfo {
+                ip: "203.0.113.24".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut report = DiagnosticReport {
+            started_at_ms: 100,
+            steps: vec![DiagnosticStep {
+                kind: DiagnosticStepKind::NetworkMihomo,
+                route: DiagnosticRoute::Mihomo,
+                completed_at_ms: 200,
+                duration_ms: 100,
+                outcome: Ok(DiagnosticData::Network(snapshot.clone())),
+            }],
+        };
+        assert_eq!(public_ip_checked_at(&snapshot, Some(&report)), Some(200));
+        assert_eq!(public_ip_checked_at(&snapshot, None), None);
+        let mut other = snapshot.clone();
+        other.route = "DIRECT".into();
+        assert_eq!(public_ip_checked_at(&other, Some(&report)), None);
+        other = snapshot.clone();
+        other.public_ip.as_mut().unwrap().ip = "203.0.113.25".into();
+        assert_eq!(public_ip_checked_at(&other, Some(&report)), None);
+        other.public_ip = None;
+        assert_eq!(public_ip_checked_at(&other, Some(&report)), None);
+        report.steps[0].completed_at_ms = 0;
+        assert_eq!(public_ip_checked_at(&snapshot, Some(&report)), None);
+        report.steps[0].completed_at_ms = 300;
+        report.steps[0].outcome = Err(zenclash_core::DiagnosticFailure {
+            message: "unavailable".into(),
+        });
+        assert_eq!(public_ip_checked_at(&snapshot, Some(&report)), None);
+    }
+
+    #[test]
+    fn public_exit_summary_tracks_failure_retry_and_recovery() {
+        assert_eq!(
+            public_exit_label(None, false),
+            zenclash_i18n::text("network.metrics.waiting")
+        );
+        let mut snapshot = NetworkProbeSnapshot {
+            public_ip_error: Some("request failed".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            public_exit_label(Some(&snapshot), false),
+            zenclash_i18n::text("network.latency.failed")
+        );
+        assert_eq!(
+            public_exit_label(Some(&snapshot), true),
+            zenclash_i18n::text("network.public_ip.probing")
+        );
+        snapshot.public_ip_error = None;
+        assert_eq!(
+            public_exit_label(Some(&snapshot), false),
+            zenclash_i18n::text("common.status.unavailable")
+        );
+        snapshot.public_ip = Some(zenclash_core::PublicIpInfo {
+            ip: "203.0.113.24".into(),
+            ..Default::default()
+        });
+        assert_eq!(public_exit_label(Some(&snapshot), false), "203.0.113.24");
+        assert_eq!(public_exit_label(Some(&snapshot), true), "203.0.113.24");
+    }
 
     #[test]
     fn chooses_mixed_then_http_proxy_port() {

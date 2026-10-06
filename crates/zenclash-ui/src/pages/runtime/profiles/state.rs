@@ -13,13 +13,13 @@ pub(crate) struct ProfileFormState {
     pub(super) subscription_user_agent: Entity<InputState>,
     pub(super) subscription_authorization: Entity<InputState>,
     pub(in crate::pages::runtime) subscription_route: RemoteProfileRoute,
-    pub(super) request_name: Entity<InputState>,
+    pub(in crate::pages::runtime) request_name: Entity<InputState>,
     pub(super) request_url: Entity<InputState>,
     pub(super) request_user_agent: Entity<InputState>,
     pub(super) request_authorization: Entity<InputState>,
     pub(super) request_timeout_seconds: Entity<InputState>,
     pub(super) update_cron: Entity<InputState>,
-    pub(super) editing_profile_id: Option<String>,
+    pub(in crate::pages::runtime) editing_profile_id: Option<String>,
     pub(super) editing_route: RemoteProfileRoute,
     pub(super) editing_fixed_update_interval: bool,
 }
@@ -149,16 +149,18 @@ impl ProfileCatalogView {
             .iter()
             .map(|profile| profile.id.clone())
             .collect();
+        let active_changed = self.active != catalog.active;
         self.active = catalog.active.clone();
         self.remote_count = catalog
             .profiles
             .iter()
             .filter(|profile| profile.is_remote())
             .count();
-        if self
-            .selected
-            .as_ref()
-            .is_none_or(|id| !self.lookup.contains_key(id))
+        if active_changed
+            || self
+                .selected
+                .as_ref()
+                .is_none_or(|id| !self.lookup.contains_key(id))
         {
             self.selected = self
                 .active
@@ -295,6 +297,26 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn successful_activation_moves_inspector_but_refresh_preserves_manual_inspection() {
+        let mut catalog = catalog();
+        let mut view = ProfileCatalogView::default();
+        view.prepare(&catalog);
+        view.select("profile-1");
+        view.prepare(&catalog);
+        assert!(view.is_selected("profile-1"));
+
+        catalog.active = Some("profile-2".into());
+        view.prepare(&catalog);
+        assert!(view.is_selected("profile-2"));
+        assert_eq!(view.selected_index(), view.active_index());
+
+        view.select("profile-3");
+        view.prepare(&catalog);
+        assert!(view.is_selected("profile-3"));
+        assert_eq!(view.active_index(), Some(2));
     }
 
     #[test]

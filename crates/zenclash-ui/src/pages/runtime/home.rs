@@ -3,15 +3,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use gpui_kit::base::TestSupportExt;
+use gpui_kit::base::{StyledExt, TestSupportExt};
 use gpui_kit::component::{
-    Disableable, Icon, IconName, Selectable, Sizable,
-    button::{Button, ButtonVariants},
+    ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable,
+    button::{Button, ButtonCustomVariant, ButtonVariants},
     chart::AreaChart,
     h_flex,
     menu::{DropdownMenu, PopupMenuItem},
     progress::Progress,
-    switch::Switch,
     v_flex,
 };
 use gpui_kit::{
@@ -30,7 +29,9 @@ use crate::{
         NavigateProfiles, NavigateProxies, NavigateSystemProxy, SetDirectMode, SetGlobalMode,
         SetRuleMode,
     },
-    components::sidebar::OutboundMode,
+    components::{
+        mint_switch::MintSwitch as Switch, sidebar::OutboundMode, wave_percentage::WavePercentage,
+    },
 };
 
 use super::{
@@ -42,10 +43,11 @@ mod dashboard;
 mod flow;
 mod history;
 mod traffic;
+#[cfg(all(test, target_os = "windows"))]
+mod validation;
 
 const HOME_PROFILE_PICKER_LIMIT: usize = 20;
 
-const LIVE_TRAFFIC_TICK_MARGIN: usize = 6;
 const MIN_TRAFFIC_CHART_CEILING: u64 = 1_024;
 
 #[derive(Default)]
@@ -61,6 +63,8 @@ pub(super) struct HomeUiState {
     generation: u64,
     flow: flow::HomeFlowState,
     history: history::HomeHistoryState,
+    #[cfg(test)]
+    design_validation: Option<(OperationalSnapshot, zenclash_core::TrafficSnapshot)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,9 +88,26 @@ struct ModeTransition {
 }
 
 impl RuntimePage {
+    fn home_operational_snapshot(&self) -> OperationalSnapshot {
+        #[cfg(test)]
+        if let Some((snapshot, _)) = &self.home.design_validation {
+            return snapshot.clone();
+        }
+        self.operational_status.snapshot()
+    }
+
+    fn home_traffic_snapshot(&self) -> zenclash_core::TrafficSnapshot {
+        #[cfg(test)]
+        if let Some((_, snapshot)) = &self.home.design_validation {
+            return snapshot.clone();
+        }
+        self.traffic_monitor.snapshot()
+    }
+
     pub(in crate::pages::runtime) fn render_home(
         &self,
         theme: &gpui_kit::component::Theme,
+        compact: bool,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let fallback_config = RuntimeConfig::default();
@@ -94,11 +115,27 @@ impl RuntimePage {
             RuntimeData::Dashboard { config, .. } => config.value().unwrap_or(&fallback_config),
             _ => &fallback_config,
         };
-        let operational = self.operational_status.snapshot();
+        let operational = self.home_operational_snapshot();
 
         v_flex()
             .gap_3()
-            .child(self.render_home_metrics(&operational.streams, theme))
+            .child(
+                h_flex()
+                    .id("home-primary-row")
+                    .test_support()
+                    .items_stretch()
+                    .flex_wrap()
+                    .gap_3()
+                    .child(v_flex().flex_1().flex_basis(rems(30.)).min_w_0().child(
+                        self.render_home_controls(config, &operational.capture, theme, compact, cx),
+                    ))
+                    .child(
+                        self.render_home_metrics(&operational.streams, theme)
+                            .flex_1()
+                            .flex_basis(rems(30.))
+                            .min_w_0(),
+                    ),
+            )
             .when_some(
                 self.app_update
                     .status
@@ -141,40 +178,74 @@ impl RuntimePage {
             )
             .child(
                 h_flex()
-                    .items_start()
+                    .id("home-traffic-row")
+                    .test_support()
+                    .items_stretch()
                     .flex_wrap()
                     .gap_3()
                     .child(
-                        div()
-                            .flex_1()
+                        v_flex()
+                            .id("home-traffic-panel")
+                            .test_support()
+                            .flex_grow(1.75)
                             .flex_basis(rems(38.))
                             .min_w_0()
                             .child(self.render_home_traffic(&operational.streams, theme, cx)),
                     )
                     .child(
-                        v_flex().flex_1().flex_basis(rems(22.)).min_w_0().child(
-                            self.render_home_controls(config, &operational.capture, theme, cx),
-                        ),
+                        v_flex()
+                            .id("home-subscription-panel")
+                            .test_support()
+                            .flex_1()
+                            .flex_basis(rems(22.))
+                            .min_w_0()
+                            .child(self.render_home_profile(theme, cx)),
                     ),
             )
             .child(
                 h_flex()
-                    .items_start()
+                    .id("home-activity-row")
+                    .test_support()
+                    .items_stretch()
                     .flex_wrap()
                     .gap_3()
-                    .child(self.render_home_process_flow(theme))
-                    .child(self.render_home_routes(theme))
-                    .child(self.render_home_node_delays(theme, cx)),
+                    .child(
+                        v_flex()
+                            .id("home-activity-panel")
+                            .test_support()
+                            .flex_1()
+                            .flex_basis(rems(30.))
+                            .min_w_0()
+                            .rounded(theme.radius_lg)
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.secondary)
+                            .child(self.render_home_routes(theme))
+                            .child(self.render_home_process_flow(theme)),
+                    )
+                    .child(
+                        v_flex()
+                            .id("home-node-panel")
+                            .test_support()
+                            .flex_1()
+                            .flex_basis(rems(30.))
+                            .min_w_0()
+                            .rounded(theme.radius_lg)
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.secondary)
+                            .child(self.render_home_proxy(theme, cx))
+                            .child(self.render_home_node_delays(theme, cx)),
+                    ),
             )
-            .child(
-                h_flex()
-                    .items_start()
-                    .flex_wrap()
-                    .gap_3()
-                    .child(self.render_home_profile(theme, cx))
-                    .child(self.render_home_recent_connections(theme)),
+            .child(self.render_home_recent_connections(theme))
+            .when(
+                operational
+                    .process
+                    .value()
+                    .is_some_and(|process| !process.running),
+                |view| view.child(self.render_home_evidence(&operational, theme)),
             )
-            .child(self.render_home_evidence(&operational, theme))
             .into_any_element()
     }
 
@@ -276,19 +347,17 @@ impl RuntimePage {
             || zenclash_i18n::text("home.profile.none_description"),
             |profile| {
                 zenclash_i18n::text_with(
-                    "home.profile.source_updated",
-                    &[
-                        ("source", profile.source_label()),
-                        ("age", format_profile_age(profile.updated_at)),
-                    ],
+                    "profiles.catalog.updated",
+                    &[("age", format_profile_age(profile.updated_at))],
                 )
             },
         );
-        let (usage, usage_percent) = active
+        let quota = active.and_then(|profile| profile.subscription.usage.as_ref());
+        let expiry = active
             .and_then(|profile| profile.subscription.usage.as_ref())
             .map_or_else(
-                || (zenclash_i18n::text("home.profile.usage_unavailable"), 0.),
-                subscription_usage,
+                || zenclash_i18n::text("home.profile.expiry_unavailable"),
+                subscription_expiry,
             );
         let active_id = self.profiles.catalog.active.clone();
         let mut profiles = self
@@ -310,10 +379,15 @@ impl RuntimePage {
             zenclash_i18n::text_with("home.profile.switch_current", &[("name", name.clone())]);
         let profile_picker = Button::new("home-profile-picker")
             .label(name)
-            .w_full()
+            .icon(Icon::new(IconName::File).size_6())
+            .justify_start()
             .min_w_0()
             .overflow_hidden()
-            .outline()
+            .ghost()
+            .small()
+            .h_8()
+            .text_lg()
+            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
             .dropdown_caret(true)
             .tooltip(profile_switch_tooltip)
             .loading(self.home.profile_switching.is_some())
@@ -347,62 +421,154 @@ impl RuntimePage {
                 )
             });
 
-        home_card(zenclash_i18n::text("home.profile.title"), theme)
-            .flex_basis(rems(30.))
+        v_flex()
+            .flex_1()
+            .line_height(gpui_kit::relative(1.25))
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.secondary)
             .min_w_0()
-            .min_h(rems(11.5))
+            .child(
+                h_flex()
+                    .px_4()
+                    .pt_4()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child(zenclash_i18n::text("home.profile.title")),
+                    )
+                    .child(
+                        Button::new("home-open-profiles")
+                            .icon(IconName::ArrowRight)
+                            .label(zenclash_i18n::text("profiles.design.details"))
+                            .small()
+                            .outline()
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(NavigateProfiles), cx)
+                            }),
+                    ),
+            )
             .child(
                 v_flex()
                     .flex_1()
-                    .p_4()
-                    .gap_3()
-                    .child(profile_picker)
+                    .px_4()
+                    .py_2()
+                    .gap_2()
+                    .child(h_flex().gap_2().child(profile_picker).when_some(
+                        active,
+                        |row, profile| {
+                            row.child(
+                                div()
+                                    .text_xs()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded(theme.radius)
+                                    .bg(theme.chart_3.opacity(0.12))
+                                    .text_color(theme.primary)
+                                    .child(profile.source_label()),
+                            )
+                        },
+                    ))
                     .child(
                         div()
-                            .text_xs()
+                            .text_sm()
                             .text_color(theme.muted_foreground)
                             .child(source),
                     )
                     .child(
-                        v_flex()
-                            .gap_2()
+                        h_flex()
+                            .gap_4()
+                            .items_center()
+                            .flex_wrap()
                             .child(
-                                h_flex()
-                                    .gap_3()
-                                    .justify_between()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(zenclash_i18n::text("home.profile.usage"))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_right()
-                                            .text_ellipsis()
-                                            .whitespace_nowrap()
-                                            .overflow_hidden()
-                                            .child(usage),
-                                    ),
+                                WavePercentage::new(
+                                    "home-subscription-quota",
+                                    zenclash_i18n::text("profiles.design.used"),
+                                )
+                                .diameter(9.)
+                                .value(
+                                    quota.filter(|value| value.total > 0).map(|value| {
+                                        100. * normalized_fraction(value.used(), value.total)
+                                    }),
+                                ),
                             )
                             .child(
-                                Progress::new("traffic-activity")
-                                    .h_1()
-                                    .color(theme.primary)
-                                    .value(usage_percent),
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .pl_4()
+                                    .border_l_1()
+                                    .border_color(theme.border)
+                                    .gap_2()
+                                    .children(
+                                        [
+                                            (
+                                                "profiles.design.used",
+                                                quota.map(SubscriptionUsage::used),
+                                            ),
+                                            (
+                                                "profiles.design.remaining",
+                                                quota.filter(|value| value.total > 0).map(
+                                                    |value| {
+                                                        value.total.saturating_sub(value.used())
+                                                    },
+                                                ),
+                                            ),
+                                        ]
+                                        .into_iter()
+                                        .map(
+                                            |(key, bytes)| {
+                                                v_flex()
+                                                    .gap_1()
+                                                    .child(
+                                                        div()
+                                                            .text_sm()
+                                                            .text_color(theme.muted_foreground)
+                                                            .child(zenclash_i18n::text(key)),
+                                                    )
+                                                    .child(
+                                                        div().text_size(px(26.)).font_bold().child(
+                                                            bytes.map_or_else(
+                                                                || "—".to_owned(),
+                                                                format_bytes,
+                                                            ),
+                                                        ),
+                                                    )
+                                            },
+                                        ),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .text_sm()
+                                            .text_color(theme.muted_foreground)
+                                            .child(zenclash_i18n::text("profiles.design.total"))
+                                            .child(
+                                                quota.filter(|value| value.total > 0).map_or_else(
+                                                    || "—".into(),
+                                                    |value| format_bytes(value.total),
+                                                ),
+                                            ),
+                                    ),
                             ),
                     )
-                    .child(div().flex_1())
                     .child(
-                        h_flex().justify_end().child(
-                            Button::new("home-open-profiles")
-                                .icon(IconName::ArrowRight)
-                                .label(zenclash_i18n::text("home.profile.all"))
-                                .small()
-                                .outline()
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(Box::new(NavigateProfiles), cx);
-                                }),
-                        ),
+                        h_flex()
+                            .justify_between()
+                            .gap_2()
+                            .pt_2()
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(expiry)
+                            .when_some(quota.and_then(subscription_expiry_date), |row, date| {
+                                row.child(date)
+                            }),
                     ),
             )
             .into_any_element()
@@ -436,17 +602,15 @@ impl RuntimePage {
 
         v_flex()
             .px_4()
-            .py_3()
-            .gap_2()
-            .border_t_1()
-            .border_color(theme.border)
+            .py_2()
+            .gap_1()
             .child(
                 h_flex()
                     .justify_between()
                     .gap_2()
                     .child(
                         div()
-                            .text_base()
+                            .text_lg()
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .child(zenclash_i18n::text("home.proxy.title")),
                     )
@@ -460,12 +624,6 @@ impl RuntimePage {
                                 window.dispatch_action(Box::new(NavigateProxies), cx);
                             }),
                     ),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(selection.group),
             )
             .child(
                 h_flex().gap_3().justify_between().child(node_picker).child(
@@ -484,7 +642,7 @@ impl RuntimePage {
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(selection.kind),
+                    .child(format!("{} · {}", selection.kind, selection.group)),
             )
             .when_some(self.home.proxy_error.clone(), |this, error| {
                 this.child(message_banner(error, theme.danger, theme))
@@ -497,6 +655,7 @@ impl RuntimePage {
         config: &RuntimeConfig,
         capture: &CaptureStatus,
         theme: &gpui_kit::component::Theme,
+        compact: bool,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let transition = self.home.capture_transition.as_ref();
@@ -531,6 +690,7 @@ impl RuntimePage {
             "home.controls.tun_disabling",
         )
         .unwrap_or_else(|| tun_status_text(effective_capture));
+        let tun_enabled = capture_presentation.tun_enabled;
         let tun_supported = effective_capture
             .tun
             .value()
@@ -548,53 +708,152 @@ impl RuntimePage {
         let mode_pending = presentation.pending;
         let port = config.system_proxy_port().map_or_else(
             || zenclash_i18n::text("home.controls.no_proxy_port"),
-            |port| {
-                zenclash_i18n::text_with("home.controls.local_proxy", &[("port", port.to_string())])
-            },
+            |port| format!("127.0.0.1:{port}"),
         );
+        let memory = self
+            .home_operational_snapshot()
+            .streams
+            .connections
+            .value()
+            .filter(|value| value.generation == self.home.generation)
+            .map_or_else(|| "—".to_owned(), |value| format_bytes(value.memory));
 
-        home_card(zenclash_i18n::text("home.controls.title"), theme)
+        let snapshot = self.home_operational_snapshot();
+        let process = snapshot
+            .process
+            .is_fresh()
+            .then(|| snapshot.process.value())
+            .flatten()
+            .filter(|process| process.generation == self.home.generation);
+        let (runtime_status, runtime_color) = process_evidence(process, theme);
+        let runtime_detail = crate::components::sidebar::runtime_uptime(process).map_or_else(
+            || self.core_kind.display_name().to_owned(),
+            |uptime| format!("{} · {uptime}", self.core_kind.display_name()),
+        );
+        let orb_color = if process.is_some_and(|process| process.running) {
+            theme.chart_3
+        } else {
+            runtime_color
+        };
+        let mode_controls = h_flex()
+            .gap_0()
+            .p_0p5()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.muted)
+            .child(mode_button(
+                "home-mode-rule",
+                OutboundMode::Rule,
+                mode,
+                mode_pending,
+                SetRuleMode,
+                cx,
+            ))
+            .child(mode_button(
+                "home-mode-global",
+                OutboundMode::Global,
+                mode,
+                mode_pending,
+                SetGlobalMode,
+                cx,
+            ))
+            .child(mode_button(
+                "home-mode-direct",
+                OutboundMode::Direct,
+                mode,
+                mode_pending,
+                SetDirectMode,
+                cx,
+            ));
+        v_flex()
+            .id("home-runtime-card")
+            .test_support()
+            .flex_1()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.secondary)
             .w_full()
+            .child(
+                h_flex()
+                    .px_4()
+                    .py_4()
+                    .gap_3()
+                    .flex_wrap()
+                    .justify_between()
+                    .text_sm()
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .size_16()
+                                    .flex_shrink_0()
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(theme.chart_2.opacity(0.35))
+                                    .bg(orb_color.opacity(0.08))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        div()
+                                            .size_8()
+                                            .rounded_full()
+                                            .bg(orb_color.opacity(0.10))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(
+                                                div().size_5().rounded_full().bg(orb_color).shadow(
+                                                    vec![gpui_kit::BoxShadow {
+                                                        inset: false,
+                                                        color: orb_color.opacity(0.38),
+                                                        offset: gpui_kit::point(px(0.), px(0.)),
+                                                        blur_radius: px(14.),
+                                                        spread_radius: px(3.),
+                                                    }],
+                                                ),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .text_size(px(26.))
+                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                            .child(runtime_status),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .when(compact, |label| label.text_xs())
+                                            .text_color(theme.muted_foreground)
+                                            .child(runtime_detail),
+                                    ),
+                            ),
+                    )
+                    .child(mode_controls),
+            )
             .child(
                 v_flex()
                     .px_4()
                     .pb_3()
                     .gap_2()
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .child(mode_button(
-                                "home-mode-rule",
-                                OutboundMode::Rule,
-                                mode,
-                                mode_pending,
-                                SetRuleMode,
-                            ))
-                            .child(mode_button(
-                                "home-mode-global",
-                                OutboundMode::Global,
-                                mode,
-                                mode_pending,
-                                SetGlobalMode,
-                            ))
-                            .child(mode_button(
-                                "home-mode-direct",
-                                OutboundMode::Direct,
-                                mode,
-                                mode_pending,
-                                SetDirectMode,
-                            )),
-                    )
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(
-                        if mode_pending {
+                    .when(mode_pending, |this| {
+                        this.child(div().text_xs().text_color(theme.muted_foreground).child(
                             zenclash_i18n::text_with(
                                 "home.controls.mode_switching",
                                 &[("mode", mode.label())],
-                            )
-                        } else {
-                            mode_description(mode)
-                        },
-                    ))
+                            ),
+                        ))
+                    })
                     .when_some(self.home.action_error.clone(), |this, error| {
                         this.child(message_banner(error, theme.danger, theme))
                     })
@@ -622,124 +881,150 @@ impl RuntimePage {
                     )
                     .child(
                         h_flex()
-                            .justify_between()
-                            .gap_3()
-                            .py_1()
-                            .child(
-                                v_flex()
-                                    .min_w_0()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                            .child(zenclash_i18n::text("tray.system_proxy")),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child(port),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child(proxy_status),
-                                    ),
-                            )
-                            .child(
-                                Switch::new("home-system-proxy")
-                                    .accessibility_label(zenclash_i18n::text("tray.system_proxy"))
-                                    .checked(capture_presentation.system_proxy_enabled)
-                                    .disabled(capture_presentation.pending)
-                                    .on_click(cx.listener(|this, checked, window, cx| {
-                                        this.apply_home_capture_plan(
-                                            if *checked {
-                                                CapturePlan::SystemProxy
-                                            } else {
-                                                CapturePlan::Off
-                                            },
-                                            window,
-                                            cx,
-                                        );
-                                    })),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .justify_between()
-                            .gap_3()
-                            .py_1()
+                            .gap_4()
+                            .pt_3()
                             .border_t_1()
                             .border_color(theme.border)
+                            .items_start()
+                            .flex_wrap()
+                            .child(
+                                h_flex()
+                                    .flex_1()
+                                    .min_w(rems(10.))
+                                    .justify_between()
+                                    .gap_3()
+                                    .py_1()
+                                    .child(
+                                        v_flex()
+                                            .min_w_0()
+                                            .gap_1()
+                                            .child(
+                                                Button::new("home-open-system-proxy")
+                                                    .label(zenclash_i18n::text("tray.system_proxy"))
+                                                    .tooltip(format!(
+                                                        "{capture_status} · {proxy_status}"
+                                                    ))
+                                                    .small()
+                                                    .text()
+                                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                                    .on_click(|_, window, cx| {
+                                                        window.dispatch_action(
+                                                            Box::new(NavigateSystemProxy),
+                                                            cx,
+                                                        )
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child(port),
+                                            ),
+                                    )
+                                    .child(
+                                        Switch::new("home-system-proxy")
+                                            .accessibility_label(zenclash_i18n::text(
+                                                "tray.system_proxy",
+                                            ))
+                                            .checked(capture_presentation.system_proxy_enabled)
+                                            .disabled(capture_presentation.pending)
+                                            .on_click(cx.listener(|this, checked, window, cx| {
+                                                this.apply_home_capture_plan(
+                                                    if *checked {
+                                                        CapturePlan::SystemProxy
+                                                    } else {
+                                                        CapturePlan::Off
+                                                    },
+                                                    window,
+                                                    cx,
+                                                );
+                                            })),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .flex_1()
+                                    .min_w(rems(10.))
+                                    .pl_4()
+                                    .border_l_1()
+                                    .border_color(theme.border)
+                                    .justify_between()
+                                    .gap_3()
+                                    .py_1()
+                                    .child(
+                                        v_flex()
+                                            .min_w_0()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                                    .child(zenclash_i18n::text(
+                                                        "home.controls.tun",
+                                                    )),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child(tun_status.clone()),
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new("home-tun")
+                                            .label(zenclash_i18n::text(if tun_enabled {
+                                                "home.controls.tun_disable"
+                                            } else {
+                                                "home.controls.tun_enable"
+                                            }))
+                                            .tooltip(tun_status.clone())
+                                            .outline()
+                                            .small()
+                                            .disabled(
+                                                capture_presentation.pending
+                                                    || !tun_supported
+                                                    || service_pending
+                                                    || self.core_busy()
+                                                    || self
+                                                        .profile_service
+                                                        .service_state()
+                                                        .is_some_and(|state| state.is_busy()),
+                                            )
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.apply_home_capture_plan(
+                                                    if tun_enabled {
+                                                        CapturePlan::Off
+                                                    } else {
+                                                        CapturePlan::Tun
+                                                    },
+                                                    window,
+                                                    cx,
+                                                );
+                                            })),
+                                    ),
+                            )
                             .child(
                                 v_flex()
-                                    .min_w_0()
                                     .gap_1()
+                                    .min_w(rems(6.))
+                                    .pl_4()
+                                    .border_l_1()
+                                    .border_color(theme.border)
                                     .child(
                                         div()
                                             .text_sm()
                                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                            .child(zenclash_i18n::text("home.controls.tun")),
+                                            .child(zenclash_i18n::text("home.traffic.core_memory")),
                                     )
                                     .child(
                                         div()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child(tun_status),
+                                            .text_lg()
+                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                            .child(memory),
                                     ),
-                            )
-                            .child(
-                                Switch::new("home-tun")
-                                    .accessibility_label(zenclash_i18n::text("home.controls.tun"))
-                                    .checked(capture_presentation.tun_enabled)
-                                    .disabled(
-                                        capture_presentation.pending
-                                            || !tun_supported
-                                            || service_pending
-                                            || self.core_busy()
-                                            || self
-                                                .profile_service
-                                                .service_state()
-                                                .is_some_and(|state| state.is_busy()),
-                                    )
-                                    .on_click(cx.listener(|this, checked, window, cx| {
-                                        this.apply_home_capture_plan(
-                                            if *checked {
-                                                CapturePlan::Tun
-                                            } else {
-                                                CapturePlan::Off
-                                            },
-                                            window,
-                                            cx,
-                                        );
-                                    })),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .justify_between()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(capture_status),
-                            )
-                            .child(
-                                Button::new("home-open-system-proxy")
-                                    .icon(IconName::ArrowRight)
-                                    .label(zenclash_i18n::text("home.controls.proxy_settings"))
-                                    .small()
-                                    .ghost()
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(Box::new(NavigateSystemProxy), cx)
-                                    }),
                             ),
                     ),
             )
-            .child(self.render_home_proxy(theme, cx))
             .into_any_element()
     }
 
@@ -747,9 +1032,9 @@ impl RuntimePage {
         &self,
         streams: &StreamStatuses,
         theme: &gpui_kit::component::Theme,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let traffic = self.traffic_monitor.snapshot();
+        let traffic = self.home_traffic_snapshot();
         let unknown_stream = Observation::<StreamStatus>::Loading;
         let traffic_stream = if streams
             .traffic
@@ -760,21 +1045,17 @@ impl RuntimePage {
         } else {
             &streams.traffic
         };
-        let connections_stream = if streams
-            .connections
-            .value()
-            .is_some_and(|status| status.generation != self.home.generation)
-        {
-            &unknown_stream
-        } else {
-            &streams.connections
-        };
-        let (traffic_status, status_color) = stream_status_text(traffic_stream, theme);
-        let (connections_status, connections_color) = stream_status_text(connections_stream, theme);
         let (points, observed_seconds) = self.home.chart.points(self.home.generation);
         let ceiling = points
             .first()
             .map_or(MIN_TRAFFIC_CHART_CEILING as f64, |point| point.ceiling);
+        let (axis_unit, axis_divisor) = if ceiling >= 1_048_576. {
+            ("MiB/s", 1_048_576.)
+        } else if ceiling >= 1_024. {
+            ("KiB/s", 1_024.)
+        } else {
+            ("B/s", 1.)
+        };
         let chart = AreaChart::new(points)
             .x(|point| point.label.clone())
             .y(|point| point.download)
@@ -788,80 +1069,144 @@ impl RuntimePage {
             .fill(theme.chart_2.opacity(0.14))
             .natural()
             .y_domain(0., ceiling)
-            .tooltip_value(|_, _, value| format_speed(value.max(0.) as u64).into())
-            .tick_margin(LIVE_TRAFFIC_TICK_MARGIN);
-
-        home_card(zenclash_i18n::text("home.traffic.title"), theme)
-            .w_full()
+            .x_axis(false)
+            .y_axis(false)
+            .grid(false)
+            .y_padding(0., 0.)
+            .tooltip_value(|_, _, value| format_speed(value.max(0.) as u64).into());
+        // A fixed five-minute frame is separate from the observed series. Unknown
+        // history stays blank; stretching a few seconds across the frame would
+        // misrepresent both the time axis and the rates.
+        let plot = h_flex()
+            .items_stretch()
+            .h(rems(10.))
+            .gap_2()
             .child(
                 v_flex()
-                    .p_4()
-                    .gap_4()
+                    .w(rems(2.))
+                    .justify_between()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .children((0..=3).rev().map(|tick| {
+                        div().text_right().child(format!(
+                            "{:.1}",
+                            ceiling / axis_divisor * f64::from(tick) / 3.
+                        ))
+                    })),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
                     .child(
-                        h_flex()
-                            .flex_wrap()
-                            .gap_3()
-                            .justify_between()
-                            .child(div().text_xs().text_color(theme.muted_foreground).child(
-                                zenclash_i18n::text_with(
-                                    "home.traffic.observed_duration",
-                                    &[("seconds", observed_seconds.to_string())],
-                                ),
-                            ))
-                            .child(self.render_home_chart_controls(cx)),
-                    )
-                    .child(
-                        h_flex().flex_wrap().justify_between().gap_3().child(
-                            h_flex()
-                                .flex_wrap()
-                                .gap_4()
-                                .child(status_label(traffic_status, status_color, theme))
-                                .child(status_label(
-                                    zenclash_i18n::text_with(
-                                        "home.traffic.connections_status",
-                                        &[("status", connections_status)],
-                                    ),
-                                    connections_color,
-                                    theme,
-                                ))
-                                .child(series_label(
-                                    zenclash_i18n::text("home.traffic.download"),
-                                    if traffic.generation == self.home.generation
-                                        && traffic_stream.value().is_some()
-                                    {
-                                        format_speed(traffic.download)
-                                    } else {
-                                        zenclash_i18n::text("common.status.unknown")
-                                    },
-                                    theme.info,
-                                    theme,
-                                ))
-                                .child(series_label(
-                                    zenclash_i18n::text("home.traffic.upload"),
-                                    if traffic.generation == self.home.generation
-                                        && traffic_stream.value().is_some()
-                                    {
-                                        format_speed(traffic.upload)
-                                    } else {
-                                        zenclash_i18n::text("common.status.unknown")
-                                    },
-                                    theme.chart_2,
-                                    theme,
-                                )),
-                        ),
+                        AreaChart::new(vec![(0., 0.), (1., 0.)])
+                            .id("home-traffic-grid")
+                            .x(|point| point.0.to_string())
+                            .y(|point| point.1)
+                            .y_domain(0., ceiling)
+                            .y_padding(0., 0.)
+                            .stroke(theme.transparent)
+                            .fill(theme.transparent)
+                            .x_axis(false)
+                            .y_axis(false)
+                            .y_tick_count(4)
+                            .grid_columns(6)
+                            .grid_dashed(false)
+                            .interactive(false),
                     )
                     .child(
                         div()
-                            .h(rems(13.))
-                            .w_full()
-                            .rounded(theme.radius)
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.background.opacity(0.36))
-                            .p_3()
+                            .absolute()
+                            .right_0()
+                            .top_0()
+                            .h_full()
+                            .w(gpui_kit::relative(traffic::observed_span_fraction(
+                                observed_seconds,
+                            )))
                             .child(chart),
                     ),
+            );
+        let time_axis = h_flex()
+            .pl(gpui_kit::rems(2.5))
+            .justify_between()
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .children((0..=5).map(|minute| {
+                div().child(if minute == 5 {
+                    zenclash_i18n::text("home.traffic.now")
+                } else {
+                    format!("−{}m", 5 - minute)
+                })
+            }));
+
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.secondary)
+            .p_4()
+            .gap_3()
+            .child(
+                h_flex()
+                    .gap_4()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_bold()
+                            .child(zenclash_i18n::text("home.traffic.title")),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(zenclash_i18n::text("home.traffic.range_300")),
+                    ),
             )
+            .child(
+                h_flex()
+                    .justify_between()
+                    .gap_3()
+                    .text_xs()
+                    .child(div().text_color(theme.muted_foreground).child(axis_unit))
+                    .child(
+                        h_flex()
+                            .gap_4()
+                            .child(series_label(
+                                "home-upload-legend",
+                                IconName::ArrowUp,
+                                zenclash_i18n::text("home.traffic.upload"),
+                                format_speed(traffic.upload),
+                                theme.chart_2,
+                                theme,
+                            ))
+                            .child(series_label(
+                                "home-download-legend",
+                                IconName::ArrowDown,
+                                zenclash_i18n::text("home.traffic.download"),
+                                format_speed(traffic.download),
+                                theme.chart_1,
+                                theme,
+                            )),
+                    ),
+            )
+            .when(!traffic_stream.is_fresh(), |view| {
+                let (status, color) = stream_status_text(traffic_stream, theme);
+                view.child(status_label(status, color, theme))
+            })
+            .child(v_flex().gap_2().w_full().child(plot).child(time_axis))
+            .when(observed_seconds == 0, |view| {
+                view.child(div().text_xs().text_color(theme.muted_foreground).child(
+                    zenclash_i18n::text_with(
+                        "home.traffic.observed_duration",
+                        &[("seconds", "0".into())],
+                    ),
+                ))
+            })
             .into_any_element()
     }
 
@@ -1217,14 +1562,19 @@ fn current_proxy_group<'a>(
         .flatten()
 }
 
-fn subscription_usage(usage: &SubscriptionUsage) -> (String, f32) {
-    let used = usage.used();
-    let quota = if usage.total == 0 {
-        zenclash_i18n::text_with("home.profile.used", &[("used", format_bytes(used))])
-    } else {
-        format!("{} / {}", format_bytes(used), format_bytes(usage.total))
-    };
-    let expiry = remaining_days(usage.expire).map_or_else(
+fn subscription_expiry_date(usage: &SubscriptionUsage) -> Option<String> {
+    let timestamp = i64::try_from(usage.expire)
+        .ok()
+        .filter(|value| *value > 0)?;
+    let date = chrono::DateTime::from_timestamp(timestamp, 0)?;
+    Some(zenclash_i18n::text_with(
+        "home.profile.expiry_date",
+        &[("date", date.format("%Y-%m-%d").to_string())],
+    ))
+}
+
+fn subscription_expiry(usage: &SubscriptionUsage) -> String {
+    remaining_days(usage.expire).map_or_else(
         || zenclash_i18n::text("home.profile.expiry_unavailable"),
         |days| {
             if days == 0 {
@@ -1236,13 +1586,7 @@ fn subscription_usage(usage: &SubscriptionUsage) -> (String, f32) {
                 )
             }
         },
-    );
-    let percent = if usage.total == 0 {
-        0.
-    } else {
-        100. * normalized_fraction(used, usage.total)
-    };
-    (format!("{quota} · {expiry}"), percent)
+    )
 }
 
 fn remaining_days(expire: u64) -> Option<u64> {
@@ -1357,7 +1701,7 @@ fn process_evidence(
         Some(ProcessRecoveryStatus::Stable | ProcessRecoveryStatus::External)
             if process.is_some_and(|process| process.running) =>
         {
-            theme.success
+            theme.chart_3
         }
         Some(
             ProcessRecoveryStatus::Recovering
@@ -1428,24 +1772,6 @@ fn stream_status_text(
     }
 }
 
-fn home_card(title: impl Into<SharedString>, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
-    v_flex()
-        .min_w(rems(20.))
-        .flex_1()
-        .rounded(theme.radius_lg)
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.group_box)
-        .child(
-            div()
-                .px_4()
-                .pt_4()
-                .text_base()
-                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                .child(title.into()),
-        )
-}
-
 fn home_service_feedback(
     phase: Option<zenclash_core::ServicePhase>,
     pending_commit: bool,
@@ -1485,6 +1811,7 @@ fn mode_button<A>(
     selected: OutboundMode,
     pending: bool,
     action: A,
+    cx: &mut Context<RuntimePage>,
 ) -> Button
 where
     A: gpui_kit::Action + Clone + 'static,
@@ -1492,9 +1819,24 @@ where
     let is_selected = value == selected;
     Button::new(id)
         .label(value.label())
+        .tooltip(mode_description(value))
         .small()
-        .when(is_selected, |this| this.icon(IconName::Check).primary())
-        .when(!is_selected, |this| this.outline())
+        .w(rems(3.75))
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .color(if is_selected {
+                    cx.theme().list_active
+                } else {
+                    cx.theme().transparent
+                })
+                .foreground(if is_selected {
+                    cx.theme().primary
+                } else {
+                    cx.theme().muted_foreground
+                })
+                .hover(cx.theme().list_active)
+                .active(cx.theme().list_active),
+        )
         .selected(is_selected)
         .loading(is_selected && pending)
         .disabled(pending)
@@ -1589,23 +1931,23 @@ fn status_label(
 }
 
 fn series_label(
+    id: &'static str,
+    icon: IconName,
     label: impl Into<SharedString>,
     value: String,
     color: gpui_kit::Hsla,
-    theme: &gpui_kit::component::Theme,
+    _theme: &gpui_kit::component::Theme,
 ) -> gpui_kit::AnyElement {
-    let label = label.into();
     h_flex()
-        .gap_2()
-        .text_xs()
-        .child(div().w_4().h_0p5().rounded_full().bg(color))
-        .child(div().text_color(theme.muted_foreground).child(label))
-        .child(
-            div()
-                .font_family(theme.mono_font_family.clone())
-                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                .child(value),
-        )
+        .id(id)
+        .gap_1()
+        .text_sm()
+        .text_color(color)
+        .child(Icon::new(icon).size_4())
+        .child(label.into())
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(value.clone()).build(window, cx)
+        })
         .into_any_element()
 }
 
@@ -1683,6 +2025,7 @@ mod tests {
             kind: zenclash_core::CoreKind::Mihomo,
             managed: true,
             pid: None,
+            started_at_secs: None,
             running: false,
             generation: 3,
             exit_reason: Some("exit status: 23".into()),

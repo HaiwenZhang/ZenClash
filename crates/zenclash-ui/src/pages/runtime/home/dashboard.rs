@@ -37,6 +37,14 @@ impl HomeUiState {
                 group
                     .all
                     .iter()
+                    .find(|id| id.controller_name() == group.now)
+                    .into_iter()
+                    .chain(
+                        group
+                            .all
+                            .iter()
+                            .filter(|id| id.controller_name() != group.now),
+                    )
                     .take(HOME_NODE_LIMIT)
                     .map(|id| HomeNodeRow {
                         name: id.controller_name().to_owned(),
@@ -90,12 +98,8 @@ impl RuntimePage {
         streams: &StreamStatuses,
         theme: &gpui_kit::component::Theme,
     ) -> gpui_kit::Div {
-        let traffic = self.traffic_monitor.snapshot();
+        let traffic = self.home_traffic_snapshot();
         let generation = self.home.generation;
-        let connections = streams
-            .connections
-            .value()
-            .filter(|value| value.generation == generation);
         let traffic_status = streams
             .traffic
             .value()
@@ -103,44 +107,47 @@ impl RuntimePage {
 
         let metrics = [
             (
-                "home.traffic.current_download",
-                traffic_status
-                    .filter(|_| traffic.generation == generation)
-                    .map_or_else(|| "—".into(), |_| format_speed(traffic.download)),
-                IconName::ArrowDown,
-            ),
-            (
+                1,
                 "home.traffic.current_upload",
                 traffic_status
                     .filter(|_| traffic.generation == generation)
                     .map_or_else(|| "—".into(), |_| format_speed(traffic.upload)),
                 IconName::ArrowUp,
+                theme.chart_2,
             ),
             (
-                "home.traffic.active_connections",
-                connections.map_or_else(|| "—".into(), |value| value.item_count.to_string()),
-                IconName::Network,
-            ),
-            (
-                "home.traffic.core_memory",
-                connections.map_or_else(|| "—".into(), |value| format_bytes(value.memory)),
-                IconName::Cpu,
+                0,
+                "home.traffic.current_download",
+                traffic_status
+                    .filter(|_| traffic.generation == generation)
+                    .map_or_else(|| "—".into(), |_| format_speed(traffic.download)),
+                IconName::ArrowDown,
+                theme.chart_1,
             ),
         ];
         h_flex()
+            .items_stretch()
             .flex_wrap()
             .gap_3()
             .children(
                 metrics
                     .into_iter()
-                    .enumerate()
-                    .map(|(index, (label, value, icon))| {
+                    .map(|(index, label, value, icon, color)| {
                         let points = self.home.chart.sparkline(index, self.home.generation);
+                        let peak = points.iter().map(|point| point.1).fold(0_f64, f64::max);
+                        let peak_label = if points.is_empty() {
+                            "—".into()
+                        } else {
+                            format_speed(peak as u64)
+                        };
                         v_flex()
+                            .id(("home-speed-card", index))
+                            .test_support()
                             .flex_1()
                             .flex_basis(rems(13.))
                             .min_w_0()
-                            .gap_2()
+                            .min_h(rems(11.5))
+                            .gap_0()
                             .p_4()
                             .rounded(theme.radius_lg)
                             .border_1()
@@ -149,38 +156,73 @@ impl RuntimePage {
                             .child(
                                 h_flex()
                                     .gap_2()
-                                    .text_xs()
+                                    .text_sm()
                                     .text_color(theme.muted_foreground)
-                                    .child(Icon::new(icon).size_4())
-                                    .child(zenclash_i18n::text(label)),
+                                    .child(
+                                        h_flex()
+                                            .size_6()
+                                            .justify_center()
+                                            .rounded(theme.radius)
+                                            .border_1()
+                                            .border_color(color.opacity(0.3))
+                                            .child(Icon::new(icon).size_4().text_color(color)),
+                                    )
+                                    .child(zenclash_i18n::text(label))
+                                    .child(div().flex_1())
+                                    .when(
+                                        traffic_status.is_some() && streams.traffic.is_fresh(),
+                                        |row| {
+                                            row.child(status_label(
+                                                zenclash_i18n::text("home.traffic.live"),
+                                                theme.chart_3,
+                                                theme,
+                                            ))
+                                        },
+                                    ),
                             )
                             .child(
-                                h_flex()
-                                    .gap_3()
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_lg()
-                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                            .truncate()
-                                            .child(value),
-                                    )
-                                    .child(
-                                        div().w_16().h_8().child(
-                                            AreaChart::new(points)
-                                                .id(("home-metric-sparkline", index))
-                                                .x(|point| point.0.clone())
-                                                .y(|point| point.1)
-                                                .stroke(theme.info)
-                                                .fill(theme.info.opacity(0.15))
-                                                .natural()
-                                                .x_axis(false)
-                                                .y_axis(false)
-                                                .grid(false)
-                                                .interactive(false),
-                                        ),
-                                    ),
+                                h_flex().gap_3().child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_size(px(32.))
+                                        .line_height(gpui_kit::relative(1.25))
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                        .truncate()
+                                        .child(value),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(zenclash_i18n::text("home.traffic.realtime_speed")),
+                            )
+                            .child(
+                                div().w_full().h(rems(3.)).child(
+                                    AreaChart::new(points)
+                                        .id(("home-metric-sparkline", index))
+                                        .x(|point| point.0.clone())
+                                        .y(|point| point.1)
+                                        .stroke(color)
+                                        .fill(color.opacity(0.15))
+                                        .y_domain(0., peak.max(1.))
+                                        .natural()
+                                        .x_axis(false)
+                                        .y_axis(false)
+                                        .grid(false)
+                                        .interactive(false),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_right()
+                                    .text_color(theme.muted_foreground)
+                                    .child(zenclash_i18n::text_with(
+                                        "home.traffic.peak",
+                                        &[("value", peak_label)],
+                                    )),
                             )
                     }),
             )
@@ -191,12 +233,14 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
-        let mut content = v_flex().p_4().gap_3();
+        let mut content = v_flex().px_4().pb_3().gap_0p5();
         if let Some(projection) = self.home_proxy_projection() {
             for (index, node) in projection.nodes.iter().enumerate() {
-                let (delay, latency_fraction) = latency_presentation(node.delay);
+                let (delay, _) = latency_presentation(node.delay);
                 let latency_color = if node.delay == Some(0) {
                     theme.danger
+                } else if node.current {
+                    theme.primary
                 } else {
                     theme.info
                 };
@@ -204,12 +248,9 @@ impl RuntimePage {
                 let name = node.name.clone();
                 let switch = Button::new(("home-select-node", index))
                     .small()
+                    .w(gpui_kit::rems(6.))
                     .outline()
-                    .label(zenclash_i18n::text(if node.current {
-                        "proxies.actions.current"
-                    } else {
-                        "proxies.actions.select"
-                    }))
+                    .label(zenclash_i18n::text("home.proxy.switch"))
                     .tooltip(zenclash_i18n::text_with(
                         "home.proxy.switch_current",
                         &[("name", name.clone())],
@@ -229,6 +270,10 @@ impl RuntimePage {
                 content = content.child(
                     h_flex()
                         .gap_3()
+                        .px_2()
+                        .py_0p5()
+                        .rounded(theme.radius)
+                        .when(node.current, |row| row.bg(theme.list_active))
                         .child(
                             div()
                                 .flex_1()
@@ -238,59 +283,35 @@ impl RuntimePage {
                                 .child(node.name.clone()),
                         )
                         .child(
-                            div().w_24().child(
-                                Progress::new(("home-node-delay", index))
-                                    .h_2()
-                                    .color(latency_color)
-                                    .value(latency_fraction),
-                            ),
-                        )
-                        .child(
                             div()
                                 .w_16()
-                                .text_xs()
+                                .text_sm()
                                 .font_family(theme.mono_font_family.clone())
                                 .text_color(latency_color)
                                 .child(delay),
                         )
-                        .child(switch),
+                        .child(if node.current {
+                            h_flex()
+                                .w(gpui_kit::rems(6.))
+                                .h_6()
+                                .gap_2()
+                                .justify_center()
+                                .rounded(theme.radius)
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.chart_3.opacity(0.12))
+                                .text_color(theme.primary)
+                                .text_xs()
+                                .child(Icon::new(IconName::Check).size_4())
+                                .child(zenclash_i18n::text("home.proxy.current"))
+                                .into_any_element()
+                        } else {
+                            switch.into_any_element()
+                        }),
                 );
             }
-            if projection.nodes.is_empty() {
-                content = content.child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child(zenclash_i18n::text("home.proxy.no_node")),
-                );
-            }
-        } else {
-            content = content.child(
-                div()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(zenclash_i18n::text("home.proxy.no_node")),
-            );
         }
-        content = content.child(
-            h_flex().justify_end().child(
-                Button::new("home-more-nodes")
-                    .small()
-                    .ghost()
-                    .icon(IconName::ArrowRight)
-                    .label(zenclash_i18n::text("home.proxy.details"))
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(NavigateProxies), cx)
-                    }),
-            ),
-        );
-        home_card(
-            zenclash_i18n::text("proxies.design.latency_comparison"),
-            theme,
-        )
-        .flex_basis(rems(19.))
-        .min_w_0()
-        .child(content)
+        content.min_w_0()
     }
 }
 
@@ -346,7 +367,14 @@ mod tests {
         assert_eq!(projection.current.delay, Some(39));
         assert_eq!(projection.nodes.len(), 4);
         assert!(projection.switchable);
-        assert!(projection.nodes.iter().all(|node| !node.current));
+        assert_eq!(projection.nodes[0].name, "node-19");
+        assert!(projection.nodes[0].current);
+        assert_eq!(projection.nodes[0].delay, Some(39));
+        assert_eq!(
+            projection.nodes.iter().filter(|node| node.current).count(),
+            1
+        );
+        assert_eq!(projection.nodes[1].name, "node-0");
     }
 
     #[test]
