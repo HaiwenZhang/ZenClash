@@ -137,7 +137,7 @@ impl LogFileSender {
         }
         let reserved = self
             .queued_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 current
                     .checked_add(bytes)
                     .filter(|next| *next <= FILE_QUEUE_BYTES)

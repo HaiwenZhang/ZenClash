@@ -265,7 +265,7 @@ impl TrafficCaptureSession {
     pub(crate) fn note_capture_intent(&self) {
         let _ = self
             .intent_revision
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |revision| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |revision| {
                 Some(revision.saturating_add(1))
             });
     }
