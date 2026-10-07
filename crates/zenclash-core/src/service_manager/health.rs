@@ -1,17 +1,14 @@
 //! Read-only upstream health classification for the explicitly selected native core.
 
 use super::*;
-use zenclash_service_integration::runstate::{NativeEnv, RunState, RunStateHost, RunStateStore};
+use crate::service::runstate::{NativeEnv, RunState, RunStateHost, RunStateStore};
 
 struct ObservationHost;
 impl RunStateHost for ObservationHost {
     // This store is used only for health detection. Core/PAC publication stays in CoreSession.
     fn set_pac_available(&self, _available: bool) {}
     fn publish(&self, _state: &RunState) {}
-    fn run_privileged(
-        &self,
-        _action: zenclash_service_integration::health::PendingAction,
-    ) -> anyhow::Result<()> {
+    fn run_privileged(&self, _action: crate::service::health::PendingAction) -> anyhow::Result<()> {
         anyhow::bail!("a read-only health probe cannot request native authorization")
     }
 }
@@ -38,10 +35,9 @@ pub(super) async fn observe(home: PathBuf, binary: Option<PathBuf>) -> ServiceHe
         Ok(Ok(requirement)) => requirement,
         // Absence remains observable even if prebuild has not supplied a local core yet.
         error => {
-            let registered = tokio::task::spawn_blocking(
-                zenclash_service_integration::platform::trusted_service_evidence,
-            )
-            .await;
+            let registered =
+                tokio::task::spawn_blocking(crate::service::platform::trusted_service_evidence)
+                    .await;
             return if matches!(registered, Ok(Ok(false))) {
                 ServiceHealth::NotInstalled
             } else {

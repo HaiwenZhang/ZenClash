@@ -3,15 +3,21 @@
 //! Run State separates observed Service health from session intent.
 //! Core lifecycle remains in `CoreManager`.
 
-use crate::RunningMode;
+use crate::service::RunningMode;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Observed availability of the installed service and its approved core.
 pub enum ServiceHealth {
     #[default]
+    /// Installation health has not yet been established.
     Unknown,
+    /// The service and selected approved core passed the health probe.
     Ready,
+    /// No trusted service installation was found.
     NotInstalled,
+    /// Installed helper evidence requires repair or version replacement.
     VersionMismatch,
+    /// Installed service or approved core is unavailable for the supplied reason.
     Unavailable(String),
 }
 
@@ -36,19 +42,30 @@ impl ServiceHealth {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+/// Explicit service maintenance intent retained by the application session.
 pub enum PendingAction {
+    /// Install the packaged service and approve the selected core.
     Install,
+    /// Remove this application's service installation.
     Uninstall,
+    /// Replace a broken or incompatible installation.
     Reinstall,
+    /// Replace the installation despite otherwise usable health evidence.
     ForceReinstall,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Service facts and session intent used to admit TUN and sidecar operations.
 pub struct RunState {
+    /// Latest observed installation health.
     pub health: ServiceHealth,
+    /// Explicit maintenance request awaiting completion.
     pub pending: Option<PendingAction>,
+    /// Whether this session has accepted local sidecar execution.
     pub sidecar_allowed: bool,
+    /// Currently owned core backend.
     pub mode: RunningMode,
+    /// Whether the desktop process has native administrator privileges.
     pub is_admin: bool,
     /// A privileged operation is currently in flight, so `health` may be stale.
     pub op_in_flight: bool,
@@ -56,16 +73,19 @@ pub struct RunState {
 
 impl RunState {
     #[must_use]
+    /// Whether the latest health probe found a usable installation.
     pub const fn service_ready(&self) -> bool {
         matches!(self.health, ServiceHealth::Ready)
     }
 
     #[must_use]
+    /// Whether installation health permits service use outside maintenance.
     pub const fn service_usable(&self) -> bool {
         self.service_ready() && !self.op_in_flight
     }
 
     #[must_use]
+    /// Whether native privilege or a usable service permits TUN.
     pub const fn tun_capable(&self) -> bool {
         self.is_admin || self.service_usable()
     }
@@ -107,6 +127,7 @@ impl RunState {
     }
 
     #[must_use]
+    /// Builds the serialized presentation of these execution and health facts.
     pub fn to_view(&self) -> RunStateView {
         RunStateView {
             mode: self.mode,
@@ -125,16 +146,27 @@ impl RunState {
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+/// Serializable service status presented to the application interface.
 pub struct RunStateView {
+    /// Currently owned core backend.
     pub mode: RunningMode,
+    /// Stable service-health label used by the presentation layer.
     pub service: &'static str,
+    /// Explanation for an unavailable service, when reported.
     pub service_unavailable_reason: Option<String>,
+    /// Outstanding explicit maintenance intent.
     pub pending_action: Option<PendingAction>,
+    /// Whether local sidecar execution has been accepted.
     pub sidecar_allowed: bool,
+    /// Whether the desktop process is elevated.
     pub is_admin: bool,
+    /// Whether a privileged maintenance operation is running.
     pub op_in_flight: bool,
+    /// Whether the service can currently accept runtime operations.
     pub service_usable: bool,
+    /// Whether current privilege and service health permit TUN.
     pub tun_capable: bool,
+    /// Whether service repair requires a user decision.
     pub service_needs_attention: bool,
 }
 

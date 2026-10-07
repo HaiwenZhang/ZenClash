@@ -5,13 +5,20 @@ ZenClash 整体按 GNU General Public License version 3（GPL-3.0-only）发布�
 允许依据该许可使用、复制、修改和再分发；在法律允许范围内不提供保证。
 完整许可文本见 LICENSE。
 
+2026-10-07 TUN 实现对照更新（修改者：ZenClash contributors）：从用户提供的 Clash
+Verge Rev enhance/tun.rs、config/clash.rs 和 utils/init.rs 适配 TUN 基础字段、条件
+fake IP/IPv6 DNS 增强，以及仅缺失时使用的 DNS 服务器默认值；由 ZenClash 有效 YAML
+和冻结服务资源共同使用。同步 IPC 服务的原生 Windows 授权及有界内核停止链路。
+保留原作者及 GPL-3.0-only；详见 docs/research/clash-verge-tun-implementation.md
+和 clash-verge-tun-sources.json。旧阶段二进制与源码配对不包含本次修改。
+
 `crates/zenclash-service` Fork 自
 [clash-verge-rev/clash-verge-service-ipc](https://github.com/clash-verge-rev/clash-verge-service-ipc)
 的本地 2.7.5 源码副本。保留上游作者 Tunglies、其他贡献者和原始版权、许可及无担保声明。
 ZenClash 修改日期：2026-10-04。修改包括 ZenClash 命名、三平台标识和安装路径、内核名、
 版本查询及构建适配；详细声明见 crates/zenclash-service/NOTICE.md。
 
-`crates/zenclash-service-integration` 复制并适配
+`crates/zenclash-core/src/service`（原独立服务集成 crate）复制并适配
 [Clash Verge Rev](https://github.com/clash-verge-rev/clash-verge-rev)
 本地 2.5.7 的应用集成代码。上游 Cargo 作者为 zzzgydi、Tunglies、wonfen、MystiPanda；
 保留其他原贡献者权利。ZenClash 修改日期：2026-10-04。
@@ -69,3 +76,7 @@ Windows/Linux 清理仍属于本应用的代理；macOS 在 displaced/transport 
 安装后启动动作，并覆盖 GUI 构建失败。清理只删除已验证在临时根目录中的本次
 打包目录。当前开发范围限定 Windows，其他平台留待对应系统开发；许可仍为
 GPL-3.0-only，新二进制随附其同版完整对应源码。
+
+2026-10-08 服务模块合并（修改者：ZenClash contributors）：原独立服务集成 crate 已
+迁入 zenclash-core::service。原作者、许可证及源文件 hash 在该模块 LICENSE、NOTICE.md
+和 UPSTREAM.json 中保留；测试、依赖、GUI 许可展示及安装包许可路径同步迁移。

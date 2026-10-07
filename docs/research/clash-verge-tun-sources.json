@@ -1,0 +1,56 @@
+{
+  "research_date": "2026-10-07",
+  "source_kind": "user-provided local snapshots",
+  "upstream_commit": null,
+  "note": "Supplemental source record; does not replace the original Fork UPSTREAM.json or claim a published upstream commit.",
+  "sources": [
+    {
+      "path": "debug/clash-verge-rev-2.5.7/src-tauri/src/enhance/tun.rs",
+      "sha256": "a9907168361ccbc01291af110dc0126e19c471a09d2a9f71c45dacb776b80683"
+    },
+    {
+      "path": "debug/clash-verge-rev-2.5.7/src-tauri/src/config/clash.rs",
+      "sha256": "bbb0d551944e38393d9b623ef3e8e93158629ca2532c689a50f8f5c0e2c33738"
+    },
+    {
+      "path": "debug/clash-verge-rev-2.5.7/src-tauri/src/utils/init.rs",
+      "sha256": "648257d075f67f247f5fec54cc415175c19a5c192ca532e5601cac42b1425ace"
+    },
+    {
+      "path": "debug/clash-verge-service-ipc/src/management.rs",
+      "sha256": "1a6c21688cf267c4625b3dc688f9b94bd6b285d140f671cb8274e324fa79fc23"
+    },
+    {
+      "path": "debug/clash-verge-service-ipc/src/core/manager.rs",
+      "sha256": "7bae82efa434c2d29cdfccae34cacc4263fd3421f44d433660f7dc8db9277327"
+    },
+    {
+      "path": "debug/clash-verge-service-ipc/src/core/server.rs",
+      "sha256": "d1cd1aae8318b47f4311af05d5ff5a9f10ddc7dc9965f893dd68b8d01118fe00"
+    },
+    {
+      "path": "debug/clash-verge-service-ipc/src/bin/install_service.rs",
+      "sha256": "e47937a3069bd821c6fabc49dc29e27b1c9442c9071ec67725713a3cb2554fed"
+    }
+  ],
+  "adaptations": {
+    "crates/zenclash-core/src/tun_config.rs": [
+      "enhance/tun.rs::use_tun",
+      "config/clash.rs::template",
+      "utils/init.rs::init_dns_config"
+    ],
+    "crates/zenclash-service/src/management.rs": [
+      "management.rs::elevate"
+    ],
+    "crates/zenclash-service/src/core/manager.rs": [
+      "manager.rs::ChildGuard",
+      "manager.rs::stop_child",
+      "manager.rs::CoreManager::stop_core_by"
+    ],
+    "crates/zenclash-service/src/core/server.rs": [
+      "server.rs::sigkill_deadline",
+      "server.rs::StartOwnerTransition",
+      "server.rs::create_ipc_router"
+    ]
+  }
+}

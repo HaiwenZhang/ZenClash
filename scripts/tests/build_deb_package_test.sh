@@ -6,7 +6,6 @@ project_root="$(cd "${script_dir}/../.." && pwd)"
 test_root="$(mktemp -d)"
 mock_bin="${test_root}/bin"
 export MIHOMO_VERSION=v1.19.30
-export ZENCLASH_DEPENDENCY_LICENSE_DIR="${test_root}/dependency-licenses"
 mock_target="${test_root}/target"
 output_dir="${test_root}/dist"
 dpkg_log="${test_root}/dpkg-deb.log"
@@ -77,9 +76,6 @@ case "${1:-}" in
     [[ ! -e "${3}/usr/lib/systemd/system/zenclash-service.service" ]]
     cp "${3}/usr/share/polkit-1/actions/org.zenclash.service.policy" "${MOCK_POLICY_COPY}"
     cp "${3}/usr/lib/zenclash/package-service.sh" "${MOCK_LIBRARY_COPY}"
-    for name in NOTICE.md CORRESPONDING-SOURCE.md licenses/zenclash-service/LICENSE licenses/zenclash-service-integration/LICENSE licenses/dependencies/MANIFEST.json; do
-      [[ -s "${3}/usr/share/doc/zenclash/${name}" ]]
-    done
     [[ -x "${3}/DEBIAN/prerm" && -x "${3}/DEBIAN/postinst" && -x "${3}/DEBIAN/postrm" ]]
     cp "${3}/DEBIAN/prerm" "${MOCK_PRERM_COPY}"
     : >"${package_path}"
@@ -95,9 +91,6 @@ case "${1:-}" in
     printf '%s\n' '-rw-r--r-- root/root 1 ./usr/lib/zenclash/geoip.metadb'
     printf '%s\n' '-rw-r--r-- root/root 1 ./usr/lib/zenclash/recovery.yaml'
     printf '%s\n' '-rw-r--r-- root/root 1 ./usr/share/doc/zenclash/LICENSE'
-    for name in NOTICE.md CORRESPONDING-SOURCE.md licenses/zenclash-service/LICENSE licenses/zenclash-service-integration/LICENSE licenses/dependencies/MANIFEST.json; do
-      printf '%s\n' "-rw-r--r-- root/root 1 ./usr/share/doc/zenclash/${name}"
-    done
     printf '%s\n' '-rwxr-xr-x root/root 1 ./usr/lib/zenclash/zenclash-service'
     printf '%s\n' '-rw-r--r-- root/root 1 ./usr/lib/zenclash/package-service.sh'
     for tool in zenclash-service-install zenclash-service-uninstall; do
@@ -138,7 +131,6 @@ chmod +x \
   "${mock_bin}/install" \
   "${test_root}/mihomo"
 printf 'fixture\n' >"${test_root}/geoip.metadb"
-python3 "${script_dir}/license_fixture.py" "${project_root}" "${ZENCLASH_DEPENDENCY_LICENSE_DIR}" "${test_root}/geoip.metadb"
 
 PATH="${mock_bin}:${PATH}" \
   MOCK_CONTROL_COPY="${control_copy}" \

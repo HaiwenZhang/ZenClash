@@ -1,5 +1,6 @@
 //! Application-owned persistence and rollback around upstream native runtime operations.
 
+use crate::service::{NativeHttpResponse, ServiceCallError, ServiceSession};
 use crate::{
     MihomoError, MihomoResult,
     service_runtime::{FrozenRuntime, ServiceRuntimeBundle},
@@ -14,7 +15,6 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 use zenclash_service::{
     RuntimeFileOutcome, RuntimeFileRequest, ServiceStatusSnapshot, StageRuntimeOutcome,
 };
-use zenclash_service_integration::{NativeHttpResponse, ServiceCallError, ServiceSession};
 
 mod cache;
 mod local_recovery;

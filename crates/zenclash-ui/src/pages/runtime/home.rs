@@ -844,7 +844,7 @@ impl RuntimePage {
                                             } else {
                                                 "home.controls.tun_enable"
                                             }))
-                                            .tooltip(tun_status.clone())
+                                            .tooltip(tun_status)
                                             .outline()
                                             .small()
                                             .disabled(

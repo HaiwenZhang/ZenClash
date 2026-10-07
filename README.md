@@ -34,18 +34,19 @@
 
 ## 下载与安装
 
-从 [Releases](https://github.com/HaiwenZhang/ZenClash/releases) 下载对应平台的安装包：
+从 [Releases](https://github.com/HaiwenZhang/ZenClash/releases) 下载对应平台的可执行文件压缩包：
 
-| 平台 | 架构 | 安装包 |
+| 平台 | 架构 | 压缩包 |
 | --- | --- | --- |
-| macOS | Apple Silicon | `.dmg` |
-| Windows | x86_64 | `.exe` |
-| Ubuntu 24.04 及以上 | amd64 | `.deb` |
-| Fedora 44 / Rocky Linux 8 | x86_64 | `.rpm` |
+| macOS | Apple Silicon | `.tar.gz` |
+| Windows | x86_64 | `.zip` |
+| Ubuntu 24.04 及以上 | amd64 | `.tar.gz` |
+| Fedora 44 / Rocky Linux 8 | x86_64 | `.tar.gz` |
 
-安装包已内置 Mihomo，无需另行下载内核。Release 提供 `SHA256SUMS` 用于校验下载文件。
+压缩包包含 Cargo 构建的 GUI、特权服务及安装/卸载工具，并附默认和恢复配置。
+压缩包内置对应平台的 Mihomo，解压后应用会自动发现内核，无需另行下载。Release 提供 `SHA256SUMS` 用于校验下载文件。
 
-macOS 安装包尚未经过 Apple 公证，首次打开请参考 [macOS 安装指南](docs/installation/macos.md)。
+解压后，Windows 运行 `zenclash.exe`，Linux 运行 `./zenclash`，macOS 运行 `./bin/zenclash`。
 
 ## 快速开始
 
@@ -67,6 +68,13 @@ TUN 需要系统权限。开发中的服务模式已接通应用内首次安装�
 
 ```sh
 cargo run --locked -p zenclash-ui --bin zenclash
+```
+
+直接构建发布程序：
+
+```sh
+cargo build --release --locked -p zenclash-ui --bin zenclash
+cargo build --release --locked -p zenclash-service --features standalone,client --bin zenclash-service --bin zenclash-service-install --bin zenclash-service-uninstall
 ```
 
 Windows PowerShell 使用相同命令。Mihomo 自动从数据目录的 `mihomo/cores`、安装包资源、仓库 `bin` 或 `PATH` 查找，也可在“设置 → 运行内核”中选择文件；不再读取内核路径环境变量。Windows 默认托管路径为 `%LOCALAPPDATA%\ZenClash\mihomo\cores\mihomo.exe`。
@@ -109,6 +117,6 @@ cargo test --workspace --all-features --locked
 ZenClash 采用 [GPL-3.0-only](LICENSE) 许可证。Copyright © 2026 Haiwen Zhang。
 
 
-`crates/zenclash-service` Fork 自 [clash-verge-rev/clash-verge-service-ipc](https://github.com/clash-verge-rev/clash-verge-service-ipc) 2.7.5 的本地源码副本，保留上游作者 Tunglies 及其他贡献者的声明和完整 GPL 第 3 版许可证；ZenClash 适配日期为 2026-10-04。来源、修改内容和接入状态见 [服务 README](crates/zenclash-service/README.md)、[修改声明](crates/zenclash-service/NOTICE.md) 和 [原始许可证](crates/zenclash-service/LICENSE)。
+`crates/zenclash-service` Fork 自 [clash-verge-rev/clash-verge-service-ipc](https://github.com/clash-verge-rev/clash-verge-service-ipc) 2.7.5，保留上游作者 Tunglies 及其他贡献者的声明和完整 GPL 第 3 版许可证；ZenClash 适配日期为 2026-10-04。来源、修改内容和接入状态见 [服务 README](crates/zenclash-service/README.md)、[修改声明](crates/zenclash-service/NOTICE.md) 和 [原始许可证](crates/zenclash-service/LICENSE)。
 
-分发包含该 Fork 的二进制时，须保留许可证和修改声明，并按 GPL 第 6 节提供与发布版本一致的完整对应源码，包含 ZenClash 的修改和必要构建/安装文件；只链接上游仓库不足以代替对应源码。具体发布操作见 [GPL 分发与对应源码](docs/development/gpl-distribution.md)。主应用打包携带根和 Fork 的许可及修改声明；发布流程从同一干净提交导出对应源码，纳入 Rust/Go 依赖，并将源码附件与安装包一起提供。流程文件已接入；2026-10-05 已在本地生成阶段 Windows 安装包和同版完整对应源码，源码解压后的哈希、锁定依赖离线解析及 GUI/服务编译检查通过。交付文件位于 `dist/gpl-2026-10-05/`；尚未发布正式 Release 或完成三平台实机/TUN 验收。
+分发包含该 Fork 的二进制时，须保留许可证和修改声明，并按 GPL 第 6 节提供与发布版本一致的完整对应源码，包含 ZenClash 的修改和必要构建/安装文件；只链接上游仓库不足以代替对应源码。具体发布操作见 [GPL 分发与对应源码](docs/development/gpl-distribution.md)。2026-10-08 起，CI 和 Release 直接用 Cargo 构建并归档可执行文件，移除许可整理和对应源码任务。历史记录：2026-10-05 已在本地生成阶段 Windows 安装包和同版完整对应源码，源码解压后的哈希、锁定依赖离线解析及 GUI/服务编译检查通过。交付文件位于 `dist/gpl-2026-10-05/`；尚未发布正式 Release 或完成三平台实机/TUN 验收。

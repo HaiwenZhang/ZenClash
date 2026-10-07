@@ -27,9 +27,13 @@ pub enum OwnerSample {
     NotActive,
     /// A complete answer.
     Status {
+        /// Whether the service still recognizes this owner session.
         is_active: bool,
+        /// Whether persisted owner intent requires a running core.
         desired_core_should_be_running: bool,
+        /// Observed service lifecycle phase.
         service_state: ServiceLifecycleState,
+        /// Observed owned core PID, if running.
         core_pid: Option<u32>,
     },
 }
@@ -54,6 +58,7 @@ pub struct OwnerWatch {
 
 impl OwnerWatch {
     #[must_use]
+    /// Creates an ownership observer without any failed samples.
     pub const fn new() -> Self {
         Self {
             unreadable_samples: 0,

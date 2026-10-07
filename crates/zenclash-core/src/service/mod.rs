@@ -14,8 +14,8 @@ pub mod platform;
 pub mod probe;
 pub mod runstate;
 
-/// Isolated native controller fixture; never enable `ipc-tests` in a release build.
-#[cfg(feature = "ipc-tests")]
+/// Isolated native controller fixture; never enable `service-ipc-tests` in a release build.
+#[cfg(feature = "service-ipc-tests")]
 pub mod test_core;
 
 pub use running_mode::RunningMode;
@@ -140,16 +140,20 @@ pub struct ServiceRunState {
 }
 
 impl ServiceRunState {
+    /// Records the latest observed service health.
     pub fn observe(&self, health: health::ServiceHealth) {
         self.stored.lock().observe(health);
     }
+    /// Retains an explicit service maintenance request.
     pub fn request(&self, action: health::PendingAction) {
         self.stored.lock().request(action);
     }
+    /// Accepts local sidecar execution for this application session.
     pub fn allow_sidecar(&self) {
         self.stored.lock().allow_sidecar();
     }
 
+    /// Projects stored intent together with current execution and privilege facts.
     pub fn snapshot(
         &self,
         mode: RunningMode,

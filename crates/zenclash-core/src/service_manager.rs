@@ -4,8 +4,8 @@
 
 use std::{future::Future, path::PathBuf, sync::Arc};
 
+use crate::service::{health::ServiceHealth, maintenance::MaintenanceError};
 use tokio::sync::{Mutex, watch};
-use zenclash_service_integration::{health::ServiceHealth, maintenance::MaintenanceError};
 
 use crate::{CoreKind, CoreRuntimeBackend, CoreSession, CoreSessionError, TrafficCaptureSession};
 
@@ -22,14 +22,11 @@ pub use maintenance::{
 pub use backup::PreparedServiceBackupConfig;
 pub use startup::verify_ordinary_local_executable;
 
-pub use zenclash_service_integration::health::ServiceHealth as ServiceHealthKind;
+pub use crate::service::health::ServiceHealth as ServiceHealthKind;
 
 /// Sets the upstream application IPC budgets once during GUI bootstrap.
 pub async fn configure_service_ipc() {
-    zenclash_service::set_config(Some(
-        zenclash_service_integration::platform::application_ipc_config(),
-    ))
-    .await;
+    zenclash_service::set_config(Some(crate::service::platform::application_ipc_config())).await;
 }
 
 /// Observes approved installation health before choosing a startup backend.
@@ -163,7 +160,7 @@ pub enum ServiceManagerError {
     Sources(#[source] std::io::Error),
     /// An authenticated service lease could not be acquired or released.
     #[error("service ownership could not be established")]
-    Connection(#[source] zenclash_service_integration::ServiceCallError),
+    Connection(#[source] crate::service::ServiceCallError),
     /// A native authorization or installation failure.
     #[error(transparent)]
     Maintenance(#[from] MaintenanceError),
@@ -403,7 +400,7 @@ impl ServiceManager {
     async fn authorize_action<A>(
         &self,
         intent: ServiceIntent,
-        action: zenclash_service_integration::health::PendingAction,
+        action: crate::service::health::PendingAction,
         authorization: A,
     ) -> Result<(), ServiceManagerError>
     where
@@ -863,7 +860,7 @@ mod tests {
     }
     #[tokio::test]
     async fn cancelled_native_authorization_retires_pending_action_without_losing_its_error() {
-        use zenclash_service_integration::health::PendingAction;
+        use crate::service::health::PendingAction;
         let manager = manager();
         let intent = manager.intent();
         let result = manager
@@ -888,7 +885,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unknown_native_authorization_keeps_the_requested_action_pending() {
-        use zenclash_service_integration::health::PendingAction;
+        use crate::service::health::PendingAction;
         let manager = manager();
         let intent = manager.intent();
         let error = tokio::spawn(async { panic!("unknown native outcome") })
@@ -913,7 +910,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_native_action_restores_the_same_sessions_previous_sidecar_choice() {
-        use zenclash_service_integration::health::PendingAction;
+        use crate::service::health::PendingAction;
         let manager = manager();
         manager.session.run_state.store.accept_sidecar();
         let result = manager
@@ -934,7 +931,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_native_action_cannot_restore_a_previous_sidecar_allowance() {
-        use zenclash_service_integration::health::PendingAction;
+        use crate::service::health::PendingAction;
         let manager = manager();
         manager.session.run_state.store.accept_sidecar();
         let result = manager

@@ -484,7 +484,7 @@ impl RuntimePage {
                             gpui_kit::div()
                                 .text_sm()
                                 .text_color(theme.muted_foreground)
-                                .child(version.version.clone()),
+                                .child(version.version),
                         )
                         .child(
                             h_flex()

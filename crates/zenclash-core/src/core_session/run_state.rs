@@ -4,17 +4,17 @@
 
 use std::sync::atomic::AtomicBool;
 
-use anyhow::Context as _;
-use parking_lot::Mutex;
-use tokio::sync::watch;
-use zenclash_service_integration::runstate::{
+use crate::service::runstate::{
     NativeEnv, PendingAction, RunState, RunStateEnv, RunStateHost, RunStateStore, ServiceHealth,
     ServiceVersionReply,
 };
+use anyhow::Context as _;
+use parking_lot::Mutex;
+use tokio::sync::watch;
 
 use super::*;
+use crate::service::RunningMode;
 use crate::{CoreRuntimeBackend, PacServer};
-use zenclash_service_integration::RunningMode;
 
 pub(crate) struct CoreRunState {
     pub(crate) store: Arc<RunStateStore<SessionEnv>>,
@@ -56,7 +56,7 @@ impl PacEffects {
 
 impl CoreRunState {
     pub(crate) fn new(client: &MihomoClient) -> Self {
-        let elevated = zenclash_service_integration::current_process_elevated();
+        let elevated = crate::service::current_process_elevated();
         let (state, _) = watch::channel(RunState {
             health: ServiceHealth::Unknown,
             pending: None,

@@ -1,3 +1,5 @@
+> 2026-10-08：应用侧集成已迁入 `zenclash-core::service`；后文旧日期为阶段记录。
+
 # ZenClash Service
 
 ZenClash 的跨平台特权服务，Fork 自 [clash-verge-rev/clash-verge-service-ipc](https://github.com/clash-verge-rev/clash-verge-service-ipc)。上游 Cargo 作者信息为 **Tunglies**；原作者及其他贡献者的权利、原始声明和 GPL 第 3 版许可证均保留。
@@ -39,7 +41,7 @@ BUILD-MANIFEST.json 全部完成才构成交付。真实安装与原生 GUI 操�
 
 该程序是后台服务；**GUI 始终由 `zenclash` / `zenclash.exe` 启动**，应用快捷方式和登录启动项应指向 GUI。GUI 对 TUN、非 TUN、权限提升以及 Service/Sidecar 切换的选择属于主程序接入逻辑。
 
-**接入状态（2026-10-05）：** `zenclash-core` 与 GUI 已改用本地 `zenclash-service-integration` 的所有者会话、原生 HTTP/WebSocket、Start/Stage/Stop 和安装维护接口，Windows GUI 编译通过。主应用打包脚本改为 `standalone,client` 并携带三个工具，四种打包载荷回归通过。2026-10-05 已生成阶段 Windows 安装包及同版对应源码，解压后的文件哈希与离线编译检查通过。持久共享 RunState/PAC 和核心事务已接通；后续策略/恢复收尾、修复的重新打包及三平台实机验收仍未完成；不能仅凭这些结果宣称安装包已验收。`crates/zenclash-service-bak` 是用户保留的旧实现备份，不参与构建。
+**接入状态（2026-10-05）：** `zenclash-core` 与 GUI 已改用`zenclash-core::service` 的所有者会话、原生 HTTP/WebSocket、Start/Stage/Stop 和安装维护接口，Windows GUI 编译通过。主应用打包脚本改为 `standalone,client` 并携带三个工具，四种打包载荷回归通过。2026-10-05 已生成阶段 Windows 安装包及同版对应源码，解压后的文件哈希与离线编译检查通过。持久共享 RunState/PAC 和核心事务已接通；后续策略/恢复收尾、修复的重新打包及三平台实机验收仍未完成；不能仅凭这些结果宣称安装包已验收。`crates/zenclash-service-bak` 是用户保留的旧实现备份，不参与构建。
 
 `ClashConfig`、`start_clash`、`/clash/...` 等名称沿用上游的内核控制接口语义。协议 epoch/revision 保持 2/5，但产品 IPC 地址、协议头和所有者令牌文件名均已改为 ZenClash；本 Fork 无需与 Clash Verge 服务互通。
 

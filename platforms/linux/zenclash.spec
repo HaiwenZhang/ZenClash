@@ -37,9 +37,6 @@ install -Dpm0644 %{payload_dir}/recovery.yaml %{buildroot}%{_prefix}/lib/zenclas
 install -Dpm0644 %{payload_dir}/zenclash.png %{buildroot}%{_datadir}/icons/hicolor/1024x1024/apps/zenclash.png
 install -Dpm0644 %{payload_dir}/zenclash.desktop %{buildroot}%{_datadir}/applications/org.zenclash.ZenClash.desktop
 install -Dpm0644 %{payload_dir}/LICENSE %{buildroot}%{_licensedir}/zenclash/LICENSE
-install -Dpm0644 %{payload_dir}/NOTICE.md %{buildroot}%{_licensedir}/zenclash/NOTICE.md
-install -Dpm0644 %{payload_dir}/CORRESPONDING-SOURCE.md %{buildroot}%{_licensedir}/zenclash/CORRESPONDING-SOURCE.md
-cp -a %{payload_dir}/licenses %{buildroot}%{_licensedir}/zenclash/licenses
 
 %files
 %license %{_licensedir}/zenclash/LICENSE

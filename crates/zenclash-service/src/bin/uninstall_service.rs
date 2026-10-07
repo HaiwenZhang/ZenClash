@@ -1,4 +1,5 @@
 // Modified for the ZenClash fork on 2026-10-04; see NOTICE.md. GPL-3.0-only.
+// Removed stale macOS foreign-service cleanup references on 2026-10-07.
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn main() {
     panic!("This program is not intended to run on this platform.");
@@ -9,8 +10,6 @@ mod shared;
 use anyhow::Error;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use shared::run_command;
-#[cfg(all(target_os = "macos", not(feature = "development-channel")))]
-use shared::uninstall_old_service;
 use shared::{enter_repair_gate, run_maintenance_if_requested};
 
 /// Removes approved cores after service deletion. Locked files are left for a later retry.
@@ -116,8 +115,6 @@ fn main() -> Result<(), Error> {
     let _gate = enter_repair_gate()?;
     let debug = env::args().any(|arg| arg == "--debug");
 
-    #[cfg(not(feature = "development-channel"))]
-    let _ = uninstall_old_service();
     let bundle_path = format!(
         "/Library/PrivilegedHelperTools/{}.bundle",
         zenclash_service::MACOS_SERVICE_ID

@@ -10,10 +10,8 @@ New-Item -ItemType Directory -Path $TestRoot | Out-Null
 $PreviousTarget = $env:CARGO_TARGET_DIR
 $PreviousFixtureRoot = $env:ZENCLASH_PACKAGE_TEST_ROOT
 $PreviousMode = $env:ZENCLASH_PACKAGE_TEST_MODE
-$PreviousLicenses = $env:ZENCLASH_DEPENDENCY_LICENSE_DIR
 $PreviousMihomoTag = $env:MIHOMO_VERSION
 $env:MIHOMO_VERSION = "v1.19.30"
-$env:ZENCLASH_DEPENDENCY_LICENSE_DIR = Join-Path $TestRoot "dependency-licenses"
 
 try {
     # These ordinary native fixtures exercise packaging only, not Mihomo or SCM.
@@ -34,8 +32,6 @@ fn main() {
     if ($LASTEXITCODE -ne 0) { throw 'Native packaging fixture compilation failed' }
     Copy-Item -LiteralPath (Join-Path $TestRoot 'fixture.exe') -Destination (Join-Path $TestRoot 'mihomo.exe')
     'ordinary packaging fixture' | Set-Content -LiteralPath (Join-Path $TestRoot 'geoip.metadb')
-    python (Join-Path $PSScriptRoot "license_fixture.py") $ProjectRoot $env:ZENCLASH_DEPENDENCY_LICENSE_DIR (Join-Path $TestRoot 'geoip.metadb')
-    if ($LASTEXITCODE -ne 0) { throw "License fixture generation failed" }
 
     # Avoid replacing resources on an executable: icon injection is outside this test.
     Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @'
@@ -91,9 +87,7 @@ foreach ($Tool in @('zenclash-service-install.exe', 'zenclash-service-uninstall.
     $ToolPath = Join-Path $Stage $Tool
     if (-not (Test-Path -LiteralPath $ToolPath -PathType Leaf) -or (Get-Item -LiteralPath $ToolPath).Length -eq 0) { throw "Missing native tool: $Tool" }
 }
-foreach ($Name in @('LICENSE', 'NOTICE.md', 'CORRESPONDING-SOURCE.md', 'licenses/zenclash-service/LICENSE', 'licenses/zenclash-service-integration/LICENSE', 'licenses/dependencies/MANIFEST.json')) {
-    if (-not (Test-Path -LiteralPath (Join-Path $Stage $Name) -PathType Leaf)) { throw "ISCC received no legal notice: $Name" }
-}
+if (-not (Test-Path -LiteralPath (Join-Path $Stage 'LICENSE.txt') -PathType Leaf)) { throw 'Missing LICENSE.txt' }
 $Gui = Join-Path $Stage 'zenclash.exe'
 if (-not (Test-Path -LiteralPath $Gui -PathType Leaf) -or (Get-Item -LiteralPath $Gui).Length -eq 0) {
     throw 'ISCC received no nonempty GUI payload'
@@ -168,7 +162,6 @@ $global:LASTEXITCODE = 0
     $env:CARGO_TARGET_DIR = $PreviousTarget
     $env:ZENCLASH_PACKAGE_TEST_ROOT = $PreviousFixtureRoot
     $env:ZENCLASH_PACKAGE_TEST_MODE = $PreviousMode
-    $env:ZENCLASH_DEPENDENCY_LICENSE_DIR = $PreviousLicenses
     $env:MIHOMO_VERSION = $PreviousMihomoTag
     $ResolvedTestRoot = [System.IO.Path]::GetFullPath($TestRoot)
     $TemporaryPrefix = $TemporaryRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar

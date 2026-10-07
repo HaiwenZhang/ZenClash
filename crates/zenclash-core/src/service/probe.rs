@@ -15,26 +15,37 @@ use super::health::ServiceHealth;
 /// What the Service replied to a protocol-version query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceVersionReply {
+    /// Protocol response code; zero denotes a successful query.
     pub code: u16,
+    /// Diagnostic message returned with the protocol response.
     pub message: String,
+    /// Helper build and protocol capabilities, if reported.
     pub protocol: Option<ProtocolInfo>,
+    /// Availability of the selected approved core, if inspected.
     pub core: Option<zenclash_service::CoreAvailability>,
 }
 
 /// The verdict on a [`ServiceVersionReply`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceVersionCheck {
+    /// Helper build, protocol and selected core are usable.
     Ready,
+    /// Installation replacement is required for the supplied reason.
     NeedsReinstall(String),
+    /// The approved core is unavailable for the supplied reason.
     CoreUnavailable(String),
 }
 
 /// What a live probe of the currently-installed Service told us.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CurrentServiceProbe {
+    /// No service response was obtained.
     Missing,
+    /// The current installation is usable.
     Ready,
+    /// The helper build or protocol requires replacement.
     VersionMismatch,
+    /// The selected core or service is unavailable.
     Unavailable,
 }
 

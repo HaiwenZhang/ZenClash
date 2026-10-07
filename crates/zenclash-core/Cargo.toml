@@ -7,17 +7,22 @@ license.workspace = true
 
 [features]
 test-support = []
+development-channel = ["zenclash-service/development-channel"]
 # Isolated Fork IPC and simulated core. Never enable for production packaging.
-service-ipc-tests = ["zenclash-service-integration/ipc-tests"]
+service-ipc-tests = ["hyper/server", "zenclash-service/standalone", "zenclash-service/test"]
 
 [dependencies]
 anyhow = "1.0.104"
+arc-swap = "1.9.2"
 chrono.workspace = true
 cron.workspace = true
 flate2.workspace = true
 futures-util.workspace = true
-getrandom.workspace = true
+getrandom = { workspace = true, features = ["std"] }
 http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 iana-time-zone = "0.1.65"
 parking_lot.workspace = true
 percent-encoding.workspace = true
@@ -33,13 +38,16 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite = { workspace = true, features = ["connect", "rustls-tls-webpki-roots"] }
 tracing.workspace = true
+url.workspace = true
 zip.workspace = true
 zenclash-i18n.workspace = true
 zenclash-service = { path = "../zenclash-service", features = ["client"] }
-zenclash-service-integration = { path = "../zenclash-service-integration" }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys.workspace = true
+windows-service = "0.8.1"
+deelevate = "0.2.0"
+runas = "=1.2.0"
+windows-sys = { workspace = true, features = ["Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -56,4 +64,9 @@ required-features = ["service-ipc-tests"]
 [[test]]
 name = "native_service_session"
 path = "tests/native_service_session.rs"
+required-features = ["service-ipc-tests"]
+
+[[test]]
+name = "native_service_client"
+path = "tests/native_service_client.rs"
 required-features = ["service-ipc-tests"]

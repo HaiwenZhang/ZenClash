@@ -3,10 +3,10 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+use crate::service::{NativeSocket, ServiceSession};
 use futures_util::StreamExt;
 use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::Message;
-use zenclash_service_integration::{NativeSocket, ServiceSession};
 
 use super::{MihomoError, MihomoResult};
 use crate::{

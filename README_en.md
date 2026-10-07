@@ -34,18 +34,19 @@
 
 ## Download and Install
 
-Download the package for your platform from [Releases](https://github.com/HaiwenZhang/ZenClash/releases):
+Download the executable archive for your platform from [Releases](https://github.com/HaiwenZhang/ZenClash/releases):
 
-| Platform | Architecture | Package |
+| Platform | Architecture | Archive |
 | --- | --- | --- |
-| macOS | Apple Silicon | `.dmg` |
-| Windows | x86_64 | `.exe` |
-| Ubuntu 24.04 and newer | amd64 | `.deb` |
-| Fedora 44 / Rocky Linux 8 | x86_64 | `.rpm` |
+| macOS | Apple Silicon | `.tar.gz` |
+| Windows | x86_64 | `.zip` |
+| Ubuntu 24.04 and newer | amd64 | `.tar.gz` |
+| Fedora 44 / Rocky Linux 8 | x86_64 | `.tar.gz` |
 
-Installers bundle Mihomo, so no separate core download is needed. Releases include `SHA256SUMS` to verify your download.
+Archives include the Cargo-built GUI, privileged service, installation/removal tools, and default/recovery configurations.
+Archives bundle Mihomo for the target platform; the app discovers it automatically after extraction. Releases include `SHA256SUMS` to verify your download.
 
-The macOS package is not yet notarized by Apple. See the [macOS installation guide](docs/installation/macos_en.md) for first-launch instructions.
+After extraction, run `zenclash.exe` on Windows, `./zenclash` on Linux, or `./bin/zenclash` on macOS.
 
 ## Quick Start
 
@@ -67,6 +68,13 @@ Run from the repository root on macOS or Linux:
 
 ```sh
 cargo run --locked -p zenclash-ui --bin zenclash
+```
+
+Build release binaries directly:
+
+```sh
+cargo build --release --locked -p zenclash-ui --bin zenclash
+cargo build --release --locked -p zenclash-service --features standalone,client --bin zenclash-service --bin zenclash-service-install --bin zenclash-service-uninstall
 ```
 
 Use the same command in Windows PowerShell. Mihomo is discovered from the data directory's `mihomo/cores`, bundled resources, the repository's `bin`, or `PATH`. You can also select a file in Settings → Runtime Core. Executable environment overrides are no longer read for Mihomo. The default managed Windows path is `%LOCALAPPDATA%\ZenClash\mihomo\cores\mihomo.exe`.

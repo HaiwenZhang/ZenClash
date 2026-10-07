@@ -20,18 +20,24 @@ pub(crate) const GEO_ASSETS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RemoteProviderRef {
+    /// Configuration section containing this provider.
     pub section: &'static str,
+    /// Provider key within its configuration section.
     pub name: String,
+    /// Remote cache declaration sent to the service.
     pub provider: RemoteProvider,
 }
 
 impl RemoteProviderRef {
+    /// Returns the provider configuration section.
     pub fn section(&self) -> &'static str {
         self.section
     }
+    /// Returns the provider key.
     pub fn name(&self) -> &str {
         &self.name
     }
+    /// Returns the remote cache declaration.
     pub fn provider(&self) -> &RemoteProvider {
         &self.provider
     }

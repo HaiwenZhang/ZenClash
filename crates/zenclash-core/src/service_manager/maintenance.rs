@@ -291,9 +291,7 @@ impl ServiceManager {
                 .authorize_action(
                     request.intent,
                     action,
-                    zenclash_service_integration::maintenance::maintain_service(
-                        action, helper, core,
-                    ),
+                    crate::service::maintenance::maintain_service(action, helper, core),
                 )
                 .await
         })
@@ -507,8 +505,8 @@ impl ServiceManager {
 fn maintenance_action(
     operation: ServiceOperation,
     health: &ServiceHealth,
-) -> Result<Option<zenclash_service_integration::health::PendingAction>, ServiceManagerError> {
-    use zenclash_service_integration::health::PendingAction;
+) -> Result<Option<crate::service::health::PendingAction>, ServiceManagerError> {
+    use crate::service::health::PendingAction;
     match (operation, health) {
         (ServiceOperation::Uninstall, ServiceHealth::NotInstalled) => Ok(None),
         (ServiceOperation::Repair, ServiceHealth::NotInstalled) => Ok(Some(PendingAction::Install)),
@@ -741,7 +739,7 @@ mod tests {
 
     #[test]
     fn unknown_health_never_authorizes_maintenance_and_absent_uninstall_needs_no_prompt() {
-        use zenclash_service_integration::health::PendingAction;
+        use crate::service::health::PendingAction;
         assert_eq!(
             maintenance_action(ServiceOperation::Repair, &ServiceHealth::NotInstalled).unwrap(),
             Some(PendingAction::Install)

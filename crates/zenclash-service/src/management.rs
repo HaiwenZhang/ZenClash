@@ -20,6 +20,14 @@ pub struct CoreSource {
 }
 
 const INSTALLATION_FAILURE_PREFIX: &str = "ZENCLASH_INSTALLATION_FAILURE_V1=";
+#[cfg(any(windows, test))]
+const AUTHORIZATION_FAILURE_PREFIX: &str = "ZENCLASH_AUTHORIZATION_FAILURE_V1=";
+
+#[cfg(any(windows, test))]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AuthorizationFailure {
+    win32_error: i32,
+}
 
 /// The installer's final inspection, preserved across the preparation subprocess.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -106,6 +114,14 @@ fn installation_result(output: Output) -> Result<()> {
         return Ok(());
     }
     for line in output.stdout.split(|byte| *byte == b'\n') {
+        #[cfg(any(windows, test))]
+        if let Some(report) = line.strip_prefix(AUTHORIZATION_FAILURE_PREFIX.as_bytes())
+            && let Ok(failure) = serde_json::from_slice::<AuthorizationFailure>(report)
+            && failure.win32_error > 0
+        {
+            return Err(std::io::Error::from_raw_os_error(failure.win32_error))
+                .context("service installer authorization failed");
+        }
         if let Some(report) = line.strip_prefix(INSTALLATION_FAILURE_PREFIX.as_bytes())
             && let Ok(failure) = serde_json::from_slice::<InstallationVerificationError>(report)
         {
@@ -315,7 +331,12 @@ pub fn prepare_install_if_requested() -> Result<bool> {
     #[cfg(unix)]
     elevate(&staged_installer, &elevated, gid, &prompt)?;
     #[cfg(windows)]
-    elevate(&staged_installer, &elevated, &prompt)?;
+    if let Err(error) = elevate(&staged_installer, &elevated, &prompt) {
+        // The GUI runs this preparation executable as a child. Preserve native
+        // cancellation across that boundary instead of guessing from stderr text.
+        report_authorization_failure(&error, std::io::stdout().lock())?;
+        return Err(error);
+    }
     // Core-only publication is verified by the privileged installer and must also work offline.
     if core_only {
         return Ok(true);
@@ -329,6 +350,19 @@ pub fn prepare_install_if_requested() -> Result<bool> {
         return Err(failure.into());
     }
     Ok(true)
+}
+
+#[cfg(any(all(windows, feature = "client"), test))]
+fn report_authorization_failure(error: &anyhow::Error, mut output: impl std::io::Write) -> Result<()> {
+    if let Some(win32_error) = error
+        .downcast_ref::<std::io::Error>()
+        .and_then(std::io::Error::raw_os_error)
+    {
+        output.write_all(AUTHORIZATION_FAILURE_PREFIX.as_bytes())?;
+        serde_json::to_writer(&mut output, &AuthorizationFailure { win32_error })?;
+        output.write_all(b"\n")?;
+    }
+    Ok(())
 }
 
 #[cfg(any(all(feature = "client", target_os = "macos"), test))]
@@ -379,20 +413,79 @@ fn elevate(installer: &Path, arguments: &[OsString], gid: u32, prompt: &str) -> 
 
 #[cfg(all(windows, feature = "client"))]
 fn elevate(installer: &Path, arguments: &[OsString], _prompt: &str) -> Result<()> {
-    use std::os::windows::process::CommandExt as _;
+    use std::ffi::OsStr;
+    use std::os::windows::{
+        ffi::OsStrExt as _,
+        io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle},
+    };
+    use windows_sys::Win32::{
+        Foundation::WAIT_OBJECT_0,
+        System::{
+            Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize},
+            Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject},
+        },
+        UI::{
+            Shell::{
+                SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
+            },
+            WindowsAndMessaging::SW_HIDE,
+        },
+    };
+    struct ComApartment(bool);
+    impl Drop for ComApartment {
+        fn drop(&mut self) {
+            if self.0 {
+                // SAFETY: balances this thread's successful CoInitializeEx, including S_FALSE.
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+    let wide = |value: &OsStr| value.encode_wide().chain([0]).collect::<Vec<_>>();
     let command_line = arguments
         .iter()
         .map(|arg| windows_quote(&arg.to_string_lossy()))
         .collect::<Vec<_>>()
         .join(" ");
-    let script = "$ErrorActionPreference = 'Stop'; $child = Start-Process -FilePath $env:ZENCLASH_INSTALLER -ArgumentList $env:ZENCLASH_INSTALL_ARGUMENTS -Verb RunAs -Wait -PassThru -WindowStyle Hidden; exit $child.ExitCode";
-    let status = Command::new("powershell.exe")
-        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .env("ZENCLASH_INSTALLER", installer)
-        .env("ZENCLASH_INSTALL_ARGUMENTS", command_line)
-        .status()?;
-    anyhow::ensure!(status.success(), "elevated installer failed with {status}");
+    let verb = wide(OsStr::new("runas"));
+    let file = wide(installer.as_os_str());
+    let parameters = wide(OsStr::new(&command_line));
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI,
+        lpVerb: verb.as_ptr(),
+        lpFile: file.as_ptr(),
+        lpParameters: parameters.as_ptr(),
+        nShow: SW_HIDE,
+        ..Default::default()
+    };
+    // ShellExecuteExW may delegate to a COM shell extension. A preexisting apartment
+    // can reject this mode; only a successful initialization must be balanced.
+    let _apartment = ComApartment(unsafe {
+        CoInitializeEx(
+            std::ptr::null(),
+            (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+        ) >= 0
+    });
+    // SAFETY: all UTF-16 strings and the correctly sized structure live through this synchronous call.
+    if unsafe { ShellExecuteExW(&mut info) } == 0 {
+        return Err(std::io::Error::last_os_error()).context("failed to elevate the service installer");
+    }
+    anyhow::ensure!(
+        !info.hProcess.is_null(),
+        "elevation did not start the service installer"
+    );
+    // SAFETY: SEE_MASK_NOCLOSEPROCESS returns an owned handle; this is its only owner.
+    let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
+    // SAFETY: the owned process handle stays valid until after the wait and exit-code query.
+    if unsafe { WaitForSingleObject(process.as_raw_handle(), INFINITE) } != WAIT_OBJECT_0 {
+        return Err(std::io::Error::last_os_error()).context("cannot wait for the elevated installer");
+    }
+    let mut code = 0;
+    // SAFETY: code points to writable storage and the owned process handle is valid.
+    if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) } == 0 {
+        return Err(std::io::Error::last_os_error()).context("cannot read the elevated installer's exit code");
+    }
+    anyhow::ensure!(code == 0, "elevated installer failed with exit code {code}");
     Ok(())
 }
 
@@ -420,6 +513,40 @@ fn windows_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_authorization_cancellation_survives_the_preparation_process() -> Result<()> {
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt as _;
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt as _;
+        let cancelled = anyhow::Error::new(std::io::Error::from_raw_os_error(1223))
+            .context("failed to elevate the service installer");
+        let mut stdout = Vec::new();
+        report_authorization_failure(&cancelled, &mut stdout)?;
+        let error = installation_result(Output {
+            status: std::process::ExitStatus::from_raw(1),
+            stdout,
+            stderr: b"localized diagnostics".to_vec(),
+        })
+        .expect_err("cancellation must remain a native error")
+        .context("install failed");
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .and_then(std::io::Error::raw_os_error),
+            Some(1223)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn diagnostics_cannot_be_mistaken_for_native_authorization_cancellation() -> Result<()> {
+        let mut stdout = Vec::new();
+        report_authorization_failure(&anyhow::anyhow!("installer exited with status 1223"), &mut stdout)?;
+        assert!(stdout.is_empty());
+        Ok(())
+    }
 
     #[test]
     fn installation_refusal_survives_subprocess_output_and_error_context() -> Result<()> {

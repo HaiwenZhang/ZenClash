@@ -26,8 +26,19 @@ use tokio::{
 };
 use tracing::{error, info, warn};
 
-const CORE_IPC_READY_TIMEOUT: Duration = Duration::from_secs(15);
+pub(super) const CORE_IPC_READY_TIMEOUT: Duration = Duration::from_secs(15);
 const CORE_IPC_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Time the core gets after SIGTERM to shut down before SIGKILL.
+pub(super) const CORE_TERM_GRACE: Duration = Duration::from_secs(3);
+/// Bound on reading an exited core's remaining output.
+pub(super) const CORE_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Grace left before `kill_by`, evaluated when the core is actually stopped; `None` is the full grace.
+fn term_grace(kill_by: Option<Instant>) -> Duration {
+    kill_by.map_or(CORE_TERM_GRACE, |kill_by| {
+        kill_by.saturating_duration_since(Instant::now()).min(CORE_TERM_GRACE)
+    })
+}
 
 #[derive(Debug)]
 pub struct CoreExitInfo {
@@ -83,35 +94,80 @@ impl ChildGuard {
         tokio::select! {
             status = child.wait() => {
                 let status = status.context("failed to wait for the starting core")?;
-                for reader in self.readers.drain(..) {
-                    if let Err(error) = reader.await {
-                        warn!("Failed to finish reading exited core output: {error}");
-                    }
-                }
+                self.drain_output().await;
                 Err(anyhow!("core exited before its IPC endpoint became ready: {status}"))
             }
             result = secure_core_ipc_socket(path, owner, pid) => result,
         }
     }
 
-    async fn kill_now(&mut self) -> Result<()> {
-        for reader in self.readers.drain(..) {
-            reader.abort();
-        }
-
-        if let Some(child) = self.child.as_mut() {
-            let child_id = child.id();
-            child
-                .kill()
-                .await
-                .with_context(|| format!("failed to kill child {child_id:?}"))?;
-            self.child.take();
-            info!("Successfully killed child ({:?})", child_id);
-        } else {
+    /// Stops the core and drains its output; a zero `grace` kills at once.
+    async fn terminate(&mut self, grace: Duration) -> Result<()> {
+        let Some(child) = self.child.as_mut() else {
+            self.drain_output().await;
             info!("No running core process found");
+            return Ok(());
+        };
+        let child_id = child.id();
+        let result = stop_child(child, grace)
+            .await
+            .with_context(|| format!("failed to kill child {child_id:?}"));
+        if result.is_err() {
+            for reader in self.readers.drain(..) {
+                reader.abort();
+            }
         }
+        result?;
+        self.child.take();
+        self.drain_output().await;
+        info!("Core ({:?}) stopped", child_id);
         Ok(())
     }
+
+    async fn drain_output(&mut self) {
+        let deadline = tokio::time::Instant::now() + CORE_OUTPUT_DRAIN_TIMEOUT;
+        // Awaited in place so a cancelled drain leaves the readers for `Drop` to abort.
+        while let Some(reader) = self.readers.first_mut() {
+            match tokio::time::timeout_at(deadline, &mut *reader).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => warn!("Failed to finish reading exited core output: {error}"),
+                Err(_) => {
+                    warn!("Core output stayed open after the core exited; dropping the rest");
+                    reader.abort();
+                }
+            }
+            self.readers.remove(0);
+        }
+    }
+}
+
+/// SIGTERM, then SIGKILL after `grace`; Windows has no SIGTERM.
+async fn stop_child(child: &mut Child, grace: Duration) -> std::io::Result<()> {
+    #[cfg(not(unix))]
+    let _ = grace;
+    // `id()` is `None` once reaped, so the PID cannot have been reused.
+    #[cfg(unix)]
+    if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok())
+        && !grace.is_zero()
+    {
+        if unsafe { platform_lib::kill(pid, platform_lib::SIGTERM) } == 0 {
+            info!("Sent SIGTERM to core ({pid})");
+            match tokio::time::timeout(grace, child.wait()).await {
+                Ok(Ok(status)) => {
+                    info!("Core ({pid}) exited after SIGTERM: {status}");
+                    return Ok(());
+                }
+                Ok(Err(error)) => warn!("Failed to wait for core ({pid}) after SIGTERM: {error}"),
+                Err(_) => warn!("Core ({pid}) did not exit within {grace:?} of SIGTERM, sending SIGKILL"),
+            }
+        } else {
+            warn!(
+                "Failed to send SIGTERM to core ({pid}): {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+    child.kill().await
 }
 
 impl Drop for ChildGuard {
@@ -270,7 +326,7 @@ pub struct CoreManager {
     last_core_exit_reason: Arc<Mutex<Option<String>>>,
     restart_count: Arc<AtomicU32>,
     last_recovery_at: Arc<AtomicU64>,
-    watchdog_shutdown: Mutex<Option<oneshot::Sender<()>>>,
+    watchdog_shutdown: Mutex<Option<oneshot::Sender<Option<Instant>>>>,
     watchdog_handle: Mutex<Option<JoinHandle<Result<()>>>>,
     failed_child: Arc<Mutex<Option<ChildGuard>>>,
     execution: Mutex<Option<std::sync::Arc<crate::execution::CoreExecutionGuard>>>,
@@ -349,7 +405,8 @@ impl CoreManager {
             .await_ipc(config.core_config.core_ipc_path.clone(), owner.clone())
             .await
         {
-            if let Err(kill_error) = child_guard.kill_now().await {
+            // Never became ready: kill at once.
+            if let Err(kill_error) = child_guard.terminate(Duration::ZERO).await {
                 let now_secs = unix_timestamp_secs();
                 self.running_pid.store(child_pid.unwrap_or_default(), Ordering::Release);
                 *self.running_config.lock().await = Some(config.clone());
@@ -370,7 +427,7 @@ impl CoreManager {
         }
 
         if let Err(record_error) = write_runtime_record_for_config(child_pid, &config, "after start").await {
-            if let Err(kill_error) = child_guard.kill_now().await {
+            if let Err(kill_error) = child_guard.terminate(Duration::ZERO).await {
                 let now_secs = unix_timestamp_secs();
                 self.running_pid.store(child_pid.unwrap_or_default(), Ordering::Release);
                 *self.running_config.lock().await = Some(config.clone());
@@ -397,13 +454,20 @@ impl CoreManager {
     }
 
     pub async fn stop_core(&self) -> Result<()> {
+        self.stop_core_by(None).await
+    }
+
+    /// Stops the core; IPC handlers pass the deadline by which it must be SIGKILLed.
+    pub(super) async fn stop_core_by(&self, kill_by: Option<Instant>) -> Result<()> {
         info!("Stopping core");
         LOG_RING.clear_logs();
 
-        let watchdog_result = self.stop_watchdog().await;
+        let watchdog_result = self.stop_watchdog(kill_by).await;
         let mut recovered_failed_child = false;
-        if let Some(mut child_guard) = self.failed_child.lock().await.take() {
-            if let Err(error) = child_guard.kill_now().await {
+        // Bound first: an `if let` scrutinee would keep the lock through the block.
+        let failed_child = self.failed_child.lock().await.take();
+        if let Some(mut child_guard) = failed_child {
+            if let Err(error) = child_guard.terminate(term_grace(kill_by)).await {
                 *self.failed_child.lock().await = Some(child_guard);
                 return Err(error.context("failed to retry termination of tracked core"));
             }
@@ -470,9 +534,10 @@ impl CoreManager {
                     };
 
                     tokio::select! {
-                        _ = &mut shutdown_rx => {
+                        kill_by = &mut shutdown_rx => {
                             info!("Core watchdog received shutdown signal");
-                            if let Err(error) = current_guard.kill_now().await {
+                            let grace = term_grace(kill_by.unwrap_or(None));
+                            if let Err(error) = current_guard.terminate(grace).await {
                                 *failed_child_arc.lock().await = Some(current_guard);
                                 set_core_lifecycle_state(ServiceLifecycleState::Fatal);
                                 return Err(error.context(
@@ -499,6 +564,8 @@ impl CoreManager {
                 *last_exit_reason_arc.lock().await = Some(exit_reason);
                 set_core_lifecycle_state(ServiceLifecycleState::RecoveringCore);
 
+                // Dropping the guard cancels its readers.
+                current_guard.drain_output().await;
                 let _ = current_guard.take();
                 running_pid_arc.store(0, Ordering::Release);
                 started_at_arc.store(0, Ordering::Relaxed);
@@ -554,7 +621,7 @@ impl CoreManager {
                                 .await
                             {
                                 error!("Failed to secure restarted core IPC: {error:#}");
-                                if let Err(kill_error) = new_guard.kill_now().await {
+                                if let Err(kill_error) = new_guard.terminate(Duration::ZERO).await {
                                     error!("Failed to terminate core after IPC hardening failure: {kill_error:#}");
                                     let now_secs = unix_timestamp_secs();
                                     running_pid_arc.store(new_pid.unwrap_or_default(), Ordering::Release);
@@ -586,7 +653,7 @@ impl CoreManager {
                                 write_runtime_record_for_config(new_pid, &config, "after restart").await
                             {
                                 error!("Failed to commit restarted core runtime: {record_error:#}");
-                                if let Err(kill_error) = new_guard.kill_now().await {
+                                if let Err(kill_error) = new_guard.terminate(Duration::ZERO).await {
                                     let now_secs = unix_timestamp_secs();
                                     running_pid_arc.store(new_pid.unwrap_or_default(), Ordering::Release);
                                     *start_time_arc.lock().await = Some(Instant::now());
@@ -637,9 +704,9 @@ impl CoreManager {
         *self.watchdog_handle.lock().await = Some(handle);
     }
 
-    async fn stop_watchdog(&self) -> Result<()> {
+    async fn stop_watchdog(&self, kill_by: Option<Instant>) -> Result<()> {
         if let Some(shutdown_tx) = self.watchdog_shutdown.lock().await.take() {
-            let _ = shutdown_tx.send(());
+            let _ = shutdown_tx.send(kill_by);
         }
 
         if let Some(handle) = self.watchdog_handle.lock().await.take() {
@@ -1016,6 +1083,46 @@ fn windows_owner_pipe_sddl(sid: &str) -> String {
 }
 
 pub static CORE_MANAGER: Lazy<Arc<Mutex<CoreManager>>> = Lazy::new(|| Arc::new(Mutex::new(CoreManager::new())));
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shutdown_drains_final_output_but_bounds_inherited_open_streams() {
+        let (written, final_output) = oneshot::channel();
+        let reader = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let _ = written.send("last core line");
+        });
+        let stuck = tokio::spawn(std::future::pending::<()>());
+        let stuck_abort = stuck.abort_handle();
+        let another_stuck = tokio::spawn(std::future::pending::<()>());
+        let mut guard = ChildGuard {
+            child: None,
+            readers: vec![reader, stuck, another_stuck],
+        };
+        let started = Instant::now();
+        guard.terminate(Duration::ZERO).await.unwrap();
+        assert_eq!(final_output.await.unwrap(), "last core line");
+        assert!(guard.readers.is_empty());
+        assert!(started.elapsed() < CORE_OUTPUT_DRAIN_TIMEOUT + Duration::from_secs(1));
+        tokio::task::yield_now().await;
+        assert!(stuck_abort.is_finished());
+    }
+
+    #[test]
+    fn queued_stop_never_gets_fresh_grace_after_its_deadline() {
+        assert_eq!(
+            term_grace(Some(Instant::now() - Duration::from_secs(1))),
+            Duration::ZERO
+        );
+        assert_eq!(
+            term_grace(Some(Instant::now() + Duration::from_secs(30))),
+            CORE_TERM_GRACE
+        );
+    }
+}
 
 #[cfg(all(test, unix))]
 mod tests {

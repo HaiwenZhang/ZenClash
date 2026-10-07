@@ -482,7 +482,7 @@ impl TrafficCaptureSession {
     /// or failures before a recoverable native transition. Saved or uncertain results carry capture facts.
     pub async fn enable_service_tun(
         &self,
-        service: Option<(Arc<zenclash_service_integration::ServiceSession>, PathBuf)>,
+        service: Option<(Arc<crate::service::ServiceSession>, PathBuf)>,
         expected_binding: u64,
         expected_generation: u64,
     ) -> Result<ServiceTunOutcome, crate::CoreSessionError> {
@@ -500,7 +500,7 @@ impl TrafficCaptureSession {
 
     pub(crate) async fn enable_service_tun_with_bundle(
         &self,
-        service: Option<(Arc<zenclash_service_integration::ServiceSession>, PathBuf)>,
+        service: Option<(Arc<crate::service::ServiceSession>, PathBuf)>,
         expected_binding: u64,
         expected_generation: u64,
         recovery_bundle: Option<Arc<crate::ServiceRuntimeBundle>>,
@@ -537,7 +537,7 @@ impl TrafficCaptureSession {
 
     async fn enable_service_tun_admitted(
         &self,
-        service: Option<(Arc<zenclash_service_integration::ServiceSession>, PathBuf)>,
+        service: Option<(Arc<crate::service::ServiceSession>, PathBuf)>,
         expected_binding: u64,
         expected_generation: u64,
         recovery_bundle: Option<Arc<crate::ServiceRuntimeBundle>>,
@@ -883,7 +883,7 @@ trait CaptureBackend: Send + Sync {
         None
     }
 
-    fn owns_service(&self, _service: &Arc<zenclash_service_integration::ServiceSession>) -> bool {
+    fn owns_service(&self, _service: &Arc<crate::service::ServiceSession>) -> bool {
         false
     }
     fn validate_service_tun_request(
@@ -896,7 +896,7 @@ trait CaptureBackend: Send + Sync {
 
     fn enable_service_tun(
         &self,
-        _service: Option<(Arc<zenclash_service_integration::ServiceSession>, PathBuf)>,
+        _service: Option<(Arc<crate::service::ServiceSession>, PathBuf)>,
         _expected_binding: u64,
         _expected_generation: u64,
         _recovery_bundle: Option<Arc<crate::ServiceRuntimeBundle>>,
@@ -940,7 +940,7 @@ impl CaptureBackend for ProductionCaptureBackend {
         Some(self.controlled.clone())
     }
 
-    fn owns_service(&self, service: &Arc<zenclash_service_integration::ServiceSession>) -> bool {
+    fn owns_service(&self, service: &Arc<crate::service::ServiceSession>) -> bool {
         self.core_session
             .client()
             .service_client()
@@ -962,7 +962,7 @@ impl CaptureBackend for ProductionCaptureBackend {
 
     fn enable_service_tun(
         &self,
-        service: Option<(Arc<zenclash_service_integration::ServiceSession>, PathBuf)>,
+        service: Option<(Arc<crate::service::ServiceSession>, PathBuf)>,
         expected_binding: u64,
         expected_generation: u64,
         recovery_bundle: Option<Arc<crate::ServiceRuntimeBundle>>,
@@ -1073,7 +1073,7 @@ impl CaptureBackend for ProductionCaptureBackend {
                     .map_err(|error| format!("读取 YAML override 任务异常结束：{error}"))?
                     .map_err(|error| error.to_string())?;
             let patch = if enabled {
-                serde_json::json!({"tun": {"enable": true}, "dns": {"enable": true}})
+                serde_json::json!({"tun": {"enable": true}})
             } else {
                 serde_json::json!({"tun": {"enable": false}})
             };
@@ -1896,7 +1896,7 @@ mod tests {
     impl CaptureBackend for FakeBackend {
         fn enable_service_tun(
             &self,
-            _service: Option<(Arc<zenclash_service_integration::ServiceSession>, PathBuf)>,
+            _service: Option<(Arc<crate::service::ServiceSession>, PathBuf)>,
             _binding: u64,
             _generation: u64,
             _recovery_bundle: Option<Arc<crate::ServiceRuntimeBundle>>,

@@ -71,11 +71,6 @@ try {
     if (-not (Test-Path -Path $MihomoBinary -PathType Leaf)) {
         throw "Set ZENCLASH_MIHOMO_BINARY to a real Mihomo executable"
     }
-    $SourceNotices = if ($env:ZENCLASH_DEPENDENCY_LICENSE_DIR) { $env:ZENCLASH_DEPENDENCY_LICENSE_DIR } else { Join-Path $ProjectRoot "dist/dependency-licenses" }
-    $SourceGeoData = Join-Path $SourceNotices "resources/geoip.metadb"
-    if ([string]::IsNullOrWhiteSpace($GeoDataFile) -and (Test-Path -LiteralPath $SourceGeoData -PathType Leaf)) {
-        $GeoDataFile = $SourceGeoData
-    }
     if ([string]::IsNullOrWhiteSpace($GeoDataFile)) {
         $GeoDataFile = Join-Path $WorkDir "geoip.metadb"
         & (Join-Path $PSScriptRoot "download_mihomo_geodata.ps1") -OutputPath $GeoDataFile -ReleaseTag $GeoDataVersion
@@ -159,9 +154,6 @@ public static class ZenClashIconResource
     Copy-Item (Join-Path $ProjectRoot "platforms\common\recovery.yaml") (Join-Path $ResourcesDir "recovery.yaml")
     Copy-Item (Join-Path $ProjectRoot "platforms\macos\ZenClash.png") (Join-Path $ResourcesDir "ZenClash.png")
     Copy-Item (Join-Path $ProjectRoot "LICENSE") (Join-Path $StageDir "LICENSE.txt")
-    $DependencyLicenses = if ($env:ZENCLASH_DEPENDENCY_LICENSE_DIR) { $env:ZENCLASH_DEPENDENCY_LICENSE_DIR } else { Join-Path $ProjectRoot "dist/dependency-licenses" }
-    python (Join-Path $PSScriptRoot "stage_release_licenses.py") --project $ProjectRoot --destination $StageDir --version $Version --dependency-licenses $DependencyLicenses --mihomo-tag $MihomoVersion --geodata-file $GeoDataFile
-    if ($LASTEXITCODE -ne 0) { throw "License and corresponding-source notice staging failed" }
     & (Join-Path $ResourcesDir "mihomo.exe") -v
     if ($LASTEXITCODE -ne 0) {
         throw "The packaged Mihomo executable failed its version check"

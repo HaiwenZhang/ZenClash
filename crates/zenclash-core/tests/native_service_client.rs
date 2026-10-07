@@ -1,9 +1,9 @@
 // ZenClash integration regression, 2026-10-04. GPL-3.0-only; see NOTICE.md.
-#![cfg(feature = "ipc-tests")]
+#![cfg(feature = "service-ipc-tests")]
 
 use anyhow::{Context as _, Result};
 use futures_util::StreamExt as _;
-use zenclash_service_integration::{RuntimeBundle, ServiceSession, StageRuntimeOutcome};
+use zenclash_core::service::{RuntimeBundle, ServiceSession, StageRuntimeOutcome};
 
 #[tokio::test]
 async fn native_session_takeover_staging_and_stop_preserve_owner_proof() -> Result<()> {
@@ -21,7 +21,7 @@ async fn native_session_takeover_staging_and_stop_preserve_owner_proof() -> Resu
         yaml: "mode: rule\n".to_owned(),
         assets: Vec::new(),
         remote_providers: Vec::new(),
-        core_path: env!("CARGO_BIN_EXE_zenclash-integration-test-core").to_owned(),
+        core_path: env!("CARGO_BIN_EXE_zenclash-core-integration-test-core").to_owned(),
     };
 
     assert!(first.snapshot().is_none());
@@ -38,11 +38,7 @@ async fn native_session_takeover_staging_and_stop_preserve_owner_proof() -> Resu
             first.snapshot().and_then(|status| status.core_pid),
             status.core_pid
         );
-        assert!(
-            zenclash_service_integration::reserve_sidecar()
-                .await
-                .is_err()
-        );
+        assert!(zenclash_core::service::reserve_sidecar().await.is_err());
 
         let version = first
             .controller_request(
@@ -142,18 +138,18 @@ async fn native_session_takeover_staging_and_stop_preserve_owner_proof() -> Resu
                     std::time::Duration::from_secs(2)
                 )
                 .await,
-            Err(zenclash_service_integration::ServiceCallError::OwnerLost)
+            Err(zenclash_core::service::ServiceCallError::OwnerLost)
         ));
-        let mut owner_watch = zenclash_service_integration::runstate::OwnerWatch::new();
+        let mut owner_watch = zenclash_core::service::runstate::OwnerWatch::new();
         assert_eq!(
             owner_watch.observe(first.owner_sample().await),
-            zenclash_service_integration::runstate::OwnerStep::Recover(
-                zenclash_service_integration::runstate::OwnerRecoveryReason::Displaced
+            zenclash_core::service::runstate::OwnerStep::Recover(
+                zenclash_core::service::runstate::OwnerRecoveryReason::Displaced
             )
         );
         assert_eq!(
             owner_watch.observe(second.owner_sample().await),
-            zenclash_service_integration::runstate::OwnerStep::Continue
+            zenclash_core::service::runstate::OwnerStep::Continue
         );
 
         // The native stale-session refusal is accepted as release of only the old handle.
@@ -165,7 +161,7 @@ async fn native_session_takeover_staging_and_stop_preserve_owner_proof() -> Resu
         assert!(first.snapshot().is_none());
         assert!(second.snapshot().is_none());
         assert!(!second.status().await?.is_active);
-        drop(zenclash_service_integration::reserve_sidecar().await?);
+        drop(zenclash_core::service::reserve_sidecar().await?);
         Ok::<_, anyhow::Error>(())
     }
     .await;

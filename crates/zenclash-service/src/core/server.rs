@@ -8,7 +8,7 @@ use crate::core::desired::{
 };
 use crate::core::legacy_cleanup::cleanup_legacy_owner_files;
 use crate::core::logger::{LOG_RING, flush_writer, set_or_update_writer};
-use crate::core::manager::CORE_MANAGER;
+use crate::core::manager::{CORE_IPC_READY_TIMEOUT, CORE_MANAGER, CORE_OUTPUT_DRAIN_TIMEOUT};
 use crate::core::paths::service_paths;
 use crate::core::runtime_generation::{PreparedRuntime, prepare_runtime, read_runtime_file, stage_runtime};
 use crate::core::state::{set_core_lifecycle_state, set_service_lifecycle_state};
@@ -40,6 +40,10 @@ const IPC_MAX_RESTARTS: u32 = 10;
 const IPC_RESTART_WINDOW: Duration = Duration::from_secs(10);
 const IPC_MAX_BACKOFF: Duration = Duration::from_millis(500);
 const IPC_HANDLER_TIMEOUT: Duration = Duration::from_secs(25);
+/// Handler time a takeover needs after stopping the previous core.
+const TAKEOVER_RESERVE: Duration = CORE_IPC_READY_TIMEOUT.saturating_add(Duration::from_secs(4));
+/// Handler time a stop needs after the core has exited.
+const STOP_RESERVE: Duration = CORE_OUTPUT_DRAIN_TIMEOUT.saturating_add(Duration::from_secs(1));
 #[cfg(any(test, all(windows, not(feature = "test"))))]
 const WINDOWS_CONTROL_PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x0012019b;;;AU)";
 #[cfg(all(windows, feature = "test"))]
@@ -88,7 +92,13 @@ async fn owner_proxy_transition(
     Ok((active, proxy_outcome))
 }
 
+/// When a handler's stop must reach SIGKILL so `reserve` still fits before the handler timeout.
+fn sigkill_deadline(handler_deadline: Instant, reserve: Duration) -> Option<Instant> {
+    Some(handler_deadline.checked_sub(reserve).unwrap_or_else(Instant::now))
+}
+
 struct StartOwnerTransition<'a> {
+    handler_deadline: Instant,
     previous_owner: Option<ActiveOwnerState>,
     owner: &'a AuthenticatedOwner,
     prepared_runtime: Option<PreparedRuntime>,
@@ -112,7 +122,8 @@ impl OwnerProxyTransition for StartOwnerTransition<'_> {
     }
 
     async fn stop_previous_core(&mut self) -> AnyResult<()> {
-        CORE_MANAGER.lock().await.stop_core().await?;
+        let kill_by = sigkill_deadline(self.handler_deadline, TAKEOVER_RESERVE);
+        CORE_MANAGER.lock().await.stop_core_by(kill_by).await?;
         if let Some(previous_owner) = self.previous_owner.as_ref() {
             persist_owner_core_stopped_by_key(&previous_owner.owner_key)
                 .await
@@ -139,7 +150,8 @@ impl OwnerProxyTransition for StartOwnerTransition<'_> {
         let start_result = core_manager.start_core(clash_config, self.owner.identity.clone()).await;
         drop(core_manager);
         if let Err(error) = start_result {
-            if let Err(stop_error) = CORE_MANAGER.lock().await.stop_core().await {
+            let kill_by = sigkill_deadline(self.handler_deadline, STOP_RESERVE);
+            if let Err(stop_error) = CORE_MANAGER.lock().await.stop_core_by(kill_by).await {
                 return Err(anyhow!(
                     "{error:#}; failed to confirm termination of the rejected core: {stop_error:#}"
                 ));
@@ -179,7 +191,7 @@ impl OwnerProxyTransition for StartOwnerTransition<'_> {
 
 impl StartOwnerTransition<'_> {
     async fn rollback_commit_failure<T>(&mut self, error: anyhow::Error) -> AnyResult<T> {
-        if let Err(rollback_error) = rollback_started_owner(self.owner).await {
+        if let Err(rollback_error) = rollback_started_owner(self.owner, self.handler_deadline).await {
             return Err(anyhow!(
                 "{error:#}; failed to roll back uncommitted owner core: {rollback_error:#}"
             ));
@@ -247,8 +259,9 @@ async fn clear_proxy_with_direct_compensation() -> std::result::Result<(), Servi
     Err(ServiceError::proxy_clear_failed(message))
 }
 
-async fn rollback_started_owner(owner: &AuthenticatedOwner) -> AnyResult<()> {
-    if let Err(stop_error) = CORE_MANAGER.lock().await.stop_core().await {
+async fn rollback_started_owner(owner: &AuthenticatedOwner, handler_deadline: Instant) -> AnyResult<()> {
+    let kill_by = sigkill_deadline(handler_deadline, STOP_RESERVE);
+    if let Err(stop_error) = CORE_MANAGER.lock().await.stop_core_by(kill_by).await {
         set_core_lifecycle_state(ServiceLifecycleState::Fatal);
         return Err(anyhow!(
             "failed to terminate owner core during rollback: {stop_error:#}"
@@ -667,6 +680,7 @@ fn create_ipc_router() -> Result<Router> {
             }
         })
         .post(IpcCommand::StartClash.as_ref(), |ctx| async move {
+            let handler_deadline = Instant::now() + IPC_HANDLER_TIMEOUT;
             trace!("Received StartClash command");
             let (request, owner) = match authenticate_request::<AuthenticatedRequest<StartClashRequest>>(&ctx) {
                 ControlFlow::Continue(authenticated) => authenticated,
@@ -696,6 +710,7 @@ fn create_ipc_router() -> Result<Router> {
                 Err(error) => return service_error(error),
             };
             let mut transition = StartOwnerTransition {
+                handler_deadline,
                 previous_owner,
                 owner: &owner,
                 prepared_runtime: Some(prepared_runtime),
@@ -750,6 +765,7 @@ fn create_ipc_router() -> Result<Router> {
             }
         })
         .delete(IpcCommand::StopClash.as_ref(), |ctx| async move {
+            let handler_deadline = Instant::now() + IPC_HANDLER_TIMEOUT;
             trace!("Received StopClash command");
             let (request, owner) = match authenticate_request::<AuthenticatedSessionRequest<()>>(&ctx) {
                 ControlFlow::Continue(authenticated) => authenticated,
@@ -763,7 +779,8 @@ fn create_ipc_router() -> Result<Router> {
             if let Err(error) = clear_proxy_with_direct_compensation().await {
                 return service_error(error);
             }
-            match CORE_MANAGER.lock().await.stop_core().await {
+            let kill_by = sigkill_deadline(handler_deadline, STOP_RESERVE);
+            match CORE_MANAGER.lock().await.stop_core_by(kill_by).await {
                 Ok(_) => info!("Core stopped successfully"),
                 Err(e) => {
                     return service_unavailable(format!("Failed to stop core: {}", e));

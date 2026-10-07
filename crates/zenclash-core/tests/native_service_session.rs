@@ -8,11 +8,11 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, ensure};
+use zenclash_core::service::{RunningMode, RuntimeBundle, ServiceSession};
 use zenclash_core::{
     ControlledConfigStore, CoreKind, CoreLifecyclePhase, CoreRuntimeBackend, CoreSession,
-    MihomoClient, PacServer, ServiceHealthKind, default_pac_script,
+    EffectiveConfigIntent, MihomoClient, PacServer, ServiceHealthKind, default_pac_script,
 };
-use zenclash_service_integration::{RunningMode, RuntimeBundle, ServiceSession};
 
 async fn pac_status(server: &PacServer) -> Result<String> {
     let address = server
@@ -102,11 +102,7 @@ async fn application_start_reload_displacement_and_shutdown_use_the_actual_nativ
         ensure!(session.run_state().service_usable());
         ensure!(pac_status(&pac).await?.starts_with("HTTP/1.1 200"));
         ensure!(client.version().await?.version == "integration-fixture");
-        ensure!(
-            zenclash_service_integration::reserve_sidecar()
-                .await
-                .is_err()
-        );
+        ensure!(zenclash_core::service::reserve_sidecar().await.is_err());
 
         let observer = Arc::new(ServiceSession::connect(&home).await?);
         let before = observer.status().await?;
@@ -129,6 +125,38 @@ async fn application_start_reload_displacement_and_shutdown_use_the_actual_nativ
             "Stage/Reload unexpectedly restarted the core"
         );
         ensure!(after.active_generation == owner_generation);
+        // Exercise actual native Stage -> core reload -> readback without a
+        // physical adapter: this fixture implements only the controller API.
+        session
+            .apply(
+                &store,
+                EffectiveConfigIntent::Patch {
+                    profile: profile.clone(),
+                    patch: serde_json::json!({"tun": {"enable": true}}),
+                    overrides: Vec::new(),
+                },
+            )
+            .await?;
+        let tun = client.runtime_config().await?.tun;
+        ensure!(tun.enable && tun.auto_route && tun.auto_detect_interface);
+        ensure!(tun.stack == "gvisor" && tun.dns_hijack == ["any:53"]);
+        let saved: serde_yaml::Value =
+            serde_yaml::from_slice(&std::fs::read(store.runtime_path())?)?;
+        ensure!(saved["dns"]["enable"] == true);
+        ensure!(saved["dns"]["fake-ip-range"] == "198.18.0.1/16");
+        ensure!(observer.status().await?.core_pid == Some(pid));
+        session
+            .apply(
+                &store,
+                EffectiveConfigIntent::Patch {
+                    profile: profile.clone(),
+                    patch: serde_json::json!({"tun": {"enable": false}}),
+                    overrides: Vec::new(),
+                },
+            )
+            .await?;
+        ensure!(!client.runtime_config().await?.tun.enable);
+        ensure!(observer.status().await?.active_generation == owner_generation);
         ensure!(
             session.run_state().mode == RunningMode::Service,
             "Service mode missing: snapshot={:?}, lifecycle={:?}, state={:?}",
@@ -174,7 +202,7 @@ async fn application_start_reload_displacement_and_shutdown_use_the_actual_nativ
         );
         observer.stop().await?;
         ensure!(!observer.status().await?.is_active);
-        drop(zenclash_service_integration::reserve_sidecar().await?);
+        drop(zenclash_core::service::reserve_sidecar().await?);
         Ok::<_, anyhow::Error>(())
     })
     .await;

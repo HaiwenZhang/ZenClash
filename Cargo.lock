@@ -10352,17 +10352,23 @@ name = "zenclash-core"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "chrono",
  "cron",
+ "deelevate",
  "flate2",
  "futures-util",
  "getrandom 0.4.3",
  "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "iana-time-zone",
  "libc",
  "parking_lot",
  "percent-encoding",
  "reqwest",
+ "runas",
  "rusqlite",
  "serde",
  "serde_json",
@@ -10374,10 +10380,11 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+ "url",
+ "windows-service",
  "windows-sys 0.61.2",
  "zenclash-i18n",
  "zenclash-service",
- "zenclash-service-integration",
  "zip",
 ]
 
@@ -10416,34 +10423,6 @@ dependencies = [
  "url",
  "windows-service",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "zenclash-service-integration"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "arc-swap",
- "deelevate",
- "futures-util",
- "getrandom 0.4.3",
- "http-body-util",
- "hyper",
- "hyper-util",
- "libc",
- "parking_lot",
- "runas",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2 0.11.0",
- "thiserror 2.0.21",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "windows-service",
- "windows-sys 0.61.2",
- "zenclash-service",
 ]
 
 [[package]]

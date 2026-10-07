@@ -24,3 +24,14 @@ UPSTREAM.json 记录修改前的文件哈希与最初适配的文件清单，不
 后续发布必须随二进制提供可获得的完整对应源码，并保留本声明和 LICENSE；详见 README 的分发章节。
 
 2026-10-05 追加 ZenClash CI 适配：补充公共接口的实际错误说明；原子 JSON 写入的泛型增加 Sync 约束，以满足跨线程异步检查；测试用 watchdog 配置记录 poisoned mutex 的 panic 条件。原服务协议和监督行为未因此改变。
+
+2026-10-07（修改者：ZenClash contributors）：根据用户提供的 debug/clash-verge-service-ipc
+源码同步 management::elevate 的原生 Windows ShellExecuteExW 授权、CoreManager 的
+Unix SIGTERM 宽限、有界输出 drain 和 IPC Start/Stop 截止预算。保留本产品身份、路径和
+原有接口文档；增加 COM/进程 handle 的资源释放与等待错误检查、跨准备子进程的结构化
+原生授权错误、停止回归测试。来源文件和 SHA-256 见
+../../docs/research/clash-verge-tun-sources.json，研究和验收记录见同目录研究文档。
+原作者和 GPL 声明继续保留；本次改动未进入以前生成的安装包。
+
+同日交叉检查修正卸载器残留的 macOS uninstall_old_service 引用；旧函数早已在本 Fork
+移除，这次仅删除失效导入与调用，继续只卸载 ZenClash 自己的 helper。

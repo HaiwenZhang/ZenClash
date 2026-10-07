@@ -6,9 +6,9 @@
 //! actions, and the privileged-operation lock. Reads differ only in freshness.
 
 mod env;
-use crate::health;
+use crate::service::health;
 mod owner;
-use crate::probe;
+use crate::service::probe;
 
 use std::{
     sync::{
@@ -35,7 +35,7 @@ pub use recovery::{
 pub use owner::{OwnerRecoveryReason, OwnerSample, OwnerStep, OwnerWatch};
 pub use probe::{ServiceVersionCheck, ServiceVersionReply, classify_service_version_reply};
 
-use crate::RunningMode;
+use crate::service::RunningMode;
 use health::StoredService;
 use probe::{CurrentServiceProbe, classify_service_health, probe_outcome};
 
@@ -87,6 +87,7 @@ pub struct RunStateStore<E: RunStateEnv> {
 }
 
 impl<E: RunStateEnv> RunStateStore<E> {
+    /// Creates session-owned state with unknown health and no running core.
     pub fn new(env: E) -> Self {
         Self {
             env: Arc::new(env),
@@ -244,6 +245,7 @@ impl<E: RunStateEnv> RunStateStore<E> {
         health
     }
 
+    /// Records health and publishes the resulting coherent session state.
     pub fn observe(&self, health: ServiceHealth) {
         let mut state = self.service.lock();
         if state.service.health == health
@@ -426,10 +428,12 @@ impl<E: RunStateEnv> RunStateStore<E> {
         Arc::clone(&self.mode.load())
     }
 
+    /// Publishes the acknowledged backend after core startup.
     pub fn core_started(&self, mode: RunningMode) {
         self.enter_mode(mode);
     }
 
+    /// Publishes that this session no longer owns a running core.
     pub fn core_stopped(&self) {
         self.enter_mode(RunningMode::NotRunning);
     }
@@ -477,16 +481,19 @@ impl<E: RunStateEnv> RunStateStore<E> {
     }
 
     #[cfg(test)]
+    /// Whether the shared maintenance operation slot is reserved.
     pub fn operation_in_flight(&self) -> bool {
         self.operation_running.load(Ordering::Acquire)
     }
 
     #[cfg(test)]
+    /// Returns the observation and effects adapter owned by this store.
     pub fn env(&self) -> &E {
         &self.env
     }
 
     #[cfg(test)]
+    /// Returns the current published state generation.
     pub fn generation_count(&self) -> u64 {
         self.service.lock().generation
     }

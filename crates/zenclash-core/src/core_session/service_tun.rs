@@ -146,7 +146,7 @@ mod preparation_tests {
         let override_path = home.join("ordered.yaml");
         std::fs::write(
             &override_path,
-            "tun: {enable: true}\ndns: {enable: false}\n",
+            "tun: {enable: true}\ndns: {enable: false, enhanced-mode: redir-host}\n",
         )
         .unwrap();
         std::fs::write(
@@ -266,8 +266,8 @@ mod preparation_tests {
         assert_eq!(yaml["tun"]["enable"].as_bool(), Some(true));
         assert_eq!(
             yaml["dns"]["enable"].as_bool(),
-            Some(false),
-            "automatic admission must preserve the requested DNS setting"
+            Some(true),
+            "fake-IP TUN must enable DNS as in the reference enhancement"
         );
         assert_eq!(yaml["mode"].as_str(), Some("global"));
         assert_eq!(committed.profile.as_ref(), Some(&profile));
@@ -909,7 +909,7 @@ impl CoreSession {
                     .await?,
             ),
         };
-        let delta = serde_json::json!({"tun":{"enable":true},"dns":{"enable":true}});
+        let delta = serde_json::json!({"tun":{"enable":true}});
         self.validate_backup_delta(&delta)?;
         let expected_pending = self.service_tun_pending_identity();
         let pending_backup = self
@@ -1133,7 +1133,7 @@ impl CoreSession {
     pub(crate) async fn enable_service_tun_admitted(
         &self,
         store: &ControlledConfigStore,
-        service: Option<(Arc<zenclash_service_integration::ServiceSession>, PathBuf)>,
+        service: Option<(Arc<crate::service::ServiceSession>, PathBuf)>,
         expected_runtime: (u64, u64),
         fallback_profile: Option<PathBuf>,
         recovery_bundle: Option<Arc<crate::ServiceRuntimeBundle>>,
@@ -1231,7 +1231,7 @@ impl CoreSession {
                     .await?,
                 ),
             };
-            let delta = serde_json::json!({"tun":{"enable":true},"dns":{"enable":true}});
+            let delta = serde_json::json!({"tun":{"enable":true}});
             if !prepared_config_is_full {
                 self.validate_backup_delta(&delta)?;
             }
@@ -1778,7 +1778,7 @@ mod tests {
                 .unwrap(),
         );
         std::fs::remove_file(home.join("rules.yaml")).unwrap();
-        let delta = serde_json::json!({"tun":{"enable":true},"dns":{"enable":true}});
+        let delta = serde_json::json!({"tun":{"enable":true}});
         let prepared = session
             .prepare_service_tun_backup(&home, payload, &bundle, &delta)
             .await

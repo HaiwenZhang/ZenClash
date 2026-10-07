@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use zenclash_service_integration::{
-    ServiceSession, health::PendingAction, maintenance::maintain_service,
-};
+use crate::service::{ServiceSession, health::PendingAction, maintenance::maintain_service};
 
 use super::*;
 

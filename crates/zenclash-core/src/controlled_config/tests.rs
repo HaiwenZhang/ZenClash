@@ -32,6 +32,49 @@ fn write_profile(root: &Path) -> PathBuf {
     path
 }
 
+#[tokio::test]
+async fn service_tun_preparation_normalizes_held_and_saved_yaml_without_polluting_user_patch() {
+    let root = test_root("service-tun-defaults");
+    fs::create_dir_all(&root).unwrap();
+    let profile = root.join("base.yaml");
+    fs::write(
+        &profile,
+        "ipv6: true\ntun: {enable: false}\nrules: [MATCH,DIRECT]\n",
+    )
+    .unwrap();
+    let store = ControlledConfigStore::new(root.join("store"));
+    store
+        .materialize_with_overrides_for_core(&profile, &[], CoreKind::Mihomo)
+        .unwrap();
+    let before = store.cached_runtime_payload().unwrap().unwrap();
+    let bundle = crate::ServiceRuntimeBundle::prepare(&before, root.clone())
+        .await
+        .unwrap();
+    let held = bundle
+        .with_delta(&serde_json::json!({"tun": {"enable": true}}))
+        .unwrap();
+    let update = store
+        .prepare_service_tun_update(profile, vec![], None)
+        .await
+        .unwrap();
+    let saved: serde_yaml::Value = serde_yaml::from_str(update.next_payload()).unwrap();
+    let frozen: serde_yaml::Value = serde_yaml::from_str(held.yaml()).unwrap();
+    assert_eq!(saved["tun"], frozen["tun"]);
+    assert_eq!(saved["dns"], frozen["dns"]);
+    assert_eq!(saved["dns"]["fake-ip-range6"], "2001:2::0/64");
+    let patch: serde_yaml::Value = serde_yaml::from_slice(&update.next_patch).unwrap();
+    assert_eq!(
+        patch,
+        serde_yaml::from_str::<serde_yaml::Value>("tun: {enable: true}\n").unwrap()
+    );
+    assert_eq!(
+        store.cached_runtime_payload().unwrap().as_deref(),
+        Some(before.as_str())
+    );
+    assert_eq!(store.load_json().unwrap(), serde_json::json!({}));
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn startup_tun_projection_overrides_yaml_layers_without_erasing_saved_intent() {
     let root = test_root("startup-tun-projection");

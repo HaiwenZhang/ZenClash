@@ -49,8 +49,8 @@ async fn replacing_an_external_binding_does_not_run_its_previous_validator() {
 
 #[test]
 fn native_preflight_is_definitive_but_lost_controller_response_is_unknown() {
+    use crate::service::{NativeHttpError, ServiceCallError};
     use zenclash_service::ServiceErrorCode;
-    use zenclash_service_integration::{NativeHttpError, ServiceCallError};
     let rejected = MihomoError::Service(ServiceCallError::Rejected {
         code: ServiceErrorCode::InvalidRuntimeAsset as u16,
         message: String::new(),

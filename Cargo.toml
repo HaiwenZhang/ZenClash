@@ -3,7 +3,6 @@ members = [
     "crates/zenclash-core",
     "crates/zenclash-i18n",
     "crates/zenclash-service",
-    "crates/zenclash-service-integration",
     "crates/zenclash-ui",
 ]
 resolver = "2"

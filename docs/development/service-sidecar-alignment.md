@@ -2,7 +2,7 @@
 
 > 2026-10-04 迁移说明：下文记录旧自研服务阶段的设计/验收。当前主仓库已替换为本地维护的
 > clash-verge-service-ipc Fork，原有 ServiceClient、协议 4、服务端配置 revision 等描述不能代表新 Fork。
-> 复制的应用接入代码、已验证模块和未完成主程序迁移见 crates/zenclash-service-integration/README.md。
+> 复制的应用接入代码、已验证模块和未完成主程序迁移见 crates/zenclash-core/src/service/README.md。
 > 2026-10-05 新 Fork 的 Windows GUI/服务已完成阶段 release 构建和对应源码交付；
 > 后续修复仍需重新打包。此前旧实现的交叉编译与 GUI 验收不能用于证明本次 Fork 的生命周期迁移完成。
 

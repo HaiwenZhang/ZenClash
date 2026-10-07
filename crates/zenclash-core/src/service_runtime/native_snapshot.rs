@@ -114,7 +114,7 @@ fn materialize(
     let mapping = mapping
         .as_mapping()
         .ok_or_else(|| invalid("Service YAML must be a mapping"))?;
-    let remote_providers = zenclash_service_integration::remote_providers_of(mapping, &root)
+    let remote_providers = crate::service::remote_providers_of(mapping, &root)
         .map_err(|error| MihomoError::InvalidInput(error.to_string()))?
         .into_iter()
         .map(|provider| provider.provider)
@@ -137,7 +137,7 @@ fn private_write(path: &Path, bytes: &[u8]) -> MihomoResult<()> {
         .ok_or_else(|| invalid("Missing snapshot parent"))?;
     fs::create_dir_all(parent).map_err(io_error)?;
     #[cfg(windows)]
-    let mut file = zenclash_service_integration::create_private_current_user_file(path)
+    let mut file = crate::service::create_private_current_user_file(path)
         .map_err(|error| MihomoError::Process(error.to_string()))?;
     #[cfg(not(windows))]
     let mut file = {

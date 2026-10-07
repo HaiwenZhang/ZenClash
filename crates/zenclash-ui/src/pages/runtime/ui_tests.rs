@@ -1567,7 +1567,7 @@ fn subscription_download_policy_controls_preserve_credentials_and_schedule(
     assert_eq!(user_agent, "clash.meta");
     assert_eq!(
         saved_options,
-        &options.clone().with_route(RemoteProfileRoute::Direct)
+        &options.with_route(RemoteProfileRoute::Direct)
     );
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);

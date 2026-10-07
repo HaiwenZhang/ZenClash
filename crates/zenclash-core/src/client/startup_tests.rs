@@ -1,6 +1,6 @@
 use super::*;
+use crate::service::ServiceCallError;
 use zenclash_service::ServiceErrorCode;
-use zenclash_service_integration::ServiceCallError;
 
 #[test]
 fn native_startup_refusals_preserve_protocol_and_authorization_facts() {

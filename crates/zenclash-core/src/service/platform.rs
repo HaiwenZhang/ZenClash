@@ -65,6 +65,7 @@ fn open_registered_service() -> Result<Option<windows_service::service::Service>
     }
 }
 
+/// Checks whether SCM has a registered ZenClash service.
 #[cfg(windows)]
 ///
 /// # Errors
@@ -93,6 +94,10 @@ pub fn service_stopped() -> Result<bool> {
         && status.exit_code != ServiceExitCode::Win32(ERROR_SERVICE_NEVER_STARTED))
 }
 
+/// Checks whether systemd has a loaded ZenClash service unit.
+///
+/// # Errors
+/// Returns systemctl execution or registration-query errors.
 #[cfg(target_os = "linux")]
 pub fn trusted_service_evidence() -> Result<bool> {
     let unit = format!("{}.service", zenclash_service::SERVICE_SLUG);
@@ -109,6 +114,10 @@ pub fn trusted_service_evidence() -> Result<bool> {
     Ok(String::from_utf8_lossy(&output.stdout).trim() != "not-found")
 }
 
+/// Checks for native launchd registration and privileged-helper markers.
+///
+/// # Errors
+/// Returns errors inspecting the service plist or helper installation markers.
 #[cfg(target_os = "macos")]
 pub fn trusted_service_evidence() -> Result<bool> {
     macos_service_install_marker_exists().context("failed to inspect launchd service registration")

@@ -14,7 +14,7 @@ const LEGAL_TEXT: &str = concat!(
     "\n\n",
     include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../zenclash-service-integration/NOTICE.md"
+        "/../zenclash-core/src/service/NOTICE.md"
     )),
     "\n\n",
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../LICENSE")),

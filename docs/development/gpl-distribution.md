@@ -10,46 +10,9 @@ ZenClash 整体、服务 Fork 和应用集成 Fork 均按 GPL-3.0-only 发布。
 只链接未修改的上游仓库、只提供服务 crate、或者只有尚不存在的源码链接均不够。
 源代码的接收者保有 GPL 的复制、修改和再分发权利，安装协议不得另加限制。
 
-## 发布流程
+## 发布与手工构建
 
-`.github/workflows/release.yml` 的 corresponding-source 作业：
-
-1. 从同一干净提交导出完整仓库，拒绝把未提交修改的二进制对应成旧 HEAD。
-2. 依据根 Cargo.lock 执行 `cargo vendor --locked --versioned-dirs`，纳入 Rust registry/Git 依赖。
-3. 获取捆绑 Mihomo 的明确 release tag，记录实际提交，纳入其源码和 `go mod vendor` 输出。
-4. 保存真实第三方版权/许可证文件、锁文件哈希、工具链和重建说明。
-5. 生成 `ZenClash-<version>-corresponding-source.tar.gz`，与安装包一起上传同一个 Release。
-
-依赖没有可获得的许可文本、源码无法获取、锁文件不能离线解析或源码快照不完整时，作业失败。
-这防止自动流程悄悄省略内容；新增依赖仍需核对许可证兼容性及其实际声明要求，文件清单不构成自动许可认证。
-对应源码须在满足许可要求的期间持续可获得。发布后验证附件能下载、哈希匹配，且按 SOURCE-BUILD.md 能重建。
-普通 GitHub 自动生成的源码包不包含 vendor 依赖，不能替代本流程的附件。
-
-三个平台打包使用 `scripts/stage_release_licenses.py`，在 payload 中写入 LICENSE、NOTICE.md、
-CORRESPONDING-SOURCE.md、两个 Fork 的原始许可证/声明及依赖声明。
-该脚本核对依赖清单与当前 Cargo.lock、Mihomo tag 和许可文件哈希；缺少所需文件时拒绝打包。
-Windows 在应用目录，macOS 在 Contents/Resources，Linux DEB 在 /usr/share/doc/zenclash，
-RPM 在 /usr/share/licenses/zenclash 保存这些内容。源码说明是实际文件，不只是 README 的要求。
-
-## 手工与离线构建
-
-源码导出需 Python 3.12+、Git、Rust/Cargo、Go；原生打包的许可文件暂存脚本只需 Python 3。
-在干净且已提交的发行源码中运行：
-
-```sh
-python3 scripts/build_corresponding_source.py --version 0.2.0 \
-  --mihomo-tag v1.19.30 --output dist
-export ZENCLASH_DEPENDENCY_LICENSE_DIR="$PWD/dist/dependency-licenses"
-```
-
-Windows 用 `python`，并通过 `$env:ZENCLASH_DEPENDENCY_LICENSE_DIR` 设置相同目录。
-自定义 Mihomo 二进制必须与所提供的对应源码版本一致；修改后的内核也须提供其修改源码，不能仅复用另一版的 tag。
-转交手工、测试或离线安装包时，同步转交同一次构建的源码附件，或在下载处给出免费、等同可访问的真实地址。
-CORRESPONDING-SOURCE.md 中的正式 Release URL 在版本未发布时不能被视作已经履行提供源码的义务。
-
-如果发行构建用到私有的打包步骤、补丁或非系统库，也应纳入对应源码；新添 Git submodule 时当前导出会拒绝运行，
-须先显式实现其递归导出，不能仅归档主仓库。不得把个人订阅、控制器密钥、运行日志或签名私钥当成构建源码发布。
-本文和源码导出脚本没有发布任何本地秘密，也不会自动发布当前未提交目录。
+许可证暂存、对应源码导出及 GeoData 源码收集脚本已移除。原生打包直接复制根 LICENSE；GeoData 通过下载脚本获取，或由 ZENCLASH_GEODATA_FILE 指定。发布所需的依赖声明和对应源码附件需另行准备。
 
 ## 法律声明与修改版本安装
 

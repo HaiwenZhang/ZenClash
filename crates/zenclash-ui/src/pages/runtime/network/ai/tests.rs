@@ -62,7 +62,7 @@ fn ai_network_close_aborts_owned_work_and_leaves_no_running_rows(
                 None,
             )
         });
-        owner = Some(view.clone());
+        owner = Some(view);
         let background = cx.new(|_| PreviewBackground);
         gpui_kit::component::Root::new(background, window, cx)
     });
@@ -141,7 +141,7 @@ fn ai_network_native_preview() {
                                 Some(true),
                             )
                         });
-                        owner = Some(view.clone());
+                        owner = Some(view);
                         let page =
                             cx.new(|cx| RuntimePage::new(Page::Network, services, window, cx));
                         page_owner = Some(page.clone());

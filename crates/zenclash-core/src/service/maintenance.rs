@@ -2,7 +2,7 @@
 // GPL-3.0-only; see NOTICE.md and UPSTREAM.json.
 //! Native helper operations use the upstream preparation/elevation contract.
 
-use crate::health::PendingAction;
+use crate::service::health::PendingAction;
 use anyhow::{Context as _, Result};
 use std::{
     path::{Path, PathBuf},
@@ -13,10 +13,13 @@ use std::{
 #[derive(Debug, thiserror::Error)]
 pub enum MaintenanceError {
     #[error("administrator authorization was cancelled")]
+    /// Windows explicitly reported cancellation of administrator authorization.
     AuthorizationCancelled,
     #[error("service maintenance failed: {0:#}")]
+    /// The installer or uninstaller returned a definite failure.
     Failed(#[source] anyhow::Error),
     #[error("service maintenance worker did not complete: {0}")]
+    /// The maintenance worker did not report a confirmed outcome.
     OutcomeUnconfirmed(#[source] tokio::task::JoinError),
 }
 
@@ -109,7 +112,7 @@ fn uninstall_service(uninstaller: &Path) -> Result<()> {
 #[cfg(target_os = "linux")]
 fn uninstall_service(uninstaller: &Path) -> Result<()> {
     anyhow::ensure!(uninstaller.is_file(), "packaged uninstaller is unavailable");
-    let status = if crate::current_process_elevated() {
+    let status = if crate::service::current_process_elevated() {
         Command::new(uninstaller).status()?
     } else {
         // Keep the upstream pkexec -> sudo fallback while handling missing pkexec directly.

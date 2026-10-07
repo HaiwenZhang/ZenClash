@@ -9,16 +9,19 @@ use super::probe::ServiceVersionReply;
 
 /// Everything Run State needs from outside itself.
 pub trait RunStateEnv: Send + Sync + 'static {
+    /// Probes the native helper protocol and selected approved core.
     fn probe_service_version(&self) -> impl Future<Output = Result<ServiceVersionReply>> + Send;
 
     /// Returns an error when installation evidence cannot be inspected, not when it is absent.
     fn trusted_install_evidence(&self) -> impl Future<Output = Result<bool>> + Send;
 
+    /// Whether the desktop process has native administrator privileges.
     fn is_elevated(&self) -> bool;
 
     /// Keeps the PAC endpoint derived from Running Mode.
     fn set_pac_available(&self, available: bool);
 
+    /// Publishes one coherent session-state observation.
     fn publish(&self, state: &RunState);
 
     ///
@@ -29,7 +32,9 @@ pub trait RunStateEnv: Send + Sync + 'static {
 
 /// Application effects owned by ZenClash's core/PAC/UI layer, rather than Tauri globals.
 pub trait RunStateHost: Send + Sync + 'static {
+    /// Sets availability of the application-owned PAC endpoint.
     fn set_pac_available(&self, available: bool);
+    /// Publishes one coherent session-state observation.
     fn publish(&self, state: &RunState);
     ///
     /// # Errors
@@ -45,6 +50,7 @@ pub struct NativeEnv<H> {
 }
 
 impl<H: RunStateHost> NativeEnv<H> {
+    /// Pairs the selected approved core with application-owned effects.
     pub const fn new(core: zenclash_service::CoreRequirement, host: H) -> Self {
         Self { core, host }
     }
@@ -53,8 +59,8 @@ impl<H: RunStateHost> NativeEnv<H> {
 impl<H: RunStateHost> RunStateEnv for NativeEnv<H> {
     async fn probe_service_version(&self) -> Result<ServiceVersionReply> {
         // Copied from RealEnv. A known stopped SCM job cannot answer IPC retries.
-        #[cfg(all(windows, not(feature = "ipc-tests")))]
-        if tokio::task::spawn_blocking(crate::platform::service_stopped)
+        #[cfg(all(windows, not(feature = "service-ipc-tests")))]
+        if tokio::task::spawn_blocking(crate::service::platform::service_stopped)
             .await
             .context("service status probe did not finish")??
         {
@@ -87,9 +93,10 @@ impl<H: RunStateHost> RunStateEnv for NativeEnv<H> {
     }
 
     async fn trusted_install_evidence(&self) -> Result<bool> {
-        let registered = tokio::task::spawn_blocking(crate::platform::trusted_service_evidence)
-            .await
-            .context("service registration probe did not finish")??;
+        let registered =
+            tokio::task::spawn_blocking(crate::service::platform::trusted_service_evidence)
+                .await
+                .context("service registration probe did not finish")??;
         // A helper that outlived its registration is broken, not absent.
         #[cfg(unix)]
         if !registered
@@ -103,7 +110,7 @@ impl<H: RunStateHost> RunStateEnv for NativeEnv<H> {
     }
 
     fn is_elevated(&self) -> bool {
-        crate::current_process_elevated()
+        crate::service::current_process_elevated()
     }
 
     fn set_pac_available(&self, available: bool) {
@@ -129,7 +136,7 @@ mod fake {
     use zenclash_service::ProtocolInfo;
 
     use super::{PendingAction, RunState, RunStateEnv, ServiceVersionReply};
-    use crate::RunningMode;
+    use crate::service::RunningMode;
 
     /// A fail-closed scripted machine that records outbound effects.
     #[derive(Debug)]
@@ -161,11 +168,13 @@ mod fake {
 
     impl FakeEnv {
         #[must_use]
+        /// Creates a scripted environment with no trusted installation.
         pub fn new() -> Self {
             Self::default()
         }
 
         #[must_use]
+        /// Configures a compatible service and approved core response.
         pub fn service_ready(self) -> Self {
             self.with_evidence(true)
                 .always_replying(Ok(ServiceVersionReply {
@@ -177,6 +186,7 @@ mod fake {
         }
 
         #[must_use]
+        /// Configures trusted installation evidence with an incompatible protocol.
         pub fn service_version_mismatch(self) -> Self {
             self.with_evidence(true)
                 .always_replying(Ok(ServiceVersionReply {
@@ -188,24 +198,28 @@ mod fake {
         }
 
         #[must_use]
+        /// Configures trusted installation evidence with unreachable IPC.
         pub fn service_unreachable(self) -> Self {
             self.with_evidence(true)
                 .always_replying(Err("ipc transport refused".to_owned()))
         }
 
         #[must_use]
+        /// Makes trusted-installation inspection fail.
         pub fn evidence_unavailable(mut self) -> Self {
             self.evidence = Err("registry probe failed".to_owned());
             self
         }
 
         #[must_use]
+        /// Reports the scripted desktop process as elevated.
         pub const fn elevated(mut self) -> Self {
             self.elevated = true;
             self
         }
 
         #[must_use]
+        /// Sets whether a trusted installation marker exists.
         pub fn with_evidence(mut self, exists: bool) -> Self {
             self.evidence = Ok(exists);
             self
@@ -219,21 +233,25 @@ mod fake {
         }
 
         #[must_use]
+        /// Repeats the same version-probe reply on every observation.
         pub fn always_replying(self, reply: Result<ServiceVersionReply, String>) -> Self {
             self.replying(vec![reply])
         }
 
         #[must_use]
+        /// Returns the number of service-version probes performed.
         pub fn probe_count(&self) -> usize {
             *self.probe_count.lock()
         }
 
         #[must_use]
+        /// Returns the last published PAC availability.
         pub fn pac_available(&self) -> Option<bool> {
             *self.pac_available.lock()
         }
 
         #[must_use]
+        /// Returns the backend from each published state in order.
         pub fn published_modes(&self) -> Vec<RunningMode> {
             self.published
                 .lock()
@@ -243,17 +261,20 @@ mod fake {
         }
 
         #[must_use]
+        /// Returns all published session-state snapshots.
         pub fn published(&self) -> Vec<RunState> {
             self.published.lock().clone()
         }
 
         #[must_use]
+        /// Makes privileged maintenance return the supplied failure.
         pub fn privileged_operations_fail(self, reason: &str) -> Self {
             *self.privileged_outcome.lock() = Err(reason.to_owned());
             self
         }
 
         #[must_use]
+        /// Returns the admitted privileged maintenance actions in order.
         pub fn privileged_actions(&self) -> Vec<PendingAction> {
             self.privileged_actions.lock().clone()
         }

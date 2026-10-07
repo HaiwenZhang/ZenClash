@@ -1,4 +1,5 @@
 use super::*;
+use crate::service::NativeHttpResponse;
 use crate::service_runtime::FrozenRuntime;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use tokio::sync::Notify;
@@ -6,7 +7,6 @@ use zenclash_service::{
     RuntimeFileOutcome, RuntimeFileRequest, ServiceLifecycleState, ServiceStatusSnapshot,
     StageRuntimeOutcome,
 };
-use zenclash_service_integration::NativeHttpResponse;
 
 #[derive(Default)]
 struct Service {

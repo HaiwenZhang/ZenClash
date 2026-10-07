@@ -9,7 +9,7 @@ $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 # native cancellation boundary and source rejection, without elevating/installing.
 Push-Location $ProjectRoot
 try {
-    cargo test --locked -p zenclash-service-integration --lib maintenance::tests
+    cargo test --locked -p zenclash-core --lib service::maintenance::tests
     if ($LASTEXITCODE -ne 0) { throw 'Native service authorization classification failed' }
 } finally {
     Pop-Location

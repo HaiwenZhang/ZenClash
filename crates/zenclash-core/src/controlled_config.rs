@@ -960,15 +960,16 @@ impl ControlledConfigStore {
             .as_ref()
             .and_then(|prepared| prepared.effective_delta())
             .unwrap_or(patch);
-        // Persist the effective delta too: implicit TUN enable and DNS normalization
-        // must survive later full applications of the controlled layer.
+        // Persist the effective delta too so implicit TUN enable survives later
+        // full applications. Generated defaults belong only to runtime YAML.
         update.next_patch = merge_held_delta(
             std::str::from_utf8(&update.next_patch)
                 .map_err(|_| ControlledConfigError::NotMapping)?,
             &delta,
         )?
         .into_bytes();
-        let next_runtime = merge_held_delta(&previous_payload, &delta)?;
+        let next_runtime =
+            normalize_partial_tun_payload(merge_held_delta(&previous_payload, &delta)?)?;
         let worker_lease = self.write_access.acquire();
         let worker = self.with_write_lease(&worker_lease);
         let cache = tokio::task::spawn_blocking(move || {
@@ -1089,7 +1090,7 @@ impl ControlledConfigStore {
             }
             store.prepare_partial_update(
                 &profile,
-                &serde_json::json!({"tun":{"enable":true},"dns":{"enable":true}}),
+                &serde_json::json!({"tun":{"enable":true}}),
                 &overrides,
                 bundle.as_deref(),
             )
@@ -1302,7 +1303,7 @@ impl ControlledConfigStore {
                 expected_patch,
                 current,
                 bundle.yaml().to_owned(),
-                &serde_json::json!({"tun":{"enable":true},"dns":{"enable":true}}),
+                &serde_json::json!({"tun":{"enable":true}}),
                 &[],
             )
         })
@@ -1469,7 +1470,8 @@ impl ControlledConfigStore {
         patch: &serde_json::Value,
         overrides: &[PathBuf],
     ) -> ControlledConfigResult<ControlledConfigUpdate> {
-        let next_payload = merge_held_delta(&previous_payload, patch)?;
+        let next_payload =
+            normalize_partial_tun_payload(merge_held_delta(&previous_payload, patch)?)?;
         let overridden = merge_payload_overrides(&next_payload, overrides)?;
         let actual: serde_json::Value = serde_yaml::from_str(&overridden)?;
         if !contains_delta(&actual, patch) {
@@ -2334,6 +2336,21 @@ impl ModePatchGate {
     }
 }
 
+fn normalize_partial_tun_payload(payload: String) -> ControlledConfigResult<String> {
+    let mut document = serde_yaml::from_str::<Value>(&payload)?;
+    let root = document
+        .as_mapping_mut()
+        .ok_or(ControlledConfigError::NotMapping)?;
+    if !crate::tun_config::normalize(root) {
+        return Ok(payload);
+    }
+    let normalized = serde_yaml::to_string(&document)?;
+    if normalized.len() > MAX_PROFILE_BYTES {
+        return Err(ControlledConfigError::TooLarge);
+    }
+    Ok(normalized)
+}
+
 pub(crate) fn normalize_runtime_payload(
     kind: CoreKind,
     payload: String,
@@ -2343,10 +2360,15 @@ pub(crate) fn normalize_runtime_payload(
         return Err(ControlledConfigError::NotMapping);
     };
     if kind == CoreKind::Mihomo {
-        if !insert_missing_mihomo_geox_urls(root) {
+        let tun_changed = crate::tun_config::normalize(root);
+        if !insert_missing_mihomo_geox_urls(root) && !tun_changed {
             return Ok(payload);
         }
-        return Ok(serde_yaml::to_string(&document)?);
+        let normalized = serde_yaml::to_string(&document)?;
+        if normalized.len() > MAX_PROFILE_BYTES {
+            return Err(ControlledConfigError::TooLarge);
+        }
+        return Ok(normalized);
     }
 
     let dns_key = Value::String("dns".into());

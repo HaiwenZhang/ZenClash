@@ -24,7 +24,7 @@ async fn unanswered_and_cancelled_start_keep_native_stop_authority_without_adopt
         .and_then(Path::parent)
         .ok_or_else(|| std::io::Error::other("test target directory missing"))?;
     let core = target.join(format!(
-        "zenclash-integration-test-core{}",
+        "zenclash-core-integration-test-core{}",
         std::env::consts::EXE_SUFFIX
     ));
     assert!(

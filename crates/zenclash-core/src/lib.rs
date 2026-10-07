@@ -2,13 +2,15 @@
 
 #![deny(missing_docs)]
 
-pub use zenclash_service_integration::{check_sidecar_available, current_process_elevated};
+pub use crate::service::{check_sidecar_available, current_process_elevated};
 
 pub mod ai_network;
 mod app_update;
 mod autostart;
 mod backup;
 mod client;
+/// Native service sessions, controller transport, authorization and runtime state.
+pub mod service;
 mod service_manager;
 mod service_runtime;
 mod service_runtime_session;
@@ -54,6 +56,7 @@ mod traffic;
 mod traffic_capture;
 mod traffic_history;
 mod tun_admission;
+mod tun_config;
 mod tun_permissions;
 mod tun_runtime;
 mod websocket;

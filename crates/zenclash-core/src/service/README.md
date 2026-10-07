@@ -1,14 +1,43 @@
-# ZenClash 服务应用集成
+# ZenClash 核心服务模块
 
-本目录是在复制的 Clash Verge Rev 应用源码基础上维护的 ZenClash 本地实现。
-`crates/zenclash-service` 同样是独立维护的本地 Fork。
-构建使用 workspace 中的这两个 crate；`examples` 只用于人工对照，不参与构建，
+当前入口是 `zenclash_core::service`；独立集成 crate 已从 workspace 和 Cargo.lock 移除。
+源文件、认证会话、控制器、健康/运行状态与原生测试全部迁入本模块；特权服务继续在
+`crates/zenclash-service`。默认生产构建关闭模拟内核，`service-ipc-tests` 同时启用
+模拟内核、测试 IPC 和原生验收。`development-channel` 仅转发服务通道选择。
+
+```powershell
+cargo test -p zenclash-core --all-features --locked
+cargo test -p zenclash-core --features service-ipc-tests --test native_service_client --test native_service_session --locked
+cargo check -p zenclash-ui --all-targets --locked
+```
+
+旧来源清单、作者和 GPL 文本完整保留。下文包含迁移前的研究及阶段验证记录，
+其中旧 crate 名称、测试 feature 和安装包结果只描述当时状态，不代表当前产物。
+
+## 2026-10-08 合并验证
+
+已删除原独立 crate 的目录、workspace 成员与锁文件包项；所有客户端调用改为
+`crate::service`，外部测试使用 `zenclash_core::service`。两套原生 IPC 测试共用
+core 的模拟内核，默认生产构建不启用该模拟程序。安装包中的许可目录同步改为
+`licenses/zenclash-core-service`，补齐许可整理脚本并验证依赖来源清单。
+
+Windows 本机验证：core 全 feature 库测试 805 项通过、5 项忽略；两套原生 IPC
+验收各 1 项通过；最后异步任务调整后的运行状态回归 16 项通过；Windows 打包
+载荷 9 个用例和许可/源码归档 19 项回归通过。默认生产 GUI 编译、完整 workspace
+严格 Clippy 与本轮涉及文件的 rustfmt 检查通过。受最后克隆清理影响的 GUI 回归
+4 项通过，1 项人工截图用例忽略。本轮未运行真实 TUN 或系统安装。
+
+
+本目录是 `zenclash-core::service`，承载从 Clash Verge Rev 应用源码适配的服务接入。
+2026-10-08 已将原独立 zenclash-service-integration crate 合并到这里。
+`crates/zenclash-service` 继续承载独立特权服务及安装/卸载工具。
+`examples` 只用于人工对照，不参与构建，
 没有对上游应用或服务仓库的 Git/path 依赖，也不会动态同步上游代码。
 通用第三方 Rust 库依赖仍按 Cargo.lock 获取。
 
 复制与来源声明：GPL-3.0-only；保留原作者、完整原始 LICENSE、NOTICE.md 和 UPSTREAM.json。
 后续可以自行修改、扩展和维护，在修改版本中持续记录来源、修改日期，并按 GPL 分发完整对应源码。
-具体发布流程见 [GPL 分发文档](../../docs/development/gpl-distribution.md)。
+具体发布流程见 [GPL 分发文档](../../../../docs/development/gpl-distribution.md)。
 
 ## 当前开发范围：Windows（2026-10-05）
 

@@ -53,25 +53,39 @@ fn session_matches_status(
 #[derive(Debug, thiserror::Error)]
 pub enum ServiceCallError {
     #[error("service rejected request ({code}): {message}")]
-    Rejected { code: u16, message: String },
+    /// The service returned a definite refusal with a protocol error code.
+    Rejected {
+        /// Stable protocol error code returned by the service.
+        code: u16,
+        /// Service diagnostic explaining the refusal.
+        message: String,
+    },
     #[error("service owner session is not active")]
+    /// No acknowledged owner session is available for this operation.
     NoActiveSession,
     /// A proposed token is retained until native Start or authenticated Stop is acknowledged.
     #[error("service start outcome is unconfirmed")]
     StartUnconfirmed,
     #[error("service owner generation changed")]
+    /// A newer owner generation displaced this session.
     OwnerLost,
     #[error("owned core process changed while controller request was running")]
+    /// The owned core PID changed during a controller operation.
     ControllerChanged,
     #[error("service helper version or protocol mismatch: {0}")]
+    /// The installed helper cannot satisfy the required version or protocol.
     VersionMismatch(String),
     #[error("service does not support {0}")]
+    /// The active helper lacks the named protocol capability.
     UnsupportedCapability(&'static str),
     #[error("service did not return {0}")]
+    /// A successful reply omitted the named required payload.
     MissingReply(&'static str),
     #[error(transparent)]
-    Controller(#[from] crate::NativeHttpError),
+    /// The native Mihomo control channel failed.
+    Controller(#[from] crate::service::NativeHttpError),
     #[error(transparent)]
+    /// The service control channel failed.
     Transport(#[from] anyhow::Error),
 }
 
@@ -85,8 +99,8 @@ impl ServiceCallError {
             | Self::MissingReply(_)
             | Self::ControllerChanged
             | Self::OwnerLost => true,
-            Self::Controller(crate::NativeHttpError::OutcomeUnknown(_)) => true,
-            Self::Controller(crate::NativeHttpError::BudgetExceeded { request_sent }) => {
+            Self::Controller(crate::service::NativeHttpError::OutcomeUnknown(_)) => true,
+            Self::Controller(crate::service::NativeHttpError::BudgetExceeded { request_sent }) => {
                 *request_sent
             }
             Self::Rejected { code, .. } => !matches!(*code,
@@ -128,7 +142,7 @@ impl ServiceSession {
     /// # Errors
     /// Returns native identity/token errors, transport errors, service refusals or incompatible protocol information.
     pub async fn connect(app_root: &Path) -> Result<Self, ServiceCallError> {
-        let credentials = crate::owner_credentials(app_root)?;
+        let credentials = crate::service::owner_credentials(app_root)?;
         let response = zenclash_service::get_version().await?;
         check_response(response.code, response.message)?;
         let info = response
@@ -251,7 +265,7 @@ impl ServiceSession {
         body: Option<&serde_json::Value>,
         secret: &str,
         timeout: std::time::Duration,
-    ) -> Result<crate::NativeHttpResponse, ServiceCallError> {
+    ) -> Result<crate::service::NativeHttpResponse, ServiceCallError> {
         let (proof, pid, controller) = self.controller_for_owner(secret).await?;
         let response = controller.request(method, path, body, timeout).await?;
         self.confirm_controller_owner(&proof, pid).await?;
@@ -266,7 +280,7 @@ impl ServiceSession {
         &self,
         path: &str,
         secret: &str,
-    ) -> Result<crate::NativeSocket, ServiceCallError> {
+    ) -> Result<crate::service::NativeSocket, ServiceCallError> {
         let (proof, pid, controller) = self.controller_for_owner(secret).await?;
         let socket = controller.websocket(path).await?;
         self.confirm_controller_owner(&proof, pid).await?;
@@ -276,8 +290,14 @@ impl ServiceSession {
     async fn controller_for_owner(
         &self,
         secret: &str,
-    ) -> Result<(OwnerSessionProof, u32, crate::controller::NativeController), ServiceCallError>
-    {
+    ) -> Result<
+        (
+            OwnerSessionProof,
+            u32,
+            crate::service::controller::NativeController,
+        ),
+        ServiceCallError,
+    > {
         let proof = self.active_proof()?;
         let status = self.status().await?;
         if self.active_proof().ok().as_ref() != Some(&proof)
@@ -291,7 +311,7 @@ impl ServiceSession {
         Ok((
             proof,
             pid,
-            crate::controller::NativeController::new(
+            crate::service::controller::NativeController::new(
                 self.core_ipc_path().into(),
                 pid,
                 secret.to_owned(),
@@ -352,8 +372,8 @@ impl ServiceSession {
 
     /// Samples the captured generation using upstream owner-watch decisions.
     /// A concurrent local start/stop invalidates an older sample instead of displacing the new proof.
-    pub async fn owner_sample(&self) -> crate::runstate::OwnerSample {
-        use crate::runstate::OwnerSample;
+    pub async fn owner_sample(&self) -> crate::service::runstate::OwnerSample {
+        use crate::service::runstate::OwnerSample;
         let proof = match self.active_proof() {
             Ok(proof) => proof,
             Err(ServiceCallError::StartUnconfirmed) => return OwnerSample::Unreadable,
@@ -550,7 +570,7 @@ async fn probe_service_capabilities() -> ServiceCapabilities {
 #[cfg(test)]
 mod error_tests {
     use super::*;
-    use crate::NativeHttpError;
+    use crate::service::NativeHttpError;
 
     #[test]
     fn controller_failure_keeps_the_send_boundary() {
@@ -602,5 +622,5 @@ mod error_tests {
     }
 }
 
-#[cfg(all(test, feature = "ipc-tests"))]
+#[cfg(all(test, feature = "service-ipc-tests"))]
 mod native_pending_tests;

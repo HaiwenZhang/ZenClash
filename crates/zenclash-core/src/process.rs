@@ -38,7 +38,7 @@ const QUIET_MEOW_PROTOCOL_LOGS: &str = "tokio_tungstenite=warn,tungstenite=warn"
 pub struct MihomoProcess {
     child: Mutex<Option<Child>>,
     started_at_secs: AtomicU64,
-    execution: Mutex<Option<zenclash_service_integration::CoreExecutionGuard>>,
+    execution: Mutex<Option<crate::service::CoreExecutionGuard>>,
     isolated_test_child: bool,
     logs: Arc<RwLock<VecDeque<String>>>,
     last_exit_reason: RwLock<Option<String>>,
@@ -446,7 +446,7 @@ impl MihomoProcess {
 
     pub(crate) fn native_controller(
         &self,
-    ) -> MihomoResult<Option<zenclash_service_integration::NativeController>> {
+    ) -> MihomoResult<Option<crate::service::NativeController>> {
         let Some(path) = self.config.endpoint.ipc_path() else {
             return Ok(None);
         };
@@ -456,7 +456,7 @@ impl MihomoProcess {
             .as_ref()
             .map(Child::id)
             .ok_or_else(|| MihomoError::Process("Local core is stopped".into()))?;
-        Ok(Some(zenclash_service_integration::NativeController::new(
+        Ok(Some(crate::service::NativeController::new(
             path.to_path_buf(),
             pid,
             self.config.endpoint.secret.clone(),
@@ -748,7 +748,7 @@ fn spawn_child(
         #[cfg(windows)]
         command.env(
             "LISTEN_NAMEDPIPE_SDDL",
-            zenclash_service_integration::current_user_pipe_sddl()
+            crate::service::current_user_pipe_sddl()
                 .map_err(|error| MihomoError::Process(error.to_string()))?,
         );
     } else if let Some(controller) = &config.controller_override {
@@ -853,13 +853,13 @@ impl Drop for MihomoProcess {
 fn reserve_execution(
     kind: CoreKind,
     isolated_test_child: bool,
-) -> MihomoResult<Option<zenclash_service_integration::CoreExecutionGuard>> {
+) -> MihomoResult<Option<crate::service::CoreExecutionGuard>> {
     // Unit fixtures intentionally run many isolated synthetic children in parallel.
     // Native reservation itself is exercised in zenclash-service and real-core tests.
     if kind != CoreKind::Mihomo || cfg!(test) || isolated_test_child {
         return Ok(None);
     }
-    zenclash_service_integration::CoreExecutionGuard::acquire()
+    crate::service::CoreExecutionGuard::acquire()
         .map(Some)
         .map_err(|error| MihomoError::Process(error.to_string()))
 }

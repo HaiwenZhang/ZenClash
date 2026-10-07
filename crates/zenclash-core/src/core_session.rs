@@ -1943,7 +1943,7 @@ async fn supervise_managed_core(
     policy: CoreRecoveryPolicy,
     capture: Option<Arc<dyn CoreRecoveryCapture>>,
 ) {
-    let mut owner_watch = zenclash_service_integration::runstate::OwnerWatch::new();
+    let mut owner_watch = crate::service::runstate::OwnerWatch::new();
     let mut watched_binding = None;
     let mut service_capture_released = false;
     loop {
@@ -1964,7 +1964,7 @@ async fn supervise_managed_core(
                 .ok()
             }
             Some(crate::owned_core::OwnedCore::Service(runtime)) => {
-                use zenclash_service_integration::runstate::{OwnerStep, OwnerWatch};
+                use crate::service::runstate::{OwnerStep, OwnerWatch};
                 let binding = client.runtime_descriptor().binding_generation();
                 if watched_binding != Some(binding) {
                     watched_binding = Some(binding);
@@ -2011,16 +2011,15 @@ async fn supervise_managed_core(
                                     Some(format!("Service owner recovery required: {reason:?}"));
                             }
                         }
-                        zenclash_service_integration::runstate::mark_service_unavailable_after_owner_loss(
+                        crate::service::runstate::mark_service_unavailable_after_owner_loss(
                             &session.run_state.store,
                             reason,
                         );
                         session.reconcile_run_state();
-                        let recovery =
-                            zenclash_service_integration::runstate::owner_recovery_policy(
-                                reason,
-                                cfg!(target_os = "macos"),
-                            );
+                        let recovery = crate::service::runstate::owner_recovery_policy(
+                            reason,
+                            cfg!(target_os = "macos"),
+                        );
                         if recovery.reset_system_proxy
                             && !service_capture_released
                             && let Some(capture) = capture.as_ref()

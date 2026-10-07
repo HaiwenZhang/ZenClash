@@ -36,9 +36,6 @@ else
   mihomo_path="${work_dir}/mihomo"
   "${script_dir}/download_mihomo.sh" linux amd64 "${mihomo_path}"
 fi
-if [[ -z "${geodata_path}" && -f "${ZENCLASH_DEPENDENCY_LICENSE_DIR:-${project_root}/dist/dependency-licenses}/resources/geoip.metadb" ]]; then
-  geodata_path="${ZENCLASH_DEPENDENCY_LICENSE_DIR:-${project_root}/dist/dependency-licenses}/resources/geoip.metadb"
-fi
 if [[ -n "${geodata_path}" ]]; then
   if [[ ! -f "${geodata_path}" ]]; then
     echo "ZENCLASH_GEODATA_FILE is not a regular file: ${geodata_path}" >&2
@@ -85,10 +82,7 @@ install -Dm644 "${profile_path}" "${payload_dir}/profile.yaml"
 install -Dm644 "${project_root}/platforms/common/recovery.yaml" "${payload_dir}/recovery.yaml"
 install -Dm644 "${project_root}/platforms/macos/ZenClash.png" "${payload_dir}/zenclash.png"
 install -Dm644 "${project_root}/platforms/linux/zenclash.desktop" "${payload_dir}/zenclash.desktop"
-python3 "${script_dir}/stage_release_licenses.py" --project "${project_root}" \
-  --destination "${payload_dir}" --version "${version}" \
-  --dependency-licenses "${ZENCLASH_DEPENDENCY_LICENSE_DIR:-${project_root}/dist/dependency-licenses}" \
-  --mihomo-tag "${MIHOMO_VERSION:-v1.19.30}" --geodata-file "${geodata_path}"
+install -Dm644 "${project_root}/LICENSE" "${payload_dir}/LICENSE"
 mkdir -p "${rpmbuild_dir}" "${output_dir}"
 
 rpmbuild -bb "${project_root}/platforms/linux/zenclash.spec" \
@@ -116,10 +110,5 @@ grep -Eq '^/usr/lib/zenclash/zenclash-service-install$' "${package_contents_path
 grep -Eq '^/usr/lib/zenclash/zenclash-service-uninstall$' "${package_contents_path}"
 grep -Eq '^/usr/share/polkit-1/actions/org.zenclash.service.policy$' "${package_contents_path}"
 
-grep -Fq "/usr/share/licenses/zenclash/NOTICE.md" "${package_contents_path}"
-grep -Fq "/usr/share/licenses/zenclash/CORRESPONDING-SOURCE.md" "${package_contents_path}"
-grep -Fq "/usr/share/licenses/zenclash/licenses/zenclash-service/LICENSE" "${package_contents_path}"
-grep -Fq "/usr/share/licenses/zenclash/licenses/zenclash-service-integration/LICENSE" "${package_contents_path}"
-grep -Fq "/usr/share/licenses/zenclash/licenses/dependencies/MANIFEST.json" "${package_contents_path}"
 
 echo "Built ${package_path}"

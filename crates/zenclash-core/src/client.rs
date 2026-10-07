@@ -52,10 +52,10 @@ pub enum MihomoError {
     Http(#[from] reqwest::Error),
     /// Local controller transport failure, retaining whether a request was sent.
     #[error("Mihomo IPC request failed: {0}")]
-    Native(#[from] zenclash_service_integration::NativeHttpError),
+    Native(#[from] crate::service::NativeHttpError),
     /// Authenticated native service transport or policy rejection.
     #[error("Mihomo service request failed: {0}")]
-    Service(#[from] zenclash_service_integration::ServiceCallError),
+    Service(#[from] crate::service::ServiceCallError),
     /// An admitted native mutation has no confirmed outcome yet.
     #[error("service runtime outcome is unconfirmed")]
     RuntimeOutcomeUnknown,
@@ -95,8 +95,8 @@ impl MihomoError {
     /// Transport loss and timeouts remain unknown; this reader performs no IPC.
     #[must_use]
     pub fn service_startup_rejection(&self) -> Option<ServiceStartupRejection> {
+        use crate::service::ServiceCallError;
         use zenclash_service::ServiceErrorCode;
-        use zenclash_service_integration::ServiceCallError;
         match self {
             Self::Service(ServiceCallError::Rejected { code, .. })
                 if *code == ServiceErrorCode::UnauthorizedOwner as u16 =>
@@ -160,8 +160,7 @@ impl MihomoClient {
         core_source: Option<std::path::PathBuf>,
     ) -> MihomoResult<Self> {
         let http = Self::build_http()?;
-        let service =
-            Arc::new(zenclash_service_integration::ServiceSession::connect(&source_home).await?);
+        let service = Arc::new(crate::service::ServiceSession::connect(&source_home).await?);
         Ok(Self::with_http(
             ControllerBinding::service_binding_with_core(service, source_home, core_source),
             http,
@@ -182,7 +181,7 @@ impl MihomoClient {
     /// # Errors
     /// Returns an error if the HTTP client used for future Direct bindings cannot be built.
     pub fn from_service(
-        service: Arc<zenclash_service_integration::ServiceSession>,
+        service: Arc<crate::service::ServiceSession>,
         source_home: std::path::PathBuf,
     ) -> MihomoResult<Self> {
         Self::new_binding(ControllerBinding::service_binding(service, source_home))
@@ -417,7 +416,7 @@ impl MihomoClient {
 
     /// Returns the authenticated service owner without exposing its controller.
     #[must_use]
-    pub fn service_client(&self) -> Option<Arc<zenclash_service_integration::ServiceSession>> {
+    pub fn service_client(&self) -> Option<Arc<crate::service::ServiceSession>> {
         self.runtime_session().map(|runtime| runtime.client.clone())
     }
 
@@ -437,7 +436,7 @@ impl MihomoClient {
     /// Rejects non-Mihomo clients or exhausted binding generations.
     pub(crate) async fn switch_to_service(
         &self,
-        service: Arc<zenclash_service_integration::ServiceSession>,
+        service: Arc<crate::service::ServiceSession>,
         source_home: std::path::PathBuf,
     ) -> MihomoResult<()> {
         if self.current_kind() != CoreKind::Mihomo {
@@ -622,10 +621,10 @@ impl MihomoError {
             | Self::RuntimeOutcomeUnknown
             | Self::RuntimePartiallyApplied(_) => true,
             Self::Service(error) => error.mutation_result_unknown(),
-            Self::Native(zenclash_service_integration::NativeHttpError::OutcomeUnknown(_)) => true,
-            Self::Native(zenclash_service_integration::NativeHttpError::BudgetExceeded {
-                request_sent,
-            }) => *request_sent,
+            Self::Native(crate::service::NativeHttpError::OutcomeUnknown(_)) => true,
+            Self::Native(crate::service::NativeHttpError::BudgetExceeded { request_sent }) => {
+                *request_sent
+            }
             _ => false,
         }
     }

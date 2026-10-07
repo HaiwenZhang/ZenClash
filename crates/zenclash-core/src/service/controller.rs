@@ -22,19 +22,29 @@ pub struct NativeController {
     secret: String,
 }
 
+/// Status and bounded body returned by the native Mihomo controller.
 pub struct NativeHttpResponse {
+    /// HTTP status returned by the controller.
     pub status: u16,
+    /// Response bytes after enforcing the transport body limit.
     pub body: Vec<u8>,
 }
 
 #[derive(Debug, thiserror::Error)]
+/// Distinguishes safe pre-send failures from potentially applied mutations.
 pub enum NativeHttpError {
     #[error("controller request failed before sending: {0}")]
+    /// Connection or validation failed before request bytes were sent.
     BeforeSend(#[source] io::Error),
     #[error("controller request outcome is unknown: {0}")]
+    /// The request may have been sent; its mutation result cannot be confirmed.
     OutcomeUnknown(#[source] io::Error),
     #[error("controller request exceeded its byte budget")]
-    BudgetExceeded { request_sent: bool },
+    /// A request or response exceeded the configured byte budget.
+    BudgetExceeded {
+        /// Whether any request bytes could have reached the controller.
+        request_sent: bool,
+    },
 }
 
 impl NativeController {
@@ -339,10 +349,10 @@ fn verify_kernel_peer(stream: &tokio::net::UnixStream, expected_pid: u32) -> io:
         }
         Some(pid)
     };
-    #[cfg(any(test, feature = "ipc-tests"))]
+    #[cfg(any(test, feature = "service-ipc-tests"))]
     // SAFETY: geteuid has no arguments or memory safety requirements.
     let expected_uid = unsafe { libc::geteuid() };
-    #[cfg(not(any(test, feature = "ipc-tests")))]
+    #[cfg(not(any(test, feature = "service-ipc-tests")))]
     let expected_uid = 0;
     if credentials.uid() != expected_uid
         || pid.and_then(|pid| u32::try_from(pid).ok()) != Some(expected_pid)

@@ -2,7 +2,7 @@ use super::*;
 
 enum RuntimeSwitch {
     Local(Arc<MihomoProcess>),
-    Service(Arc<zenclash_service_integration::ServiceSession>, PathBuf),
+    Service(Arc<crate::service::ServiceSession>, PathBuf),
     Direct(crate::MihomoEndpoint),
 }
 
@@ -68,7 +68,7 @@ impl CoreSession {
     /// Rejects shutdown, unsupported cores, unresolved service transactions or failed retirement.
     pub async fn switch_to_service(
         &self,
-        service: Arc<zenclash_service_integration::ServiceSession>,
+        service: Arc<crate::service::ServiceSession>,
         source_home: PathBuf,
     ) -> Result<u64, CoreSessionError> {
         self.switch_runtime(RuntimeSwitch::Service(service, source_home))

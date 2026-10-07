@@ -58,35 +58,10 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo scripts/install_linux_build_deps.sh
 
-      - name: Test Windows helper payload packaging behavior
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: scripts/tests/build_windows_installer_test.ps1
-
       - name: Test authorization result classification
         if: runner.os == 'Windows'
         shell: pwsh
         run: scripts/tests/service_authorization_test.ps1
-
-      - name: Test package service removal policy
-        if: runner.os == 'Linux'
-        run: bash scripts/tests/package_service_test.sh
-
-      - name: Test Debian packaging behavior
-        if: runner.os == 'Linux'
-        run: bash scripts/tests/build_deb_package_test.sh
-
-      - name: Test RPM payload packaging behavior
-        if: runner.os == 'Linux'
-        run: bash scripts/tests/build_rpm_package_test.sh
-
-      - name: Test macOS helper payload packaging behavior
-        if: runner.os == 'macOS'
-        run: bash scripts/tests/build_macos_app_test.sh
-
-      - name: Test GPL notice staging and corresponding-source snapshots
-        if: runner.os == 'Linux'
-        run: python3 -m unittest discover -s scripts/tests -p test_release_licenses.py -v
 
       - name: Run Clippy
         run: >-

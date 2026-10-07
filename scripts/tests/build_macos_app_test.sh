@@ -7,7 +7,6 @@ test_root="$(mktemp -d)"
 [[ "${test_root}" == /* && "${test_root}" != / && -d "${test_root}" && ! -L "${test_root}" ]]
 mock_bin="${test_root}/bin"
 export MIHOMO_VERSION=v1.19.30
-export ZENCLASH_DEPENDENCY_LICENSE_DIR="${test_root}/dependency-licenses"
 mock_target="${test_root}/target"
 app_dir="${test_root}/output/ZenClash.app"
 sign_log="${test_root}/codesign.log"
@@ -78,7 +77,6 @@ printf 'Mihomo fixture\n'
 EOF
 chmod +x "${mock_bin}/"* "${test_root}/mihomo"
 printf 'geodata fixture\n' >"${test_root}/geoip.metadb"
-python3 "${script_dir}/license_fixture.py" "${project_root}" "${ZENCLASH_DEPENDENCY_LICENSE_DIR}" "${test_root}/geoip.metadb"
 
 run_build() {
   # The fixed native plist utility is replaced only in this shell; the production
@@ -103,9 +101,6 @@ assert_payload_and_order() {
   for tool in zenclash-service-install zenclash-service-uninstall; do
     cmp "${mock_target}/aarch64-apple-darwin/release/${tool}" "${app_dir}/Contents/MacOS/${tool}"
     grep -Fq -- "--verify --strict --verbose=2 ${app_dir}/Contents/MacOS/${tool}" "${sign_log}"
-  done
-  for name in NOTICE.md CORRESPONDING-SOURCE.md licenses/zenclash-service/LICENSE licenses/zenclash-service-integration/LICENSE licenses/dependencies/MANIFEST.json; do
-    [[ -s "${app_dir}/Contents/Resources/${name}" ]]
   done
   local helper_sign helper_verify bundle_sign bundle_verify
   helper_sign="$(grep -n -- '--force.*--sign.*Contents/MacOS/zenclash-service$' "${sign_log}" | cut -d: -f1)"

@@ -7,7 +7,6 @@ test_root="$(mktemp -d)"
 trap '[[ -n "${test_root}" && -d "${test_root}/bin" ]] && rm -rf "${test_root}"' EXIT
 mkdir -p "${test_root}/bin" "${test_root}/target/release" "${test_root}/captured"
 export MIHOMO_VERSION=v1.19.30
-export ZENCLASH_DEPENDENCY_LICENSE_DIR="${test_root}/dependency-licenses"
 
 cat >"${test_root}/bin/cargo" <<'EOF'
 #!/usr/bin/env bash
@@ -96,7 +95,6 @@ EOF
 
 printf '#!/usr/bin/env bash\nprintf "Mihomo fixture\\n"\n' >"${test_root}/mihomo"
 printf 'fixture\n' >"${test_root}/geoip.metadb"
-python3 "${script_dir}/license_fixture.py" "${project_root}" "${ZENCLASH_DEPENDENCY_LICENSE_DIR}" "${test_root}/geoip.metadb"
 chmod +x "${test_root}/bin/"* "${test_root}/mihomo"
 export PATH="${test_root}/bin:${PATH}"
 export CARGO_TARGET_DIR="${test_root}/target"

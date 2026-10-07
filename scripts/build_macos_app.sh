@@ -32,9 +32,6 @@ if [[ "$(uname -m)" != "arm64" ]]; then
   exit 1
 fi
 
-if [[ -z "${GEODATA_PATH}" && -f "${ZENCLASH_DEPENDENCY_LICENSE_DIR:-${PROJECT_ROOT}/dist/dependency-licenses}/resources/geoip.metadb" ]]; then
-  GEODATA_PATH="${ZENCLASH_DEPENDENCY_LICENSE_DIR:-${PROJECT_ROOT}/dist/dependency-licenses}/resources/geoip.metadb"
-fi
 if [[ -n "${GEODATA_PATH}" ]]; then
   if [[ ! -f "${GEODATA_PATH}" ]]; then
     echo "ZENCLASH_GEODATA_FILE is not a regular file: ${GEODATA_PATH}" >&2
@@ -108,10 +105,6 @@ cp "${GEODATA_PATH}" "${RESOURCES_DIR}/geoip.metadb"
 cp "${PROFILE_PATH}" "${RESOURCES_DIR}/profile.yaml"
 cp "${PROJECT_ROOT}/platforms/common/recovery.yaml" "${RESOURCES_DIR}/recovery.yaml"
 cp "${PROJECT_ROOT}/LICENSE" "${RESOURCES_DIR}/LICENSE.txt"
-python3 "${SCRIPT_DIR}/stage_release_licenses.py" --project "${PROJECT_ROOT}" \
-  --destination "${RESOURCES_DIR}" --version "${VERSION}" \
-  --dependency-licenses "${ZENCLASH_DEPENDENCY_LICENSE_DIR:-${PROJECT_ROOT}/dist/dependency-licenses}" \
-  --mihomo-tag "${MIHOMO_VERSION:-v1.19.30}" --geodata-file "${GEODATA_PATH}"
 chmod 755 "${MACOS_DIR}/zenclash" "${MACOS_DIR}/zenclash-service" "${RESOURCES_DIR}/mihomo"
 "${RESOURCES_DIR}/mihomo" -v
 

@@ -666,14 +666,14 @@ async fn run_status_monitor(
     let mut schedule = StatusRefreshSchedule::default();
     while let Some(status) = status.upgrade() {
         let refresh_platform = schedule.next_refreshes_platform();
-        refresh_status(
+        Box::pin(refresh_status(
             &status,
             &core_session,
             system_proxy.clone(),
             &traffic,
             &logs,
             refresh_platform,
-        )
+        ))
         .await;
         drop(status);
         tokio::time::sleep(STATUS_REFRESH_INTERVAL).await;
@@ -688,7 +688,7 @@ async fn refresh_status(
     logs: &LogMonitor,
     refresh_platform: bool,
 ) {
-    refresh_status_with_tun_reader(
+    Box::pin(refresh_status_with_tun_reader(
         status,
         core_session,
         system_proxy,
@@ -696,7 +696,7 @@ async fn refresh_status(
         logs,
         refresh_platform,
         move |kind, config| observe_runtime_tun(core_session, kind, config),
-    )
+    ))
     .await;
 }
 
@@ -1156,7 +1156,7 @@ mod tests {
             let traffic = traffic.clone();
             let logs = logs.clone();
             tokio::spawn(async move {
-                refresh_status_with_tun_reader(
+                Box::pin(refresh_status_with_tun_reader(
                     &status,
                     &core,
                     None,
@@ -1168,7 +1168,7 @@ mod tests {
                         released.await.unwrap();
                         Ok(TunCaptureStatus::from_config(kind, &config))
                     },
-                )
+                ))
                 .await;
             })
         };

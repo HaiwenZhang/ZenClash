@@ -1,6 +1,6 @@
 # Fork 来源与修改声明
 
-本 crate 的应用服务集成源码复制自 Clash Verge Rev 的 `src-tauri/src/core`，本地上游清单版本为 2.5.7。原清单作者为 zzzgydi、Tunglies、wonfen、MystiPanda，保留其他原贡献者的权利及已有声明。来源 https://github.com/clash-verge-rev/clash-verge-rev 。完整 GPL 第 3 版许可证原样保存在 LICENSE。
+本模块（原 zenclash-service-integration crate）的应用服务集成源码复制自 Clash Verge Rev 的 `src-tauri/src/core`，本地上游清单版本为 2.5.7。原清单作者为 zzzgydi、Tunglies、wonfen、MystiPanda，保留其他原贡献者的权利及已有声明。来源 https://github.com/clash-verge-rev/clash-verge-rev 。完整 GPL 第 3 版许可证原样保存在 LICENSE。
 
 ZenClash contributors 于 **2026-10-04** 修改本源码：服务依赖名称改为 zenclash-service；将日志接入 tracing、YAML 接入现有 workspace 的 serde_yaml；应用数据根目录由调用方显式传入；运行模式类型移到集成 crate；按 ZenClash 的独立会话实例管理上游所有者会话，不依赖 Tauri 窗口或全局配置对象。临时文件与缓存分配前缀改为 ZenClash。
 
@@ -27,3 +27,9 @@ Windows/Linux 清理仍属于本应用的代理；macOS 在 displaced/transport 
 2026-10-05 将隔离 native-controller fixture 提取为测试 feature 专属模块，共用 CLI
 验证及 HTTP/WebSocket，实现主应用启动、配置保存/重载、PAC、所有权替换和退出回归。
 生产包不得启用 service-ipc-tests/ipc-tests；模拟内核不代表真实 Mihomo 或 TUN 验收。
+
+2026-10-08（修改者：ZenClash contributors）：按用户要求将原独立 crate 合并为
+zenclash-core::service，迁移 source、RunState、认证、原生传输和所有测试；调整模块路径及
+测试特性，不改变服务协议或产品身份。模拟内核统一由 core 的 service-ipc-tests 门控。
+保留完整 LICENSE、原作者及 UPSTREAM.json 的原始来源 hash；补充公开接口文档以遵循
+core 的 missing_docs 检查。许可打包位置改为 licenses/zenclash-core-service。

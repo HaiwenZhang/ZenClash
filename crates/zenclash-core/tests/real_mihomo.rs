@@ -55,7 +55,7 @@ async fn managed_ipc_carries_http_and_all_realtime_streams_across_restart() {
     );
     client.memory_snapshot().await.unwrap();
     client.connections_snapshot().await.unwrap();
-    let controller = zenclash_service_integration::NativeController::new(
+    let controller = zenclash_core::service::NativeController::new(
         process.endpoint().ipc_path().unwrap().to_path_buf(),
         process.snapshot().pid.unwrap(),
         process.endpoint().secret.clone(),

@@ -180,6 +180,9 @@ impl ServiceRuntimeBundle {
         let patch =
             serde_yaml::to_value(delta).map_err(|_| invalid("Invalid service runtime delta"))?;
         crate::profile::merge_yaml(&mut value, patch);
+        if let Some(root) = value.as_mapping_mut() {
+            crate::tun_config::normalize(root);
+        }
         let yaml = serde_yaml::to_string(&value)
             .map_err(|_| invalid("Invalid patched service runtime YAML"))?;
         if yaml.len() > MAX_CONFIG_BYTES {
@@ -207,6 +210,9 @@ fn prepare_bundle(payload: &str, source_home: &Path) -> MihomoResult<ServiceRunt
         .map_err(|_| invalid("Invalid service runtime YAML merge"))?;
     if !value.is_mapping() {
         return Err(invalid("Service runtime must be a YAML mapping"));
+    }
+    if let Some(root) = value.as_mapping_mut() {
+        crate::tun_config::normalize(root);
     }
     let mut builder = BundleBuilder {
         home: source_home,
