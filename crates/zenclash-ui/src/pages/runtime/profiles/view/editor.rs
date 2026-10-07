@@ -1,15 +1,18 @@
 use super::super::super::{
-    Button, ButtonVariants, Context, Disableable, IconName, Input, ParentElement,
-    RemoteProfileRoute, RuntimePage, Sizable, Styled, config_input_row, div, h_flex, px,
-    setting_card, setting_switch, v_flex,
+    Button, ButtonVariants, Context, Disableable, FluentBuilder, Input, ParentElement,
+    RemoteProfileRoute, RuntimePage, Styled, div, h_flex, v_flex,
 };
+use crate::components::mint_switch::MintSwitch;
+use gpui_kit::base::Selectable;
+use gpui_kit::component::WindowExt;
+use gpui_kit::{InteractiveElement, TestSupportExt};
 
 impl RuntimePage {
-    pub(super) fn render_remote_profile_editor(
+    pub(in crate::pages::runtime) fn render_remote_profile_editor(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> gpui_kit::Div {
+    ) -> impl gpui_kit::IntoElement + use<> {
         let name = self
             .profiles
             .forms
@@ -22,141 +25,155 @@ impl RuntimePage {
                     .iter()
                     .find(|profile| profile.id == id)
             })
-            .map_or_else(
-                || zenclash_i18n::text("profiles.editor.generic_name"),
-                |profile| profile.name.clone(),
-            );
-        setting_card(zenclash_i18n::text("profiles.editor.title"), theme)
+            .map_or_else(String::new, |profile| profile.name.clone());
+        let field = |label: String, input: Input| {
+            v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(label),
+                )
+                .child(input.disabled(self.core_busy()))
+        };
+        v_flex()
+            .id("profile-request-dialog")
+            .test_support()
+            .gap_4()
+            .min_w_0()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(name),
+            )
+            .child(field(
+                zenclash_i18n::text("profiles.form.name"),
+                Input::new(&self.profiles.forms.request_name),
+            ))
+            .child(field(
+                zenclash_i18n::text("profiles.editor.url"),
+                Input::new(&self.profiles.forms.request_url),
+            ))
+            .child(field(
+                "User-Agent".into(),
+                Input::new(&self.profiles.forms.request_user_agent),
+            ))
+            .child(field(
+                "Authorization".into(),
+                Input::new(&self.profiles.forms.request_authorization).mask_toggle(),
+            ))
             .child(
                 h_flex()
-                    .min_h(px(48.))
-                    .px_4()
-                    .justify_between()
-                    .child(div().text_sm().child(name))
+                    .gap_3()
                     .child(
                         div()
-                            .text_size(px(10.))
+                            .w(gpui_kit::rems(7.))
+                            .flex_shrink_0()
+                            .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child(zenclash_i18n::text("profiles.editor.save_hint")),
+                            .child(zenclash_i18n::text("profiles.design.download_route")),
+                    )
+                    .child(
+                        h_flex().flex_1().min_w_0().gap_2().children(
+                            [
+                                ("edit-profile-direct", "profiles.dialog.direct", false),
+                                (
+                                    "edit-profile-use-mihomo-proxy",
+                                    "profiles.dialog.mihomo",
+                                    true,
+                                ),
+                            ]
+                            .into_iter()
+                            .map(|(id, label, proxy)| {
+                                Button::new(id)
+                                    .outline()
+                                    .flex_1()
+                                    .h_10()
+                                    .label(zenclash_i18n::text(label))
+                                    .selected(
+                                        (self.profiles.forms.editing_route
+                                            == RemoteProfileRoute::Mihomo)
+                                            == proxy,
+                                    )
+                                    .disabled(self.core_busy())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.profiles.forms.editing_route = if proxy {
+                                            RemoteProfileRoute::Mihomo
+                                        } else {
+                                            RemoteProfileRoute::DirectWithMihomoFallback
+                                        };
+                                        cx.notify();
+                                    }))
+                            }),
+                        ),
                     ),
             )
-            .child(config_input_row(
-                zenclash_i18n::text("profiles.form.name"),
-                zenclash_i18n::text("profiles.editor.name_description"),
-                Input::new(&self.profiles.forms.request_name),
-                theme,
-            ))
-            .child(config_input_row(
-                zenclash_i18n::text("profiles.editor.url"),
-                zenclash_i18n::text("profiles.editor.url_description"),
-                Input::new(&self.profiles.forms.request_url),
-                theme,
-            ))
-            .child(config_input_row(
-                "User-Agent",
-                zenclash_i18n::text("profiles.editor.user_agent_description"),
-                Input::new(&self.profiles.forms.request_user_agent),
-                theme,
-            ))
-            .child(config_input_row(
-                "Authorization",
-                zenclash_i18n::text("profiles.editor.authorization_description"),
-                Input::new(&self.profiles.forms.request_authorization).mask_toggle(),
-                theme,
-            ))
-            .child(config_input_row(
-                zenclash_i18n::text("profiles.editor.timeout"),
-                zenclash_i18n::text("profiles.editor.timeout_description"),
-                Input::new(&self.profiles.forms.request_timeout_seconds),
-                theme,
-            ))
-            .child(self.render_remote_profile_route_settings(theme, cx))
-            .child(config_input_row(
-                zenclash_i18n::text("profiles.editor.cron"),
-                zenclash_i18n::text("profiles.editor.cron_description"),
-                Input::new(&self.profiles.forms.update_cron),
-                theme,
-            ))
-            .child(setting_switch(
-                zenclash_i18n::text("profiles.editor.fixed_interval"),
-                zenclash_i18n::text("profiles.editor.fixed_interval_description"),
-                self.profiles.forms.editing_fixed_update_interval,
-                "edit-profile-fixed-update-interval",
-                theme,
-                cx.listener(|this, checked, _, cx| {
-                    this.profiles.forms.editing_fixed_update_interval = *checked;
-                    cx.notify();
-                }),
-            ))
-            .child(self.render_remote_profile_editor_actions(cx))
-    }
-
-    fn render_remote_profile_route_settings(
-        &self,
-        theme: &gpui_kit::component::Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui_kit::Div {
-        v_flex()
-            .child(setting_switch(
-                zenclash_i18n::text("profiles.editor.proxy"),
-                zenclash_i18n::text("profiles.editor.proxy_description"),
-                self.profiles.forms.editing_route == RemoteProfileRoute::Mihomo,
-                "edit-profile-use-mihomo-proxy",
-                theme,
-                cx.listener(|this, checked, _, cx| {
-                    this.profiles.forms.editing_route = if *checked {
-                        RemoteProfileRoute::Mihomo
-                    } else {
-                        RemoteProfileRoute::DirectWithMihomoFallback
-                    };
-                    cx.notify();
-                }),
-            ))
-            .child(setting_switch(
-                zenclash_i18n::text("profiles.editor.fallback"),
-                zenclash_i18n::text("profiles.editor.fallback_description"),
-                self.profiles.forms.editing_route == RemoteProfileRoute::DirectWithMihomoFallback,
-                "edit-profile-mihomo-fallback",
-                theme,
-                cx.listener(|this, checked, _, cx| {
-                    if this.profiles.forms.editing_route != RemoteProfileRoute::Mihomo {
-                        this.profiles.forms.editing_route = if *checked {
-                            RemoteProfileRoute::DirectWithMihomoFallback
-                        } else {
-                            RemoteProfileRoute::Direct
-                        };
-                    }
-                    cx.notify();
-                }),
-            ))
-    }
-
-    fn render_remote_profile_editor_actions(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
-        h_flex()
-            .px_4()
-            .py_3()
-            .gap_2()
-            .justify_end()
             .child(
-                Button::new("cancel-profile-request-edit")
-                    .label(zenclash_i18n::text("profiles.actions.cancel"))
-                    .small()
-                    .ghost()
-                    .disabled(self.core_busy())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.cancel_edit_remote_profile(cx);
-                    })),
+                h_flex()
+                    .gap_3()
+                    .child(
+                        div()
+                            .w(gpui_kit::rems(7.))
+                            .flex_shrink_0()
+                            .text_sm()
+                            .child(zenclash_i18n::text("profiles.editor.fallback")),
+                    )
+                    .child(
+                        MintSwitch::new("edit-profile-mihomo-fallback")
+                            .checked(
+                                self.profiles.forms.editing_route
+                                    == RemoteProfileRoute::DirectWithMihomoFallback,
+                            )
+                            .disabled(
+                                self.core_busy()
+                                    || self.profiles.forms.editing_route
+                                        == RemoteProfileRoute::Mihomo,
+                            )
+                            .on_click(cx.listener(|this, checked, _, cx| {
+                                this.profiles.forms.editing_route = if *checked {
+                                    RemoteProfileRoute::DirectWithMihomoFallback
+                                } else {
+                                    RemoteProfileRoute::Direct
+                                };
+                                cx.notify();
+                            })),
+                    ),
             )
+            .when_some(self.error.clone(), |view, error| {
+                view.child(div().text_sm().text_color(theme.danger).child(error))
+            })
             .child(
-                Button::new("save-profile-request-edit")
-                    .icon(IconName::Check)
-                    .label(zenclash_i18n::text("profiles.actions.save_request"))
-                    .small()
-                    .primary()
-                    .loading(self.core_busy())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.save_remote_profile_settings(cx);
-                    })),
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(
+                        Button::new("cancel-profile-request-edit")
+                            .min_w_24()
+                            .outline()
+                            .h_10()
+                            .label(zenclash_i18n::text("profiles.actions.cancel"))
+                            .disabled(self.core_busy())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.cancel_edit_remote_profile(cx);
+                                window.close_dialog(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("save-profile-request-edit")
+                            .min_w(gpui_kit::rems(7.))
+                            .primary()
+                            .h_10()
+                            .label(zenclash_i18n::text("profiles.dialog.save"))
+                            .loading(self.core_busy())
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.save_remote_profile_settings(cx)),
+                            ),
+                    ),
             )
     }
 }

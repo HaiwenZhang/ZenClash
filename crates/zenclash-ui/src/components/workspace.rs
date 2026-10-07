@@ -1,35 +1,7 @@
-use gpui_kit::component::{
-    ActiveTheme, Selectable, Sizable,
-    button::{Button, ButtonVariants},
-    h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme, v_flex};
 use gpui_kit::{App, IntoElement, ParentElement, Styled, div, prelude::FluentBuilder};
 
 use crate::pages::Page;
-
-/// Keep diagnostics reachable from the unified Rules destination at every width.
-pub(crate) fn diagnostics_navigation(page: Page) -> impl IntoElement {
-    h_flex()
-        .gap_2()
-        .flex_wrap()
-        .children(
-            [Page::Rules, Page::Logs, Page::Network]
-                .into_iter()
-                .map(|destination| {
-                    Button::new((
-                        gpui_kit::ElementId::from("diagnostics-navigation"),
-                        destination.route(),
-                    ))
-                    .label(destination.label())
-                    .small()
-                    .ghost()
-                    .selected(page == destination)
-                    .on_click(move |_, window, cx| {
-                        crate::components::sidebar::dispatch_navigate(destination, window, cx);
-                    })
-                }),
-        )
-}
 
 /// Title and supporting description aligned with the workspace content inset.
 pub(crate) fn title(page: Page, cx: &mut App) -> impl IntoElement {
@@ -45,9 +17,13 @@ pub(crate) fn title(page: Page, cx: &mut App) -> impl IntoElement {
                         .line_height(gpui_kit::relative(1.25))
                 })
                 .font_weight(gpui_kit::FontWeight::BOLD)
-                .child(page.title()),
+                .child(if page == Page::Logs {
+                    page.label()
+                } else {
+                    page.title()
+                }),
         )
-        .when(page == Page::Settings, |this| {
+        .when(matches!(page, Page::Settings | Page::Rules), |this| {
             this.child(
                 div()
                     .text_sm()

@@ -1,11 +1,10 @@
 use super::*;
 use crate::components::mint_switch::MintSwitch as Switch;
-use gpui_kit::StatefulInteractiveElement;
 use gpui_kit::component::Selectable;
 use gpui_kit::component::button::{ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_kit::component::progress::Progress;
 use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::{ActiveTheme, WindowExt};
 
 impl RuntimePage {
     pub(super) fn rule_dashboard(
@@ -95,17 +94,37 @@ impl RuntimePage {
         let mut table = panel(theme)
             .id("rules-table-panel")
             .test_support()
-            .gap_0p5()
+            .gap_0()
             .w_full()
             .min_w_0()
-            .h(gpui_kit::rems(32.))
+            .flex_1()
+            .min_h_0()
             .child(
-                Input::new(&self.rules.filter)
-                    .prefix(gpui_kit::component::Icon::new(IconName::Search))
-                    .large(),
+                h_flex()
+                    .gap_2()
+                    .pb_3()
+                    .flex_wrap()
+                    .child(
+                        div().flex_1().min_w(gpui_kit::rems(12.)).child(
+                            Input::new(&self.rules.filter)
+                                .prefix(gpui_kit::component::Icon::new(IconName::Search)),
+                        ),
+                    )
+                    .child(filters)
+                    .child(
+                        gpui_kit::component::checkbox::Checkbox::new("rules-disabled-filter")
+                            .label(zenclash_i18n::text("redesign.only_disabled"))
+                            .checked(self.rules.worker.disabled_only)
+                            .on_click(cx.listener(|this, checked, _, cx| {
+                                this.rules.worker.disabled_only = *checked;
+                                this.rules.page = 0;
+                                this.rules.projection = None;
+                                this.update_rule_presentation(cx);
+                                cx.notify();
+                            })),
+                    ),
             )
-            .child(filters)
-            .when(!compact, |table| table.child(rule_columns(theme).mt_3()));
+            .when(!compact, |table| table.child(rule_columns(theme)));
         let mut rows = v_flex().gap_0().when(indices.is_empty(), |this| {
             this.child(empty_state(
                 zenclash_i18n::text(if self.rules.projecting {
@@ -198,27 +217,138 @@ impl RuntimePage {
                             ),
                     ),
             );
-        let mut inspector = panel(theme)
-            .id("rule-inspector")
-            .test_support()
-            .flex_1()
-            .flex_basis(gpui_kit::rems(24.))
-            .min_w_0()
-            .min_h(gpui_kit::rems(34.))
+        let known = rules.iter().all(|rule| rule.extra.is_some());
+        let disabled = rules
+            .iter()
+            .filter(|rule| {
+                rule.index
+                    .and_then(|index| self.rules.confirmed_disabled.get(&index).copied())
+                    .unwrap_or_else(|| rule.extra.as_ref().is_some_and(|stats| stats.disabled))
+            })
+            .count();
+        v_flex()
+            .h_full()
+            .min_h_0()
             .gap_3()
             .child(
-                section_title("rules.details.title", theme)
-                    .text_xl()
-                    .pb_1()
-                    .border_b_1()
-                    .border_color(theme.border),
-            );
+                h_flex().gap_3().children(
+                    [
+                        (
+                            "rules.summary.runtime",
+                            rules.len().to_string(),
+                            gpui_kit::assets::IconName::FileText,
+                        ),
+                        (
+                            "common.status.enabled",
+                            if known {
+                                (rules.len() - disabled).to_string()
+                            } else {
+                                "—".into()
+                            },
+                            gpui_kit::assets::IconName::Check,
+                        ),
+                        (
+                            "redesign.disabled",
+                            if known {
+                                disabled.to_string()
+                            } else {
+                                "—".into()
+                            },
+                            gpui_kit::assets::IconName::Minus,
+                        ),
+                    ]
+                    .into_iter()
+                    .map(|(label, value, icon)| {
+                        panel(theme).flex_1().min_w_0().py_3().child(
+                            h_flex()
+                                .gap_3()
+                                .child(
+                                    h_flex()
+                                        .size_10()
+                                        .justify_center()
+                                        .rounded_full()
+                                        .bg(theme.secondary)
+                                        .text_color(theme.primary)
+                                        .child(gpui_kit::component::Icon::new(icon).size_5()),
+                                )
+                                .child(
+                                    v_flex()
+                                        .gap_1()
+                                        .min_w_0()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(theme.muted_foreground)
+                                                .child(zenclash_i18n::text(label)),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_2xl()
+                                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                                .child(value),
+                                        ),
+                                ),
+                        )
+                    }),
+                ),
+            )
+            .child(table)
+            .into_any_element()
+    }
+
+    fn open_rule_details(&mut self, position: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.rules.selected = Some(position);
+        self.rules.details = self
+            .rules
+            .projection
+            .as_ref()
+            .map(|projection| projection.snapshot.clone());
+        let owner = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let content = owner
+                .update(cx, |page, cx| {
+                    let theme = cx.theme().clone();
+                    page.render_rule_details(&theme, cx)
+                })
+                .ok();
+            let close_owner = owner.clone();
+            dialog
+                .bg(cx.theme().group_box)
+                .title(zenclash_i18n::text("rules.details.title"))
+                .width(window.rem_size() * 34.)
+                .margin_top(
+                    ((window.viewport_size().height - window.rem_size() * 36.) / 2.)
+                        .max(gpui_kit::px(16.)),
+                )
+                .when_some(content, |dialog, content| dialog.child(content))
+                .on_close(move |_, _, cx| {
+                    let _ = close_owner.update(cx, |page, _| page.rules.details = None);
+                })
+        });
+        cx.notify();
+    }
+
+    fn render_rule_details(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let Some(snapshot) = &self.rules.details else {
+            return empty_state(zenclash_i18n::text("runtime.empty.unavailable"), theme)
+                .into_any_element();
+        };
+        let rules = &snapshot.rules;
+        let current = matches!(&self.data, RuntimeData::Rules { catalog, .. } if std::sync::Arc::ptr_eq(catalog, snapshot));
+        let mut inspector = v_flex()
+            .id("rule-inspector")
+            .test_support()
+            .gap_3()
+            .min_w_0();
         if let Some((position, rule)) = self
             .rules
             .selected
             .and_then(|position| rules.get(position).map(|rule| (position, rule)))
         {
-            let identity = rule.index.unwrap_or(position);
             let disabled = rule
                 .index
                 .and_then(|index| self.rules.confirmed_disabled.get(&index).copied())
@@ -284,7 +414,8 @@ impl RuntimePage {
                                                 ))
                                                 .checked(disabled == Some(false))
                                                 .disabled(
-                                                    self.rules.pending.contains(&index)
+                                                    !current
+                                                        || self.rules.pending.contains(&index)
                                                         || !self
                                                             .core_kind
                                                             .capabilities()
@@ -314,7 +445,15 @@ impl RuntimePage {
                                 ),
                         ),
                 )
-                .child(section_title("rules.details.flow", theme))
+                .when_some(
+                    match &self.data {
+                        RuntimeData::Rules { config, .. } => config.as_ref(),
+                        _ => None,
+                    },
+                    |view, config| {
+                        view.child(detail("rules.summary.mode", config.mode.clone(), theme))
+                    },
+                )
                 .child(
                     h_flex()
                         .gap_2()
@@ -338,7 +477,6 @@ impl RuntimePage {
                             theme,
                         )),
                 )
-                .child(section_title("rules.details.statistics", theme))
                 .child(
                     h_flex().gap_3().children(
                         [
@@ -393,29 +531,27 @@ impl RuntimePage {
                         }),
                     ),
                 )
-                .child(section_title("rules.details.notes", theme))
                 .child(
-                    h_flex()
-                        .justify_between()
-                        .gap_3()
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_sm()
-                                .text_color(theme.muted_foreground)
-                                .child(zenclash_i18n::text("rules.details.order_note")),
-                        )
-                        .child(
-                            Button::new(("rule-overrides", identity))
-                                .outline()
-                                .small()
-                                .h_9()
-                                .label(zenclash_i18n::text("rules.details.overrides"))
-                                .on_click(|_, window, cx| {
-                                    window
-                                        .dispatch_action(Box::new(crate::app::NavigateOverride), cx)
-                                }),
-                        ),
+                    div()
+                        .p_3()
+                        .rounded(theme.radius)
+                        .bg(theme.secondary)
+                        .text_sm()
+                        .font_family(theme.mono_font_family.clone())
+                        .child(if rule.payload.is_empty() {
+                            format!("{},{}", rule.kind, rule.proxy)
+                        } else {
+                            format!("{},{},{}", rule.kind, rule.payload, rule.proxy)
+                        }),
+                )
+                .child(
+                    h_flex().justify_between().gap_3().child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(zenclash_i18n::text("rules.details.order_note")),
+                    ),
                 )
                 .child(
                     div()
@@ -429,129 +565,44 @@ impl RuntimePage {
                 theme,
             ));
         }
-        v_flex()
-            .gap_3()
+        inspector
             .child(
                 h_flex()
-                    .gap_3()
-                    .items_stretch()
-                    .flex_wrap()
+                    .justify_end()
+                    .gap_2()
                     .child(
-                        div()
-                            .flex_grow(1.5)
-                            .flex_basis(gpui_kit::rems(38.))
-                            .min_w_0()
-                            .min_h(gpui_kit::rems(34.))
-                            .child(table)
-                            .overflow_x_scrollbar(),
-                    )
-                    .when(!compact || self.rules.selected.is_some(), |row| {
-                        row.child(inspector)
-                    }),
-            )
-            .child(
-                Button::new("rules-statistics")
-                    .ghost()
-                    .label(zenclash_i18n::text("rules.summary.statistics"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.rules.analytics_expanded = !this.rules.analytics_expanded;
-                        cx.notify();
-                    })),
-            )
-            .when(self.rules.analytics_expanded, |view| {
-                view.child(
-        v_flex()
-            .gap_3()
-            .child(
-                panel(theme).child(
-                    h_flex().gap_4().children(
-                        [
-                            (
-                                "profiles.metrics.current",
-                                self.profiles
-                                    .active_profile()
-                                    .map_or_else(|| "—".into(), |profile| profile.name.clone()),
-                            ),
-                            ("rules.summary.runtime", rules.len().to_string()),
-                            (
-                                "rules.summary.mode",
-                                match &self.data {
-                                    RuntimeData::Rules {
-                                        config: Some(config),
-                                        ..
-                                    } => crate::components::sidebar::OutboundMode::from_api(
-                                        &config.mode,
-                                    )
-                                    .label(),
-                                    _ => "—".into(),
-                                },
-                            ),
-                            (
-                                "rules.summary.statistics",
-                                zenclash_i18n::text(
-                                    if rules.iter().any(|rule| rule.extra.is_some()) {
-                                        "rules.summary.from_core"
+                        Button::new("copy-rule")
+                            .outline()
+                            .label(zenclash_i18n::text("redesign.copy_rule"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(rule) =
+                                    this.rules.details.as_ref().and_then(|snapshot| {
+                                        this.rules
+                                            .selected
+                                            .and_then(|position| snapshot.rules.get(position))
+                                    })
+                                {
+                                    let content = if rule.payload.is_empty() {
+                                        format!("{},{}", rule.kind, rule.proxy)
                                     } else {
-                                        "common.status.unavailable"
-                                    },
-                                ),
-                            ),
-                        ]
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, (key, value))| {
-                            h_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .gap_4()
-                                .when(index > 0, |this| {
-                                    this.pl_4().border_l_1().border_color(theme.border)
-                                })
-                                .child(
-                                    gpui_kit::component::Icon::new(
-                                        [
-                                            gpui_kit::assets::IconName::FileText,
-                                            gpui_kit::assets::IconName::Layers,
-                                            gpui_kit::assets::IconName::List,
-                                            gpui_kit::assets::IconName::ChartColumn,
-                                        ][index],
-                                    )
-                                    .size_8()
-                                    .text_color(theme.foreground),
-                                )
-                                .child(
-                                    v_flex()
-                                        .min_w_0()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(theme.muted_foreground)
-                                                .child(zenclash_i18n::text(key)),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xl()
-                                                .truncate()
-                                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                                .child(value),
-                                        ),
-                                )
-                        }),
+                                        format!("{},{},{}", rule.kind, rule.payload, rule.proxy)
+                                    };
+                                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                        content,
+                                    ));
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new("close-rule-details")
+                            .primary()
+                            .label(zenclash_i18n::text("common.actions.close"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.rules.details = None;
+                                window.close_dialog(cx);
+                            })),
                     ),
-                ),
             )
-
-            .child(
-                h_flex()
-                    .gap_3()
-                    .items_stretch()
-                    .flex_wrap()
-                    .child(distribution("rules.charts.types", &projection.kinds, theme))
-                    .child(policy_distribution(&projection.hits, theme)),
-            )
-            )
-            })
             .into_any_element()
     }
 
@@ -584,7 +635,13 @@ impl RuntimePage {
                     .border_color(theme.table_active)
                     .bg(theme.table_active)
             })
-            .child(div().w_8().text_sm().child((position + 1).to_string()))
+            .child(
+                div()
+                    .w_12()
+                    .flex_shrink_0()
+                    .text_sm()
+                    .child((position + 1).to_string()),
+            )
             .child(
                 div()
                     .w(gpui_kit::rems(if compact { 7. } else { 9. }))
@@ -622,10 +679,8 @@ impl RuntimePage {
                         .min_w_0()
                         .truncate()
                         .tooltip(rule.payload.clone())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.rules.selected =
-                                (this.rules.selected != Some(position)).then_some(position);
-                            cx.notify();
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_rule_details(position, window, cx);
                         })),
                 ),
             )
@@ -639,35 +694,53 @@ impl RuntimePage {
             );
         if let (Some(index), Some(_)) = (rule.index, &rule.extra) {
             row = row.child(
-                div().w_12().child(
-                    Switch::new(("rule-enabled", index))
-                        .accessibility_label(zenclash_i18n::text_with(
-                            "rules.row.enabled_named",
-                            &[
-                                ("index", index.to_string()),
-                                ("payload", rule.payload.clone()),
-                            ],
-                        ))
-                        .checked(!disabled)
-                        .disabled(
-                            self.rules.pending.contains(&index)
-                                || !self.core_kind.capabilities().rule_toggle,
-                        )
-                        .on_click(cx.listener(move |this, checked, _, cx| {
-                            this.set_rule_enabled(index, *checked, cx)
-                        })),
-                ),
+                h_flex()
+                    .w_24()
+                    .flex_shrink_0()
+                    .gap_2()
+                    .child(
+                        Switch::new(("rule-enabled", index))
+                            .accessibility_label(zenclash_i18n::text_with(
+                                "rules.row.enabled_named",
+                                &[
+                                    ("index", index.to_string()),
+                                    ("payload", rule.payload.clone()),
+                                ],
+                            ))
+                            .checked(!disabled)
+                            .disabled(
+                                self.rules.pending.contains(&index)
+                                    || !self.core_kind.capabilities().rule_toggle,
+                            )
+                            .on_click(cx.listener(move |this, checked, _, cx| {
+                                this.set_rule_enabled(index, *checked, cx)
+                            })),
+                    )
+                    .child(div().text_xs().child(zenclash_i18n::text(if disabled {
+                        "redesign.disabled"
+                    } else {
+                        "common.status.enabled"
+                    }))),
             );
         } else {
             row = row.child(
                 div()
-                    .w_12()
+                    .w_24()
                     .text_sm()
                     .text_color(theme.muted_foreground)
                     .child("—"),
             );
         }
-        row.into_any_element()
+        row.child(
+            Button::new(("open-rule-details", identity))
+                .ghost()
+                .small()
+                .label(zenclash_i18n::text("redesign.details"))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.open_rule_details(position, window, cx)
+                })),
+        )
+        .into_any_element()
     }
 }
 
@@ -698,14 +771,6 @@ fn detail(key: &str, value: String, theme: &gpui_kit::component::Theme) -> gpui_
         .child(div().flex_1().min_w_0().truncate().child(value))
 }
 
-fn section_title(key: &str, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
-    div()
-        .text_lg()
-        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-        .text_color(theme.foreground)
-        .child(zenclash_i18n::text(key))
-}
-
 fn flow_step(
     key: &str,
     value: &str,
@@ -715,33 +780,25 @@ fn flow_step(
     v_flex()
         .flex_1()
         .min_w_0()
-        .h_16()
-        .px_2()
-        .py_2()
         .gap_1()
-        .justify_center()
-        .items_center()
-        .rounded(theme.radius)
-        .border_1()
-        .border_color(theme.border)
-        .bg(if active {
-            theme.chart_1.opacity(0.12)
-        } else {
-            theme.secondary
-        })
+        .py_3()
         .child(
             div()
-                .text_base()
+                .text_sm()
                 .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                .child(zenclash_i18n::text(key)),
+                .text_color(if active {
+                    theme.primary
+                } else {
+                    theme.foreground
+                })
+                .truncate()
+                .child(value.to_owned()),
         )
         .child(
             div()
-                .w_full()
-                .text_center()
-                .text_sm()
-                .truncate()
-                .child(value.to_owned()),
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(zenclash_i18n::text(key)),
         )
 }
 
@@ -799,54 +856,6 @@ fn rule_outlet(catalog: Option<&zenclash_core::ProxyCatalog>, policy: &str) -> O
     None
 }
 
-fn distribution(
-    title: &str,
-    values: &[(String, u64)],
-    theme: &gpui_kit::component::Theme,
-) -> gpui_kit::Div {
-    let maximum = values.iter().map(|value| value.1).max().unwrap_or(1).max(1);
-    panel(theme)
-        .flex_grow(1.)
-        .flex_basis(gpui_kit::rems(36.))
-        .min_w_0()
-        .min_h(gpui_kit::rems(13.5))
-        .child(
-            div()
-                .text_lg()
-                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                .child(zenclash_i18n::text(title))
-                .id("rule-type-distribution-title")
-                .tooltip(|window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(zenclash_i18n::text(
-                        "runtime.charts.top_five",
-                    ))
-                    .build(window, cx)
-                }),
-        )
-        .when(values.is_empty(), |this| {
-            this.child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child("—"),
-            )
-        })
-        .children(values.iter().map(|(label, count)| {
-            h_flex()
-                .gap_3()
-                .child(div().w_32().text_sm().truncate().child(label.clone()))
-                .child(
-                    Progress::new((gpui_kit::ElementId::from(title.to_owned()), label.clone()))
-                        .accessibility_label(label.clone())
-                        .value(*count as f32 / maximum as f32 * 100.)
-                        .color(theme.chart_3)
-                        .h_3()
-                        .flex_1(),
-                )
-                .child(div().w_12().text_sm().text_right().child(count.to_string()))
-        }))
-}
-
 fn rule_columns(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
     h_flex()
         .gap_2()
@@ -884,11 +893,8 @@ fn rule_columns(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
                 .text_right()
                 .child(zenclash_i18n::text("rules.columns.hits")),
         )
-        .child(
-            div()
-                .w_12()
-                .child(zenclash_i18n::text("rules.columns.enabled")),
-        )
+        .child(div().w_24().child(zenclash_i18n::text("redesign.status")))
+        .child(div().w_16().child(zenclash_i18n::text("redesign.action")))
 }
 
 fn policy_badge(policy: &str, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
@@ -909,104 +915,6 @@ fn policy_badge(policy: &str, theme: &gpui_kit::component::Theme) -> gpui_kit::D
         .text_xs()
         .truncate()
         .child(policy.to_owned())
-}
-
-fn policy_distribution(
-    values: &[(String, u64)],
-    theme: &gpui_kit::component::Theme,
-) -> gpui_kit::Div {
-    let total = values.iter().map(|(_, count)| *count as f64).sum::<f64>();
-    panel(theme)
-        .flex_1()
-        .flex_basis(gpui_kit::rems(24.))
-        .min_w_0()
-        .min_h(gpui_kit::rems(13.5))
-        .child(
-            div()
-                .text_lg()
-                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                .child(zenclash_i18n::text("rules.charts.hits"))
-                .id("rule-policy-distribution-title")
-                .tooltip(|window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(zenclash_i18n::text(
-                        "rules.charts.reported_hits",
-                    ))
-                    .build(window, cx)
-                }),
-        )
-        .when(total > 0., |this| {
-            this.child(
-                h_flex()
-                    .w_full()
-                    .h_7()
-                    .rounded(theme.radius)
-                    .overflow_hidden()
-                    .children(
-                        values
-                            .iter()
-                            .filter(|(_, count)| *count > 0)
-                            .enumerate()
-                            .map(|(index, (policy, count))| {
-                                div()
-                                    .h_full()
-                                    .flex_grow(*count as f32)
-                                    .flex_basis(gpui_kit::px(0.))
-                                    .when(index == 0, |segment| segment.rounded_l(theme.radius))
-                                    .when(
-                                        index + 1
-                                            == values
-                                                .iter()
-                                                .filter(|(_, count)| *count > 0)
-                                                .count(),
-                                        |segment| segment.rounded_r(theme.radius),
-                                    )
-                                    .when(index > 0, |segment| {
-                                        segment.border_l_1().border_color(theme.group_box)
-                                    })
-                                    .bg(if policy.eq_ignore_ascii_case("DIRECT") {
-                                        theme.chart_3
-                                    } else if policy.starts_with("REJECT") {
-                                        theme.danger
-                                    } else {
-                                        theme.chart_1
-                                    })
-                            }),
-                    ),
-            )
-        })
-        .children(values.iter().map(|(policy, count)| {
-            h_flex()
-                .gap_3()
-                .justify_between()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .min_w_0()
-                        .child(div().size_4().flex_shrink_0().rounded_full().bg(
-                            if policy.eq_ignore_ascii_case("DIRECT") {
-                                theme.chart_3
-                            } else if policy.starts_with("REJECT") {
-                                theme.danger
-                            } else {
-                                theme.chart_1
-                            },
-                        ))
-                        .child(div().text_sm().truncate().child(policy.clone())),
-                )
-                .child(div().text_sm().child(if total > 0. {
-                    format!("{:.1}%", *count as f64 / total * 100.)
-                } else {
-                    "—".into()
-                }))
-        }))
-        .when(values.is_empty(), |this| {
-            this.child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child("—"),
-            )
-        })
 }
 
 #[cfg(test)]

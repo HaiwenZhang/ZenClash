@@ -7,7 +7,7 @@ use thiserror::Error;
 
 const IP_RESPONSE_LIMIT: usize = 256 * 1024;
 const LATENCY_RESPONSE_LIMIT: usize = 2 * 1024 * 1024;
-const MAX_LATENCY_TARGETS: usize = 16;
+const MAX_LATENCY_TARGETS: usize = DEFAULT_NETWORK_LATENCY_TARGETS.len() + 13;
 
 /// Built-in public-IP services compatible with Clash Party's network page.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -134,11 +134,13 @@ impl NetworkLatencyTarget {
     }
 }
 
-/// Default latency endpoints mirrored from Clash Party.
-pub const DEFAULT_NETWORK_LATENCY_TARGETS: [(&str, &str); 3] = [
+/// Default public endpoints for network latency diagnostics.
+pub const DEFAULT_NETWORK_LATENCY_TARGETS: [(&str, &str); 5] = [
     ("Google", "https://www.google.com/generate_204"),
     ("Cloudflare", "https://www.cloudflare.com/cdn-cgi/trace"),
     ("GitHub", "https://github.com/"),
+    ("OpenAI", "https://chatgpt.com/robots.txt"),
+    ("Anthropic", "https://www.anthropic.com/robots.txt"),
 ];
 
 /// Result for one independent latency endpoint.

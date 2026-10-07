@@ -27,7 +27,6 @@ mod presentation;
 mod view;
 
 const MAX_LOCAL_DELAY_HISTORY: usize = 20;
-const GROUPS_PER_PAGE: usize = 8;
 
 /// Interactive proxy-group catalog backed by Mihomo's live controller state.
 pub struct ProxiesPage {
@@ -40,7 +39,6 @@ pub struct ProxiesPage {
     active_profile: Option<(String, bool)>,
     node_summary: presentation::NodeSummary,
     visible_group_indices: Vec<usize>,
-    group_page_index: usize,
     outbound_mode: String,
     mode_revision: u64,
     expanded: HashSet<String>,
@@ -62,7 +60,6 @@ pub struct ProxiesPage {
     switching: ProxySelectionState,
     restoring_auto: Option<String>,
     measuring_and_restoring_auto: Option<String>,
-    show_hidden: bool,
     sort_by_latency: bool,
     hide_unavailable: bool,
     loading: bool,
@@ -71,8 +68,8 @@ pub struct ProxiesPage {
     delay_generation: u64,
     error: Option<String>,
     notice: Option<String>,
-    show_node_details: bool,
     node_focus: HashMap<(String, ProxyNodeId), gpui_kit::FocusHandle>,
+    details_focus: HashMap<(String, ProxyNodeId), gpui_kit::FocusHandle>,
     focus_handle: gpui_kit::FocusHandle,
 }
 
@@ -204,7 +201,6 @@ impl ProxiesPage {
             active_profile: None,
             node_summary: Default::default(),
             visible_group_indices: Vec::new(),
-            group_page_index: 0,
             outbound_mode: "rule".into(),
             mode_revision: 0,
             expanded: HashSet::new(),
@@ -226,7 +222,6 @@ impl ProxiesPage {
             switching: ProxySelectionState::default(),
             restoring_auto: None,
             measuring_and_restoring_auto: None,
-            show_hidden: false,
             sort_by_latency: false,
             hide_unavailable: false,
             loading: false,
@@ -235,8 +230,8 @@ impl ProxiesPage {
             delay_generation: 0,
             error: None,
             notice: None,
-            show_node_details: false,
             node_focus: HashMap::new(),
+            details_focus: HashMap::new(),
             focus_handle: cx.focus_handle(),
         }
     }
@@ -268,14 +263,6 @@ struct PendingProxySelection {
 struct ProxySelectionState {
     generation: u64,
     pending: HashMap<String, PendingProxySelection>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ProxyPage {
-    index: usize,
-    count: usize,
-    start: usize,
-    end: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -372,23 +359,6 @@ impl ProxySelectionState {
     }
 }
 
-fn group_page(total: usize, requested_index: usize) -> ProxyPage {
-    bounded_page(total, requested_index, GROUPS_PER_PAGE)
-}
-
-fn bounded_page(total: usize, requested_index: usize, page_size: usize) -> ProxyPage {
-    let count = total.div_ceil(page_size);
-    let index = requested_index.min(count.saturating_sub(1));
-    let start = index * page_size;
-    let end = (start + page_size).min(total);
-    ProxyPage {
-        index,
-        count,
-        start,
-        end,
-    }
-}
-
 fn toggle_expanded_group(expanded: &mut HashSet<String>, name: &str) {
     if expanded.remove(name) {
         return;
@@ -432,32 +402,34 @@ impl Render for ProxiesPage {
         self.window_handle = Some(window.window_handle());
         self.ensure_search_input(window, cx);
         let mut keys = Vec::new();
-        if let Some(catalog) = &self.catalog {
-            let page = group_page(self.visible_group_indices.len(), self.group_page_index);
-            if let Some(index) = presentation::selected_group_index(
+        if let Some(catalog) = &self.catalog
+            && let Some(index) = presentation::selected_group_index(
                 catalog,
-                &self.visible_group_indices[page.start..page.end],
+                &self.visible_group_indices,
                 &self.expanded,
-            ) {
-                let group = &catalog.groups()[index];
-                let nodes = self.displayed_nodes(catalog, group);
-                keys.extend(
-                    nodes
-                        .iter()
-                        .map(|&index| (group.name.clone(), group.all[index].clone())),
-                );
-            }
+            )
+        {
+            let group = &catalog.groups()[index];
+            let nodes = self.displayed_nodes(catalog, group);
+            keys.extend(
+                nodes
+                    .iter()
+                    .map(|&index| (group.name.clone(), group.all[index].clone())),
+            );
         }
         self.node_focus.retain(|key, _| keys.contains(key));
+        self.details_focus.retain(|key, _| keys.contains(key));
         for key in keys {
             self.node_focus
+                .entry(key.clone())
+                .or_insert_with(|| cx.focus_handle());
+            self.details_focus
                 .entry(key)
                 .or_insert_with(|| cx.focus_handle());
         }
 
         let theme = cx.theme().clone();
         let catalog = self.catalog.as_ref();
-        let groups = group_page(self.visible_group_indices.len(), self.group_page_index);
 
         v_flex()
             .track_focus(&self.focus_handle)
@@ -472,11 +444,6 @@ impl Render for ProxiesPage {
                     .gap_4()
                     .px_8()
                     .py_3()
-                    .when(self.show_node_details, |this| {
-                        this.when_some(catalog, |this, catalog| {
-                            this.child(self.render_summary(catalog, &theme))
-                        })
-                    })
                     .when(self.loading && catalog.is_none(), |this| {
                         this.child(
                             div()
@@ -505,11 +472,9 @@ impl Render for ProxiesPage {
                                     .text_sm()
                                     .child(message),
                             )
-                            .child(self.render_group_visibility(cx))
                         } else {
                             this.child(self.render_workspace(
                                 catalog,
-                                groups,
                                 window.viewport_size().width < window.rem_size() * 68.,
                                 if window.viewport_size().width < window.rem_size() * 42. {
                                     1
@@ -961,8 +926,8 @@ mod tests {
                         }
                     };
                     let select_b = control(window, "select-proxy", "b", "Airport B");
-                    let test_a = control(window, "proxy-menu", "a", "Airport A");
-                    let test_b = control(window, "proxy-menu", "b", "Airport B");
+                    let test_a = control(window, "test-proxy", "a", "Airport A");
+                    let test_b = control(window, "test-proxy", "b", "Airport B");
                     for target in [&select_b, &test_a, &test_b] {
                         let bounds = window.find(target.clone()).bounds();
                         assert!(bounds.right() <= dimensions.width, "control extends beyond the window: {bounds:?}");
@@ -1003,13 +968,7 @@ mod tests {
                 window.find(id("current-proxy", "b", "Airport B"));
                 window.click(test_a, cx);
                 window.render_frame(cx);
-                window.press("down", cx);
-                window.press("enter", cx);
-                window.render_frame(cx);
                 window.click(test_b, cx);
-                window.render_frame(cx);
-                window.press("down", cx);
-                window.press("enter", cx);
                 let page = page.read(cx);
                 let group = &page.catalog.as_ref().unwrap().groups()[0];
                 let testing = page.testing.get("Proxy");
@@ -1205,6 +1164,101 @@ mod tests {
             Root::new(view, window, cx)
         });
         (window.into(), page.unwrap(), runtime)
+    }
+
+    #[gpui_kit::test]
+    fn node_details_and_current_node_open_the_same_modal_without_switching(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, page, _runtime) = open_catalog(
+            cx,
+            ProxyCatalog::from_group_nodes(
+                vec![(
+                    ProxyGroup {
+                        name: "group".into(),
+                        now: "current".into(),
+                        ..Default::default()
+                    },
+                    vec![
+                        ProxyNode {
+                            name: "current".into(),
+                            kind: "Trojan".into(),
+                            ..Default::default()
+                        },
+                        ProxyNode {
+                            name: "other".into(),
+                            kind: "Shadowsocks".into(),
+                            ..Default::default()
+                        },
+                    ],
+                )],
+                2,
+            ),
+        );
+        let current = ProxyNodeId::new("current".into(), None);
+        let other = ProxyNodeId::new("other".into(), None);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("proxy-node-inspector").is_none());
+            assert!(window.try_find("proxy-details").is_none());
+            assert!(
+                window
+                    .try_find(view::proxy_element_id("proxy-menu", "group", &other))
+                    .is_none()
+            );
+            assert!(
+                window
+                    .find(view::proxy_element_id("test-proxy", "group", &other))
+                    .visible()
+            );
+        })
+        .unwrap();
+        for (trigger, shown) in [
+            (
+                view::proxy_element_id("proxy-node-details", "group", &other),
+                other,
+            ),
+            (
+                view::proxy_element_id("select-proxy", "group", &current),
+                current,
+            ),
+        ] {
+            cx.update_window(window, |_, window, cx| {
+                window.click(trigger.clone(), cx);
+                window.render_frame(cx);
+                assert!(window.find("proxy-node-inspector").visible());
+                window.find(view::proxy_element_id(
+                    "inspector-node-name",
+                    "group",
+                    &shown,
+                ));
+                assert_eq!(
+                    page.read(cx).catalog.as_ref().unwrap().groups()[0].now,
+                    "current"
+                );
+                assert!(!page.read(cx).operation_pending());
+                window.press("escape", cx);
+                window.render_frame(cx);
+                assert!(window.try_find("proxy-node-inspector").is_none());
+            })
+            .unwrap();
+            // Dialog restores focus after its exit animation completes.
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(std::time::Duration::from_millis(500));
+            cx.run_until_parked();
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                assert_eq!(
+                    window.find(trigger.clone()).focused(),
+                    Some(true),
+                    "{trigger:?}"
+                );
+            })
+            .unwrap();
+        }
+        cx.update_window(window, |_, window, _| window.remove_window())
+            .unwrap();
     }
 
     #[gpui_kit::test]
@@ -1436,10 +1490,8 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn proxy_group_headers_are_bounded_and_keyboard_pages_reach_the_last_group(
-        cx: &mut gpui_kit::TestAppContext,
-    ) {
-        let (window, page, _runtime) = open_catalog(
+    fn every_proxy_group_is_available_without_pagination(cx: &mut TestAppContext) {
+        let (window, page, _runtime) = open_catalog_at(
             cx,
             ProxyCatalog::from_group_nodes(
                 (0..17)
@@ -1455,71 +1507,34 @@ mod tests {
                     .collect(),
                 17,
             ),
+            size(px(1400.), px(1600.)),
         );
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
-            window.find((gpui_kit::ElementId::from("toggle-group"), "group-0"));
-            window.find((gpui_kit::ElementId::from("toggle-group"), "group-7"));
-            assert!(
-                window
-                    .try_find((gpui_kit::ElementId::from("toggle-group"), "group-8"))
-                    .is_none()
-            );
-        })
-        .unwrap();
-        for expected_page in 1..=2 {
-            cx.update_window(window, |_, window, cx| {
-                let focus = page.read(cx).focus_handle.clone();
-                window.focus(&focus, cx);
-                window.render_frame(cx);
-                for _ in 0..40 {
-                    if window.find("next-proxy-group-page").focused() == Some(true) {
-                        break;
-                    }
-                    window.press("tab", cx);
-                }
-                assert_eq!(window.find("next-proxy-group-page").focused(), Some(true));
-                window.press("enter", cx);
-            })
-            .unwrap();
-            cx.run_until_parked();
-            cx.update_window(window, |_, window, cx| {
-                assert_eq!(page.read(cx).group_page_index, expected_page);
-                window.render_frame(cx);
-                let first = expected_page * GROUPS_PER_PAGE;
-                let last = (first + GROUPS_PER_PAGE).min(17);
-                for index in 0..17 {
-                    assert_eq!(
-                        window
-                            .try_find((
-                                gpui_kit::ElementId::from("toggle-group"),
-                                format!("group-{index}"),
-                            ))
-                            .is_some(),
-                        (first..last).contains(&index)
-                    );
-                }
-                window.find((
-                    gpui_kit::ElementId::from("test-group"),
-                    format!("group-{first}"),
-                ));
-            })
-            .unwrap();
-        }
-        cx.update_window(window, |_, window, cx| {
-            window.click("next-proxy-group-page", cx);
-            assert_eq!(page.read(cx).group_page_index, 2);
-            window.click("previous-proxy-group-page", cx);
-            assert_eq!(page.read(cx).group_page_index, 1);
+            for index in 0..17 {
+                assert!(
+                    window
+                        .find((
+                            gpui_kit::ElementId::from("toggle-group"),
+                            format!("group-{index}")
+                        ))
+                        .visible()
+                );
+            }
+            assert!(window.try_find("next-proxy-group-page").is_none());
+            assert!(window.try_find("previous-proxy-group-page").is_none());
+            assert!(window.try_find("proxies-show-hidden").is_none());
+            window.click((gpui_kit::ElementId::from("toggle-group"), "group-16"), cx);
             window.render_frame(cx);
-            window.find((gpui_kit::ElementId::from("toggle-group"), "group-8"));
+            assert!(page.read(cx).expanded.contains("group-16"));
+            window.find((gpui_kit::ElementId::from("test-group"), "group-16"));
             window.remove_window();
         })
         .unwrap();
     }
 
     #[gpui_kit::test]
-    fn all_hidden_groups_can_be_revealed_from_the_empty_workspace(cx: &mut TestAppContext) {
+    fn hidden_groups_remain_hidden_without_a_visibility_toggle(cx: &mut TestAppContext) {
         let (window, page, _runtime) = open_catalog(
             cx,
             ProxyCatalog::from_group_nodes(
@@ -1537,19 +1552,14 @@ mod tests {
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             assert!(page.read(cx).visible_group_indices.is_empty());
-            assert!(window.find("proxies-show-hidden").visible());
-            window.click("proxies-show-hidden", cx);
-            window.render_frame(cx);
-            assert_eq!(page.read(cx).visible_group_indices, [0]);
-            window.find((gpui_kit::ElementId::from("toggle-group"), "hidden"));
-            assert!(window.find("proxies-show-hidden").visible());
+            assert!(window.try_find("proxies-show-hidden").is_none());
             window.remove_window();
         })
         .unwrap();
     }
 
     #[gpui_kit::test]
-    fn replacing_and_filtering_group_catalogs_clamps_pages_and_suspend_releases_them(
+    fn replacing_and_filtering_group_catalogs_preserves_mode_and_suspend_releases_them(
         cx: &mut TestAppContext,
     ) {
         let (window, page, _runtime) = open_catalog(
@@ -1570,7 +1580,6 @@ mod tests {
             ),
         );
         cx.update_window(window, |_, window, cx| {
-            page.update(cx, |page, cx| page.set_catalog_page(2, cx));
             window.render_frame(cx);
             window.find((gpui_kit::ElementId::from("toggle-group"), "old-16"));
             page.update(cx, |page, cx| {
@@ -1604,7 +1613,6 @@ mod tests {
                 );
                 let indices = presentation::visible_group_indices(&catalog, "rule", false);
                 page.install_catalog(catalog, "rule".into(), indices);
-                assert_eq!(page.group_page_index, 0);
                 assert_eq!(page.catalog.as_ref().unwrap().groups()[0].now, "HK");
                 cx.notify();
             });
@@ -1622,10 +1630,6 @@ mod tests {
             );
             assert!(window.try_find("next-proxy-group-page").is_none());
 
-            window.click("proxies-show-hidden", cx);
-            assert!(page.read(cx).show_hidden);
-            window.render_frame(cx);
-            window.find((gpui_kit::ElementId::from("toggle-group"), "hidden"));
             page.update(cx, |page, cx| page.set_outbound_mode("GLOBAL", cx));
             window.render_frame(cx);
             window.find((gpui_kit::ElementId::from("toggle-group"), "GLOBAL"));
@@ -1650,11 +1654,10 @@ mod tests {
 
             page.update(cx, |page, cx| {
                 page.set_outbound_mode("rule", cx);
-                assert_eq!(page.visible_group_indices, [0, 1]);
+                assert_eq!(page.visible_group_indices, [0]);
                 page.suspend();
                 assert!(page.catalog.is_none());
                 assert!(page.visible_group_indices.is_empty());
-                assert_eq!(page.group_page_index, 0);
                 cx.notify();
             });
             window.render_frame(cx);

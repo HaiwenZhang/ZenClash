@@ -152,12 +152,8 @@ impl ProxiesPage {
 
         let client = self.client.clone();
         let mode_revision = self.mode_revision;
-        let visibility = if self.show_hidden {
-            ProxyVisibility::IncludeHidden
-        } else {
-            ProxyVisibility::VisibleOnly
-        };
-        let show_hidden = self.show_hidden;
+        let visibility = ProxyVisibility::VisibleOnly;
+        let show_hidden = false;
         let task = self.runtime.spawn(async move {
             let operations = ProxyOperations::new(client.clone());
             let (catalog, config) =
@@ -192,11 +188,8 @@ impl ProxiesPage {
                     Ok((catalog, mut mode, mut indices)) => {
                         if mode_revision != this.mode_revision {
                             mode = this.outbound_mode.clone();
-                            indices = super::presentation::visible_group_indices(
-                                &catalog,
-                                &mode,
-                                this.show_hidden,
-                            );
+                            indices =
+                                super::presentation::visible_group_indices(&catalog, &mode, false);
                         }
                         if this.expanded.is_empty()
                             && let Some(group) = catalog.groups_for_mode(&mode).next()
@@ -223,7 +216,6 @@ impl ProxiesPage {
     ) {
         if !self.outbound_mode.eq_ignore_ascii_case(&mode) {
             self.mode_revision = self.mode_revision.wrapping_add(1);
-            self.group_page_index = 0;
         }
         self.set_group_indices(indices);
         self.group_orders.clear();
@@ -240,24 +232,14 @@ impl ProxiesPage {
     }
 
     fn set_group_indices(&mut self, indices: Vec<usize>) {
-        self.group_page_index = super::group_page(indices.len(), self.group_page_index).index;
         self.visible_group_indices = indices;
     }
 
     fn refresh_group_indices(&mut self) {
         let indices = self.catalog.as_ref().map_or_else(Vec::new, |catalog| {
-            super::presentation::visible_group_indices(
-                catalog,
-                &self.outbound_mode,
-                self.show_hidden,
-            )
+            super::presentation::visible_group_indices(catalog, &self.outbound_mode, false)
         });
         self.set_group_indices(indices);
-    }
-
-    pub(super) fn set_catalog_page(&mut self, page: usize, cx: &mut Context<Self>) {
-        self.group_page_index = super::group_page(self.visible_group_indices.len(), page).index;
-        cx.notify();
     }
 
     /// Invalidates an older catalog request and loads current controller state.
@@ -279,7 +261,8 @@ impl ProxiesPage {
         self.node_summary = Default::default();
         self.group_orders.release_current();
         self.visible_group_indices = Vec::new();
-        self.group_page_index = 0;
+        self.node_focus.clear();
+        self.details_focus.clear();
         self.expanded.clear();
         self.testing.clear();
         self.active_testing_groups.clear();
@@ -302,32 +285,10 @@ impl ProxiesPage {
     pub(crate) fn profile_invalidated(&mut self) {
         self.suspend();
         self.active_profile = None;
-        self.show_hidden = false;
-    }
-
-    pub(super) fn set_show_hidden(&mut self, show_hidden: bool, cx: &mut Context<Self>) {
-        if self.show_hidden == show_hidden || self.loading || self.operation_pending() {
-            return;
-        }
-        self.show_hidden = show_hidden;
-        self.group_page_index = 0;
-        self.refresh_group_indices();
-        self.group_orders.clear();
-        self.expanded.clear();
-        self.start_refresh(true, cx);
     }
 
     pub(super) fn toggle_group(&mut self, name: &str, cx: &mut Context<Self>) {
         super::toggle_expanded_group(&mut self.expanded, name);
-        if self.expanded.contains(name)
-            && let Some(catalog) = &self.catalog
-            && let Some(position) = self
-                .visible_group_indices
-                .iter()
-                .position(|&index| catalog.groups()[index].name == name)
-        {
-            self.group_page_index = position / super::GROUPS_PER_PAGE;
-        }
         if !self.expanded.contains(name) {
             self.group_orders.invalidate(name);
         }
@@ -341,7 +302,6 @@ impl ProxiesPage {
             return;
         }
         self.outbound_mode = mode.to_ascii_lowercase();
-        self.group_page_index = 0;
         self.refresh_group_indices();
         self.group_orders.clear();
         self.expanded.clear();
@@ -502,7 +462,7 @@ impl ProxiesPage {
                             tracing::warn!(%warning, "automatic proxy group restored with a warning");
                         }
                         if let Some(catalog) = outcome.catalog {
-                            let indices = super::presentation::visible_group_indices(&catalog, &this.outbound_mode, this.show_hidden);
+                            let indices = super::presentation::visible_group_indices(&catalog, &this.outbound_mode, false);
                             this.install_catalog(catalog, this.outbound_mode.clone(), indices);
                         }
                         this.error = None;
@@ -567,7 +527,7 @@ impl ProxiesPage {
                             tracing::warn!(%warning, "group delay completed with a readback warning");
                         }
                         if let Some(catalog) = outcome.selection.catalog {
-                            let indices = super::presentation::visible_group_indices(&catalog, &this.outbound_mode, this.show_hidden);
+                            let indices = super::presentation::visible_group_indices(&catalog, &this.outbound_mode, false);
                             this.install_catalog(catalog, this.outbound_mode.clone(), indices);
                         }
                         let results = this.catalog.as_ref().and_then(|catalog| {

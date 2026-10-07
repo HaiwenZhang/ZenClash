@@ -2,6 +2,15 @@ _version: 2
 
 common:
   actions:
+    save:
+      zh-CN: 保存
+      en: Save
+    close:
+      zh-CN: 关闭
+      en: Close
+    retry:
+      zh-CN: 重试
+      en: Retry
     pause_display:
       zh-CN: 暂停展示
       en: Pause display
@@ -1342,6 +1351,16 @@ profiles:
       zh-CN: 直连网络请求失败时，经当前内核 HTTP/Mixed 端口重试一次
       en: Retry once through the current core HTTP/Mixed port after a direct request fails
   dialog:
+    direct:
+      zh-CN: 直连
+      en: Direct
+    mihomo:
+      zh-CN: 通过 Mihomo
+      en: Via Mihomo
+    save:
+      zh-CN: 保存
+      en: Save
+
     choose_yaml:
       zh-CN: 选择 Clash YAML 配置
       en: Select a Clash YAML Profile
@@ -5003,3 +5022,128 @@ unified:
     all_policies:
       zh-CN: 全部策略
       en: All policies
+
+redesign:
+  copy_rule:
+    zh-CN: 复制规则
+    en: Copy rule
+  log_settings:
+    zh-CN: 日志设置…
+    en: Log settings…
+  log_details:
+    zh-CN: 日志详情
+    en: Log details
+  copy_content:
+    zh-CN: 复制内容
+    en: Copy content
+  log_privacy:
+    zh-CN: 日志可能包含域名和网络地址。内存最多保留 500 条，文件按容量轮转。
+    en: Logs may contain domains and network addresses. Memory retains up to 500 entries; files rotate by size.
+  details:
+    zh-CN: 详情…
+    en: Details…
+  diagnostic_details:
+    zh-CN: 诊断详情
+    en: Diagnostic details
+  duration:
+    zh-CN: 耗时
+    en: Duration
+  add_target:
+    zh-CN: 添加检测目标
+    en: Add test target
+  dns_cache_scope:
+    zh-CN: 清理 Mihomo 内核的 DNS 查询缓存。下一次查询将重新解析，不修改系统 DNS 设置。
+    en: Clear the Mihomo DNS query cache. Subsequent queries resolve again; system DNS settings remain unchanged.
+  fake_ip_cache_scope:
+    zh-CN: 清理 Mihomo 内核的 Fake-IP 映射缓存。已有映射将失效，相关连接可能需要重新建立。
+    en: Clear Mihomo Fake-IP mappings. Existing mappings expire and affected connections may need to reconnect.
+  check_passed:
+    zh-CN: '%{count} 项正常'
+    en: '%{count} passed'
+  check_failed:
+    zh-CN: '%{count} 项异常'
+    en: '%{count} failed'
+  check_elapsed:
+    zh-CN: '耗时 %{time}'
+    en: 'Elapsed %{time}'
+  only_disabled:
+    zh-CN: 仅看禁用
+    en: Disabled only
+  action:
+    zh-CN: 操作
+    en: Action
+  export_report:
+    zh-CN: 导出报告…
+    en: Export report…
+  report_saved:
+    zh-CN: 诊断报告已导出
+    en: Diagnostic report exported
+  auto_scroll:
+    zh-CN: 自动滚动
+    en: Auto-scroll
+  jump_latest:
+    zh-CN: 跳到最新
+    en: Jump to latest
+  log_count:
+    zh-CN: '显示 %{count} 条'
+    en: 'Showing %{count} entries'
+  check_item:
+    zh-CN: 检查项
+    en: Check
+  result:
+    zh-CN: 结果
+    en: Result
+  network_options:
+    zh-CN: 网络详情与设置
+    en: Network details and settings
+  core_logs:
+    zh-CN: 内核日志
+    en: Core logs
+  receiving:
+    zh-CN: 实时接收
+    en: Receiving live
+  display_paused:
+    zh-CN: 显示已暂停
+    en: Display paused
+  disabled:
+    zh-CN: 已禁用
+    en: Disabled
+  status:
+    zh-CN: 状态
+    en: Status
+  check_results:
+    zh-CN: 检测结果
+    en: Check results
+  exit_info:
+    zh-CN: 出口信息
+    en: Exit information
+  local_network:
+    zh-CN: 本机网络
+    en: Local network
+  log_info:
+    zh-CN: 信息
+    en: Info
+  log_warning:
+    zh-CN: 警告
+    en: Warning
+  log_error:
+    zh-CN: 错误
+    en: Error
+  log_debug:
+    zh-CN: 调试
+    en: Debug
+  clear_log_list:
+    zh-CN: 清空当前列表
+    en: Clear current list
+  recheck:
+    zh-CN: 重新检测
+    en: Run checks again
+  recheck_all:
+    zh-CN: 重新运行全部网络检测并更新结果
+    en: Run all network checks again and update the results
+  log_settings_title:
+    zh-CN: 日志设置
+    en: Log settings
+  log_silent:
+    zh-CN: 静默
+    en: Silent

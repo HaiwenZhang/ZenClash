@@ -56,6 +56,7 @@ impl NodeSummary {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn counts(&self) -> [usize; 3] {
         self.counts
     }
@@ -130,6 +131,7 @@ impl GroupOrders {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn current_node(&self, group: &ProxyGroup) -> Option<ProxyNodeId> {
         self.current
             .borrow()

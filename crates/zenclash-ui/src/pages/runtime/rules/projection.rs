@@ -11,8 +11,6 @@ pub(super) struct RuleProjection {
     pub(super) snapshot: Arc<RuleCatalog>,
     pub(super) query: String,
     pub(super) indices: Vec<usize>,
-    pub(super) kinds: Vec<(String, u64)>,
-    pub(super) hits: Vec<(String, u64)>,
     pub(super) types: Vec<String>,
     pub(super) policies: Vec<String>,
 }
@@ -21,6 +19,7 @@ pub(super) struct RuleProjection {
 pub(super) struct ProjectionWorker {
     pub(super) kind: Option<String>,
     pub(super) policy: Option<String>,
+    pub(super) disabled_only: bool,
     generation: Arc<AtomicU64>,
     gate: Arc<tokio::sync::Mutex<()>>,
     task: super::super::loader::PageReadTask,
@@ -59,6 +58,7 @@ impl ProjectionWorker {
         let gate = self.gate.clone();
         let kind = self.kind.clone();
         let policy = self.policy.clone();
+        let disabled_only = self.disabled_only;
         let task = runtime.spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(80)).await;
             let permit = gate.lock_owned().await;
@@ -70,23 +70,19 @@ impl ProjectionWorker {
                 let mut indices = Vec::new();
                 let mut kinds = std::collections::BTreeMap::<String, u64>::new();
                 let mut policies = std::collections::BTreeSet::new();
-                let mut hits = std::collections::BTreeMap::<String, u64>::new();
                 for (index, rule) in snapshot.rules.iter().enumerate() {
                     if index % 256 == 0 && current.load(Ordering::Acquire) != generation {
                         return None;
                     }
                     policies.insert(rule.proxy.clone());
-                    if rule_matches(rule, &query)
+                    if (!disabled_only || rule.extra.as_ref().is_some_and(|stats| stats.disabled))
+                        && rule_matches(rule, &query)
                         && kind.as_ref().is_none_or(|kind| *kind == rule.kind)
                         && policy.as_ref().is_none_or(|policy| *policy == rule.proxy)
                     {
                         indices.push(index);
                     }
                     *kinds.entry(rule.kind.clone()).or_default() += 1;
-                    if let Some(stats) = &rule.extra {
-                        let total = hits.entry(rule.proxy.clone()).or_default();
-                        *total = total.saturating_add(stats.hit_count);
-                    }
                 }
                 (current.load(Ordering::Acquire) == generation).then_some(RuleProjection {
                     snapshot,
@@ -94,8 +90,6 @@ impl ProjectionWorker {
                     indices,
                     types: kinds.keys().cloned().collect(),
                     policies: policies.into_iter().collect(),
-                    kinds: ranked(kinds),
-                    hits: ranked(hits),
                 })
             })
             .await
@@ -104,13 +98,6 @@ impl ProjectionWorker {
         self.task.replace(&task);
         (generation, task)
     }
-}
-
-fn ranked(values: std::collections::BTreeMap<String, u64>) -> Vec<(String, u64)> {
-    let mut values = values.into_iter().collect::<Vec<_>>();
-    values.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    values.truncate(5);
-    values
 }
 
 impl Drop for ProjectionWorker {
@@ -122,6 +109,30 @@ impl Drop for ProjectionWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn disabled_filter_excludes_unknown_and_enabled_rules() {
+        let mut worker = ProjectionWorker::default();
+        worker.disabled_only = true;
+        let snapshot = Arc::new(RuleCatalog {
+            rules: vec![
+                zenclash_core::Rule {
+                    extra: Some(zenclash_core::RuleRuntimeStats {
+                        disabled: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                zenclash_core::Rule {
+                    extra: Some(Default::default()),
+                    ..Default::default()
+                },
+                zenclash_core::Rule::default(),
+            ],
+        });
+        let (_, task) = worker.start(&tokio::runtime::Handle::current(), snapshot, String::new());
+        assert_eq!(task.await.unwrap().unwrap().unwrap().indices, [0]);
+    }
 
     #[tokio::test]
     async fn distribution_uses_full_catalog_and_only_returned_hit_counters() {
@@ -150,8 +161,8 @@ mod tests {
         let (_, task) = worker.start(&tokio::runtime::Handle::current(), source, "match".into());
         let projection = task.await.unwrap().unwrap().unwrap();
         assert_eq!(projection.indices, [0]);
-        assert_eq!(projection.kinds, [("DomainSuffix".into(), 2)]);
-        assert_eq!(projection.hits, [("DIRECT".into(), 9)]);
+        assert_eq!(projection.types, ["DomainSuffix"]);
+        assert_eq!(projection.policies, ["DIRECT", "REJECT"]);
     }
 
     #[tokio::test]
@@ -241,7 +252,7 @@ mod tests {
             super::super::list_page(projection.indices.len(), 2, super::super::RULES_PER_PAGE);
         assert_eq!(
             &projection.indices[page.start..page.end],
-            &(200..250).collect::<Vec<_>>()
+            &(100..150).collect::<Vec<_>>()
         );
         assert!(worker.is_current(generation));
     }

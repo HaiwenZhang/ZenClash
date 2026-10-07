@@ -11,16 +11,18 @@ use super::{
     Input, InputEvent, InputState, IntoElement, LogTimeSource, MihomoLogLevel, Page, ParentElement,
     RuntimePage, Selectable, Sizable, Styled, Subscription, Window,
     contains_ascii_case_insensitive, div, empty_state, format_log_entries,
-    format_log_entries_support_safe, h_flex, list_page, pagination_summary, v_flex,
+    format_log_entries_support_safe, h_flex, v_flex,
 };
 
-const LOGS_PER_PAGE: usize = 100;
 const LOG_HEALTH_REFRESH: Duration = Duration::from_secs(1);
 mod dashboard;
+mod dialogs;
 
 pub(super) struct LogUiState {
     pub(super) filter: Entity<InputState>,
     pub(super) page: usize,
+    scroll: gpui_kit::UniformListScrollHandle,
+    auto_scroll: bool,
     query: String,
     presentation: Arc<LogPresentation>,
     worker: LogProjectionWorker,
@@ -36,6 +38,7 @@ pub(super) struct LogUiState {
     oldest_first: bool,
     selected: Option<(Arc<zenclash_core::LogEntry>, LogRow)>,
     paused: bool,
+    settings: Option<dialogs::LogSettingsDraft>,
 }
 
 #[derive(Clone, Default)]
@@ -344,6 +347,8 @@ impl LogUiState {
             Self {
                 filter,
                 page: 0,
+                scroll: gpui_kit::UniformListScrollHandle::default(),
+                auto_scroll: true,
                 query: String::new(),
                 presentation: Arc::default(),
                 worker: LogProjectionWorker::default(),
@@ -359,6 +364,7 @@ impl LogUiState {
                 oldest_first: false,
                 selected: None,
                 paused: false,
+                settings: None,
             },
             subscription,
         )
@@ -435,6 +441,9 @@ impl RuntimePage {
                         this.logs.persistence = view.persistence;
                         this.logs.pending_entries = view.pending_entries;
                         if changed {
+                            if this.logs.auto_scroll {
+                                this.jump_to_latest_log(cx);
+                            }
                             cx.notify();
                         }
                     }
@@ -468,8 +477,20 @@ impl RuntimePage {
         self.log_dashboard(theme, cx)
     }
 
-    fn set_logs_page(&mut self, page: usize, cx: &mut Context<Self>) {
-        self.logs.page = page;
+    fn jump_to_latest_log(&mut self, cx: &mut Context<Self>) {
+        let index = if self.logs.oldest_first {
+            self.logs.presentation.matches.len().saturating_sub(1)
+        } else {
+            0
+        };
+        self.logs.scroll.scroll_to_item(
+            index,
+            if self.logs.oldest_first {
+                gpui_kit::ScrollStrategy::Bottom
+            } else {
+                gpui_kit::ScrollStrategy::Top
+            },
+        );
         cx.notify();
     }
 
@@ -832,78 +853,6 @@ fn prepare_log_payload(entries: Vec<Arc<zenclash_core::LogEntry>>, support_safe:
     } else {
         format_log_entries(&entries)
     }
-}
-
-fn render_log_header(
-    total_entries: usize,
-    filtered_entries: usize,
-    query_is_empty: bool,
-    connected: Option<bool>,
-    latest_time: Option<gpui_kit::SharedString>,
-    theme: &gpui_kit::component::Theme,
-) -> gpui_kit::Div {
-    let color = match connected {
-        Some(true) => theme.success,
-        Some(false) => theme.warning,
-        None => theme.muted_foreground,
-    };
-    h_flex()
-        .gap_4()
-        .flex_wrap()
-        .p_4()
-        .border_1()
-        .border_color(theme.border)
-        .rounded(theme.radius_lg)
-        .min_h(gpui_kit::rems(4.))
-        .bg(theme.group_box)
-        .child(
-            h_flex()
-                .gap_2()
-                .text_sm()
-                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                .text_color(color)
-                .child(div().size_2().rounded_full().bg(color))
-                .child(zenclash_i18n::text(match connected {
-                    Some(true) => "logs.stream.connected",
-                    Some(false) => "logs.stream.reconnecting",
-                    None => "runtime.empty.loading",
-                })),
-        )
-        .child(
-            h_flex()
-                .gap_3()
-                .pl_4()
-                .border_l_1()
-                .border_color(theme.border)
-                .child(div().text_sm().text_color(theme.muted_foreground).child(
-                    zenclash_i18n::text(if query_is_empty {
-                        "logs.metrics.entries"
-                    } else {
-                        "logs.metrics.filtered"
-                    }),
-                ))
-                .child(
-                    div()
-                        .text_lg()
-                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                        .child(if query_is_empty {
-                            total_entries.to_string()
-                        } else {
-                            format!("{filtered_entries} / {total_entries}")
-                        }),
-                ),
-        )
-        .child(
-            h_flex()
-                .gap_3()
-                .pl_4()
-                .border_l_1()
-                .border_color(theme.border)
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child(zenclash_i18n::text("logs.ui.updated"))
-                .child(latest_time.unwrap_or_else(|| "—".into())),
-        )
 }
 
 fn normalized_level(level: &str) -> String {

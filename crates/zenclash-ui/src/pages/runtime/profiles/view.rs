@@ -87,9 +87,6 @@ impl RuntimePage {
         };
         v_flex()
             .gap_4()
-            .when(self.profiles.forms.editing_profile_id.is_some(), |view| {
-                view.child(self.render_remote_profile_editor(theme, cx))
-            })
             .child(
                 gpui_kit::component::input::Input::new(&self.profiles.forms.search)
                     .prefix(gpui_kit::component::Icon::new(IconName::Search)),
@@ -114,7 +111,8 @@ impl RuntimePage {
                             .min_w_0()
                             .when(compact, |view| view.w_full())
                             .gap_4()
-                            .child(self.render_managed_profiles(compact, theme, cx)),
+                            .child(self.render_managed_profiles(compact, theme, cx))
+                            .child(self.render_current_profile(config, theme, cx)),
                     )
                     .when(!compact, |row| {
                         row.child(
@@ -128,69 +126,6 @@ impl RuntimePage {
                         )
                     }),
             )
-            .child(
-                Button::new("profiles-advanced")
-                    .outline()
-                    .min_h_12()
-                    .justify_start()
-                    .icon(if self.profiles.forms.advanced_open {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    })
-                    .label(zenclash_i18n::text("unified.profiles.advanced"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.profiles.forms.advanced_open = !this.profiles.forms.advanced_open;
-                        cx.notify();
-                    })),
-            )
-            .when(self.profiles.forms.advanced_open, |view| {
-                view.when_some(
-                    match &self.data {
-                        RuntimeData::Profile {
-                            proxy_count,
-                            group_count,
-                            rule_count,
-                            ..
-                        } => Some((*proxy_count, *group_count, *rule_count)),
-                        _ => None,
-                    },
-                    |view, (proxies, groups, rules)| {
-                        view.child(
-                            h_flex().gap_4().flex_wrap().children(
-                                [
-                                    ("profiles.metrics.proxies", proxies),
-                                    ("profiles.metrics.groups", groups),
-                                    ("profiles.metrics.rules", rules),
-                                ]
-                                .into_iter()
-                                .map(|(key, value)| {
-                                    gpui_kit::div().child(format!(
-                                        "{}: {}",
-                                        zenclash_i18n::text(key),
-                                        value.map_or_else(|| "—".into(), |count| count.to_string())
-                                    ))
-                                }),
-                            ),
-                        )
-                    },
-                )
-                .when_some(config, |view, config| {
-                    view.child(self.render_current_profile(config, theme, cx))
-                })
-                .child(
-                    Button::new("profile-manage-overrides")
-                        .outline()
-                        .label(zenclash_i18n::text("profiles.design.manage_overrides"))
-                        .on_click(|_, window, cx| {
-                            crate::components::sidebar::dispatch_navigate(
-                                crate::pages::Page::Override,
-                                window,
-                                cx,
-                            )
-                        }),
-                )
-            })
             .into_any_element()
     }
 }

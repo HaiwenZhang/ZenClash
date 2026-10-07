@@ -5,7 +5,7 @@ use gpui_kit::component::{
     chart::{AreaChart, PieChart},
     progress::Progress,
 };
-use gpui_kit::{InteractiveElement, TestSupportExt};
+use gpui_kit::{InteractiveElement, StatefulInteractiveElement, TestSupportExt};
 
 impl RuntimePage {
     pub(in crate::pages::runtime) fn render_connection_close_all(
@@ -264,7 +264,8 @@ impl RuntimePage {
             .id("connections-table")
             .test_support()
             .gap_0()
-            .min_h(gpui_kit::rems(35.))
+            .flex_1()
+            .min_h(gpui_kit::rems(18.))
             .w_full()
             .min_w_0()
             .child(tabs)
@@ -465,12 +466,15 @@ impl RuntimePage {
         }
         table = table.child(
             div()
-                .id(("connection-table-viewport", page.index))
-                .h(gpui_kit::rems(26.))
-                .overflow_y_scrollbar()
-                .child(rows),
+                .id("connection-table-viewport")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(&self.connections.scroll)
+                .child(rows)
+                .vertical_scrollbar(&self.connections.scroll),
         );
-        table = table.child(div().flex_1()).child(
+        table = table.child(
             h_flex()
                 .flex_wrap()
                 .gap_2()
@@ -493,7 +497,10 @@ impl RuntimePage {
                                 .label(zenclash_i18n::text("common.actions.previous_page"))
                                 .disabled(page.index == 0)
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.set_connections_page(page.index.saturating_sub(1), cx)
+                                    this.set_connections_page(
+                                        this.connections.page.saturating_sub(1),
+                                        cx,
+                                    )
                                 })),
                         )
                         .child(
@@ -504,80 +511,82 @@ impl RuntimePage {
                                 .label(zenclash_i18n::text("common.actions.next_page"))
                                 .disabled(page.index + 1 >= page.count)
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.set_connections_page(page.index + 1, cx)
+                                    this.set_connections_page(this.connections.page + 1, cx)
                                 })),
                         ),
                 ),
         );
         v_flex()
+            .h_full()
             .gap_3()
-            .child(table)
             .child(
-                Button::new("connection-analytics-toggle")
-                    .label(zenclash_i18n::text("unified.connections.analytics"))
-                    .small()
-                    .ghost()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.connections.analytics_expanded = !this.connections.analytics_expanded;
-                        cx.notify();
-                    })),
+                div()
+                    .text_sm()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .child(zenclash_i18n::text("unified.connections.analytics")),
             )
-            .when(self.connections.analytics_expanded, |body| {
-                body.child(
-                    h_flex()
-                        .gap_3()
-                        .flex_wrap()
-                        .items_stretch()
-                        .child(connection_metric(
-                            IconName::Network,
-                            zenclash_i18n::text("connections.metrics.active"),
-                            data.connections.len().to_string(),
-                            self.connections.history.points(0),
-                            theme.chart_1,
-                            0,
-                            theme,
-                        ))
-                        .child(connection_metric(
-                            IconName::ArrowUp,
-                            zenclash_i18n::text("connections.metrics.upload"),
-                            format_bytes(data.upload_total),
-                            self.connections.history.points(1),
-                            theme.chart_2,
-                            1,
-                            theme,
-                        ))
-                        .child(connection_metric(
-                            IconName::ArrowDown,
-                            zenclash_i18n::text("connections.metrics.download"),
-                            format_bytes(data.download_total),
-                            self.connections.history.points(2),
-                            theme.chart_1,
-                            2,
-                            theme,
-                        ))
-                        .child(connection_metric(
-                            IconName::Cpu,
-                            zenclash_i18n::text("connections.metrics.memory"),
-                            format_bytes(data.memory),
-                            self.connections.history.points(3),
-                            theme.chart_1,
-                            3,
-                            theme,
-                        )),
-                )
-                .child(
-                    h_flex()
-                        .gap_3()
-                        .flex_wrap()
-                        .items_stretch()
-                        .child(distribution(
-                            "connections.charts.processes",
-                            &projection.processes,
-                            theme,
-                        ))
-                        .child(protocol_distribution(&projection.protocols, theme)),
-                )
-            })
+            .child(
+                v_flex()
+                    .id("connection-statistics")
+                    .test_support()
+                    .gap_3()
+                    .flex_shrink_0()
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .flex_wrap()
+                            .items_stretch()
+                            .child(connection_metric(
+                                IconName::Network,
+                                zenclash_i18n::text("connections.metrics.active"),
+                                data.connections.len().to_string(),
+                                self.connections.history.points(0),
+                                theme.chart_1,
+                                0,
+                                theme,
+                            ))
+                            .child(connection_metric(
+                                IconName::ArrowUp,
+                                zenclash_i18n::text("connections.metrics.upload"),
+                                format_bytes(data.upload_total),
+                                self.connections.history.points(1),
+                                theme.chart_2,
+                                1,
+                                theme,
+                            ))
+                            .child(connection_metric(
+                                IconName::ArrowDown,
+                                zenclash_i18n::text("connections.metrics.download"),
+                                format_bytes(data.download_total),
+                                self.connections.history.points(2),
+                                theme.chart_1,
+                                2,
+                                theme,
+                            ))
+                            .child(connection_metric(
+                                IconName::Cpu,
+                                zenclash_i18n::text("connections.metrics.memory"),
+                                format_bytes(data.memory),
+                                self.connections.history.points(3),
+                                theme.chart_1,
+                                3,
+                                theme,
+                            )),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .flex_wrap()
+                            .items_stretch()
+                            .child(distribution(
+                                "connections.charts.processes",
+                                &projection.processes,
+                                theme,
+                            ))
+                            .child(protocol_distribution(&projection.protocols, theme)),
+                    ),
+            )
+            .child(table)
             .into_any_element()
     }
 }

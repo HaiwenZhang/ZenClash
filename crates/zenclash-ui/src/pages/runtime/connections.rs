@@ -15,13 +15,14 @@ mod dashboard;
 mod projection;
 mod timeline;
 
-const CONNECTIONS_PER_PAGE: usize = 100;
+const CONNECTIONS_PER_PAGE: usize = 50;
 
 pub(super) struct ConnectionsUiState {
     pub(super) filter: Entity<InputState>,
     pub(super) closing: HashSet<String>,
     pub(super) expanded: Option<String>,
     pub(super) page: usize,
+    scroll: gpui_kit::ScrollHandle,
     transport: ConnectionTransport,
     sort: ConnectionSort,
     query: String,
@@ -30,7 +31,6 @@ pub(super) struct ConnectionsUiState {
     pub(super) projecting: bool,
     frozen: Option<std::sync::Arc<zenclash_core::ConnectionsSnapshot>>,
     history: ConnectionMetricHistory,
-    analytics_expanded: bool,
     show_closed: bool,
     timeline: timeline::ConnectionTimeline,
 }
@@ -120,6 +120,7 @@ impl ConnectionsUiState {
                 closing: HashSet::new(),
                 expanded: None,
                 page: 0,
+                scroll: gpui_kit::ScrollHandle::default(),
                 transport: ConnectionTransport::All,
                 sort: ConnectionSort::Default,
                 query: String::new(),
@@ -128,7 +129,6 @@ impl ConnectionsUiState {
                 projecting: false,
                 frozen: None,
                 history: ConnectionMetricHistory::default(),
-                analytics_expanded: false,
                 show_closed: false,
                 timeline: timeline::ConnectionTimeline::default(),
             },
@@ -316,6 +316,9 @@ impl RuntimePage {
 
     fn set_connections_page(&mut self, page: usize, cx: &mut Context<Self>) {
         self.connections.page = page;
+        self.connections
+            .scroll
+            .set_offset(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(0.)));
         cx.notify();
     }
 

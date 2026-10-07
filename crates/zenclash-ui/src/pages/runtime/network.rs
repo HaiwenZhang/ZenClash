@@ -1,13 +1,14 @@
+use gpui_kit::InteractiveElement;
 use gpui_kit::base::TestSupportExt;
-use gpui_kit::{InteractiveElement, StatefulInteractiveElement};
 use std::collections::HashSet;
 
 mod actions;
+mod dialogs;
 mod model;
 
 use model::{
-    average_latency, format_asn, format_coordinates, format_proxy_flags, join_present,
-    latency_color, public_ip_checked_at,
+    format_asn, format_coordinates, format_proxy_flags, join_present, latency_color,
+    public_ip_checked_at,
 };
 
 use super::{
@@ -15,8 +16,8 @@ use super::{
     DiagnosticStep, DiagnosticStepKind, Disableable, Entity, FluentBuilder, IconName, Input,
     InputState, IntoElement, NetworkLatencyTarget, NetworkProbeRoutePreference,
     NetworkProbeSnapshot, ParentElement, PublicIpProvider, RuntimeConfig, RuntimeData, RuntimePage,
-    Selectable, Sizable, Styled, SystemNetworkSnapshot, Window, config_input_row, div, empty_dash,
-    h_flex, json, px, v_flex,
+    Selectable, Sizable, Styled, SystemNetworkSnapshot, Window, div, empty_dash, h_flex, json, px,
+    v_flex,
 };
 
 #[derive(Debug)]
@@ -31,7 +32,6 @@ pub(super) struct NetworkProbeUiState {
     pub(super) task: super::loader::PageReadTask,
     cache_confirmation: Option<DnsCacheAction>,
     adding_target: bool,
-    pub(super) details_expanded: bool,
 }
 
 impl NetworkProbeUiState {
@@ -56,7 +56,6 @@ impl NetworkProbeUiState {
             task: super::loader::PageReadTask::default(),
             cache_confirmation: None,
             adding_target: false,
-            details_expanded: false,
         }
     }
 }
@@ -78,6 +77,7 @@ enum NetworkPreferenceChange {
 impl RuntimePage {
     pub(super) fn render_network(
         &self,
+        compact: bool,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
@@ -86,50 +86,71 @@ impl RuntimePage {
             _ => (RuntimeConfig::default(), SystemNetworkSnapshot::default()),
         };
         let snapshot = self.network_probe.snapshot.clone().unwrap_or_default();
-        let average_latency = average_latency(&snapshot);
+        let steps = self
+            .network_probe
+            .report
+            .as_ref()
+            .map(|report| report.steps.as_slice())
+            .unwrap_or_default();
+        let passed = steps.iter().filter(|step| step.outcome.is_ok()).count();
+        let elapsed = self.network_probe.report.as_ref().and_then(|report| {
+            report
+                .steps
+                .iter()
+                .map(|step| step.completed_at_ms)
+                .max()
+                .map(|end| end.saturating_sub(report.started_at_ms))
+        });
         v_flex()
             .gap_3()
             .child(
                 h_flex()
-                    .rounded(theme.radius_lg)
+                    .gap_6()
+                    .px_4()
+                    .py_3()
                     .border_1()
                     .border_color(theme.border)
+                    .rounded(theme.radius_lg)
                     .bg(theme.group_box)
-                    .flex_wrap()
-                    .child(network_summary_metric(
-                        gpui_kit::assets::IconName::Globe,
-                        zenclash_i18n::text("network.metrics.public_exit"),
-                        model::public_exit_label(
-                            self.network_probe.snapshot.as_ref(),
-                            self.network_probe.loading,
+                    .child(
+                        div()
+                            .text_color(theme.success)
+                            .child(zenclash_i18n::text_with(
+                                "redesign.check_passed",
+                                &[("count", passed.to_string())],
+                            )),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme.warning)
+                            .child(zenclash_i18n::text_with(
+                                "redesign.check_failed",
+                                &[("count", (steps.len() - passed).to_string())],
+                            )),
+                    )
+                    .child(div().text_color(theme.muted_foreground).child(
+                        zenclash_i18n::text_with(
+                            "redesign.check_elapsed",
+                            &[(
+                                "time",
+                                elapsed.map_or_else(
+                                    || "—".into(),
+                                    |ms| format!("{:.1} s", ms as f64 / 1000.),
+                                ),
+                            )],
                         ),
-                        false,
-                        theme,
-                    ))
-                    .child(network_summary_metric(
-                        gpui_kit::assets::IconName::Clock,
-                        zenclash_i18n::text("network.metrics.average_latency"),
-                        average_latency.map_or_else(|| "—".into(), |value| format!("{value} ms")),
-                        true,
-                        theme,
-                    ))
-                    .child(network_summary_metric(
-                        gpui_kit::assets::IconName::Network,
-                        zenclash_i18n::text("network.metrics.route"),
-                        empty_dash(&snapshot.route),
-                        true,
-                        theme,
                     )),
             )
             .child(
                 h_flex()
                     .gap_3()
                     .items_start()
-                    .flex_wrap()
+                    .when(compact, |row| row.flex_col())
                     .child(
                         v_flex()
                             .flex_1()
-                            .flex_basis(gpui_kit::rems(0.))
+                            .w_full()
+                            .when(!compact, |column| column.flex_basis(gpui_kit::rems(0.)))
                             .flex_grow(1.44)
                             .min_w_0()
                             .gap_3()
@@ -139,32 +160,13 @@ impl RuntimePage {
                     .child(
                         v_flex()
                             .flex_1()
-                            .flex_basis(gpui_kit::rems(0.))
+                            .w_full()
+                            .when(!compact, |column| column.flex_basis(gpui_kit::rems(0.)))
                             .min_w_0()
                             .gap_3()
-                            .child(self.render_public_ip_card(&snapshot, theme, cx))
-                            .child(self.render_system_network_card(&config, &system, theme, cx))
+                            .child(self.render_public_ip_card(&snapshot, false, theme, cx))
                             .child(
-                                network_card(
-                                    zenclash_i18n::text("network.capabilities.title"),
-                                    theme,
-                                )
-                                .child(network_capability_row("IPv6", Some(config.ipv6), theme))
-                                .child(network_capability_row(
-                                    zenclash_i18n::text("network.capabilities.lan"),
-                                    Some(config.allow_lan),
-                                    theme,
-                                ))
-                                .child(network_capability_row(
-                                    zenclash_i18n::text("network.capabilities.tcp_concurrent"),
-                                    Some(config.tcp_concurrent),
-                                    theme,
-                                ))
-                                .child(network_capability_row(
-                                    zenclash_i18n::text("network.capabilities.unified_delay"),
-                                    Some(config.unified_delay),
-                                    theme,
-                                )),
+                                self.render_system_network_card(&config, &system, false, theme, cx),
                             ),
                     ),
             )
@@ -177,21 +179,6 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
         let report = self.network_probe.report.as_ref();
-        let selected_route =
-            if self.preferences.network_probe_route == NetworkProbeRoutePreference::Mihomo {
-                DiagnosticStepKind::NetworkMihomo
-            } else {
-                DiagnosticStepKind::NetworkDirect
-            };
-        let is_primary = |step: &&DiagnosticStep| {
-            matches!(
-                step.kind,
-                DiagnosticStepKind::Controller
-                    | DiagnosticStepKind::Capture
-                    | DiagnosticStepKind::DnsA
-            ) || step.kind == selected_route
-                || step.outcome.is_err()
-        };
         let checked_at = report
             .and_then(|report| report.steps.iter().map(|step| step.completed_at_ms).max())
             .filter(|timestamp| *timestamp > 0)
@@ -209,157 +196,51 @@ impl RuntimePage {
                 )
             });
         network_card_with_meta(
-            zenclash_i18n::text("network.diagnostics.title"),
+            zenclash_i18n::text("redesign.check_results"),
             checked_at,
             theme,
         )
         .child(
-            h_flex()
-                .px_4()
-                .py_3()
-                .gap_3()
-                .flex_wrap()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child(zenclash_i18n::text("network.diagnostics.dns_name")),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(gpui_kit::rems(12.))
-                        .child(Input::new(&self.network_probe.dns_name)),
-                )
-                .child(
-                    Button::new("start-network-diagnostics")
-                        .label(zenclash_i18n::text("network.diagnostics.start"))
-                        .primary()
-                        .small()
-                        .h_10()
-                        .loading(self.network_probe.loading)
-                        .disabled(self.network_probe.loading || self.core_busy())
-                        .on_click(cx.listener(|this, _, _, cx| this.refresh_network_probe(cx))),
-                )
-                .child(
-                    Button::new("toggle-network-diagnostic-details")
-                        .icon(if self.network_probe.details_expanded {
-                            IconName::ChevronUp
-                        } else {
-                            IconName::ChevronDown
-                        })
-                        .accessibility_label(zenclash_i18n::text(
-                            if self.network_probe.details_expanded {
-                                "network.diagnostics.hide_details"
-                            } else {
-                                "network.diagnostics.show_details"
-                            },
-                        ))
-                        .tooltip(zenclash_i18n::text(
-                            if self.network_probe.details_expanded {
-                                "network.diagnostics.hide_details"
-                            } else {
-                                "network.diagnostics.show_details"
-                            },
-                        ))
-                        .small()
-                        .h_8()
-                        .ghost()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.network_probe.details_expanded =
-                                !this.network_probe.details_expanded;
-                            cx.notify();
-                        })),
-                ),
-        )
-        .child(
             v_flex()
                 .mx_4()
+                .mb_4()
                 .rounded(theme.radius)
                 .border_1()
                 .border_color(theme.border)
                 .overflow_hidden()
-                .children(report.into_iter().flat_map(|report| {
+                .child(
+                    h_flex()
+                        .px_3()
+                        .py_2()
+                        .gap_3()
+                        .text_sm()
+                        .bg(theme.table_head)
+                        .text_color(theme.muted_foreground)
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(zenclash_i18n::text("redesign.check_item")),
+                        )
+                        .child(div().w_24().child(zenclash_i18n::text("redesign.result")))
+                        .child(div().w_20().child(zenclash_i18n::text("redesign.duration")))
+                        .child(div().w_16().child(zenclash_i18n::text("redesign.action"))),
+                )
+                .children(
                     report
-                        .steps
-                        .iter()
-                        .filter(|step| self.network_probe.details_expanded || is_primary(step))
-                        .map(|step| render_diagnostic_step(step, theme))
-                })),
-        )
-        .child(
-            h_flex()
-                .px_4()
-                .py_3()
-                .gap_2()
-                .flex_wrap()
-                .justify_start()
-                .when_some(self.network_probe.cache_confirmation, |this, action| {
-                    this.child(
-                        Button::new("cancel-network-cache-flush")
-                            .label(zenclash_i18n::text("network.diagnostics.cancel"))
-                            .small()
-                            .h_10()
-                            .ghost()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.cancel_network_cache_flush(cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("confirm-network-cache-flush")
-                            .icon(IconName::Delete)
-                            .label(match action {
-                                DnsCacheAction::Dns => {
-                                    zenclash_i18n::text("network.diagnostics.confirm_dns_flush")
-                                }
-                                DnsCacheAction::FakeIp => {
-                                    zenclash_i18n::text("network.diagnostics.confirm_fake_ip_flush")
-                                }
-                            })
-                            .small()
-                            .h_10()
-                            .danger()
-                            .disabled(self.core_busy())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.flush_network_cache(action, cx);
-                            })),
-                    )
-                })
-                .when(self.network_probe.cache_confirmation.is_none(), |this| {
-                    this.child(
-                        Button::new("request-dns-cache-flush")
-                            .icon(gpui_kit::component::Icon::default().path("icons/trash.svg"))
-                            .label(zenclash_i18n::text("network.diagnostics.flush_dns"))
-                            .small()
-                            .h_10()
-                            .outline()
-                            .disabled(self.core_busy())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.request_network_cache_flush(DnsCacheAction::Dns, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("request-fake-ip-cache-flush")
-                            .icon(gpui_kit::component::Icon::default().path("icons/trash.svg"))
-                            .label(zenclash_i18n::text("network.diagnostics.flush_fake_ip"))
-                            .small()
-                            .h_10()
-                            .outline()
-                            .disabled(self.core_busy())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.request_network_cache_flush(DnsCacheAction::FakeIp, cx);
-                            })),
-                    )
-                }),
+                        .into_iter()
+                        .flat_map(|report| report.steps.iter())
+                        .map(|step| self.render_diagnostic_step(step, theme, cx)),
+                ),
         )
     }
 
     fn render_public_ip_card(
         &self,
         snapshot: &NetworkProbeSnapshot,
+        expanded: bool,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let provider = self.preferences.network_ip_provider;
         let info = snapshot.public_ip.as_ref();
         let ip_version = info
@@ -373,8 +254,35 @@ impl RuntimePage {
                     .format("%H:%M:%S")
                     .to_string()
             });
-        network_card(zenclash_i18n::text("network.public_ip.title"), theme)
-            .when(self.network_probe.details_expanded, |card| {
+        network_card(zenclash_i18n::text("redesign.exit_info"), theme)
+            .when(!expanded, |view| {
+                view.child(
+                    h_flex()
+                        .px_4()
+                        .pb_2()
+                        .gap_2()
+                        .child(
+                            Button::new("refresh-network-probe")
+                                .small()
+                                .outline()
+                                .label(zenclash_i18n::text("network.public_ip.refresh"))
+                                .disabled(self.network_probe.loading || self.core_busy())
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.refresh_network_probe(cx)),
+                                ),
+                        )
+                        .child(
+                            Button::new("network-options")
+                                .small()
+                                .ghost()
+                                .label(zenclash_i18n::text("redesign.details"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_network_options(window, cx)
+                                })),
+                        ),
+                )
+            })
+            .when(expanded, |card| {
                 card.child(
                     h_flex()
                         .min_h(px(58.))
@@ -442,9 +350,12 @@ impl RuntimePage {
                             .min_w_0()
                             .text_2xl()
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(info.map_or_else(|| "—".into(), |info| info.ip.clone())),
+                            .child(model::public_exit_label(
+                                self.network_probe.snapshot.as_ref(),
+                                self.network_probe.loading,
+                            )),
                     )
-                    .when_some(ip_version, |row, version| {
+                    .when_some(ip_version.filter(|_| expanded), |row, version| {
                         row.child(
                             div()
                                 .px_3()
@@ -485,12 +396,20 @@ impl RuntimePage {
                 ),
                 theme,
             ))
+            .when(expanded, |view| {
+                view.child(info_row(
+                    zenclash_i18n::text("network.metrics.average_latency"),
+                    model::average_latency(snapshot)
+                        .map_or_else(|| "—".into(), |value| format!("{value} ms")),
+                    theme,
+                ))
+            })
             .child(info_row(
                 zenclash_i18n::text("network.public_ip.updated_at"),
                 checked_at.unwrap_or_else(|| "—".into()),
                 theme,
             ))
-            .when(self.network_probe.details_expanded, |this| {
+            .when(expanded, |this| {
                 this.when_some(info, |this, info| {
                     this.child(info_row("ISP", info.isp.as_deref().unwrap_or(""), theme))
                         .child(info_row(
@@ -517,36 +436,24 @@ impl RuntimePage {
         snapshot: &NetworkProbeSnapshot,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> gpui_kit::AnyElement {
         let custom_urls = self
             .preferences
             .network_latency_targets
             .iter()
             .map(|target| target.url.as_str())
             .collect::<HashSet<_>>();
-        v_flex()
-            .min_w_0()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.group_box)
-            .overflow_hidden()
+        network_card(zenclash_i18n::text("network.latency.title"), theme)
             .child(
                 h_flex()
                     .px_4()
-                    .py_3()
-                    .gap_3()
+                    .pb_3()
+                    .gap_2()
                     .flex_wrap()
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(zenclash_i18n::text("network.latency.title")),
-                    )
                     .children(
                         [
-                            (true, "network.diagnostics.routes.mihomo"),
                             (false, "network.diagnostics.routes.direct"),
+                            (true, "network.diagnostics.routes.mihomo"),
                         ]
                         .into_iter()
                         .map(|(through_mihomo, label)| {
@@ -555,18 +462,14 @@ impl RuntimePage {
                             } else {
                                 "network-route-direct"
                             })
-                            .label(zenclash_i18n::text(label))
-                            .small()
-                            .h_10()
                             .outline()
+                            .small()
+                            .label(zenclash_i18n::text(label))
                             .selected(
                                 (self.preferences.network_probe_route
                                     == NetworkProbeRoutePreference::Mihomo)
                                     == through_mihomo,
                             )
-                            .tooltip(zenclash_i18n::text(
-                                "network.latency.through_core_description",
-                            ))
                             .disabled(
                                 self.network_probe.loading
                                     || self.mutation_busy(
@@ -579,164 +482,96 @@ impl RuntimePage {
                                         NetworkPreferenceChange::ThroughMihomo(through_mihomo),
                                         zenclash_i18n::text("network.notices.route"),
                                         cx,
-                                    );
+                                    )
                                 },
                             ))
                         }),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .mx_4()
-                    .rounded(theme.radius)
-                    .border_1()
-                    .border_color(theme.border)
-                    .overflow_hidden()
-                    .when(!snapshot.latencies.is_empty(), |this| {
-                        this.child(
-                            h_flex()
-                                .px_4()
-                                .py_2()
-                                .gap_3()
-                                .text_sm()
-                                .bg(theme.table_head)
-                                .text_color(theme.muted_foreground)
-                                .child(
-                                    div().w(gpui_kit::rems(7.)).flex_shrink_0().child(
-                                        zenclash_i18n::text("network.latency.column_target"),
-                                    ),
-                                )
-                                .child(
-                                    div().flex_1().min_w_0().child(zenclash_i18n::text(
-                                        "network.latency.column_address",
-                                    )),
-                                )
-                                .child(
-                                    div().w(gpui_kit::rems(5.)).flex_shrink_0().child(
-                                        zenclash_i18n::text("network.latency.column_latency"),
-                                    ),
-                                )
-                                .child(
-                                    div().w(gpui_kit::rems(7.)).flex_shrink_0().child(
-                                        zenclash_i18n::text("network.latency.column_status"),
-                                    ),
-                                )
-                                .child(div().w_8().flex_shrink_0()),
-                        )
-                    })
-                    .children(
-                        snapshot
-                            .latencies
-                            .iter()
-                            .enumerate()
-                            .map(|(index, result)| {
-                                self.render_latency_result(
-                                    index,
-                                    result,
-                                    custom_urls.contains(result.target.url.as_str()),
-                                    theme,
-                                    cx,
-                                )
-                            }),
-                    ),
-            )
-            .when(self.network_probe.adding_target, |this| {
-                this.child(config_input_row(
-                    zenclash_i18n::text("network.latency.target_name"),
-                    zenclash_i18n::text("network.latency.target_name_description"),
-                    Input::new(&self.network_probe.latency_name),
-                    theme,
-                ))
-            })
-            .when(self.network_probe.adding_target, |this| {
-                this.child(config_input_row(
-                    zenclash_i18n::text("network.latency.target_url"),
-                    zenclash_i18n::text("network.latency.target_url_description"),
-                    Input::new(&self.network_probe.latency_url),
-                    theme,
-                ))
-            })
-            .child(
-                h_flex()
-                    .px_4()
-                    .py_3()
-                    .gap_2()
-                    .justify_between()
-                    .when(self.network_probe.adding_target, |this| {
-                        this.child(
-                            Button::new("cancel-network-target")
-                                .label(zenclash_i18n::text("network.diagnostics.cancel"))
-                                .small()
-                                .h_10()
-                                .ghost()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.network_probe.adding_target = false;
-                                    this.restore_page_focus(super::Page::Network, cx);
-                                    cx.notify();
-                                })),
-                        )
-                    })
+                    )
+                    .child(div().flex_1())
                     .child(
                         Button::new("add-network-latency-target")
-                            .icon(IconName::Plus)
-                            .label(zenclash_i18n::text("network.latency.add"))
-                            .small()
-                            .h_10()
                             .outline()
+                            .small()
+                            .label(zenclash_i18n::text("network.latency.add"))
                             .disabled(
                                 self.mutation_busy(
                                     crate::pages::runtime::busy::MutationDomain::Network,
                                 ) || self.preferences.network_latency_targets.len() >= 13,
                             )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if this.network_probe.adding_target {
-                                    this.add_network_latency_target(cx);
-                                } else {
-                                    this.network_probe.adding_target = true;
-                                    cx.notify();
-                                }
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_network_target(window, cx)
                             })),
                     )
                     .child(
                         Button::new("retry-network-latency")
-                            .icon(crate::assets::AppIcon::RefreshCw)
-                            .label(zenclash_i18n::text("network.latency.retest"))
-                            .small()
-                            .h_10()
                             .outline()
+                            .small()
+                            .label(zenclash_i18n::text("network.latency.retest"))
                             .loading(self.network_probe.loading)
                             .disabled(self.network_probe.loading || self.core_busy())
                             .on_click(cx.listener(|this, _, _, cx| this.refresh_network_probe(cx))),
                     ),
             )
+            .child(
+                v_flex()
+                    .mx_4()
+                    .mb_4()
+                    .child(
+                        h_flex()
+                            .px_3()
+                            .py_2()
+                            .gap_3()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .bg(theme.table_head)
+                            .child(
+                                div()
+                                    .w_24()
+                                    .child(zenclash_i18n::text("network.latency.column_target")),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .child(zenclash_i18n::text("network.latency.column_latency")),
+                            )
+                            .child(div().w_20().child(zenclash_i18n::text("redesign.status")))
+                            .child(div().w_16().child(zenclash_i18n::text("redesign.action"))),
+                    )
+                    .when(snapshot.latencies.is_empty(), |view| {
+                        view.child(
+                            div()
+                                .p_3()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child(zenclash_i18n::text("network.metrics.waiting")),
+                        )
+                    })
+                    .children(snapshot.latencies.iter().map(|result| {
+                        self.render_latency_result(
+                            result,
+                            custom_urls.contains(result.target.url.as_str()),
+                            theme,
+                            cx,
+                        )
+                    })),
+            )
+            .into_any_element()
     }
 
     fn render_latency_result(
         &self,
-        index: usize,
         result: &zenclash_core::NetworkLatencyResult,
         custom: bool,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let value = result
-            .latency_ms
-            .map_or_else(|| "—".into(), |latency| format!("{latency} ms"));
-        let status = if result.latency_ms.is_some() {
-            zenclash_i18n::text("network.latency.succeeded")
-        } else {
-            result
-                .error
-                .clone()
-                .unwrap_or_else(|| zenclash_i18n::text("network.latency.failed"))
-        };
-        let color = result
-            .latency_ms
-            .map_or(theme.danger, |latency| latency_color(Some(latency), theme));
+        let key = gpui_kit::ElementId::from(result.target.url.clone());
         let url = result.target.url.clone();
+        let detail_result = result.clone();
+        let color = latency_color(result.latency_ms, theme);
         h_flex()
-            .min_h(gpui_kit::rems(2.25))
-            .px_4()
+            .min_h(gpui_kit::rems(2.75))
+            .px_3()
             .py_2()
             .gap_3()
             .text_sm()
@@ -744,64 +579,74 @@ impl RuntimePage {
             .border_color(theme.border)
             .child(
                 div()
-                    .w(gpui_kit::rems(7.))
+                    .w_24()
                     .flex_shrink_0()
+                    .truncate()
                     .child(result.target.name.clone()),
             )
             .child(
-                div()
+                h_flex()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .id(("latency-target-url", index))
-                    .tooltip({
-                        let value = result.target.url.clone();
-                        move |window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(value.clone())
-                                .build(window, cx)
-                        }
-                    })
-                    .child(result.target.url.clone()),
-            )
-            .child(
-                div()
-                    .w(gpui_kit::rems(5.))
-                    .flex_shrink_0()
-                    .text_color(color)
-                    .child(value),
-            )
-            .child(
-                div()
-                    .w(gpui_kit::rems(7.))
-                    .flex_shrink_0()
-                    .text_color(color)
-                    .truncate()
-                    .id(("latency-target-status", index))
-                    .tooltip({
-                        let value = status.clone();
-                        move |window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(value.clone())
-                                .build(window, cx)
-                        }
-                    })
+                    .gap_2()
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .child(network_status_icon(result.latency_ms.is_some(), theme))
-                            .child(div().truncate().child(if result.latency_ms.is_some() {
-                                status
-                            } else {
-                                zenclash_i18n::text("network.latency.failed")
-                            })),
+                        div().w_16().text_color(color).child(
+                            result
+                                .latency_ms
+                                .map_or_else(|| "—".into(), |ms| format!("{ms} ms")),
+                        ),
+                    )
+                    .child(
+                        gpui_kit::component::progress::Progress::new((key.clone(), "latency"))
+                            .flex_1()
+                            .h_1p5()
+                            .value(
+                                result
+                                    .latency_ms
+                                    .map_or(0., |ms| (ms as f32 / 1000. * 100.).clamp(1., 100.)),
+                            )
+                            .color(color),
                     ),
             )
-            .child(h_flex().w_8().flex_shrink_0().when(custom, |this| {
-                this.child(
-                    Button::new(("remove-network-target", index))
-                        .icon(IconName::Delete)
+            .child(
+                h_flex()
+                    .w_20()
+                    .flex_shrink_0()
+                    .gap_1()
+                    .child(network_status_icon(result.latency_ms.is_some(), theme))
+                    .child(zenclash_i18n::text(if result.latency_ms.is_some() {
+                        "network.latency.succeeded"
+                    } else {
+                        "network.latency.failed"
+                    })),
+            )
+            .when(result.latency_ms.is_none(), |row| {
+                row.child(
+                    Button::new((key.clone(), "retry"))
                         .small()
-                        .h_10()
+                        .outline()
+                        .label(zenclash_i18n::text("common.actions.retry"))
+                        .tooltip(zenclash_i18n::text("redesign.recheck_all"))
+                        .disabled(self.network_probe.loading || self.core_busy())
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh_network_probe(cx))),
+                )
+            })
+            .child(
+                Button::new((key.clone(), "details"))
+                    .outline()
+                    .small()
+                    .label(zenclash_i18n::text("redesign.details"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_latency_details(detail_result.clone(), window, cx)
+                    })),
+            )
+            .when(custom, |row| {
+                row.child(
+                    Button::new((key, "remove"))
                         .ghost()
+                        .small()
+                        .icon(IconName::Delete)
+                        .tooltip(zenclash_i18n::text("common.actions.delete"))
                         .disabled(
                             self.mutation_busy(
                                 crate::pages::runtime::busy::MutationDomain::Network,
@@ -812,10 +657,10 @@ impl RuntimePage {
                                 NetworkPreferenceChange::RemoveTarget(url.clone()),
                                 zenclash_i18n::text("network.notices.target_removed"),
                                 cx,
-                            );
+                            )
                         })),
                 )
-            }))
+            })
             .into_any_element()
     }
 
@@ -823,9 +668,10 @@ impl RuntimePage {
         &self,
         config: &RuntimeConfig,
         system: &SystemNetworkSnapshot,
+        expanded: bool,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let capture = self.network_probe.report.as_ref().and_then(|report| {
             match report
                 .step(DiagnosticStepKind::Capture)?
@@ -847,7 +693,8 @@ impl RuntimePage {
                 zenclash_core::CapabilityState::Inactive => Some(false),
                 _ => None,
             });
-        network_card(zenclash_i18n::text("network.system.title"), theme)
+        network_card(zenclash_i18n::text("redesign.local_network"), theme)
+            .child(network_capability_row("IPv6", Some(config.ipv6), theme))
             .child(network_capability_row(
                 zenclash_i18n::text("tray.system_proxy"),
                 system_proxy,
@@ -864,19 +711,17 @@ impl RuntimePage {
                 &system.interface,
                 theme,
             ))
-            .when(self.network_probe.details_expanded, |this| {
-                this.child(info_row(
-                    zenclash_i18n::text("network.system.gateway"),
-                    &system.gateway,
-                    theme,
-                ))
-            })
+            .child(info_row(
+                zenclash_i18n::text("network.system.gateway"),
+                &system.gateway,
+                theme,
+            ))
             .child(info_row(
                 zenclash_i18n::text("network.system.local_address"),
                 &system.local_ipv4,
                 theme,
             ))
-            .when(self.network_probe.details_expanded, |card| {
+            .when(expanded, |card| {
                 card.child(
                     h_flex()
                         .min_h(px(58.))
@@ -939,6 +784,33 @@ impl RuntimePage {
                         ),
                 )
             })
+            .child(
+                h_flex().px_4().py_3().gap_2().flex_wrap().children(
+                    [
+                        (
+                            DnsCacheAction::Dns,
+                            "request-dns-cache-flush",
+                            "network.diagnostics.flush_dns",
+                        ),
+                        (
+                            DnsCacheAction::FakeIp,
+                            "request-fake-ip-cache-flush",
+                            "network.diagnostics.flush_fake_ip",
+                        ),
+                    ]
+                    .into_iter()
+                    .map(|(action, id, label)| {
+                        Button::new(id)
+                            .small()
+                            .outline()
+                            .label(zenclash_i18n::text(label))
+                            .disabled(self.core_busy())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_network_cache_confirmation(action, window, cx)
+                            }))
+                    }),
+                ),
+            )
     }
 }
 
@@ -1020,154 +892,6 @@ fn info_row(
                 .min_w_0()
                 .text_sm()
                 .child(empty_dash(&value.to_string())),
-        )
-}
-
-fn render_diagnostic_step(
-    step: &DiagnosticStep,
-    theme: &gpui_kit::component::Theme,
-) -> gpui_kit::AnyElement {
-    let (status, color) = match &step.outcome {
-        Ok(data) => (diagnostic_data_summary(data), theme.success),
-        Err(error) => (error.message.clone(), theme.danger),
-    };
-    h_flex()
-        .min_h(px(64.))
-        .px_4()
-        .py_2()
-        .gap_3()
-        .justify_between()
-        .border_b_1()
-        .border_color(theme.border)
-        .child(
-            h_flex()
-                .size_8()
-                .flex_shrink_0()
-                .justify_center()
-                .rounded_full()
-                .bg(theme.info.opacity(0.10))
-                .text_color(theme.info)
-                .child(
-                    gpui_kit::component::Icon::new(match step.kind {
-                        DiagnosticStepKind::Controller => {
-                            gpui_kit::component::Icon::default().path("icons/server.svg")
-                        }
-                        DiagnosticStepKind::Capture => {
-                            gpui_kit::component::Icon::new(IconName::Network)
-                        }
-                        _ => gpui_kit::component::Icon::new(IconName::Globe),
-                    })
-                    .size_5(),
-                ),
-        )
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .gap_1()
-                .child(
-                    div()
-                        .text_base()
-                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                        .child(diagnostic_step_label(step.kind)),
-                )
-                .child(div().text_sm().text_color(theme.muted_foreground).child(
-                    zenclash_i18n::text_with(
-                        "network.diagnostics.route_time",
-                        &[
-                            ("route", diagnostic_route_label(step.route)),
-                            ("duration", step.duration_ms.to_string()),
-                        ],
-                    ),
-                )),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_left()
-                .text_sm()
-                .text_color(color)
-                .truncate()
-                .id(format!("diagnostic-status:{:?}", step.kind))
-                .test_support()
-                .tooltip({
-                    let value = status.clone();
-                    move |window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(value.clone()).build(window, cx)
-                    }
-                })
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .child(network_status_icon(step.outcome.is_ok(), theme))
-                                .child(div().text_sm().child(zenclash_i18n::text(
-                                    if step.outcome.is_ok() {
-                                        "network.latency.succeeded"
-                                    } else {
-                                        "network.latency.failed"
-                                    },
-                                ))),
-                        )
-                        .child(
-                            div()
-                                .truncate()
-                                .text_color(theme.muted_foreground)
-                                .child(status),
-                        ),
-                ),
-        )
-        .into_any_element()
-}
-
-fn network_summary_metric(
-    icon: gpui_kit::assets::IconName,
-    label: String,
-    value: String,
-    separator: bool,
-    theme: &gpui_kit::component::Theme,
-) -> gpui_kit::Div {
-    h_flex()
-        .flex_1()
-        .min_w(gpui_kit::rems(14.))
-        .min_h(px(104.))
-        .px_4()
-        .py_3()
-        .gap_3()
-        .when(separator, |this| {
-            this.child(div().h_16().w(px(1.)).flex_shrink_0().bg(theme.border))
-        })
-        .child(
-            h_flex()
-                .size_16()
-                .flex_shrink_0()
-                .justify_center()
-                .rounded_full()
-                .bg(theme.chart_3.opacity(0.12))
-                .text_color(theme.primary)
-                .child(gpui_kit::component::Icon::new(icon).size_6()),
-        )
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .gap_1()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .truncate()
-                        .text_2xl()
-                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                        .child(value),
-                ),
         )
 }
 

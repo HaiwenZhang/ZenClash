@@ -254,17 +254,39 @@ impl RenderOnce for Sidebar {
             .collapsible(true)
             .collapsed(self.collapsed)
             .header(
-                h_flex().w_full().justify_end().child(
-                    Button::new("toggle-sidebar")
-                        .icon(toggle_icon)
-                        .small()
-                        .ghost()
-                        .accessibility_label(toggle_label.clone())
-                        .tooltip(toggle_label)
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(ToggleSidebar), cx)
-                        }),
-                ),
+                h_flex()
+                    .w_full()
+                    .gap_1()
+                    .justify_between()
+                    .when(!self.collapsed, |row| {
+                        row.child(
+                            h_flex()
+                                .gap_2()
+                                .min_w_0()
+                                .child(
+                                    gpui_kit::img(crate::assets::ZENCLASH_LOGO_PATH)
+                                        .size_5()
+                                        .flex_shrink_0(),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(gpui_kit::FontWeight::BOLD)
+                                        .child("ZenClash"),
+                                ),
+                        )
+                    })
+                    .child(
+                        Button::new("toggle-sidebar")
+                            .icon(toggle_icon)
+                            .small()
+                            .ghost()
+                            .accessibility_label(toggle_label.clone())
+                            .tooltip(toggle_label)
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(ToggleSidebar), cx)
+                            }),
+                    ),
             )
             .child(SidebarNavigation::new(self.current_page, navigation))
             .footer(

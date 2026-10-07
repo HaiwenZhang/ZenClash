@@ -11,7 +11,7 @@ use super::{
     h_flex, list_page, pagination_summary, v_flex,
 };
 
-const RULES_PER_PAGE: usize = 100;
+const RULES_PER_PAGE: usize = 50;
 
 pub(super) struct RulesUiState {
     pub(super) filter: Entity<InputState>,
@@ -23,7 +23,7 @@ pub(super) struct RulesUiState {
     pub(super) confirmed_disabled: HashMap<usize, bool>,
     pub(super) projecting: bool,
     selected: Option<usize>,
-    analytics_expanded: bool,
+    details: Option<std::sync::Arc<zenclash_core::RuleCatalog>>,
 }
 
 impl RulesUiState {
@@ -56,7 +56,7 @@ impl RulesUiState {
                 confirmed_disabled: HashMap::new(),
                 projecting: false,
                 selected: None,
-                analytics_expanded: false,
+                details: None,
             },
             subscription,
         )
@@ -74,6 +74,7 @@ impl RulesUiState {
         self.projection = None;
         self.confirmed_disabled.clear();
         self.selected = None;
+        self.details = None;
     }
 }
 

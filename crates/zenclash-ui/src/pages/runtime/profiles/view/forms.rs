@@ -7,6 +7,7 @@ use super::super::super::{
 };
 
 use crate::components::mint_switch::MintSwitch as Switch;
+use gpui_kit::{InteractiveElement, TestSupportExt};
 
 impl RuntimePage {
     pub(super) fn render_subscription_form(
@@ -164,7 +165,7 @@ impl RuntimePage {
 
     pub(super) fn render_current_profile(
         &self,
-        config: &RuntimeConfig,
+        config: Option<&RuntimeConfig>,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
@@ -205,7 +206,109 @@ impl RuntimePage {
                             .on_click(cx.listener(|this, _, _, cx| this.reload_profile(cx))),
                     ),
             )
-            .child(runtime_config_preview(config, theme))
+            .child(self.render_profile_statistics(theme))
+            .when_some(config, |view, config| {
+                view.child(runtime_config_preview(config, theme))
+            })
+            .when(config.is_none(), |view| {
+                view.child(
+                    div()
+                        .m_3()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(zenclash_i18n::text("runtime.empty.unavailable")),
+                )
+            })
+    }
+    fn render_profile_statistics(&self, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
+        let (proxies, groups, rules) = match &self.data {
+            super::super::super::RuntimeData::Profile {
+                proxy_count,
+                group_count,
+                rule_count,
+                ..
+            } => (*proxy_count, *group_count, *rule_count),
+            _ => (None, None, None),
+        };
+        h_flex().px_3().gap_3().children(
+            [
+                (
+                    "profiles.metrics.proxies",
+                    proxies,
+                    gpui_kit::assets::IconName::Globe,
+                ),
+                (
+                    "profiles.metrics.groups",
+                    groups,
+                    gpui_kit::assets::IconName::Layers,
+                ),
+                (
+                    "profiles.metrics.rules",
+                    rules,
+                    gpui_kit::assets::IconName::File,
+                ),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (key, count, icon))| {
+                h_flex()
+                    .id(("profile-statistic", index))
+                    .test_support()
+                    .flex_1()
+                    .min_w_0()
+                    .p_3()
+                    .gap_3()
+                    .rounded(theme.radius)
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.group_box)
+                    .child(
+                        div()
+                            .size_11()
+                            .flex_shrink_0()
+                            .rounded(theme.radius)
+                            .bg(crate::design::workspace_background(theme))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(Icon::new(icon).size_6()),
+                    )
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(zenclash_i18n::text(key)),
+                            )
+                            .child(
+                                div()
+                                    .text_2xl()
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                    .child(count.map_or_else(
+                                        || "—".into(),
+                                        |value| {
+                                            let digits = value.to_string();
+                                            digits.chars().enumerate().fold(
+                                                String::new(),
+                                                |mut text, (index, digit)| {
+                                                    if index > 0
+                                                        && (digits.len() - index).is_multiple_of(3)
+                                                    {
+                                                        text.push(',');
+                                                    }
+                                                    text.push(digit);
+                                                    text
+                                                },
+                                            )
+                                        },
+                                    )),
+                            ),
+                    )
+            }),
+        )
     }
 }
 
@@ -256,7 +359,12 @@ fn runtime_config_preview(
         ),
         (
             zenclash_i18n::text("profiles.current.mode"),
-            super::super::super::empty_dash(&config.mode),
+            match config.mode.as_str() {
+                "rule" => zenclash_i18n::text("home.controls.mode_rule"),
+                "global" => zenclash_i18n::text("home.controls.mode_global"),
+                "direct" => zenclash_i18n::text("home.controls.mode_direct"),
+                _ => super::super::super::empty_dash(&config.mode),
+            },
         ),
         (
             zenclash_i18n::text("profiles.current.log_level"),

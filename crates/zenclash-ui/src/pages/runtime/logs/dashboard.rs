@@ -1,7 +1,7 @@
 use super::*;
-use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::{ActiveTheme, WindowExt};
 
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::{InteractiveElement, TestSupportExt};
@@ -36,17 +36,6 @@ impl RuntimePage {
                     })),
             )
             .child(
-                Button::new("copy-support-safe-logs")
-                    .icon(gpui_kit::assets::IconName::Clipboard)
-                    .label(zenclash_i18n::text("logs.actions.copy_safe"))
-                    .small()
-                    .h_10()
-                    .outline()
-                    .loading(self.logs.copying)
-                    .disabled(presentation.entries.is_empty() || self.logs.copying)
-                    .on_click(cx.listener(|this, _, _, cx| this.copy_support_safe_logs(cx))),
-            )
-            .child(
                 Button::new("export-logs")
                     .icon(gpui_kit::assets::IconName::Upload)
                     .label(zenclash_i18n::text("logs.actions.export"))
@@ -58,41 +47,37 @@ impl RuntimePage {
                     .on_click(cx.listener(|this, _, _, cx| this.choose_log_export(cx))),
             )
             .child(
-                Button::new("clear-logs")
-                    .icon(gpui_kit::assets::IconName::Trash)
-                    .label(zenclash_i18n::text("logs.actions.clear"))
-                    .small()
-                    .h_10()
+                Button::new("log-settings")
                     .outline()
-                    .disabled(presentation.entries.is_empty())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        let owner = cx.entity().downgrade();
-                        if window.focused(cx).is_none() {
-                            window.focus(&this.focus_handle, cx);
-                        }
-                        window.open_alert_dialog(cx, move |dialog, _, _| {
-                            let owner = owner.clone();
-                            dialog
-                                .confirm()
-                                .title(zenclash_i18n::text("logs.ui.clear_title"))
-                                .description(zenclash_i18n::text("logs.ui.clear_description"))
-                                .ok_text(zenclash_i18n::text("logs.ui.clear_confirm"))
-                                .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
-                                .on_ok(move |_, _, cx| {
-                                    let _ = owner.update(cx, |this, cx| {
-                                        this.log_monitor.clear();
-                                        this.logs.paused = false;
-                                        this.logs.selected = None;
-                                        this.logs.page = 0;
-                                        this.logs.cancel_refresh();
-                                        this.update_log_presentation(cx);
-                                        cx.notify();
-                                    });
-                                    true
-                                })
-                        });
-                    })),
+                    .h_10()
+                    .label(zenclash_i18n::text("redesign.log_settings"))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_log_settings(window, cx)),
+                    ),
             )
+    }
+
+    pub(in crate::pages::runtime) fn log_stream_status(
+        &self,
+        theme: &gpui_kit::component::Theme,
+    ) -> gpui_kit::Div {
+        let color = if self.logs.connected {
+            theme.success
+        } else {
+            theme.muted_foreground
+        };
+        h_flex()
+            .gap_2()
+            .text_sm()
+            .text_color(color)
+            .child(div().size_2().rounded_full().bg(color))
+            .child(zenclash_i18n::text(if self.logs.paused {
+                "redesign.display_paused"
+            } else if self.logs.connected {
+                "redesign.receiving"
+            } else {
+                "logs.stream.reconnecting"
+            }))
     }
 
     pub(super) fn log_dashboard(
@@ -102,13 +87,13 @@ impl RuntimePage {
     ) -> gpui_kit::AnyElement {
         let presentation = &self.logs.presentation;
         let ready = presentation.revision.is_some();
-        let page = list_page(presentation.matches.len(), self.logs.page, LOGS_PER_PAGE);
         let mut table = panel(theme)
             .id("logs-table")
             .test_support()
             .max_w_full()
             .gap_0()
-            .min_h(gpui_kit::rems(49.))
+            .flex_1()
+            .min_h_0()
             .w_full()
             .min_w_0()
             .child(
@@ -126,164 +111,270 @@ impl RuntimePage {
                                 .h_10(),
                         ),
                     )
-                    .child(self.log_level_filters(cx)),
-            )
-            .child(log_columns(theme));
-        let mut rows = v_flex()
-            .gap_0()
-            .when(presentation.matches.is_empty(), |this| {
-                this.child(empty_state(
-                    zenclash_i18n::text(if !ready {
-                        "runtime.empty.loading"
-                    } else if presentation.entries.is_empty() {
-                        "logs.empty.waiting"
-                    } else {
-                        "logs.empty.filtered"
-                    }),
-                    theme,
-                ))
-            });
-        for &index in &presentation.matches[page.start..page.end] {
-            let row = &presentation.rows[index];
-            let entry = presentation.entries[index].clone();
-            let selected = self
-                .logs
-                .selected
-                .as_ref()
-                .is_some_and(|selected| Arc::ptr_eq(&selected.0, &entry));
-            let id = Arc::as_ptr(&entry) as usize;
-            let selected_row = row.clone();
-            rows = rows.child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .gap_3()
-                    .min_h(gpui_kit::rems(2.5))
-                    .py_1()
-                    .px_2()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .when(selected, |row| {
-                        row.rounded(theme.radius).bg(theme.table_active)
-                    })
                     .child(
                         div()
-                            .w_24()
-                            .flex_shrink_0()
-                            .text_sm()
-                            .truncate()
-                            .child(row.time.clone()),
-                    )
-                    .child(
-                        h_flex()
-                            .w(gpui_kit::rems(7.))
-                            .flex_shrink_0()
-                            .child(level_badge(row.level.clone(), theme)),
-                    )
-                    .child(
-                        div().flex_1().min_w_0().child(
-                            Button::new(("inspect-log", id))
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .min_w_0()
-                                        .text_sm()
-                                        .truncate()
-                                        .child(row.payload.clone()),
-                                )
-                                .accessibility_label(zenclash_i18n::text("logs.actions.inspect"))
-                                .tooltip(row.payload.clone())
-                                .small()
-                                .w_full()
-                                .justify_start()
-                                .px_0()
-                                .when(selected, |button| {
-                                    button.font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                })
-                                .custom(ButtonCustomVariant::new(cx).foreground(theme.foreground))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.logs.selected =
-                                        Some((entry.clone(), selected_row.clone()));
-                                    cx.notify();
-                                })),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .w_20()
-                            .flex_shrink_0()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child(column_source(row.time_source)),
+                            .child(zenclash_i18n::text("redesign.core_logs")),
+                    )
+                    .child(self.log_level_filters(cx))
+                    .child(
+                        Button::new("clear-logs")
+                            .icon(gpui_kit::assets::IconName::Trash)
+                            .label(zenclash_i18n::text("redesign.clear_log_list"))
+                            .small()
+                            .h_10()
+                            .outline()
+                            .disabled(presentation.entries.is_empty())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let owner = cx.entity().downgrade();
+                                if window.focused(cx).is_none() {
+                                    window.focus(&this.focus_handle, cx);
+                                }
+                                window.open_alert_dialog(cx, move |dialog, _, _| {
+                                    let owner = owner.clone();
+                                    dialog
+                                        .confirm()
+                                        .title(zenclash_i18n::text("logs.ui.clear_title"))
+                                        .description(zenclash_i18n::text(
+                                            "logs.ui.clear_description",
+                                        ))
+                                        .ok_text(zenclash_i18n::text("logs.ui.clear_confirm"))
+                                        .ok_variant(
+                                            gpui_kit::component::button::ButtonVariant::Danger,
+                                        )
+                                        .on_ok(move |_, _, cx| {
+                                            let _ = owner.update(cx, |this, cx| {
+                                                this.log_monitor.clear();
+                                                this.logs.paused = false;
+                                                this.logs.selected = None;
+                                                this.logs.page = 0;
+                                                this.logs.cancel_refresh();
+                                                this.update_log_presentation(cx);
+                                                cx.notify();
+                                            });
+                                            true
+                                        })
+                                });
+                            })),
                     ),
-            );
-        }
+            )
+            .child(log_columns(theme));
+        let owner = cx.entity().downgrade();
         table = table.child(
             div()
-                .id(("log-table-viewport", page.index))
-                .h(gpui_kit::rems(30.))
-                .overflow_y_scrollbar()
-                .child(rows),
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .when(presentation.matches.is_empty(), |view| {
+                    view.child(empty_state(
+                        zenclash_i18n::text(if !ready {
+                            "runtime.empty.loading"
+                        } else if presentation.entries.is_empty() {
+                            "logs.empty.waiting"
+                        } else {
+                            "logs.empty.filtered"
+                        }),
+                        theme,
+                    ))
+                })
+                .when(!presentation.matches.is_empty(), |view| {
+                    view.child(
+                        gpui_kit::uniform_list(
+                            "log-table-viewport",
+                            presentation.matches.len(),
+                            move |range, _, cx| {
+                                owner
+                                    .update(cx, |page, cx| {
+                                        let theme = cx.theme().clone();
+                                        range
+                                            .filter_map(|position| {
+                                                page.logs
+                                                    .presentation
+                                                    .matches
+                                                    .get(position)
+                                                    .copied()
+                                            })
+                                            .map(|index| page.render_log_row(index, &theme, cx))
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_default()
+                            },
+                        )
+                        .track_scroll(&self.logs.scroll)
+                        .h_full()
+                        .w_full(),
+                    )
+                })
+                .vertical_scrollbar(&self.logs.scroll),
         );
-        table = table.child(div().flex_1()).child(
+        table = table.child(
             h_flex()
                 .justify_between()
                 .flex_wrap()
                 .gap_2()
-                .pt_4()
-                .border_t_1()
-                .border_color(theme.border)
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child(pagination_summary(page, presentation.matches.len())),
-                )
+                .pt_3()
+                .child(div().text_sm().text_color(theme.muted_foreground).child(
+                    zenclash_i18n::text_with(
+                        "redesign.log_count",
+                        &[("count", presentation.matches.len().to_string())],
+                    ),
+                ))
                 .child(
                     h_flex()
                         .gap_2()
                         .child(self.render_log_order(cx))
                         .child(
-                            Button::new("previous-logs-page")
-                                .icon(IconName::ChevronLeft)
-                                .small()
-                                .h_10()
-                                .outline()
-                                .label(zenclash_i18n::text("common.actions.previous_page"))
-                                .disabled(page.index == 0)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.set_logs_page(page.index.saturating_sub(1), cx)
+                            div()
+                                .text_sm()
+                                .child(zenclash_i18n::text("redesign.auto_scroll")),
+                        )
+                        .child(
+                            crate::components::mint_switch::MintSwitch::new("log-auto-scroll")
+                                .accessibility_label(zenclash_i18n::text("redesign.auto_scroll"))
+                                .checked(self.logs.auto_scroll)
+                                .on_click(cx.listener(|page, checked, _, cx| {
+                                    page.logs.auto_scroll = *checked;
+                                    if *checked {
+                                        page.jump_to_latest_log(cx);
+                                    }
+                                    cx.notify();
                                 })),
                         )
                         .child(
-                            Button::new("next-logs-page")
-                                .icon(IconName::ChevronRight)
-                                .small()
-                                .h_10()
+                            Button::new("jump-to-latest-log")
                                 .outline()
-                                .label(zenclash_i18n::text("common.actions.next_page"))
-                                .disabled(page.index + 1 >= page.count)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.set_logs_page(page.index + 1, cx)
-                                })),
+                                .small()
+                                .label(zenclash_i18n::text("redesign.jump_latest"))
+                                .on_click(
+                                    cx.listener(|page, _, _, cx| page.jump_to_latest_log(cx)),
+                                ),
                         ),
                 ),
         );
         v_flex()
+            .h_full()
+            .min_h_0()
             .gap_3()
             .child(
-                render_log_header(
-                    presentation.entries.len(),
-                    presentation.matches.len(),
-                    presentation.query.is_empty() && presentation.level_filter.is_none(),
-                    ready.then_some(self.logs.connected),
-                    presentation.rows.last().map(|row| row.time.clone()),
-                    theme,
-                )
-                .child(div().flex_1())
-                .child(self.render_log_collection_level(cx)),
+                h_flex().gap_4().py_2().flex_wrap().children(
+                    [
+                        (None, "logs.levels.all"),
+                        (Some("INFO"), "redesign.log_info"),
+                        (Some("WARNING"), "redesign.log_warning"),
+                        (Some("ERROR"), "redesign.log_error"),
+                    ]
+                    .into_iter()
+                    .map(|(level, label)| {
+                        let count = level.map_or(presentation.entries.len() as u64, |level| {
+                            presentation
+                                .level_counts
+                                .iter()
+                                .find(|(name, _)| name == level)
+                                .map_or(0, |(_, count)| *count)
+                        });
+                        h_flex()
+                            .gap_2()
+                            .text_sm()
+                            .text_color(
+                                level.map_or(theme.foreground, |level| level_color(level, theme)),
+                            )
+                            .child(zenclash_i18n::text(label))
+                            .child(
+                                div()
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                    .child(count.to_string()),
+                            )
+                    }),
+                ),
             )
             .child(table)
+            .into_any_element()
+    }
+
+    fn render_log_row(
+        &self,
+        index: usize,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let presentation = &self.logs.presentation;
+        let row = &presentation.rows[index];
+        let entry = presentation.entries[index].clone();
+        let selected = self
+            .logs
+            .selected
+            .as_ref()
+            .is_some_and(|selected| Arc::ptr_eq(&selected.0, &entry));
+        let id = Arc::as_ptr(&entry) as usize;
+        let selected_row = row.clone();
+        let detail_entry = entry.clone();
+        let detail_row = row.clone();
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .gap_3()
+            .h(gpui_kit::rems(2.75))
+            .py_1()
+            .px_2()
+            .border_b_1()
+            .border_color(theme.border)
+            .when(selected, |row| {
+                row.rounded(theme.radius).bg(theme.table_active)
+            })
+            .child(
+                div()
+                    .w_24()
+                    .flex_shrink_0()
+                    .text_sm()
+                    .truncate()
+                    .child(row.time.clone()),
+            )
+            .child(
+                h_flex()
+                    .w(gpui_kit::rems(7.))
+                    .flex_shrink_0()
+                    .child(level_badge(row.level.clone(), theme)),
+            )
+            .child(
+                div().flex_1().min_w_0().child(
+                    Button::new(("inspect-log", id))
+                        .child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .text_sm()
+                                .truncate()
+                                .font_family(theme.mono_font_family.clone())
+                                .child(row.payload.clone()),
+                        )
+                        .accessibility_label(zenclash_i18n::text("logs.actions.inspect"))
+                        .tooltip(row.payload.clone())
+                        .small()
+                        .w_full()
+                        .justify_start()
+                        .px_0()
+                        .when(selected, |button| {
+                            button.font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        })
+                        .custom(ButtonCustomVariant::new(cx).foreground(theme.foreground))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.logs.selected = Some((entry.clone(), selected_row.clone()));
+                            this.open_log_details(window, cx);
+                        })),
+                ),
+            )
+            .child(
+                Button::new(("log-details", id))
+                    .small()
+                    .ghost()
+                    .w_20()
+                    .label(zenclash_i18n::text("redesign.details"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.logs.selected = Some((detail_entry.clone(), detail_row.clone()));
+                        this.open_log_details(window, cx);
+                    })),
+            )
             .into_any_element()
     }
 
@@ -298,23 +389,22 @@ impl RuntimePage {
             ]
             .into_iter()
             .map(|level| {
-                let label =
-                    level.map_or_else(|| zenclash_i18n::text("logs.levels.all"), str::to_owned);
+                let label = level.map_or_else(
+                    || zenclash_i18n::text("logs.levels.all"),
+                    |level| {
+                        zenclash_i18n::text(match level {
+                            "INFO" => "redesign.log_info",
+                            "WARNING" => "redesign.log_warning",
+                            "ERROR" => "redesign.log_error",
+                            _ => "redesign.log_debug",
+                        })
+                    },
+                );
                 Button::new((
                     gpui_kit::ElementId::from("log-level-filter"),
                     level.unwrap_or("ALL").to_owned(),
                 ))
-                .label(format!(
-                    "{label} {}",
-                    level.map_or(self.logs.presentation.entries.len() as u64, |level| {
-                        self.logs
-                            .presentation
-                            .level_counts
-                            .iter()
-                            .find(|(name, _)| name == level)
-                            .map_or(0, |(_, count)| *count)
-                    })
-                ))
+                .label(label)
                 .small()
                 .h_10()
                 .outline()
@@ -363,64 +453,6 @@ impl RuntimePage {
                 menu
             })
     }
-
-    fn render_log_collection_level(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
-        let current = self.logs.level;
-        let owner = cx.entity().downgrade();
-        h_flex()
-            .gap_3()
-            .child(
-                div()
-                    .text_xs()
-                    .child(zenclash_i18n::text("logs.collection_level")),
-            )
-            .child(
-                Button::new("log-collection-level")
-                    .tooltip(current.map_or_else(
-                        || zenclash_i18n::text("runtime.empty.loading"),
-                        log_level_description,
-                    ))
-                    .small()
-                    .h_10()
-                    .outline()
-                    .dropdown_caret(true)
-                    .label(
-                        current
-                            .map_or_else(|| "—".into(), |level| level.api_value().to_uppercase()),
-                    )
-                    .disabled(
-                        self.core_busy()
-                            || self.config_inputs_loading
-                            || !self
-                                .config_inputs
-                                .is_for_profile(self.profile_path.as_deref()),
-                    )
-                    .dropdown_menu(move |mut menu, _, _| {
-                        for level in [
-                            MihomoLogLevel::Info,
-                            MihomoLogLevel::Debug,
-                            MihomoLogLevel::Warning,
-                            MihomoLogLevel::Error,
-                            MihomoLogLevel::Silent,
-                        ] {
-                            let owner = owner.clone();
-                            menu = menu.item(
-                                PopupMenuItem::new(level.api_value().to_uppercase())
-                                    .checked(current == Some(level))
-                                    .on_click(move |_, _, cx| {
-                                        let _ =
-                                            owner.update(cx, |page, cx| {
-                                                page.apply_controlled_config(
-                                        serde_json::json!({"log-level": level.api_value()}),
-                                        zenclash_i18n::text("logs.collection_level_updated"), cx);
-                                            });
-                                    }),
-                            );
-                        }
-                        menu
-                    }),
-            )
-    }
 }
 
 fn panel(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
@@ -433,19 +465,12 @@ fn panel(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
         .bg(theme.group_box)
 }
 
-fn column_source(source: LogTimeSource) -> String {
-    zenclash_i18n::text(match source {
-        LogTimeSource::Core => "logs.ui.core",
-        LogTimeSource::LocalReceive => "logs.ui.local",
-    })
-}
-
 fn level_color(level: &str, theme: &gpui_kit::component::Theme) -> gpui_kit::Hsla {
     match level {
         "ERROR" => theme.danger,
         "WARNING" | "WARN" => theme.warning,
-        "DEBUG" => theme.chart_1.opacity(0.65),
-        _ => theme.chart_1,
+        "DEBUG" => theme.muted_foreground,
+        _ => theme.muted_foreground,
     }
 }
 
@@ -472,11 +497,7 @@ fn log_columns(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
                 .flex_1()
                 .child(zenclash_i18n::text("logs.columns.message")),
         )
-        .child(
-            div()
-                .w_20()
-                .child(zenclash_i18n::text("logs.columns.source")),
-        )
+        .child(div().w_20().child(zenclash_i18n::text("redesign.details")))
 }
 
 fn level_badge(level: gpui_kit::SharedString, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {

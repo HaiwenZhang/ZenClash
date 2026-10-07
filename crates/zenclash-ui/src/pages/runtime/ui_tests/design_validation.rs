@@ -76,6 +76,7 @@ fn native_pages_render_for_design_validation() {
         .with_assets(crate::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
             zenclash_i18n::set_locale(locale);
             let mut owners = None;
             let window = cx
@@ -187,6 +188,8 @@ fn native_pages_render_for_design_validation() {
                             Page::Profiles,
                             Page::Connections,
                             Page::Rules,
+                            Page::Logs,
+                            Page::Network,
                             Page::Settings,
                         ] {
                             cx.update(|cx| {
@@ -330,32 +333,22 @@ fn native_pages_render_for_design_validation() {
                                             }
                                             window.click(("rule-details", identity), cx);
                                             window.render_frame(cx);
+                                            window.render_frame(cx);
+                                            window.render_to_image().map_err(|error| error.to_string())?.save(output.join(format!("rules-details-{suffix}{viewport}.png"))).map_err(|error| error.to_string())?;
+                                            window.press("escape", cx);
+                                            window.render_frame(cx);
                                         }
                                         if destination == Page::Network && live.is_none() {
-                                            let toggle = "toggle-network-diagnostic-details";
                                             let supplemental = "diagnostic-status:DnsAaaa";
-                                            if window.try_find(supplemental).is_some() || window.try_find(("network-provider", 0_usize)).is_some() {
-                                                return Err("healthy supplemental results/options should start collapsed".to_owned());
+                                            if window.try_find("toggle-network-diagnostic-details").is_some() || window.try_find(supplemental).is_none() {
+                                                return Err("diagnostic results must be directly available".into());
                                             }
-                                            if !window.try_find(toggle).is_some_and(|target| target.visible()) {
-                                                return Err("supplemental diagnostic results are not reachable".to_owned());
-                                            }
-                                            window.click(toggle, cx);
+                                            window.click("diagnostic-details:DnsAaaa", cx);
                                             window.render_frame(cx);
-                                            if !page.read(cx).network_probe.details_expanded {
-                                                return Err("diagnostic expansion did not respond".to_owned());
-                                            }
-                                            if !window.try_find(supplemental).is_some_and(|target| target.visible()) || !window.try_find(("network-provider", 0_usize)).is_some_and(|target| target.visible()) {
-                                                return Err("expanded diagnostics do not expose supplemental results and provider options".to_owned());
-                                            }
-                                            window.hover("design-validation-pointer-target", cx);
                                             window.render_frame(cx);
-                                            window.render_to_image().map_err(|error| error.to_string())?.save(output.join(format!("network-{suffix}-expanded{viewport}.png"))).map_err(|error| error.to_string())?;
-                                            window.click(toggle, cx);
+                                            window.render_to_image().map_err(|error| error.to_string())?.save(output.join(format!("network-details-{suffix}{viewport}.png"))).map_err(|error| error.to_string())?;
+                                            window.press("escape", cx);
                                             window.render_frame(cx);
-                                            if page.read(cx).network_probe.details_expanded {
-                                                return Err("diagnostic collapse did not respond".to_owned());
-                                            }
                                             let previous = page.update(cx, |page, cx| {
                                                 let step = page.network_probe.report.as_mut().unwrap().steps.iter_mut().find(|step| step.kind == DiagnosticStepKind::DnsAaaa).unwrap();
                                                 let previous = step.outcome.clone();
@@ -376,6 +369,38 @@ fn native_pages_render_for_design_validation() {
                                             });
                                             window.render_frame(cx);
                                         }
+                                        if destination == Page::Profiles && live.is_none() {
+                                            if window.try_find("profiles-advanced").is_some() || window.try_find("profile-manage-overrides").is_some() {
+                                                return Err("removed profile controls remain visible".into());
+                                            }
+                                            let original = page.update(cx, |page, cx| {
+                                                let original = page.profiles.catalog.clone();
+                                                page.profiles.catalog.profiles.truncate(1);
+                                                page.profiles.forms.catalog_view.prepare(&page.profiles.catalog);
+                                                cx.notify();
+                                                original
+                                            });
+                                            window.render_frame(cx);
+                                            window.render_to_image().map_err(|error| error.to_string())?
+                                                .save(output.join(format!("profiles-current-{suffix}{viewport}.png"))).map_err(|error| error.to_string())?;
+                                            let id = page.read(cx).profiles.catalog.profiles[0].id.clone();
+                                            page.update(cx, |page, cx| page.begin_edit_remote_profile(id, window, cx));
+                                            window.render_frame(cx);
+                                            window.render_frame(cx);
+                                            let dialog = window.try_find("profile-request-dialog").ok_or("request settings did not open a modal")?.bounds();
+                                            if dialog.left() < px(0.) || dialog.right() > window.viewport_size().width {
+                                                return Err("request modal extends outside viewport".into());
+                                            }
+                                            window.render_to_image().map_err(|error| error.to_string())?
+                                                .save(output.join(format!("profiles-request-settings-{suffix}{viewport}.png"))).map_err(|error| error.to_string())?;
+                                            window.press("escape", cx);
+                                            page.update(cx, |page, cx| {
+                                                page.profiles.catalog = original;
+                                                page.profiles.forms.catalog_view.prepare(&page.profiles.catalog);
+                                                cx.notify();
+                                            });
+                                            window.render_frame(cx);
+                                        }
                                         if destination == Page::Logs {
                                             let first_log = page.read(cx).logs.design_validation_log_id();
                                             if let Some(id) = first_log {
@@ -385,6 +410,16 @@ fn native_pages_render_for_design_validation() {
                                                     return Err("long log pushes its detail action outside the table".to_owned());
                                                 }
                                                 window.click(("inspect-log", id), cx);
+                                                window.render_frame(cx);
+                                                window.render_frame(cx);
+                                                window.render_to_image().map_err(|error| error.to_string())?.save(output.join(format!("logs-details-{suffix}{viewport}.png"))).map_err(|error| error.to_string())?;
+                                                window.press("escape", cx);
+                                                window.render_frame(cx);
+                                                window.click("log-settings", cx);
+                                                window.render_frame(cx);
+                                                window.render_frame(cx);
+                                                window.render_to_image().map_err(|error| error.to_string())?.save(output.join(format!("logs-settings-{suffix}{viewport}.png"))).map_err(|error| error.to_string())?;
+                                                window.press("escape", cx);
                                                 window.render_frame(cx);
                                             }
                                         }
@@ -404,6 +439,23 @@ fn native_pages_render_for_design_validation() {
                                                 }
                                             }
                                         }
+                                        if destination == Page::Proxies && live.is_none() {
+                                            if window.try_find("proxies-show-hidden").is_some() || window.try_find("next-proxy-group-page").is_some() || window.try_find("proxy-node-inspector").is_some() {
+                                                return Err("proxy workspace contains removed controls or a side inspector".to_owned());
+                                            }
+                                            window.click(gpui_kit::ElementId::from((gpui_kit::ElementId::from((gpui_kit::ElementId::from("proxy-node-details"), "节点选择".to_owned())), "Hong Kong 01".to_owned())), cx);
+                                            window.render_frame(cx);
+                                            let details = window.find("proxy-node-inspector").bounds();
+                                            if details.left() < px(0.) || details.right() > window.viewport_size().width + px(1.) {
+                                                return Err(format!("node details dialog overflows: {details:?}"));
+                                            }
+                                            window.hover("design-validation-pointer-target", cx);
+                                            window.render_frame(cx);
+                                            window.render_to_image().map_err(|error| error.to_string())?.save(output.join(format!("proxies-details-{suffix}{viewport}.png"))).map_err(|error| error.to_string())?;
+                                            window.press("escape", cx);
+                                            window.render_frame(cx);
+                                            if window.try_find("proxy-node-inspector").is_some() { return Err("node details did not close with Escape".to_owned()); }
+                                        }
                                         let bounds = window.viewport_size();
                                         let mut metadata = serde_json::json!({
                                             "viewport_width": f32::from(bounds.width),
@@ -415,15 +467,22 @@ fn native_pages_render_for_design_validation() {
                                         let regions: &[&str] = match destination {
                                             Page::Home => &["home-runtime-card", "home-traffic-row", "home-speed-row", "home-node-panel", "home-group-row", "home-node-row"],
                                             Page::Proxies => &["proxy-node-panel"],
-                                            Page::Connections => &["connections-table"],
+                                            Page::Connections => &["connection-statistics", "connections-table"],
                                             Page::Profiles => if width >= 1088. { &["profiles-catalog-region", "profiles-inspector-region"] } else { &["profiles-catalog-region"] },
                                             Page::Rules => &["rules-table-panel"],
+                                            Page::Logs => &["logs-table"],
                                             Page::Settings => &["settings-appearance-card", "settings-startup-card"],
                                             _ => &[],
                                         };
                                         let mut geometry = serde_json::Map::new();
                                         for &id in regions {
                                             let region = window.try_find(id).ok_or_else(|| format!("missing region {id}"))?.bounds();
+                                            if destination == Page::Connections && id == "connections-table" && width >= 1280. {
+                                                let bottom_gap = bounds.height - region.bottom();
+                                                if bottom_gap < px(8.) || bottom_gap > px(20.) {
+                                                    return Err(format!("connection panel bottom gap is {bottom_gap:?}"));
+                                                }
+                                            }
                                             if region.left() < px(0.) || region.right() > bounds.width + px(1.) {
                                                 if let Ok(image) = window.render_to_image() {
                                                     let _ = image.save(output.join(format!("{}-{suffix}{viewport}-overflow.png", destination.route())));

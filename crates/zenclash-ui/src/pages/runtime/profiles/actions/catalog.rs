@@ -1,10 +1,12 @@
-use gpui_kit::Focusable;
+use gpui_kit::component::{ActiveTheme, WindowExt};
+use gpui_kit::prelude::FluentBuilder;
+use gpui_kit::{AppContext, Focusable, ParentElement, Styled};
 use zenclash_core::ProfileSource;
 
 use super::{Context, Page, RemoteProfileOptions, RuntimePage, Window, workflow};
 
 impl RuntimePage {
-    pub(in super::super) fn begin_edit_remote_profile(
+    pub(in crate::pages::runtime) fn begin_edit_remote_profile(
         &mut self,
         id: String,
         window: &mut Window,
@@ -68,6 +70,37 @@ impl RuntimePage {
         self.profiles.forms.editing_route = options.route();
         self.profiles.forms.editing_fixed_update_interval = options.fixed_update_interval;
         self.profiles.forms.editing_profile_id = Some(id);
+        self.error = None;
+        let owner = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let content = owner
+                .update(cx, |page, cx| {
+                    let theme = cx.theme().clone();
+                    page.render_remote_profile_editor(&theme, cx)
+                })
+                .ok();
+            let cancel_owner = owner.clone();
+            dialog
+                .title(zenclash_i18n::text("profiles.actions.request_settings"))
+                .width(window.rem_size() * 34.)
+                .bg(cx.theme().group_box)
+                .margin_top(
+                    ((window.viewport_size().height - window.rem_size() * 35.) / 2.)
+                        .max(gpui_kit::px(16.)),
+                )
+                .when_some(content, |dialog, content| dialog.child(content))
+                .on_cancel(move |_, _, cx| {
+                    cancel_owner
+                        .update(cx, |page, cx| {
+                            if page.core_busy() {
+                                return false;
+                            }
+                            page.cancel_edit_remote_profile(cx);
+                            true
+                        })
+                        .unwrap_or(true)
+                })
+        });
         self.profiles
             .forms
             .request_name
@@ -83,7 +116,10 @@ impl RuntimePage {
         cx.notify();
     }
 
-    pub(in super::super) fn save_remote_profile_settings(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::pages::runtime) fn save_remote_profile_settings(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
         let Some(id) = self.profiles.forms.editing_profile_id.clone() else {
             return;
         };
@@ -177,7 +213,12 @@ impl RuntimePage {
                 match result {
                     Ok(()) => {
                         this.reload_profile_catalog(cx);
-                        this.profiles.forms.editing_profile_id = None;
+                        let was_editing = this.profiles.forms.editing_profile_id.take().is_some();
+                        if was_editing && this.is_page_task_current(token) {
+                            let _ = cx.update_window(this.window_handle, |_, window, cx| {
+                                window.close_dialog(cx)
+                            });
+                        }
                         if this.is_page_task_current(token) {
                             this.notice =
                                 Some(zenclash_i18n::text("profiles.notices.request_saved"));

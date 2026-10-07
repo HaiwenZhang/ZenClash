@@ -277,7 +277,7 @@ mod tests {
 
         let targets = network_latency_targets(&custom);
 
-        assert_eq!(targets.len(), 4);
+        assert_eq!(targets.len(), DEFAULT_NETWORK_LATENCY_TARGETS.len() + 1);
         assert_eq!(targets.last().unwrap().name, "Custom");
     }
 

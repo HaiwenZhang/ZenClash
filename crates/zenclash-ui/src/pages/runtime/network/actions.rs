@@ -5,7 +5,7 @@ use zenclash_core::{
 };
 
 use super::{DnsCacheAction, NetworkPreferenceChange, model};
-use crate::pages::runtime::{ClipboardItem, Context, Page, RuntimeData, RuntimePage};
+use crate::pages::runtime::{Context, Page, RuntimeData, RuntimePage};
 
 impl RuntimePage {
     pub(in crate::pages::runtime) fn cancel_network_probe(&mut self) {
@@ -190,19 +190,51 @@ impl RuntimePage {
         cx.notify();
     }
 
-    pub(in crate::pages::runtime) fn copy_network_support_bundle(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) {
+    pub(in crate::pages::runtime) fn export_network_report(&mut self, cx: &mut Context<Self>) {
         let Some(report) = self.network_probe.report.as_ref() else {
             return;
         };
         let diagnostics =
             NetworkDiagnostics::new(self.client.clone(), self.operational_status.clone());
-        let bundle = diagnostics.export(report, SupportSafe);
-        cx.write_to_clipboard(ClipboardItem::new_string(bundle.json));
-        self.notice = Some(zenclash_i18n::text("network.notices.support_bundle_copied"));
-        cx.notify();
+        let payload = diagnostics.export(report, SupportSafe).json;
+        let token = self.page_task_token_for(Page::Network);
+        let receiver =
+            cx.prompt_for_new_path(&std::env::temp_dir(), Some("zenclash-network-report.json"));
+        cx.spawn(async move |this, cx| {
+            let path = match receiver.await {
+                Ok(Ok(Some(path))) => path,
+                Ok(Ok(None)) => return,
+                result => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.set_page_error(token, format!("{result:?}"));
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let task = this.update(cx, |this, _| {
+                this.runtime
+                    .spawn_blocking(move || std::fs::write(path, payload))
+            });
+            let result = match task {
+                Ok(task) => task
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(|result| result.map_err(|error| error.to_string())),
+                Err(_) => return,
+            };
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) if this.is_page_task_current(token) => {
+                        this.notice = Some(zenclash_i18n::text("redesign.report_saved"))
+                    }
+                    Ok(()) => {}
+                    Err(error) => this.set_page_error(token, error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(super) fn add_network_latency_target(&mut self, cx: &mut Context<Self>) {
@@ -240,6 +272,7 @@ impl RuntimePage {
         ) else {
             return;
         };
+        let adding = matches!(&change, NetworkPreferenceChange::AddTarget(_));
         let task = self.runtime.spawn_blocking(move || {
             store
                 .update(|preferences| match change {
@@ -289,6 +322,17 @@ impl RuntimePage {
                             crate::pages::runtime::PreferenceScope::Network,
                             cx,
                         );
+                        if adding
+                            && this.is_page_task_current(token)
+                            && this.network_probe.adding_target
+                        {
+                            this.network_probe.adding_target = false;
+                            use gpui_kit::AppContext;
+                            use gpui_kit::component::WindowExt;
+                            let _ = cx.update_window(this.window_handle, |_, window, cx| {
+                                window.close_dialog(cx)
+                            });
+                        }
                         this.cancel_network_probe();
                         if this.is_page_task_current(token) {
                             this.refresh_network_probe(cx);

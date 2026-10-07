@@ -9,13 +9,15 @@ use gpui_kit::StatefulInteractiveElement;
 impl RuntimePage {
     fn render_header(
         &self,
-        _theme: &gpui_kit::component::Theme,
+        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let refresh = Button::new("refresh-runtime-page")
             .icon(AppIcon::RefreshCw)
             .label(zenclash_i18n::text(if self.loading {
                 "common.actions.loading"
+            } else if self.page == Page::Network {
+                "redesign.recheck"
             } else {
                 "common.actions.refresh"
             }))
@@ -27,7 +29,13 @@ impl RuntimePage {
             .outline()
             .loading(self.loading)
             .disabled(self.core_busy())
-            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx)));
+            .on_click(cx.listener(|this, _, _, cx| {
+                if this.page == Page::Network {
+                    this.refresh_network_probe(cx);
+                } else {
+                    this.refresh(cx);
+                }
+            }));
         let commands = match self.page {
             Page::Home => div().into_any_element(),
             Page::Profiles => h_flex()
@@ -45,32 +53,17 @@ impl RuntimePage {
                 .gap_2()
                 .child(refresh)
                 .child(
-                    Button::new("copy-support-bundle")
+                    Button::new("export-network-report")
                         .icon(gpui_kit::component::IconName::Copy)
-                        .label(zenclash_i18n::text("network.diagnostics.copy_support"))
+                        .label(zenclash_i18n::text("redesign.export_report"))
                         .small()
                         .h_10()
                         .outline()
                         .disabled(self.network_probe.report.is_none())
-                        .on_click(
-                            cx.listener(|this, _, _, cx| this.copy_network_support_bundle(cx)),
-                        ),
+                        .on_click(cx.listener(|this, _, _, cx| this.export_network_report(cx))),
                 )
                 .into_any_element(),
-            Page::Rules => h_flex()
-                .gap_2()
-                .child(refresh)
-                .child(
-                    Button::new("rules-resources")
-                        .label(zenclash_i18n::text("rules.details.resources"))
-                        .small()
-                        .h_10()
-                        .outline()
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(crate::app::NavigateResources), cx)
-                        }),
-                )
-                .into_any_element(),
+            Page::Rules => refresh.into_any_element(),
             _ => refresh.into_any_element(),
         };
         v_flex()
@@ -87,12 +80,15 @@ impl RuntimePage {
                     .flex_wrap()
                     .items_end()
                     .justify_between()
-                    .child(div().child(workspace::title(self.page, cx)))
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .child(workspace::title(self.page, cx))
+                            .when(self.page == Page::Logs, |view| {
+                                view.child(self.log_stream_status(theme))
+                            }),
+                    )
                     .child(commands),
-            )
-            .when(
-                matches!(self.page, Page::Rules | Page::Logs | Page::Network),
-                |header| header.child(workspace::diagnostics_navigation(self.page)),
             )
     }
 
@@ -178,7 +174,7 @@ impl RuntimePage {
             Page::Tun => self.render_tun(theme, cx),
             Page::Sniffer => self.render_sniffer(theme, cx),
             Page::Traffic => self.render_traffic(theme, cx),
-            Page::Network => self.render_network(theme, cx),
+            Page::Network => self.render_network(compact, theme, cx),
             Page::Dns => self.render_dns(theme, cx),
             Page::SystemProxy => self.render_system_proxy(theme, cx),
             Page::Override => self.render_override(theme, cx),
@@ -238,6 +234,13 @@ impl Render for RuntimePage {
                         .child(
                             v_flex()
                                 .min_w_0()
+                                .when(
+                                    matches!(
+                                        self.page,
+                                        Page::Connections | Page::Rules | Page::Logs
+                                    ),
+                                    |view| view.h_full(),
+                                )
                                 .gap_4()
                                 .px_6()
                                 .when(self.page != Page::Settings, |view| view.px_8())
