@@ -986,7 +986,12 @@ fn bootstrap_core(
         ))
     })?;
     for attempt in 1..=MANAGED_CONTROLLER_ATTEMPTS {
-        let controller = allocate_managed_controller().map_err(|error| {
+        let controller = (if core_kind == CoreKind::Mihomo {
+            MihomoEndpoint::local_ipc(&launch.home_dir).map_err(std::io::Error::other)
+        } else {
+            allocate_managed_controller()
+        })
+        .map_err(|error| {
             std::io::Error::other(zenclash_i18n::text_with(
                 "startup.controller_allocation",
                 &[

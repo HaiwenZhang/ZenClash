@@ -2,8 +2,8 @@ use zenclash_core::RuntimeConfig;
 
 use super::super::super::{
     Button, ButtonVariants, Context, Disableable, FluentBuilder, Icon, IconName, Input,
-    ParentElement, RemoteProfileRoute, RuntimePage, Sizable, Styled, div, h_flex, message_banner,
-    px, setting_card, v_flex,
+    ParentElement, RemoteProfileRoute, RuntimePage, Sizable, Styled, div, h_flex, px, setting_card,
+    v_flex,
 };
 
 use crate::components::mint_switch::MintSwitch as Switch;
@@ -58,10 +58,6 @@ impl RuntimePage {
                             theme,
                         ))
                         .child(self.render_subscription_route_controls(theme, cx)),
-                )
-                .when_some(
-                    self.profiles.forms.subscription_error.clone(),
-                    |this, error| this.child(message_banner(error, theme.danger, theme)),
                 )
                 .child(
                     h_flex()

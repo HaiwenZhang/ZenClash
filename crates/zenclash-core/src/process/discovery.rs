@@ -23,7 +23,7 @@ pub struct MihomoLaunchConfig {
     pub config_file: PathBuf,
     /// Writable Mihomo data directory passed with `-d`.
     pub home_dir: PathBuf,
-    /// Controller endpoint and secret parsed from the configuration.
+    /// Private IPC controller for Mihomo, or configured HTTP controller for other cores.
     pub endpoint: MihomoEndpoint,
     /// Optional isolated controller address passed with `-ext-ctl`.
     pub controller_override: Option<String>,
@@ -110,7 +110,7 @@ struct FileControllerConfig {
 }
 
 impl MihomoLaunchConfig {
-    /// Builds a launch configuration and reads its controller settings from YAML.
+    /// Builds a launch configuration with a private Mihomo IPC controller.
     ///
     /// # Errors
     ///
@@ -135,12 +135,18 @@ impl MihomoLaunchConfig {
         home_dir: impl Into<PathBuf>,
     ) -> MihomoResult<Self> {
         let config_file = config_file.into();
-        let endpoint = endpoint_from_config_file(&config_file)?;
+        let home_dir = home_dir.into();
+        let configured_endpoint = endpoint_from_config_file(&config_file)?;
+        let endpoint = if kind == CoreKind::Mihomo {
+            MihomoEndpoint::local_ipc(&home_dir)?
+        } else {
+            configured_endpoint
+        };
         Ok(Self {
             kind,
             binary: binary.into(),
             config_file,
-            home_dir: home_dir.into(),
+            home_dir,
             endpoint,
             controller_override: None,
         })
@@ -252,12 +258,13 @@ impl MihomoLaunchConfig {
                 Some(&lease),
             )?;
             crate::verify_ordinary_local_executable(&binary)?;
+            let endpoint = MihomoEndpoint::local_ipc(&home_dir)?;
             Ok(Self {
                 kind: CoreKind::Mihomo,
                 binary,
                 config_file,
                 home_dir,
-                endpoint: MihomoEndpoint::default(),
+                endpoint,
                 controller_override: None,
             })
         })

@@ -1,3 +1,4 @@
+use gpui_kit::AppContext;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -26,11 +27,13 @@ mod presentation;
 mod view;
 
 const MAX_LOCAL_DELAY_HISTORY: usize = 20;
-const PROXIES_PER_PAGE: usize = 9;
 const GROUPS_PER_PAGE: usize = 8;
 
 /// Interactive proxy-group catalog backed by Mihomo's live controller state.
 pub struct ProxiesPage {
+    feedback_notifications: crate::components::feedback::FeedbackNotifications,
+    _feedback_subscription: gpui_kit::Subscription,
+    window_handle: Option<gpui_kit::AnyWindowHandle>,
     client: MihomoClient,
     runtime: tokio::runtime::Handle,
     catalog: Option<Arc<ProxyCatalog>>,
@@ -41,7 +44,6 @@ pub struct ProxiesPage {
     outbound_mode: String,
     mode_revision: u64,
     expanded: HashSet<String>,
-    proxy_pages: HashMap<String, usize>,
     group_orders: presentation::GroupOrders,
     search_input: Option<gpui_kit::Entity<gpui_kit::component::input::InputState>>,
     search_subscription: Option<gpui_kit::Subscription>,
@@ -69,6 +71,8 @@ pub struct ProxiesPage {
     delay_generation: u64,
     error: Option<String>,
     notice: Option<String>,
+    show_node_details: bool,
+    node_focus: HashMap<(String, ProxyNodeId), gpui_kit::FocusHandle>,
     focus_handle: gpui_kit::FocusHandle,
 }
 
@@ -164,7 +168,36 @@ impl ProxiesPage {
         runtime: tokio::runtime::Handle,
         cx: &mut Context<Self>,
     ) -> Self {
+        let feedback_subscription = cx.observe_self(|this, cx| {
+            if let Some(handle) = this.window_handle {
+                let mut messages = Vec::new();
+                if let Some(error) = this.error.clone().or_else(|| {
+                    this.loading
+                        .then(|| this.feedback_notifications.current_message("proxy-error"))
+                        .flatten()
+                }) {
+                    messages.push(crate::components::feedback::Feedback::new(
+                        "proxy-error",
+                        crate::components::feedback::FeedbackKind::Error,
+                        error,
+                    ));
+                }
+                if let Some(notice) = &this.notice {
+                    messages.push(crate::components::feedback::Feedback::new(
+                        "proxy-notice",
+                        crate::components::feedback::FeedbackKind::Info,
+                        notice.clone(),
+                    ));
+                }
+                let _ = cx.update_window(handle, |_, window, cx| {
+                    this.feedback_notifications.publish(messages, window, cx);
+                });
+            }
+        });
         Self {
+            feedback_notifications: Default::default(),
+            _feedback_subscription: feedback_subscription,
+            window_handle: None,
             client,
             runtime,
             catalog: None,
@@ -175,7 +208,6 @@ impl ProxiesPage {
             outbound_mode: "rule".into(),
             mode_revision: 0,
             expanded: HashSet::new(),
-            proxy_pages: HashMap::new(),
             group_orders: presentation::GroupOrders::default(),
             search_input: None,
             search_subscription: None,
@@ -203,6 +235,8 @@ impl ProxiesPage {
             delay_generation: 0,
             error: None,
             notice: None,
+            show_node_details: false,
+            node_focus: HashMap::new(),
             focus_handle: cx.focus_handle(),
         }
     }
@@ -338,10 +372,6 @@ impl ProxySelectionState {
     }
 }
 
-fn proxy_page(total: usize, requested_index: usize) -> ProxyPage {
-    bounded_page(total, requested_index, PROXIES_PER_PAGE)
-}
-
 fn group_page(total: usize, requested_index: usize) -> ProxyPage {
     bounded_page(total, requested_index, GROUPS_PER_PAGE)
 }
@@ -399,11 +429,34 @@ impl ProxiesPage {
 
 impl Render for ProxiesPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.window_handle = Some(window.window_handle());
         self.ensure_search_input(window, cx);
+        let mut keys = Vec::new();
+        if let Some(catalog) = &self.catalog {
+            let page = group_page(self.visible_group_indices.len(), self.group_page_index);
+            if let Some(index) = presentation::selected_group_index(
+                catalog,
+                &self.visible_group_indices[page.start..page.end],
+                &self.expanded,
+            ) {
+                let group = &catalog.groups()[index];
+                let nodes = self.displayed_nodes(catalog, group);
+                keys.extend(
+                    nodes
+                        .iter()
+                        .map(|&index| (group.name.clone(), group.all[index].clone())),
+                );
+            }
+        }
+        self.node_focus.retain(|key, _| keys.contains(key));
+        for key in keys {
+            self.node_focus
+                .entry(key)
+                .or_insert_with(|| cx.focus_handle());
+        }
+
         let theme = cx.theme().clone();
         let catalog = self.catalog.as_ref();
-        let error = self.error.clone();
-        let notice = self.notice.clone();
         let groups = group_page(self.visible_group_indices.len(), self.group_page_index);
 
         v_flex()
@@ -419,38 +472,10 @@ impl Render for ProxiesPage {
                     .gap_4()
                     .px_8()
                     .py_3()
-                    .when_some(catalog, |this, catalog| {
-                        this.child(self.render_summary(catalog, &theme))
-                    })
-                    .when_some(error, |this, error| {
-                        this.child(
-                            h_flex()
-                                .gap_2()
-                                .p_3()
-                                .rounded(theme.radius)
-                                .border_1()
-                                .border_color(theme.danger.opacity(0.6))
-                                .bg(theme.danger.opacity(0.12))
-                                .text_sm()
-                                .text_color(theme.danger)
-                                .child(Icon::new(IconName::CircleX).size_4())
-                                .child(error),
-                        )
-                    })
-                    .when_some(notice, |this, notice| {
-                        this.child(
-                            h_flex()
-                                .gap_2()
-                                .p_3()
-                                .rounded(theme.radius)
-                                .border_1()
-                                .border_color(theme.primary.opacity(0.5))
-                                .bg(theme.primary.opacity(0.08))
-                                .text_sm()
-                                .text_color(theme.foreground)
-                                .child(Icon::new(IconName::Info).size_4())
-                                .child(notice),
-                        )
+                    .when(self.show_node_details, |this| {
+                        this.when_some(catalog, |this, catalog| {
+                            this.child(self.render_summary(catalog, &theme))
+                        })
                     })
                     .when(self.loading && catalog.is_none(), |this| {
                         this.child(
@@ -482,7 +507,20 @@ impl Render for ProxiesPage {
                             )
                             .child(self.render_group_visibility(cx))
                         } else {
-                            this.child(self.render_workspace(catalog, groups, &theme, cx))
+                            this.child(self.render_workspace(
+                                catalog,
+                                groups,
+                                window.viewport_size().width < window.rem_size() * 68.,
+                                if window.viewport_size().width < window.rem_size() * 42. {
+                                    1
+                                } else if window.viewport_size().width < window.rem_size() * 68. {
+                                    2
+                                } else {
+                                    3
+                                },
+                                &theme,
+                                cx,
+                            ))
                         }
                     }),
             )
@@ -923,8 +961,8 @@ mod tests {
                         }
                     };
                     let select_b = control(window, "select-proxy", "b", "Airport B");
-                    let test_a = control(window, "test-proxy", "a", "Airport A");
-                    let test_b = control(window, "test-proxy", "b", "Airport B");
+                    let test_a = control(window, "proxy-menu", "a", "Airport A");
+                    let test_b = control(window, "proxy-menu", "b", "Airport B");
                     for target in [&select_b, &test_a, &test_b] {
                         let bounds = window.find(target.clone()).bounds();
                         assert!(bounds.right() <= dimensions.width, "control extends beyond the window: {bounds:?}");
@@ -936,6 +974,10 @@ mod tests {
                         }
                         window.press("tab", cx);
                     }
+                    assert_eq!(window.find(select_b.clone()).focused(), Some(true));
+                    window.press("left", cx);
+                    assert_eq!(window.find(id("select-proxy", "a", "Airport A")).focused(), Some(true));
+                    window.press("right", cx);
                     assert_eq!(window.find(select_b.clone()).focused(), Some(true));
                     window.press("enter", cx);
                     (select_b, test_a, test_b)
@@ -956,10 +998,18 @@ mod tests {
             cx.update_window(window, |_, window, cx| {
                 assert_eq!(page.read(cx).catalog.as_ref().unwrap().groups()[0].now, "b");
                 window.render_frame(cx);
-                assert!(window.try_find(select_b).is_none());
+                // Selection keeps the card and its keyboard focus stable.
+                assert!(window.try_find(select_b).is_some());
                 window.find(id("current-proxy", "b", "Airport B"));
                 window.click(test_a, cx);
+                window.render_frame(cx);
+                window.press("down", cx);
+                window.press("enter", cx);
+                window.render_frame(cx);
                 window.click(test_b, cx);
+                window.render_frame(cx);
+                window.press("down", cx);
+                window.press("enter", cx);
                 let page = page.read(cx);
                 let group = &page.catalog.as_ref().unwrap().groups()[0];
                 let testing = page.testing.get("Proxy");
@@ -1206,7 +1256,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn numbered_node_pages_show_the_requested_members(cx: &mut TestAppContext) {
+    fn all_node_members_are_available_without_pagination(cx: &mut TestAppContext) {
         let (window, page, _runtime) = open_catalog(
             cx,
             ProxyCatalog::from_group_nodes(
@@ -1228,21 +1278,12 @@ mod tests {
         );
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
-            window.click("proxy-page:group:2", cx);
-            window.render_frame(cx);
-            assert_eq!(page.read(cx).proxy_pages.get("group"), Some(&2));
-            let id = ProxyNodeId::new("node-18".into(), None);
-            window.find(super::view::proxy_element_id("select-proxy", "group", &id));
-            let previous = ProxyNodeId::new("node-0".into(), None);
-            assert!(
-                window
-                    .try_find(super::view::proxy_element_id(
-                        "select-proxy",
-                        "group",
-                        &previous
-                    ))
-                    .is_none()
-            );
+            assert_eq!(page.read(cx).node_focus.len(), 27);
+            for index in 0..27 {
+                let id = ProxyNodeId::new(format!("node-{index}"), None);
+                window.find(super::view::proxy_element_id("select-proxy", "group", &id));
+            }
+            assert!(window.try_find("proxy-node-pagination").is_none());
             window.remove_window();
         })
         .unwrap();
@@ -1902,23 +1943,6 @@ mod tests {
             DelayTestFailure::from_error("Mihomo API returned HTTP 503: transport error"),
             DelayTestFailure::Failed
         );
-    }
-
-    #[test]
-    fn large_proxy_groups_render_at_most_one_page_of_nodes() {
-        let page = proxy_page(500, 0);
-
-        assert_eq!(page.end - page.start, PROXIES_PER_PAGE);
-        assert_eq!(page.count, 56);
-    }
-
-    #[test]
-    fn stale_proxy_page_is_clamped_after_catalog_shrinks() {
-        let page = proxy_page(30, 20);
-
-        assert_eq!(page.index, 3);
-        assert_eq!(page.start, 27);
-        assert_eq!(page.end, 30);
     }
 
     #[test]

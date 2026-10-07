@@ -1,8 +1,8 @@
 use super::{
     Button, ButtonVariants, Context, Disableable, FluentBuilder, IconName, Input, IntoElement,
     Page, ParentElement, RuntimeConfig, RuntimeData, RuntimePage, Sizable, Styled, VersionInfo,
-    config_input_row, format_port, h_flex, info_row, json, load_page, message_banner, metric,
-    setting_card, setting_switch, v_flex,
+    config_input_row, format_port, h_flex, info_row, json, load_page, metric, setting_card,
+    setting_switch, v_flex,
 };
 use zenclash_core::{CoreMaintenanceIntent, CoreRuntimeBackend, Observation};
 
@@ -202,13 +202,6 @@ impl RuntimePage {
                         theme,
                     )),
             )
-            .when(!has_runtime_data, |this| {
-                this.child(message_banner(
-                    zenclash_i18n::text("core_page.status.no_placeholder"),
-                    theme.danger,
-                    theme,
-                ))
-            })
             .when(has_runtime_data, |this| {
                 this.child(
                     setting_card(zenclash_i18n::text("core_page.switches.title"), theme)
@@ -351,16 +344,6 @@ impl RuntimePage {
                     ),
             )
             .child(self.render_versioned_core_updates(&version.version, local_source, theme, cx))
-            .when(
-                descriptor.backend() == CoreRuntimeBackend::Service,
-                |this| {
-                    this.child(message_banner(
-                        zenclash_i18n::text("core_page.maintenance.service_upgrade"),
-                        theme.warning,
-                        theme,
-                    ))
-                },
-            )
             .when(local_source, |this| {
                 this.child(
                     setting_card(zenclash_i18n::text("core_page.process.title"), theme)

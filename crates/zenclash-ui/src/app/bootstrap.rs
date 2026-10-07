@@ -103,6 +103,7 @@ fn open_main_window(
             cx,
         )),
         titlebar: Some(TitleBar::title_bar_options()),
+        window_min_size: Some(gpui_kit::size(px(720.), px(560.))),
         app_owns_titlebar_drag: false,
         ..Default::default()
     };

@@ -40,6 +40,7 @@ mod common;
 mod config_inputs;
 mod connections;
 mod dns;
+mod feedback;
 mod home;
 mod lifecycle;
 mod loader;
@@ -62,8 +63,8 @@ mod view;
 mod ui_tests;
 
 use common::{
-    config_input_row, contains_ascii_case_insensitive, empty_dash, empty_state, format_bytes,
-    format_port, format_profile_age, format_proxy, info_row, list_page, message_banner, metric,
+    config_input_row, contains_ascii_case_insensitive, context_note, empty_dash, empty_state,
+    format_bytes, format_port, format_profile_age, format_proxy, info_row, list_page, metric,
     normalized_fraction, pagination_summary, setting_card, setting_switch, yes_no,
 };
 use config_inputs::{ConfigInputs, config_input_snapshot};
@@ -73,6 +74,7 @@ use state::{ConfigInputsTaskToken, PageTaskToken, RuntimeData};
 
 /// Stateful GPUI page host for Mihomo runtime, configuration, and diagnostics.
 pub struct RuntimePage {
+    feedback_notifications: crate::components::feedback::FeedbackNotifications,
     page: Page,
     core_kind: CoreKind,
     core_session: CoreSession,

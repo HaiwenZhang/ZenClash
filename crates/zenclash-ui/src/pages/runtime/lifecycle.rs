@@ -488,6 +488,7 @@ impl RuntimePage {
         let (live_updates_enabled, live_update_activity) =
             tokio::sync::watch::channel(ui_visibility.updates_enabled());
         let mut this = Self {
+            feedback_notifications: Default::default(),
             page,
             core_kind,
             core_session,
@@ -560,6 +561,11 @@ impl RuntimePage {
                 this.set_window_active(window.is_window_active(), cx);
             });
         this._subscriptions.push(window_activation_subscription);
+        let feedback_subscription = cx.observe_in(&cx.entity(), window, |this, _, window, cx| {
+            this.publish_feedback(window, cx);
+        });
+        this._subscriptions.push(feedback_subscription);
+        cx.defer_in(window, |this, window, cx| this.publish_feedback(window, cx));
         this.finish_initial_persistent_state(
             persistent_task,
             initial_profile,

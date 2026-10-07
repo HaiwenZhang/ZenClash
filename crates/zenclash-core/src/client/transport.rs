@@ -263,6 +263,18 @@ impl ControllerBinding {
             return Err("Controller changed while opening stream".into());
         }
         let stream = match &binding.backend {
+            ControllerBackend::Local(process) if process.endpoint().ipc_path().is_some() => {
+                let controller = process
+                    .native_controller()
+                    .map_err(|error| error.to_string())?
+                    .ok_or("Local binding has no IPC controller")?;
+                StreamBackend::Service(Box::new(
+                    controller
+                        .websocket(&service_stream_path(path, query)?)
+                        .await
+                        .map_err(|error| error.to_string())?,
+                ))
+            }
             ControllerBackend::Direct(_) | ControllerBackend::Local(_) => {
                 let endpoint = binding.endpoint().ok_or("Direct binding has no endpoint")?;
                 StreamBackend::Direct(Box::new(

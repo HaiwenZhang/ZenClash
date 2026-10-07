@@ -41,7 +41,6 @@ impl ProxiesPage {
                     let query = input.read(cx).value().trim().to_lowercase();
                     if this.search_query != query {
                         this.search_query = query;
-                        this.proxy_pages.clear();
                         this.prepare_search(cx);
                         cx.notify();
                     }
@@ -282,7 +281,6 @@ impl ProxiesPage {
         self.visible_group_indices = Vec::new();
         self.group_page_index = 0;
         self.expanded.clear();
-        self.proxy_pages.clear();
         self.testing.clear();
         self.active_testing_groups.clear();
         self.test_failures.clear();
@@ -316,20 +314,23 @@ impl ProxiesPage {
         self.refresh_group_indices();
         self.group_orders.clear();
         self.expanded.clear();
-        self.proxy_pages.clear();
         self.start_refresh(true, cx);
     }
 
     pub(super) fn toggle_group(&mut self, name: &str, cx: &mut Context<Self>) {
         super::toggle_expanded_group(&mut self.expanded, name);
+        if self.expanded.contains(name)
+            && let Some(catalog) = &self.catalog
+            && let Some(position) = self
+                .visible_group_indices
+                .iter()
+                .position(|&index| catalog.groups()[index].name == name)
+        {
+            self.group_page_index = position / super::GROUPS_PER_PAGE;
+        }
         if !self.expanded.contains(name) {
             self.group_orders.invalidate(name);
         }
-        cx.notify();
-    }
-
-    pub(super) fn set_group_page(&mut self, name: String, page: usize, cx: &mut Context<Self>) {
-        self.proxy_pages.insert(name, page);
         cx.notify();
     }
 
@@ -344,7 +345,6 @@ impl ProxiesPage {
         self.refresh_group_indices();
         self.group_orders.clear();
         self.expanded.clear();
-        self.proxy_pages.clear();
         if let Some(catalog) = &self.catalog
             && let Some(group) = catalog.groups_for_mode(&self.outbound_mode).next()
         {

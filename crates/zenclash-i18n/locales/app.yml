@@ -371,7 +371,7 @@ navigation:
       zh-CN: 总览
       en: Overview
     title:
-      zh-CN: 网络总览
+      zh-CN: 总览
       en: Network overview
     subtitle:
       zh-CN: 查看流量、节点与当前网络接管状态
@@ -402,11 +402,11 @@ navigation:
       en: Manage profile sources, update configurations, and choose an active profile
   proxies:
     label:
-      zh-CN: 代理组
-      en: Proxy groups
+      zh-CN: 代理
+      en: Proxies
     title:
-      zh-CN: 代理组
-      en: Proxy groups
+      zh-CN: 代理
+      en: Proxies
     subtitle:
       zh-CN: 对比节点延迟，选择当前代理组的出口
       en: Compare node latency and select an outbound for the current group
@@ -422,8 +422,8 @@ navigation:
       zh-CN: 连接
       en: Connections
     title:
-      zh-CN: 活动连接
-      en: Active connections
+      zh-CN: 连接
+      en: Connections
     subtitle:
       zh-CN: 从目标、进程与代理路径定位网络活动
       en: Find network activity by destination, process, and outbound
@@ -456,7 +456,7 @@ navigation:
       zh-CN: 规则
       en: Rules
     title:
-      zh-CN: 路由规则
+      zh-CN: 规则
       en: Routing rules
     subtitle:
       zh-CN: 按顺序匹配，查看规则内容与当前分流策略
@@ -759,6 +759,21 @@ home:
       zh-CN: 剩余 %{days} 天
       en: "%{days} days remaining"
   proxy:
+    groups:
+      zh-CN: 代理组
+      en: Groups
+    nodes:
+      zh-CN: 节点
+      en: Nodes
+    more_groups:
+      zh-CN: 更多代理组
+      en: More groups
+    more_nodes:
+      zh-CN: 更多节点
+      en: More nodes
+    switch_in_group:
+      zh-CN: 在“%{group}”中选择“%{node}”
+      en: Select “%{node}” in “%{group}”
     current:
       zh-CN: 当前
       en: Current
@@ -926,9 +941,9 @@ home:
     range_60:
       zh-CN: 60秒
       en: 60s
-    range_300:
-      zh-CN: 最近 5 分钟
-      en: 5m
+    range_120:
+      zh-CN: 最近 2 分钟
+      en: Last 2 minutes
     peak:
       zh-CN: "峰值 %{value}"
       en: "Peak %{value}"
@@ -975,7 +990,7 @@ home:
       zh-CN: 当前上传
       en: Current Upload
     active_connections:
-      zh-CN: 活动连接
+      zh-CN: 连接
       en: Active Connections
     core_memory:
       zh-CN: 内核内存
@@ -1564,7 +1579,7 @@ proxies:
       en: Selected
   header:
     title:
-      zh-CN: 代理组
+      zh-CN: 代理
       en: Proxies
     description:
       zh-CN: 新连接使用所选节点；现有连接保持原链路。可查看协议能力并执行真实延迟测试。
@@ -1737,7 +1752,7 @@ proxies:
       zh-CN: 延迟测试任务异常结束：%{error}
       en: "The delay test task ended unexpectedly: %{error}"
     group_delay_task:
-      zh-CN: 代理组延迟测试任务异常结束：%{error}
+      zh-CN: 代理延迟测试任务异常结束：%{error}
       en: "The group delay test task ended unexpectedly: %{error}"
     group_failed_detail:
       zh-CN: "%{count} 个节点延迟测试失败；首个错误：%{error}"
@@ -3001,7 +3016,7 @@ traffic:
       zh-CN: 区间用量
       en: Range Usage
     connections:
-      zh-CN: 活动连接
+      zh-CN: 连接
       en: Active Connections
   chart:
     title:
@@ -4275,7 +4290,7 @@ connections:
       en: "%{core} does not report every UDP connection. TCP connections, totals, and close actions still come from the live controller."
   metrics:
     active:
-      zh-CN: 活动连接
+      zh-CN: 连接
       en: Active Connections
     upload:
       zh-CN: 累计上传
@@ -4896,3 +4911,95 @@ panel:
   local:
     zh-CN: "本机控制器"
     en: "Local controller"
+
+unified:
+  settings:
+    general:
+      zh-CN: 常规
+      en: General
+    network:
+      zh-CN: 网络
+      en: Network
+    data:
+      zh-CN: 数据
+      en: Data
+    about:
+      zh-CN: 关于
+      en: About
+  network:
+    system_proxy_description:
+      zh-CN: 让浏览器和应用使用代理
+      en: Route browsers and apps through the proxy
+    tun_description:
+      zh-CN: 接管更多应用的流量
+      en: Capture traffic from more apps
+    advanced:
+      zh-CN: 高级网络配置
+      en: Advanced network configuration
+  connections:
+    upload_rate:
+      zh-CN: 上传速率
+      en: Upload rate
+    download_rate:
+      zh-CN: 下载速率
+      en: Download rate
+    inbound:
+      zh-CN: 入站
+      en: Inbound
+    host:
+      zh-CN: 主机名
+      en: Host
+    started:
+      zh-CN: 开始时间
+      en: Started
+    process:
+      zh-CN: 进程
+      en: Process
+    path:
+      zh-CN: 进程路径
+      en: Process path
+    id:
+      zh-CN: 连接 ID
+      en: Connection ID
+    active_count:
+      zh-CN: "%{count} 条活动连接"
+      en: "%{count} active connections"
+    analytics:
+      zh-CN: 连接统计
+      en: Connection statistics
+    active:
+      zh-CN: 活动
+      en: Active
+    closed:
+      zh-CN: 已关闭
+      en: Closed
+
+  profiles:
+    details:
+      zh-CN: 详情
+      en: Details
+    update_all:
+      zh-CN: 更新全部
+      en: Update all
+    updated_all:
+      zh-CN: 已更新 %{count} 个订阅
+      en: Updated %{count} subscriptions
+    search:
+      zh-CN: 搜索订阅
+      en: Search subscriptions
+    advanced:
+      zh-CN: 高级配置
+      en: Advanced configuration
+
+  proxies:
+    details:
+      zh-CN: 节点详情
+      en: Node details
+
+  rules:
+    all_types:
+      zh-CN: 全部类型
+      en: All types
+    all_policies:
+      zh-CN: 全部策略
+      en: All policies

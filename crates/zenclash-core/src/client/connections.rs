@@ -34,7 +34,17 @@ impl MihomoClient {
             {
                 return Ok(cached.value.clone());
             }
-            let value = Arc::new(self.get_json::<ConnectionsSnapshot>("/connections").await?);
+            let binding = self.operation_binding()?;
+            let native = binding.is_service()
+                || binding
+                    .endpoint()
+                    .is_some_and(|endpoint| endpoint.ipc_path().is_some());
+            let value = Arc::new(if native {
+                self.stream_snapshot::<ConnectionsSnapshot>("/connections")
+                    .await?
+            } else {
+                self.get_json::<ConnectionsSnapshot>("/connections").await?
+            });
             // A close or restart can invalidate an in-flight response.
             if self.connections.epoch.load(Ordering::Acquire) != epoch
                 || !self.binding.is_current(binding_generation)

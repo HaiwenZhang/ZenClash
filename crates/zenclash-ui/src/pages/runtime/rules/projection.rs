@@ -13,10 +13,14 @@ pub(super) struct RuleProjection {
     pub(super) indices: Vec<usize>,
     pub(super) kinds: Vec<(String, u64)>,
     pub(super) hits: Vec<(String, u64)>,
+    pub(super) types: Vec<String>,
+    pub(super) policies: Vec<String>,
 }
 
 #[derive(Default)]
 pub(super) struct ProjectionWorker {
+    pub(super) kind: Option<String>,
+    pub(super) policy: Option<String>,
     generation: Arc<AtomicU64>,
     gate: Arc<tokio::sync::Mutex<()>>,
     task: super::super::loader::PageReadTask,
@@ -53,6 +57,8 @@ impl ProjectionWorker {
         let generation = self.generation.load(Ordering::Acquire);
         let current = self.generation.clone();
         let gate = self.gate.clone();
+        let kind = self.kind.clone();
+        let policy = self.policy.clone();
         let task = runtime.spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(80)).await;
             let permit = gate.lock_owned().await;
@@ -63,12 +69,17 @@ impl ProjectionWorker {
                 let _permit = permit;
                 let mut indices = Vec::new();
                 let mut kinds = std::collections::BTreeMap::<String, u64>::new();
+                let mut policies = std::collections::BTreeSet::new();
                 let mut hits = std::collections::BTreeMap::<String, u64>::new();
                 for (index, rule) in snapshot.rules.iter().enumerate() {
                     if index % 256 == 0 && current.load(Ordering::Acquire) != generation {
                         return None;
                     }
-                    if rule_matches(rule, &query) {
+                    policies.insert(rule.proxy.clone());
+                    if rule_matches(rule, &query)
+                        && kind.as_ref().is_none_or(|kind| *kind == rule.kind)
+                        && policy.as_ref().is_none_or(|policy| *policy == rule.proxy)
+                    {
                         indices.push(index);
                     }
                     *kinds.entry(rule.kind.clone()).or_default() += 1;
@@ -81,6 +92,8 @@ impl ProjectionWorker {
                     snapshot,
                     query,
                     indices,
+                    types: kinds.keys().cloned().collect(),
+                    policies: policies.into_iter().collect(),
                     kinds: ranked(kinds),
                     hits: ranked(hits),
                 })
@@ -139,6 +152,33 @@ mod tests {
         assert_eq!(projection.indices, [0]);
         assert_eq!(projection.kinds, [("DomainSuffix".into(), 2)]);
         assert_eq!(projection.hits, [("DIRECT".into(), 9)]);
+    }
+
+    #[tokio::test]
+    async fn type_and_policy_filters_intersect_without_changing_rule_order() {
+        let source = Arc::new(RuleCatalog {
+            rules: [
+                ("DOMAIN", "DIRECT"),
+                ("DOMAIN", "Proxy"),
+                ("IP-CIDR", "Proxy"),
+                ("DOMAIN", "Proxy"),
+            ]
+            .into_iter()
+            .map(|(kind, proxy)| zenclash_core::Rule {
+                kind: kind.into(),
+                proxy: proxy.into(),
+                payload: "example".into(),
+                ..Default::default()
+            })
+            .collect(),
+        });
+        let mut worker = ProjectionWorker::default();
+        worker.kind.replace("DOMAIN".into());
+        worker.policy.replace("Proxy".into());
+        let (_, task) = worker.start(&tokio::runtime::Handle::current(), source, "example".into());
+        let projection = task.await.unwrap().unwrap().unwrap();
+        assert_eq!(projection.indices, [1, 3]);
+        assert_eq!(projection.policies, ["DIRECT", "Proxy"]);
     }
 
     fn snapshot(value: &str) -> Arc<RuleCatalog> {

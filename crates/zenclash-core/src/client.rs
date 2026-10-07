@@ -50,6 +50,9 @@ pub enum MihomoError {
     /// HTTP transport, timeout or response-decoding failure.
     #[error("Mihomo request failed: {0}")]
     Http(#[from] reqwest::Error),
+    /// Local controller transport failure, retaining whether a request was sent.
+    #[error("Mihomo IPC request failed: {0}")]
+    Native(#[from] zenclash_service_integration::NativeHttpError),
     /// Authenticated native service transport or policy rejection.
     #[error("Mihomo service request failed: {0}")]
     Service(#[from] zenclash_service_integration::ServiceCallError),
@@ -619,6 +622,10 @@ impl MihomoError {
             | Self::RuntimeOutcomeUnknown
             | Self::RuntimePartiallyApplied(_) => true,
             Self::Service(error) => error.mutation_result_unknown(),
+            Self::Native(zenclash_service_integration::NativeHttpError::OutcomeUnknown(_)) => true,
+            Self::Native(zenclash_service_integration::NativeHttpError::BudgetExceeded {
+                request_sent,
+            }) => *request_sent,
             _ => false,
         }
     }

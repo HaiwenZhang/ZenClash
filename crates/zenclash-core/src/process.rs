@@ -391,9 +391,25 @@ impl MihomoProcess {
             if remaining.is_zero() {
                 return Err(self.readiness_timeout_error());
             }
-            if tokio::time::timeout(readiness_attempt_timeout(remaining), client.version())
-                .await
-                .is_ok_and(|result| result.is_ok())
+            if tokio::time::timeout(readiness_attempt_timeout(remaining), async {
+                if let Some(controller) = self.native_controller()? {
+                    let response = controller
+                        .request("GET", "/version", None, remaining)
+                        .await
+                        .map_err(|error| MihomoError::Process(error.to_string()))?;
+                    if response.status != 200 {
+                        return Err(MihomoError::Process(
+                            "Native controller is not ready".into(),
+                        ));
+                    }
+                    serde_json::from_slice::<crate::VersionInfo>(&response.body)?;
+                    Ok(())
+                } else {
+                    client.version().await.map(|_| ())
+                }
+            })
+            .await
+            .is_ok_and(|result| result.is_ok())
             {
                 return Ok(());
             }
@@ -426,6 +442,25 @@ impl MihomoProcess {
     #[must_use]
     pub const fn endpoint(&self) -> &MihomoEndpoint {
         &self.config.endpoint
+    }
+
+    pub(crate) fn native_controller(
+        &self,
+    ) -> MihomoResult<Option<zenclash_service_integration::NativeController>> {
+        let Some(path) = self.config.endpoint.ipc_path() else {
+            return Ok(None);
+        };
+        let pid = self
+            .child
+            .lock()
+            .as_ref()
+            .map(Child::id)
+            .ok_or_else(|| MihomoError::Process("Local core is stopped".into()))?;
+        Ok(Some(zenclash_service_integration::NativeController::new(
+            path.to_path_buf(),
+            pid,
+            self.config.endpoint.secret.clone(),
+        )))
     }
 
     /// Returns the concrete runtime core owned by this process.
@@ -700,7 +735,23 @@ fn spawn_child(
     } else {
         command.arg(&config.config_file);
     }
-    if let Some(controller) = &config.controller_override {
+    if let Some(path) = config.endpoint.ipc_path() {
+        command
+            .arg(if cfg!(windows) {
+                "-ext-ctl-pipe"
+            } else {
+                "-ext-ctl-unix"
+            })
+            .arg(path)
+            .arg("--secret")
+            .arg(&config.endpoint.secret);
+        #[cfg(windows)]
+        command.env(
+            "LISTEN_NAMEDPIPE_SDDL",
+            zenclash_service_integration::current_user_pipe_sddl()
+                .map_err(|error| MihomoError::Process(error.to_string()))?,
+        );
+    } else if let Some(controller) = &config.controller_override {
         command
             .arg("--ext-ctl")
             .arg(controller)

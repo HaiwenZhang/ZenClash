@@ -20,6 +20,7 @@ const UPDATE_INTERVALS: [u32; 4] = [60, 6 * 60, 12 * 60, 24 * 60];
 impl RuntimePage {
     pub(super) fn render_managed_profiles(
         &self,
+        compact: bool,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
@@ -97,18 +98,24 @@ impl RuntimePage {
                         ),
                 ),
         );
-        let grid = div().grid().grid_cols(2).gap_3().p_3().children(
+        let grid = div().grid().grid_cols(1).gap_3().p_3().children(
             self.profiles
                 .forms
                 .catalog_view
                 .visible_indices()
                 .iter()
                 .filter_map(|&index| {
-                    self.profiles
-                        .catalog
-                        .profiles
-                        .get(index)
-                        .map(|profile| self.render_managed_profile(profile, theme, cx))
+                    self.profiles.catalog.profiles.get(index).map(|profile| {
+                        v_flex()
+                            .gap_2()
+                            .child(self.render_managed_profile(profile, theme, cx))
+                            .when(
+                                compact
+                                    && self.profiles.forms.details_open
+                                    && self.profiles.forms.catalog_view.is_selected(&profile.id),
+                                |view| view.child(self.render_profile_inspector(theme, cx)),
+                            )
+                    })
                 }),
         );
         card = card.child(grid).when(
@@ -351,9 +358,9 @@ impl RuntimePage {
             .min_w_0()
             .w_full()
             .max_w_full()
-            .min_h(gpui_kit::rems(14.))
-            .p_4()
-            .gap_3()
+            .min_h_0()
+            .p_3()
+            .gap_2()
             .rounded(theme.radius_lg)
             .border_1()
             .border_color(if selected {
@@ -409,6 +416,7 @@ impl RuntimePage {
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.profiles.forms.catalog_view.select(&show_id);
+                                this.profiles.forms.details_open = true;
                                 cx.notify();
                             })),
                     )
@@ -419,7 +427,7 @@ impl RuntimePage {
             .child(
                 v_flex()
                     .flex_1()
-                    .min_h_12()
+                    .min_h_0()
                     .when_some(profile.subscription.usage.as_ref(), |this, usage| {
                         this.child(render_subscription_usage(
                             usage,
@@ -466,7 +474,29 @@ impl RuntimePage {
                             )),
                     ),
             )
-            .child(self.render_profile_actions(profile, active, "", cx))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        self.render_profile_actions(profile, active, "", cx)
+                            .flex_1(),
+                    )
+                    .child({
+                        let id = profile.id.clone();
+                        Button::new(format!("profile-details:{id}"))
+                            .outline()
+                            .small()
+                            .h_10()
+                            .label(zenclash_i18n::text("unified.profiles.details"))
+                            .on_click(cx.listener(move |page, _, _, cx| {
+                                let was_open = page.profiles.forms.catalog_view.is_selected(&id)
+                                    && page.profiles.forms.details_open;
+                                page.profiles.forms.catalog_view.select(&id);
+                                page.profiles.forms.details_open = !was_open;
+                                cx.notify();
+                            }))
+                    }),
+            )
     }
 
     fn render_profile_actions(
@@ -835,78 +865,26 @@ fn quota_percent(usage: &SubscriptionUsage) -> Option<f32> {
 }
 
 fn subscription_quota_chart(
-    profile: &ProfileRecord,
+    _profile: &ProfileRecord,
     usage: &SubscriptionUsage,
     theme: &gpui_kit::component::Theme,
 ) -> gpui_kit::Div {
-    let Some(percent) = quota_percent(usage) else {
-        return v_flex().child(render_subscription_usage(
-            usage,
-            format!("detail-quota:{}", profile.id),
+    v_flex()
+        .gap_2()
+        .child(profile_detail_row(
+            "profiles.design.used",
+            quota_percent(usage).map_or_else(|| "—".into(), |value| format!("{value:.1}%")),
             theme,
-        ));
-    };
-    v_flex().gap_3().child(
-        h_flex()
-            .gap_3()
-            .child(
-                crate::components::wave_percentage::WavePercentage::new(
-                    format!("profile-quota:{}", profile.id),
-                    zenclash_i18n::text("profiles.design.used"),
-                )
-                .value(Some(percent))
-                .diameter(11.),
-            )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .pl_4()
-                    .border_l_1()
-                    .border_color(theme.border)
-                    .gap_3()
-                    .children(
-                        [
-                            ("profiles.design.used", usage.used()),
-                            (
-                                "profiles.design.remaining",
-                                usage.total.saturating_sub(usage.used()),
-                            ),
-                            ("profiles.design.total", usage.total),
-                        ]
-                        .into_iter()
-                        .map(|(key, bytes)| {
-                            h_flex()
-                                .gap_2()
-                                .justify_between()
-                                .when(key == "profiles.design.total", |this| {
-                                    this.pt_3().border_t_1().border_color(theme.border)
-                                })
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .text_sm()
-                                        .text_color(theme.muted_foreground)
-                                        .when(key != "profiles.design.total", |this| {
-                                            this.child(
-                                                div()
-                                                    .size_3()
-                                                    .flex_shrink_0()
-                                                    .rounded_full()
-                                                    .border_1()
-                                                    .border_color(theme.chart_3)
-                                                    .when(key == "profiles.design.used", |this| {
-                                                        this.bg(theme.chart_3)
-                                                    }),
-                                            )
-                                        })
-                                        .child(zenclash_i18n::text(key)),
-                                )
-                                .child(div().text_base().child(format_bytes(bytes)))
-                        }),
-                    ),
+        ))
+        .child(profile_detail_row(
+            "profiles.design.total",
+            format!(
+                "{} / {}",
+                format_bytes(usage.used()),
+                format_bytes(usage.total)
             ),
-    )
+            theme,
+        ))
 }
 
 fn profile_detail_row(

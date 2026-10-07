@@ -1,6 +1,6 @@
 use super::{
-    App, Disableable, Icon, IconName, InteractiveElement, IntoElement, ParentElement, Styled,
-    Switch, Window, div, h_flex, px, v_flex,
+    App, Disableable, InteractiveElement, IntoElement, ParentElement, Styled, Switch, Window, div,
+    h_flex, px, v_flex,
 };
 use gpui_kit::{SharedString, StatefulInteractiveElement};
 
@@ -249,32 +249,17 @@ pub(super) fn metric(
         .into_any_element()
 }
 
-pub(super) fn message_banner(
+pub(super) fn context_note(
     message: String,
-    color: gpui_kit::Hsla,
     theme: &gpui_kit::component::Theme,
 ) -> gpui_kit::AnyElement {
-    h_flex()
-        .gap_3()
-        .p_3()
-        .rounded(theme.radius_lg)
-        .border_1()
-        .border_color(color.opacity(0.55))
-        .bg(color.opacity(0.1))
+    div()
+        .px_4()
+        .py_2()
         .text_sm()
-        .text_color(color)
-        .child(
-            div()
-                .size(px(28.))
-                .flex_shrink_0()
-                .rounded(theme.radius)
-                .bg(color.opacity(0.14))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(Icon::new(IconName::Info).size_4()),
-        )
-        .child(div().flex_1().min_w_0().whitespace_normal().child(message))
+        .text_color(theme.muted_foreground)
+        .whitespace_normal()
+        .child(message)
         .into_any_element()
 }
 

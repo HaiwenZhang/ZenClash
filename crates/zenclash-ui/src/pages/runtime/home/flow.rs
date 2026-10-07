@@ -24,14 +24,6 @@ impl Route {
             Self::Unknown => 3,
         }
     }
-    fn label(self) -> String {
-        zenclash_i18n::text(match self {
-            Self::Proxy => "home.flow.proxy",
-            Self::Direct => "home.flow.direct",
-            Self::Reject => "home.flow.reject",
-            Self::Unknown => "common.status.unknown",
-        })
-    }
 }
 fn route(connection: &Connection) -> Route {
     match connection.chains.first().map(|chain| chain.trim()) {
@@ -149,7 +141,7 @@ impl HomeFlowState {
         }
         true
     }
-    fn release(&mut self) {
+    pub(super) fn release(&mut self) {
         self.epoch.fetch_add(1, Ordering::AcqRel);
         self.task.cancel();
         self.in_flight = false;
@@ -165,16 +157,6 @@ impl Drop for HomeFlowState {
 }
 
 impl RuntimePage {
-    pub(in crate::pages::runtime) fn release_home_presentation(&mut self) {
-        #[cfg(test)]
-        {
-            self.home.design_validation = None;
-        }
-        self.home.flow.release();
-        self.home.history.release();
-        self.home.chart = traffic::HomeChartState::default();
-        self.home.projection = None;
-    }
     pub(super) fn update_home_flow(&mut self, cx: &mut Context<Self>) {
         if self.page != Page::Home {
             self.home.flow.release();
@@ -238,228 +220,6 @@ impl RuntimePage {
         (self.home.flow.generation == self.home.generation)
             .then_some(self.home.flow.summary.as_ref())
             .flatten()
-    }
-    fn home_flow_status(&self, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
-        let state = &self.home.flow;
-        let message = if state.generation != self.home.generation {
-            "home.flow.loading"
-        } else if state.error.is_some() && state.summary.is_none() {
-            "common.status.unavailable"
-        } else if state.error.is_some() {
-            "home.flow.stale"
-        } else if state.summary.is_none() {
-            "home.flow.loading"
-        } else {
-            "home.flow.scope"
-        };
-        div()
-            .text_xs()
-            .text_color(if state.error.is_some() {
-                theme.warning
-            } else {
-                theme.muted_foreground
-            })
-            .child(zenclash_i18n::text(message))
-    }
-    pub(super) fn render_home_routes(&self, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
-        let title = || {
-            div()
-                .text_lg()
-                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                .child(zenclash_i18n::text("home.flow.routes"))
-        };
-        let mut content = v_flex().p_4().gap_2();
-        if let Some(summary) = self.home_flow_summary() {
-            let kinds = [Route::Proxy, Route::Direct, Route::Reject, Route::Unknown];
-            let colors = [
-                theme.chart_3,
-                theme.chart_1,
-                theme.chart_2,
-                theme.muted_foreground,
-            ];
-            let total = summary.routes.iter().sum::<u64>();
-            if total > 0 {
-                let legend = v_flex()
-                    .line_height(gpui_kit::relative(1.4))
-                    .gap_1()
-                    .children(
-                        kinds
-                            .iter()
-                            .enumerate()
-                            .filter(|(index, _)| *index != 3 || summary.routes[*index] > 0)
-                            .map(|(index, kind)| {
-                                h_flex()
-                                    .gap_2()
-                                    .text_sm()
-                                    .child(div().size_3().rounded_full().bg(colors[index]))
-                                    .child(kind.label())
-                                    .child(format!(
-                                        "{} ({:.1}%)",
-                                        summary.routes[index],
-                                        summary.routes[index] as f64 / total as f64 * 100.
-                                    ))
-                            }),
-                    );
-                content = content.child(
-                    h_flex()
-                        .items_start()
-                        .flex_wrap()
-                        .gap_4()
-                        .child(div().flex_1().min_w_0().child(title()))
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_size(px(36.))
-                                        .line_height(gpui_kit::relative(1.25))
-                                        .font_weight(gpui_kit::FontWeight::BOLD)
-                                        .child(total.to_string()),
-                                )
-                                .child(
-                                    div().text_sm().text_color(theme.muted_foreground).child(
-                                        zenclash_i18n::text("home.traffic.active_connections"),
-                                    ),
-                                ),
-                        )
-                        .child(legend.pl_4().border_l_1().border_color(theme.border)),
-                );
-            } else {
-                content = content.child(title()).child(
-                    div()
-                        .text_sm()
-                        .child(zenclash_i18n::text("connections.empty.active")),
-                );
-            }
-        } else {
-            content = content.child(title()).child(self.home_flow_status(theme));
-        }
-        content.when(
-            self.home.flow.error.is_some() && self.home_flow_summary().is_some(),
-            |this| this.child(self.home_flow_status(theme)),
-        )
-    }
-    pub(super) fn render_home_recent_connections(
-        &self,
-        theme: &gpui_kit::component::Theme,
-    ) -> gpui_kit::AnyElement {
-        let mut content = v_flex()
-            .px_4()
-            .pb_2()
-            .gap_0()
-            .when(self.home.flow.error.is_some(), |content| {
-                content.child(self.home_flow_status(theme))
-            })
-            .child(
-                h_flex()
-                    .gap_3()
-                    .px_2()
-                    .py_0p5()
-                    .bg(theme.table_head)
-                    .text_sm()
-                    .line_height(gpui_kit::relative(1.25))
-                    .text_color(theme.muted_foreground)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(zenclash_i18n::text("home.flow.host")),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(zenclash_i18n::text("home.flow.process")),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(zenclash_i18n::text("home.flow.route")),
-                    )
-                    .child(
-                        div()
-                            .w_24()
-                            .text_right()
-                            .child(zenclash_i18n::text("home.flow.bytes")),
-                    ),
-            );
-        if let Some(summary) = self.home_flow_summary() {
-            for connection in &summary.recent {
-                content = content.child(
-                    h_flex()
-                        .gap_3()
-                        .px_2()
-                        .py_1()
-                        .border_b_1()
-                        .border_color(theme.border)
-                        .text_sm()
-                        .line_height(gpui_kit::relative(1.25))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .child(connection.host.clone()),
-                        )
-                        .child(div().flex_1().min_w_0().truncate().child(
-                            if connection.process.is_empty() {
-                                zenclash_i18n::text("common.status.unknown")
-                            } else {
-                                connection.process.clone()
-                            },
-                        ))
-                        .child(div().flex_1().min_w_0().child(connection.route.label()))
-                        .child(
-                            div()
-                                .w_24()
-                                .text_right()
-                                .child(format_bytes(connection.bytes)),
-                        ),
-                );
-            }
-            if summary.recent.is_empty() {
-                content = content.child(
-                    div()
-                        .text_sm()
-                        .child(zenclash_i18n::text("home.flow.recent_unknown")),
-                );
-            }
-        }
-        let header = h_flex()
-            .px_4()
-            .pt_3()
-            .pb_2()
-            .justify_between()
-            .gap_3()
-            .child(
-                div()
-                    .text_lg()
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .child(zenclash_i18n::text("home.flow.recent")),
-            )
-            .child(
-                Button::new("home-open-connections")
-                    .small()
-                    .ghost()
-                    .label(zenclash_i18n::text("home.flow.all_connections"))
-                    .icon(IconName::ArrowRight)
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(crate::app::NavigateConnections), cx)
-                    }),
-            );
-        v_flex()
-            .id("home-recent-connections-panel")
-            .test_support()
-            .line_height(gpui_kit::relative(1.4))
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.secondary)
-            .min_w_0()
-            .child(header)
-            .child(content)
-            .into_any_element()
     }
 }
 
@@ -680,6 +440,8 @@ mod tests {
         assert_eq!(summary.routes, [6, 1, 1, 1]);
         assert_eq!(summary.recent.len(), 2);
         assert_eq!(summary.recent[0].host, "host-8");
+        assert_eq!(summary.recent[0].process, "process-8");
+        assert_eq!(summary.recent[0].route, Route::Proxy);
     }
     #[test]
     fn missing_chain_and_timestamp_remain_unknown_and_cancelled_work_is_discarded() {

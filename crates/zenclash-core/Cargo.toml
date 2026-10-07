@@ -27,6 +27,7 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true
 socket2.workspace = true
+sysinfo = { version = "0.31.4", default-features = false, features = ["system"] }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite = { workspace = true, features = ["connect", "rustls-tls-webpki-roots"] }

@@ -47,14 +47,20 @@ impl Page {
     /// Everyday destinations kept visible in the compact sidebar.
     ///
     /// Home and Settings are rendered separately.
-    pub const PRIMARY: [Self; 6] = [
+    pub const PRIMARY: [Self; 4] = [
         Self::Proxies,
         Self::Profiles,
         Self::Connections,
         Self::Rules,
-        Self::Network,
-        Self::Logs,
     ];
+
+    /// Related diagnostic destinations share the Rules navigation entry.
+    pub(crate) const fn navigation_parent(self) -> Self {
+        match self {
+            Self::Logs | Self::Network => Self::Rules,
+            _ => self,
+        }
+    }
 
     /// Returns the localized navigation label.
     #[must_use]
@@ -183,8 +189,6 @@ mod tests {
                 Page::Profiles,
                 Page::Connections,
                 Page::Rules,
-                Page::Network,
-                Page::Logs,
                 Page::Settings,
             ]
         );

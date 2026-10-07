@@ -10180,6 +10180,7 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "socket2",
+ "sysinfo",
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite",

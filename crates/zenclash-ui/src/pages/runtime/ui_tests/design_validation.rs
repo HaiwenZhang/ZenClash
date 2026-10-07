@@ -14,7 +14,7 @@ struct DesignValidationShell {
 }
 
 impl Render for DesignValidationShell {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .id("design-validation-shell")
             .test_support()
@@ -30,7 +30,10 @@ impl Render for DesignValidationShell {
                     .left_0()
                     .size_1(),
             )
-            .child(crate::components::sidebar::Sidebar::new(self.page))
+            .child(
+                crate::components::sidebar::Sidebar::new(self.page)
+                    .collapsed(window.viewport_size().width < window.rem_size() * 68.),
+            )
             .child(
                 div()
                     .flex_1()
@@ -167,7 +170,7 @@ fn native_pages_render_for_design_validation() {
                     let profile = page.read(cx).profiles.catalog.active_profile().cloned();
                     proxies.update(cx, |proxies, cx| proxies.set_active_profile(profile.as_ref(), cx));
                 });
-                for (width, height, viewport) in [(1536., 1024., ""), (1280., 820., "-compact"), (1513., 1008., "-reference")] {
+                for (width, height, viewport) in [(1536., 1024., ""), (1280., 820., "-compact"), (900., 700., "-medium"), (720., 560., "-narrow")] {
                     cx.update(|cx| {
                         cx.update_window(window.into(), |_, window, _| {
                             window.resize(size(px(width), px(height)));
@@ -184,8 +187,6 @@ fn native_pages_render_for_design_validation() {
                             Page::Profiles,
                             Page::Connections,
                             Page::Rules,
-                            Page::Network,
-                            Page::Logs,
                             Page::Settings,
                         ] {
                             cx.update(|cx| {
@@ -301,6 +302,21 @@ fn native_pages_render_for_design_validation() {
                                 .update(|cx| {
                                     cx.update_window(window.into(), |_, window, cx| {
                                         window.render_frame(cx);
+                                        if destination == Page::Settings {
+                                            for (index, section) in [(1_usize, "network"), (2, "data"), (3, "about")] {
+                                                window.click(("settings-section", index), cx);
+                                                window.render_frame(cx);
+                                                window.render_to_image().map_err(|error| error.to_string())?.save(output.join(format!("settings-{section}-{suffix}{viewport}.png"))).map_err(|error| error.to_string())?;
+                                                if index == 1 {
+                                                    window.click("settings-advanced-network", cx);
+                                                    window.render_frame(cx);
+                                                    window.render_to_image().map_err(|error| error.to_string())?.save(output.join(format!("settings-network-expanded-{suffix}{viewport}.png"))).map_err(|error| error.to_string())?;
+                                                    window.click("settings-advanced-network", cx);
+                                                }
+                                            }
+                                            window.click(("settings-section", 0_usize), cx);
+                                            window.render_frame(cx);
+                                        }
                                         if destination == Page::Rules {
                                             let RuntimeData::Rules { catalog, .. } = &page.read(cx).data else {
                                                 return Err("rule catalog is unavailable".to_owned());
@@ -372,6 +388,22 @@ fn native_pages_render_for_design_validation() {
                                                 window.render_frame(cx);
                                             }
                                         }
+                                        if destination == Page::Home && live.is_none() {
+                                            let group = window.find(gpui_kit::ElementId::from((gpui_kit::ElementId::from("home-group-card"), "节点选择".to_owned()))).bounds();
+                                            let node = window.find(gpui_kit::ElementId::from((gpui_kit::ElementId::from("home-node-card"), "🇭🇰 香港 · HK 01".to_owned()))).bounds();
+                                            for card in [node, window.find("home-more-groups").bounds(), window.find("home-more-nodes").bounds()] {
+                                                let tolerance = 1. / window.scale_factor();
+                                                if f32::from((card.size.width - group.size.width).abs()) > tolerance ||
+                                                    f32::from((card.size.height - group.size.height).abs()) > tolerance {
+                                                    return Err(format!("proxy group and node card dimensions differ: {group:?} vs {card:?}"));
+                                                }
+                                            }
+                                            for (trigger, row_id) in [("home-more-groups", "home-group-row"), ("home-more-nodes", "home-node-row")] {
+                                                if window.find(trigger).bounds().right() > window.find(row_id).bounds().right() + px(1.) {
+                                                    return Err(format!("{trigger} extends past its row"));
+                                                }
+                                            }
+                                        }
                                         let bounds = window.viewport_size();
                                         let mut metadata = serde_json::json!({
                                             "viewport_width": f32::from(bounds.width),
@@ -380,76 +412,27 @@ fn native_pages_render_for_design_validation() {
                                             "fixture": live.is_none(),
                                             "locale": locale,
                                         });
-                                        if destination == Page::Home {
-                                            let mut geometry = serde_json::Map::new();
-                                            let ids = [gpui_kit::ElementId::from("home-runtime-card"), gpui_kit::ElementId::from(("home-speed-card", 0_usize)), gpui_kit::ElementId::from(("home-speed-card", 1_usize))]
-                                                .into_iter().chain(["home-primary-row", "home-traffic-row", "home-traffic-panel", "home-subscription-panel", "home-activity-row", "home-activity-panel", "home-node-panel", "home-recent-connections-panel"].map(gpui_kit::ElementId::from));
-                                            for id in ids {
-                                                let bounds = window.try_find(id.clone()).ok_or_else(|| format!("missing Home region {id:?}"))?.bounds();
-                                                geometry.insert(format!("{id:?}"), serde_json::json!({"x": bounds.origin.x.as_f32(), "y": bounds.origin.y.as_f32(), "width": bounds.size.width.as_f32(), "height": bounds.size.height.as_f32()}));
-                                            }
-                                            metadata["regions"] = geometry.into();
-                                            if width >= 1500. {
-                                                for (left, right) in [("home-traffic-panel", "home-subscription-panel"), ("home-activity-panel", "home-node-panel")] {
-                                                    let left = window.try_find(left).unwrap().bounds();
-                                                    let right = window.try_find(right).unwrap().bounds();
-                                                    if (left.top() - right.top()).abs() * window.scale_factor() > px(1.) || (left.bottom() - right.bottom()).abs() * window.scale_factor() > px(1.) {
-                                                        return Err("Overview row panels do not share their top and bottom edges".to_owned());
-                                                    }
+                                        let regions: &[&str] = match destination {
+                                            Page::Home => &["home-runtime-card", "home-traffic-row", "home-speed-row", "home-node-panel", "home-group-row", "home-node-row"],
+                                            Page::Proxies => &["proxy-node-panel"],
+                                            Page::Connections => &["connections-table"],
+                                            Page::Profiles => if width >= 1088. { &["profiles-catalog-region", "profiles-inspector-region"] } else { &["profiles-catalog-region"] },
+                                            Page::Rules => &["rules-table-panel"],
+                                            Page::Settings => &["settings-appearance-card", "settings-startup-card"],
+                                            _ => &[],
+                                        };
+                                        let mut geometry = serde_json::Map::new();
+                                        for &id in regions {
+                                            let region = window.try_find(id).ok_or_else(|| format!("missing region {id}"))?.bounds();
+                                            if region.left() < px(0.) || region.right() > bounds.width + px(1.) {
+                                                if let Ok(image) = window.render_to_image() {
+                                                    let _ = image.save(output.join(format!("{}-{suffix}{viewport}-overflow.png", destination.route())));
                                                 }
-                                                if live.is_none() && window.try_find("home-recent-connections-panel").unwrap().bounds().bottom() > bounds.height {
-                                                    if let Ok(image) = window.render_to_image() {
-                                                        let _ = image.save(output.join(format!("home-{suffix}{viewport}-failure.png")));
-                                                    }
-                                                    return Err("populated Overview recent connections extend below the reference viewport".to_owned());
-                                                }
+                                                return Err(format!("{id} extends outside {width} x {height}: {region:?}"));
                                             }
+                                            geometry.insert(id.into(), serde_json::json!({"x": region.origin.x.as_f32(), "y": region.origin.y.as_f32(), "width": region.size.width.as_f32(), "height": region.size.height.as_f32()}));
                                         }
-                                        if destination == Page::Connections {
-                                            let first = window.try_find(("connection-metric-card", 0_usize)).ok_or_else(|| "missing first connection metric".to_owned())?.bounds();
-                                            for index in 1_usize..4 {
-                                                let bounds = window.try_find(("connection-metric-card", index)).ok_or_else(|| format!("missing connection metric {index}"))?.bounds();
-                                                if (bounds.origin.y - first.origin.y).abs() * window.scale_factor() > px(1.) {
-                                                    return Err("connection summary cards wrap before the compact viewport".to_owned());
-                                                }
-                                            }
-                                            if width >= 1500. {
-                                                let table = window.try_find("connections-table").ok_or_else(|| "missing connection table".to_owned())?.bounds();
-                                                let inspector = window.try_find("connection-inspector").ok_or_else(|| "missing connection inspector".to_owned())?.bounds();
-                                                if (table.bottom() - inspector.bottom()).abs() * window.scale_factor() > px(1.) {
-                                                    return Err("connection table and inspector bottom edges differ".to_owned());
-                                                }
-                                            }
-                                        }
-                                        if destination == Page::Rules && width >= 1500. {
-                                            let table = window.try_find("rules-table-panel").ok_or_else(|| "missing Rules table".to_owned())?.bounds();
-                                            let inspector = window.try_find("rule-inspector").ok_or_else(|| "missing Rules inspector".to_owned())?.bounds();
-                                            if (table.bottom() - inspector.bottom()).abs() * window.scale_factor() > px(1.) {
-                                                return Err("Rules table and inspector bottom edges differ".to_owned());
-                                            }
-                                        }
-                                        if destination == Page::Proxies {
-                                            let pagination = window.try_find("proxy-node-pagination").ok_or_else(|| "missing node pagination".to_owned())?.bounds();
-                                            let controls = window.try_find("proxy-node-pagination-controls").ok_or_else(|| "missing node pagination controls".to_owned())?.bounds();
-                                            if (controls.right() - pagination.right()).as_f32() * window.scale_factor() > 1.
-                                                || (pagination.left() - controls.left()).as_f32() * window.scale_factor() > 1. {
-                                                return Err("node pagination controls extend outside their panel".to_owned());
-                                            }
-                                            let mut geometry = serde_json::Map::new();
-                                            let mut panel_top = None;
-                                            for id in ["proxy-summary", "proxy-group-navigation", "proxy-node-panel", "proxy-node-inspector"] {
-                                                let bounds = window.try_find(id).ok_or_else(|| format!("missing proxy region {id}"))?.bounds();
-                                                if id != "proxy-summary" && width >= 1500. {
-                                                    let top = bounds.origin.y.as_f32();
-                                                    if panel_top.is_some_and(|previous: f32| (top - previous).abs() * window.scale_factor() > 1.) {
-                                                        return Err("proxy columns do not share a top edge".to_owned());
-                                                    }
-                                                    panel_top = Some(top);
-                                                }
-                                                geometry.insert(id.into(), serde_json::json!({"x": bounds.origin.x.as_f32(), "y": bounds.origin.y.as_f32(), "width": bounds.size.width.as_f32(), "height": bounds.size.height.as_f32()}));
-                                            }
-                                            metadata["regions"] = geometry.into();
-                                        }
+                                        metadata["regions"] = geometry.into();
                                         // Park the pointer away from navigation and row actions so
                                         // their previous hover state cannot masquerade as selection.
                                         window.hover("design-validation-pointer-target", cx);
@@ -465,7 +448,7 @@ fn native_pages_render_for_design_validation() {
                                 .background_executor()
                                 .spawn(async move {
                                     let (image, mut metadata) = image?;
-                                    if image.width() < 1200 || image.height() < 800 {
+                                    if image.width() < width as u32 || image.height() < height as u32 {
                                         return Err(format!(
                                             "native renderer returned only {} x {} pixels",
                                             image.width(),
@@ -533,36 +516,56 @@ fn fixture_data(page: Page) -> RuntimeData {
             },
             proxies: Observation::Fresh {
                 value: zenclash_core::ProxyCatalog::from_group_nodes(
-                    vec![(
-                        zenclash_core::ProxyGroup {
-                            name: "节点选择".into(),
-                            now: "香港 · HK 01".into(),
-                            behavior: zenclash_core::ProxyGroupBehavior::Selector,
-                            ..Default::default()
-                        },
-                        [
-                            ("香港 · HK 01", Some(28)),
-                            ("香港 · HK 02", Some(35)),
-                            ("新加坡 · SG 01", Some(0)),
-                            ("日本 · JP 01", None),
-                        ]
-                        .into_iter()
-                        .map(|(name, delay)| zenclash_core::ProxyNode {
-                            name: name.into(),
-                            kind: "Shadowsocks".into(),
-                            udp: true,
-                            history: delay
-                                .into_iter()
-                                .map(|delay| zenclash_core::DelayHistory {
-                                    delay,
-                                    ..Default::default()
-                                })
-                                .collect(),
-                            ..Default::default()
-                        })
-                        .collect(),
-                    )],
-                    4,
+                    [
+                        "节点选择",
+                        "自动选择",
+                        "流媒体",
+                        "游戏加速",
+                        "全球直连",
+                        "工作网络",
+                        "备用线路",
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, name)| {
+                        (
+                            zenclash_core::ProxyGroup {
+                                name: name.into(),
+                                now: "🇭🇰 香港 · HK 01".into(),
+                                behavior: if index == 1 {
+                                    zenclash_core::ProxyGroupBehavior::Automatic { fixed: false }
+                                } else {
+                                    zenclash_core::ProxyGroupBehavior::Selector
+                                },
+                                ..Default::default()
+                            },
+                            [
+                                ("🇭🇰 香港 · HK 01", Some(28)),
+                                ("🇭🇰 香港 · HK 02", Some(35)),
+                                ("🇯🇵 日本 · JP 01", Some(62)),
+                                ("🇸🇬 新加坡 · SG 01", Some(48)),
+                                ("🇺🇸 美国 · US 01", Some(156)),
+                                ("备用 · HK 03", None),
+                            ]
+                            .into_iter()
+                            .map(|(name, delay)| zenclash_core::ProxyNode {
+                                name: name.into(),
+                                kind: "Shadowsocks".into(),
+                                udp: true,
+                                history: delay
+                                    .into_iter()
+                                    .map(|delay| zenclash_core::DelayHistory {
+                                        delay,
+                                        ..Default::default()
+                                    })
+                                    .collect(),
+                                ..Default::default()
+                            })
+                            .collect(),
+                        )
+                    })
+                    .collect(),
+                    6,
                 ),
                 observed_at_ms: 0,
             },

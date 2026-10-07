@@ -1,7 +1,7 @@
 use super::{
     Button, ButtonVariants, Context, Disableable, IconName, Input, IntoElement, Page,
-    ParentElement, RuntimeData, RuntimePage, Styled, config_input_row, empty_dash, h_flex,
-    info_row, json, message_banner, setting_card, setting_switch, v_flex,
+    ParentElement, RuntimeData, RuntimePage, Styled, config_input_row, context_note, empty_dash,
+    h_flex, info_row, json, setting_card, setting_switch, v_flex,
 };
 use gpui_kit::component::input::Textarea;
 use zenclash_core::{
@@ -65,7 +65,7 @@ impl RuntimePage {
                 .children(
                     self.profile_service
                         .service_tun_warning()
-                        .map(|warning| message_banner(warning, theme.danger, theme)),
+                        .map(|warning| context_note(warning, theme)),
                 )
                 .child(self.render_service_tun_actions(&state, cx)),
         )
@@ -107,9 +107,8 @@ impl RuntimePage {
                     theme,
                 ));
         } else {
-            card = card.child(message_banner(
+            card = card.child(context_note(
                 zenclash_i18n::text("tun.runtime.loading"),
-                theme.primary,
                 theme,
             ));
         }
@@ -179,7 +178,7 @@ impl RuntimePage {
                 }
                 _ => zenclash_i18n::text("tun.permissions.loading"),
             };
-            card = card.child(message_banner(message, theme.warning, theme));
+            card = card.child(context_note(message, theme));
         }
         card.child(
             h_flex().justify_end().p_4().child(

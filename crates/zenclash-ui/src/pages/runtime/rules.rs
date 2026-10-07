@@ -8,7 +8,7 @@ use super::{
     AppContext, Button, Context, Disableable, Entity, FluentBuilder, IconName, Input, InputEvent,
     InputState, InteractiveElement, IntoElement, Page, ParentElement, RuntimeData, RuntimePage,
     Sizable, Styled, Subscription, Window, contains_ascii_case_insensitive, div, empty_state,
-    h_flex, list_page, message_banner, pagination_summary, v_flex,
+    h_flex, list_page, pagination_summary, v_flex,
 };
 
 const RULES_PER_PAGE: usize = 100;
@@ -23,6 +23,7 @@ pub(super) struct RulesUiState {
     pub(super) confirmed_disabled: HashMap<usize, bool>,
     pub(super) projecting: bool,
     selected: Option<usize>,
+    analytics_expanded: bool,
 }
 
 impl RulesUiState {
@@ -55,6 +56,7 @@ impl RulesUiState {
                 confirmed_disabled: HashMap::new(),
                 projecting: false,
                 selected: None,
+                analytics_expanded: false,
             },
             subscription,
         )
@@ -194,10 +196,11 @@ impl RuntimePage {
 
     pub(super) fn render_rules(
         &self,
+        compact: bool,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        self.rule_dashboard(theme, cx)
+        self.rule_dashboard(compact, theme, cx)
     }
 }
 

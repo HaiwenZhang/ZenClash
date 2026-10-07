@@ -1,8 +1,8 @@
 use super::{
     Button, ButtonVariants, ClipboardItem, ConfigDiffReport, Context, Disableable, FluentBuilder,
     IconName, IntoElement, Page, ParentElement, PathPromptOptions, RuntimePage, ScrollableElement,
-    Sizable, Styled, Switch, diff_yaml_configs, div, h_flex, info_row, load_page, message_banner,
-    px, setting_card, v_flex,
+    Sizable, Styled, Switch, context_note, diff_yaml_configs, div, h_flex, info_row, load_page, px,
+    setting_card, v_flex,
 };
 
 mod diff_view;
@@ -18,6 +18,12 @@ pub(super) struct ConfigPreview {
     source: String,
     effective: String,
     diff: ConfigDiffReport,
+}
+
+impl ConfigPreview {
+    pub(super) fn is_truncated(&self) -> bool {
+        self.source.len() > MAX_PREVIEW_BYTES || self.effective.len() > MAX_PREVIEW_BYTES
+    }
 }
 
 pub(super) struct OverridesState {
@@ -259,9 +265,8 @@ impl RuntimePage {
         v_flex()
             .gap_4()
             .child(self.render_override_chain(theme, cx))
-            .child(message_banner(
+            .child(context_note(
                 zenclash_i18n::text("overrides.chain.explanation"),
-                theme.primary,
                 theme,
             ))
             .children(self.overrides.preview.as_ref().map(|preview| {
@@ -487,9 +492,8 @@ where
                 .child(content),
         )
         .when(truncated, |panel| {
-            panel.child(message_banner(
+            panel.child(context_note(
                 zenclash_i18n::text("overrides.preview.truncated"),
-                theme.warning,
                 theme,
             ))
         })

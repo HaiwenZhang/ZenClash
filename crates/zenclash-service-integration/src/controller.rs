@@ -14,7 +14,9 @@ const MAX_HEADER_BYTES: usize = 32 * 1024;
 const MAX_REQUEST_BYTES: usize = 24 * 1024 * 1024 + 1024;
 const MAX_DEADLINE: Duration = Duration::from_secs(12);
 
-pub(crate) struct NativeController {
+/// Mihomo HTTP and WebSocket transport over a local pipe or Unix socket.
+/// The peer must match the PID of the owned kernel before credentials are sent.
+pub struct NativeController {
     path: PathBuf,
     pid: u32,
     secret: String,
@@ -27,20 +29,25 @@ pub struct NativeHttpResponse {
 
 #[derive(Debug, thiserror::Error)]
 pub enum NativeHttpError {
-    #[error("controller request failed before sending")]
+    #[error("controller request failed before sending: {0}")]
     BeforeSend(#[source] io::Error),
-    #[error("controller request outcome is unknown")]
+    #[error("controller request outcome is unknown: {0}")]
     OutcomeUnknown(#[source] io::Error),
     #[error("controller request exceeded its byte budget")]
     BudgetExceeded { request_sent: bool },
 }
 
 impl NativeController {
-    pub(crate) fn new(path: PathBuf, pid: u32, secret: String) -> Self {
+    /// Creates a transport for one owned kernel process without performing I/O.
+    pub fn new(path: PathBuf, pid: u32, secret: String) -> Self {
         Self { path, pid, secret }
     }
 
-    pub(crate) async fn request(
+    /// Sends an HTTP request directly to the owned kernel.
+    ///
+    /// # Errors
+    /// Reports peer verification, transport, deadline and body budget failures.
+    pub async fn request(
         &self,
         method: &str,
         path: &str,
@@ -107,7 +114,18 @@ impl NativeController {
     #[cfg(windows)]
     async fn connect(&self) -> io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
         use std::os::windows::io::AsRawHandle;
-        let stream = tokio::net::windows::named_pipe::ClientOptions::new().open(&self.path)?;
+        use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
+        // Mihomo publishes the next instance after accepting the previous one.
+        // Concurrent HTTP and WebSocket opens can observe that short busy interval.
+        let stream = loop {
+            match tokio::net::windows::named_pipe::ClientOptions::new().open(&self.path) {
+                Ok(stream) => break stream,
+                Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        };
         let mut pid = 0;
         if unsafe {
             windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId(
@@ -254,7 +272,11 @@ pub type NativeSocket =
 pub type NativeSocket = tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>;
 
 impl NativeController {
-    pub(crate) async fn websocket(&self, path: &str) -> Result<NativeSocket, NativeHttpError> {
+    /// Opens a WebSocket directly on the owned kernel's local controller.
+    ///
+    /// # Errors
+    /// Reports peer verification, transport, deadline and handshake failures.
+    pub async fn websocket(&self, path: &str) -> Result<NativeSocket, NativeHttpError> {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
         // Reuse HTTP origin-form checks and the same secret/header byte limits.
         let http = self.build_request("GET", path, None)?;
@@ -496,6 +518,27 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(tail.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_busy_pipe_wait_is_cancelled_by_the_request_deadline() {
+        use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+        let name = format!(r"\\.\pipe\ZenClash.Kernel.Busy.{}", std::process::id());
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .max_instances(1)
+            .create(&name)
+            .unwrap();
+        let _occupied = ClientOptions::new().open(&name).unwrap();
+        server.connect().await.unwrap();
+        let controller =
+            NativeController::new(name.into(), std::process::id(), "private-secret".into());
+        let result = controller
+            .request("GET", "/version", None, Duration::from_millis(40))
+            .await;
+        assert!(matches!(result, Err(NativeHttpError::BeforeSend(ref error))
+            if error.kind() == io::ErrorKind::TimedOut));
     }
 
     #[cfg(windows)]

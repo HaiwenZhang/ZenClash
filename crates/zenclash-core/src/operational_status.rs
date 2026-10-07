@@ -13,6 +13,7 @@ use crate::{
 };
 
 const STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+mod memory;
 const PLATFORM_REFRESH_TICKS: u8 = 6;
 
 #[derive(Debug, Default)]
@@ -499,9 +500,11 @@ pub struct StreamStatus {
     pub memory: u64,
 }
 
-/// Independent traffic, log, and connection freshness.
+/// Independent memory, traffic, log, and connection freshness.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StreamStatuses {
+    /// Current resident memory from the owned process or `/memory` for external cores.
+    pub memory: Observation<StreamStatus>,
     /// `/traffic` WebSocket freshness.
     pub traffic: Observation<StreamStatus>,
     /// `/logs` WebSocket freshness.
@@ -771,10 +774,42 @@ async fn refresh_status_with_tun_reader<F, R>(
             .await,
         )
     };
-    let (version, config, connections, native) = tokio::join!(
+    let pid = core_session
+        .managed_process_snapshot()
+        .and_then(|process| process.pid)
+        .or_else(|| {
+            client
+                .service_client()
+                .and_then(|client| client.snapshot())
+                .and_then(|snapshot| snapshot.core_pid)
+        });
+    let memory_read = async {
+        let reported = match client.memory_snapshot().await {
+            Ok(memory) if memory.inuse > 0 => return Ok(memory),
+            result => result,
+        };
+        if let Some(pid) = pid
+            && let Ok(Some(bytes)) =
+                tokio::task::spawn_blocking(move || memory::resident_memory(pid)).await
+        {
+            return Ok(crate::MemorySnapshot {
+                inuse: bytes,
+                oslimit: 0,
+            });
+        }
+        let memory = reported?;
+        if memory.inuse == 0 {
+            return Err(crate::MihomoError::Process(
+                "Core memory is unavailable".into(),
+            ));
+        }
+        Ok(memory)
+    };
+    let (version, config, connections, memory, native) = tokio::join!(
         client.version(),
         client.runtime_config(),
         client.connections_summary(),
+        memory_read,
         native,
     );
     let tun = if refresh_platform {
@@ -866,6 +901,17 @@ async fn refresh_status_with_tun_reader<F, R>(
                 logs,
                 current.generation,
                 now,
+            );
+            next.streams.memory = Observation::record(
+                &generation_observation(&next.streams.memory, current.generation),
+                memory.map(|memory| StreamStatus {
+                    generation: current.generation,
+                    last_success_at_ms: now,
+                    memory: memory.inuse,
+                    ..Default::default()
+                }),
+                now,
+                RecoveryAction::Retry,
             );
             next.streams.connections = Observation::record(
                 &generation_observation(&next.streams.connections, current.generation),
@@ -1010,6 +1056,13 @@ impl HasGeneration for StreamStatus {
 
 fn reset_old_generation_streams(streams: &mut StreamStatuses, generation: u64) {
     if streams
+        .memory
+        .value()
+        .is_some_and(|value| value.generation != generation)
+    {
+        streams.memory = Observation::Loading;
+    }
+    if streams
         .traffic
         .value()
         .is_some_and(|value| value.generation != generation)
@@ -1056,7 +1109,7 @@ mod tests {
         let endpoint =
             crate::MihomoEndpoint::new(format!("http://{}", listener.local_addr().unwrap()), "");
         let server = std::thread::spawn(move || {
-            for index in 0..5 {
+            for index in 0..6 {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut request = [0_u8; 8_192];
                 let length = stream.read(&mut request).unwrap();
@@ -1065,7 +1118,7 @@ mod tests {
                     r#"{"version":"test"}"#
                 } else if request.starts_with("GET /connections ") {
                     r#"{"connections":[],"uploadTotal":0,"downloadTotal":0}"#
-                } else if index < 3 {
+                } else if index < 4 {
                     r#"{"mode":"rule"}"#
                 } else {
                     r#"{"mode":"global"}"#
@@ -1136,6 +1189,7 @@ mod tests {
         assert!(snapshot.controller.value().is_none());
         assert!(snapshot.capture.tun.value().is_none());
         assert!(snapshot.streams.connections.value().is_none());
+        assert!(snapshot.streams.memory.value().is_none());
         server.join().unwrap();
     }
 
@@ -1352,6 +1406,19 @@ mod tests {
         };
 
         assert!(!same_generation(expected, current));
+        let mut streams = StreamStatuses {
+            memory: Observation::Fresh {
+                value: StreamStatus {
+                    generation: 3,
+                    memory: 47_000_000,
+                    ..Default::default()
+                },
+                observed_at_ms: 1,
+            },
+            ..Default::default()
+        };
+        reset_old_generation_streams(&mut streams, current.generation);
+        assert_eq!(streams.memory, Observation::Loading);
     }
 
     #[test]

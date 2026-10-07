@@ -64,6 +64,18 @@ fn native_preflight_is_definitive_but_lost_controller_response_is_unknown() {
     assert!(!rejected.mutation_result_unknown());
     assert!(!connection.mutation_result_unknown());
     assert!(lost.mutation_result_unknown());
+    assert!(
+        !MihomoError::Native(NativeHttpError::BeforeSend(std::io::Error::other(
+            "unavailable"
+        ),))
+        .mutation_result_unknown()
+    );
+    assert!(
+        MihomoError::Native(NativeHttpError::OutcomeUnknown(std::io::Error::other(
+            "response lost"
+        ),))
+        .mutation_result_unknown()
+    );
 }
 
 #[tokio::test]

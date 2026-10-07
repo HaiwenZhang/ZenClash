@@ -46,6 +46,12 @@ impl RuntimePage {
                 observed_at_ms,
             },
             streams: StreamStatuses {
+                memory: fresh(StreamStatus {
+                    generation,
+                    last_success_at_ms: observed_at_ms,
+                    memory: 64 * 1024 * 1024,
+                    ..Default::default()
+                }),
                 traffic: fresh(StreamStatus {
                     generation,
                     last_success_at_ms: observed_at_ms,

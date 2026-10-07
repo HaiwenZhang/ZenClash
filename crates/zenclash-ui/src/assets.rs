@@ -8,6 +8,8 @@ use gpui_kit::{AssetSource, Result, SharedString};
 
 /// Asset path for the monochrome `ZenClash` brand mark.
 pub const ZENCLASH_MARK_PATH: &str = "icons/zenclash-mark.svg";
+/// Shared full-color title-bar branding from the unified design source.
+pub const ZENCLASH_LOGO_PATH: &str = "images/zenclash-logo.png";
 /// Asset path for the layered group icon used by the proxies sidebar destination.
 pub const GROUP_ICON_PATH: &str = "icons/group.svg";
 /// Asset path for the linked chain icon used by the connections sidebar destination.
@@ -80,6 +82,11 @@ pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == ZENCLASH_LOGO_PATH {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/zenclash-logo.png"
+            ))));
+        }
         let diagnostic_icon: Option<&'static [u8]> = match path {
             "icons/server.svg" => Some(include_bytes!("../assets/icons/server.svg")),
             "icons/clock.svg" => Some(include_bytes!("../assets/icons/clock.svg")),

@@ -1142,6 +1142,8 @@ pub(in crate::pages::runtime) mod tests {
             });
             cx.update_window(window.into(), |_, window, cx| {
                 window.render_frame(cx);
+                window.click(("settings-section", 2_usize), cx);
+                window.render_frame(cx);
                 window.click("confirm-clear-traffic", cx);
             })
             .unwrap();
@@ -1304,6 +1306,8 @@ pub(in crate::pages::runtime) mod tests {
                 })
             });
             cx.update_window(window.into(), |_, window, cx| {
+                window.render_frame(cx);
+                window.click(("settings-section", 2_usize), cx);
                 window.render_frame(cx);
                 window.click("settings-log-file-enabled", cx);
             })

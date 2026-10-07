@@ -170,4 +170,4 @@ impl ServiceRunState {
 
 pub use execution::{CoreExecutionGuard, check_sidecar_available, current_process_elevated};
 
-pub use controller::{NativeHttpError, NativeHttpResponse, NativeSocket};
+pub use controller::{NativeController, NativeHttpError, NativeHttpResponse, NativeSocket};

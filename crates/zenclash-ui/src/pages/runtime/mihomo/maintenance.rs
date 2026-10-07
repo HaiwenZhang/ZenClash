@@ -3,19 +3,18 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
     h_flex, v_flex,
 };
-use gpui_kit::{Context, IntoElement, ParentElement, Styled, prelude::FluentBuilder};
+use gpui_kit::{Context, IntoElement, ParentElement, Styled};
 use zenclash_core::{CoreInstallOutcome, CoreSession, MihomoRelease, MihomoReleaseService};
 
 use super::super::{
-    Page, RuntimeConfigApplied, RuntimePage, format_bytes, info_row, load_page, message_banner,
-    setting_card,
+    Page, RuntimeConfigApplied, RuntimePage, format_bytes, info_row, load_page, setting_card,
 };
 
 #[derive(Default)]
 pub(crate) struct CoreReleaseState {
     releases: Vec<MihomoRelease>,
     loading: bool,
-    error: Option<String>,
+    pub(in crate::pages::runtime) error: Option<String>,
 }
 
 impl RuntimePage {
@@ -169,9 +168,6 @@ impl RuntimePage {
             zenclash_i18n::text("core_page.maintenance.replacement_strategy_description"),
             theme,
         ))
-        .when_some(self.core_releases.error.clone(), |this, error| {
-            this.child(message_banner(error, theme.danger, theme))
-        })
         .children(releases.into_iter().enumerate().map(|(index, release)| {
             let is_current = versions_match(current_version, &release.tag);
             let release_for_action = release.clone();

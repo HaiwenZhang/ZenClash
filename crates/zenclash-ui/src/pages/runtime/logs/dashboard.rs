@@ -24,7 +24,7 @@ impl RuntimePage {
                     }))
                     .tooltip(zenclash_i18n::text("logs.display_pause_description"))
                     .small()
-                    .h_8()
+                    .h_10()
                     .outline()
                     .disabled(self.logs.presentation.revision.is_none())
                     .on_click(cx.listener(|this, _, _, cx| {

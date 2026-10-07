@@ -8,11 +8,12 @@ use super::{
     AppContext, Button, ButtonVariants, Context, Disableable, Entity, FluentBuilder, IconName,
     Input, InputEvent, InputState, IntoElement, Page, ParentElement, RuntimeData, RuntimePage,
     Sizable, Styled, Subscription, Window, contains_ascii_case_insensitive, div, empty_state,
-    format_bytes, h_flex, list_page, message_banner, pagination_summary, v_flex,
+    format_bytes, h_flex, list_page, pagination_summary, v_flex,
 };
 
 mod dashboard;
 mod projection;
+mod timeline;
 
 const CONNECTIONS_PER_PAGE: usize = 100;
 
@@ -29,6 +30,9 @@ pub(super) struct ConnectionsUiState {
     pub(super) projecting: bool,
     frozen: Option<std::sync::Arc<zenclash_core::ConnectionsSnapshot>>,
     history: ConnectionMetricHistory,
+    analytics_expanded: bool,
+    show_closed: bool,
+    timeline: timeline::ConnectionTimeline,
 }
 
 #[derive(Default)]
@@ -124,6 +128,9 @@ impl ConnectionsUiState {
                 projecting: false,
                 frozen: None,
                 history: ConnectionMetricHistory::default(),
+                analytics_expanded: false,
+                show_closed: false,
+                timeline: timeline::ConnectionTimeline::default(),
             },
             subscription,
         )
@@ -132,7 +139,7 @@ impl ConnectionsUiState {
 
 impl RuntimePage {
     pub(super) fn update_connection_presentation(&mut self, cx: &mut Context<Self>) {
-        let data = match (&self.connections.frozen, &self.data) {
+        let mut data = match (&self.connections.frozen, &self.data) {
             (Some(snapshot), _) | (None, RuntimeData::Connections(snapshot)) => snapshot.clone(),
             _ => {
                 self.connections.release_presentation();
@@ -142,6 +149,17 @@ impl RuntimePage {
         if self.page != Page::Connections {
             return;
         }
+        if self.connections.frozen.is_none() {
+            self.connections.timeline.observe(
+                self.core_session.generation(),
+                data.clone(),
+                std::time::Instant::now(),
+            );
+        }
+        if self.connections.show_closed {
+            data = self.connections.timeline.closed();
+        }
+
         if self.connections.frozen.is_some()
             && self
                 .connections
@@ -436,10 +454,11 @@ impl RuntimePage {
 
     pub(super) fn render_connections(
         &self,
+        compact: bool,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        self.connection_dashboard(theme, cx)
+        self.connection_dashboard(compact, theme, cx)
     }
 }
 

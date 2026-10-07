@@ -329,6 +329,102 @@ impl RuntimePage {
         cx.notify();
     }
 
+    pub(in super::super) fn update_all_managed_profiles(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = self.profiles.store.clone() else {
+            return;
+        };
+        let ids = self
+            .profiles
+            .catalog
+            .profiles
+            .iter()
+            .filter(|profile| profile.is_remote())
+            .map(|profile| (profile.id.clone(), profile.name.clone()))
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            return;
+        }
+        let Some(token) = self.begin_mutation(Page::Profiles) else {
+            return;
+        };
+        let controlled = self.controlled_config_store.clone();
+        let service = self.profile_service.clone();
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let mut errors = Vec::new();
+            let mut updated = 0;
+            // One operation at a time: an active subscription can reload the core.
+            for (id, name) in ids {
+                let result = runtime
+                    .spawn(workflow::update_remote(
+                        store.clone(),
+                        controlled.clone(),
+                        service.clone(),
+                        id,
+                    ))
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(|result| result);
+                let keep_going = this
+                    .update(cx, |page, cx| {
+                        match result {
+                            Ok(outcome) => {
+                                let accepted =
+                                    page.synchronize_profile_receipt(&outcome.receipt, cx);
+                                if !accepted && outcome.receipt.runtime_version().is_some() {
+                                    errors.push(format!(
+                                        "{name}: {}",
+                                        zenclash_i18n::text("runtime.empty.unavailable")
+                                    ));
+                                    return false;
+                                }
+                                updated += 1;
+                                if let Some(warning) = outcome.receipt.warning() {
+                                    errors.push(format!("{name}: {warning}"));
+                                }
+                                if page.profile_service.is_current(outcome.refresh_version) {
+                                    match outcome.refresh {
+                                        Ok(data) => {
+                                            page.replace_page_data(token, data, cx);
+                                        }
+                                        Err(error) => errors.push(format!("{name}: {error}")),
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                errors.push(format!("{name}: {error}"));
+                                page.synchronize_profile_recovery();
+                            }
+                        }
+                        page.reload_profile_catalog(cx);
+                        cx.notify();
+                        page.profiles.recovery.is_none()
+                            && page.profiles.pending_finalization.is_none()
+                    })
+                    .unwrap_or(false);
+                if !keep_going {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |page, cx| {
+                page.finish_mutation(token);
+                page.reload_profile_catalog(cx);
+                if page.is_page_task_current(token) {
+                    page.notice = Some(zenclash_i18n::text_with(
+                        "unified.profiles.updated_all",
+                        &[("count", updated.to_string())],
+                    ));
+                    if !errors.is_empty() {
+                        page.error = Some(errors.join("\n"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     pub(in super::super) fn update_managed_profile(&mut self, id: String, cx: &mut Context<Self>) {
         let Some(store) = self.profiles.store.clone() else {
             return;

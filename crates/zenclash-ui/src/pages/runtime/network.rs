@@ -16,7 +16,7 @@ use super::{
     InputState, IntoElement, NetworkLatencyTarget, NetworkProbeRoutePreference,
     NetworkProbeSnapshot, ParentElement, PublicIpProvider, RuntimeConfig, RuntimeData, RuntimePage,
     Selectable, Sizable, Styled, SystemNetworkSnapshot, Window, config_input_row, div, empty_dash,
-    h_flex, json, message_banner, px, v_flex,
+    h_flex, json, px, v_flex,
 };
 
 #[derive(Debug)]
@@ -422,9 +422,6 @@ impl RuntimePage {
                                 })),
                         ),
                 )
-            })
-            .when_some(snapshot.public_ip_error.clone(), |this, error| {
-                this.child(message_banner(error, theme.danger, theme))
             })
             .child(
                 h_flex()
@@ -879,9 +876,6 @@ impl RuntimePage {
                 &system.local_ipv4,
                 theme,
             ))
-            .when_some(system.error.clone(), |this, error| {
-                this.child(message_banner(error, theme.warning, theme))
-            })
             .when(self.network_probe.details_expanded, |card| {
                 card.child(
                     h_flex()

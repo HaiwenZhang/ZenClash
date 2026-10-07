@@ -1,6 +1,6 @@
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::{
-    Selectable,
+    Selectable, WindowExt,
     button::ButtonVariants,
     menu::{DropdownMenu, PopupMenuItem},
 };
@@ -12,7 +12,7 @@ use super::{
     Button, Context, Disableable, FluentBuilder, Icon, IconName, IntoElement, ParentElement,
     ProxiesPage, ProxyCatalog, ProxyGroup, ProxyGroupBehavior, ProxyNode, ProxyNodeId, ProxyPage,
     Sizable, Styled, Switch, div, group_allows_manual_selection, group_has_unique_current, h_flex,
-    proxy_page, v_flex,
+    v_flex,
 };
 
 impl ProxiesPage {
@@ -125,6 +125,8 @@ impl ProxiesPage {
         &self,
         catalog: &ProxyCatalog,
         page: ProxyPage,
+        compact: bool,
+        columns: u16,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
@@ -142,7 +144,7 @@ impl ProxiesPage {
             .max_w_full()
             .flex_shrink_0()
             .gap_2()
-            .min_h(gpui_kit::rems(49.))
+            .min_h_0()
             .p_3()
             .rounded(theme.radius_lg)
             .border_1()
@@ -228,8 +230,7 @@ impl ProxiesPage {
         h_flex()
             .items_stretch()
             .gap_3()
-            .flex_wrap()
-            .child(navigation)
+            .when(!compact, |row| row.child(navigation))
             .child(
                 v_flex()
                     .flex_1()
@@ -237,15 +238,44 @@ impl ProxiesPage {
                     .min_w_0()
                     .max_w_full()
                     .gap_3()
-                    .child(self.render_group(
-                        catalog,
-                        group,
-                        self.active_testing_groups.contains_key(&group.name),
-                        theme,
-                        cx,
-                    )),
+                    .when(compact, |column| {
+                        let owner = cx.entity().downgrade();
+                        let choices = catalog
+                            .groups()
+                            .iter()
+                            .enumerate()
+                            .filter(|(index, _)| self.visible_group_indices.contains(index))
+                            .map(|(_, group)| group.name.clone())
+                            .collect::<Vec<_>>();
+                        column.child(
+                            Button::new("compact-proxy-group")
+                                .label(group.name.clone())
+                                .outline()
+                                .dropdown_caret(true)
+                                .dropdown_menu(move |mut menu, _, _| {
+                                    for name in &choices {
+                                        let name = name.clone();
+                                        let owner = owner.clone();
+                                        menu =
+                                            menu.item(PopupMenuItem::new(name.clone()).on_click(
+                                                move |_, _, cx| {
+                                                    let _ = owner.update(cx, |page, cx| {
+                                                        if !page.expanded.contains(&name) {
+                                                            page.toggle_group(&name, cx);
+                                                        }
+                                                    });
+                                                },
+                                            ));
+                                    }
+                                    menu
+                                }),
+                        )
+                    })
+                    .child(self.render_group(catalog, group, columns, theme, cx)),
             )
-            .child(self.render_current_node(catalog, group, theme, cx))
+            .when(self.show_node_details, |row| {
+                row.child(self.render_current_node(catalog, group, theme, cx))
+            })
             .into_any_element()
     }
 
@@ -720,55 +750,88 @@ impl ProxiesPage {
         let testing = selected
             .as_ref()
             .is_some_and(|name| self.active_testing_groups.contains_key(name));
-        v_flex().px_8().pt_4().pb_3().gap_3().child(
-            h_flex()
-                .justify_between()
-                .items_end()
-                .gap_3()
-                .child(crate::components::workspace::title(
-                    crate::pages::Page::Proxies,
-                    cx,
-                ))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            Button::new("refresh-proxies")
-                                .icon(crate::assets::AppIcon::RefreshCw)
-                                .label(zenclash_i18n::text("proxies.actions.refresh"))
+        v_flex()
+            .px_8()
+            .pt_4()
+            .pb_3()
+            .gap_3()
+            .child(
+                h_flex().gap_1().children(
+                    [
+                        crate::components::sidebar::OutboundMode::Rule,
+                        crate::components::sidebar::OutboundMode::Global,
+                        crate::components::sidebar::OutboundMode::Direct,
+                    ]
+                    .into_iter()
+                    .map(|mode| {
+                        Button::new((gpui_kit::ElementId::from("proxy-mode"), mode.api_value()))
+                            .label(mode.label())
+                            .outline()
+                            .selected(self.outbound_mode == mode.api_value())
+                            .disabled(self.operation_pending())
+                            .on_click(move |_, window, cx| {
+                                use crate::components::sidebar::OutboundMode;
+                                match mode {
+                                    OutboundMode::Rule => window
+                                        .dispatch_action(Box::new(crate::app::SetRuleMode), cx),
+                                    OutboundMode::Global => window
+                                        .dispatch_action(Box::new(crate::app::SetGlobalMode), cx),
+                                    OutboundMode::Direct => window
+                                        .dispatch_action(Box::new(crate::app::SetDirectMode), cx),
+                                }
+                            })
+                    }),
+                ),
+            )
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_end()
+                    .gap_3()
+                    .child(crate::components::workspace::title(
+                        crate::pages::Page::Proxies,
+                        cx,
+                    ))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("refresh-proxies")
+                                    .icon(crate::assets::AppIcon::RefreshCw)
+                                    .label(zenclash_i18n::text("proxies.actions.refresh"))
+                                    .small()
+                                    .h_10()
+                                    .outline()
+                                    .loading(self.loading)
+                                    .disabled(self.operation_pending())
+                                    .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                            )
+                            .child(
+                                Button::new((
+                                    gpui_kit::ElementId::from("test-group"),
+                                    selected.clone().unwrap_or_default(),
+                                ))
+                                .icon(IconName::Play)
+                                .label(zenclash_i18n::text(if testing {
+                                    "proxies.actions.testing"
+                                } else {
+                                    "proxies.actions.test_selected_group"
+                                }))
+                                .outline()
                                 .small()
                                 .h_10()
-                                .outline()
-                                .loading(self.loading)
-                                .disabled(self.operation_pending())
-                                .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
-                        )
-                        .child(
-                            Button::new((
-                                gpui_kit::ElementId::from("test-group"),
-                                selected.clone().unwrap_or_default(),
-                            ))
-                            .icon(IconName::Play)
-                            .label(zenclash_i18n::text(if testing {
-                                "proxies.actions.testing"
-                            } else {
-                                "proxies.actions.test_selected_group"
-                            }))
-                            .outline()
-                            .small()
-                            .h_10()
-                            .loading(testing)
-                            .disabled(selected.is_none() || self.operation_pending())
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    if let Some(name) = &selected {
-                                        this.test_group(name, cx);
-                                    }
-                                },
-                            )),
-                        ),
-                ),
-        )
+                                .loading(testing)
+                                .disabled(selected.is_none() || self.operation_pending())
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        if let Some(name) = &selected {
+                                            this.test_group(name, cx);
+                                        }
+                                    },
+                                )),
+                            ),
+                    ),
+            )
     }
 
     fn render_node_filters(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
@@ -777,6 +840,17 @@ impl ProxiesPage {
         h_flex()
             .gap_2()
             .flex_wrap()
+            .child(
+                Button::new("proxy-details")
+                    .label(zenclash_i18n::text("home.proxy.title"))
+                    .small()
+                    .outline()
+                    .selected(self.show_node_details)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_node_details = !this.show_node_details;
+                        cx.notify();
+                    })),
+            )
             .child(
                 Button::new("sort-proxies-by-latency")
                     .icon(gpui_kit::assets::IconName::ArrowDownUp)
@@ -801,7 +875,6 @@ impl ProxiesPage {
                                     .on_click(move |_, _, cx| {
                                         let _ = owner.update(cx, |page, cx| {
                                             page.sort_by_latency = sort;
-                                            page.proxy_pages.clear();
                                             page.prepare_search(cx);
                                             cx.notify();
                                         });
@@ -822,7 +895,6 @@ impl ProxiesPage {
                             .checked(self.hide_unavailable)
                             .on_click(cx.listener(|this, checked, _, cx| {
                                 this.hide_unavailable = *checked;
-                                this.proxy_pages.clear();
                                 this.prepare_search(cx);
                                 cx.notify();
                             })),
@@ -867,13 +939,13 @@ impl ProxiesPage {
         &self,
         catalog: &ProxyCatalog,
         group: &ProxyGroup,
-        _testing_group: bool,
+        columns: u16,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let expanded = true;
         v_flex()
-            .min_h(gpui_kit::rems(49.))
+            .min_h_0()
             .id("proxy-node-panel")
             .test_support()
             .rounded(theme.radius_lg)
@@ -902,16 +974,15 @@ impl ProxiesPage {
             )
             .when(expanded, |this| {
                 let nodes = self.displayed_nodes(catalog, group);
-                let page = proxy_page(
-                    nodes.len(),
-                    self.proxy_pages
-                        .get(&group.name)
-                        .copied()
-                        .unwrap_or_default(),
-                );
 
-                let previous_group = group.name.clone();
-                let next_group = group.name.clone();
+                let focus_handles = nodes
+                    .iter()
+                    .filter_map(|&index| {
+                        self.node_focus
+                            .get(&(group.name.clone(), group.all[index].clone()))
+                            .cloned()
+                    })
+                    .collect::<Vec<_>>();
                 this.child(
                     v_flex()
                         .flex_1()
@@ -934,41 +1005,31 @@ impl ProxiesPage {
                                 .child(self.render_node_filters(cx)),
                         )
                         .child(
-                            v_flex()
-                                .flex_1()
+                            div()
+                                .grid()
+                                .grid_cols(columns)
+                                .on_key_down(move |event, window, cx| {
+                                    let Some(index) = focus_handles
+                                        .iter()
+                                        .position(|handle| handle.is_focused(window))
+                                    else {
+                                        return;
+                                    };
+                                    let step = match event.keystroke.key.as_str() {
+                                        "left" => -1,
+                                        "right" => 1,
+                                        "up" => -isize::try_from(columns).unwrap_or(1),
+                                        "down" => isize::try_from(columns).unwrap_or(1),
+                                        _ => return,
+                                    };
+                                    let target = index
+                                        .saturating_add_signed(step)
+                                        .min(focus_handles.len().saturating_sub(1));
+                                    focus_handles[target].focus(window, cx);
+                                    cx.stop_propagation();
+                                })
                                 .p_3()
-                                .gap_0()
-                                .child(
-                                    h_flex()
-                                        .px_3()
-                                        .py_2()
-                                        .h_10()
-                                        .gap_2()
-                                        .text_sm()
-                                        .text_color(theme.muted_foreground)
-                                        .bg(theme.table_head)
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .child(zenclash_i18n::text("proxies.columns.node")),
-                                        )
-                                        .child(
-                                            div().w(gpui_kit::rems(6.5)).child(
-                                                zenclash_i18n::text("proxies.columns.protocol"),
-                                            ),
-                                        )
-                                        .child(
-                                            div().w(gpui_kit::rems(4.5)).child(
-                                                zenclash_i18n::text("proxies.columns.latency"),
-                                            ),
-                                        )
-                                        .child(
-                                            div().w(gpui_kit::rems(5.5)).text_right().child(
-                                                zenclash_i18n::text("proxies.columns.actions"),
-                                            ),
-                                        ),
-                                )
+                                .gap_3()
                                 .when(!self.search_query.is_empty() && nodes.is_empty(), |body| {
                                     body.child(
                                         div()
@@ -986,122 +1047,13 @@ impl ProxiesPage {
                                             )),
                                     )
                                 })
-                                .children(nodes[page.start..page.end].iter().filter_map(
-                                    |&index| {
-                                        let id = &group.all[index];
-                                        catalog.node(id).map(|node| {
-                                            self.render_proxy(group, id, node, theme, cx)
-                                        })
-                                    },
-                                )),
-                        )
-                        .map(|this| {
-                            this.child(
-                                h_flex()
-                                    .id("proxy-node-pagination")
-                                    .test_support()
-                                    .flex_wrap()
-                                    .gap_2()
-                                    .px_3()
-                                    .pb_3()
-                                    .items_center()
-                                    .justify_between()
-                                    .child(
-                                        div().text_xs().text_color(theme.muted_foreground).child(
-                                            zenclash_i18n::text_with(
-                                                "proxies.pagination.summary",
-                                                &[
-                                                    ("current", (page.index + 1).to_string()),
-                                                    ("total", page.count.to_string()),
-                                                    (
-                                                        "first",
-                                                        if nodes.is_empty() {
-                                                            0
-                                                        } else {
-                                                            page.start + 1
-                                                        }
-                                                        .to_string(),
-                                                    ),
-                                                    ("last", page.end.to_string()),
-                                                    ("count", nodes.len().to_string()),
-                                                ],
-                                            ),
-                                        ),
-                                    )
-                                    .child(
-                                        h_flex()
-                                            .id("proxy-node-pagination-controls")
-                                            .test_support()
-                                            .gap_1()
-                                            .child(
-                                                Button::new((
-                                                    gpui_kit::ElementId::from(
-                                                        "previous-proxy-page",
-                                                    ),
-                                                    group.name.clone(),
-                                                ))
-                                                .label(zenclash_i18n::text(
-                                                    "proxies.actions.previous_page",
-                                                ))
-                                                .small()
-                                                .h_10()
-                                                .outline()
-                                                .disabled(page.index == 0)
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.set_group_page(
-                                                        previous_group.clone(),
-                                                        page.index.saturating_sub(1),
-                                                        cx,
-                                                    );
-                                                })),
-                                            )
-                                            .children({
-                                                let start = page
-                                                    .index
-                                                    .saturating_sub(2)
-                                                    .min(page.count.saturating_sub(5));
-                                                (start..(start + 5).min(page.count)).map(|index| {
-                                                    let name = group.name.clone();
-                                                    Button::new(format!(
-                                                        "proxy-page:{name}:{index}"
-                                                    ))
-                                                    .label((index + 1).to_string())
-                                                    .small()
-                                                    .h_10()
-                                                    .outline()
-                                                    .when(index == page.index, |button| {
-                                                        button
-                                                            .bg(theme.list_active)
-                                                            .text_color(theme.primary)
-                                                    })
-                                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                                        this.set_group_page(name.clone(), index, cx)
-                                                    }))
-                                                })
-                                            })
-                                            .child(
-                                                Button::new((
-                                                    gpui_kit::ElementId::from("next-proxy-page"),
-                                                    group.name.clone(),
-                                                ))
-                                                .label(zenclash_i18n::text(
-                                                    "proxies.actions.next_page",
-                                                ))
-                                                .small()
-                                                .h_10()
-                                                .outline()
-                                                .disabled(page.index + 1 >= page.count)
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.set_group_page(
-                                                        next_group.clone(),
-                                                        page.index + 1,
-                                                        cx,
-                                                    );
-                                                })),
-                                            ),
-                                    ),
-                            )
-                        }),
+                                .children(nodes.iter().filter_map(|&index| {
+                                    let id = &group.all[index];
+                                    catalog
+                                        .node(id)
+                                        .map(|node| self.render_proxy(group, id, node, theme, cx))
+                                })),
+                        ),
                 )
             })
             .into_any_element()
@@ -1152,18 +1104,15 @@ impl ProxiesPage {
                 None => zenclash_i18n::text("proxies.design.untested"),
             }
         };
-        h_flex()
+        v_flex()
             .relative()
+            .flex_basis(gpui_kit::rems(12.))
+            .flex_grow(1.)
             .min_w_0()
-            .max_w_full()
-            .min_h(gpui_kit::px(52.))
-            .gap_2()
-            .px_3()
-            .py_2()
-            .when(selected, |row| row.rounded(theme.radius))
-            .border_b_1()
+            .rounded(theme.radius)
+            .border_1()
             .border_color(if selected {
-                theme.list_active
+                theme.primary
             } else {
                 theme.border
             })
@@ -1173,102 +1122,116 @@ impl ProxiesPage {
                 theme.group_box
             })
             .child(
-                h_flex().flex_1().min_w_0().justify_between().gap_2().child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_sm()
-                        .font_weight(if selected {
-                            gpui_kit::FontWeight::BOLD
-                        } else {
-                            gpui_kit::FontWeight::NORMAL
-                        })
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .child(if switching {
-                            zenclash_i18n::text_with(
-                                "proxies.status.switching",
-                                &[("proxy", proxy.name.clone())],
+                gpui_kit::base::Button::new(proxy_element_id("select-proxy", &group.name, id))
+                    .when_some(
+                        self.node_focus.get(&(group.name.clone(), id.clone())),
+                        |button, focus| button.track_focus(focus),
+                    )
+                    .accessibility_label(proxy.name.clone())
+                    .rounded(theme.radius)
+                    .hover(|style| style.bg(theme.list_hover))
+                    .focus(|style| style.border_2().border_color(theme.ring))
+                    .styles(|styles| styles.disabled(|style| style.opacity(0.6)))
+                    .w_full()
+                    .h_auto()
+                    .p_4()
+                    .selected(selected)
+                    .disabled(selection_blocked || !selectable)
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .min_w_0()
+                            .gap_3()
+                            .text_left()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_ellipsis()
+                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                            .child(proxy.name.clone()),
+                                    )
+                                    .when(selected, |row| {
+                                        row.child(
+                                            div()
+                                                .id(proxy_element_id(
+                                                    "current-proxy",
+                                                    &group.name,
+                                                    id,
+                                                ))
+                                                .test_support()
+                                                .child(Icon::new(IconName::Check).size_4()),
+                                        )
+                                    }),
                             )
-                        } else {
-                            proxy.name.clone()
-                        }),
-                ),
-            )
-            .child(
-                div()
-                    .w(gpui_kit::rems(6.5))
-                    .flex_shrink_0()
-                    .truncate()
-                    .text_sm()
-                    .child(proxy.kind.clone()),
-            )
-            .child(
-                Button::new(proxy_element_id("test-proxy", &group.name, id))
-                    .w(gpui_kit::rems(4.5))
-                    .justify_start()
-                    .label(delay_text)
-                    .tooltip(zenclash_i18n::text("proxies.actions.test"))
-                    .small()
-                    .ghost()
-                    .text_color(delay_color)
-                    .loading(testing)
-                    .disabled(testing || selection_blocked)
+                            .child(div().text_lg().text_color(delay_color).child(if switching {
+                                zenclash_i18n::text("proxies.actions.switching")
+                            } else {
+                                delay_text
+                            }))
+                            .child(div().text_xs().text_color(theme.muted_foreground).child(
+                                format!("{}{}", proxy.kind, if proxy.udp { " · UDP" } else { "" }),
+                            )),
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.test_proxy(
-                            delay_group.clone(),
-                            delay_proxy.clone(),
-                            test_url.clone(),
-                            cx,
-                        );
+                        this.change_proxy(group_name.clone(), proxy_name.clone(), cx);
                     })),
             )
-            .child(
-                h_flex()
-                    .w(gpui_kit::rems(5.5))
-                    .flex_shrink_0()
-                    .justify_end()
-                    .flex_wrap()
-                    .gap_1()
-                    .when(selectable, |this| {
-                        if selected {
-                            return this.child(
-                                h_flex()
-                                    .id(proxy_element_id("current-proxy", &group.name, id))
-                                    .test_support()
-                                    .h_8()
-                                    .w_full()
-                                    .justify_center()
-                                    .rounded(theme.radius)
-                                    .border_1()
-                                    .border_color(theme.chart_3.opacity(0.3))
-                                    .bg(theme.chart_3.opacity(0.12))
-                                    .text_color(theme.primary)
-                                    .text_sm()
-                                    .child(zenclash_i18n::text("proxies.design.current")),
-                            );
-                        }
-                        this.child(
-                            Button::new(proxy_element_id("select-proxy", &group.name, id))
-                                .tooltip(proxy.name.clone())
-                                .label(if switching {
-                                    zenclash_i18n::text("proxies.actions.switching")
-                                } else {
-                                    zenclash_i18n::text("proxies.actions.select")
-                                })
-                                .small()
-                                .h_8()
-                                .w_full()
-                                .outline()
-                                .loading(switching)
-                                .disabled(selection_blocked)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.change_proxy(group_name.clone(), proxy_name.clone(), cx);
-                                })),
+            .child({
+                let owner = cx.entity().downgrade();
+                let name = proxy.name.clone();
+                let protocol = proxy.kind.clone();
+                let provider = id.provider().unwrap_or("—").to_owned();
+                Button::new(proxy_element_id("proxy-menu", &group.name, id))
+                    .label("···")
+                    .accessibility_label(zenclash_i18n::text("unified.proxies.details"))
+                    .small()
+                    .ghost()
+                    .loading(testing)
+                    .dropdown_menu(move |menu, _, _| {
+                        let owner = owner.clone();
+                        let group = delay_group.clone();
+                        let node = delay_proxy.clone();
+                        let url = test_url.clone();
+                        let name = name.clone();
+                        let protocol = protocol.clone();
+                        let provider = provider.clone();
+                        menu.item(
+                            PopupMenuItem::new(zenclash_i18n::text("proxies.actions.test"))
+                                .disabled(testing || selection_blocked)
+                                .on_click(move |_, _, cx| {
+                                    let _ = owner.update(cx, |page, cx| {
+                                        page.test_proxy(
+                                            group.clone(),
+                                            node.clone(),
+                                            url.clone(),
+                                            cx,
+                                        )
+                                    });
+                                }),
                         )
-                    }),
-            )
+                        .item(
+                            PopupMenuItem::new(zenclash_i18n::text("unified.proxies.details"))
+                                .on_click(move |_, window, cx| {
+                                    let name = name.clone();
+                                    let protocol = protocol.clone();
+                                    let provider = provider.clone();
+                                    window.open_dialog(cx, move |dialog, _, _| {
+                                        dialog.title(name.clone()).child(
+                                            v_flex()
+                                                .gap_3()
+                                                .child(protocol.clone())
+                                                .child(provider.clone()),
+                                        )
+                                    });
+                                }),
+                        )
+                    })
+            })
             .into_any_element()
     }
 }

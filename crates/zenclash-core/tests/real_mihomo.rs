@@ -18,6 +18,107 @@ use zenclash_core::{
     RulesetBehavior, RulesetConverter, SystemNetworkSnapshot, TrafficMonitor, YamlOverrideStore,
 };
 
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires ZENCLASH_MIHOMO_BINARY pointing to a real Mihomo executable"]
+async fn managed_ipc_carries_http_and_all_realtime_streams_across_restart() {
+    use futures_util::StreamExt as _;
+    let binary =
+        PathBuf::from(std::env::var_os("ZENCLASH_MIHOMO_BINARY").expect("real kernel binary"));
+    let root = std::env::temp_dir().join(format!("zenclash-real-ipc-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let profile = root.join("profile.yaml");
+    fs::write(&profile, "mixed-port: 0\nexternal-controller: ''\nmode: rule\nlog-level: debug\ndns:\n  enable: false\nproxies: []\nproxy-groups:\n  - name: test group\n    type: select\n    proxies: [DIRECT, REJECT]\nrules: ['MATCH,DIRECT']\n").unwrap();
+    let launch = MihomoLaunchConfig::new(binary, &profile, root.join("home")).unwrap();
+    assert!(launch.endpoint.ipc_path().is_some());
+    assert!(launch.controller_override.is_none());
+    let process = MihomoProcess::spawn_isolated_for_test(launch).unwrap();
+    process
+        .wait_until_ready(Duration::from_secs(20))
+        .await
+        .unwrap_or_else(|error| panic!("{error}\n{}", process.snapshot().logs.join("\n")));
+    let client = MihomoClient::from_process(process.clone()).unwrap();
+    let traffic =
+        TrafficMonitor::start_with_client(&tokio::runtime::Handle::current(), client.clone());
+    assert!(client.version().await.unwrap().meta);
+    for _ in 0..4 {
+        let requests = (0..32).map(|_| client.version());
+        for result in futures_util::future::join_all(requests).await {
+            result.expect("concurrent IPC requests must wait for an available pipe instance");
+        }
+    }
+    assert!(!client.proxy_catalog().await.unwrap().groups().is_empty());
+    client.change_proxy("test group", "REJECT").await.unwrap();
+    assert_eq!(
+        client.proxy_group_selection("test group").await.unwrap(),
+        "REJECT"
+    );
+    client.memory_snapshot().await.unwrap();
+    client.connections_snapshot().await.unwrap();
+    let controller = zenclash_service_integration::NativeController::new(
+        process.endpoint().ipc_path().unwrap().to_path_buf(),
+        process.snapshot().pid.unwrap(),
+        process.endpoint().secret.clone(),
+    );
+    for path in ["/traffic", "/memory", "/connections"] {
+        let mut stream = controller.websocket(path).await.unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(frame.is_text(), "{path} must produce a JSON frame");
+        let _: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+    }
+    let mut logs = controller.websocket("/logs?level=debug").await.unwrap();
+    let reload = controller
+        .request(
+            "PUT",
+            "/configs?force=true",
+            Some(&serde_json::json!({"payload": fs::read_to_string(&profile).unwrap()})),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reload.status, 204);
+    let log = tokio::time::timeout(Duration::from_secs(5), logs.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(log.is_text());
+    let _: serde_json::Value = serde_json::from_str(log.to_text().unwrap()).unwrap();
+    drop(logs);
+    let old_pid = process.snapshot().pid.unwrap();
+    let previous_traffic_frame = traffic.snapshot().updated_at_ms;
+    process.restart().unwrap();
+    process
+        .wait_until_ready(Duration::from_secs(20))
+        .await
+        .unwrap();
+    assert_ne!(process.snapshot().pid.unwrap(), old_pid);
+    assert!(client.version().await.unwrap().meta);
+    client.memory_snapshot().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let snapshot = traffic.snapshot();
+            if snapshot.connected && snapshot.updated_at_ms > previous_traffic_frame {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("GPUI's shared traffic client must reconnect to the restarted IPC kernel");
+    drop(traffic);
+    process.stop().unwrap();
+    assert!(client.version().await.is_err());
+    drop(client);
+    drop(process);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// This test intentionally has no mock server. Set `ZENCLASH_MIHOMO_BINARY` to
 /// an actual Mihomo executable before running it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

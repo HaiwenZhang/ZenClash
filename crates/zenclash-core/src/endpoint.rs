@@ -6,7 +6,7 @@ use crate::{MihomoError, MihomoResult};
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MihomoEndpoint {
-    /// HTTP(S) controller base URL or `host:port` shorthand.
+    /// HTTP(S) controller URL, `host:port` shorthand, or `ipc://` native path.
     pub controller: String,
     /// Bearer token configured as Mihomo's controller secret.
     #[serde(default)]
@@ -33,6 +33,31 @@ impl Default for MihomoEndpoint {
 }
 
 impl MihomoEndpoint {
+    /// Returns the native controller path for an IPC endpoint.
+    #[must_use]
+    pub fn ipc_path(&self) -> Option<&std::path::Path> {
+        self.controller
+            .strip_prefix("ipc://")
+            .map(std::path::Path::new)
+    }
+
+    /// Allocates a private local controller name and authentication secret.
+    ///
+    /// # Errors
+    /// Returns operating system random source failures.
+    pub fn local_ipc(home: &std::path::Path) -> MihomoResult<Self> {
+        let mut endpoint = Self::with_random_secret("")?;
+        let name_entropy = Self::with_random_secret("")?;
+        let name = format!("zenclash-mihomo-{}", &name_entropy.secret[..16]);
+        let path = if cfg!(windows) {
+            std::path::PathBuf::from(format!(r"\\.\pipe\{name}"))
+        } else {
+            home.join(format!("{name}.sock"))
+        };
+        endpoint.controller = format!("ipc://{}", path.display());
+        Ok(endpoint)
+    }
+
     /// Creates an endpoint without performing network I/O.
     #[must_use]
     pub fn new(controller: impl Into<String>, secret: impl Into<String>) -> Self {

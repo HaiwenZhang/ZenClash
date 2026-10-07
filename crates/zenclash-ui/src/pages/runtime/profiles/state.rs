@@ -5,6 +5,10 @@ use zenclash_core::{ProfileCatalog, RemoteProfileRoute};
 
 /// Input and editor state owned by the profiles page.
 pub(crate) struct ProfileFormState {
+    pub(in crate::pages::runtime) search: Entity<InputState>,
+    _search_subscription: gpui_kit::Subscription,
+    pub(in crate::pages::runtime) details_open: bool,
+    pub(in crate::pages::runtime) advanced_open: bool,
     pub(in crate::pages::runtime) catalog_view: ProfileCatalogView,
     pub(in crate::pages::runtime) adding_subscription: bool,
     pub(in crate::pages::runtime) subscription_error: Option<String>,
@@ -29,7 +33,27 @@ impl ProfileFormState {
         window: &mut Window,
         cx: &mut Context<'_, super::super::RuntimePage>,
     ) -> Self {
+        let search = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(zenclash_i18n::text("unified.profiles.search"))
+        });
+        let search_subscription = cx.subscribe(
+            &search,
+            |this, _, event: &gpui_kit::component::input::InputEvent, cx| {
+                if matches!(event, gpui_kit::component::input::InputEvent::Change) {
+                    let query = this.profiles.forms.search.read(cx).value().to_lowercase();
+                    this.profiles
+                        .forms
+                        .catalog_view
+                        .set_query(query, &this.profiles.catalog);
+                    cx.notify();
+                }
+            },
+        );
         Self {
+            search,
+            _search_subscription: search_subscription,
+            details_open: false,
+            advanced_open: false,
             catalog_view: ProfileCatalogView::default(),
             adding_subscription: false,
             subscription_error: None,
@@ -122,6 +146,7 @@ pub(super) enum ProfileFilter {
 
 #[derive(Default)]
 pub(in crate::pages::runtime) struct ProfileCatalogView {
+    query: String,
     pub(super) filter: ProfileFilter,
     pub(super) page: usize,
     selected: Option<String>,
@@ -181,9 +206,18 @@ impl ProfileCatalogView {
                 ProfileFilter::Remote => profile.is_remote(),
                 ProfileFilter::Local => !profile.is_remote(),
             })
+            .filter(|(_, profile)| {
+                self.query.is_empty() || profile.name.to_lowercase().contains(&self.query)
+            })
             .map(|(index, _)| index)
             .collect();
         self.page = self.page.min(self.page_count().saturating_sub(1));
+    }
+
+    pub(super) fn set_query(&mut self, query: String, catalog: &ProfileCatalog) {
+        self.query = query;
+        self.page = 0;
+        self.rebuild_indices(catalog);
     }
 
     pub(super) fn set_filter(&mut self, filter: ProfileFilter, catalog: &ProfileCatalog) {

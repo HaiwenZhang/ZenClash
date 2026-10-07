@@ -223,6 +223,41 @@ fn subscription_form_focuses_name_and_escape_preserves_draft(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
+fn subscription_validation_uses_notifications_without_repeating_on_updates(
+    cx: &mut TestAppContext,
+) {
+    use gpui_kit::component::WindowExt;
+    let fixture = Fixture::new();
+    let (window, page) = open(cx, &fixture, Page::Profiles);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    cx.update_window(window, |_, window, cx| {
+        window.clear_notifications(cx);
+        window.render_frame(cx);
+        window.click("toggle-add-subscription", cx);
+        window.render_frame(cx);
+        window.click("download-subscription", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let count = cx
+        .update_window(window, |_, window, cx| {
+            assert!(page.read(cx).profiles.forms.subscription_error.is_some());
+            let count = window.notifications(cx).len();
+            assert!(count > 0);
+            page.update(cx, |_, cx| cx.notify());
+            count
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.notifications(cx).len(), count);
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn request_editor_focuses_name_and_escape_cancels_without_saving(cx: &mut TestAppContext) {
     let controller = ControllerFixture::new(false);
     let fixture = Fixture::with_controller(controller.url.clone());
@@ -1679,6 +1714,7 @@ fn connection_transport_buttons_filter_rows_with_pointer_and_keyboard(cx: &mut T
         assert!(!window.has_active_dialog(cx));
         window.find(row("UDP"));
         assert!(window.try_find(row("latest")).is_none());
+        window.render_frame(cx);
         window.click(("connection-transport", 0usize), cx);
     })
     .unwrap();
@@ -1723,12 +1759,8 @@ fn offline_settings_keep_local_controls_and_accessible_names(cx: &mut TestAppCon
             cx.notify();
         });
         window.render_frame(cx);
-        window.find("language-en");
+        window.find("settings-language");
         window.find("theme-dark");
-        assert_eq!(
-            window.find("settings-traffic-history").label(),
-            Some(zenclash_i18n::text("settings.traffic_history.title").as_str())
-        );
         assert!(window.try_find("settings-ipv6").is_none());
         window.click("settings-autostart", cx);
         assert!(!page.read(cx).core_busy());
@@ -1748,12 +1780,7 @@ fn offline_settings_keep_local_controls_and_accessible_names(cx: &mut TestAppCon
     cx.simulate_window_resize(window, size(px(1056.), px(820.)));
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
-        for id in [
-            "theme-light",
-            "theme-dark",
-            "theme-system",
-            "workspace-appearance",
-        ] {
+        for id in ["theme-light", "theme-dark", "theme-system"] {
             let bounds = window.find(id).bounds();
             assert!(bounds.size.width > px(0.));
             assert!(
@@ -1764,9 +1791,12 @@ fn offline_settings_keep_local_controls_and_accessible_names(cx: &mut TestAppCon
         for (card, ids) in [
             (
                 "settings-appearance-card",
-                ["language-zh-cn", "language-en"],
+                ["settings-language", "settings-language"],
             ),
-            ("settings-startup-card", ["tray-show", "tray-hide"]),
+            (
+                "settings-startup-card",
+                ["settings-tray-visible", "settings-tray-visible"],
+            ),
         ] {
             let card_bounds = window.find(card).bounds();
             for id in ids {
@@ -1778,11 +1808,11 @@ fn offline_settings_keep_local_controls_and_accessible_names(cx: &mut TestAppCon
                 );
             }
         }
-        assert!(!window.find("settings-traffic-history").visible());
-        window.click(("settings-section", 3usize), cx);
+        assert!(window.try_find("settings-traffic-history").is_none());
+        window.click(("settings-section", 2usize), cx);
         assert!(window.simulate_next_frame(cx) > 0);
         window.render_frame(cx);
-        assert!(page.read(cx).settings_navigation.scroll.offset().y < px(0.));
+        assert_eq!(page.read(cx).settings_navigation.scroll.offset().y, px(0.));
         assert!(window.find("settings-traffic-history").visible());
         window.click("settings-traffic-history", cx);
         window.click(("settings-section", 0usize), cx);
@@ -1807,13 +1837,11 @@ fn offline_settings_keep_local_controls_and_accessible_names(cx: &mut TestAppCon
         });
     });
     cx.update_window(window, |_, window, cx| {
-        window.click(
-            (
-                gpui_kit::ElementId::from("settings-tool"),
-                Page::Dns.route(),
-            ),
-            cx,
-        );
+        window.click(("settings-section", 1_usize), cx);
+        window.render_frame(cx);
+        window.click("settings-advanced-network", cx);
+        window.render_frame(cx);
+        window.click(Page::Dns.route(), cx);
     })
     .unwrap();
     cx.run_until_parked();
@@ -2315,6 +2343,9 @@ fn exercise_delayed_yaml_save(cx: &mut TestAppContext, newer_mode: bool) {
 }
 
 struct ControllerFixture {
+    proxy_catalog: Arc<std::sync::Mutex<serde_json::Value>>,
+    proxy_selections: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
+    subscription_requests: Arc<std::sync::atomic::AtomicUsize>,
     url: String,
     stopped: Arc<std::sync::atomic::AtomicBool>,
     apply_failures: Arc<std::sync::atomic::AtomicUsize>,
@@ -2339,6 +2370,12 @@ impl ControllerFixture {
         let failures = apply_failures.clone();
         let requests = apply_requests.clone();
         let blocked = blocked_apply.clone();
+        let subscription_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let subscriptions = subscription_requests.clone();
+        let proxy_catalog = Arc::new(std::sync::Mutex::new(serde_json::json!({"proxies":{}})));
+        let proxy_selections = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let catalog = proxy_catalog.clone();
+        let selections = proxy_selections.clone();
         let server = std::thread::spawn(move || {
             let mut mode = "rule".to_owned();
             let mut log_level = "info".to_owned();
@@ -2411,7 +2448,24 @@ impl ControllerFixture {
                                 }
                             }
                         }
-                        let response = if is_apply {
+                        let proxy_path = headers
+                            .lines()
+                            .next()
+                            .unwrap()
+                            .split_whitespace()
+                            .nth(1)
+                            .unwrap()
+                            .replace("%2D", "-");
+                        let is_selection = request.starts_with(b"PUT /proxies/");
+                        if is_selection {
+                            let payload: serde_json::Value =
+                                serde_json::from_slice(&payload).unwrap();
+                            let group = proxy_path.strip_prefix("/proxies/").unwrap();
+                            catalog.lock().unwrap()["proxies"][group]["now"] =
+                                payload["name"].clone();
+                            selections.lock().unwrap().push((proxy_path, payload));
+                        }
+                        let response = if is_apply || is_selection {
                             "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n".to_owned()
                         } else if request.starts_with(b"GET /configs ") {
                             let body =
@@ -2421,12 +2475,13 @@ impl ControllerFixture {
                                 body.len()
                             )
                         } else if request.starts_with(b"GET /proxies ") {
-                            let body = r#"{"proxies":{}}"#;
+                            let body = catalog.lock().unwrap().to_string();
                             format!(
                                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                                 body.len()
                             )
                         } else if request.starts_with(b"GET /subscription ") {
+                            subscriptions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             let body = "mixed-port: 7891\nrules: [MATCH,REJECT]\n";
                             format!(
                                 "HTTP/1.1 200 OK\r\nContent-Type: application/yaml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -2446,6 +2501,9 @@ impl ControllerFixture {
         });
         Self {
             url: format!("http://{address}"),
+            proxy_catalog,
+            proxy_selections,
+            subscription_requests,
             stopped,
             apply_failures,
             apply_requests,
@@ -2496,6 +2554,12 @@ fn backup_retry_button_preserves_failed_snapshot_then_refreshes_after_success(
     retain_failed_backup_snapshot(&fixture);
     controller.apply_failures.store(1, Ordering::SeqCst);
     let (window, page) = open(cx, &fixture, Page::Settings);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("settings-section", 2_usize), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
     fixture.settle(cx, &page, |page| !page.persistent_loading);
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
@@ -2554,6 +2618,12 @@ fn late_backup_retry_refresh_cannot_replace_a_newer_profile_or_notice(cx: &mut T
     retain_failed_backup_snapshot(&fixture);
     controller.blocked_apply.store(true, Ordering::Release);
     let (window, page) = open(cx, &fixture, Page::Settings);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("settings-section", 2_usize), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
     fixture.settle(cx, &page, |page| !page.persistent_loading);
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
@@ -2613,6 +2683,12 @@ fn backup_retry_ignores_duplicate_click_and_synchronizes_after_navigation(cx: &m
     retain_failed_backup_snapshot(&fixture);
     controller.blocked_apply.store(true, Ordering::Release);
     let (window, page) = open(cx, &fixture, Page::Settings);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("settings-section", 2_usize), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
     fixture.settle(cx, &page, |page| !page.persistent_loading);
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
@@ -2659,6 +2735,12 @@ fn backup_retry_refresh_failure_keeps_the_accepted_runtime_and_reports_refresh_f
     let fixture = Fixture::with_controller(controller.url.clone());
     retain_failed_backup_snapshot(&fixture);
     let (window, page) = open(cx, &fixture, Page::Settings);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("settings-section", 2_usize), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
     fixture.settle(cx, &page, |page| !page.persistent_loading);
     fs::write(
         fixture.root.join("preferences.json"),
@@ -2698,6 +2780,12 @@ fn backup_retry_is_reachable_by_tab_and_activates_once_with_enter(cx: &mut TestA
     let fixture = Fixture::with_controller(controller.url.clone());
     retain_failed_backup_snapshot(&fixture);
     let (window, page) = open(cx, &fixture, Page::Settings);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("settings-section", 2_usize), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
     fixture.settle(cx, &page, |page| !page.persistent_loading);
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
@@ -3109,6 +3197,8 @@ fn exercise_recovery_completion(cx: &mut TestAppContext, manual_reload: bool) {
                     gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-1000.))),
                     cx,
                 );
+                window.click("profiles-advanced", cx);
+                window.render_frame(cx);
                 window.click("reload-profile", cx);
             } else {
                 window.click("reapply-profile-recovery", cx);
@@ -3143,6 +3233,12 @@ fn license_and_fork_notices_are_readable_with_an_offline_core(cx: &mut TestAppCo
     use gpui_kit::component::WindowExt as _;
     let fixture = Fixture::new();
     let (window, page) = open(cx, &fixture, Page::Settings);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("settings-section", 3_usize), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
     fixture.settle(cx, &page, |page| !page.persistent_loading && !page.loading);
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
@@ -3190,6 +3286,149 @@ fn accepted_sidecar_does_not_repeat_local_choice_but_keeps_service_repair_reacha
             window.press("tab", cx);
         }
         assert_eq!(window.find("repair-service").focused(), Some(true));
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn update_all_subscriptions_downloads_each_remote_once_and_keeps_active_profile(
+    cx: &mut TestAppContext,
+) {
+    use std::sync::atomic::Ordering;
+    let controller = ControllerFixture::new(false);
+    let fixture = Fixture::with_controller(controller.url.clone());
+    for name in ["First remote", "Second remote"] {
+        fixture
+            .runtime
+            .as_ref()
+            .unwrap()
+            .block_on(fixture.profiles.add_remote(
+                name,
+                &format!("{}/subscription", controller.url),
+                "clash.meta",
+            ))
+            .unwrap();
+    }
+    let active = fixture.profiles.load().unwrap().active;
+    let (window, page) = open(cx, &fixture, Page::Profiles);
+    fixture.settle(cx, &page, |page| !page.persistent_loading && !page.loading);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("update-all-profiles", cx);
+        window.render_frame(cx);
+        window.click("update-all-profiles", cx);
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| !page.core_busy() && page.notice.is_some());
+    assert_eq!(controller.subscription_requests.load(Ordering::SeqCst), 4);
+    assert_eq!(fixture.profiles.load().unwrap().active, active);
+    cx.update_window(window, |_, window, _| window.remove_window())
+        .unwrap();
+}
+
+#[gpui_kit::test]
+fn home_selector_cards_and_overflow_menu_apply_to_the_displayed_group(cx: &mut TestAppContext) {
+    let controller = ControllerFixture::new(false);
+    let mut proxies = serde_json::Map::new();
+    for index in 0..20 {
+        proxies.insert(
+            format!("node-{index}"),
+            serde_json::json!({"name":format!("node-{index}"),"type":"Shadowsocks"}),
+        );
+    }
+    for index in 0..8 {
+        proxies.insert(
+            format!("group-{index}"),
+            serde_json::json!({
+                "name":format!("group-{index}"),"type":"Selector","now":"node-19",
+                "all":(0..20).map(|index| format!("node-{index}")).collect::<Vec<_>>()
+            }),
+        );
+    }
+    *controller.proxy_catalog.lock().unwrap() = serde_json::json!({"proxies":proxies});
+    let fixture = Fixture::with_controller(controller.url.clone());
+    let (window, page) = open(cx, &fixture, Page::Home);
+    fixture.settle(cx, &page, |page| {
+        !page.loading
+            && !page.persistent_loading
+            && matches!(page.data, RuntimeData::Dashboard { .. })
+    });
+    cx.run_until_parked();
+    let group_card = |name: &str| {
+        gpui_kit::ElementId::from((
+            gpui_kit::ElementId::from("home-group-card"),
+            name.to_owned(),
+        ))
+    };
+    let node_card = |name: &str| {
+        gpui_kit::ElementId::from((gpui_kit::ElementId::from("home-node-card"), name.to_owned()))
+    };
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find(group_card("group-0")).selected(), Some(true));
+        assert_eq!(window.find(node_card("node-19")).selected(), Some(true));
+        window.click(group_card("group-1"), cx);
+        window.render_frame(cx);
+        assert_eq!(window.find(group_card("group-1")).selected(), Some(true));
+        assert!(controller.proxy_selections.lock().unwrap().is_empty());
+        assert!(window.try_find("home-open-proxies").is_none());
+        assert!(window.try_find("home-open-profiles").is_none());
+        assert!(window.try_find("home-activity-panel").is_none());
+        window.click("home-more-groups", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("escape", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find(group_card("group-1")).selected(), Some(true));
+        window.click("home-more-groups", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("down", cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find(group_card("group-0")).selected(), Some(true));
+        window.click(node_card("node-0"), cx);
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| {
+        !page.loading
+            && page.home.proxy_switching.is_none()
+            && !controller.proxy_selections.lock().unwrap().is_empty()
+    });
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            controller.proxy_selections.lock().unwrap().as_slice(),
+            &[(
+                "/proxies/group-0".into(),
+                serde_json::json!({"name":"node-0"})
+            )]
+        );
+        assert_eq!(window.find(node_card("node-0")).selected(), Some(true));
+        assert_eq!(window.find(group_card("group-0")).selected(), Some(true));
+        window.click("home-more-nodes", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("escape", cx);
         window.remove_window();
     })
     .unwrap();

@@ -6,14 +6,14 @@ use gpui_kit::component::{
 use gpui_kit::{Context, IntoElement, ParentElement, Styled, prelude::FluentBuilder};
 use zenclash_core::{AppUpdateService, AppUpdateStatus};
 
-use super::super::{RuntimePage, div, info_row, message_banner, setting_card};
+use super::super::{RuntimePage, context_note, div, info_row, setting_card};
 
 #[derive(Default)]
 pub(in crate::pages::runtime) struct AppUpdateUiState {
     pub(in crate::pages::runtime) status: Option<AppUpdateStatus>,
     pub(super) loading: bool,
     pub(in crate::pages::runtime) checked: bool,
-    pub(super) error: Option<String>,
+    pub(in crate::pages::runtime) error: Option<String>,
 }
 
 impl RuntimePage {
@@ -79,9 +79,6 @@ impl RuntimePage {
                 zenclash_i18n::text("settings.app_update.policy_description"),
                 theme,
             ));
-        if let Some(error) = &state.error {
-            card = card.child(message_banner(error.clone(), theme.warning, theme));
-        }
         card = match &state.status {
             Some(AppUpdateStatus::NoPublishedRelease { .. }) => card.child(info_row(
                 zenclash_i18n::text("settings.app_update.status"),
@@ -98,12 +95,11 @@ impl RuntimePage {
             )),
             Some(AppUpdateStatus::Available { release, .. }) => {
                 let url = release.page_url.clone();
-                card.child(message_banner(
+                card.child(context_note(
                     zenclash_i18n::text_with(
                         "settings.app_update.available",
                         &[("version", release.tag.clone())],
                     ),
-                    theme.success,
                     theme,
                 ))
                 .child(info_row(

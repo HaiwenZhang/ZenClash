@@ -2,9 +2,11 @@ use super::*;
 use zenclash_core::TrafficSnapshot;
 
 const HOME_CHART_SAMPLE_LIMIT: usize = 300;
+const HOME_CHART_WINDOW_SECONDS: u64 = 120;
 
 pub(super) fn observed_span_fraction(seconds: u64) -> f32 {
-    (seconds.min(300) as f32 / 300.).max(1. / 300.)
+    (seconds.min(HOME_CHART_WINDOW_SECONDS) as f32 / HOME_CHART_WINDOW_SECONDS as f32)
+        .max(1. / HOME_CHART_WINDOW_SECONDS as f32)
 }
 
 #[derive(Clone, Copy)]
@@ -139,7 +141,7 @@ impl HomeChartState {
     fn displayed(&self) -> impl Iterator<Item = &TimedSample> {
         let samples = &self.samples;
         let end = samples.back().map_or(0, |sample| sample.at_ms);
-        let duration = 300_000;
+        let duration = HOME_CHART_WINDOW_SECONDS * 1_000;
         samples
             .iter()
             .filter(move |sample| sample.at_ms >= end.saturating_sub(duration))
@@ -181,8 +183,11 @@ impl RuntimePage {
         if self.observe_home_traffic() {
             cx.notify();
         }
-        self.update_home_flow(cx);
-        self.update_home_history(cx);
+        #[cfg(test)]
+        {
+            self.update_home_flow(cx);
+            self.update_home_history(cx);
+        }
     }
 
     pub(super) fn observe_home_traffic(&mut self) -> bool {
@@ -244,9 +249,9 @@ mod tests {
     }
 
     #[test]
-    fn short_history_occupies_only_its_observed_part_of_the_five_minute_frame() {
-        assert_eq!(observed_span_fraction(60), 0.2);
-        assert_eq!(observed_span_fraction(300), 1.);
+    fn short_history_occupies_only_its_observed_part_of_the_two_minute_frame() {
+        assert_eq!(observed_span_fraction(60), 0.5);
+        assert_eq!(observed_span_fraction(120), 1.);
         assert_eq!(observed_span_fraction(600), 1.);
     }
 
@@ -258,8 +263,8 @@ mod tests {
         }
         state.observe(&frame(400_000), 1);
         assert_eq!(state.samples.len(), 300);
-        assert_eq!(state.points(1).0.len(), 300);
-        assert_eq!(state.points(1).1, 299);
+        assert_eq!(state.points(1).0.len(), 121);
+        assert_eq!(state.points(1).1, 120);
     }
     #[test]
     fn generation_change_clears_old_samples() {

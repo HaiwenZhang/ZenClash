@@ -2,8 +2,8 @@ use super::{
     Button, ButtonVariants, Context, Disableable, FluentBuilder, Icon, IconName,
     InteractiveElement, IntoElement, Page, ParentElement, ProviderCatalog, ProviderKind,
     RuntimeConfig, RuntimeData, RuntimePage, Sizable, Styled, div, empty_dash, empty_state,
-    format_profile_age, h_flex, info_row, json, load_page, message_banner, px, setting_card,
-    setting_switch, v_flex,
+    format_profile_age, h_flex, info_row, json, load_page, px, setting_card, setting_switch,
+    v_flex,
 };
 
 mod ruleset;
@@ -235,20 +235,6 @@ impl RuntimePage {
             .unwrap_or("—");
 
         setting_card(zenclash_i18n::text("resources.builtin.title"), theme)
-            .when(
-                !self.core_kind.capabilities().geodata_update
-                    || !self.core_kind.capabilities().external_ui_update,
-                |card| {
-                    card.child(message_banner(
-                        zenclash_i18n::text_with(
-                            "resources.builtin.unsupported",
-                            &[("core", self.core_kind.display_name().to_owned())],
-                        ),
-                        theme.warning,
-                        theme,
-                    ))
-                },
-            )
             .child(setting_switch(
                 zenclash_i18n::text("resources.builtin.geodata_mode"),
                 zenclash_i18n::text("resources.builtin.geodata_mode_description"),

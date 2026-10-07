@@ -7,8 +7,8 @@ use gpui_kit::component::{
     v_flex,
 };
 use gpui_kit::{
-    App, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce, Styled, Window,
-    div, prelude::FluentBuilder as _, rems,
+    App, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce, Styled,
+    TestSupportExt, Window, div, prelude::FluentBuilder as _, rems,
 };
 
 use crate::{
@@ -18,7 +18,7 @@ use crate::{
         NavigateRules, NavigateSettings, NavigateSniffer, NavigateSystemProxy, NavigateTraffic,
         NavigateTun, SetDarkTheme, SetLightTheme, ToggleSidebar,
     },
-    assets::{AppIcon, GROUP_ICON_PATH, RADIO_ICON_PATH, RULER_ICON_PATH, ZENCLASH_MARK_PATH},
+    assets::{AppIcon, GROUP_ICON_PATH, RADIO_ICON_PATH, RULER_ICON_PATH},
     pages::Page,
 };
 
@@ -172,14 +172,14 @@ impl RenderOnce for SidebarNavigation {
         v_flex()
             .gap_1()
             .children(self.pages.into_iter().map(|page| {
-                let active = page == self.current_page;
+                let active = page == self.current_page.navigation_parent();
 
                 Button::new(page.route())
                     .accessibility_label(page.label())
                     .w_full()
                     .h(rems(2.75))
                     .justify_start()
-                    .when(self.collapsed, |this| this.justify_center())
+                    .when(self.collapsed, |this| this.justify_center().px_1())
                     .custom(
                         ButtonCustomVariant::new(cx)
                             .foreground(if active {
@@ -191,32 +191,37 @@ impl RenderOnce for SidebarNavigation {
                             .active(cx.theme().sidebar_accent),
                     )
                     .selected(active)
-                    .when(active && self.current_page != Page::Settings, |button| {
-                        button.border_l_1().border_color(cx.theme().chart_3)
-                    })
                     .child(
                         h_flex()
                             .w_full()
                             .gap_3()
                             .when(self.collapsed, |this| this.justify_center())
                             .child(
-                                if self.current_page == Page::Settings {
-                                    sidebar_icon(page)
-                                } else {
-                                    match page {
-                                        Page::Profiles => {
-                                            Icon::new(gpui_kit::assets::IconName::NotebookTabs)
+                                div()
+                                    .id(format!("sidebar-icon:{}", page.route()))
+                                    .test_support()
+                                    .size(rems(1.25))
+                                    .flex_shrink_0()
+                                    .child(
+                                        if self.current_page == Page::Settings {
+                                            sidebar_icon(page)
+                                        } else {
+                                            match page {
+                                                Page::Profiles => Icon::new(
+                                                    gpui_kit::assets::IconName::NotebookTabs,
+                                                ),
+                                                Page::Network => {
+                                                    Icon::new(gpui_kit::assets::IconName::Activity)
+                                                }
+                                                Page::Logs => {
+                                                    Icon::new(gpui_kit::assets::IconName::FileText)
+                                                }
+                                                _ => sidebar_icon(page),
+                                            }
                                         }
-                                        Page::Network => {
-                                            Icon::new(gpui_kit::assets::IconName::Activity)
-                                        }
-                                        Page::Logs => {
-                                            Icon::new(gpui_kit::assets::IconName::FileText)
-                                        }
-                                        _ => sidebar_icon(page),
-                                    }
-                                }
-                                .size(rems(1.25)),
+                                        .size(rems(1.25))
+                                        .flex_shrink_0(),
+                                    ),
                             )
                             .when(!self.collapsed, |this| {
                                 this.child(div().min_w_0().text_ellipsis().child(page.label()))
@@ -245,110 +250,58 @@ impl RenderOnce for Sidebar {
         });
 
         GpuiSidebar::new("main-sidebar")
-            .w(if self.current_page == Page::Settings {
-                rems(14.)
-            } else {
-                rems(14.5)
-            })
+            .w(rems(9.))
             .collapsible(true)
             .collapsed(self.collapsed)
             .header(
-                h_flex()
-                    .min_h(rems(4.5))
-                    .w_full()
-                    .when(!self.collapsed, |this| {
-                        this.gap_2().child(
-                            h_flex()
-                                .min_w_0()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .size(rems(2.5))
-                                        .flex_shrink_0()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .child(
-                                            Icon::empty()
-                                                .path(ZENCLASH_MARK_PATH)
-                                                .size(rems(2.5))
-                                                .text_color(
-                                                    if self.current_page == Page::Settings {
-                                                        theme.primary
-                                                    } else {
-                                                        theme.chart_3
-                                                    },
-                                                ),
-                                        ),
-                                )
-                                .child(
-                                    v_flex()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .gap_0p5()
-                                        .child(
-                                            div()
-                                                .text_lg()
-                                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                                .child(zenclash_i18n::text("app.name")),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .when(
-                                                    self.current_page != Page::Settings,
-                                                    |label| label.text_xs(),
-                                                )
-                                                .text_color(theme.muted_foreground)
-                                                .child(zenclash_i18n::text(
-                                                    if self.current_page == Page::Settings {
-                                                        "app.description"
-                                                    } else {
-                                                        "app.desktop_description"
-                                                    },
-                                                )),
-                                        ),
-                                ),
-                        )
-                    })
-                    .when(self.collapsed, |this| this.justify_center())
-                    .child(
-                        Button::new("toggle-sidebar")
-                            .accessibility_label(toggle_label.clone())
-                            .icon(toggle_icon)
-                            .small()
-                            .ghost()
-                            .tooltip(toggle_label)
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(ToggleSidebar), cx);
-                            }),
-                    ),
+                h_flex().w_full().justify_end().child(
+                    Button::new("toggle-sidebar")
+                        .icon(toggle_icon)
+                        .small()
+                        .ghost()
+                        .accessibility_label(toggle_label.clone())
+                        .tooltip(toggle_label)
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(ToggleSidebar), cx)
+                        }),
+                ),
             )
             .child(SidebarNavigation::new(self.current_page, navigation))
             .footer(
                 v_flex()
                     .w_full()
                     .gap_3()
-                    .child(SidebarNavigation::new(self.current_page, [Page::Settings]))
+                    .child(
+                        SidebarNavigation::new(self.current_page, [Page::Settings])
+                            .collapsed(self.collapsed),
+                    )
                     .child(
                         Button::new("sidebar-appearance")
                             .w_full()
                             .h(rems(2.75))
                             .ghost()
                             .justify_start()
-                            .when(self.collapsed, |this| this.justify_center())
+                            .when(self.collapsed, |this| this.justify_center().px_1())
                             .child(
                                 h_flex()
                                     .w_full()
                                     .gap_3()
                                     .when(self.collapsed, |this| this.justify_center())
                                     .child(
-                                        Icon::new(if dark {
-                                            IconName::Moon
-                                        } else {
-                                            IconName::Sun
-                                        })
-                                        .size(rems(1.25)),
+                                        div()
+                                            .id("sidebar-icon:appearance")
+                                            .test_support()
+                                            .size(rems(1.25))
+                                            .flex_shrink_0()
+                                            .child(
+                                                Icon::new(if dark {
+                                                    IconName::Moon
+                                                } else {
+                                                    IconName::Sun
+                                                })
+                                                .size(rems(1.25))
+                                                .flex_shrink_0(),
+                                            ),
                                     )
                                     .when(!self.collapsed, |this| {
                                         this.child(zenclash_i18n::text(if dark {
@@ -545,6 +498,55 @@ mod tests {
     fn sidebar_defaults_to_expanded_and_accepts_collapsed_state() {
         assert!(!Sidebar::new(Page::Home).collapsed);
         assert!(Sidebar::new(Page::Home).collapsed(true).collapsed);
+    }
+
+    #[gpui_kit::test]
+    fn collapsed_sidebar_preserves_full_icon_bounds(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::component::Root;
+        use gpui_kit::test::TestWindowExt;
+        use gpui_kit::{
+            AppContext, Context, IntoElement, ParentElement, Render, Styled, div, px, size,
+        };
+        struct Navigation;
+        impl Render for Navigation {
+            fn render(
+                &mut self,
+                _: &mut gpui_kit::Window,
+                _: &mut Context<Self>,
+            ) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .child(Sidebar::new(Page::Home).collapsed(true))
+            }
+        }
+        cx.update(gpui_kit::init);
+        let handle = cx.open_window(size(px(200.), px(700.)), |window, cx| {
+            let view = cx.new(|_| Navigation);
+            Root::new(view, window, cx)
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            for page in std::iter::once(Page::Home)
+                .chain(Page::PRIMARY)
+                .chain([Page::Settings])
+            {
+                let icon = window
+                    .find(format!("sidebar-icon:{}", page.route()))
+                    .bounds();
+                let button = window.find(page.route()).bounds();
+                assert_eq!(
+                    icon.size.width,
+                    gpui_kit::rems(1.25).to_pixels(window.rem_size())
+                );
+                assert!(
+                    icon.left() >= button.left() && icon.right() <= button.right(),
+                    "{} icon exceeds its button",
+                    page.route()
+                );
+            }
+            window.remove_window();
+        })
+        .unwrap();
     }
 
     #[test]

@@ -10,7 +10,6 @@ use gpui_kit::component::{
     chart::AreaChart,
     h_flex,
     menu::{DropdownMenu, PopupMenuItem},
-    progress::Progress,
     v_flex,
 };
 use gpui_kit::{
@@ -25,23 +24,23 @@ use zenclash_core::{
 };
 
 use crate::{
-    app::{
-        NavigateProfiles, NavigateProxies, NavigateSystemProxy, SetDirectMode, SetGlobalMode,
-        SetRuleMode,
-    },
+    app::{NavigateProfiles, NavigateSystemProxy, SetDirectMode, SetGlobalMode, SetRuleMode},
     components::{
         mint_switch::MintSwitch as Switch, sidebar::OutboundMode, wave_percentage::WavePercentage,
     },
 };
 
 use super::{
-    Context, FluentBuilder, Page, ProxySelectionChanged, RuntimeData, RuntimePage, format_bytes,
-    format_profile_age, message_banner, normalized_fraction,
+    Context, FluentBuilder, Page, ProxySelectionChanged, RuntimeData, RuntimePage, context_note,
+    format_bytes, format_profile_age, normalized_fraction,
 };
 
 mod dashboard;
+#[cfg(test)]
 mod flow;
+#[cfg(test)]
 mod history;
+mod selector;
 mod traffic;
 #[cfg(all(test, target_os = "windows"))]
 mod validation;
@@ -58,10 +57,14 @@ pub(super) struct HomeUiState {
     capture_transition: Option<CaptureTransition>,
     pub(super) action_error: Option<String>,
     mode_transition: Option<ModeTransition>,
-    projection: Option<dashboard::HomeProxyProjection>,
+    projection: Option<selector::HomeProxyProjection>,
     chart: traffic::HomeChartState,
     generation: u64,
+    selected_group: Option<String>,
+    selector_width_rems: f32,
+    #[cfg(test)]
     flow: flow::HomeFlowState,
+    #[cfg(test)]
     history: history::HomeHistoryState,
     #[cfg(test)]
     design_validation: Option<(OperationalSnapshot, zenclash_core::TrafficSnapshot)>,
@@ -104,6 +107,18 @@ impl RuntimePage {
         self.traffic_monitor.snapshot()
     }
 
+    pub(in crate::pages::runtime) fn release_home_presentation(&mut self) {
+        #[cfg(test)]
+        {
+            self.home.design_validation = None;
+            self.home.flow.release();
+            self.home.history.release();
+        }
+        self.home.chart = traffic::HomeChartState::default();
+        self.home.projection = None;
+        self.home.selected_group = None;
+    }
+
     pub(in crate::pages::runtime) fn render_home(
         &self,
         theme: &gpui_kit::component::Theme,
@@ -119,23 +134,7 @@ impl RuntimePage {
 
         v_flex()
             .gap_3()
-            .child(
-                h_flex()
-                    .id("home-primary-row")
-                    .test_support()
-                    .items_stretch()
-                    .flex_wrap()
-                    .gap_3()
-                    .child(v_flex().flex_1().flex_basis(rems(30.)).min_w_0().child(
-                        self.render_home_controls(config, &operational.capture, theme, compact, cx),
-                    ))
-                    .child(
-                        self.render_home_metrics(&operational.streams, theme)
-                            .flex_1()
-                            .flex_basis(rems(30.))
-                            .min_w_0(),
-                    ),
-            )
+            .child(self.render_home_controls(config, &operational.capture, theme, compact, cx))
             .when_some(
                 self.app_update
                     .status
@@ -176,6 +175,7 @@ impl RuntimePage {
                     )
                 },
             )
+            .child(self.render_home_proxy(theme, cx))
             .child(
                 h_flex()
                     .id("home-traffic-row")
@@ -190,6 +190,7 @@ impl RuntimePage {
                             .flex_grow(1.75)
                             .flex_basis(rems(38.))
                             .min_w_0()
+                            .gap_3()
                             .child(self.render_home_traffic(&operational.streams, theme, cx)),
                     )
                     .child(
@@ -202,43 +203,6 @@ impl RuntimePage {
                             .child(self.render_home_profile(theme, cx)),
                     ),
             )
-            .child(
-                h_flex()
-                    .id("home-activity-row")
-                    .test_support()
-                    .items_stretch()
-                    .flex_wrap()
-                    .gap_3()
-                    .child(
-                        v_flex()
-                            .id("home-activity-panel")
-                            .test_support()
-                            .flex_1()
-                            .flex_basis(rems(30.))
-                            .min_w_0()
-                            .rounded(theme.radius_lg)
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.secondary)
-                            .child(self.render_home_routes(theme))
-                            .child(self.render_home_process_flow(theme)),
-                    )
-                    .child(
-                        v_flex()
-                            .id("home-node-panel")
-                            .test_support()
-                            .flex_1()
-                            .flex_basis(rems(30.))
-                            .min_w_0()
-                            .rounded(theme.radius_lg)
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.secondary)
-                            .child(self.render_home_proxy(theme, cx))
-                            .child(self.render_home_node_delays(theme, cx)),
-                    ),
-            )
-            .child(self.render_home_recent_connections(theme))
             .when(
                 operational
                     .process
@@ -430,27 +394,12 @@ impl RuntimePage {
             .bg(theme.secondary)
             .min_w_0()
             .child(
-                h_flex()
-                    .px_4()
-                    .pt_4()
-                    .justify_between()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(zenclash_i18n::text("home.profile.title")),
-                    )
-                    .child(
-                        Button::new("home-open-profiles")
-                            .icon(IconName::ArrowRight)
-                            .label(zenclash_i18n::text("profiles.design.details"))
-                            .small()
-                            .outline()
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(NavigateProfiles), cx)
-                            }),
-                    ),
+                h_flex().px_4().pt_4().justify_between().gap_2().child(
+                    div()
+                        .text_lg()
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .child(zenclash_i18n::text("home.profile.title")),
+                ),
             )
             .child(
                 v_flex()
@@ -574,82 +523,6 @@ impl RuntimePage {
             .into_any_element()
     }
 
-    fn render_home_proxy(
-        &self,
-        theme: &gpui_kit::component::Theme,
-        _cx: &mut Context<Self>,
-    ) -> gpui_kit::AnyElement {
-        let selection = self
-            .home_proxy_projection()
-            .map(|projection| projection.current.clone())
-            .unwrap_or_else(|| {
-                current_proxy_summary(&RuntimeConfig::default(), &ProxyCatalog::default())
-            });
-        let latency_color = match selection.delay {
-            Some(1..=499) => theme.success,
-            Some(500..) => theme.warning,
-            Some(0) => theme.danger,
-            None => theme.muted_foreground,
-        };
-        let (latency, _) = dashboard::latency_presentation(selection.delay);
-        let node_picker = div()
-            .flex_1()
-            .min_w_0()
-            .text_lg()
-            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-            .truncate()
-            .child(selection.node);
-
-        v_flex()
-            .px_4()
-            .py_2()
-            .gap_1()
-            .child(
-                h_flex()
-                    .justify_between()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(zenclash_i18n::text("home.proxy.title")),
-                    )
-                    .child(
-                        Button::new("home-open-proxies")
-                            .icon(IconName::ArrowRight)
-                            .label(zenclash_i18n::text("home.proxy.details"))
-                            .small()
-                            .ghost()
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(NavigateProxies), cx);
-                            }),
-                    ),
-            )
-            .child(
-                h_flex().gap_3().justify_between().child(node_picker).child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .rounded_full()
-                        .bg(latency_color.opacity(0.12))
-                        .font_family(theme.mono_font_family.clone())
-                        .text_xs()
-                        .text_color(latency_color)
-                        .child(latency),
-                ),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(format!("{} · {}", selection.kind, selection.group)),
-            )
-            .when_some(self.home.proxy_error.clone(), |this, error| {
-                this.child(message_banner(error, theme.danger, theme))
-            })
-            .into_any_element()
-    }
-
     fn render_home_controls(
         &self,
         config: &RuntimeConfig,
@@ -710,13 +583,11 @@ impl RuntimePage {
             || zenclash_i18n::text("home.controls.no_proxy_port"),
             |port| format!("127.0.0.1:{port}"),
         );
-        let memory = self
-            .home_operational_snapshot()
-            .streams
-            .connections
-            .value()
-            .filter(|value| value.generation == self.home.generation)
-            .map_or_else(|| "—".to_owned(), |value| format_bytes(value.memory));
+        let memory = core_memory_bytes(
+            &self.home_operational_snapshot().streams,
+            self.home.generation,
+        )
+        .map_or_else(|| "—".to_owned(), format_core_memory);
 
         let snapshot = self.home_operational_snapshot();
         let process = snapshot
@@ -825,10 +696,48 @@ impl RuntimePage {
                                     .gap_1()
                                     .min_w_0()
                                     .child(
-                                        div()
-                                            .text_size(px(26.))
-                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                            .child(runtime_status),
+                                        h_flex()
+                                            .gap_4()
+                                            .flex_wrap()
+                                            .child(
+                                                div()
+                                                    .text_size(px(26.))
+                                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                                    .child(runtime_status),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .id("home-core-memory")
+                                                    .test_support()
+                                                    .flex_shrink_0()
+                                                    .gap_2()
+                                                    .px_3()
+                                                    .py_1p5()
+                                                    .rounded_full()
+                                                    .border_1()
+                                                    .border_color(theme.primary.opacity(0.16))
+                                                    .bg(theme.primary.opacity(0.06))
+                                                    .text_sm()
+                                                    .child(
+                                                        Icon::new(IconName::Cpu)
+                                                            .size_4()
+                                                            .text_color(theme.primary),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_color(theme.muted_foreground)
+                                                            .child(zenclash_i18n::text(
+                                                                "home.traffic.core_memory",
+                                                            )),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .font_weight(
+                                                                gpui_kit::FontWeight::SEMIBOLD,
+                                                            )
+                                                            .child(memory),
+                                                    ),
+                                            ),
                                     )
                                     .child(
                                         div()
@@ -841,6 +750,7 @@ impl RuntimePage {
                     )
                     .child(mode_controls),
             )
+            .child(self.render_home_metrics(&snapshot.streams, theme))
             .child(
                 v_flex()
                     .px_4()
@@ -853,9 +763,6 @@ impl RuntimePage {
                                 &[("mode", mode.label())],
                             ),
                         ))
-                    })
-                    .when_some(self.home.action_error.clone(), |this, error| {
-                        this.child(message_banner(error, theme.danger, theme))
                     })
                     .children(
                         home_service_feedback(
@@ -1002,26 +909,6 @@ impl RuntimePage {
                                                 );
                                             })),
                                     ),
-                            )
-                            .child(
-                                v_flex()
-                                    .gap_1()
-                                    .min_w(rems(6.))
-                                    .pl_4()
-                                    .border_l_1()
-                                    .border_color(theme.border)
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                            .child(zenclash_i18n::text("home.traffic.core_memory")),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_lg()
-                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                            .child(memory),
-                                    ),
                             ),
                     ),
             )
@@ -1074,7 +961,7 @@ impl RuntimePage {
             .grid(false)
             .y_padding(0., 0.)
             .tooltip_value(|_, _, value| format_speed(value.max(0.) as u64).into());
-        // A fixed five-minute frame is separate from the observed series. Unknown
+        // A fixed two-minute frame is separate from the observed series. Unknown
         // history stays blank; stretching a few seconds across the frame would
         // misrepresent both the time axis and the rates.
         let plot = h_flex()
@@ -1112,7 +999,7 @@ impl RuntimePage {
                             .x_axis(false)
                             .y_axis(false)
                             .y_tick_count(4)
-                            .grid_columns(6)
+                            .grid_columns(5)
                             .grid_dashed(false)
                             .interactive(false),
                     )
@@ -1133,13 +1020,8 @@ impl RuntimePage {
             .justify_between()
             .text_xs()
             .text_color(theme.muted_foreground)
-            .children((0..=5).map(|minute| {
-                div().child(if minute == 5 {
-                    zenclash_i18n::text("home.traffic.now")
-                } else {
-                    format!("−{}m", 5 - minute)
-                })
-            }));
+            .children(["−2m", "−1m 30s", "−1m", "−30s"].map(|label| div().child(label)))
+            .child(zenclash_i18n::text("home.traffic.now"));
 
         v_flex()
             .flex_1()
@@ -1164,7 +1046,7 @@ impl RuntimePage {
                         div()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child(zenclash_i18n::text("home.traffic.range_300")),
+                            .child(zenclash_i18n::text("home.traffic.range_120")),
                     ),
             )
             .child(
@@ -1199,14 +1081,12 @@ impl RuntimePage {
                 view.child(status_label(status, color, theme))
             })
             .child(v_flex().gap_2().w_full().child(plot).child(time_axis))
-            .when(observed_seconds == 0, |view| {
-                view.child(div().text_xs().text_color(theme.muted_foreground).child(
-                    zenclash_i18n::text_with(
-                        "home.traffic.observed_duration",
-                        &[("seconds", "0".into())],
-                    ),
-                ))
-            })
+            .child(div().text_xs().text_color(theme.muted_foreground).child(
+                zenclash_i18n::text_with(
+                    "home.traffic.observed_duration",
+                    &[("seconds", observed_seconds.to_string())],
+                ),
+            ))
             .into_any_element()
     }
 
@@ -1274,13 +1154,96 @@ impl RuntimePage {
         cx.notify();
     }
 
+    pub(super) fn render_network_capture_settings(
+        &self,
+        config: Option<&RuntimeConfig>,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let snapshot = self.operational_status.snapshot();
+        let transition = self.home.capture_transition.as_ref();
+        let capture = transition
+            .and_then(|state| state.confirmed.as_ref())
+            .unwrap_or(&snapshot.capture);
+        let proxy = capture
+            .system_proxy
+            .value()
+            .map_or(self.preferences.system_proxy_enabled, |value| {
+                value.intent_enabled
+            });
+        let tun = capture
+            .tun
+            .value()
+            .map_or(config.is_some_and(|value| value.tun.enable), |value| {
+                value.requested || value.configured
+            });
+        let display = capture_presentation(proxy, tun, transition);
+        let pending = display.pending
+            || self.core_busy()
+            || self.profile_service.pending_finalization().is_some();
+        super::setting_card(zenclash_i18n::text("unified.settings.network"), theme)
+            .child(super::common::setting_switch_disabled(
+                zenclash_i18n::text("tray.system_proxy"),
+                zenclash_i18n::text("unified.network.system_proxy_description"),
+                display.system_proxy_enabled,
+                "settings-system-proxy",
+                theme,
+                pending || config.is_none(),
+                cx.listener(|this, checked, window, cx| {
+                    this.apply_home_capture_plan(
+                        if *checked {
+                            CapturePlan::SystemProxy
+                        } else {
+                            CapturePlan::Off
+                        },
+                        window,
+                        cx,
+                    );
+                }),
+            ))
+            .child(super::common::setting_switch_disabled(
+                zenclash_i18n::text("navigation.tun.label"),
+                zenclash_i18n::text("unified.network.tun_description"),
+                display.tun_enabled,
+                "settings-tun",
+                theme,
+                pending || config.is_none(),
+                cx.listener(|this, checked, window, cx| {
+                    this.apply_home_capture_plan(
+                        if *checked {
+                            CapturePlan::Tun
+                        } else {
+                            CapturePlan::Off
+                        },
+                        window,
+                        cx,
+                    );
+                }),
+            ))
+            .child(super::common::setting_switch_disabled(
+                zenclash_i18n::text("core_page.switches.allow_lan"),
+                zenclash_i18n::text("core_page.switches.allow_lan_description"),
+                config.is_some_and(|value| value.allow_lan),
+                "settings-allow-lan",
+                theme,
+                pending || config.is_none(),
+                cx.listener(|this, checked, _, cx| {
+                    this.apply_controlled_config(
+                        serde_json::json!({"allow-lan": *checked}),
+                        zenclash_i18n::text("core_page.notices.allow_lan"),
+                        cx,
+                    );
+                }),
+            ))
+    }
+
     fn apply_home_capture_plan(
         &mut self,
         plan: CapturePlan,
         window: &mut gpui_kit::Window,
         cx: &mut Context<Self>,
     ) {
-        if self.page != Page::Home
+        if !matches!(self.page, Page::Home | Page::Settings)
             || self
                 .home
                 .capture_transition
@@ -1307,7 +1270,7 @@ impl RuntimePage {
             confirmed,
         });
         self.home.action_error = None;
-        let token = self.page_task_token_for(Page::Home);
+        let token = self.page_task_token_for(self.page);
         let capture = self.traffic_capture.clone();
         let preferences_store = self.preferences_store.clone();
         let task = self.runtime.spawn(async move {
@@ -1484,7 +1447,6 @@ struct CurrentProxySummary {
     group: String,
     node: String,
     kind: String,
-    delay: Option<u32>,
 }
 
 fn current_proxy_summary(config: &RuntimeConfig, proxies: &ProxyCatalog) -> CurrentProxySummary {
@@ -1494,7 +1456,6 @@ fn current_proxy_summary(config: &RuntimeConfig, proxies: &ProxyCatalog) -> Curr
             group: zenclash_i18n::text("outbound_mode.direct_mode"),
             node: "DIRECT".into(),
             kind: zenclash_i18n::text("home.proxy.direct_description"),
-            delay: None,
         };
     }
     let Some(group) = current_proxy_group(config, proxies) else {
@@ -1502,15 +1463,17 @@ fn current_proxy_summary(config: &RuntimeConfig, proxies: &ProxyCatalog) -> Curr
             group: zenclash_i18n::text("home.proxy.no_group"),
             node: zenclash_i18n::text("home.proxy.no_node"),
             kind: zenclash_i18n::text("home.proxy.check_configuration"),
-            delay: None,
         };
     };
+    proxy_summary_for_group(group, proxies)
+}
+
+fn proxy_summary_for_group(group: &ProxyGroup, proxies: &ProxyCatalog) -> CurrentProxySummary {
     if matches!(group.behavior, ProxyGroupBehavior::LoadBalance) {
         return CurrentProxySummary {
             group: group.name.clone(),
             node: zenclash_i18n::text("home.proxy.load_balance"),
             kind: zenclash_i18n::text("home.proxy.load_balance_description"),
-            delay: None,
         };
     }
     let node = group
@@ -1542,7 +1505,6 @@ fn current_proxy_summary(config: &RuntimeConfig, proxies: &ProxyCatalog) -> Curr
             }))
             .collect::<Vec<_>>()
             .join(" · "),
-        delay: node.and_then(zenclash_core::ProxyNode::latest_delay),
     }
 }
 
@@ -1791,7 +1753,7 @@ fn home_service_feedback(
                     .id("home-service-pending")
                     .role(gpui_kit::Role::Status)
                     .aria_label(pending_message.clone())
-                    .child(message_banner(pending_message, theme.warning, theme))
+                    .child(context_note(pending_message, theme))
                     .test_support()
             }))
             .children(warning.map(|warning| {
@@ -1799,7 +1761,7 @@ fn home_service_feedback(
                     .id("home-service-warning")
                     .role(gpui_kit::Role::Status)
                     .aria_label(warning.clone())
-                    .child(message_banner(warning, theme.danger, theme))
+                    .child(context_note(warning, theme))
                     .test_support()
             })),
     )
@@ -1951,6 +1913,25 @@ fn series_label(
         .into_any_element()
 }
 
+fn core_memory_bytes(streams: &StreamStatuses, generation: u64) -> Option<u64> {
+    streams
+        .memory
+        .is_fresh()
+        .then(|| streams.memory.value())
+        .flatten()
+        .filter(|value| value.generation == generation && value.memory > 0)
+        .map(|value| value.memory)
+}
+
+fn format_core_memory(bytes: u64) -> String {
+    let (unit, label) = if bytes >= 1_000_000_000 {
+        (1_000_000_000, "GB")
+    } else {
+        (1_000_000, "MB")
+    };
+    format!("{}.{:01} {label}", bytes / unit, (bytes % unit) * 10 / unit)
+}
+
 #[cfg(test)]
 mod tests {
     use zenclash_core::{
@@ -1959,6 +1940,45 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn core_memory_uses_mb_minimum_and_requires_current_fresh_data() {
+        assert_eq!(format_core_memory(1024), "0.0 MB");
+        assert_eq!(format_core_memory(1_500_000), "1.5 MB");
+        assert_eq!(format_core_memory(1_500_000_000), "1.5 GB");
+        let mut streams = StreamStatuses::default();
+        assert_eq!(core_memory_bytes(&streams, 2), None);
+        streams.memory = Observation::Fresh {
+            value: StreamStatus {
+                generation: 2,
+                memory: 47_000_000,
+                ..Default::default()
+            },
+            observed_at_ms: 1,
+        };
+        assert_eq!(core_memory_bytes(&streams, 2), Some(47_000_000));
+        assert_eq!(core_memory_bytes(&streams, 3), None);
+        streams.memory = Observation::Stale {
+            value: *streams.memory.value().unwrap(),
+            observed_at_ms: 1,
+            failure: zenclash_core::OperationalFailure {
+                message: "read failed".into(),
+                occurred_at_ms: 2,
+            },
+        };
+        assert_eq!(core_memory_bytes(&streams, 2), None);
+        streams.memory = Observation::Loading;
+        assert_eq!(core_memory_bytes(&streams, 2), None);
+        streams.memory = Observation::Fresh {
+            value: StreamStatus {
+                generation: 2,
+                memory: 0,
+                ..Default::default()
+            },
+            observed_at_ms: 1,
+        };
+        assert_eq!(core_memory_bytes(&streams, 2), None);
+    }
 
     struct ServiceFeedbackView {
         phase: Option<zenclash_core::ServicePhase>,
@@ -2096,8 +2116,8 @@ mod tests {
             },
             &catalog,
         );
-
-        assert_eq!(summary.delay, Some(42));
+        assert_eq!(summary.group, "Proxy");
+        assert_eq!(summary.node, "HK 01");
     }
 
     #[test]
@@ -2162,7 +2182,6 @@ mod tests {
 
         assert!(!home_group_can_switch(&group));
         assert_eq!(summary.node, zenclash_i18n::text("home.proxy.load_balance"));
-        assert_eq!(summary.delay, None);
     }
 
     #[test]

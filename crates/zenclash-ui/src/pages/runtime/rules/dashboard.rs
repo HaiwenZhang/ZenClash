@@ -3,12 +3,14 @@ use crate::components::mint_switch::MintSwitch as Switch;
 use gpui_kit::StatefulInteractiveElement;
 use gpui_kit::component::Selectable;
 use gpui_kit::component::button::{ButtonCustomVariant, ButtonVariants};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::scroll::ScrollableElement;
 
 impl RuntimePage {
     pub(super) fn rule_dashboard(
         &self,
+        compact: bool,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
@@ -38,20 +40,72 @@ impl RuntimePage {
             &[]
         };
         let page = list_page(indices.len(), self.rules.page, RULES_PER_PAGE);
+        let filters = h_flex().gap_2().flex_wrap().children(
+            [
+                (
+                    true,
+                    "unified.rules.all_types",
+                    self.rules.worker.kind.clone(),
+                    projection.types.clone(),
+                ),
+                (
+                    false,
+                    "unified.rules.all_policies",
+                    self.rules.worker.policy.clone(),
+                    projection.policies.clone(),
+                ),
+            ]
+            .into_iter()
+            .map(|(is_kind, key, selected, options)| {
+                let owner = cx.entity().downgrade();
+                Button::new(if is_kind {
+                    "rules-type-filter"
+                } else {
+                    "rules-policy-filter"
+                })
+                .outline()
+                .icon(IconName::ChevronDown)
+                .label(selected.clone().unwrap_or_else(|| zenclash_i18n::text(key)))
+                .dropdown_menu(move |mut menu, _, _| {
+                    for value in std::iter::once(None).chain(options.iter().cloned().map(Some)) {
+                        let owner = owner.clone();
+                        let label = value.clone().unwrap_or_else(|| zenclash_i18n::text(key));
+                        menu = menu.item(
+                            PopupMenuItem::new(label)
+                                .checked(value == selected)
+                                .on_click(move |_, _, cx| {
+                                    let _ = owner.update(cx, |page, cx| {
+                                        if is_kind {
+                                            page.rules.worker.kind = value.clone();
+                                        } else {
+                                            page.rules.worker.policy = value.clone();
+                                        }
+                                        page.rules.page = 0;
+                                        page.rules.projection = None;
+                                        page.update_rule_presentation(cx);
+                                        cx.notify();
+                                    });
+                                }),
+                        );
+                    }
+                    menu
+                })
+            }),
+        );
         let mut table = panel(theme)
             .id("rules-table-panel")
             .test_support()
             .gap_0p5()
             .w_full()
-            .min_w(gpui_kit::rems(38.))
-            .min_h(gpui_kit::rems(34.))
-            .h_full()
+            .min_w_0()
+            .h(gpui_kit::rems(32.))
             .child(
                 Input::new(&self.rules.filter)
                     .prefix(gpui_kit::component::Icon::new(IconName::Search))
                     .large(),
             )
-            .child(rule_columns(theme).mt_3());
+            .child(filters)
+            .when(!compact, |table| table.child(rule_columns(theme).mt_3()));
         let mut rows = v_flex().gap_0().when(indices.is_empty(), |this| {
             this.child(empty_state(
                 zenclash_i18n::text(if self.rules.projecting {
@@ -67,13 +121,13 @@ impl RuntimePage {
             ))
         });
         for &position in &indices[page.start..page.end] {
-            rows = rows.child(self.render_rule_row(position, &rules[position], theme, cx));
+            rows = rows.child(self.render_rule_row(position, &rules[position], compact, theme, cx));
         }
         table = table.child(
             div()
                 .id(("rule-table-viewport", page.index))
                 .flex_1()
-                .min_h(gpui_kit::rems(22.))
+                .min_h_0()
                 .overflow_y_scrollbar()
                 .child(rows),
         );
@@ -378,6 +432,37 @@ impl RuntimePage {
         v_flex()
             .gap_3()
             .child(
+                h_flex()
+                    .gap_3()
+                    .items_stretch()
+                    .flex_wrap()
+                    .child(
+                        div()
+                            .flex_grow(1.5)
+                            .flex_basis(gpui_kit::rems(38.))
+                            .min_w_0()
+                            .min_h(gpui_kit::rems(34.))
+                            .child(table)
+                            .overflow_x_scrollbar(),
+                    )
+                    .when(!compact || self.rules.selected.is_some(), |row| {
+                        row.child(inspector)
+                    }),
+            )
+            .child(
+                Button::new("rules-statistics")
+                    .ghost()
+                    .label(zenclash_i18n::text("rules.summary.statistics"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.rules.analytics_expanded = !this.rules.analytics_expanded;
+                        cx.notify();
+                    })),
+            )
+            .when(self.rules.analytics_expanded, |view| {
+                view.child(
+        v_flex()
+            .gap_3()
+            .child(
                 panel(theme).child(
                     h_flex().gap_4().children(
                         [
@@ -456,16 +541,7 @@ impl RuntimePage {
                     ),
                 ),
             )
-            .when(!self.core_kind.capabilities().rule_toggle, |this| {
-                this.child(message_banner(
-                    zenclash_i18n::text_with(
-                        "rules.warnings.stats_unavailable",
-                        &[("core", self.core_kind.display_name().to_owned())],
-                    ),
-                    theme.warning,
-                    theme,
-                ))
-            })
+
             .child(
                 h_flex()
                     .gap_3()
@@ -474,22 +550,8 @@ impl RuntimePage {
                     .child(distribution("rules.charts.types", &projection.kinds, theme))
                     .child(policy_distribution(&projection.hits, theme)),
             )
-            .child(
-                h_flex()
-                    .gap_3()
-                    .items_stretch()
-                    .flex_wrap()
-                    .child(
-                        div()
-                            .flex_grow(1.5)
-                            .flex_basis(gpui_kit::rems(38.))
-                            .min_w_0()
-                            .min_h(gpui_kit::rems(34.))
-                            .child(table)
-                            .overflow_x_scrollbar(),
-                    )
-                    .child(inspector),
             )
+            })
             .into_any_element()
     }
 
@@ -497,6 +559,7 @@ impl RuntimePage {
         &self,
         position: usize,
         rule: &zenclash_core::Rule,
+        compact: bool,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
@@ -509,6 +572,7 @@ impl RuntimePage {
         let mut row = h_flex()
             .id(("rule-row", identity))
             .test_support()
+            .when(compact, |row| row.flex_wrap())
             .gap_2()
             .py_1()
             .px_2()
@@ -520,16 +584,16 @@ impl RuntimePage {
                     .border_color(theme.table_active)
                     .bg(theme.table_active)
             })
-            .child(div().w_12().text_sm().child((position + 1).to_string()))
+            .child(div().w_8().text_sm().child((position + 1).to_string()))
             .child(
                 div()
-                    .w(gpui_kit::rems(9.))
+                    .w(gpui_kit::rems(if compact { 7. } else { 9. }))
                     .text_sm()
                     .truncate()
                     .child(rule.kind.clone()),
             )
             .child(
-                div().flex_1().min_w_0().child(
+                div().flex_1().min_w(gpui_kit::rems(10.)).child(
                     Button::new(("rule-details", identity))
                         .accessibility_label(if rule.payload.is_empty() {
                             rule.kind.clone()
@@ -559,7 +623,8 @@ impl RuntimePage {
                         .truncate()
                         .tooltip(rule.payload.clone())
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.rules.selected = Some(position);
+                            this.rules.selected =
+                                (this.rules.selected != Some(position)).then_some(position);
                             cx.notify();
                         })),
                 ),

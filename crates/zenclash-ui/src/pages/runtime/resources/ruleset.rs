@@ -37,16 +37,6 @@ impl RuntimePage {
         );
 
         setting_card(zenclash_i18n::text("resources.ruleset.title"), theme)
-            .when(!self.core_kind.capabilities().ruleset_conversion, |card| {
-                card.child(super::super::message_banner(
-                    zenclash_i18n::text_with(
-                        "resources.ruleset.unsupported",
-                        &[("core", self.core_kind.display_name().to_owned())],
-                    ),
-                    theme.warning,
-                    theme,
-                ))
-            })
             .child(self.render_ruleset_controls(source, theme, cx))
             .child(info_row(
                 zenclash_i18n::text("resources.ruleset.source"),

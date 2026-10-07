@@ -178,6 +178,13 @@ fn main_window_title_bar(
     let on_close_window: WindowCloseListener = Rc::new(on_close_window);
     let linux_close_listener = on_close_window.clone();
     let title_bar = TitleBar::new()
+        .child(
+            h_flex()
+                .gap_2()
+                .px_3()
+                .child(gpui_kit::img(crate::assets::ZENCLASH_LOGO_PATH).size_8())
+                .child("ZenClash"),
+        )
         .on_close_window(move |event, window, cx| {
             linux_close_listener(event, window, cx);
         })
@@ -249,7 +256,7 @@ impl ControllerIndicator {
 }
 
 impl Render for ZenClashApp {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let content = match self.current_page {
             Page::Proxies => self.proxies_page.clone().into_any_element(),
@@ -347,7 +354,10 @@ impl Render for ZenClashApp {
                     .items_stretch()
                     .child(
                         Sidebar::new(self.current_page)
-                            .collapsed(self.sidebar_collapsed)
+                            .collapsed(
+                                self.sidebar_collapsed
+                                    || window.viewport_size().width < window.rem_size() * 68.,
+                            )
                             .status(sidebar_core, sidebar_detail, sidebar_live),
                     )
                     .child(

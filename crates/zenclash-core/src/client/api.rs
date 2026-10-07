@@ -12,6 +12,44 @@ use crate::{
 };
 
 impl MihomoClient {
+    /// Reads one frame from the dedicated memory stream and releases the connection.
+    ///
+    /// # Errors
+    /// Returns a bounded timeout, transport failure, missing frame or JSON decoding error.
+    pub async fn memory_snapshot(&self) -> MihomoResult<crate::MemorySnapshot> {
+        self.stream_snapshot("/memory").await
+    }
+
+    pub(super) async fn stream_snapshot<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+    ) -> MihomoResult<T> {
+        let binding = self.operation_binding()?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut stream = self
+                .binding
+                .connect_pinned(&binding, path, &[], "Mihomo snapshot stream timed out")
+                .await
+                .map_err(MihomoError::Process)?;
+            while let Some(frame) = stream.next().await {
+                match frame.map_err(MihomoError::Process)? {
+                    tokio_tungstenite::tungstenite::Message::Text(text) => {
+                        return serde_json::from_str(&text).map_err(MihomoError::Decode);
+                    }
+                    tokio_tungstenite::tungstenite::Message::Binary(bytes) => {
+                        return serde_json::from_slice(&bytes).map_err(MihomoError::Decode);
+                    }
+                    tokio_tungstenite::tungstenite::Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+            Err(MihomoError::Process(
+                "Mihomo snapshot stream closed before reporting a value".into(),
+            ))
+        })
+        .await
+        .map_err(|_| MihomoError::Process("Mihomo snapshot stream timed out".into()))?
+    }
     /// Fetches Mihomo core version information.
     ///
     /// # Errors
@@ -866,6 +904,33 @@ mod verification_tests {
     use crate::{MihomoClient, MihomoEndpoint, MihomoError, MihomoResult};
 
     type SwitchFuture = Pin<Box<dyn Future<Output = MihomoResult<()>> + Send>>;
+
+    #[tokio::test]
+    async fn memory_snapshot_reads_one_frame_without_waiting_for_stream_end() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, waiter) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            socket
+                .send(Message::Text(r#"{"inuse":47000000,"oslimit":0}"#.into()))
+                .await
+                .unwrap();
+            let _ = waiter.await;
+        });
+        let client =
+            MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+        let memory = tokio::time::timeout(Duration::from_secs(1), client.memory_snapshot())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(memory.inuse, 47_000_000);
+        let _ = release.send(());
+        server.await.unwrap();
+    }
 
     struct SwitchOnUnlock(Mutex<Option<SwitchFuture>>);
 

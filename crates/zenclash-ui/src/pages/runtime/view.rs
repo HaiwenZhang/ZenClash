@@ -1,7 +1,7 @@
 use super::{
     ActiveTheme, App, Button, Context, Disableable, FluentBuilder, Focusable, InteractiveElement,
     IntoElement, Page, ParentElement, Render, RuntimeData, RuntimePage, ScrollableElement, Sizable,
-    Styled, Window, div, empty_state, h_flex, message_banner, v_flex,
+    Styled, Window, div, empty_state, h_flex, v_flex,
 };
 use crate::{assets::AppIcon, components::workspace};
 use gpui_kit::StatefulInteractiveElement;
@@ -81,37 +81,19 @@ impl RuntimePage {
             .when(self.page == Page::Home, |view| view.pb_1())
             .when(self.page == Page::Logs, |view| view.pb_0())
             .gap_3()
-            .when(self.page == Page::Settings, |this| {
-                this.child(workspace::breadcrumb(self.page, cx))
-            })
             .child(
                 h_flex()
                     .gap_3()
                     .flex_wrap()
                     .items_end()
                     .justify_between()
-                    .child(
-                        div()
-                            .when(self.page == Page::Logs, |title| title.pb_10())
-                            .child(workspace::title(self.page, cx)),
-                    )
+                    .child(div().child(workspace::title(self.page, cx)))
                     .child(commands),
             )
-    }
-
-    fn render_status(&self, theme: &gpui_kit::component::Theme) -> gpui_kit::AnyElement {
-        v_flex()
-            .gap_2()
-            .when_some(self.startup_error.clone(), |this, error| {
-                this.child(message_banner(error, theme.danger, theme))
-            })
-            .when_some(self.error.clone(), |this, error| {
-                this.child(message_banner(error, theme.danger, theme))
-            })
-            .when_some(self.notice.clone(), |this, notice| {
-                this.child(message_banner(notice, theme.success, theme))
-            })
-            .into_any_element()
+            .when(
+                matches!(self.page, Page::Rules | Page::Logs | Page::Network),
+                |header| header.child(workspace::diagnostics_navigation(self.page)),
+            )
     }
 
     fn render_body(
@@ -188,9 +170,9 @@ impl RuntimePage {
         match self.page {
             Page::Home => unreachable!("home is rendered before the empty-data fallback"),
             Page::Mihomo => self.render_core(theme, cx),
-            Page::Profiles => self.render_profile(theme, cx),
-            Page::Connections => self.render_connections(theme, cx),
-            Page::Rules => self.render_rules(theme, cx),
+            Page::Profiles => self.render_profile(compact, theme, cx),
+            Page::Connections => self.render_connections(compact, theme, cx),
+            Page::Rules => self.render_rules(compact, theme, cx),
             Page::Resources => self.render_resources(theme, cx),
             Page::Logs => self.render_logs(theme, cx),
             Page::Tun => self.render_tun(theme, cx),
@@ -237,54 +219,37 @@ impl Render for RuntimePage {
                 page.bg(crate::design::workspace_background(&theme))
             })
             .child(self.render_header(&theme, cx))
+            .when(self.page == Page::Settings, |page| {
+                page.child(
+                    div()
+                        .px_6()
+                        .child(self.render_settings_navigation(&theme, cx)),
+                )
+            })
             .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .items_stretch()
-                    .when(self.page == Page::Settings, |this| {
-                        this.child(
+                h_flex().flex_1().min_h_0().items_stretch().child(
+                    v_flex()
+                        .id("runtime-body-scroll")
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.settings_navigation.scroll)
+                        .child(
                             v_flex()
-                                .flex_shrink_0()
-                                .min_h_0()
-                                .h_full()
-                                .pl_6()
-                                .pr_3()
+                                .min_w_0()
+                                .gap_4()
+                                .px_6()
+                                .when(self.page != Page::Settings, |view| view.px_8())
                                 .py_3()
-                                .child(self.render_settings_navigation(&theme, cx)),
+                                .child(self.render_body(
+                                    &theme,
+                                    window.viewport_size().width < window.rem_size() * 68.,
+                                    cx,
+                                )),
                         )
-                    })
-                    .child(
-                        v_flex()
-                            .id("runtime-body-scroll")
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.settings_navigation.scroll)
-                            .child(
-                                v_flex()
-                                    .min_w_0()
-                                    .gap_4()
-                                    .px_6()
-                                    .when(self.page != Page::Settings, |view| view.px_8())
-                                    .py_3()
-                                    .when(self.page == Page::Settings, |body| body.pl_0())
-                                    .when(
-                                        self.page == Page::Settings
-                                            || self.startup_error.is_some()
-                                            || self.error.is_some()
-                                            || self.notice.is_some(),
-                                        |body| body.child(self.render_status(&theme)),
-                                    )
-                                    .child(self.render_body(
-                                        &theme,
-                                        window.viewport_size().width < gpui_kit::px(1400.),
-                                        cx,
-                                    )),
-                            )
-                            .vertical_scrollbar(&self.settings_navigation.scroll),
-                    ),
+                        .vertical_scrollbar(&self.settings_navigation.scroll),
+                ),
             )
     }
 }

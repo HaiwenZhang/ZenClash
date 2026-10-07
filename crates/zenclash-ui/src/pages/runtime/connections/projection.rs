@@ -16,10 +16,12 @@ pub(super) struct ConnectionProjection {
     pub(super) protocols: Vec<(String, u64)>,
     pub(super) by_id: std::collections::HashMap<String, usize>,
     pub(super) durations: Vec<String>,
+    pub(super) policies: Vec<String>,
 }
 
 #[derive(Default)]
 pub(super) struct ProjectionWorker {
+    pub(super) policy: Option<String>,
     generation: Arc<AtomicU64>,
     gate: Arc<tokio::sync::Mutex<()>>,
     task: super::super::loader::PageReadTask,
@@ -50,6 +52,7 @@ impl ProjectionWorker {
         let generation = self.generation.load(Ordering::Acquire);
         let current = self.generation.clone();
         let gate = self.gate.clone();
+        let policy = self.policy.clone();
         let task = runtime.spawn(async move {
             // Coalesce typing before admitting CPU work; only one projection may run per view.
             tokio::time::sleep(std::time::Duration::from_millis(80)).await;
@@ -62,7 +65,18 @@ impl ProjectionWorker {
                 if current.load(Ordering::Acquire) != generation {
                     return None;
                 }
-                let order = present_connections(&snapshot.connections, &query, transport, sort);
+                let mut order = present_connections(&snapshot.connections, &query, transport, sort);
+                if let Some(policy) = &policy {
+                    order
+                        .retain(|&index| snapshot.connections[index].chains.last() == Some(policy));
+                }
+                let policies = snapshot
+                    .connections
+                    .iter()
+                    .filter_map(|connection| connection.chains.last().cloned())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
                 let (processes, protocols) = distributions(&snapshot.connections);
                 let by_id = snapshot
                     .connections
@@ -86,6 +100,7 @@ impl ProjectionWorker {
                     protocols,
                     by_id,
                     durations,
+                    policies,
                 })
             })
             .await
@@ -98,7 +113,7 @@ impl ProjectionWorker {
 
 type CountGroups = Vec<(String, u64)>;
 
-fn connection_duration(start: &str, now: chrono::DateTime<chrono::Utc>) -> String {
+pub(super) fn connection_duration(start: &str, now: chrono::DateTime<chrono::Utc>) -> String {
     let Ok(start) = chrono::DateTime::parse_from_rfc3339(start) else {
         return "—".into();
     };

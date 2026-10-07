@@ -70,6 +70,41 @@ impl MihomoClient {
     ) -> MihomoResult<ApiReply> {
         let binding = self.operation_binding()?;
         let response = match &binding.backend {
+            ControllerBackend::Local(process) if process.endpoint().ipc_path().is_some() => {
+                let controller = process
+                    .native_controller()?
+                    .ok_or(MihomoError::StaleBinding)?;
+                let mut url = reqwest::Url::parse(&format!("http://localhost{path}"))
+                    .map_err(|error| MihomoError::InvalidInput(error.to_string()))?;
+                url.query_pairs_mut().extend_pairs(query.iter().copied());
+                let target = format!(
+                    "{}{}",
+                    url.path(),
+                    url.query()
+                        .map_or_else(String::new, |query| format!("?{query}"))
+                );
+                if !self.binding.is_current(binding.generation) {
+                    return Err(MihomoError::StaleBinding);
+                }
+                let response = controller
+                    .request(
+                        method.as_str(),
+                        &target,
+                        body.as_ref(),
+                        timeout.unwrap_or(std::time::Duration::from_secs(12)),
+                    )
+                    .await
+                    .map_err(MihomoError::Native)?;
+                if !(200..300).contains(&response.status) {
+                    return Err(MihomoError::Api {
+                        status: response.status,
+                        message: error_message(
+                            &response.body[..response.body.len().min(MAX_ERROR_BODY_BYTES)],
+                        ),
+                    });
+                }
+                ReplyBody::Service(response.body)
+            }
             ControllerBackend::Direct(_) | ControllerBackend::Local(_) => {
                 let endpoint = binding.endpoint().ok_or(MihomoError::StaleBinding)?;
                 let mut request = self
