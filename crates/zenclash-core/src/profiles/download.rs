@@ -145,12 +145,23 @@ fn downloaded_profile_name(headers: &reqwest::header::HeaderMap, url: &reqwest::
     if let Some(disposition) = disposition {
         let mut quoted = false;
         let mut escaped = false;
-        for parameter in disposition.split(|character| {
-            if escaped { escaped = false; return false; }
-            if quoted && character == '\\' { escaped = true; return false; }
-            if character == '"' { quoted = !quoted; }
-            character == ';' && !quoted
-        }).skip(1) {
+        for parameter in disposition
+            .split(|character| {
+                if escaped {
+                    escaped = false;
+                    return false;
+                }
+                if quoted && character == '\\' {
+                    escaped = true;
+                    return false;
+                }
+                if character == '"' {
+                    quoted = !quoted;
+                }
+                character == ';' && !quoted
+            })
+            .skip(1)
+        {
             let Some((key, value)) = parameter.trim().split_once('=') else {
                 continue;
             };
@@ -335,7 +346,12 @@ mod filename_tests {
     #[test]
     fn quoted_filename_preserves_semicolons_and_ignores_path_components() {
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("content-disposition", "attachment; filename=\"folder/Airport; HK.yaml\"".parse().unwrap());
+        headers.insert(
+            "content-disposition",
+            "attachment; filename=\"folder/Airport; HK.yaml\""
+                .parse()
+                .unwrap(),
+        );
         let url = reqwest::Url::parse("https://example.com/subscribe").unwrap();
         assert_eq!(downloaded_profile_name(&headers, &url), "Airport; HK");
     }

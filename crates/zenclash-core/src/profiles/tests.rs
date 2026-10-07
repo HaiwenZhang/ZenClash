@@ -976,7 +976,10 @@ async fn empty_remote_name_uses_downloaded_filename_and_persists_it() {
         write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/yaml\r\nContent-Disposition: attachment; filename=Airport.yaml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", payload.len(), payload).unwrap();
     });
     let store = ProfileStore::new(root.join("store")).unwrap();
-    let record = store.add_remote("  ", format!("http://{address}/subscribe?token=secret"), "").await.unwrap();
+    let record = store
+        .add_remote("  ", format!("http://{address}/subscribe?token=secret"), "")
+        .await
+        .unwrap();
     server.join().unwrap();
     assert_eq!(record.name, "Airport");
     assert_eq!(store.load().unwrap().profiles[0].name, "Airport");

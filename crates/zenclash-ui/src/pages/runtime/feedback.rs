@@ -45,7 +45,10 @@ impl RuntimePage {
                     );
                 }
                 if self.page == Page::Settings
-                    && let RuntimeData::Settings { autostart: Err(error), .. } = &self.data
+                    && let RuntimeData::Settings {
+                        autostart: Err(error),
+                        ..
+                    } = &self.data
                 {
                     add("autostart", FeedbackKind::Warning, Some(error.clone()));
                 }

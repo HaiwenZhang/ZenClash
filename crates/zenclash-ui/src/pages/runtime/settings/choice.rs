@@ -161,7 +161,11 @@ impl RenderOnce for ChoicePopover {
                 div()
                     .w_48()
                     .text_color(cx.theme().popover_foreground)
-                    .child(List::new(&list).max_h(gpui_kit::rems(14.)).scrollbar_visible(false))
+                    .child(
+                        List::new(&list)
+                            .max_h(gpui_kit::rems(14.))
+                            .scrollbar_visible(false),
+                    )
             });
         if self.disabled {
             popover = popover.open(false);

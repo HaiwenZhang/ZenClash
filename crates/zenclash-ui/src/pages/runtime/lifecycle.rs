@@ -4,8 +4,8 @@ use super::{
     RuntimeConfig, RuntimeConfigApplied, RuntimeData, RuntimePage, RuntimePageServices, Value,
     Window, YamlOverrideCatalog, YamlOverrideStore, config_input_snapshot, load_page_with_core,
 };
-use zenclash_core::{CoreApplyKind, EffectiveConfigIntent};
 use gpui_kit::component::WindowExt;
+use zenclash_core::{CoreApplyKind, EffectiveConfigIntent};
 
 const LIVE_UPDATE_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -673,8 +673,11 @@ impl RuntimePage {
             return;
         }
         let previous_page = self.page;
-        let close_subscription = previous_page == Page::Profiles && self.profiles.forms.adding_subscription;
-        if close_subscription { self.profiles.forms.adding_subscription = false; }
+        let close_subscription =
+            previous_page == Page::Profiles && self.profiles.forms.adding_subscription;
+        if close_subscription {
+            self.profiles.forms.adding_subscription = false;
+        }
 
         let config = matches!(page, Page::Dns | Page::Sniffer)
             .then(|| self.config().cloned())
@@ -706,7 +709,9 @@ impl RuntimePage {
                 }
                 let focus = page.focus_handle.clone();
                 let _ = cx.update_window(page.window_handle, |_, window, cx| {
-                    if close_subscription { window.close_dialog(cx); }
+                    if close_subscription {
+                        window.close_dialog(cx);
+                    }
                     focus.focus(window, cx);
                 });
             });

@@ -65,7 +65,9 @@ impl RuntimePage {
                         .small()
                         .h_10()
                         .outline()
-                        .on_click(cx.listener(|this, _, window, cx| this.open_ai_network(window, cx))),
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_ai_network(window, cx)),
+                        ),
                 )
                 .child(refresh)
                 .child(

@@ -41,8 +41,8 @@ impl SettingsNavigationState {
 }
 
 mod app_update;
-mod choice;
 pub(super) mod backup;
+mod choice;
 mod core_management;
 pub(super) mod forms;
 mod legal;

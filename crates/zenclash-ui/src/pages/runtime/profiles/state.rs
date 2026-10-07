@@ -56,8 +56,9 @@ impl ProfileFormState {
             adding_subscription: false,
             subscription_error: None,
             subscription_name: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder(zenclash_i18n::text("settings_redesign.subscription_name_placeholder"))
+                InputState::new(window, cx).placeholder(zenclash_i18n::text(
+                    "settings_redesign.subscription_name_placeholder",
+                ))
             }),
             subscription_url: cx.new(|cx| {
                 InputState::new(window, cx)
@@ -113,7 +114,10 @@ impl ProfileFormState {
         cx: &mut Context<'_, super::super::RuntimePage>,
     ) {
         for (input, key) in [
-            (&self.subscription_name, "settings_redesign.subscription_name_placeholder"),
+            (
+                &self.subscription_name,
+                "settings_redesign.subscription_name_placeholder",
+            ),
             (
                 &self.subscription_authorization,
                 "profiles.form.placeholder_authorization",

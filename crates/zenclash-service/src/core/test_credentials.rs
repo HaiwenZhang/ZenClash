@@ -32,6 +32,10 @@ pub fn test_owner_credentials(app_data_root: &Path) -> Result<OwnerCredentials> 
     })
 }
 
+/// Creates synthetic test owner credentials for the given Unix user ID.
+///
+/// # Errors
+/// Returns an error if the application data directory cannot be created.
 #[cfg(unix)]
 pub fn test_owner_credentials_for_uid(app_data_root: &Path, uid: u32) -> Result<OwnerCredentials> {
     std::fs::create_dir_all(app_data_root)?;
