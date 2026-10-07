@@ -63,9 +63,9 @@ mod view;
 mod ui_tests;
 
 use common::{
-    config_input_row, contains_ascii_case_insensitive, context_note, empty_dash, empty_state,
-    format_bytes, format_port, format_profile_age, format_proxy, info_row, list_page, metric,
-    normalized_fraction, pagination_summary, setting_card, setting_switch, yes_no,
+    contains_ascii_case_insensitive, context_note, empty_dash, empty_state, format_bytes,
+    format_profile_age, format_proxy, info_row, list_page, metric, normalized_fraction,
+    pagination_summary, setting_card, yes_no,
 };
 use config_inputs::{ConfigInputs, config_input_snapshot};
 use loader::{load_page, load_page_with_core};
@@ -98,7 +98,6 @@ pub struct RuntimePage {
     preferences: AppPreferences,
     core_management: settings::CoreManagementUiState,
     settings_navigation: settings::SettingsNavigationState,
-    app_update: settings::AppUpdateUiState,
     system_proxy_session: Option<SystemProxySession>,
     traffic_history_store: Option<TrafficHistoryStore>,
     profiles: profiles::ProfileLibrary,
@@ -110,6 +109,7 @@ pub struct RuntimePage {
     core_releases: CoreReleaseState,
     data: RuntimeData,
     data_runtime_version: u64,
+    page_snapshots: state::PageSnapshots,
     home: home::HomeUiState,
     traffic_history: traffic::TrafficHistoryUiState,
     network_probe: network::NetworkProbeUiState,

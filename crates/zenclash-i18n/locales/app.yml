@@ -1415,8 +1415,8 @@ profiles:
       zh-CN: 配置仓库不可用
       en: Profile library unavailable
     required_fields:
-      zh-CN: 请填写订阅名称和订阅 URL
-      en: Enter a subscription name and URL
+      zh-CN: 请填写订阅 URL
+      en: Enter a subscription URL
     request_invalid:
       zh-CN: 订阅请求设置无效：%{error}
       en: "Invalid subscription request settings: %{error}"
@@ -3292,8 +3292,8 @@ resources:
         zh-CN: "%{core} 不支持 MRS 规则集转换"
         en: "%{core} does not support MRS ruleset conversion"
       binary_missing:
-        zh-CN: 未找到 Mihomo 可执行文件；请先由 ZenClash 启动内核，或设置 ZENCLASH_MIHOMO_BINARY
-        en: Mihomo executable not found; start the core with ZenClash first or set ZENCLASH_MIHOMO_BINARY
+        zh-CN: 未找到 Mihomo 可执行文件；请在设置 → 运行内核中重新检测或选择文件
+        en: Mihomo executable not found; detect it again or select a file in Settings → Runtime Core
       conversion_task:
         zh-CN: MRS 转换任务异常结束：%{error}
         en: "The MRS conversion task ended unexpectedly: %{error}"
@@ -3887,8 +3887,8 @@ overrides:
       zh-CN: 预览最终配置
       en: Preview Effective Profile
     edit:
-      zh-CN: 编辑原始 YAML
-      en: Edit Source YAML
+      zh-CN: 编辑原始 YAML…
+      en: Edit source YAML…
     import:
       zh-CN: 导入文件 / 目录
       en: Import Files / Directories
@@ -5073,11 +5073,11 @@ redesign:
     zh-CN: 操作
     en: Action
   export_report:
-    zh-CN: 导出报告…
-    en: Export report…
+    zh-CN: 导出 Markdown…
+    en: Export Markdown…
   report_saved:
-    zh-CN: 诊断报告已导出
-    en: Diagnostic report exported
+    zh-CN: Markdown 诊断报告已导出
+    en: Markdown diagnostic report exported
   auto_scroll:
     zh-CN: 自动滚动
     en: Auto-scroll
@@ -5147,3 +5147,176 @@ redesign:
   log_silent:
     zh-CN: 静默
     en: Silent
+
+settings_redesign:
+  subscription_name_optional:
+    zh-CN: 订阅名称（可选）
+    en: Subscription name (optional)
+  subscription_name_placeholder:
+    zh-CN: 留空将使用下载文件名
+    en: Leave empty to use the downloaded filename
+  update_unimplemented:
+    zh-CN: 暂时未实现
+    en: Not implemented yet
+  appearance_startup:
+    zh-CN: 外观与启动
+    en: Appearance and startup
+  edit:
+    zh-CN: 编辑…
+    en: Edit…
+  list_hint:
+    zh-CN: 每行一项。完成后返回页面，保存配置后生效。
+    en: One entry per line. Finish editing, then save the page configuration to apply.
+  accept_draft:
+    zh-CN: 完成
+    en: Done
+  behavior:
+    zh-CN: 解析行为
+    en: Resolver behavior
+  protocols:
+    zh-CN: 协议与端口
+    en: Protocols and ports
+  filters:
+    zh-CN: 匹配范围
+    en: Matching scope
+  tun_basics:
+    zh-CN: 基础配置
+    en: Basic configuration
+  tun_routes:
+    zh-CN: 路由范围
+    en: Route scope
+  search_resources:
+    zh-CN: 搜索资源
+    en: Search resources
+  providers:
+    zh-CN: 资源提供者
+    en: Resource providers
+  converter:
+    zh-CN: 规则集转换…
+    en: Convert rule set…
+  tab_proxy:
+    zh-CN: 系统代理
+    en: System proxy
+  tab_tun:
+    zh-CN: TUN
+    en: TUN
+  tab_dns:
+    zh-CN: DNS
+    en: DNS
+  tab_sniffer:
+    zh-CN: 嗅探
+    en: Sniffer
+  tab_resources:
+    zh-CN: 资源
+    en: Resources
+  tab_core:
+    zh-CN: 内核
+    en: Core
+  dns_servers:
+    zh-CN: 解析服务器
+    en: Resolvers
+  dns_policy:
+    zh-CN: 策略与过滤
+    en: Policies and filters
+  dns_nameserver:
+    zh-CN: 主 DNS
+    en: Primary DNS
+  dns_fallback:
+    zh-CN: 后备 DNS
+    en: Fallback DNS
+  dns_cidr:
+    zh-CN: 后备地址过滤
+    en: Fallback CIDRs
+  dns_mapping:
+    zh-CN: 域名解析策略
+    en: Resolver policies
+  dns_hosts:
+    zh-CN: Hosts 映射
+    en: Hosts mappings
+  fallback_filter:
+    en: Fallback filter
+    zh-CN: 后备过滤
+  geoip_filter:
+    en: GeoIP filtering
+    zh-CN: GeoIP 过滤
+  invalid_bool:
+    en: Choose true or false.
+    zh-CN: 请选择 true 或 false。
+  backup_contents:
+    en: Subscriptions, settings and managed configuration
+    zh-CN: 订阅、应用设置及托管配置
+  backup_summary:
+    en: Export a snapshot or restore from a local backup.
+    zh-CN: 导出快照，或从本地备份恢复。
+  update_channel:
+    en: Update channel
+    zh-CN: 更新通道
+  stable_channel:
+    en: Stable
+    zh-CN: 稳定版
+  core_updates:
+    en: Core updates…
+    zh-CN: 内核更新…
+  core_interrupt:
+    en: This will interrupt current connections. Continue?
+    zh-CN: 此操作将中断当前连接，是否继续？
+  core_source:
+    en: Core source
+    zh-CN: 内核来源
+  custom_core:
+    en: Custom program
+    zh-CN: 自定义程序
+  manage_cores:
+    en: Manage cores…
+    zh-CN: 管理内核…
+  dns_title:
+    en: DNS resolution
+    zh-CN: DNS 解析
+  sniffer_title:
+    en: Protocol sniffing
+    zh-CN: 协议嗅探
+  resource_name:
+    en: Resource name
+    zh-CN: 资源名称
+  resource_rule:
+    en: Rules
+    zh-CN: 规则
+  resource_proxy:
+    en: Proxies
+    zh-CN: 代理
+  extra_network:
+    en: Additional network parameters
+    zh-CN: 其他网络参数
+  manage_service:
+    en: Manage service…
+    zh-CN: 管理服务…
+  confirm:
+    en: Confirm
+    zh-CN: 确认
+  resource_type:
+    en: Type
+    zh-CN: 类型
+  resource_count:
+    en: Count
+    zh-CN: 数量
+  resource_updated:
+    en: Last update
+    zh-CN: 最近更新
+  resource_actions:
+    en: Actions
+    zh-CN: 操作
+  bypass_rules:
+    en: Bypass rules
+    zh-CN: 绕过规则
+  listener_ports:
+    en: Listener ports
+    zh-CN: 监听端口
+  network_behavior:
+    en: Network behavior
+    zh-CN: 网络行为
+  records:
+    en: Records and storage
+    zh-CN: 记录与存储
+  version_updates:
+    en: Version and updates
+    zh-CN: 版本与更新

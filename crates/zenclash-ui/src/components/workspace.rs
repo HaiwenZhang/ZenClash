@@ -23,7 +23,7 @@ pub(crate) fn title(page: Page, cx: &mut App) -> impl IntoElement {
                     page.title()
                 }),
         )
-        .when(matches!(page, Page::Settings | Page::Rules), |this| {
+        .when(page == Page::Rules, |this| {
             this.child(
                 div()
                     .text_sm()

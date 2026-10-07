@@ -16,6 +16,8 @@ pub const GROUP_ICON_PATH: &str = "icons/group.svg";
 pub const RADIO_ICON_PATH: &str = "icons/radio.svg";
 /// Asset path for the rule shield icon used by the rules sidebar destination.
 pub const RULER_ICON_PATH: &str = "icons/ruler.svg";
+/// Asset path for the RSS icon used by the subscriptions sidebar destination.
+pub const RSS_ICON_PATH: &str = "icons/rss.svg";
 /// Asset path for the house icon used by the home destination.
 pub const HOUSE_ICON_PATH: &str = "icons/house.svg";
 /// Asset path for the clockwise refresh icon used by refresh commands.
@@ -116,6 +118,11 @@ impl AssetSource for Assets {
                 "../assets/icons/ruler.svg"
             ))));
         }
+        if path == RSS_ICON_PATH {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/rss.svg"
+            ))));
+        }
         if path == HOUSE_ICON_PATH {
             return Ok(Some(Cow::Borrowed(include_bytes!(
                 "../assets/icons/house.svg"
@@ -159,6 +166,7 @@ impl AssetSource for Assets {
             GROUP_ICON_PATH,
             RADIO_ICON_PATH,
             RULER_ICON_PATH,
+            RSS_ICON_PATH,
             HOUSE_ICON_PATH,
             REFRESH_CW_ICON_PATH,
             GAUGE_ICON_PATH,

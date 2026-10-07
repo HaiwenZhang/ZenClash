@@ -95,11 +95,11 @@ async fn route(
                 )
                 .await;
                 let message = if oversized {
-                    tokio_tungstenite::tungstenite::Message::Binary(vec![b'x'; 128 * 1024 + 1])
-                } else {
-                    tokio_tungstenite::tungstenite::Message::Text(
-                        "{\"up\":1,\"down\":2}".to_owned(),
+                    tokio_tungstenite::tungstenite::Message::Binary(
+                        vec![b'x'; 128 * 1024 + 1].into(),
                     )
+                } else {
+                    tokio_tungstenite::tungstenite::Message::Text("{\"up\":1,\"down\":2}".into())
                 };
                 let _ = socket.send(message).await;
             }

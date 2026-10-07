@@ -338,7 +338,10 @@ pub(super) fn parse_digest(digest: &str) -> CoreUpdateResult<String> {
 }
 
 pub(super) fn verify_sha256(bytes: &[u8], expected: &str) -> CoreUpdateResult<()> {
-    let actual = format!("{:x}", Sha256::digest(bytes));
+    let actual: String = Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     if actual == expected {
         Ok(())
     } else {

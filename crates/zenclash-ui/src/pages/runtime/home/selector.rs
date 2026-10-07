@@ -26,6 +26,14 @@ struct HomeNodeRow {
 
 impl HomeUiState {
     pub(super) fn prepare(&mut self, config: &RuntimeConfig, catalog: &ProxyCatalog) {
+        let group_names: HashSet<_> = catalog
+            .groups()
+            .iter()
+            .map(|group| group.name.as_str())
+            .collect();
+        let is_node = |id: &ProxyNodeId| {
+            id.provider().is_some() || !group_names.contains(id.controller_name())
+        };
         let group = self
             .selected_group
             .as_ref()
@@ -64,6 +72,7 @@ impl HomeUiState {
                         .iter()
                         .filter(|id| id.controller_name() != group.now),
                 )
+                .filter(|id| is_node(id))
                 .map(|id| node_row(id, switchable.then_some(group)))
                 .collect()
         });
@@ -87,6 +96,7 @@ impl HomeUiState {
             .groups()
             .iter()
             .flat_map(|group| group.all.iter())
+            .filter(|id| is_node(id))
             .filter(|id| seen.insert((*id).clone()))
             .map(|id| node_row(id, targets.get(id).copied()))
             .collect();
@@ -574,6 +584,68 @@ mod tests {
     use super::super::dashboard::latency_presentation;
     use super::*;
     use zenclash_core::{DelayHistory, ProxyNode};
+
+    #[test]
+    fn node_choices_exclude_nested_groups_but_keep_builtin_routes() {
+        let catalog = ProxyCatalog::from_group_nodes(
+            vec![
+                (
+                    ProxyGroup {
+                        name: "primary".into(),
+                        now: "automatic".into(),
+                        behavior: ProxyGroupBehavior::Selector,
+                        ..Default::default()
+                    },
+                    ["automatic", "node", "DIRECT", "REJECT"]
+                        .into_iter()
+                        .map(|name| ProxyNode {
+                            name: name.into(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                ),
+                (
+                    ProxyGroup {
+                        name: "automatic".into(),
+                        now: "node".into(),
+                        behavior: ProxyGroupBehavior::Automatic { fixed: false },
+                        ..Default::default()
+                    },
+                    vec![ProxyNode {
+                        name: "node".into(),
+                        ..Default::default()
+                    }],
+                ),
+            ],
+            4,
+        );
+        let mut home = HomeUiState {
+            selected_group: Some("primary".into()),
+            ..Default::default()
+        };
+        home.prepare(
+            &RuntimeConfig {
+                mode: "rule".into(),
+                ..Default::default()
+            },
+            &catalog,
+        );
+        let projection = home.projection.unwrap();
+        for rows in [&projection.nodes, &projection.all_nodes] {
+            assert_eq!(
+                rows.iter()
+                    .map(|node| node.id.controller_name())
+                    .collect::<Vec<_>>(),
+                ["node", "DIRECT", "REJECT"],
+            );
+        }
+        assert!(
+            projection
+                .groups
+                .iter()
+                .any(|group| group.name == "automatic")
+        );
+    }
 
     #[test]
     fn latency_timeout_is_distinct_from_unknown_and_success() {

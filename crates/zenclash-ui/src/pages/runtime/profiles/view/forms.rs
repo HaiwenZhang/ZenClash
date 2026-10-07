@@ -2,85 +2,102 @@ use zenclash_core::RuntimeConfig;
 
 use super::super::super::{
     Button, ButtonVariants, Context, Disableable, FluentBuilder, Icon, IconName, Input,
-    ParentElement, RemoteProfileRoute, RuntimePage, Sizable, Styled, div, h_flex, px, setting_card,
-    v_flex,
+    ParentElement, RemoteProfileRoute, RuntimePage, Sizable, Styled, div, h_flex, px, v_flex,
 };
 
 use crate::components::mint_switch::MintSwitch as Switch;
 use gpui_kit::{InteractiveElement, TestSupportExt};
 
 impl RuntimePage {
-    pub(super) fn render_subscription_form(
+    pub(in crate::pages::runtime) fn render_subscription_form(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
-        setting_card(zenclash_i18n::text("profiles.form.title"), theme).child(
-            v_flex()
-                .p_4()
-                .gap_3()
-                .child(
-                    h_flex()
-                        .gap_3()
-                        .child(subscription_input(
-                            zenclash_i18n::text("profiles.form.name"),
-                            Input::new(&self.profiles.forms.subscription_name)
-                                .prefix(Icon::new(IconName::File))
+        v_flex()
+            .gap_4()
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(subscription_input(
+                        zenclash_i18n::text("settings_redesign.subscription_name_optional"),
+                        Input::new(&self.profiles.forms.subscription_name)
+                            .prefix(Icon::new(IconName::File))
+                            .cleanable(true),
+                        theme,
+                    ))
+                    .child(
+                        subscription_input(
+                            zenclash_i18n::text("profiles.form.user_agent"),
+                            Input::new(&self.profiles.forms.subscription_user_agent)
+                                .prefix(Icon::new(IconName::Bot))
                                 .cleanable(true),
                             theme,
-                        ))
-                        .child(
-                            subscription_input(
-                                zenclash_i18n::text("profiles.form.user_agent"),
-                                Input::new(&self.profiles.forms.subscription_user_agent)
-                                    .prefix(Icon::new(IconName::Bot))
-                                    .cleanable(true),
-                                theme,
-                            )
-                            .w(px(220.)),
-                        ),
-                )
-                .child(subscription_input(
-                    zenclash_i18n::text("profiles.form.url"),
-                    Input::new(&self.profiles.forms.subscription_url)
-                        .prefix(Icon::new(IconName::Globe))
-                        .cleanable(true),
-                    theme,
-                ))
-                .child(
-                    h_flex()
-                        .gap_3()
-                        .child(subscription_input(
-                            zenclash_i18n::text("profiles.form.authorization"),
-                            Input::new(&self.profiles.forms.subscription_authorization)
-                                .prefix(Icon::new(IconName::Asterisk))
-                                .mask_toggle()
-                                .cleanable(true),
-                            theme,
-                        ))
-                        .child(self.render_subscription_route_controls(theme, cx)),
-                )
-                .child(
-                    h_flex()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(zenclash_i18n::text("profiles.form.validation_note")),
                         )
-                        .child(
-                            Button::new("download-subscription")
-                                .icon(IconName::Inbox)
-                                .label(zenclash_i18n::text("profiles.actions.download_enable"))
-                                .primary()
-                                .loading(self.core_busy())
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.add_remote_profile(cx);
-                                })),
-                        ),
-                ),
-        )
+                        .w(px(220.)),
+                    ),
+            )
+            .child(subscription_input(
+                zenclash_i18n::text("profiles.form.url"),
+                Input::new(&self.profiles.forms.subscription_url)
+                    .prefix(Icon::new(IconName::Globe))
+                    .cleanable(true),
+                theme,
+            ))
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(subscription_input(
+                        zenclash_i18n::text("profiles.form.authorization"),
+                        Input::new(&self.profiles.forms.subscription_authorization)
+                            .prefix(Icon::new(IconName::Asterisk))
+                            .mask_toggle()
+                            .cleanable(true),
+                        theme,
+                    ))
+                    .child(self.render_subscription_route_controls(theme, cx)),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(zenclash_i18n::text("profiles.form.validation_note")),
+            )
+            .when_some(
+                self.profiles.forms.subscription_error.as_ref(),
+                |form, error| {
+                    form.child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.danger)
+                            .child(error.clone()),
+                    )
+                },
+            )
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("cancel-add-subscription")
+                            .outline()
+                            .label(zenclash_i18n::text("common.actions.cancel"))
+                            .disabled(self.core_busy())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_subscription_form(cx);
+                                gpui_kit::component::WindowExt::close_dialog(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("download-subscription")
+                            .icon(IconName::Inbox)
+                            .label(zenclash_i18n::text("profiles.actions.download_enable"))
+                            .primary()
+                            .loading(self.core_busy())
+                            .disabled(self.core_busy())
+                            .on_click(cx.listener(|this, _, _, cx| this.add_remote_profile(cx))),
+                    ),
+            )
     }
 
     fn render_subscription_route_controls(

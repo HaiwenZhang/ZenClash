@@ -96,7 +96,11 @@ impl RuntimePage {
             .into_any_element()
     }
 
-    pub(super) fn open_log_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::pages::runtime) fn open_log_settings(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.logs.settings = Some(LogSettingsDraft {
             level: self.logs.level,
             enabled: self.preferences.log_file_enabled,

@@ -1,9 +1,12 @@
-use super::{
-    Button, ButtonVariants, Context, Disableable, IconName, Input, IntoElement, Page,
-    ParentElement, RuntimeData, RuntimePage, Styled, config_input_row, context_note, empty_dash,
-    h_flex, info_row, json, setting_card, setting_switch, v_flex,
+use super::settings::forms::{
+    settings_input_row as config_input_row, settings_status, settings_switch as setting_switch,
 };
-use gpui_kit::component::input::Textarea;
+use super::{
+    Button, ButtonVariants, Context, Disableable, IconName, Input, IntoElement, ParentElement,
+    RuntimeData, RuntimePage, Styled, context_note, h_flex, info_row, json, setting_card, v_flex,
+};
+use gpui_kit::component::{ActiveTheme, WindowExt};
+use gpui_kit::prelude::FluentBuilder;
 use zenclash_core::{
     CapabilityState, CaptureOutcome, CapturePlan, CoreTunPermissionStatus, Observation,
     ServiceHealthKind, ServicePhase,
@@ -15,20 +18,162 @@ mod service;
 impl RuntimePage {
     pub(super) fn render_tun(
         &self,
+        compact: bool,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
+        let tun = self.config().cloned().unwrap_or_default().tun;
         v_flex()
             .gap_4()
-            .children(self.render_service_status(theme, cx))
-            .child(self.render_tun_permissions(theme, cx))
-            .child(self.render_tun_runtime(theme))
-            .child(self.render_tun_switches(theme, cx))
-            .child(self.render_tun_routes(theme, cx))
+            .child(settings_status(
+                zenclash_i18n::text("tun.switches.enable"),
+                zenclash_i18n::text_with(
+                    "tun.switches.enable_description",
+                    &[("core", self.core_kind.display_name().to_owned())],
+                ),
+                self.controlled_bool("/tun/enable", tun.enable),
+                "tun-enable",
+                theme,
+                cx.listener(|this, checked, window, cx| {
+                    if *checked && this.profile_service.service_state().is_some() {
+                        this.request_service_tun(window, cx);
+                    } else {
+                        this.apply_tun_plan(
+                            *checked,
+                            zenclash_i18n::text("tun.notices.enabled"),
+                            cx,
+                        );
+                    }
+                }),
+            ))
+            .child(
+                h_flex()
+                    .items_start()
+                    .gap_4()
+                    .when(compact, |view| view.flex_col())
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_4()
+                            .when(compact, |view| view.w_full())
+                            .child(
+                                self.render_tun_routes(theme, cx)
+                                    .child(self.render_tun_switches(theme, cx)),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_4()
+                            .when(compact, |view| view.w_full())
+                            .child(self.render_tun_permissions(theme, cx))
+                            .child(self.render_tun_runtime(theme))
+                            .child(
+                                setting_card(
+                                    zenclash_i18n::text("settings_redesign.tun_routes"),
+                                    theme,
+                                )
+                                .child(self.settings_list_row(
+                                    "tun.routes.include",
+                                    &self.config_inputs.tun.route_include_address,
+                                    cx,
+                                ))
+                                .child(self.settings_list_row(
+                                    "tun.routes.exclude",
+                                    &self.config_inputs.tun.route_exclude_address,
+                                    cx,
+                                )),
+                            ),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(self.settings_cancel(cx))
+                    .child(
+                        Button::new("save-tun-advanced")
+                            .icon(IconName::Check)
+                            .label(zenclash_i18n::text("common.actions.save"))
+                            .primary()
+                            .loading(self.core_busy())
+                            .disabled(self.core_busy())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                match this.config_inputs.tun.patch(cx) {
+                                    Ok(patch) => this.apply_controlled_config(
+                                        patch,
+                                        zenclash_i18n::text("tun.notices.advanced"),
+                                        cx,
+                                    ),
+                                    Err(error) => {
+                                        this.error = Some(error);
+                                        cx.notify();
+                                    }
+                                }
+                            })),
+                    ),
+            )
             .into_any_element()
     }
 
     pub(super) fn render_service_status(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::Div> {
+        let state = self.profile_service.service_state()?;
+        let status = match state.health() {
+            Some(ServiceHealthKind::Ready) => "core_page.service.ready",
+            Some(ServiceHealthKind::NotInstalled) => "core_page.service.missing",
+            Some(ServiceHealthKind::Unavailable(_)) => "core_page.service.unavailable",
+            Some(ServiceHealthKind::VersionMismatch) => "core_page.service.incompatible",
+            _ => "core_page.service.unknown",
+        };
+        Some(
+            setting_card(zenclash_i18n::text("core_page.service.title"), theme).child(
+                h_flex()
+                    .px_4()
+                    .pb_4()
+                    .gap_3()
+                    .justify_between()
+                    .child(gpui_kit::div().text_sm().child(zenclash_i18n::text(status)))
+                    .child(
+                        Button::new("manage-core-service")
+                            .outline()
+                            .label(zenclash_i18n::text("settings_redesign.manage_service"))
+                            .on_click(cx.listener(|_, _, window, cx| {
+                                if window.has_active_dialog(cx) {
+                                    return;
+                                }
+                                let owner = cx.entity().downgrade();
+                                window.open_dialog(cx, move |dialog, window, cx| {
+                                    let content = owner
+                                        .update(cx, |page, cx| {
+                                            page.render_service_details(&cx.theme().clone(), cx)
+                                        })
+                                        .ok()
+                                        .flatten();
+                                    dialog
+                                        .title(zenclash_i18n::text("core_page.service.title"))
+                                        .bg(cx.theme().group_box)
+                                        .width(window.rem_size() * 40.)
+                                        .margin_top(
+                                            ((window.viewport_size().height
+                                                - window.rem_size() * 24.)
+                                                / 2.)
+                                                .max(window.rem_size()),
+                                        )
+                                        .when_some(content, |dialog, content| dialog.child(content))
+                                });
+                            })),
+                    ),
+            ),
+        )
+    }
+
+    pub(super) fn render_service_details(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
@@ -221,43 +366,7 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
         let tun = self.config().cloned().unwrap_or_default().tun;
-        setting_card(zenclash_i18n::text("tun.switches.title"), theme)
-            .child(setting_switch(
-                zenclash_i18n::text("tun.switches.enable"),
-                zenclash_i18n::text_with(
-                    "tun.switches.enable_description",
-                    &[("core", self.core_kind.display_name().to_owned())],
-                ),
-                self.controlled_bool("/tun/enable", tun.enable),
-                "tun-enable",
-                theme,
-                cx.listener(|this, checked, window, cx| {
-                    if *checked && this.profile_service.service_state().is_some() {
-                        this.request_service_tun(window, cx);
-                    } else {
-                        this.apply_tun_plan(
-                            *checked,
-                            zenclash_i18n::text("tun.notices.enabled"),
-                            cx,
-                        );
-                    }
-                }),
-            ))
-            .child(info_row(
-                zenclash_i18n::text("tun.switches.stack"),
-                &tun.stack,
-                theme,
-            ))
-            .child(info_row(
-                zenclash_i18n::text("tun.switches.device"),
-                empty_dash(&tun.device),
-                theme,
-            ))
-            .child(info_row(
-                zenclash_i18n::text("tun.switches.dns_hijack"),
-                tun.dns_hijack.join(", "),
-                theme,
-            ))
+        v_flex()
             .child(setting_switch(
                 zenclash_i18n::text("tun.switches.auto_route"),
                 zenclash_i18n::text_with(
@@ -306,21 +415,23 @@ impl RuntimePage {
                     );
                 }),
             ))
-            .child(setting_switch(
-                zenclash_i18n::text("tun.switches.auto_redirect"),
-                zenclash_i18n::text("tun.switches.auto_redirect_description"),
-                self.controlled_bool("/tun/auto-redirect", false),
-                "tun-auto-redirect",
-                theme,
-                cx.listener(|this, checked, _, cx| {
-                    this.patch_tun_bool(
-                        "auto-redirect",
-                        *checked,
-                        zenclash_i18n::text("tun.notices.auto_redirect"),
-                        cx,
-                    );
-                }),
-            ))
+            .when(cfg!(target_os = "linux"), |view| {
+                view.child(setting_switch(
+                    zenclash_i18n::text("tun.switches.auto_redirect"),
+                    zenclash_i18n::text("tun.switches.auto_redirect_description"),
+                    self.controlled_bool("/tun/auto-redirect", false),
+                    "tun-auto-redirect",
+                    theme,
+                    cx.listener(|this, checked, _, cx| {
+                        this.patch_tun_bool(
+                            "auto-redirect",
+                            *checked,
+                            zenclash_i18n::text("tun.notices.auto_redirect"),
+                            cx,
+                        );
+                    }),
+                ))
+            })
     }
 
     fn patch_tun_bool(
@@ -334,7 +445,7 @@ impl RuntimePage {
     }
 
     fn apply_tun_plan(&mut self, enabled: bool, success: String, cx: &mut Context<Self>) {
-        let Some(token) = self.begin_mutation(Page::Tun) else {
+        let Some(token) = self.begin_mutation(self.page) else {
             return;
         };
         let capture = self.traffic_capture.clone();
@@ -387,11 +498,16 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
         let inputs = &self.config_inputs.tun;
-        setting_card(zenclash_i18n::text("tun.routes.title"), theme)
+        setting_card(zenclash_i18n::text("settings_redesign.tun_basics"), theme)
             .child(config_input_row(
                 zenclash_i18n::text("tun.switches.stack"),
                 zenclash_i18n::text("tun.routes.stack_description"),
-                Input::new(&inputs.stack).cleanable(true),
+                self.settings_choice(
+                    "tun-stack",
+                    &inputs.stack,
+                    &["mixed", "system", "gvisor"],
+                    cx,
+                ),
                 theme,
             ))
             .child(config_input_row(
@@ -412,41 +528,6 @@ impl RuntimePage {
                 Input::new(&inputs.dns_hijack).cleanable(true),
                 theme,
             ))
-            .child(config_input_row(
-                zenclash_i18n::text("tun.routes.include"),
-                zenclash_i18n::text("tun.routes.include_description"),
-                Textarea::new(&inputs.route_include_address),
-                theme,
-            ))
-            .child(config_input_row(
-                zenclash_i18n::text("tun.routes.exclude"),
-                zenclash_i18n::text("tun.routes.exclude_description"),
-                Textarea::new(&inputs.route_exclude_address),
-                theme,
-            ))
-            .child(
-                h_flex().justify_end().p_4().child(
-                    Button::new("save-tun-advanced")
-                        .icon(IconName::Check)
-                        .label(zenclash_i18n::text("tun.routes.save"))
-                        .primary()
-                        .loading(self.core_busy())
-                        .disabled(self.core_busy())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            match this.config_inputs.tun.patch(cx) {
-                                Ok(patch) => this.apply_controlled_config(
-                                    patch,
-                                    zenclash_i18n::text("tun.notices.advanced"),
-                                    cx,
-                                ),
-                                Err(error) => {
-                                    this.error = Some(error);
-                                    cx.notify();
-                                }
-                            }
-                        })),
-                ),
-            )
     }
 }
 

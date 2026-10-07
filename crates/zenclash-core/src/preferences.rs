@@ -431,16 +431,19 @@ fn default_data_dir() -> AppPreferencesResult<PathBuf> {
             .ok_or(AppPreferencesError::MissingDataDirectory)
     };
     if cfg!(target_os = "macos") {
-        Ok(home()?.join("Library/Application Support/ZenClash"))
+        Ok(home()?
+            .join("Library")
+            .join("Application Support")
+            .join("ZenClash"))
     } else if cfg!(target_os = "windows") {
         Ok(std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
-            .unwrap_or(home()?.join("AppData/Local"))
+            .unwrap_or(home()?.join("AppData").join("Local"))
             .join("ZenClash"))
     } else {
         Ok(std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
-            .unwrap_or(home()?.join(".local/share"))
+            .unwrap_or(home()?.join(".local").join("share"))
             .join("zenclash"))
     }
 }

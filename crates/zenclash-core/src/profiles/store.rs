@@ -19,17 +19,29 @@ impl ProfileStore {
     /// the profile directory cannot be created.
     pub fn discover() -> ProfileStoreResult<Self> {
         let root = if cfg!(target_os = "macos") {
-            home_dir()?.join("Library/Application Support/ZenClash/profiles")
+            home_dir()?
+                .join("Library")
+                .join("Application Support")
+                .join("ZenClash")
+                .join("profiles")
         } else if cfg!(target_os = "windows") {
             if let Some(data_home) = std::env::var_os("LOCALAPPDATA") {
-                PathBuf::from(data_home).join("ZenClash/profiles")
+                PathBuf::from(data_home).join("ZenClash").join("profiles")
             } else {
-                home_dir()?.join("AppData/Local/ZenClash/profiles")
+                home_dir()?
+                    .join("AppData")
+                    .join("Local")
+                    .join("ZenClash")
+                    .join("profiles")
             }
         } else if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
-            PathBuf::from(data_home).join("zenclash/profiles")
+            PathBuf::from(data_home).join("zenclash").join("profiles")
         } else {
-            home_dir()?.join(".local/share/zenclash/profiles")
+            home_dir()?
+                .join(".local")
+                .join("share")
+                .join("zenclash")
+                .join("profiles")
         };
         Self::new(root)
     }

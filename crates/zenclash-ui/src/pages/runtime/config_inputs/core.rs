@@ -75,7 +75,41 @@ impl CoreInputs {
         }
     }
 
-    pub(in crate::pages::runtime) fn patch(&self, cx: &gpui_kit::App) -> Result<Value, String> {
+    pub(in crate::pages::runtime) fn listener_patch(
+        &self,
+        cx: &gpui_kit::App,
+    ) -> Result<Value, String> {
+        let bind = text(&self.bind_address, cx);
+        if bind.is_empty() && self.source.pointer("/bind-address").is_some() {
+            return Err(zenclash_i18n::text("config_inputs.errors.bind_address"));
+        }
+        let mut patch = Map::new();
+        for (key, field, label) in [
+            ("mixed-port", &self.mixed_port, "Mixed"),
+            ("port", &self.port, "HTTP"),
+            ("socks-port", &self.socks_port, "SOCKS"),
+        ] {
+            insert_port(
+                &mut patch,
+                key,
+                &text(field, cx),
+                label,
+                self.source.get(key).is_some(),
+            )?;
+        }
+        insert_text(
+            &mut patch,
+            "bind-address",
+            bind,
+            self.source.get("bind-address").is_some(),
+        );
+        Ok(Value::Object(patch))
+    }
+
+    pub(in crate::pages::runtime) fn advanced_patch(
+        &self,
+        cx: &gpui_kit::App,
+    ) -> Result<Value, String> {
         let log_level = text(&self.log_level, cx).to_ascii_lowercase();
         if !log_level.is_empty()
             && !matches!(
@@ -85,63 +119,26 @@ impl CoreInputs {
         {
             return Err(zenclash_i18n::text("config_inputs.errors.log_level"));
         }
-        let bind_address = text(&self.bind_address, cx);
-        if bind_address.is_empty() && self.source.pointer("/bind-address").is_some() {
-            return Err(zenclash_i18n::text("config_inputs.errors.bind_address"));
-        }
         let mut patch = Map::new();
-        insert_port(
-            &mut patch,
-            "port",
-            &text(&self.port, cx),
-            "HTTP",
-            self.source.pointer("/port").is_some(),
-        )?;
-        insert_port(
-            &mut patch,
-            "socks-port",
-            &text(&self.socks_port, cx),
-            "SOCKS",
-            self.source.pointer("/socks-port").is_some(),
-        )?;
-        insert_port(
-            &mut patch,
-            "mixed-port",
-            &text(&self.mixed_port, cx),
-            "Mixed",
-            self.source.pointer("/mixed-port").is_some(),
-        )?;
         insert_port(
             &mut patch,
             "redir-port",
             &text(&self.redir_port, cx),
             "Redir",
-            self.source.pointer("/redir-port").is_some(),
+            self.source.get("redir-port").is_some(),
         )?;
         insert_port(
             &mut patch,
             "tproxy-port",
             &text(&self.tproxy_port, cx),
             "TPROXY",
-            self.source.pointer("/tproxy-port").is_some(),
+            self.source.get("tproxy-port").is_some(),
         )?;
-        insert_text(
-            &mut patch,
-            "bind-address",
-            bind_address,
-            self.source.pointer("/bind-address").is_some(),
-        );
-        insert_text(
-            &mut patch,
-            "interface-name",
-            text(&self.interface_name, cx),
-            self.source.pointer("/interface-name").is_some(),
-        );
         insert_text(
             &mut patch,
             "log-level",
             log_level,
-            self.source.pointer("/log-level").is_some(),
+            self.source.get("log-level").is_some(),
         );
         Ok(Value::Object(patch))
     }

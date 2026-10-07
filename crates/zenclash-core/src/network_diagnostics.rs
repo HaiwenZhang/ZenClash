@@ -200,8 +200,8 @@ pub struct SupportSafe;
 pub struct SupportBundle {
     /// Unix timestamp in milliseconds when the bundle was generated.
     pub generated_at_ms: u64,
-    /// Pretty-printed JSON with secrets, URLs, addresses and user paths omitted.
-    pub json: String,
+    /// Markdown report with secrets, URLs, addresses and user paths omitted.
+    pub markdown: String,
 }
 
 /// Runs independent controller, capture, DNS, provider, and route diagnostics.
@@ -283,7 +283,7 @@ impl NetworkDiagnostics {
         }
     }
 
-    /// Projects a report into a strictly allow-listed support-safe JSON bundle.
+    /// Projects a report into a strictly allow-listed support-safe Markdown bundle.
     ///
     /// Controller addresses and secrets, DNS names and answers, public IPs,
     /// target URLs, provider names and raw error messages are intentionally not
@@ -291,19 +291,35 @@ impl NetworkDiagnostics {
     #[must_use]
     pub fn export(&self, report: &DiagnosticReport, _policy: SupportSafe) -> SupportBundle {
         let generated_at_ms = now_ms();
-        let safe = SafeReport {
-            schema: 1,
-            generated_at_ms,
-            started_at_ms: report.started_at_ms,
-            steps: report.steps.iter().map(SafeStep::from).collect(),
-        };
-        let json = serde_json::to_string_pretty(&safe).unwrap_or_else(|error| {
-            tracing::error!(%error, "failed to serialize support-safe diagnostics");
-            r#"{"schema":1,"generated_at_ms":0,"started_at_ms":0,"steps":[]}"#.into()
-        });
+        let mut markdown = format!(
+            "# ZenClash 网络诊断报告\n\n- 生成时间：{}\n- 诊断开始：{}\n- 检查项目：{}\n\n## 检查结果\n\n| 项目 | 路由 | 结果 | 耗时 | 完成时间 |\n| --- | --- | --- | --- | --- |\n",
+            report_time(generated_at_ms),
+            report_time(report.started_at_ms),
+            report.steps.len(),
+        );
+        let steps: Vec<_> = report.steps.iter().map(SafeStep::from).collect();
+        for step in &steps {
+            markdown.push_str(&format!(
+                "| {} | {} | {} | {} ms | {} |\n",
+                step.kind.report_label(),
+                step.route.report_label(),
+                step.status,
+                step.duration_ms,
+                report_time(step.completed_at_ms),
+            ));
+        }
+        markdown.push_str("\n## 检查详情\n");
+        for step in steps {
+            markdown.push_str(&format!("\n### {}\n\n", step.kind.report_label()));
+            markdown.push_str(&step.facts.map_or_else(
+                || "检查失败，详细原因请在应用内查看。".into(),
+                |facts| facts.report_summary(),
+            ));
+            markdown.push('\n');
+        }
         SupportBundle {
             generated_at_ms,
-            json,
+            markdown,
         }
     }
 
@@ -411,32 +427,20 @@ impl DiagnosticBackend for LiveDiagnosticBackend {
     }
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SafeReport {
-    schema: u8,
-    generated_at_ms: u64,
-    started_at_ms: u64,
-    steps: Vec<SafeStep>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 struct SafeStep {
     kind: DiagnosticStepKind,
     route: DiagnosticRoute,
     completed_at_ms: u64,
     duration_ms: u64,
     status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
     facts: Option<SafeFacts>,
 }
 
 impl From<&DiagnosticStep> for SafeStep {
     fn from(step: &DiagnosticStep) -> Self {
         let (status, facts) = match &step.outcome {
-            Ok(data) => ("success", Some(SafeFacts::from(data))),
-            Err(_) => ("failed", None),
+            Ok(data) => ("成功", Some(SafeFacts::from(data))),
+            Err(_) => ("失败", None),
         };
         Self {
             kind: step.kind,
@@ -449,8 +453,6 @@ impl From<&DiagnosticStep> for SafeStep {
     }
 }
 
-#[derive(Serialize)]
-#[serde(tag = "type", rename_all = "kebab-case")]
 enum SafeFacts {
     Controller {
         meta: bool,
@@ -514,6 +516,95 @@ impl From<&DiagnosticData> for SafeFacts {
             },
         }
     }
+}
+
+impl DiagnosticStepKind {
+    const fn report_label(self) -> &'static str {
+        match self {
+            Self::Controller => "内核控制器",
+            Self::Capture => "系统代理与 TUN",
+            Self::DnsA => "DNS IPv4（A）",
+            Self::DnsAaaa => "DNS IPv6（AAAA）",
+            Self::NetworkDirect => "直连网络",
+            Self::NetworkMihomo => "代理网络",
+            Self::ProxyProviders => "代理集合",
+            Self::RuleProviders => "规则集合",
+        }
+    }
+}
+
+impl DiagnosticRoute {
+    const fn report_label(self) -> &'static str {
+        match self {
+            Self::Controller => "内核控制器",
+            Self::Local => "本地",
+            Self::Direct => "直连",
+            Self::Mihomo => "Mihomo 代理",
+        }
+    }
+}
+
+impl SafeFacts {
+    fn report_summary(self) -> String {
+        let yes_no = |value| if value { "是" } else { "否" };
+        match self {
+            Self::Controller { meta } => format!("- Meta 内核：{}", yes_no(meta)),
+            Self::Capture {
+                system_proxy_observed,
+                tun_observed,
+            } => format!(
+                "- 已读取系统代理状态：{}\n- 已读取 TUN 状态：{}",
+                yes_no(system_proxy_observed),
+                yes_no(tun_observed),
+            ),
+            Self::Dns {
+                response_status,
+                answer_count,
+                ttl_seconds,
+            } => format!(
+                "- DNS 响应码：{response_status}\n- 解析记录数：{answer_count}\n- TTL（秒）：{}",
+                report_numbers(&ttl_seconds),
+            ),
+            Self::Network {
+                public_ip_available,
+                public_ip_failed,
+                successful_targets,
+                failed_targets,
+                latencies_ms,
+            } => format!(
+                "- 已获取公网 IP：{}\n- 公网 IP 查询失败：{}\n- 延迟测试成功：{successful_targets}\n- 延迟测试失败：{failed_targets}\n- 延迟（ms）：{}",
+                yes_no(public_ip_available),
+                yes_no(public_ip_failed),
+                report_numbers(&latencies_ms),
+            ),
+            Self::Providers {
+                provider_count,
+                item_count,
+            } => format!("- 集合数：{provider_count}\n- 条目数：{item_count}",),
+        }
+    }
+}
+
+fn report_numbers(values: &[impl std::fmt::Display]) -> String {
+    if values.is_empty() {
+        "无".into()
+    } else {
+        values
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("、")
+    }
+}
+
+fn report_time(timestamp_ms: u64) -> String {
+    i64::try_from(timestamp_ms)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map_or_else(
+            || "未知".into(),
+            |time| time.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        )
 }
 
 fn now_ms() -> u64 {
@@ -682,9 +773,15 @@ mod tests {
             "private-provider",
             "target-with-secret",
         ] {
-            assert!(!bundle.json.contains(secret), "leaked {secret}");
+            assert!(!bundle.markdown.contains(secret), "leaked {secret}");
         }
-        assert!(bundle.json.contains("network-direct"));
-        assert!(bundle.json.contains("\"status\": \"failed\""));
+        assert!(bundle.markdown.starts_with("# ZenClash 网络诊断报告\n"));
+        assert!(bundle.markdown.contains("| 直连网络 | 直连 | 成功 |"));
+        assert!(
+            bundle
+                .markdown
+                .contains("| DNS IPv4（A） | 内核控制器 | 失败 |")
+        );
+        assert!(bundle.markdown.contains("## 检查详情"));
     }
 }

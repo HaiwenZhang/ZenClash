@@ -45,7 +45,7 @@ impl RuntimePage {
                             .disabled(self.core_busy() || state.is_busy() || pending.is_some())
                             .on_click(cx.listener(|this, _, window, cx| {
                                 if window.has_active_dialog(cx) {
-                                    return;
+                                    window.close_dialog(cx);
                                 }
                                 if window.focused(cx).is_none() {
                                     window.focus(&this.focus_handle, cx);
@@ -90,9 +90,12 @@ impl RuntimePage {
                         state.is_busy() && state.operation() == Some(ServiceOperation::EnableTun),
                     )
                     .disabled(self.core_busy() || state.is_busy() || pending.is_some())
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.request_service_tun(window, cx)),
-                    ),
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if window.has_active_dialog(cx) {
+                            window.close_dialog(cx);
+                        }
+                        this.request_service_tun(window, cx);
+                    })),
             )
             .children(
                 [
@@ -114,6 +117,9 @@ impl RuntimePage {
                         .loading(state.is_busy() && state.operation() == Some(operation))
                         .disabled(self.core_busy() || state.is_busy())
                         .on_click(cx.listener(move |this, _, window, cx| {
+                            if window.has_active_dialog(cx) {
+                                window.close_dialog(cx);
+                            }
                             this.request_service_maintenance(operation, window, cx);
                         }))
                 }),
@@ -284,7 +290,7 @@ impl RuntimePage {
     }
 
     fn confirm_service_tun(&mut self, version: u64, cx: &mut Context<Self>) {
-        let Some(token) = self.begin_mutation(Page::Tun) else {
+        let Some(token) = self.begin_mutation(self.page) else {
             return;
         };
         let profiles = self.profile_service.clone();

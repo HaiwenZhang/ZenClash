@@ -15,22 +15,9 @@ impl RuntimePage {
         setting_card(zenclash_i18n::text("backup.local.title"), theme)
             .child(info_row(
                 zenclash_i18n::text("backup.local.contents"),
-                zenclash_i18n::text("backup.local.contents_description"),
+                zenclash_i18n::text("settings_redesign.backup_contents"),
                 theme,
             ))
-            .child(
-                div()
-                    .px_4()
-                    .py_3()
-                    .text_xs()
-                    .text_color(theme.warning)
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(zenclash_i18n::text_with(
-                        "backup.local.validation",
-                        &[("core", self.core_kind.display_name().to_owned())],
-                    )),
-            )
             .when(
                 self.profile_service.pending_backup_restore().is_some() || recovering,
                 |this| {
@@ -81,9 +68,10 @@ impl RuntimePage {
             )
             .child(
                 h_flex()
-                    .min_h(px(58.))
+                    .min_h(px(72.))
                     .px_4()
                     .gap_3()
+                    .flex_wrap()
                     .justify_between()
                     .child(
                         v_flex()
@@ -94,9 +82,10 @@ impl RuntimePage {
                                     .child(zenclash_i18n::text("backup.local.snapshot")),
                             )
                             .child(
-                                div().text_xs().text_color(theme.muted_foreground).child(
-                                    zenclash_i18n::text("backup.local.snapshot_description"),
-                                ),
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(zenclash_i18n::text("settings_redesign.backup_summary")),
                             ),
                     )
                     .child(

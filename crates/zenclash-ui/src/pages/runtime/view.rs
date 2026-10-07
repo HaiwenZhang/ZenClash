@@ -27,7 +27,7 @@ impl RuntimePage {
                 button.h_10()
             })
             .outline()
-            .loading(self.loading)
+            .loading(self.loading || (self.page == Page::Network && self.network_probe.loading))
             .disabled(self.core_busy())
             .on_click(cx.listener(|this, _, _, cx| {
                 if this.page == Page::Network {
@@ -37,7 +37,14 @@ impl RuntimePage {
                 }
             }));
         let commands = match self.page {
-            Page::Home => div().into_any_element(),
+            Page::Home
+            | Page::Settings
+            | Page::SystemProxy
+            | Page::Tun
+            | Page::Dns
+            | Page::Sniffer
+            | Page::Resources
+            | Page::Mihomo => div().into_any_element(),
             Page::Profiles => h_flex()
                 .gap_2()
                 .flex_wrap()
@@ -51,6 +58,15 @@ impl RuntimePage {
                 .into_any_element(),
             Page::Network => h_flex()
                 .gap_2()
+                .flex_wrap()
+                .child(
+                    Button::new("ai-network-diagnostics")
+                        .label(zenclash_i18n::text("ai_network.open"))
+                        .small()
+                        .h_10()
+                        .outline()
+                        .on_click(cx.listener(|this, _, window, cx| this.open_ai_network(window, cx))),
+                )
                 .child(refresh)
                 .child(
                     Button::new("export-network-report")
@@ -68,7 +84,7 @@ impl RuntimePage {
         };
         v_flex()
             .px_6()
-            .when(self.page != Page::Settings, |view| view.px_8())
+            .when(!self.page.is_settings(), |view| view.px_8())
             .pt_3()
             .pb_2()
             .when(self.page == Page::Home, |view| view.pb_1())
@@ -83,7 +99,14 @@ impl RuntimePage {
                     .child(
                         h_flex()
                             .gap_3()
-                            .child(workspace::title(self.page, cx))
+                            .child(workspace::title(
+                                if self.page.is_settings() {
+                                    Page::Settings
+                                } else {
+                                    self.page
+                                },
+                                cx,
+                            ))
                             .when(self.page == Page::Logs, |view| {
                                 view.child(self.log_stream_status(theme))
                             }),
@@ -98,6 +121,9 @@ impl RuntimePage {
         compact: bool,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
+        if self.page == Page::Network {
+            return self.render_network(compact, theme, cx);
+        }
         // Installation remains reachable when the current controller cannot provide
         // runtime forms. The card reads only the application owner's prepared state.
         if self.page == Page::Tun
@@ -110,7 +136,7 @@ impl RuntimePage {
         {
             return v_flex()
                 .gap_4()
-                .children(self.render_service_status(theme, cx))
+                .children(self.render_service_details(theme, cx))
                 .child(empty_state(
                     zenclash_i18n::text(if self.persistent_loading || self.loading {
                         "runtime.empty.loading"
@@ -124,7 +150,7 @@ impl RuntimePage {
         if self.persistent_loading
             || (matches!(
                 self.page,
-                Page::Dns | Page::Sniffer | Page::Tun | Page::Mihomo
+                Page::Dns | Page::Sniffer | Page::Tun | Page::Mihomo | Page::SystemProxy
             ) && !self
                 .config_inputs
                 .is_for_profile(self.profile_path.as_deref()))
@@ -165,20 +191,20 @@ impl RuntimePage {
         }
         match self.page {
             Page::Home => unreachable!("home is rendered before the empty-data fallback"),
-            Page::Mihomo => self.render_core(theme, cx),
+            Page::Mihomo => self.render_core(compact, theme, cx),
             Page::Profiles => self.render_profile(compact, theme, cx),
             Page::Connections => self.render_connections(compact, theme, cx),
             Page::Rules => self.render_rules(compact, theme, cx),
             Page::Resources => self.render_resources(theme, cx),
             Page::Logs => self.render_logs(theme, cx),
-            Page::Tun => self.render_tun(theme, cx),
-            Page::Sniffer => self.render_sniffer(theme, cx),
+            Page::Tun => self.render_tun(compact, theme, cx),
+            Page::Sniffer => self.render_sniffer(compact, theme, cx),
             Page::Traffic => self.render_traffic(theme, cx),
             Page::Network => self.render_network(compact, theme, cx),
-            Page::Dns => self.render_dns(theme, cx),
-            Page::SystemProxy => self.render_system_proxy(theme, cx),
+            Page::Dns => self.render_dns(compact, theme, cx),
+            Page::SystemProxy => self.render_system_proxy(compact, theme, cx),
             Page::Override => self.render_override(theme, cx),
-            Page::Settings => self.render_settings(theme, cx),
+            Page::Settings => self.render_settings(compact, theme, cx),
             Page::Proxies => div().into_any_element(),
         }
     }
@@ -210,12 +236,9 @@ impl Render for RuntimePage {
                 }
             }))
             .size_full()
-            .bg(theme.background)
-            .when(self.page != Page::Settings, |page| {
-                page.bg(crate::design::workspace_background(&theme))
-            })
+            .bg(crate::design::workspace_background(&theme))
             .child(self.render_header(&theme, cx))
-            .when(self.page == Page::Settings, |page| {
+            .when(self.page.is_settings(), |page| {
                 page.child(
                     div()
                         .px_6()
@@ -243,11 +266,13 @@ impl Render for RuntimePage {
                                 )
                                 .gap_4()
                                 .px_6()
-                                .when(self.page != Page::Settings, |view| view.px_8())
+                                .when(!self.page.is_settings(), |view| view.px_8())
                                 .py_3()
                                 .child(self.render_body(
                                     &theme,
-                                    window.viewport_size().width < window.rem_size() * 68.,
+                                    window.viewport_size().width
+                                        < window.rem_size()
+                                            * if self.page.is_settings() { 60. } else { 68. },
                                     cx,
                                 )),
                         )

@@ -496,13 +496,10 @@ impl RuntimePage {
 
     pub(super) fn render_log_preferences_controls(
         &self,
-        theme: &gpui_kit::component::Theme,
+        _theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
-        use gpui_kit::component::{
-            menu::{DropdownMenu, PopupMenuItem},
-            switch::Switch,
-        };
+        use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
         let owner = cx.entity().downgrade();
         let disabled = self.preferences_store.is_none()
             || self.mutation_busy(crate::pages::runtime::busy::MutationDomain::Logs);
@@ -518,15 +515,15 @@ impl RuntimePage {
                             .child(zenclash_i18n::text("logs.persistence.enabled.title")),
                     )
                     .child(
-                        Switch::new("settings-log-file-enabled")
-                            .accessibility_label(zenclash_i18n::text(
-                                "logs.persistence.enabled.title",
-                            ))
-                            .checked(self.preferences.log_file_enabled)
-                            .disabled(disabled)
-                            .on_click(cx.listener(|this, checked, _, cx| {
-                                this.set_log_file_enabled(*checked, cx)
-                            })),
+                        crate::components::mint_switch::MintSwitch::new(
+                            "settings-log-file-enabled",
+                        )
+                        .accessibility_label(zenclash_i18n::text("logs.persistence.enabled.title"))
+                        .checked(self.preferences.log_file_enabled)
+                        .disabled(disabled)
+                        .on_click(cx.listener(|this, checked, _, cx| {
+                            this.set_log_file_enabled(*checked, cx)
+                        })),
                     ),
             )
             .child(
@@ -562,12 +559,6 @@ impl RuntimePage {
                                 menu
                             }),
                     ),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(zenclash_i18n::text("logs.persistence.enabled.description")),
             )
     }
 
@@ -1091,7 +1082,6 @@ pub(in crate::pages::runtime) mod tests {
             });
             cx.update_window(window.into(), |_, window, cx| {
                 window.render_frame(cx);
-                window.click(("settings-section", 2_usize), cx);
                 window.render_frame(cx);
                 window.click("confirm-clear-traffic", cx);
             })
@@ -1256,7 +1246,6 @@ pub(in crate::pages::runtime) mod tests {
             });
             cx.update_window(window.into(), |_, window, cx| {
                 window.render_frame(cx);
-                window.click(("settings-section", 2_usize), cx);
                 window.render_frame(cx);
                 window.click("settings-log-file-enabled", cx);
             })

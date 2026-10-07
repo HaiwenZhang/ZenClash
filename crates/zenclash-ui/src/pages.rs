@@ -58,7 +58,35 @@ impl Page {
 
     /// Every primary destination owns its navigation selection.
     pub(crate) const fn navigation_parent(self) -> Self {
-        self
+        if self.is_settings() {
+            Self::Settings
+        } else {
+            self
+        }
+    }
+
+    /// Settings categories share one workspace and sidebar destination.
+    pub(crate) const SETTINGS: [Self; 7] = [
+        Self::Settings,
+        Self::SystemProxy,
+        Self::Tun,
+        Self::Dns,
+        Self::Sniffer,
+        Self::Resources,
+        Self::Mihomo,
+    ];
+
+    pub(crate) const fn is_settings(self) -> bool {
+        matches!(
+            self,
+            Self::Settings
+                | Self::SystemProxy
+                | Self::Tun
+                | Self::Dns
+                | Self::Sniffer
+                | Self::Resources
+                | Self::Mihomo
+        )
     }
 
     /// Returns the localized navigation label.

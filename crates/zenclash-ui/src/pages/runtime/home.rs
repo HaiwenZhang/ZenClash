@@ -135,46 +135,6 @@ impl RuntimePage {
         v_flex()
             .gap_3()
             .child(self.render_home_controls(config, &operational.capture, theme, compact, cx))
-            .when_some(
-                self.app_update
-                    .status
-                    .as_ref()
-                    .and_then(|status| match status {
-                        zenclash_core::AppUpdateStatus::Available { release, .. } => {
-                            Some(release.tag.clone())
-                        }
-                        zenclash_core::AppUpdateStatus::NoPublishedRelease { .. }
-                        | zenclash_core::AppUpdateStatus::UpToDate { .. } => None,
-                    }),
-                |this, version| {
-                    this.child(
-                        h_flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_3()
-                            .px_4()
-                            .py_3()
-                            .rounded(theme.radius)
-                            .border_1()
-                            .border_color(theme.success.opacity(0.35))
-                            .bg(theme.success.opacity(0.08))
-                            .child(div().text_sm().child(zenclash_i18n::text_with(
-                                "home.app_update.available",
-                                &[("version", version)],
-                            )))
-                            .child(
-                                Button::new("home-view-app-update")
-                                    .icon(IconName::ExternalLink)
-                                    .label(zenclash_i18n::text("home.app_update.action"))
-                                    .small()
-                                    .outline()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.switch_to(Page::Settings, cx);
-                                    })),
-                            ),
-                    )
-                },
-            )
             .child(self.render_home_proxy(theme, cx))
             .child(
                 h_flex()
@@ -1152,89 +1112,6 @@ impl RuntimePage {
         })
         .detach();
         cx.notify();
-    }
-
-    pub(super) fn render_network_capture_settings(
-        &self,
-        config: Option<&RuntimeConfig>,
-        theme: &gpui_kit::component::Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let snapshot = self.operational_status.snapshot();
-        let transition = self.home.capture_transition.as_ref();
-        let capture = transition
-            .and_then(|state| state.confirmed.as_ref())
-            .unwrap_or(&snapshot.capture);
-        let proxy = capture
-            .system_proxy
-            .value()
-            .map_or(self.preferences.system_proxy_enabled, |value| {
-                value.intent_enabled
-            });
-        let tun = capture
-            .tun
-            .value()
-            .map_or(config.is_some_and(|value| value.tun.enable), |value| {
-                value.requested || value.configured
-            });
-        let display = capture_presentation(proxy, tun, transition);
-        let pending = display.pending
-            || self.core_busy()
-            || self.profile_service.pending_finalization().is_some();
-        super::setting_card(zenclash_i18n::text("unified.settings.network"), theme)
-            .child(super::common::setting_switch_disabled(
-                zenclash_i18n::text("tray.system_proxy"),
-                zenclash_i18n::text("unified.network.system_proxy_description"),
-                display.system_proxy_enabled,
-                "settings-system-proxy",
-                theme,
-                pending || config.is_none(),
-                cx.listener(|this, checked, window, cx| {
-                    this.apply_home_capture_plan(
-                        if *checked {
-                            CapturePlan::SystemProxy
-                        } else {
-                            CapturePlan::Off
-                        },
-                        window,
-                        cx,
-                    );
-                }),
-            ))
-            .child(super::common::setting_switch_disabled(
-                zenclash_i18n::text("navigation.tun.label"),
-                zenclash_i18n::text("unified.network.tun_description"),
-                display.tun_enabled,
-                "settings-tun",
-                theme,
-                pending || config.is_none(),
-                cx.listener(|this, checked, window, cx| {
-                    this.apply_home_capture_plan(
-                        if *checked {
-                            CapturePlan::Tun
-                        } else {
-                            CapturePlan::Off
-                        },
-                        window,
-                        cx,
-                    );
-                }),
-            ))
-            .child(super::common::setting_switch_disabled(
-                zenclash_i18n::text("core_page.switches.allow_lan"),
-                zenclash_i18n::text("core_page.switches.allow_lan_description"),
-                config.is_some_and(|value| value.allow_lan),
-                "settings-allow-lan",
-                theme,
-                pending || config.is_none(),
-                cx.listener(|this, checked, _, cx| {
-                    this.apply_controlled_config(
-                        serde_json::json!({"allow-lan": *checked}),
-                        zenclash_i18n::text("core_page.notices.allow_lan"),
-                        cx,
-                    );
-                }),
-            ))
     }
 
     fn apply_home_capture_plan(

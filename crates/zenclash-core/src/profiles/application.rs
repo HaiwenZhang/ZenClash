@@ -1265,7 +1265,11 @@ impl ProfileApplication {
                 });
             }
         };
-        let name = match normalized_profile_name(&name) {
+        let name = match if name.trim().is_empty() {
+            Ok(String::new())
+        } else {
+            normalized_profile_name(&name)
+        } {
             Ok(name) => name,
             Err(error) => {
                 return Err(ProfilePreparationError {
@@ -1309,6 +1313,11 @@ impl ProfileApplication {
                     cause: error.into(),
                 });
             }
+        };
+        let name = if name.is_empty() {
+            downloaded.suggested_name.clone()
+        } else {
+            name
         };
         let source = ProfileSource::Remote {
             url,
@@ -2501,7 +2510,7 @@ mod tests {
 
         let outcome = application
             .apply(ProfileChange::AddRemote {
-                name: "Remote Candidate".into(),
+                name: String::new(),
                 url: format!("http://{origin_address}/profile.yaml"),
                 user_agent: "ZenClash-ProfileApplication-Test".into(),
                 options: RemoteProfileOptions::default().with_route(RemoteProfileRoute::Direct),

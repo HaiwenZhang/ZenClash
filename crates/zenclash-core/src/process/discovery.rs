@@ -5,7 +5,7 @@ use serde::Deserialize;
 use super::resources::{
     bundled_core_binary, bundled_profile, default_core_home_dir, find_core_binary,
     install_bundled_core, install_bundled_core_with_lease, install_bundled_mihomo_data,
-    is_core_binary_candidate,
+    is_core_binary_candidate, managed_core_binary,
 };
 use crate::{
     CoreCapabilities, CoreConfigValidationError, CoreConfigValidator, CoreKind, MihomoEndpoint,
@@ -194,8 +194,8 @@ impl MihomoLaunchConfig {
 
     /// Discovers launch inputs while honoring a user-selected executable.
     ///
-    /// Environment overrides remain authoritative. When no override exists, a
-    /// custom path is checked before bundled, workspace, and `PATH` candidates.
+    /// A custom path is checked before managed, bundled, workspace, and `PATH`
+    /// candidates. Only experimental cores accept executable environment overrides.
     ///
     /// # Errors
     ///
@@ -302,12 +302,9 @@ fn resolve_core_binary(
     home_dir: &Path,
     lease: Option<&crate::data_coordinator::DataWriteLease>,
 ) -> MihomoResult<PathBuf> {
-    let binary_override = std::env::var_os("ZENCLASH_CORE_BINARY")
-        .map(|value| ("ZENCLASH_CORE_BINARY", PathBuf::from(value)))
-        .or_else(|| {
-            std::env::var_os(kind.binary_environment_variable())
-                .map(|value| (kind.binary_environment_variable(), PathBuf::from(value)))
-        });
+    let binary_override = kind.binary_environment_variable().and_then(|variable| {
+        std::env::var_os(variable).map(|value| (variable, PathBuf::from(value)))
+    });
     Ok(match binary_override {
         Some((_, binary)) if is_core_binary_candidate(&binary) => binary,
         Some((variable, binary)) => {
@@ -328,6 +325,8 @@ fn resolve_core_binary(
                     )));
                 }
                 binary.to_path_buf()
+            } else if let Some(managed) = managed_core_binary(home_dir, kind) {
+                managed
             } else if let Some(bundled) = bundled_core_binary(kind) {
                 match lease {
                     Some(lease) => {
@@ -342,10 +341,8 @@ fn resolve_core_binary(
                     .or_else(|| find_core_binary(kind))
                     .ok_or_else(|| {
                         MihomoError::Process(format!(
-                            "找不到 {}；请设置 {} 或将 {} 放入 PATH",
-                            kind.display_name(),
-                            kind.binary_environment_variable(),
-                            kind.executable_stem()
+                            "找不到 {}；请在设置 → 运行内核中重新检测或选择文件",
+                            kind.display_name()
                         ))
                     })?
             }
@@ -408,23 +405,26 @@ mod tests {
                 "mihomo"
             });
             let mode = std::env::var("ZENCLASH_TEST_RECOVERY_IDENTITY_MODE").unwrap();
+            let managed = home.join("cores").join(binary.file_name().unwrap());
+            let expected = if mode == "managed" { &managed } else { &binary };
             let result = MihomoLaunchConfig::discover_ordinary_recovery(
                 root.clone(),
-                Some(binary.clone()),
+                (mode != "managed").then(|| binary.clone()),
                 root.join("removed.yaml"),
                 home.clone(),
             )
             .await;
-            if mode == "invalid-override" {
-                assert!(
-                    result.is_err(),
-                    "an explicit missing override must not fall back"
-                );
-            } else if mode == "setid" {
+            if mode == "setid" {
                 assert!(matches!(result, Err(MihomoError::InvalidInput(_))));
             } else {
                 let launch = result.unwrap();
-                assert_eq!(launch.binary, binary);
+                assert_eq!(&launch.binary, expected);
+                if mode == "managed" {
+                    assert_eq!(
+                        super::super::resources::service_core_source(&home).unwrap(),
+                        std::fs::canonicalize(&managed).unwrap()
+                    );
+                }
                 assert_eq!(launch.home_dir, home);
                 assert_eq!(launch.config_file, root.join("removed.yaml"));
                 assert!(!launch.config_file.exists());
@@ -470,10 +470,16 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+        std::fs::create_dir_all(root.join("home/cores")).unwrap();
+        std::fs::copy(
+            &binary,
+            root.join("home/cores").join(binary.file_name().unwrap()),
+        )
+        .unwrap();
         let modes = if cfg!(unix) {
-            vec!["ordinary", "invalid-override", "setid"]
+            vec!["ordinary", "invalid-override", "managed", "setid"]
         } else {
-            vec!["ordinary", "invalid-override"]
+            vec!["ordinary", "invalid-override", "managed"]
         };
         for mode in modes {
             #[cfg(unix)]
@@ -488,8 +494,10 @@ mod tests {
                 .env("ZENCLASH_TEST_RECOVERY_IDENTITY_MODE", mode)
                 .env_remove("ZENCLASH_CORE_BINARY")
                 .env_remove("ZENCLASH_MIHOMO_BINARY");
-            if mode == "invalid-override" {
-                command.env("ZENCLASH_CORE_BINARY", root.join("missing-binary"));
+            if mode == "invalid-override" || mode == "managed" {
+                command
+                    .env("ZENCLASH_CORE_BINARY", root.join("missing-binary"))
+                    .env("ZENCLASH_MIHOMO_BINARY", root.join("missing-mihomo"));
             }
             let output = tokio::task::spawn_blocking(move || command.output())
                 .await

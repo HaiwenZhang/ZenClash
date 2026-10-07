@@ -3,6 +3,7 @@ use gpui_kit::base::TestSupportExt;
 use std::collections::HashSet;
 
 mod actions;
+mod ai;
 mod dialogs;
 mod model;
 
@@ -117,7 +118,13 @@ impl RuntimePage {
                             .text_color(theme.success)
                             .child(zenclash_i18n::text_with(
                                 "redesign.check_passed",
-                                &[("count", passed.to_string())],
+                                &[(
+                                    "count",
+                                    self.network_probe
+                                        .report
+                                        .as_ref()
+                                        .map_or_else(|| "—".into(), |_| passed.to_string()),
+                                )],
                             )),
                     )
                     .child(
@@ -125,7 +132,13 @@ impl RuntimePage {
                             .text_color(theme.warning)
                             .child(zenclash_i18n::text_with(
                                 "redesign.check_failed",
-                                &[("count", (steps.len() - passed).to_string())],
+                                &[(
+                                    "count",
+                                    self.network_probe.report.as_ref().map_or_else(
+                                        || "—".into(),
+                                        |_| (steps.len() - passed).to_string(),
+                                    ),
+                                )],
                             )),
                     )
                     .child(div().text_color(theme.muted_foreground).child(
@@ -229,8 +242,24 @@ impl RuntimePage {
                     report
                         .into_iter()
                         .flat_map(|report| report.steps.iter())
-                        .map(|step| self.render_diagnostic_step(step, theme, cx)),
-                ),
+                        .map(|step| self.render_diagnostic_step(step.kind, Some(step), theme, cx)),
+                )
+                .when(report.is_none(), |view| {
+                    view.children(
+                        [
+                            DiagnosticStepKind::Controller,
+                            DiagnosticStepKind::Capture,
+                            DiagnosticStepKind::DnsA,
+                            DiagnosticStepKind::DnsAaaa,
+                            DiagnosticStepKind::NetworkDirect,
+                            DiagnosticStepKind::NetworkMihomo,
+                            DiagnosticStepKind::ProxyProviders,
+                            DiagnosticStepKind::RuleProviders,
+                        ]
+                        .into_iter()
+                        .map(|kind| self.render_diagnostic_step(kind, None, theme, cx)),
+                    )
+                }),
         )
     }
 
@@ -538,12 +567,37 @@ impl RuntimePage {
                             .child(div().w_16().child(zenclash_i18n::text("redesign.action"))),
                     )
                     .when(snapshot.latencies.is_empty(), |view| {
-                        view.child(
-                            div()
-                                .p_3()
-                                .text_sm()
-                                .text_color(theme.muted_foreground)
-                                .child(zenclash_i18n::text("network.metrics.waiting")),
+                        view.children(
+                            model::network_latency_targets(
+                                &self.preferences.network_latency_targets,
+                            )
+                            .into_iter()
+                            .map(|target| {
+                                h_flex()
+                                    .min_h(gpui_kit::rems(2.75))
+                                    .px_3()
+                                    .py_2()
+                                    .gap_3()
+                                    .text_sm()
+                                    .border_b_1()
+                                    .border_color(theme.border)
+                                    .child(
+                                        div().w_24().flex_shrink_0().truncate().child(target.name),
+                                    )
+                                    .text_color(theme.muted_foreground)
+                                    .child(div().flex_1().min_w_0().child("—"))
+                                    .child(div().w_20().child("—"))
+                                    .child(
+                                        Button::new((
+                                            gpui_kit::ElementId::from(target.url),
+                                            "details",
+                                        ))
+                                        .small()
+                                        .outline()
+                                        .label(zenclash_i18n::text("redesign.details"))
+                                        .disabled(true),
+                                    )
+                            }),
                         )
                     })
                     .children(snapshot.latencies.iter().map(|result| {
@@ -694,7 +748,11 @@ impl RuntimePage {
                 _ => None,
             });
         network_card(zenclash_i18n::text("redesign.local_network"), theme)
-            .child(network_capability_row("IPv6", Some(config.ipv6), theme))
+            .child(network_capability_row(
+                "IPv6",
+                matches!(self.data, RuntimeData::Network { .. }).then_some(config.ipv6),
+                theme,
+            ))
             .child(network_capability_row(
                 zenclash_i18n::text("tray.system_proxy"),
                 system_proxy,

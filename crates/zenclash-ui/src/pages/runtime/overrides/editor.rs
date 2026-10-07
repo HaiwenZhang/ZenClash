@@ -1,15 +1,17 @@
 use gpui_kit::component::input::{Editor, EditorState};
-use gpui_kit::{AppContext, Context, Entity, Window};
+use gpui_kit::component::{ActiveTheme, WindowExt};
+use gpui_kit::{AppContext, Context, Entity, Focusable, Window, prelude::FluentBuilder};
 
 use super::super::{
-    Button, ButtonVariants, Disableable, IconName, ParentElement, RuntimePage, Styled, h_flex, px,
-    setting_card, v_flex,
+    Button, ButtonVariants, Disableable, IconName, ParentElement, RuntimePage, Styled, h_flex,
+    v_flex,
 };
 
 pub(crate) struct ProfileEditorState {
     pub(in crate::pages::runtime) input: Entity<EditorState>,
     pub(in crate::pages::runtime) original: Option<String>,
     pub(in crate::pages::runtime) profile_id: Option<String>,
+    dialog_open: bool,
 }
 
 impl ProfileEditorState {
@@ -22,6 +24,7 @@ impl ProfileEditorState {
             }),
             original: None,
             profile_id: None,
+            dialog_open: false,
         }
     }
 
@@ -49,6 +52,10 @@ impl RuntimePage {
             let _ = cx.update_window(window_handle, |_, window, cx| {
                 let _ = page.update(cx, |page, cx| {
                     if page.overrides.editor.original.is_none() {
+                        if page.overrides.editor.dialog_open {
+                            page.overrides.editor.dialog_open = false;
+                            window.close_dialog(cx);
+                        }
                         input.update(cx, |input, cx| {
                             if input.value() == saved {
                                 input.set_value(String::new(), window, cx);
@@ -61,6 +68,9 @@ impl RuntimePage {
     }
 
     pub(super) fn open_profile_yaml_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.core_busy() || window.has_active_dialog(cx) {
+            return;
+        }
         let Some(preview) = &self.overrides.preview else {
             self.error = Some(zenclash_i18n::text("overrides.errors.preview_required"));
             cx.notify();
@@ -78,6 +88,46 @@ impl RuntimePage {
         self.overrides.editor.original = Some(original);
         self.overrides.editor.profile_id = Some(profile_id);
         self.error = None;
+        self.overrides.editor.dialog_open = true;
+        let owner = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let content = owner
+                .update(cx, |page, cx| {
+                    let theme = cx.theme().clone();
+                    page.render_profile_yaml_editor(&theme, window, cx)
+                })
+                .ok();
+            let busy = owner
+                .update(cx, |page, _| page.core_busy())
+                .unwrap_or(false);
+            let cancel_owner = owner.clone();
+            dialog
+                .title(zenclash_i18n::text("overrides.editor.title"))
+                .width(
+                    (window.rem_size() * 64.)
+                        .min(window.viewport_size().width - window.rem_size() * 2.),
+                )
+                .margin_top(window.rem_size())
+                .close_button(!busy)
+                .overlay_closable(false)
+                .when_some(content, |dialog, content| dialog.child(content))
+                .on_cancel(move |_, window, cx| {
+                    cancel_owner
+                        .update(cx, |page, cx| {
+                            if page.core_busy() {
+                                return false;
+                            }
+                            page.cancel_profile_yaml_editor(window, cx);
+                            true
+                        })
+                        .unwrap_or(true)
+                })
+        });
+        self.overrides
+            .editor
+            .input
+            .focus_handle(cx)
+            .focus(window, cx);
         cx.notify();
     }
 
@@ -91,6 +141,8 @@ impl RuntimePage {
         });
         self.overrides.editor.original = None;
         self.overrides.editor.profile_id = None;
+        self.overrides.editor.dialog_open = false;
+        self.error = None;
         cx.notify();
     }
 
@@ -214,15 +266,26 @@ impl RuntimePage {
     pub(super) fn render_profile_yaml_editor(
         &self,
         theme: &gpui_kit::component::Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
-        setting_card(zenclash_i18n::text("overrides.editor.title"), theme)
+        v_flex()
+            .gap_3()
             .child(
                 v_flex()
-                    .h(px(520.))
-                    .p_3()
+                    .h((window.viewport_size().height - window.rem_size() * 14.)
+                        .max(window.rem_size() * 8.)
+                        .min(window.rem_size() * 36.))
                     .child(Editor::new(&self.overrides.editor.input).h_full()),
             )
+            .when_some(self.error.as_ref(), |view, error| {
+                view.child(
+                    super::super::div()
+                        .text_sm()
+                        .text_color(theme.danger)
+                        .child(error.clone()),
+                )
+            })
             .child(
                 h_flex()
                     .justify_end()
@@ -235,6 +298,7 @@ impl RuntimePage {
                             .disabled(self.core_busy())
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.cancel_profile_yaml_editor(window, cx);
+                                window.close_dialog(cx);
                             })),
                     )
                     .child(

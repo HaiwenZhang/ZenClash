@@ -1,10 +1,12 @@
+use super::settings::forms::settings_switch as setting_switch;
 use super::{
-    Button, ButtonVariants, Context, Disableable, FluentBuilder, Icon, IconName,
-    InteractiveElement, IntoElement, Page, ParentElement, ProviderCatalog, ProviderKind,
-    RuntimeConfig, RuntimeData, RuntimePage, Sizable, Styled, div, empty_dash, empty_state,
-    format_profile_age, h_flex, info_row, json, load_page, px, setting_card, setting_switch,
-    v_flex,
+    Button, ButtonVariants, Context, Disableable, FluentBuilder, IconName, InteractiveElement,
+    IntoElement, Page, ParentElement, ProviderCatalog, ProviderKind, RuntimeConfig, RuntimeData,
+    RuntimePage, Sizable, Styled, div, empty_dash, empty_state, format_profile_age, h_flex,
+    info_row, json, load_page, px, setting_card, v_flex,
 };
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::{ActiveTheme, WindowExt};
 
 mod ruleset;
 
@@ -121,6 +123,60 @@ impl RuntimePage {
         .detach();
     }
 
+    fn update_all_providers(&mut self, cx: &mut Context<Self>) {
+        let RuntimeData::Resources { proxy, rules, .. } = &self.data else {
+            return;
+        };
+        let targets = proxy
+            .providers
+            .keys()
+            .map(|name| (ProviderKind::Proxy, name.clone()))
+            .chain(
+                rules
+                    .providers
+                    .keys()
+                    .map(|name| (ProviderKind::Rule, name.clone())),
+            )
+            .collect::<Vec<_>>();
+        let Some(token) = self.begin_mutation(Page::Resources) else {
+            return;
+        };
+        let operations = self.provider_operations.clone();
+        let client = self.client.clone();
+        let task = self.runtime.spawn(async move {
+            let mut errors = Vec::new();
+            for (kind, name) in targets {
+                if let Err(error) = operations.update(kind, &name).await {
+                    errors.push(format!("{name}: {error}"));
+                }
+            }
+            (load_page(client, Page::Resources).await, errors)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.finish_mutation(token);
+                match result {
+                    Ok((data, errors)) => {
+                        match data {
+                            Ok(data) => {
+                                this.replace_page_data(token, data, cx);
+                            }
+                            Err(error) => this.set_page_error(token, error),
+                        }
+                        if !errors.is_empty() {
+                            this.set_page_error(token, errors.join("\n"));
+                        }
+                    }
+                    Err(error) => this.set_page_error(token, error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn healthcheck_provider(&mut self, name: String, cx: &mut Context<Self>) {
         let Some(token) = self.begin_mutation(Page::Resources) else {
             return;
@@ -178,25 +234,84 @@ impl RuntimePage {
         v_flex()
             .gap_4()
             .child(self.render_builtin_resources(config, theme, cx))
-            .child(self.render_ruleset_converter(theme, cx))
-            .child(provider_section(
-                zenclash_i18n::text("resources.providers.proxy"),
-                proxy,
-                false,
-                self.core_busy(),
-                &self.provider_operations,
-                theme,
-                cx,
-            ))
-            .child(provider_section(
-                zenclash_i18n::text("resources.providers.rule"),
-                rules,
-                true,
-                self.core_busy(),
-                &self.provider_operations,
-                theme,
-                cx,
-            ))
+            .child(
+                setting_card(zenclash_i18n::text("settings_redesign.providers"), theme)
+                    .child(
+                        h_flex()
+                            .px_4()
+                            .pb_3()
+                            .gap_3()
+                            .child(gpui_kit::component::input::Input::new(
+                                &self.settings_navigation.resource_search,
+                            ))
+                            .child(
+                                Button::new("update-all-providers")
+                                    .label(zenclash_i18n::text("unified.profiles.update_all"))
+                                    .outline()
+                                    .disabled(self.core_busy())
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.update_all_providers(cx)),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .px_4()
+                            .py_3()
+                            .gap_3()
+                            .flex_wrap()
+                            .bg(theme.muted)
+                            .text_sm()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .child(zenclash_i18n::text("settings_redesign.resource_name")),
+                            )
+                            .child(
+                                div()
+                                    .w_16()
+                                    .child(zenclash_i18n::text("settings_redesign.resource_type")),
+                            )
+                            .child(
+                                div()
+                                    .w_16()
+                                    .child(zenclash_i18n::text("settings_redesign.resource_count")),
+                            )
+                            .child(
+                                div().w_32().child(zenclash_i18n::text(
+                                    "settings_redesign.resource_updated",
+                                )),
+                            )
+                            .child(
+                                div().w(gpui_kit::rems(15.)).child(zenclash_i18n::text(
+                                    "settings_redesign.resource_actions",
+                                )),
+                            ),
+                    )
+                    .child(self.render_provider_section(proxy, false, theme, cx))
+                    .child(self.render_provider_section(rules, true, theme, cx)),
+            )
+            .child(
+                Button::new("open-ruleset-converter")
+                    .label(zenclash_i18n::text("settings_redesign.converter"))
+                    .outline()
+                    .on_click(cx.listener(|_, _, window, cx| {
+                        let owner = cx.entity().downgrade();
+                        window.open_dialog(cx, move |dialog, window, cx| {
+                            let content = owner
+                                .update(cx, |page, cx| {
+                                    let theme = cx.theme().clone();
+                                    page.render_ruleset_converter(&theme, cx).into_any_element()
+                                })
+                                .ok();
+                            dialog
+                                .title(zenclash_i18n::text("settings_redesign.converter"))
+                                .bg(cx.theme().group_box)
+                                .width(window.rem_size() * 48.)
+                                .when_some(content, |dialog, content| dialog.child(content))
+                        });
+                    })),
+            )
             .into_any_element()
     }
 
@@ -206,6 +321,7 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
+        let owner = cx.entity().downgrade();
         let controlled = &self.controlled_config;
         let geodata_mode = config_bool(config, controlled, "geodata-mode");
         let geo_auto_update = config_bool(config, controlled, "geo-auto-update");
@@ -235,6 +351,8 @@ impl RuntimePage {
             .unwrap_or("—");
 
         setting_card(zenclash_i18n::text("resources.builtin.title"), theme)
+            .child(h_flex().flex_wrap().items_start()
+                .child(v_flex().flex_1().min_w(gpui_kit::rems(20.))
             .child(setting_switch(
                 zenclash_i18n::text("resources.builtin.geodata_mode"),
                 zenclash_i18n::text("resources.builtin.geodata_mode_description"),
@@ -263,14 +381,23 @@ impl RuntimePage {
                     );
                 }),
             ))
-            .child(info_row(
-                zenclash_i18n::text("resources.builtin.interval"),
-                &geo_interval,
-                theme,
-            ))
+            .child(h_flex().px_4().py_3().justify_between()
+                .child(div().text_sm().child(zenclash_i18n::text("resources.builtin.interval")))
+                .child(Button::new("geodata-update-interval").outline().dropdown_caret(true).label(geo_interval)
+                    .disabled(self.core_busy()).dropdown_menu(move |mut menu, _, _| {
+                        for hours in [6_u64, 12, 24, 48, 168] {
+                            let owner = owner.clone();
+                            menu = menu.item(PopupMenuItem::new(zenclash_i18n::text_with("resources.builtin.hours", &[("hours", hours.to_string())]))
+                                .on_click(move |_, _, cx| { let _ = owner.update(cx, |page, cx| page.apply_controlled_config(
+                                    json!({"geo-update-interval": hours}), zenclash_i18n::text("resources.notices.geodata_auto"), cx)); }));
+                        }
+                        menu
+                    })))
+            )
+            .child(v_flex().flex_1().min_w(gpui_kit::rems(20.))
             .child(info_row("GeoIP", geoip, theme))
             .child(info_row("GeoSite", geosite, theme))
-            .child(info_row("External UI", external_ui_url, theme))
+            .child(info_row("External UI", external_ui_url, theme))))
             .child(
                 h_flex()
                     .justify_end()
@@ -322,189 +449,258 @@ fn config_bool(config: &RuntimeConfig, controlled: &serde_json::Value, key: &str
         .unwrap_or(false)
 }
 
-fn provider_section(
-    title: String,
-    catalog: &ProviderCatalog,
-    is_rule: bool,
-    mutating: bool,
-    operations: &super::ProviderOperations,
-    theme: &gpui_kit::component::Theme,
-    cx: &mut Context<RuntimePage>,
-) -> gpui_kit::AnyElement {
-    let count = catalog.providers.len();
-    v_flex()
-        .gap_2()
-        .child(
-            h_flex()
-                .justify_between()
-                .child(
-                    div()
-                        .text_lg()
-                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                        .child(title),
-                )
-                .child(div().text_xs().text_color(theme.muted_foreground).child(
-                    zenclash_i18n::text_with(
-                        "resources.providers.count",
-                        &[("count", count.to_string())],
-                    ),
-                )),
-        )
-        .child(
-            v_flex()
-                .rounded(theme.radius)
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.secondary)
-                .when(count == 0, |this| {
-                    this.child(empty_state(
-                        zenclash_i18n::text("resources.providers.empty"),
-                        theme,
-                    ))
-                })
-                .children(
-                    catalog
-                        .providers
-                        .iter()
-                        .enumerate()
-                        .map(|(index, (key, provider))| {
-                            let name = if provider.name.is_empty() {
-                                key.as_str()
-                            } else {
-                                provider.name.as_str()
-                            };
-                            let display_name = name.to_owned();
-                            let name_for_click = display_name.clone();
-                            let name_for_healthcheck = display_name.clone();
-                            let status = operations.status(
-                                if is_rule {
-                                    ProviderKind::Rule
+impl RuntimePage {
+    fn render_provider_section(
+        &self,
+        catalog: &ProviderCatalog,
+        is_rule: bool,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<RuntimePage>,
+    ) -> gpui_kit::AnyElement {
+        let mutating = self.core_busy();
+        let operations = &self.provider_operations;
+        let query = self
+            .settings_navigation
+            .resource_search
+            .read(cx)
+            .value()
+            .to_lowercase();
+        let count = catalog
+            .providers
+            .iter()
+            .filter(|(name, provider)| {
+                name.to_lowercase().contains(&query)
+                    || provider.name.to_lowercase().contains(&query)
+            })
+            .count();
+        v_flex()
+            .child(
+                v_flex()
+                    .rounded(theme.radius)
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.secondary)
+                    .when(count == 0, |this| {
+                        this.child(empty_state(
+                            zenclash_i18n::text("resources.providers.empty"),
+                            theme,
+                        ))
+                    })
+                    .children(
+                        catalog
+                            .providers
+                            .iter()
+                            .filter(|(name, provider)| {
+                                name.to_lowercase().contains(&query)
+                                    || provider.name.to_lowercase().contains(&query)
+                            })
+                            .enumerate()
+                            .map(|(index, (key, provider))| {
+                                let name = if provider.name.is_empty() {
+                                    key.as_str()
                                 } else {
-                                    ProviderKind::Proxy
-                                },
-                                name,
-                            );
-                            let item_count = if is_rule {
-                                provider.rule_count
-                            } else {
-                                provider.proxies.len()
-                            };
-                            let metadata = if is_rule {
-                                let behavior = empty_dash(&provider.behavior);
-                                let format = empty_dash(&provider.format).to_ascii_uppercase();
-                                zenclash_i18n::text_with(
-                                    "resources.providers.rule_metadata",
-                                    &[
-                                        ("type", provider.vehicle_type.clone()),
-                                        ("behavior", behavior),
-                                        ("format", format),
-                                        ("updated", provider_updated_at(&provider.updated_at)),
-                                        ("count", item_count.to_string()),
-                                    ],
-                                )
-                            } else {
-                                zenclash_i18n::text_with(
-                                    "resources.providers.proxy_metadata",
-                                    &[
-                                        ("type", provider.vehicle_type.clone()),
-                                        ("updated", provider_updated_at(&provider.updated_at)),
-                                        ("count", item_count.to_string()),
-                                    ],
-                                )
-                            };
-                            let operation_metadata = status.as_ref().map(|status| {
-                                zenclash_i18n::text_with(
-                                    "resources.providers.operation_metadata",
-                                    &[
-                                        ("success", provider_event_age(status.last_success_at_ms)),
-                                        (
-                                            "failure",
-                                            provider_failure_age(status.last_failure.as_ref()),
-                                        ),
-                                        ("update", provider_action_summary(&status.update)),
-                                        (
-                                            "health",
-                                            if is_rule {
-                                                zenclash_i18n::text(
-                                                    "resources.providers.not_applicable",
-                                                )
-                                            } else {
-                                                provider_action_summary(&status.healthcheck)
-                                            },
-                                        ),
-                                    ],
-                                )
-                            });
-                            h_flex()
-                                .id((
+                                    provider.name.as_str()
+                                };
+                                let display_name = name.to_owned();
+                                let name_for_click = key.clone();
+                                let name_for_healthcheck = key.clone();
+                                let status = operations.status(
                                     if is_rule {
-                                        "rule-provider"
+                                        ProviderKind::Rule
                                     } else {
-                                        "proxy-provider"
+                                        ProviderKind::Proxy
                                     },
-                                    index,
-                                ))
-                                .min_h(px(58.))
-                                .px_4()
-                                .gap_3()
-                                .border_b_1()
-                                .border_color(theme.border)
-                                .child(Icon::new(IconName::Inbox).size_4())
-                                .child(
-                                    v_flex()
-                                        .flex_1()
-                                        .child(div().text_sm().child(display_name))
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .child(metadata),
-                                        )
-                                        .when_some(operation_metadata, |this, metadata| {
-                                            this.child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(theme.muted_foreground)
-                                                    .child(metadata),
-                                            )
-                                        }),
-                                )
-                                .when(!is_rule, |row| {
-                                    row.child(
-                                        Button::new(("healthcheck-provider", index))
-                                            .icon(IconName::Heart)
-                                            .label(zenclash_i18n::text(
-                                                "resources.providers.healthcheck",
-                                            ))
-                                            .small()
-                                            .outline()
-                                            .disabled(mutating)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.healthcheck_provider(
-                                                    name_for_healthcheck.clone(),
-                                                    cx,
-                                                );
-                                            })),
+                                    key,
+                                );
+                                let item_count = if is_rule {
+                                    provider.rule_count
+                                } else {
+                                    provider.proxies.len()
+                                };
+                                let metadata = if is_rule {
+                                    let behavior = empty_dash(&provider.behavior);
+                                    let format = empty_dash(&provider.format).to_ascii_uppercase();
+                                    zenclash_i18n::text_with(
+                                        "resources.providers.rule_metadata",
+                                        &[
+                                            ("type", provider.vehicle_type.clone()),
+                                            ("behavior", behavior),
+                                            ("format", format),
+                                            ("updated", provider_updated_at(&provider.updated_at)),
+                                            ("count", item_count.to_string()),
+                                        ],
                                     )
-                                })
-                                .child(
-                                    Button::new(("update-provider", index))
-                                        .icon(crate::assets::AppIcon::RefreshCw)
-                                        .label(zenclash_i18n::text("resources.providers.update"))
-                                        .small()
-                                        .disabled(mutating)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.update_provider(
-                                                name_for_click.clone(),
-                                                is_rule,
-                                                cx,
-                                            );
-                                        })),
-                                )
-                        }),
-                ),
-        )
-        .into_any_element()
+                                } else {
+                                    zenclash_i18n::text_with(
+                                        "resources.providers.proxy_metadata",
+                                        &[
+                                            ("type", provider.vehicle_type.clone()),
+                                            ("updated", provider_updated_at(&provider.updated_at)),
+                                            ("count", item_count.to_string()),
+                                        ],
+                                    )
+                                };
+                                let operation_metadata = status.as_ref().map(|status| {
+                                    zenclash_i18n::text_with(
+                                        "resources.providers.operation_metadata",
+                                        &[
+                                            (
+                                                "success",
+                                                provider_event_age(status.last_success_at_ms),
+                                            ),
+                                            (
+                                                "failure",
+                                                provider_failure_age(status.last_failure.as_ref()),
+                                            ),
+                                            ("update", provider_action_summary(&status.update)),
+                                            (
+                                                "health",
+                                                if is_rule {
+                                                    zenclash_i18n::text(
+                                                        "resources.providers.not_applicable",
+                                                    )
+                                                } else {
+                                                    provider_action_summary(&status.healthcheck)
+                                                },
+                                            ),
+                                        ],
+                                    )
+                                });
+                                h_flex()
+                                    .id((
+                                        if is_rule {
+                                            "rule-provider"
+                                        } else {
+                                            "proxy-provider"
+                                        },
+                                        index,
+                                    ))
+                                    .min_h(px(58.))
+                                    .flex_wrap()
+                                    .py_2()
+                                    .px_4()
+                                    .gap_3()
+                                    .border_b_1()
+                                    .border_color(theme.border)
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_sm()
+                                            .child(display_name.clone()),
+                                    )
+                                    .child(div().w_16().text_sm().child(zenclash_i18n::text(
+                                        if is_rule {
+                                            "settings_redesign.resource_rule"
+                                        } else {
+                                            "settings_redesign.resource_proxy"
+                                        },
+                                    )))
+                                    .child(div().w_16().text_sm().child(item_count.to_string()))
+                                    .child(
+                                        div()
+                                            .w_32()
+                                            .truncate()
+                                            .text_sm()
+                                            .text_color(theme.muted_foreground)
+                                            .child(provider_updated_at(&provider.updated_at)),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .w(gpui_kit::rems(15.))
+                                            .justify_end()
+                                            .gap_2()
+                                            .child(
+                                                Button::new(gpui_kit::SharedString::from(format!(
+                                                    "provider-details-{is_rule}-{key}"
+                                                )))
+                                                .label(zenclash_i18n::text("redesign.details"))
+                                                .small()
+                                                .outline()
+                                                .on_click(move |_, window, cx| {
+                                                    let metadata = metadata.clone();
+                                                    let operation_metadata =
+                                                        operation_metadata.clone();
+                                                    let title = display_name.clone();
+                                                    window.open_dialog(
+                                                        cx,
+                                                        move |dialog, window, cx| {
+                                                            dialog
+                                                                .title(title.clone())
+                                                                .bg(cx.theme().group_box)
+                                                                .width(window.rem_size() * 34.)
+                                                                .margin_top(
+                                                                    ((window
+                                                                        .viewport_size()
+                                                                        .height
+                                                                        - window.rem_size() * 20.)
+                                                                        / 2.)
+                                                                        .max(window.rem_size()),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .text_sm()
+                                                                        .child(metadata.clone()),
+                                                                )
+                                                                .when_some(
+                                                                    operation_metadata.clone(),
+                                                                    |dialog, value| {
+                                                                        dialog.child(
+                                                                            div()
+                                                                                .text_sm()
+                                                                                .child(value),
+                                                                        )
+                                                                    },
+                                                                )
+                                                        },
+                                                    );
+                                                }),
+                                            )
+                                            .when(!is_rule, |row| {
+                                                row.child(
+                                                    Button::new(gpui_kit::SharedString::from(
+                                                        format!("healthcheck-provider-{key}"),
+                                                    ))
+                                                    .icon(IconName::Heart)
+                                                    .label(zenclash_i18n::text(
+                                                        "resources.providers.healthcheck",
+                                                    ))
+                                                    .small()
+                                                    .outline()
+                                                    .disabled(mutating)
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        this.healthcheck_provider(
+                                                            name_for_healthcheck.clone(),
+                                                            cx,
+                                                        );
+                                                    })),
+                                                )
+                                            })
+                                            .child(
+                                                Button::new(gpui_kit::SharedString::from(format!(
+                                                    "update-provider-{is_rule}-{key}"
+                                                )))
+                                                .icon(crate::assets::AppIcon::RefreshCw)
+                                                .label(zenclash_i18n::text(
+                                                    "resources.providers.update",
+                                                ))
+                                                .small()
+                                                .disabled(mutating)
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.update_provider(
+                                                        name_for_click.clone(),
+                                                        is_rule,
+                                                        cx,
+                                                    );
+                                                })),
+                                            ),
+                                    )
+                            }),
+                    ),
+            )
+            .into_any_element()
+    }
 }
 
 fn provider_event_age(timestamp_ms: Option<u64>) -> String {

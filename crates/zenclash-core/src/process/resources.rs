@@ -76,26 +76,19 @@ pub(super) fn bundled_core_binary(kind: CoreKind) -> Option<PathBuf> {
     bundled_resource(&name).filter(|candidate| is_core_binary_candidate(candidate))
 }
 
+pub(super) fn managed_core_binary(home: &Path, kind: CoreKind) -> Option<PathBuf> {
+    let name = executable_filename(kind);
+    [home.join("cores").join(&name), home.join(&name)]
+        .into_iter()
+        .find(|path| is_core_binary_candidate(path))
+}
+
 // Service discovery reads a source only; installation and generation ownership
 // remain with the fork. Do not enqueue another home lease during admitted apply.
 pub(crate) fn service_core_source(home: &Path) -> MihomoResult<PathBuf> {
     let kind = CoreKind::Mihomo;
-    if let Some(binary) = std::env::var_os("ZENCLASH_CORE_BINARY")
-        .or_else(|| std::env::var_os(kind.binary_environment_variable()))
-    {
-        let binary = PathBuf::from(binary);
-        if !is_core_binary_candidate(&binary) {
-            return Err(MihomoError::InvalidInput(
-                "The configured service core is unavailable".into(),
-            ));
-        }
-        return std::fs::canonicalize(binary)
-            .map_err(|error| MihomoError::Process(error.to_string()));
-    }
     let name = executable_filename(kind);
-    let binary = [home.join("cores").join(&name), home.join(&name)]
-        .into_iter()
-        .find(|path| is_core_binary_candidate(path))
+    let binary = managed_core_binary(home, kind)
         .or_else(|| bundled_core_binary(kind))
         .or_else(|| {
             std::env::current_dir()
@@ -396,9 +389,11 @@ fn executable_filename(kind: CoreKind) -> String {
 fn platform_data_dir() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|home| home.join("Library/Application Support/ZenClash"))
+        std::env::var_os("HOME").map(PathBuf::from).map(|home| {
+            home.join("Library")
+                .join("Application Support")
+                .join("ZenClash")
+        })
     }
 
     #[cfg(target_os = "windows")]
@@ -408,7 +403,7 @@ fn platform_data_dir() -> Option<PathBuf> {
             .or_else(|| {
                 std::env::var_os("USERPROFILE")
                     .map(PathBuf::from)
-                    .map(|home| home.join("AppData/Local"))
+                    .map(|home| home.join("AppData").join("Local"))
             })
             .map(|data| data.join("ZenClash"))
     }
@@ -420,7 +415,7 @@ fn platform_data_dir() -> Option<PathBuf> {
             .or_else(|| {
                 std::env::var_os("HOME")
                     .map(PathBuf::from)
-                    .map(|home| home.join(".local/share"))
+                    .map(|home| home.join(".local").join("share"))
             })
             .map(|data| data.join("zenclash"))
     }

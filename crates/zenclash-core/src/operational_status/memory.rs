@@ -5,7 +5,8 @@ pub(super) fn resident_memory(pid: u32) -> Option<u64> {
     let mut system = System::new();
     system.refresh_processes_specifics(
         ProcessesToUpdate::Some(&[pid]),
-        ProcessRefreshKind::new().with_memory(),
+        true,
+        ProcessRefreshKind::nothing().with_memory(),
     );
     system
         .process(pid)

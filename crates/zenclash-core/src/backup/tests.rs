@@ -823,7 +823,11 @@ fn restore_rejects_an_oversized_valid_index_without_changing_live_data() {
                 .find(|entry| entry["path"] == PROFILE_INDEX_PATH)
                 .unwrap();
             entry["size"] = serde_json::json!(index.len());
-            entry["sha256"] = serde_json::json!(format!("{:x}", Sha256::digest(&index)));
+            let checksum: String = Sha256::digest(&index)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            entry["sha256"] = serde_json::json!(checksum);
             *bytes = serde_json::to_vec(&manifest).unwrap();
         }
     });

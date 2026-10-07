@@ -31,7 +31,7 @@ impl ProfileStore {
     ///
     /// # Errors
     ///
-    /// Returns an error for an empty name, invalid subscription URL or
+    /// Returns an error for an invalid subscription URL or
     /// payload, network failure, or persistence failure.
     pub async fn add_remote(
         &self,
@@ -58,11 +58,17 @@ impl ProfileStore {
         options: RemoteProfileOptions,
         mihomo_proxy_port: Option<u16>,
     ) -> ProfileStoreResult<ProfileRecord> {
-        let name = normalized_profile_name(&name.into())?;
+        let name = name.into();
+        let name = if name.trim().is_empty() {
+            None
+        } else {
+            Some(normalized_profile_name(&name)?)
+        };
         let url = normalized_remote_url(&url.into())?;
         let user_agent = user_agent.into();
         let user_agent = normalized_user_agent(&user_agent)?;
         let downloaded = download_profile(&url, &user_agent, &options, mihomo_proxy_port).await?;
+        let name = name.unwrap_or_else(|| downloaded.suggested_name.clone());
         let store = self.clone();
         run_store_task(move || {
             validate_clash_yaml(&downloaded.payload)?;

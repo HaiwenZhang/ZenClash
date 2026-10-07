@@ -4,6 +4,7 @@
 
 pub use zenclash_service_integration::{check_sidecar_available, current_process_elevated};
 
+pub mod ai_network;
 mod app_update;
 mod autostart;
 mod backup;

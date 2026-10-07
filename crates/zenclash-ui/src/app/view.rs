@@ -178,13 +178,7 @@ fn main_window_title_bar(
     let on_close_window: WindowCloseListener = Rc::new(on_close_window);
     let linux_close_listener = on_close_window.clone();
     let title_bar = TitleBar::new()
-        .child(
-            h_flex()
-                .gap_2()
-                .px_3()
-                .child(gpui_kit::img(crate::assets::ZENCLASH_LOGO_PATH).size_8())
-                .child("ZenClash"),
-        )
+        .child(h_flex().px_3().child("ZenClash"))
         .on_close_window(move |event, window, cx| {
             linux_close_listener(event, window, cx);
         })

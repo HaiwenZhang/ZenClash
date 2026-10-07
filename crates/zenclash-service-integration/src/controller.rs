@@ -287,19 +287,14 @@ impl NativeController {
             hyper::header::AUTHORIZATION,
             http.headers()[hyper::header::AUTHORIZATION].clone(),
         );
-        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
-            max_message_size: Some(if path.split('?').next() == Some("/logs") {
-                128 * 1024
-            } else {
-                MAX_RESPONSE_BYTES
-            }),
-            max_frame_size: Some(if path.split('?').next() == Some("/logs") {
-                128 * 1024
-            } else {
-                MAX_RESPONSE_BYTES
-            }),
-            ..Default::default()
+        let max_bytes = if path.split('?').next() == Some("/logs") {
+            128 * 1024
+        } else {
+            MAX_RESPONSE_BYTES
         };
+        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(max_bytes))
+            .max_frame_size(Some(max_bytes));
         tokio::time::timeout(MAX_DEADLINE, async {
             let stream = self.connect().await.map_err(NativeHttpError::BeforeSend)?;
             tokio_tungstenite::client_async_with_config(request, stream, Some(config))

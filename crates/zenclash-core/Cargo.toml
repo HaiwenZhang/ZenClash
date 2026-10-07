@@ -11,13 +11,14 @@ test-support = []
 service-ipc-tests = ["zenclash-service-integration/ipc-tests"]
 
 [dependencies]
-anyhow = "1.0"
+anyhow = "1.0.104"
 chrono.workspace = true
 cron.workspace = true
 flate2.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 http.workspace = true
+iana-time-zone = "0.1.65"
 parking_lot.workspace = true
 percent-encoding.workspace = true
 reqwest.workspace = true
@@ -27,7 +28,7 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true
 socket2.workspace = true
-sysinfo = { version = "0.31.4", default-features = false, features = ["system"] }
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite = { workspace = true, features = ["connect", "rustls-tls-webpki-roots"] }

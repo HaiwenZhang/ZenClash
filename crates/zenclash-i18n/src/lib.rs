@@ -3,6 +3,7 @@
 // Keep Cargo's non-test dependency graph aware of locale-only edits so
 // incremental release builds regenerate rust-i18n's embedded catalog.
 const _: &str = include_str!("../locales/app.yml");
+const _: &str = include_str!("../locales/ai_network.yml");
 
 rust_i18n::i18n!("locales", fallback = "zh-CN");
 
@@ -84,7 +85,7 @@ mod tests {
         );
         assert_eq!(text_for(EN, "common.actions.refresh"), "Refresh");
         assert_eq!(text_for(ZH_CN, "common.actions.refresh"), "刷新");
-        assert_eq!(text("network.diagnostics.title"), "分层诊断与支持");
+        assert_eq!(text("network.diagnostics.title"), "连接诊断");
         assert_eq!(
             text_for(EN, "resources.providers.healthcheck"),
             "Health Check"
@@ -110,7 +111,11 @@ mod tests {
                 "连接详情",
                 "Connection details",
             ),
-            ("rules.charts.hits", "命中策略", "Matched policies"),
+            (
+                "rules.charts.hits",
+                "命中策略分布",
+                "Matched policy distribution",
+            ),
             ("logs.actions.inspect", "查看日志详情", "Inspect log"),
             ("logs.levels.all", "全部", "All"),
             ("profiles.design.remaining", "剩余", "Remaining"),

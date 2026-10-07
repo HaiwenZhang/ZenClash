@@ -8,7 +8,66 @@ use super::{
 
 mod catalog;
 
+use gpui_kit::component::{ActiveTheme, WindowExt};
+use gpui_kit::{Focusable, ParentElement, Styled, prelude::FluentBuilder};
+
 impl RuntimePage {
+    pub(in crate::pages::runtime) fn open_subscription_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.core_busy() || window.has_active_dialog(cx) {
+            return;
+        }
+        self.profiles.forms.adding_subscription = true;
+        self.profiles.forms.subscription_error = None;
+        let owner = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let content = owner
+                .update(cx, |page, cx| {
+                    let theme = cx.theme().clone();
+                    page.render_subscription_form(&theme, cx)
+                })
+                .ok();
+            let busy = owner
+                .update(cx, |page, _| page.core_busy())
+                .unwrap_or(false);
+            let cancel_owner = owner.clone();
+            dialog
+                .title(zenclash_i18n::text("profiles.form.title"))
+                .width(
+                    (window.rem_size() * 38.)
+                        .min(window.viewport_size().width - window.rem_size() * 2.),
+                )
+                .bg(cx.theme().group_box)
+                .margin_top(
+                    ((window.viewport_size().height - window.rem_size() * 28.) / 2.)
+                        .max(gpui_kit::px(16.)),
+                )
+                .close_button(!busy)
+                .overlay_closable(!busy)
+                .when_some(content, |dialog, content| dialog.child(content))
+                .on_cancel(move |_, _, cx| {
+                    cancel_owner
+                        .update(cx, |page, cx| {
+                            if page.core_busy() {
+                                return false;
+                            }
+                            page.close_subscription_form(cx);
+                            true
+                        })
+                        .unwrap_or(true)
+                })
+        });
+        self.profiles
+            .forms
+            .subscription_url
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
     pub(in crate::pages::runtime) fn close_subscription_form(&mut self, cx: &mut Context<Self>) {
         if !self.profiles.forms.adding_subscription || self.core_busy() {
             return;
@@ -123,9 +182,15 @@ impl RuntimePage {
             return;
         };
         let generation = self.profiles.begin_read();
-        let task = self
-            .runtime
-            .spawn_blocking(move || store.load().map_err(|error| error.to_string()));
+        let task = self.runtime.spawn_blocking(move || {
+            let started = std::time::Instant::now();
+            let result = store.load().map_err(|error| error.to_string());
+            tracing::debug!(
+                elapsed_ms = started.elapsed().as_millis(),
+                "loaded profile catalog"
+            );
+            result
+        });
         self.profiles.read_task.replace(&task);
         cx.spawn(async move |this, cx| {
             let result = task
@@ -251,7 +316,7 @@ impl RuntimePage {
             .read(cx)
             .value()
             .to_string();
-        if name.trim().is_empty() || url.trim().is_empty() {
+        if url.trim().is_empty() {
             self.profiles.forms.subscription_error =
                 Some(zenclash_i18n::text("profiles.errors.required_fields"));
             cx.notify();
@@ -297,7 +362,13 @@ impl RuntimePage {
                 match result {
                     Ok(outcome) => {
                         this.profiles.forms.subscription_error = None;
+                        let was_adding = this.profiles.forms.adding_subscription;
                         this.profiles.forms.adding_subscription = false;
+                        if was_adding && this.is_page_task_current(token) {
+                            let _ = cx.update_window(this.window_handle, |_, window, cx| {
+                                window.close_dialog(cx)
+                            });
+                        }
                         this.restore_page_focus(Page::Profiles, cx);
                         this.apply_profile_activation(
                             outcome,

@@ -5,6 +5,7 @@ use super::{
     Window, YamlOverrideCatalog, YamlOverrideStore, config_input_snapshot, load_page_with_core,
 };
 use zenclash_core::{CoreApplyKind, EffectiveConfigIntent};
+use gpui_kit::component::WindowExt;
 
 const LIVE_UPDATE_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -123,14 +124,12 @@ struct InitialPersistentState {
     profile_store: Option<ProfileStore>,
     profile_catalog: ProfileCatalog,
     controlled_config: Value,
-    effective_config: Value,
     override_store: Option<YamlOverrideStore>,
     override_catalog: YamlOverrideCatalog,
     error: Option<String>,
 }
 
 fn load_initial_persistent_state(
-    profile_path: Option<&std::path::Path>,
     controlled_store: &ControlledConfigStore,
     profile_store: Option<ProfileStore>,
     override_store: Option<YamlOverrideStore>,
@@ -169,29 +168,13 @@ fn load_initial_persistent_state(
             Some(zenclash_i18n::text("overrides.errors.store_unavailable")),
         ),
     };
-    let override_paths = override_store
-        .as_ref()
-        .map_or_else(Vec::new, |store| store.enabled_paths(&override_catalog));
-    let (effective_config, effective_error) = profile_path
-        .map_or_else(
-            || Ok(empty_json_object()),
-            |profile| controlled_store.effective_json_with_overrides(profile, &override_paths),
-        )
-        .map_or_else(
-            |error| (empty_json_object(), Some(error.to_string())),
-            |value| (value, None),
-        );
     InitialPersistentState {
         profile_store,
         profile_catalog,
         controlled_config,
-        effective_config,
         override_store,
         override_catalog,
-        error: store_error
-            .or(controlled_error)
-            .or(effective_error)
-            .or(override_error),
+        error: store_error.or(controlled_error).or(override_error),
     }
 }
 
@@ -456,16 +439,13 @@ impl RuntimePage {
             startup_notice,
             startup_error,
         } = services;
-        let initial_profile = profile_path.clone();
         let initial_runtime_version = core_session.generation();
         let persistent_task = {
-            let profile = profile_path.clone();
             let store = controlled_config_store.clone();
             let profiles = profile_store.clone();
             let overrides = override_store.clone();
-            runtime.spawn_blocking(move || {
-                load_initial_persistent_state(profile.as_deref(), &store, profiles, overrides)
-            })
+            runtime
+                .spawn_blocking(move || load_initial_persistent_state(&store, profiles, overrides))
         };
         let profile_catalog = ProfileCatalog::default();
         let controlled_config = empty_json_object();
@@ -473,9 +453,8 @@ impl RuntimePage {
         let override_catalog = YamlOverrideCatalog::default();
         let error = None;
         let effective_config = config_input_snapshot(effective_config);
-        let config_inputs =
-            ConfigInputs::new(&effective_config, profile_path.as_deref(), window, cx);
-        let config_inputs_profile = profile_path.clone();
+        let config_inputs = ConfigInputs::new(&effective_config, None, window, cx);
+        let config_inputs_profile = None;
         let profile_forms = super::profiles::ProfileFormState::new(window, cx);
         let profile_editor = super::overrides::ProfileEditorState::new(window, cx);
         let provider_operations = super::ProviderOperations::new(client.clone());
@@ -484,6 +463,8 @@ impl RuntimePage {
             super::connections::ConnectionsUiState::new(window, cx);
         let (logs, log_filter_subscription) = super::logs::LogUiState::new(window, cx);
         let (rules, rule_filter_subscription) = super::rules::RulesUiState::new(window, cx);
+        let (settings_navigation, settings_search_subscription) =
+            super::settings::SettingsNavigationState::new(window, cx);
         let ui_visibility = UiVisibility::new(window.is_window_active());
         let (live_updates_enabled, live_update_activity) =
             tokio::sync::watch::channel(ui_visibility.updates_enabled());
@@ -511,8 +492,7 @@ impl RuntimePage {
             preferences_store,
             preferences,
             core_management: super::settings::CoreManagementUiState::default(),
-            settings_navigation: super::settings::SettingsNavigationState::default(),
-            app_update: super::settings::AppUpdateUiState::default(),
+            settings_navigation,
             system_proxy_session,
             traffic_history_store,
             profiles: super::profiles::ProfileLibrary::new(
@@ -532,6 +512,7 @@ impl RuntimePage {
             core_releases: super::CoreReleaseState::default(),
             data: RuntimeData::Empty,
             data_runtime_version: initial_runtime_version,
+            page_snapshots: super::state::PageSnapshots::default(),
             home: super::home::HomeUiState::default(),
             traffic_history: super::traffic::TrafficHistoryUiState::default(),
             network_probe,
@@ -551,6 +532,7 @@ impl RuntimePage {
             ui_visibility,
             live_updates_enabled,
             _subscriptions: vec![
+                settings_search_subscription,
                 connection_filter_subscription,
                 log_filter_subscription,
                 rule_filter_subscription,
@@ -566,14 +548,8 @@ impl RuntimePage {
         });
         this._subscriptions.push(feedback_subscription);
         cx.defer_in(window, |this, window, cx| this.publish_feedback(window, cx));
-        this.finish_initial_persistent_state(
-            persistent_task,
-            initial_profile,
-            initial_runtime_version,
-            cx,
-        );
+        this.finish_initial_persistent_state(persistent_task, initial_runtime_version, cx);
         this.refresh(cx);
-        this.refresh_app_update(cx);
         if let Some(mut updates) = this.profile_service.service_updates() {
             cx.spawn(async move |this, cx| {
                 while updates.changed().await.is_ok() {
@@ -608,56 +584,37 @@ impl RuntimePage {
     fn finish_initial_persistent_state(
         &self,
         task: tokio::task::JoinHandle<InitialPersistentState>,
-        profile: Option<std::path::PathBuf>,
         runtime_version: u64,
         cx: &mut Context<Self>,
     ) {
-        let window_handle = self.window_handle;
         cx.spawn(async move |this, cx| {
             let result = task.await;
-            let _ = cx.update_window(window_handle, |_, window, cx| {
-                let _ = this.update(cx, |this, cx| {
-                    this.persistent_loading = false;
-                    this.config_inputs_loading = false;
-                    match result {
-                        Ok(state) => {
-                            this.profiles.store = state.profile_store;
-                            if this.profiles.generation == 0 {
-                                this.profiles
-                                    .forms
-                                    .catalog_view
-                                    .prepare(&state.profile_catalog);
-                                this.profiles.catalog = state.profile_catalog;
-                            }
-                            this.overrides.store = state.override_store;
-                            this.overrides.catalog = state.override_catalog;
-                            if this.profile_service.is_current(runtime_version) {
-                                this.controlled_config = state.controlled_config;
-                                this.error = state.error;
-                            } else {
-                                this.reload_controlled_config(cx);
-                            }
-                            if this.profile_path == profile
-                                && this.config_inputs_generation == 0
-                                && this.profile_service.is_current(runtime_version)
-                            {
-                                let config = config_input_snapshot(state.effective_config);
-                                this.config_inputs.refresh(
-                                    &config,
-                                    this.profile_path.as_deref(),
-                                    window,
-                                    cx,
-                                );
-                                this.effective_config = config;
-                                this.config_inputs_profile = profile;
-                            } else {
-                                this.invalidate_config_inputs(cx);
-                            }
+            let _ = this.update(cx, |this, cx| {
+                this.persistent_loading = false;
+                this.config_inputs_loading = false;
+                match result {
+                    Ok(state) => {
+                        this.profiles.store = state.profile_store;
+                        if this.profiles.generation == 0 {
+                            this.profiles
+                                .forms
+                                .catalog_view
+                                .prepare(&state.profile_catalog);
+                            this.profiles.catalog = state.profile_catalog;
                         }
-                        Err(error) => this.error = Some(error.to_string()),
+                        this.overrides.store = state.override_store;
+                        this.overrides.catalog = state.override_catalog;
+                        if this.profile_service.is_current(runtime_version) {
+                            this.controlled_config = state.controlled_config;
+                            this.error = state.error;
+                        } else {
+                            this.reload_controlled_config(cx);
+                        }
                     }
-                    cx.notify();
-                });
+                    Err(error) => this.error = Some(error.to_string()),
+                }
+                this.refresh_config_inputs(cx);
+                cx.notify();
             });
         })
         .detach();
@@ -716,6 +673,13 @@ impl RuntimePage {
             return;
         }
         let previous_page = self.page;
+        let close_subscription = previous_page == Page::Profiles && self.profiles.forms.adding_subscription;
+        if close_subscription { self.profiles.forms.adding_subscription = false; }
+
+        let config = matches!(page, Page::Dns | Page::Sniffer)
+            .then(|| self.config().cloned())
+            .flatten();
+        self.retain_page_snapshot();
         if self.page == Page::Network {
             self.cancel_network_probe();
         }
@@ -742,19 +706,32 @@ impl RuntimePage {
                 }
                 let focus = page.focus_handle.clone();
                 let _ = cx.update_window(page.window_handle, |_, window, cx| {
+                    if close_subscription { window.close_dialog(cx); }
                     focus.focus(window, cx);
                 });
             });
         });
-        self.data = RuntimeData::Empty;
         self.connections.release_presentation();
         self.rules.release_presentation();
         self.invalidate_page_load();
+        let runtime_version = self.core_session.generation();
+        self.data = self.page_snapshots.take(self.page, runtime_version);
+        if matches!(self.data, RuntimeData::Empty)
+            && self.data_runtime_version == runtime_version
+            && let Some(config) = config
+        {
+            self.data = RuntimeData::Config(config);
+        }
+        self.data_runtime_version = runtime_version;
+        self.prepare_home_projection();
+        self.update_connection_presentation(cx);
+        self.update_rule_presentation(cx);
         self.error = None;
         self.notice = None;
         if self.live_updates_enabled() {
             self.refresh_visible_page(cx);
         }
+        cx.notify();
     }
 
     pub(crate) fn set_presented(&mut self, presented: bool, cx: &mut Context<Self>) {
@@ -775,13 +752,26 @@ impl RuntimePage {
         }
         if !visible && !self.core_busy() {
             self.release_inactive_page_data();
+            self.page_snapshots.clear();
         }
         let was_enabled = self.ui_visibility.updates_enabled();
         self.ui_visibility.window_visible = visible;
         self.update_live_update_activity(was_enabled, cx);
     }
 
+    fn retain_page_snapshot(&mut self) {
+        let data = std::mem::replace(&mut self.data, RuntimeData::Empty);
+        if !self.core_busy()
+            && self.rules.pending.is_empty()
+            && self.rules.confirmed_disabled.is_empty()
+        {
+            self.page_snapshots
+                .store(self.page, self.data_runtime_version, data);
+        }
+    }
+
     fn release_inactive_page_data(&mut self) {
+        self.retain_page_snapshot();
         self.release_home_presentation();
         self.logs.release_results();
         if self.page == Page::Network {
@@ -811,7 +801,9 @@ impl RuntimePage {
     fn update_live_update_activity(&mut self, was_enabled: bool, cx: &mut Context<Self>) {
         let enabled = self.ui_visibility.updates_enabled();
         if !enabled {
-            self.release_home_presentation();
+            if !self.ui_visibility.window_visible || !self.ui_visibility.page_presented {
+                self.release_home_presentation();
+            }
             if self.network_probe.loading {
                 self.cancel_network_probe();
             }
@@ -830,6 +822,13 @@ impl RuntimePage {
         }
         self.live_updates_enabled.send_replace(enabled);
         if enabled {
+            if matches!(self.data, RuntimeData::Empty) {
+                let version = self.core_session.generation();
+                self.data = self.page_snapshots.take(self.page, version);
+                self.data_runtime_version = version;
+                self.prepare_home_projection();
+                self.update_connection_presentation(cx);
+            }
             self.refresh_visible_page(cx);
             self.update_rule_presentation(cx);
             cx.notify();
@@ -846,11 +845,8 @@ impl RuntimePage {
             self.reload_profile_catalog(cx);
         }
         self.refresh(cx);
-        if self.page == Page::Settings {
+        if self.page == Page::Mihomo {
             self.refresh_core_management(cx);
-            if !self.app_update.checked {
-                self.refresh_app_update(cx);
-            }
         }
         if self.page == Page::Traffic {
             self.refresh_traffic_history(cx);
@@ -905,7 +901,7 @@ impl RuntimePage {
                             break;
                         }
                     }
-                    () = tokio::time::sleep(LIVE_UPDATE_INTERVAL) => {
+                    () = cx.background_executor().timer(LIVE_UPDATE_INTERVAL) => {
                         if this.update(cx, |this, cx| {
                             let actions = schedule.tick(
                                 this.page,
@@ -952,9 +948,16 @@ impl RuntimePage {
         let page = self.page;
         let client = self.client.clone();
         let core = self.core_session.clone();
-        let task = self
-            .runtime
-            .spawn(async move { load_page_with_core(client, page, Some(core)).await });
+        let task = self.runtime.spawn(async move {
+            let started = std::time::Instant::now();
+            let result = load_page_with_core(client, page, Some(core)).await;
+            tracing::debug!(
+                ?page,
+                elapsed_ms = started.elapsed().as_millis(),
+                "loaded runtime page"
+            );
+            result
+        });
         self.page_read_task.replace(&task);
         cx.spawn(async move |this, cx| {
             let result = match task.await {
@@ -1126,10 +1129,16 @@ impl RuntimePage {
         let controlled = self.controlled_config_store.clone();
         let overrides = self.enabled_override_paths();
         let task = self.runtime.spawn_blocking(move || {
-            controlled
+            let started = std::time::Instant::now();
+            let result = controlled
                 .effective_json_with_overrides(profile, &overrides)
                 .map(config_input_snapshot)
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string());
+            tracing::debug!(
+                elapsed_ms = started.elapsed().as_millis(),
+                "loaded configuration form snapshot"
+            );
+            result
         });
         let window_handle = self.window_handle;
         cx.spawn(async move |this, cx| {
@@ -1142,6 +1151,8 @@ impl RuntimePage {
                     if !token
                         .is_current(this.profile_path.as_deref(), this.config_inputs_generation)
                     {
+                        this.config_inputs_loading = false;
+                        this.refresh_config_inputs(cx);
                         return;
                     }
                     this.config_inputs_loading = false;
@@ -1170,8 +1181,8 @@ impl RuntimePage {
     }
 
     pub(super) fn invalidate_config_inputs(&mut self, cx: &mut Context<Self>) {
+        self.page_snapshots.clear();
         self.config_inputs_generation = self.config_inputs_generation.wrapping_add(1);
-        self.config_inputs_loading = false;
         self.config_inputs_profile = None;
         self.refresh_config_inputs(cx);
     }
@@ -1253,6 +1264,7 @@ impl RuntimePage {
             return None;
         }
         let mutation = self.mutations.begin(domain)?;
+        self.page_snapshots.clear();
         if matches!(
             domain,
             super::busy::MutationDomain::Core

@@ -66,11 +66,10 @@ The TUN service for all three platforms is being implemented according to the [d
 Run from the repository root on macOS or Linux:
 
 ```sh
-ZENCLASH_MIHOMO_BINARY=/absolute/path/to/mihomo \
-  cargo run --locked -p zenclash-ui --bin zenclash
+cargo run --locked -p zenclash-ui --bin zenclash
 ```
 
-In Windows PowerShell, set the core path with `$env:ZENCLASH_MIHOMO_BINARY = 'C:\path\to\mihomo.exe'`, then run the same `cargo run` command.
+Use the same command in Windows PowerShell. Mihomo is discovered from the data directory's `mihomo/cores`, bundled resources, the repository's `bin`, or `PATH`. You can also select a file in Settings → Runtime Core. Executable environment overrides are no longer read for Mihomo. The default managed Windows path is `%LOCALAPPDATA%\ZenClash\mihomo\cores\mihomo.exe`.
 
 Check formatting and run tests before submitting changes:
 

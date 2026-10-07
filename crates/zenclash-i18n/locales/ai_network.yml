@@ -1,0 +1,198 @@
+_version: 2
+
+ai_network:
+  partial:
+    zh-CN: 部分检测完成
+    en: Partially tested
+  title:
+    zh-CN: "AI 网络环境诊断"
+    en: "AI network diagnostics"
+  open:
+    zh-CN: "AI 网络环境诊断…"
+    en: "AI network diagnostics…"
+  subtitle:
+    zh-CN: "检查 AI 工具使用的网络环境，定位异常并查看建议"
+    en: "Inspect network conditions for AI tools and review diagnostic observations"
+  exit_ip:
+    zh-CN: "出口 IP"
+    en: "Exit IP"
+  proxy:
+    zh-CN: "代理配置"
+    en: "Proxy settings"
+  ipv6:
+    zh-CN: "IPv6 路径"
+    en: "IPv6 path"
+  dns:
+    zh-CN: "DNS 来源"
+    en: "DNS servers"
+  risk:
+    zh-CN: "IP 风险"
+    en: "IP risk"
+  timezone:
+    zh-CN: "时区一致性"
+    en: "Time zones"
+  claude:
+    zh-CN: "Claude 端点"
+    en: "Claude endpoint"
+  unavailable:
+    zh-CN: "检测未完成"
+    en: "Check unavailable"
+  retry_hint:
+    zh-CN: "数据源不可用或响应无效，请稍后重测"
+    en: "The source is unavailable or returned invalid data. Retry later."
+  ipv6_found:
+    zh-CN: "本机 IPv6 出口可达；需核对是否经过 TUN，不能据此断言泄露"
+    en: "Host IPv6 is reachable. Check TUN routing; this alone does not establish a leak."
+  ipv6_missing:
+    zh-CN: "未获取到 IPv6 出口"
+    en: "No IPv6 exit obtained"
+  ipv6_unknown:
+    zh-CN: "可能未启用 IPv6，也可能是请求失败，无法据此确定已禁用"
+    en: "IPv6 may be unavailable or the request may have failed; this does not prove it is disabled."
+  risk_result:
+    zh-CN: "风险评分 %{score} / 100 · %{spam}"
+    en: "Risk score %{score} / 100 · %{spam}"
+  spam_found:
+    zh-CN: "发现滥用记录"
+    en: "Abuse record found"
+  spam_clear:
+    zh-CN: "未发现滥用记录"
+    en: "No abuse record found"
+  spam_unknown:
+    zh-CN: "滥用记录未确认"
+    en: "Abuse status unknown"
+  risk_source:
+    zh-CN: "来源：proxycheck.io / StopForumSpam；缺失的数据不代表低风险"
+    en: "Sources: proxycheck.io / StopForumSpam. Missing data does not mean low risk."
+  proxy_result:
+    zh-CN: "系统代理：%{system} · Mihomo TUN 配置：%{tun}"
+    en: "System proxy: %{system} · Mihomo TUN setting: %{tun}"
+  proxy_detail:
+    zh-CN: "本进程代理变量：%{env}。配置开启不等于所有 AI 工具流量已代理"
+    en: "This process's proxy variables: %{env}. Configured proxies do not prove other AI tools use them."
+  unset:
+    zh-CN: "未设置"
+    en: "Not set"
+  enabled:
+    zh-CN: "已开启"
+    en: "Enabled"
+  disabled:
+    zh-CN: "未开启"
+    en: "Disabled"
+  unknown:
+    zh-CN: "无法判断"
+    en: "Unknown"
+  dns_missing:
+    zh-CN: "未获取到系统 DNS"
+    en: "System DNS unavailable"
+  dns_domestic:
+    zh-CN: "匹配到已知国内 DNS；请结合代理 DNS 设置和实际解析路径检查"
+    en: "Known mainland China DNS detected. Check proxy DNS settings and the actual resolution path."
+  dns_observation:
+    zh-CN: "仅显示系统配置的 DNS，不代表实际解析出口；私网地址需进一步核对"
+    en: "System DNS settings only, not the actual resolver exit. Private addresses need further investigation."
+  matching:
+    zh-CN: "一致"
+    en: "Matching"
+  different_identifier:
+    zh-CN: "标识不同"
+    en: "Different identifiers"
+  timezone_result:
+    zh-CN: "CLI：%{cli} · 系统：%{system}"
+    en: "CLI: %{cli} · System: %{system}"
+  timezone_detail:
+    zh-CN: "系统 %{system} · 本进程 CLI %{cli} → 出口 %{exit}；不同名称可能为等价时区"
+    en: "System %{system} · Process CLI %{cli} → Exit %{exit}. Different names may be equivalent zones."
+  claude_default:
+    zh-CN: "检测到本地安装痕迹，未设置自定义端点；实际 CLI 或项目配置可能覆盖"
+    en: "Local installation detected, no custom endpoint found. CLI or project settings may override it."
+  claude_missing:
+    zh-CN: "未检测到 Claude Code"
+    en: "Claude Code not detected"
+  claude_scope:
+    zh-CN: "仅检查本进程环境与用户配置，不代表其他终端或桌面端设置"
+    en: "Checks this process and user settings, not other terminals or the desktop app."
+  claude_official:
+    zh-CN: "官方端点配置；未测试认证或服务可用性"
+    en: "Official endpoint configuration; authentication and availability not tested."
+  claude_custom:
+    zh-CN: "自定义端点，请核对服务商；可能是其他模型服务或中转"
+    en: "Custom endpoint. Verify the provider; it may be another model service or a relay."
+  config_unavailable:
+    zh-CN: "尚未获取运行配置，请关闭弹窗并刷新网络诊断后重试"
+    en: "Runtime configuration unavailable. Close this dialog, refresh network diagnostics, then retry."
+  pending:
+    zh-CN: "待检测"
+    en: "Pending"
+  testing:
+    zh-CN: "检测中"
+    en: "Testing"
+  retest:
+    zh-CN: "重测"
+    en: "Retest"
+  observed:
+    zh-CN: "已检测"
+    en: "Observed"
+  passed:
+    zh-CN: "正常"
+    en: "Passed"
+  attention:
+    zh-CN: "需关注"
+    en: "Attention"
+  high_risk:
+    zh-CN: "高风险"
+    en: "High risk"
+  route_host:
+    zh-CN: "检测路径：本机网络（不使用应用代理，系统 TUN 仍可能接管）"
+    en: "Route: host network (no application proxy; system TUN may still intercept)"
+  route_mihomo:
+    zh-CN: "检测路径：Mihomo 代理；IPv6 单独检测本机路径"
+    en: "Route: Mihomo proxy; IPv6 checks the host route separately"
+  stopped:
+    zh-CN: "已停止"
+    en: "Stopped"
+  completed:
+    zh-CN: "检测完成"
+    en: "Completed"
+  ready:
+    zh-CN: "准备检测"
+    en: "Ready to test"
+  ready_hint:
+    zh-CN: "点击“开始测试”检查全部 7 项，也可单项测试"
+    en: "Run all seven checks, or test an individual item"
+  counts:
+    zh-CN: "%{done} 项已完成 · %{attention} 项需关注 · %{unknown} 项无法判断 · 本轮耗时 %{seconds} 秒"
+    en: "%{done} completed · %{attention} need attention · %{unknown} unknown · Run duration %{seconds} s"
+  findings:
+    zh-CN: "发现需要关注的网络配置或风险信号"
+    en: "Network settings or risk signals need attention"
+  findings_hint:
+    zh-CN: "请查看下方提示，调整相关设置后重测对应项目"
+    en: "Review the observations below and retest after adjusting the relevant settings"
+  column_check:
+    zh-CN: "检测项目"
+    en: "Check"
+  column_result:
+    zh-CN: "检测结果"
+    en: "Result"
+  column_status:
+    zh-CN: "状态"
+    en: "Status"
+  disclaimer:
+    zh-CN: "仅用于网络排查，不代表账号安全结论"
+    en: "For network troubleshooting; not an account safety assessment"
+  copied:
+    zh-CN: "已复制"
+    en: "Copied"
+  copy:
+    zh-CN: "复制报告"
+    en: "Copy report"
+  stop:
+    zh-CN: "停止测试"
+    en: "Stop"
+  run_again:
+    zh-CN: "重新测试"
+    en: "Test again"
+  run:
+    zh-CN: "开始测试"
+    en: "Start test"

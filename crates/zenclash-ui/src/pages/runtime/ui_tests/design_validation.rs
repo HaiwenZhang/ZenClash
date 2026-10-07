@@ -191,6 +191,12 @@ fn native_pages_render_for_design_validation() {
                             Page::Logs,
                             Page::Network,
                             Page::Settings,
+                            Page::SystemProxy,
+                            Page::Tun,
+                            Page::Dns,
+                            Page::Sniffer,
+                            Page::Resources,
+                            Page::Mihomo,
                         ] {
                             cx.update(|cx| {
                                 cx.update_window(window.into(), |_, window, cx| {
@@ -201,7 +207,6 @@ fn native_pages_render_for_design_validation() {
                                         page.persistent_loading = false;
                                         page.startup_error = None;
                                         page.error = None;
-                                        page.app_update = Default::default();
                                         page.ui_visibility = lifecycle::UiVisibility::new(true);
                                         page.live_updates_enabled.send_replace(false);
                                         page.settings_navigation
@@ -218,6 +223,11 @@ fn native_pages_render_for_design_validation() {
                                                 || fixture_data(destination),
                                                 |(_, data)| data.clone(),
                                             );
+                                        if live.is_none() && destination.is_settings() {
+                                            let config = settings_fixture_config();
+                                            page.controlled_config = config.clone();
+                                            page.config_inputs.refresh(&config, page.profile_path.as_deref(), window, cx);
+                                        }
                                         if let RuntimeData::Connections(snapshot) = &data {
                                             page.connections.expanded = snapshot
                                                 .connections
@@ -305,19 +315,34 @@ fn native_pages_render_for_design_validation() {
                                 .update(|cx| {
                                     cx.update_window(window.into(), |_, window, cx| {
                                         window.render_frame(cx);
-                                        if destination == Page::Settings {
-                                            for (index, section) in [(1_usize, "network"), (2, "data"), (3, "about")] {
-                                                window.click(("settings-section", index), cx);
-                                                window.render_frame(cx);
-                                                window.render_to_image().map_err(|error| error.to_string())?.save(output.join(format!("settings-{section}-{suffix}{viewport}.png"))).map_err(|error| error.to_string())?;
-                                                if index == 1 {
-                                                    window.click("settings-advanced-network", cx);
-                                                    window.render_frame(cx);
-                                                    window.render_to_image().map_err(|error| error.to_string())?.save(output.join(format!("settings-network-expanded-{suffix}{viewport}.png"))).map_err(|error| error.to_string())?;
-                                                    window.click("settings-advanced-network", cx);
-                                                }
+                                        if live.is_none() && width >= 1280. && matches!(destination, Page::Dns | Page::SystemProxy) {
+                                            let trigger = if destination == Page::Dns { "settings-edit-settings_redesign.dns_nameserver" } else { "edit-system-proxy" };
+                                            window.click(trigger, cx);
+                                            window.render_frame(cx);
+                                            window.render_frame(cx);
+                                            if !window.has_active_dialog(cx) { return Err(format!("{trigger} did not open a dialog")); }
+                                            window.render_to_image().map_err(|error| error.to_string())?.save(output.join(format!("{}-editor-{suffix}{viewport}.png", destination.route()))).map_err(|error| error.to_string())?;
+                                            window.press("escape", cx);
+                                            window.render_frame(cx);
+                                        }
+                                        if live.is_none() && destination == Page::Profiles {
+                                            window.click("toggle-add-subscription", cx);
+                                            window.render_frame(cx);
+                                            window.render_frame(cx);
+                                            if !window.has_active_dialog(cx) { return Err("subscription add must open a dialog".into()); }
+                                            if !window.find("download-subscription").visible() || !window.find("cancel-add-subscription").visible() {
+                                                return Err("subscription dialog actions are clipped".into());
                                             }
-                                            window.click(("settings-section", 0_usize), cx);
+                                            window.render_to_image().map_err(|error| error.to_string())?.save(output.join(format!("subscription-add-{suffix}{viewport}.png"))).map_err(|error| error.to_string())?;
+                                            window.press("escape", cx);
+                                            window.render_frame(cx);
+                                        }
+                                        if live.is_none() && width >= 1280. && destination == Page::Dns {
+                                            window.click("dns-mode", cx);
+                                            window.render_frame(cx);
+                                            window.render_frame(cx);
+                                            window.render_to_image().map_err(|error| error.to_string())?.save(output.join(format!("dns-choice-{suffix}{viewport}.png"))).map_err(|error| error.to_string())?;
+                                            window.press("escape", cx);
                                             window.render_frame(cx);
                                         }
                                         if destination == Page::Rules {
@@ -471,7 +496,7 @@ fn native_pages_render_for_design_validation() {
                                             Page::Profiles => if width >= 1088. { &["profiles-catalog-region", "profiles-inspector-region"] } else { &["profiles-catalog-region"] },
                                             Page::Rules => &["rules-table-panel"],
                                             Page::Logs => &["logs-table"],
-                                            Page::Settings => &["settings-appearance-card", "settings-startup-card"],
+                                            Page::Settings => &["settings-appearance-card"],
                                             _ => &[],
                                         };
                                         let mut geometry = serde_json::Map::new();
@@ -689,6 +714,13 @@ fn fixture_data(page: Page) -> RuntimeData {
             config: Some(RuntimeConfig::default()),
             autostart: Ok(AutostartStatus::default()),
         },
+        Page::Dns | Page::Sniffer => RuntimeData::Config(serde_json::from_value(settings_fixture_config()).unwrap()),
+        Page::Tun => RuntimeData::Tun { config: serde_json::from_value(settings_fixture_config()).unwrap(), permissions: Observation::Loading },
+        Page::SystemProxy => RuntimeData::SystemProxy { config: serde_json::from_value(settings_fixture_config()).unwrap(), status: SystemProxyStatus::default() },
+        Page::Resources => RuntimeData::Resources { config: serde_json::from_value(settings_fixture_config()).unwrap(),
+            proxy: serde_json::from_value(json!({"providers":{"Daily Network":{"name":"Daily Network","proxies":[{}, {}, {}],"updatedAt":"2026-10-07 10:30","vehicleType":"HTTP"}}})).unwrap(),
+            rules: serde_json::from_value(json!({"providers":{"applications":{"name":"applications","ruleCount":1432,"updatedAt":"2026-10-07 09:30","vehicleType":"HTTP","behavior":"classical","format":"mrs"},"private":{"name":"private","ruleCount":28,"vehicleType":"File","behavior":"ipcidr","format":"yaml"}}})).unwrap() },
+        Page::Mihomo => RuntimeData::Core { config: serde_json::from_value(settings_fixture_config()).unwrap(), version: Default::default() },
         Page::Network => RuntimeData::Network {
             config: RuntimeConfig {
                 ipv6: true,
@@ -699,4 +731,19 @@ fn fixture_data(page: Page) -> RuntimeData {
         },
         _ => RuntimeData::Empty,
     }
+}
+
+fn settings_fixture_config() -> serde_json::Value {
+    json!({
+        "mixed-port":7890,"port":7891,"socks-port":7892,"bind-address":"127.0.0.1","log-level":"info","interface-name":"",
+        "ipv6":true,"tcp-concurrent":true,"unified-delay":true,
+        "dns":{"enable":true,"enhanced-mode":"fake-ip","fake-ip-range":"198.18.0.1/16","fake-ip-filter-mode":"blacklist",
+            "nameserver":["https://dns.alidns.com/dns-query"],"default-nameserver":["223.5.5.5"],"proxy-server-nameserver":["https://1.1.1.1/dns-query"],
+            "direct-nameserver":["223.5.5.5"],"fallback":["https://dns.google/dns-query"],"fake-ip-filter":["*.lan","localhost"],
+            "fallback-filter":{"geoip":true,"geoip-code":"CN","ipcidr":["240.0.0.0/4"]},"nameserver-policy":{"*.example.com":"223.5.5.5"},"ipv6":true,"use-hosts":true,"use-system-hosts":true,"respect-rules":true},
+        "hosts":{"router.local":"192.168.1.1"},
+        "tun":{"enable":false,"stack":"mixed","device":"ZenClash","mtu":1500,"dns-hijack":["any:53"],"auto-route":true,"auto-detect-interface":true,"strict-route":false,"route-exclude-address":["192.168.0.0/16"]},
+        "sniffer":{"enable":true,"force-dns-mapping":true,"parse-pure-ip":true,"override-destination":true,"sniff":{"HTTP":{"ports":[80,"8080-8880"]},"TLS":{"ports":[443,8443]},"QUIC":{"ports":[443,8443]}},"skip-domain":["*.apple.com"],"skip-dst-address":["192.168.0.0/16"]},
+        "geodata-mode":true,"geo-auto-update":true,"geo-update-interval":24,"geox-url":{"geoip":"https://example.com/geoip.dat","geosite":"https://example.com/geosite.dat"},"external-ui-url":"https://example.com/dashboard.zip"
+    })
 }

@@ -9,7 +9,7 @@ enum IconGenerationError: Error, CustomStringConvertible {
     var description: String {
         switch self {
         case .invalidSource(let url):
-            return "Cannot load SVG source at \(url.path)"
+            return "Cannot load icon source at \(url.path)"
         case .bitmapCreationFailed(let size):
             return "Cannot create a \(size)x\(size) bitmap"
         case .pngEncodingFailed(let size):
@@ -21,7 +21,7 @@ enum IconGenerationError: Error, CustomStringConvertible {
 let fileManager = FileManager.default
 let scriptURL = URL(fileURLWithPath: #filePath).standardizedFileURL
 let projectRoot = scriptURL.deletingLastPathComponent().deletingLastPathComponent()
-let sourceURL = projectRoot.appendingPathComponent("platforms/branding/zenclash-app-icon.svg")
+let sourceURL = projectRoot.appendingPathComponent("crates/zenclash-ui/assets/zenclash-logo.png")
 let macOSDirectory = projectRoot.appendingPathComponent("platforms/macos")
 let windowsDirectory = projectRoot.appendingPathComponent("platforms/windows")
 let sourceImage = NSImage(contentsOf: sourceURL)

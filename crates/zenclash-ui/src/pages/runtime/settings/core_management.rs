@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use super::super::{
-    Button, ButtonVariants, Context, CoreBinaryInfo, CoreKind, Disableable, FluentBuilder, Icon,
-    IconName, IntoElement, MihomoLaunchConfig, Page, ParentElement, PathPromptOptions, RuntimeData,
+    Button, ButtonVariants, Context, CoreBinaryInfo, CoreKind, Disableable, FluentBuilder,
+    IconName, IntoElement, MihomoLaunchConfig, ParentElement, PathPromptOptions, RuntimeData,
     RuntimePage, Selectable, Sizable, Styled, div, h_flex, px, setting_card, v_flex,
 };
 
@@ -43,137 +43,149 @@ struct CoreProbeResult {
 }
 
 impl RuntimePage {
-    pub(super) fn render_core_management(
+    pub(in crate::pages::runtime) fn render_core_management(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let requested = self.preferences.core_kind;
-        let online = self.runtime_core_available();
-        let recovered = online && requested != self.core_kind;
-        let status_color = if !online {
-            theme.danger
-        } else if recovered {
-            theme.warning
-        } else {
-            theme.success
-        };
-        setting_card(zenclash_i18n::text("core_management.title"), theme)
+        let kind = self.preferences.core_kind;
+        let custom = self.preferences.core_binaries.path(kind).is_some();
+        let state = self.core_management.get(kind);
+        let locked = binary_environment_override(kind).is_some();
+        let path = self
+            .preferences
+            .core_binaries
+            .path(kind)
+            .map(|p| p.display().to_string())
+            .or_else(|| {
+                state
+                    .info
+                    .as_ref()
+                    .map(|info| info.path.display().to_string())
+            })
+            .unwrap_or_else(|| zenclash_i18n::text("core_management.status.not_checked"));
+        setting_card(zenclash_i18n::text("settings_redesign.core_source"), theme)
             .child(
                 h_flex()
-                    .min_h(px(76.))
-                    .px_4()
-                    .py_3()
-                    .gap_4()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(theme.border)
+                    .gap_3()
+                    .p_4()
                     .child(
-                        h_flex()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .size(px(38.))
-                                    .rounded(theme.radius)
-                                    .bg(status_color.opacity(0.14))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        Icon::new(if !online || recovered {
-                                            IconName::TriangleAlert
-                                        } else {
-                                            IconName::SquareTerminal
-                                        })
-                                        .size_5()
-                                        .text_color(status_color),
-                                    ),
-                            )
-                            .child(
-                                v_flex()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                            .child(if online {
-                                                zenclash_i18n::text_with(
-                                                    "core_management.summary.online",
-                                                    &[
-                                                        (
-                                                            "current",
-                                                            self.core_kind
-                                                                .display_name()
-                                                                .to_owned(),
-                                                        ),
-                                                        (
-                                                            "requested",
-                                                            requested.display_name().to_owned(),
-                                                        ),
-                                                    ],
-                                                )
-                                            } else {
-                                                zenclash_i18n::text_with(
-                                                    "core_management.summary.offline",
-                                                    &[(
-                                                        "requested",
-                                                        requested.display_name().to_owned(),
-                                                    )],
-                                                )
-                                            }),
-                                    )
-                                    .child(
-                                        div().text_xs().text_color(theme.muted_foreground).child(
-                                            if !online {
-                                                zenclash_i18n::text(
-                                                    "core_management.summary.offline_description",
-                                                )
-                                            } else if recovered {
-                                                zenclash_i18n::text(
-                                                    "core_management.summary.recovered_description",
-                                                )
-                                            } else {
-                                                zenclash_i18n::text(
-                                                    "core_management.summary.normal_description",
-                                                )
-                                            },
-                                        ),
-                                    ),
+                        Button::new(("auto-core-binary", core_index(kind)))
+                            .flex_1()
+                            .h_20()
+                            .outline()
+                            .selected(!custom)
+                            .label(zenclash_i18n::text("core_management.actions.automatic"))
+                            .when(!custom, |button| {
+                                button.custom(
+                                    gpui_kit::component::button::ButtonCustomVariant::new(cx)
+                                        .color(theme.sidebar_accent)
+                                        .foreground(theme.primary)
+                                        .active(theme.sidebar_accent),
+                                )
+                            })
+                            .disabled(self.core_busy() || state.checking || locked)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if custom {
+                                    this.use_automatic_core_binary(kind, cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new(("select-core-binary", core_index(kind)))
+                            .flex_1()
+                            .h_20()
+                            .outline()
+                            .selected(custom)
+                            .icon(IconName::FolderOpen)
+                            .label(zenclash_i18n::text("settings_redesign.custom_core"))
+                            .disabled(self.core_busy() || state.checking || locked)
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.choose_core_binary(kind, cx)
+                                }),
+                            ),
+                    ),
+            )
+            .child(super::super::info_row(
+                zenclash_i18n::text("core_page.process.binary"),
+                path,
+                theme,
+            ))
+            .child(super::super::info_row(
+                zenclash_i18n::text("core_management.status.running"),
+                self.core_kind.display_name(),
+                theme,
+            ))
+            .child(super::super::info_row(
+                zenclash_i18n::text("core_management.status.next"),
+                kind.display_name(),
+                theme,
+            ))
+            .when(locked, |view| {
+                view.child(super::super::context_note(
+                    zenclash_i18n::text("core_management.summary.environment_override"),
+                    theme,
+                ))
+            })
+            .child(
+                h_flex()
+                    .p_4()
+                    .gap_2()
+                    .child(
+                        Button::new("refresh-core-management")
+                            .outline()
+                            .small()
+                            .label(zenclash_i18n::text("core_management.summary.refresh"))
+                            .disabled(self.core_busy() || state.checking)
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.refresh_core_management(cx)),
                             ),
                     )
                     .child(
-                        Button::new("refresh-core-management")
-                            .icon(crate::assets::AppIcon::RefreshCw)
-                            .label(zenclash_i18n::text("core_management.summary.refresh"))
-                            .small()
+                        Button::new("manage-core-kinds")
                             .outline()
-                            .disabled(
-                                self.core_busy()
-                                    || self.core_management.mihomo.checking
-                                    || self.core_management.meow.checking,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.refresh_core_management(cx);
+                            .small()
+                            .label(zenclash_i18n::text("settings_redesign.manage_cores"))
+                            .on_click(cx.listener(|_, _, window, cx| {
+                                use gpui_kit::component::{ActiveTheme, WindowExt};
+                                if window.has_active_dialog(cx) {
+                                    return;
+                                }
+                                let owner = cx.entity().downgrade();
+                                window.open_dialog(cx, move |dialog, window, cx| {
+                                    let content = owner
+                                        .update(cx, |page, cx| {
+                                            let theme = cx.theme().clone();
+                                            v_flex()
+                                                .child(page.render_core_binary_row(
+                                                    CoreKind::Mihomo,
+                                                    &theme,
+                                                    cx,
+                                                ))
+                                                .child(page.render_core_binary_row(
+                                                    CoreKind::Meow,
+                                                    &theme,
+                                                    cx,
+                                                ))
+                                                .child(page.render_core_extra_network(cx))
+                                        })
+                                        .ok();
+                                    dialog
+                                        .title(zenclash_i18n::text("core_management.title"))
+                                        .bg(cx.theme().group_box)
+                                        .width(window.rem_size() * 46.)
+                                        .margin_top(
+                                            ((window.viewport_size().height
+                                                - window.rem_size() * 26.)
+                                                / 2.)
+                                                .max(window.rem_size()),
+                                        )
+                                        .when_some(content, |dialog, content| dialog.child(content))
+                                });
                             })),
                     ),
             )
-            .when(std::env::var_os("ZENCLASH_CORE").is_some(), |card| {
-                card.child(
-                    div()
-                        .px_4()
-                        .py_2()
-                        .border_b_1()
-                        .border_color(theme.warning.opacity(0.45))
-                        .bg(theme.warning.opacity(0.08))
-                        .text_xs()
-                        .text_color(theme.warning)
-                        .child(zenclash_i18n::text(
-                            "core_management.summary.environment_override",
-                        )),
-                )
-            })
-            .child(self.render_core_binary_row(CoreKind::Mihomo, theme, cx))
-            .child(self.render_core_binary_row(CoreKind::Meow, theme, cx))
     }
 
     fn render_core_binary_row(
@@ -376,10 +388,11 @@ impl RuntimePage {
             && self.data_runtime_version == self.core_session.generation()
             && matches!(
                 self.data,
-                RuntimeData::Settings {
-                    config: Some(_),
-                    ..
-                }
+                RuntimeData::Core { .. }
+                    | RuntimeData::Settings {
+                        config: Some(_),
+                        ..
+                    }
             )
     }
 
@@ -499,7 +512,7 @@ impl RuntimePage {
             cx.notify();
             return;
         };
-        let Some(token) = self.begin_mutation(Page::Settings) else {
+        let Some(token) = self.begin_mutation(self.page) else {
             return;
         };
         self.core_management.get_mut(kind).checking = true;
@@ -576,7 +589,7 @@ impl RuntimePage {
             cx.notify();
             return;
         };
-        let Some(token) = self.begin_mutation(Page::Settings) else {
+        let Some(token) = self.begin_mutation(self.page) else {
             return;
         };
         let task = self.runtime.spawn(async move {
@@ -645,7 +658,7 @@ impl RuntimePage {
             cx.notify();
             return;
         };
-        let Some(token) = self.begin_mutation(Page::Settings) else {
+        let Some(token) = self.begin_mutation(self.page) else {
             return;
         };
         let task = self.runtime.spawn(async move {
@@ -739,13 +752,7 @@ fn project_root() -> Result<PathBuf, String> {
 }
 
 fn binary_environment_override(kind: CoreKind) -> Option<&'static str> {
-    if std::env::var_os("ZENCLASH_CORE_BINARY").is_some() {
-        Some("ZENCLASH_CORE_BINARY")
-    } else if std::env::var_os(kind.binary_environment_variable()).is_some() {
-        Some(kind.binary_environment_variable())
-    } else {
-        None
-    }
+    kind.binary_environment_variable()
 }
 
 fn binary_source(kind: CoreKind, preferred: Option<&Path>) -> String {

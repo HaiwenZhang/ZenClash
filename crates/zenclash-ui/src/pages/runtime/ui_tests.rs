@@ -13,6 +13,77 @@ use zenclash_core::MihomoProcess;
 #[cfg(target_os = "windows")]
 mod design_validation;
 
+#[gpui_kit::test]
+fn returning_to_a_tab_renders_its_snapshot_while_controller_is_slow(cx: &mut TestAppContext) {
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let fixture = Fixture::with_controller(format!("http://{}", listener.local_addr().unwrap()));
+    let _runtime_context = fixture.runtime.as_ref().unwrap().enter();
+    let (window, page) = open(cx, &fixture, Page::Dns);
+    cx.update_window(window, |_, window, _| window.activate_window())
+        .unwrap();
+    cx.run_until_parked();
+    fixture.settle(cx, &page, |page| {
+        !page.persistent_loading && !page.config_inputs_loading
+    });
+    cx.update_window(window, |_, window, cx| {
+        page.update(cx, |page, cx| {
+            let token = page.page_task_token_for(Page::Dns);
+            page.replace_page_data(token, RuntimeData::Config(RuntimeConfig::default()), cx);
+            page.switch_to(Page::Sniffer, cx);
+            assert!(matches!(page.data, RuntimeData::Config(_)));
+            page.switch_to(Page::Dns, cx);
+            assert!(page.loading);
+            assert!(matches!(page.data, RuntimeData::Config(_)));
+        });
+        window.render_frame(cx);
+        window.find("save-dns-advanced");
+        page.update(cx, |page, cx| {
+            page.set_presented(false, cx);
+            page.set_presented(true, cx);
+            assert!(matches!(page.data, RuntimeData::Config(_)));
+        });
+        window.render_frame(cx);
+        window.find("save-dns-advanced");
+        page.update(cx, |page, cx| page.set_presented(false, cx));
+        window.remove_window();
+    })
+    .unwrap();
+    cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn repeated_config_invalidations_finish_with_the_latest_form_values(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (window, page) = open(cx, &fixture, Page::Profiles);
+    fixture.settle(cx, &page, |page| {
+        !page.persistent_loading && !page.config_inputs_loading
+    });
+    cx.update(|cx| {
+        page.update(cx, |page, cx| {
+            page.invalidate_config_inputs(cx);
+            assert!(page.config_inputs_loading);
+            fs::write(
+                &fixture.profile,
+                "mixed-port: 7899\nrules: [MATCH,DIRECT]\n",
+            )
+            .unwrap();
+            page.invalidate_config_inputs(cx);
+            page.invalidate_config_inputs(cx);
+            assert!(page.config_inputs_loading);
+            assert!(!page.persistent_loading);
+        })
+    });
+    fixture.settle(cx, &page, |page| !page.config_inputs_loading);
+    cx.update(|cx| {
+        assert_eq!(
+            page.read(cx).config_inputs.core.mixed_port.read(cx).value(),
+            "7899"
+        );
+    });
+    cx.update_window(window, |_, window, _| window.remove_window())
+        .unwrap();
+}
+
 pub(super) struct Fixture {
     root: PathBuf,
     managed_process: Option<Arc<MihomoProcess>>,
@@ -165,7 +236,10 @@ pub(super) fn open(
     initial: Page,
 ) -> (AnyWindowHandle, Entity<RuntimePage>) {
     cx.executor().allow_parking();
-    cx.update(gpui_kit::init);
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        cx.set_reduce_motion(true);
+    });
     let mut page = None;
     let height = if initial == Page::Settings {
         2600.
@@ -181,7 +255,7 @@ pub(super) fn open(
 }
 
 #[gpui_kit::test]
-fn subscription_form_focuses_name_and_escape_preserves_draft(cx: &mut TestAppContext) {
+fn subscription_dialog_focuses_url_and_escape_preserves_draft(cx: &mut TestAppContext) {
     let fixture = Fixture::new();
     let (window, page) = open(cx, &fixture, Page::Profiles);
     fixture.settle(cx, &page, |page| !page.persistent_loading);
@@ -194,7 +268,15 @@ fn subscription_form_focuses_name_and_escape_preserves_draft(cx: &mut TestAppCon
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
         let input = page.read(cx).profiles.forms.subscription_name.clone();
-        assert!(input.focus_handle(cx).is_focused(window));
+        assert!(window.has_active_dialog(cx));
+        assert!(
+            page.read(cx)
+                .profiles
+                .forms
+                .subscription_url
+                .focus_handle(cx)
+                .is_focused(window)
+        );
         input.update(cx, |input, cx| {
             input.set_value("unfinished draft", window, cx)
         });
@@ -315,7 +397,7 @@ fn request_editor_focuses_name_and_escape_cancels_without_saving(cx: &mut TestAp
 }
 
 #[gpui_kit::test]
-fn collapsing_subscription_form_restores_focus(cx: &mut TestAppContext) {
+fn cancelling_subscription_dialog_restores_focus(cx: &mut TestAppContext) {
     let fixture = Fixture::new();
     let (window, page) = open(cx, &fixture, Page::Profiles);
     fixture.settle(cx, &page, |page| !page.persistent_loading);
@@ -328,6 +410,7 @@ fn collapsing_subscription_form_restores_focus(cx: &mut TestAppContext) {
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
         assert!(page.read(cx).profiles.forms.adding_subscription);
+        assert!(window.has_active_dialog(cx));
         let input = page
             .read(cx)
             .profiles
@@ -337,7 +420,7 @@ fn collapsing_subscription_form_restores_focus(cx: &mut TestAppContext) {
         window.focus(&input, cx);
         window.render_frame(cx);
         assert!(input.is_focused(window));
-        window.click("toggle-add-subscription", cx);
+        window.click("cancel-add-subscription", cx);
     })
     .unwrap();
     cx.run_until_parked();
@@ -445,6 +528,8 @@ fn exercise_stop_completion(cx: &mut TestAppContext, replace_owner: bool) {
         .unwrap();
     // This tall headless viewport exercises the production action, not native layout acceptance.
     let (window, page) = open(cx, &fixture, Page::Settings);
+    // Keep geometry fixed while asserting the stop command and publication race.
+    cx.update(|cx| cx.set_reduce_motion(true));
     fixture.settle(cx, &page, |page| !page.persistent_loading);
     cx.update_window(window, |_, window, cx| {
         page.update(cx, |page, cx| {
@@ -461,6 +546,17 @@ fn exercise_stop_completion(cx: &mut TestAppContext, replace_owner: bool) {
         });
         window.render_frame(cx);
         window.click("stop-mihomo-core", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("ok").visible());
+        window.click("ok", cx);
+        assert!(
+            page.read(cx).core_busy(),
+            "confirmation must submit the stop intent"
+        );
     })
     .unwrap();
     // Do not pump the GUI while the real owned child is stopped and another owner is published.
@@ -1166,6 +1262,17 @@ fn saving_yaml_preserves_edits_made_after_submission(cx: &mut TestAppContext) {
     let submitted = "mixed-port: 7890\nmode: global\n".to_owned();
     let newer = format!("{submitted}# next edit\n");
     cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("preview-overrides", cx);
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| page.overrides.preview.is_some());
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("edit-source-profile", cx);
+    })
+    .unwrap();
+    cx.update_window(window, |_, window, cx| {
         page.update(cx, |page, cx| {
             let id = page.profiles.catalog.active.clone().unwrap();
             let original = fs::read_to_string(&fixture.profile).unwrap();
@@ -1189,6 +1296,15 @@ fn saving_yaml_preserves_edits_made_after_submission(cx: &mut TestAppContext) {
         });
         window.render_frame(cx);
         window.find("save-profile-yaml-edit");
+        assert!(window.has_active_dialog(cx));
+        window.click("cancel-profile-yaml-edit", cx);
+        assert!(!window.has_active_dialog(cx));
+        assert!(page.read(cx).overrides.editor.original.is_none());
+        assert_eq!(page.read(cx).overrides.editor.input.read(cx).value(), "");
+        assert_eq!(
+            fs::read_to_string(&fixture.profile).unwrap(),
+            "mixed-port: 7890\nrules: [MATCH,DIRECT]\n"
+        );
         window.remove_window();
     })
     .unwrap();
@@ -1821,7 +1937,7 @@ fn offline_settings_keep_local_controls_and_accessible_names(cx: &mut TestAppCon
                 ["settings-language", "settings-language"],
             ),
             (
-                "settings-startup-card",
+                "settings-appearance-card",
                 ["settings-tray-visible", "settings-tray-visible"],
             ),
         ] {
@@ -1835,14 +1951,12 @@ fn offline_settings_keep_local_controls_and_accessible_names(cx: &mut TestAppCon
                 );
             }
         }
-        assert!(window.try_find("settings-traffic-history").is_none());
-        window.click(("settings-section", 2usize), cx);
+        assert!(window.try_find("settings-traffic-history").is_some());
         assert!(window.simulate_next_frame(cx) > 0);
         window.render_frame(cx);
         assert_eq!(page.read(cx).settings_navigation.scroll.offset().y, px(0.));
         assert!(window.find("settings-traffic-history").visible());
         window.click("settings-traffic-history", cx);
-        window.click(("settings-section", 0usize), cx);
         window.render_frame(cx);
         assert_eq!(page.read(cx).settings_navigation.scroll.offset().y, px(0.));
     })
@@ -1864,11 +1978,7 @@ fn offline_settings_keep_local_controls_and_accessible_names(cx: &mut TestAppCon
         });
     });
     cx.update_window(window, |_, window, cx| {
-        window.click(("settings-section", 1_usize), cx);
-        window.render_frame(cx);
-        window.click("settings-advanced-network", cx);
-        window.render_frame(cx);
-        window.click(Page::Dns.route(), cx);
+        window.click("settings-tab-dns", cx);
     })
     .unwrap();
     cx.run_until_parked();
@@ -2583,7 +2693,6 @@ fn backup_retry_button_preserves_failed_snapshot_then_refreshes_after_success(
     let (window, page) = open(cx, &fixture, Page::Settings);
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
-        window.click(("settings-section", 2_usize), cx);
         window.render_frame(cx);
     })
     .unwrap();
@@ -2647,7 +2756,6 @@ fn late_backup_retry_refresh_cannot_replace_a_newer_profile_or_notice(cx: &mut T
     let (window, page) = open(cx, &fixture, Page::Settings);
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
-        window.click(("settings-section", 2_usize), cx);
         window.render_frame(cx);
     })
     .unwrap();
@@ -2712,7 +2820,6 @@ fn backup_retry_ignores_duplicate_click_and_synchronizes_after_navigation(cx: &m
     let (window, page) = open(cx, &fixture, Page::Settings);
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
-        window.click(("settings-section", 2_usize), cx);
         window.render_frame(cx);
     })
     .unwrap();
@@ -2764,7 +2871,6 @@ fn backup_retry_refresh_failure_keeps_the_accepted_runtime_and_reports_refresh_f
     let (window, page) = open(cx, &fixture, Page::Settings);
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
-        window.click(("settings-section", 2_usize), cx);
         window.render_frame(cx);
     })
     .unwrap();
@@ -2809,7 +2915,6 @@ fn backup_retry_is_reachable_by_tab_and_activates_once_with_enter(cx: &mut TestA
     let (window, page) = open(cx, &fixture, Page::Settings);
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
-        window.click(("settings-section", 2_usize), cx);
         window.render_frame(cx);
     })
     .unwrap();
@@ -3151,6 +3256,7 @@ fn adding_a_remote_profile_with_a_lost_response_displays_the_recovery_card(
     let (window, page) = open(cx, &fixture, Page::Profiles);
     fixture.settle(cx, &page, |page| !page.persistent_loading);
     cx.update_window(window, |_, window, cx| {
+        page.update(cx, |page, cx| page.open_subscription_dialog(window, cx));
         page.update(cx, |page, cx| {
             page.profiles.forms.adding_subscription = true;
             page.profiles.forms.subscription_route = zenclash_core::RemoteProfileRoute::Direct;
@@ -3261,7 +3367,6 @@ fn license_and_fork_notices_are_readable_with_an_offline_core(cx: &mut TestAppCo
     let (window, page) = open(cx, &fixture, Page::Settings);
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
-        window.click(("settings-section", 3_usize), cx);
         window.render_frame(cx);
     })
     .unwrap();
@@ -3401,6 +3506,21 @@ fn home_selector_cards_and_overflow_menu_apply_to_the_displayed_group(cx: &mut T
         assert!(window.try_find("home-open-proxies").is_none());
         assert!(window.try_find("home-open-profiles").is_none());
         assert!(window.try_find("home-activity-panel").is_none());
+    })
+    .unwrap();
+    VisualTestContext::from_window(window, cx).deactivate_window();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find(group_card("group-1")).selected(), Some(true));
+        assert_eq!(window.find(node_card("node-19")).selected(), Some(true));
+        window.activate_window();
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find(group_card("group-1")).selected(), Some(true));
         window.click("home-more-groups", cx);
     })
     .unwrap();
@@ -3618,4 +3738,216 @@ fn request_modal_validates_and_saves_without_resetting_download_policy(cx: &mut 
         options.authorization.as_ref().unwrap().expose_secret(),
         "Bearer fixture-secret"
     );
+}
+
+#[gpui_kit::test]
+fn settings_list_modal_stages_acceptance_and_cancels_without_saving(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (window, page) = open(cx, &fixture, Page::Dns);
+    fixture.settle(cx, &page, |page| {
+        !page.persistent_loading && !page.config_inputs_loading
+    });
+    cx.update_window(window, |_, window, cx| {
+        page.update(cx, |page, cx| {
+            page.data = RuntimeData::Config(RuntimeConfig::default());
+            page.data_runtime_version = page.core_session.generation();
+            page.error = None;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        window.click("settings-edit-settings_redesign.dns_nameserver", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.has_active_dialog(cx));
+        window.input("https://example.com/dns-query", cx);
+        assert_eq!(
+            page.read(cx).config_inputs.dns.nameserver.read(cx).value(),
+            ""
+        );
+        window.press("escape", cx);
+        window.render_frame(cx);
+        assert_eq!(
+            page.read(cx).config_inputs.dns.nameserver.read(cx).value(),
+            ""
+        );
+        window.click("settings-edit-settings_redesign.dns_nameserver", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.input("https://example.net/dns-query", cx);
+        window.click("ok", cx);
+        window.render_frame(cx);
+        assert!(!window.has_active_dialog(cx));
+        assert_eq!(
+            page.read(cx).config_inputs.dns.nameserver.read(cx).value(),
+            "https://example.net/dns-query"
+        );
+        assert!(
+            page.read(cx)
+                .controlled_config
+                .pointer("/dns/nameserver")
+                .is_none()
+        );
+        page.update(cx, |page, cx| {
+            page.config_inputs
+                .core
+                .mixed_port
+                .update(cx, |input, cx| input.set_value("7899", window, cx));
+        });
+        window.click("settings-cancel-draft", cx);
+        assert_eq!(
+            page.read(cx).config_inputs.dns.nameserver.read(cx).value(),
+            ""
+        );
+        assert_eq!(
+            page.read(cx).config_inputs.core.mixed_port.read(cx).value(),
+            "7899"
+        );
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn system_proxy_save_does_not_validate_or_apply_other_tab_drafts(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (window, page) = open(cx, &fixture, Page::SystemProxy);
+    fixture.settle(cx, &page, |page| {
+        !page.persistent_loading && !page.config_inputs_loading
+    });
+    cx.update_window(window, |_, window, cx| {
+        page.update(cx, |page, cx| {
+            page.config_inputs
+                .core
+                .mixed_port
+                .update(cx, |input, cx| input.set_value("7899", window, cx));
+            page.config_inputs.core.log_level.update(cx, |input, cx| {
+                input.set_value("unfinished-level", window, cx)
+            });
+            page.config_inputs.core.redir_port.update(cx, |input, cx| {
+                input.set_value("unfinished-port", window, cx)
+            });
+            let patch = page.config_inputs.core.listener_patch(cx).unwrap();
+            assert_eq!(patch["mixed-port"], 7899);
+            assert!(patch.get("log-level").is_none());
+            assert!(patch.get("redir-port").is_none());
+            page.config_inputs.reset_page(Page::SystemProxy, window, cx);
+            assert_eq!(page.config_inputs.core.mixed_port.read(cx).value(), "7890");
+            assert_eq!(
+                page.config_inputs.core.log_level.read(cx).value(),
+                "unfinished-level"
+            );
+        });
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn settings_enum_popover_accepts_keyboard_selection_without_saving(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let fixture = Fixture::new();
+    let (window, page) = open(cx, &fixture, Page::Dns);
+    fixture.settle(cx, &page, |page| {
+        !page.persistent_loading && !page.config_inputs_loading
+    });
+    cx.update_window(window, |_, window, cx| {
+        page.update(cx, |page, cx| {
+            page.data = RuntimeData::Config(RuntimeConfig::default());
+            page.data_runtime_version = page.core_session.generation();
+            page.config_inputs
+                .dns
+                .enhanced_mode
+                .update(cx, |input, cx| input.set_value("fake-ip", window, cx));
+            cx.notify();
+        });
+        window.render_frame(cx);
+        window.click("dns-mode", cx);
+        window.render_frame(cx);
+        assert!(
+            window.find("normal").visible(),
+            "all enum choices must be visible"
+        );
+        window.press("down", cx);
+        window.press("enter", cx);
+        window.render_frame(cx);
+        assert_eq!(
+            page.read(cx)
+                .config_inputs
+                .dns
+                .enhanced_mode
+                .read(cx)
+                .value(),
+            "redir-host"
+        );
+        assert!(
+            page.read(cx)
+                .controlled_config
+                .pointer("/dns/enhanced-mode")
+                .is_none()
+        );
+        window.click("dns-mode", cx);
+        window.render_frame(cx);
+        window.press("down", cx);
+        window.press("escape", cx);
+        assert_eq!(
+            page.read(cx)
+                .config_inputs
+                .dns
+                .enhanced_mode
+                .read(cx)
+                .value(),
+            "redir-host"
+        );
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn app_update_check_opens_placeholder_dialog(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let fixture = Fixture::new();
+    let (window, page) = open(cx, &fixture, Page::Settings);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("check-app-update", cx);
+        window.render_frame(cx);
+        assert!(window.has_active_dialog(cx));
+        window.click("app-update-close", cx);
+        window.render_frame(cx);
+        assert!(!window.has_active_dialog(cx));
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn missing_network_modes_display_core_defaults_and_keep_explicit_values(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (window, page) = open(cx, &fixture, Page::Dns);
+    fixture.settle(cx, &page, |page| {
+        !page.persistent_loading && !page.config_inputs_loading
+    });
+    cx.update_window(window, |_, window, cx| {
+        let mut inputs = ConfigInputs::new(&serde_json::json!({}), None, window, cx);
+        assert_eq!(inputs.tun.stack.read(cx).value(), "gvisor");
+        assert_eq!(inputs.dns.enhanced_mode.read(cx).value(), "redir-host");
+        inputs.refresh(
+            &serde_json::json!({"tun":{"stack":"mixed"},"dns":{"enhanced-mode":"fake-ip"}}),
+            None,
+            window,
+            cx,
+        );
+        assert_eq!(inputs.tun.stack.read(cx).value(), "mixed");
+        assert_eq!(inputs.dns.enhanced_mode.read(cx).value(), "fake-ip");
+        window.remove_window();
+    })
+    .unwrap();
 }

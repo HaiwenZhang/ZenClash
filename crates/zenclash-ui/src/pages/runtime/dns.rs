@@ -1,22 +1,95 @@
+use super::settings::forms::{
+    SettingsField, settings_input_row as config_input_row, settings_status,
+    settings_switch as setting_switch,
+};
 use super::{
     Button, ButtonVariants, Context, Disableable, IconName, Input, IntoElement, ParentElement,
-    RuntimePage, Styled, config_input_row, empty_dash, h_flex, info_row, json, setting_card,
-    setting_switch, v_flex,
+    RuntimePage, Styled, h_flex, json, setting_card, v_flex,
 };
-use gpui_kit::component::input::Textarea;
+use gpui_kit::prelude::FluentBuilder;
 
 impl RuntimePage {
     pub(super) fn render_dns(
         &self,
+        compact: bool,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         v_flex()
             .gap_4()
-            .child(self.render_dns_switches(theme, cx))
-            .child(self.render_dns_resolvers(theme))
-            .child(self.render_dns_policy(theme, cx))
+            .child(self.render_dns_enable(theme, cx))
+            .child(
+                h_flex()
+                    .items_start()
+                    .gap_4()
+                    .when(compact, |view| view.flex_col())
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .when(compact, |view| view.w_full())
+                            .child(self.render_dns_resolvers(theme, cx)),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_4()
+                            .when(compact, |view| view.w_full())
+                            .child(self.render_dns_switches(theme, cx))
+                            .child(self.render_dns_policy(theme, cx)),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(self.settings_cancel(cx))
+                    .child(
+                        Button::new("save-dns-advanced")
+                            .icon(IconName::Check)
+                            .label(zenclash_i18n::text("common.actions.save"))
+                            .primary()
+                            .loading(self.core_busy())
+                            .disabled(self.core_busy())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                match this.config_inputs.dns.patch(cx) {
+                                    Ok(patch) => this.apply_controlled_config(
+                                        patch,
+                                        zenclash_i18n::text("dns.notices.advanced"),
+                                        cx,
+                                    ),
+                                    Err(error) => {
+                                        this.error = Some(error);
+                                        cx.notify();
+                                    }
+                                }
+                            })),
+                    ),
+            )
             .into_any_element()
+    }
+
+    fn render_dns_enable(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        settings_status(
+            zenclash_i18n::text("settings_redesign.dns_title"),
+            zenclash_i18n::text("dns.status.enable_description"),
+            self.controlled_bool("/dns/enable", true),
+            "dns-enable",
+            theme,
+            cx.listener(|this, checked, _, cx| {
+                this.patch_dns_bool(
+                    "enable",
+                    *checked,
+                    zenclash_i18n::text("dns.notices.enabled"),
+                    cx,
+                );
+            }),
+        )
     }
 
     fn render_dns_switches(
@@ -24,37 +97,7 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
-        let config = self.config().cloned().unwrap_or_default();
-        setting_card(zenclash_i18n::text("dns.status.title"), theme)
-            .child(setting_switch(
-                zenclash_i18n::text("dns.status.enable"),
-                zenclash_i18n::text("dns.status.enable_description"),
-                self.controlled_bool("/dns/enable", true),
-                "dns-enable",
-                theme,
-                cx.listener(|this, checked, _, cx| {
-                    this.patch_dns_bool(
-                        "enable",
-                        *checked,
-                        zenclash_i18n::text("dns.notices.enabled"),
-                        cx,
-                    );
-                }),
-            ))
-            .child(setting_switch(
-                "Fallback GeoIP",
-                zenclash_i18n::text("dns.status.fallback_geoip_description"),
-                self.controlled_bool("/dns/fallback-filter/geoip", true),
-                "dns-fallback-geoip",
-                theme,
-                cx.listener(|this, checked, _, cx| {
-                    this.apply_controlled_config(
-                        json!({"dns": {"fallback-filter": {"geoip": *checked}}}),
-                        zenclash_i18n::text("dns.notices.fallback_geoip"),
-                        cx,
-                    );
-                }),
-            ))
+        setting_card(zenclash_i18n::text("settings_redesign.behavior"), theme)
             .child(setting_switch(
                 zenclash_i18n::text("dns.status.ipv6"),
                 zenclash_i18n::text("dns.status.ipv6_description"),
@@ -115,20 +158,6 @@ impl RuntimePage {
                     );
                 }),
             ))
-            .child(info_row(
-                zenclash_i18n::text("dns.status.tun_hijack"),
-                empty_dash(&config.tun.dns_hijack.join(", ")),
-                theme,
-            ))
-            .child(info_row(
-                zenclash_i18n::text("dns.status.sniffer_mapping"),
-                if config.sniffing.force_dns_mapping {
-                    zenclash_i18n::text("common.status.yes")
-                } else {
-                    zenclash_i18n::text("common.status.no")
-                },
-                theme,
-            ))
     }
 
     fn patch_dns_bool(
@@ -141,13 +170,22 @@ impl RuntimePage {
         self.apply_controlled_config(json!({"dns": {key: value}}), success, cx);
     }
 
-    fn render_dns_resolvers(&self, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
+    fn render_dns_resolvers(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
         let inputs = &self.config_inputs.dns;
-        setting_card(zenclash_i18n::text("dns.resolvers.title"), theme)
+        setting_card(zenclash_i18n::text("settings_redesign.dns_servers"), theme)
             .child(config_input_row(
                 zenclash_i18n::text("dns.resolvers.enhanced_mode"),
                 "fake-ip / redir-host / normal",
-                Input::new(&inputs.enhanced_mode).cleanable(true),
+                self.settings_choice(
+                    "dns-mode",
+                    &inputs.enhanced_mode,
+                    &["fake-ip", "redir-host", "normal"],
+                    cx,
+                ),
                 theme,
             ))
             .child(config_input_row(
@@ -156,48 +194,19 @@ impl RuntimePage {
                 Input::new(&inputs.fake_ip_range).cleanable(true),
                 theme,
             ))
-            .child(config_input_row(
-                zenclash_i18n::text("dns.resolvers.filter_mode"),
-                "blacklist / whitelist / rule",
-                Input::new(&inputs.fake_ip_filter_mode).cleanable(true),
-                theme,
+            .child(self.settings_list_row("dns.resolvers.default", &inputs.default_nameserver, cx))
+            .child(self.settings_list_row(
+                "settings_redesign.dns_nameserver",
+                &inputs.nameserver,
+                cx,
             ))
-            .child(config_input_row(
-                zenclash_i18n::text("dns.resolvers.fake_ip_filter"),
-                zenclash_i18n::text("dns.resolvers.fake_ip_filter_description"),
-                Textarea::new(&inputs.fake_ip_filter),
-                theme,
+            .child(self.settings_list_row(
+                "dns.resolvers.proxy",
+                &inputs.proxy_server_nameserver,
+                cx,
             ))
-            .child(config_input_row(
-                zenclash_i18n::text("dns.resolvers.default"),
-                zenclash_i18n::text("dns.resolvers.default_description"),
-                Textarea::new(&inputs.default_nameserver),
-                theme,
-            ))
-            .child(config_input_row(
-                "Nameserver",
-                zenclash_i18n::text("dns.resolvers.nameserver_description"),
-                Textarea::new(&inputs.nameserver),
-                theme,
-            ))
-            .child(config_input_row(
-                zenclash_i18n::text("dns.resolvers.proxy"),
-                zenclash_i18n::text("dns.resolvers.proxy_description"),
-                Textarea::new(&inputs.proxy_server_nameserver),
-                theme,
-            ))
-            .child(config_input_row(
-                zenclash_i18n::text("dns.resolvers.direct"),
-                zenclash_i18n::text("dns.resolvers.direct_description"),
-                Textarea::new(&inputs.direct_nameserver),
-                theme,
-            ))
-            .child(config_input_row(
-                "Fallback",
-                zenclash_i18n::text("dns.resolvers.fallback_description"),
-                Textarea::new(&inputs.fallback),
-                theme,
-            ))
+            .child(self.settings_list_row("dns.resolvers.direct", &inputs.direct_nameserver, cx))
+            .child(self.settings_list_row("settings_redesign.dns_fallback", &inputs.fallback, cx))
     }
 
     fn render_dns_policy(
@@ -206,59 +215,64 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
         let inputs = &self.config_inputs.dns;
-        setting_card(zenclash_i18n::text("dns.policy.title"), theme)
-            .child(config_input_row(
-                zenclash_i18n::text("dns.policy.country"),
-                zenclash_i18n::text("dns.policy.country_description"),
-                Input::new(&inputs.fallback_geoip_code).cleanable(true),
-                theme,
-            ))
-            .child(config_input_row(
-                "Fallback IP CIDR",
-                zenclash_i18n::text("dns.policy.cidr_description"),
-                Textarea::new(&inputs.fallback_ipcidr),
-                theme,
-            ))
-            .child(config_input_row(
-                zenclash_i18n::text("dns.policy.domain"),
-                zenclash_i18n::text("dns.policy.domain_description"),
-                Textarea::new(&inputs.fallback_domain),
-                theme,
-            ))
-            .child(config_input_row(
-                "Nameserver Policy",
-                zenclash_i18n::text("dns.policy.nameserver_policy_description"),
-                Textarea::new(&inputs.nameserver_policy),
-                theme,
-            ))
-            .child(config_input_row(
-                "Hosts",
-                zenclash_i18n::text("dns.policy.hosts_description"),
-                Textarea::new(&inputs.hosts),
-                theme,
-            ))
+        setting_card(zenclash_i18n::text("settings_redesign.dns_policy"), theme)
             .child(
-                h_flex().justify_end().p_4().child(
-                    Button::new("save-dns-advanced")
-                        .icon(IconName::Check)
-                        .label(zenclash_i18n::text("dns.policy.save"))
-                        .primary()
-                        .loading(self.core_busy())
-                        .disabled(self.core_busy())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            match this.config_inputs.dns.patch(cx) {
-                                Ok(patch) => this.apply_controlled_config(
-                                    patch,
-                                    zenclash_i18n::text("dns.notices.advanced"),
-                                    cx,
-                                ),
-                                Err(error) => {
-                                    this.error = Some(error);
-                                    cx.notify();
-                                }
-                            }
-                        })),
+                self.settings_group_row(
+                    "dns.resolvers.fake_ip_filter",
+                    inputs
+                        .fake_ip_filter
+                        .read(cx)
+                        .value()
+                        .lines()
+                        .count()
+                        .to_string(),
+                    vec![
+                        SettingsField {
+                            label: "dns.resolvers.filter_mode",
+                            input: inputs.fake_ip_filter_mode.clone().into(),
+                            choices: &["blacklist", "whitelist", "rule"],
+                        },
+                        SettingsField {
+                            label: "dns.resolvers.fake_ip_filter",
+                            input: inputs.fake_ip_filter.clone().into(),
+                            choices: &[],
+                        },
+                    ],
+                    cx,
                 ),
             )
+            .child(self.settings_list_row(
+                "settings_redesign.dns_mapping",
+                &inputs.nameserver_policy,
+                cx,
+            ))
+            .child(self.settings_list_row("settings_redesign.dns_hosts", &inputs.hosts, cx))
+            .child(self.settings_group_row(
+                "settings_redesign.fallback_filter",
+                inputs.fallback_geoip_code.read(cx).value().to_string(),
+                vec![
+                    SettingsField {
+                        label: "settings_redesign.geoip_filter",
+                        input: inputs.fallback_geoip.clone().into(),
+                        choices: &["true", "false"],
+                    },
+                    SettingsField {
+                        label: "dns.policy.country",
+                        input: inputs.fallback_geoip_code.clone().into(),
+                        choices: &[],
+                    },
+                    SettingsField {
+                        label: "settings_redesign.dns_cidr",
+                        input: inputs.fallback_ipcidr.clone().into(),
+                        choices: &[],
+                    },
+                    SettingsField {
+                        label: "dns.policy.domain",
+                        input: inputs.fallback_domain.clone().into(),
+                        choices: &[],
+                    },
+                ],
+                cx,
+            ))
     }
 }

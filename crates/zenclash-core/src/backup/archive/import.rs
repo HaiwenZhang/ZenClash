@@ -122,7 +122,7 @@ fn extract_and_validate(archive_path: &Path, staging_root: &Path) -> BackupResul
     Ok((observed.len(), payload_bytes))
 }
 
-fn validate_entry_type(entry: &zip::read::ZipFile<'_>) -> BackupResult<()> {
+fn validate_entry_type<R: Read + ?Sized>(entry: &zip::read::ZipFile<'_, R>) -> BackupResult<()> {
     if entry.encrypted() {
         return Err(BackupError::InvalidArchive(format!(
             "不支持加密条目 {}",
@@ -295,7 +295,9 @@ fn validate_profile_file_set(staging_root: &Path, catalog: &ProfileCatalog) -> B
     Ok(())
 }
 
-fn normalized_archive_path(entry: &zip::read::ZipFile<'_>) -> BackupResult<String> {
+fn normalized_archive_path<R: Read + ?Sized>(
+    entry: &zip::read::ZipFile<'_, R>,
+) -> BackupResult<String> {
     let enclosed = entry.enclosed_name().ok_or_else(|| {
         BackupError::InvalidArchive(format!("不安全的 ZIP 路径 {}", entry.name()))
     })?;

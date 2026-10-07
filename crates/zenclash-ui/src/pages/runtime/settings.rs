@@ -1,114 +1,109 @@
 use super::{
     AutostartStatus, Button, Context, Disableable, FluentBuilder, HideTrafficIcon, IconName,
     IntoElement, Page, ParentElement, RuntimeConfig, RuntimeData, RuntimePage, Selectable,
-    SetDarkTheme, SetLightTheme, SetSystemTheme, ShowTrafficIcon, Sizable, Styled, div, h_flex,
-    info_row, px, setting_card, v_flex,
+    SetDarkTheme, SetLightTheme, SetSystemTheme, ShowTrafficIcon, Sizable, Styled, div, h_flex, px,
+    setting_card, v_flex,
 };
 use crate::components::sidebar::dispatch_navigate;
 use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_kit::{
-    InteractiveElement, ScrollAnchor, ScrollHandle, StatefulInteractiveElement, TestSupportExt,
-};
+use gpui_kit::{InteractiveElement, ScrollHandle, TestSupportExt};
 
 pub(super) struct SettingsNavigationState {
     pub(super) scroll: ScrollHandle,
-    appearance: ScrollAnchor,
-    startup: ScrollAnchor,
-    records: ScrollAnchor,
-    selected: usize,
-    advanced_network: bool,
+    pub(super) resource_search: gpui_kit::Entity<gpui_kit::component::input::InputState>,
 }
 
-impl Default for SettingsNavigationState {
-    fn default() -> Self {
-        let scroll = ScrollHandle::default();
-        Self {
-            appearance: ScrollAnchor::for_handle(scroll.clone()),
-            startup: ScrollAnchor::for_handle(scroll.clone()),
-            records: ScrollAnchor::for_handle(scroll.clone()),
-            scroll,
-            selected: 0,
-            advanced_network: false,
-        }
+impl SettingsNavigationState {
+    pub(super) fn new(
+        window: &mut gpui_kit::Window,
+        cx: &mut Context<RuntimePage>,
+    ) -> (Self, gpui_kit::Subscription) {
+        use gpui_kit::AppContext;
+        use gpui_kit::component::input::{InputEvent, InputState};
+        let search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(zenclash_i18n::text("settings_redesign.search_resources"))
+        });
+        let subscription = cx.subscribe(&search, |_, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
+        (
+            Self {
+                scroll: ScrollHandle::default(),
+                resource_search: search,
+            },
+            subscription,
+        )
     }
 }
 
 mod app_update;
+mod choice;
 pub(super) mod backup;
 mod core_management;
+pub(super) mod forms;
 mod legal;
-pub(in crate::pages::runtime) use app_update::AppUpdateUiState;
 pub(in crate::pages::runtime) use core_management::CoreManagementUiState;
-
-const PROXY_TOOL_PAGES: [Page; 2] = [Page::SystemProxy, Page::Tun];
-const CONFIGURATION_TOOL_PAGES: [Page; 4] =
-    [Page::Dns, Page::Sniffer, Page::Resources, Page::Override];
-const DIAGNOSTIC_TOOL_PAGES: [Page; 1] = [Page::Mihomo];
 
 impl RuntimePage {
     pub(super) fn render_settings(
         &self,
+        compact: bool,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let (config, autostart, _autostart_error) = match &self.data {
-            RuntimeData::Settings { config, autostart } => (
-                config.as_ref(),
-                autostart.as_ref().ok(),
-                autostart.as_ref().err(),
-            ),
-            _ => (None, None, None),
+        let (config, autostart) = match &self.data {
+            RuntimeData::Settings { config, autostart } => {
+                (config.as_ref(), autostart.as_ref().ok())
+            }
+            _ => (None, None),
         };
-        let body = v_flex()
-            .w_full()
-            .max_w(gpui_kit::rems(52.))
+        let left = v_flex()
+            .flex_1()
             .min_w_0()
-            .gap_4();
-        match self.settings_navigation.selected {
-            1 => body
-                .child(self.render_network_capture_settings(config, theme, cx))
-                .child(
-                    Button::new("settings-advanced-network")
-                        .label(zenclash_i18n::text("unified.network.advanced"))
-                        .outline()
-                        .selected(self.settings_navigation.advanced_network)
-                        .icon(if self.settings_navigation.advanced_network {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.settings_navigation.advanced_network =
-                                !this.settings_navigation.advanced_network;
-                            cx.notify();
-                        })),
-                )
-                .when(self.settings_navigation.advanced_network, |body| {
-                    body.child(self.render_advanced_tools(theme))
-                        .child(self.render_core_management(theme, cx))
-                })
-                .child(
-                    Button::new("settings-network-diagnostics")
-                        .label(Page::Network.label())
-                        .outline()
-                        .on_click(|_, window, cx| dispatch_navigate(Page::Network, window, cx)),
-                )
-                .into_any_element(),
-            2 => body
-                .child(self.render_application_settings(config, autostart, theme, cx))
-                .child(self.render_backup_card(theme, cx))
-                .child(self.render_local_data_status(theme))
-                .into_any_element(),
-            3 => body
-                .child(self.render_version_info(theme))
-                .child(self.render_app_update(theme, cx))
-                .child(self.render_license_info(theme, cx))
-                .into_any_element(),
-            _ => body
-                .child(self.render_application_settings(config, autostart, theme, cx))
-                .into_any_element(),
-        }
+            .gap_4()
+            .child(self.render_application_settings(config, autostart, theme, cx))
+            .child(self.render_backup_card(theme, cx));
+        let right = v_flex()
+            .flex_1()
+            .min_w_0()
+            .gap_4()
+            .child(
+                setting_card(zenclash_i18n::text("settings_redesign.records"), theme)
+                    .child(self.traffic_history_setting(theme, cx))
+                    .child(div().p_4().child(self.render_clear_history_control(cx)))
+                    .child(
+                        div()
+                            .p_4()
+                            .child(self.render_log_preferences_controls(theme, cx)),
+                    )
+                    .child(
+                        div().px_4().pb_4().child(
+                            Button::new("settings-open-log-settings")
+                                .outline()
+                                .small()
+                                .label(zenclash_i18n::text("redesign.log_settings_title"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_log_settings(window, cx)
+                                })),
+                        ),
+                    ),
+            )
+            .child(
+                self.render_app_update(theme, cx)
+                    .child(self.render_license_info(theme, cx)),
+            );
+        h_flex()
+            .w_full()
+            .items_start()
+            .gap_4()
+            .when(compact, |view| view.flex_col())
+            .child(left.when(compact, |view| view.w_full()))
+            .child(right.when(compact, |view| view.w_full()))
+            .into_any_element()
     }
 
     pub(super) fn render_settings_navigation(
@@ -119,139 +114,36 @@ impl RuntimePage {
         h_flex()
             .w_full()
             .gap_2()
-            .border_b_1()
-            .border_color(theme.border)
-            .children(
-                ["general", "network", "data", "about"]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, section)| {
-                        Button::new(("settings-section", index))
-                            .label(zenclash_i18n::text(&format!("unified.settings.{section}")))
-                            .small()
-                            .ghost()
-                            .min_h_10()
-                            .selected(self.settings_navigation.selected == index)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.settings_navigation.selected = index;
-                                this.settings_navigation
-                                    .scroll
-                                    .set_offset(gpui_kit::point(px(0.), px(0.)));
-                                cx.notify();
-                            }))
-                    }),
-            )
-    }
-
-    fn render_local_data_status(&self, theme: &gpui_kit::component::Theme) -> impl IntoElement {
-        let count = |available: bool, value: usize| {
-            if !self.persistent_loading && available {
-                value.to_string()
-            } else {
-                zenclash_i18n::text("common.status.unknown")
-            }
-        };
-        let enabled = |value: bool| {
-            zenclash_i18n::text(if value {
-                "common.status.enabled"
-            } else {
-                "common.status.disabled"
-            })
-        };
-        div().id("settings-local-data").test_support().child(
-            setting_card(zenclash_i18n::text("settings.local_data.title"), theme)
-                .child(info_row(
-                    zenclash_i18n::text("settings.local_data.profiles"),
-                    count(
-                        self.profiles.store.is_some(),
-                        self.profiles.catalog.profiles.len(),
-                    ),
-                    theme,
-                ))
-                .child(info_row(
-                    zenclash_i18n::text("settings.local_data.overrides"),
-                    count(
-                        self.overrides.store.is_some(),
-                        self.overrides.catalog.items.len(),
-                    ),
-                    theme,
-                ))
-                .child(info_row(
-                    zenclash_i18n::text("settings.local_data.history"),
-                    enabled(self.preferences.traffic_history_enabled),
-                    theme,
-                ))
-                .child(info_row(
-                    zenclash_i18n::text("settings.local_data.logs"),
-                    enabled(self.preferences.log_file_enabled),
-                    theme,
-                )),
-        )
-    }
-
-    fn render_version_info(&self, theme: &gpui_kit::component::Theme) -> impl IntoElement {
-        let snapshot = self.operational_status.snapshot();
-        let bundled = env!("ZENCLASH_BUILD_MIHOMO_VERSION");
-        let running = match &snapshot.controller {
-            zenclash_core::Observation::Fresh { value, .. }
-                if !value.version.version.is_empty() =>
-            {
-                format!(
-                    "{} {}",
-                    self.core_kind.display_name(),
-                    value.version.version
-                )
-            }
-            _ => zenclash_i18n::text("settings.versions.unavailable"),
-        };
-        setting_card(zenclash_i18n::text("settings.versions.title"), theme)
-            .child(info_row(
-                zenclash_i18n::text("settings.versions.app"),
-                env!("ZENCLASH_BUILD_VERSION"),
-                theme,
-            ))
-            .child(info_row(
-                zenclash_i18n::text("settings.versions.bundled"),
-                if bundled.is_empty() {
-                    zenclash_i18n::text("settings.versions.not_bundled")
-                } else {
-                    bundled.to_owned()
-                },
-                theme,
-            ))
-            .child(info_row(
-                zenclash_i18n::text("settings.versions.running"),
-                running,
-                theme,
-            ))
-    }
-
-    fn render_advanced_tools(&self, theme: &gpui_kit::component::Theme) -> impl IntoElement {
-        setting_card(zenclash_i18n::text("settings.advanced_tools.title"), theme).child(
-            v_flex().px_4().pb_4().gap_1().children(
-                PROXY_TOOL_PAGES
-                    .into_iter()
-                    .chain(CONFIGURATION_TOOL_PAGES)
-                    .chain(DIAGNOSTIC_TOOL_PAGES)
-                    .map(|page| {
-                        Button::new(page.route())
-                            .accessibility_label(page.label())
-                            .child(
-                                h_flex()
-                                    .w_full()
-                                    .gap_2()
-                                    .child(gpui_kit::component::Icon::new(page.icon()))
-                                    .child(div().min_w_0().truncate().child(page.label())),
-                            )
-                            .ghost()
-                            .w_full()
-                            .min_h_12()
-                            .justify_start()
-                            .tooltip(page.subtitle())
-                            .on_click(move |_, window, cx| dispatch_navigate(page, window, cx))
-                    }),
-            ),
-        )
+            .flex_wrap()
+            .children(Page::SETTINGS.into_iter().map(|page| {
+                Button::new(gpui_kit::SharedString::from(format!(
+                    "settings-tab-{}",
+                    page.route()
+                )))
+                .label(zenclash_i18n::text(match page {
+                    Page::Settings => "unified.settings.general",
+                    Page::SystemProxy => "settings_redesign.tab_proxy",
+                    Page::Tun => "settings_redesign.tab_tun",
+                    Page::Dns => "settings_redesign.tab_dns",
+                    Page::Sniffer => "settings_redesign.tab_sniffer",
+                    Page::Resources => "settings_redesign.tab_resources",
+                    _ => "settings_redesign.tab_core",
+                }))
+                .small()
+                .ghost()
+                .min_h_10()
+                .selected(self.page == page)
+                .when(self.page == page, |button| {
+                    button.custom(
+                        gpui_kit::component::button::ButtonCustomVariant::new(cx)
+                            .color(theme.sidebar_accent)
+                            .foreground(theme.primary)
+                            .hover(theme.sidebar_accent)
+                            .active(theme.sidebar_accent),
+                    )
+                })
+                .on_click(move |_, window, cx| dispatch_navigate(page, window, cx))
+            }))
     }
 
     fn render_application_settings(
@@ -261,50 +153,34 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let appearance = setting_card(zenclash_i18n::text("settings.design.appearance"), theme)
-            .id("settings-appearance-card")
-            .test_support()
-            .anchor_scroll(Some(self.settings_navigation.appearance.clone()))
-            .child(theme_setting(theme, self.preferences.appearance))
-            .child(self.language_setting(theme, cx));
-        let startup = setting_card(zenclash_i18n::text("settings.design.startup"), theme)
-            .id("settings-startup-card")
-            .test_support()
-            .anchor_scroll(Some(self.settings_navigation.startup.clone()))
-            .child(super::common::setting_switch_disabled(
-                zenclash_i18n::text("settings.application.autostart.title"),
-                if autostart.is_none() {
-                    zenclash_i18n::text("common.status.unavailable")
-                } else if autostart
-                    .is_some_and(|status| status.enabled && !status.matches_current_executable)
-                {
-                    zenclash_i18n::text("settings.application.autostart.stale")
-                } else {
-                    zenclash_i18n::text("settings.application.autostart.current")
-                },
-                autostart.is_some_and(|status| status.enabled),
-                "settings-autostart",
-                theme,
-                autostart.is_none() || self.core_busy(),
-                cx.listener(|this, checked, _, cx| {
-                    this.set_autostart(*checked, cx);
-                }),
-            ))
-            .child(tray_setting(theme, self.preferences.traffic_tray_visible));
-        let records = setting_card(zenclash_i18n::text("settings.design.records"), theme)
-            .id("settings-records-card")
-            .anchor_scroll(Some(self.settings_navigation.records.clone()))
-            .child(self.traffic_history_setting(theme, cx))
-            .child(div().p_4().child(self.render_clear_history_control(cx)))
-            .child(self.render_log_preferences_controls(theme, cx));
-        v_flex()
-            .gap_4()
-            .when(self.settings_navigation.selected == 0, |body| {
-                body.child(appearance).child(startup)
-            })
-            .when(self.settings_navigation.selected == 2, |body| {
-                body.child(records)
-            })
+        setting_card(
+            zenclash_i18n::text("settings_redesign.appearance_startup"),
+            theme,
+        )
+        .id("settings-appearance-card")
+        .test_support()
+        .child(theme_setting(theme, self.preferences.appearance))
+        .child(self.language_setting(theme, cx))
+        .child(super::settings::forms::settings_switch_disabled(
+            zenclash_i18n::text("settings.application.autostart.title"),
+            if autostart.is_none() {
+                zenclash_i18n::text("common.status.unavailable")
+            } else if autostart
+                .is_some_and(|status| status.enabled && !status.matches_current_executable)
+            {
+                zenclash_i18n::text("settings.application.autostart.stale")
+            } else {
+                zenclash_i18n::text("settings.application.autostart.current")
+            },
+            autostart.is_some_and(|status| status.enabled),
+            "settings-autostart",
+            theme,
+            autostart.is_none() || self.core_busy(),
+            cx.listener(|this, checked, _, cx| {
+                this.set_autostart(*checked, cx);
+            }),
+        ))
+        .child(tray_setting(theme, self.preferences.traffic_tray_visible))
     }
 
     fn language_setting(
@@ -326,16 +202,10 @@ impl RuntimePage {
             .child(
                 v_flex()
                     .flex_1()
-                    .flex_basis(gpui_kit::rems(16.))
+                    .flex_basis(gpui_kit::rems(8.))
                     .min_w_0()
                     .gap_1()
-                    .child(div().text_sm().child(zenclash_i18n::text("language.title")))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(zenclash_i18n::text("language.description")),
-                    ),
+                    .child(div().text_sm().child(zenclash_i18n::text("language.title"))),
             )
             .child(
                 Button::new("settings-language")
@@ -504,7 +374,7 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         v_flex()
-            .child(crate::pages::runtime::common::setting_switch_disabled(
+            .child(crate::pages::runtime::settings::forms::settings_switch_disabled(
                 zenclash_i18n::text("settings.traffic_history.title"),
                 zenclash_i18n::text_with(
                     "settings.traffic_history.description",
@@ -737,19 +607,13 @@ fn tray_setting(theme: &gpui_kit::component::Theme, visible: bool) -> gpui_kit::
         .child(
             v_flex()
                 .flex_1()
-                .flex_basis(gpui_kit::rems(16.))
+                .flex_basis(gpui_kit::rems(8.))
                 .min_w_0()
                 .gap_1()
                 .child(
                     div()
                         .text_sm()
                         .child(zenclash_i18n::text("settings.tray.title")),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(zenclash_i18n::text("settings.tray.description")),
                 ),
         )
         .child(
@@ -764,22 +628,4 @@ fn tray_setting(theme: &gpui_kit::component::Theme, visible: bool) -> gpui_kit::
                     }
                 }),
         )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{CONFIGURATION_TOOL_PAGES, DIAGNOSTIC_TOOL_PAGES, PROXY_TOOL_PAGES, Page};
-
-    #[test]
-    fn sidebar_runtime_destinations_are_not_repeated_in_application_settings() {
-        let settings_tools = PROXY_TOOL_PAGES
-            .into_iter()
-            .chain(CONFIGURATION_TOOL_PAGES)
-            .chain(DIAGNOSTIC_TOOL_PAGES)
-            .collect::<Vec<_>>();
-
-        for page in [Page::Rules, Page::Network, Page::Traffic, Page::Logs] {
-            assert!(!settings_tools.contains(&page));
-        }
-    }
 }

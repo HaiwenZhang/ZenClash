@@ -1,15 +1,17 @@
 use super::SystemProxyEditorState;
+use crate::pages::runtime::settings::forms::settings_status;
 use crate::pages::runtime::{
     Button, ButtonVariants, Context, Disableable, FluentBuilder, Input, IntoElement, ParentElement,
     RuntimeConfig, RuntimeData, RuntimePage, Selectable, Sizable, Styled, SystemProxyMode,
-    SystemProxyStatus, div, format_port, format_proxy, h_flex, info_row, px, setting_card,
-    setting_switch, v_flex,
+    SystemProxyStatus, div, format_proxy, h_flex, info_row, setting_card, v_flex,
 };
+use gpui_kit::component::WindowExt;
 use gpui_kit::component::input::Textarea;
 
 impl RuntimePage {
     pub(in crate::pages::runtime) fn render_system_proxy(
         &self,
+        compact: bool,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
@@ -19,129 +21,140 @@ impl RuntimePage {
         };
         let active = status.active();
         let port = config.system_proxy_port().unwrap_or_default();
-        let native_bypass = if status.bypass.is_empty() {
-            zenclash_i18n::text("system_proxy.status.none")
-        } else {
-            status.bypass.join(" · ")
-        };
-        let mode = match self.preferences.system_proxy_mode {
-            SystemProxyMode::Manual => zenclash_i18n::text("system_proxy.mode.manual_summary"),
-            SystemProxyMode::Pac => zenclash_i18n::text("system_proxy.mode.pac"),
-        };
-        let current_pac = if status.auto_enabled {
-            status.auto_url.clone()
-        } else {
-            zenclash_i18n::text("system_proxy.status.disabled")
-        };
-        let mut card = setting_card(zenclash_i18n::text("system_proxy.title"), theme)
-            .child(setting_switch(
+        let mode = self.preferences.system_proxy_mode;
+        let endpoint = format_proxy(&status.server, status.port, status.enabled);
+        let bypass = self.preferences.system_proxy_bypass.clone();
+        v_flex()
+            .gap_4()
+            .child(settings_status(
                 zenclash_i18n::text("system_proxy.enable.title"),
-                zenclash_i18n::text("system_proxy.enable.description"),
+                format!("{}:{}", self.preferences.system_proxy_host, port),
                 active,
                 "system-proxy-enable",
                 theme,
                 cx.listener(|this, checked, _, cx| this.toggle_system_proxy(*checked, cx)),
             ))
-            .child(self.render_proxy_settings_summary(&mode, theme, cx))
-            .child(info_row(
-                zenclash_i18n::text("system_proxy.fields.service"),
-                &status.service,
-                theme,
-            ))
-            .child(info_row(
-                zenclash_i18n::text("system_proxy.fields.http"),
-                format_proxy(&status.server, status.port, status.enabled),
-                theme,
-            ))
-            .child(info_row(
-                zenclash_i18n::text("system_proxy.fields.https"),
-                format_proxy(
-                    &status.secure_server,
-                    status.secure_port,
-                    status.secure_enabled,
-                ),
-                theme,
-            ))
-            .child(info_row(
-                zenclash_i18n::text("system_proxy.fields.pac"),
-                current_pac,
-                theme,
-            ))
-            .child(info_row(
-                zenclash_i18n::text("system_proxy.fields.bypass"),
-                &native_bypass,
-                theme,
-            ))
-            .child(info_row(
-                zenclash_i18n::text("system_proxy.fields.port"),
-                format_port(port),
-                theme,
-            ));
-        if let Some(editor) = self.system_proxy_editor.as_ref() {
-            card = card.child(self.render_system_proxy_editor(editor, theme, cx));
-        }
-        card.into_any_element()
-    }
-
-    fn render_proxy_settings_summary(
-        &self,
-        mode: &str,
-        theme: &gpui_kit::component::Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui_kit::AnyElement {
-        let detail = match self.preferences.system_proxy_mode {
-            SystemProxyMode::Manual if self.preferences.system_proxy_bypass.is_empty() => {
-                zenclash_i18n::text("system_proxy.status.no_bypass")
-            }
-            SystemProxyMode::Manual => self.preferences.system_proxy_bypass.join(" · "),
-            SystemProxyMode::Pac => zenclash_i18n::text_with(
-                "system_proxy.status.pac_summary",
-                &[
-                    (
-                        "lines",
-                        self.preferences
-                            .system_proxy_pac_script
-                            .lines()
-                            .count()
-                            .to_string(),
-                    ),
-                    ("host", self.preferences.system_proxy_host.clone()),
-                ],
-            ),
-        };
-        h_flex()
-            .min_h(px(64.))
-            .px_4()
-            .gap_3()
-            .justify_between()
-            .border_b_1()
-            .border_color(theme.border)
             .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().text_sm().child(mode.to_owned()))
+                h_flex()
+                    .items_start()
+                    .gap_4()
+                    .when(compact, |view| view.flex_col())
                     .child(
-                        div()
-                            .max_w(px(680.))
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(detail),
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .when(compact, |view| view.w_full())
+                            .child(self.render_core_inputs(theme, cx)),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .when(compact, |view| view.w_full())
+                            .child(
+                                setting_card(zenclash_i18n::text("system_proxy.mode.label"), theme)
+                                    .child(
+                                        h_flex().p_4().gap_2().children(
+                                            [
+                                                (
+                                                    "manual",
+                                                    SystemProxyMode::Manual,
+                                                    "system_proxy.mode.manual",
+                                                ),
+                                                (
+                                                    "pac",
+                                                    SystemProxyMode::Pac,
+                                                    "system_proxy.mode.pac",
+                                                ),
+                                            ]
+                                            .into_iter()
+                                            .map(
+                                                |(id, value, key)| {
+                                                    Button::new(id)
+                                                        .outline()
+                                                        .selected(mode == value)
+                                                        .label(zenclash_i18n::text(key))
+                                                        .disabled(self.core_busy())
+                                                        .on_click(cx.listener(
+                                                            move |this, _, window, cx| {
+                                                                this.open_system_proxy_editor(
+                                                                    window, cx,
+                                                                );
+                                                                this.set_system_proxy_editor_mode(
+                                                                    value, cx,
+                                                                );
+                                                            },
+                                                        ))
+                                                },
+                                            ),
+                                        ),
+                                    )
+                                    .child(info_row(
+                                        zenclash_i18n::text("system_proxy.fields.http"),
+                                        endpoint,
+                                        theme,
+                                    ))
+                                    .child(info_row(
+                                        zenclash_i18n::text("system_proxy.fields.pac"),
+                                        if status.auto_enabled {
+                                            status.auto_url
+                                        } else {
+                                            "—".into()
+                                        },
+                                        theme,
+                                    ))
+                                    .child(
+                                        div().p_4().child(
+                                            Button::new("edit-system-proxy")
+                                                .label(zenclash_i18n::text(
+                                                    "system_proxy.editor.edit",
+                                                ))
+                                                .outline()
+                                                .disabled(self.core_busy())
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.open_system_proxy_editor(window, cx)
+                                                })),
+                                        ),
+                                    ),
+                            ),
                     ),
             )
             .child(
-                Button::new("edit-system-proxy")
-                    .label(zenclash_i18n::text("system_proxy.editor.edit"))
-                    .small()
-                    .outline()
-                    .disabled(self.core_busy())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_system_proxy_editor(window, cx);
-                    })),
+                setting_card(
+                    zenclash_i18n::text("system_proxy.fields.bypass_rules"),
+                    theme,
+                )
+                .child(
+                    h_flex()
+                        .p_4()
+                        .gap_2()
+                        .flex_wrap()
+                        .children(bypass.into_iter().map(|entry| {
+                            div()
+                                .px_3()
+                                .py_2()
+                                .text_sm()
+                                .rounded(theme.radius)
+                                .bg(theme.background)
+                                .child(entry)
+                        })),
+                )
+                .child(
+                    div().p_4().child(
+                        Button::new("edit-proxy-bypass")
+                            .label(zenclash_i18n::text("settings_redesign.edit"))
+                            .outline()
+                            .disabled(self.core_busy())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_system_proxy_editor(window, cx)
+                            })),
+                    ),
+                ),
             )
             .into_any_element()
     }
 
-    fn render_system_proxy_editor(
+    pub(super) fn render_system_proxy_editor(
         &self,
         editor: &SystemProxyEditorState,
         theme: &gpui_kit::component::Theme,
@@ -217,7 +230,8 @@ impl RuntimePage {
                             .small()
                             .ghost()
                             .disabled(self.core_busy())
-                            .on_click(cx.listener(|this, _, _, cx| {
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                window.close_dialog(cx);
                                 this.cancel_system_proxy_editor(cx);
                             })),
                     )

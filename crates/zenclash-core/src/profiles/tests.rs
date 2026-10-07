@@ -962,3 +962,23 @@ fn verify_independent_catalog_updates(store: &ProfileStore) {
         ("renamed", true, 15),
     );
 }
+
+#[tokio::test]
+async fn empty_remote_name_uses_downloaded_filename_and_persists_it() {
+    let root = test_root("subscription-response-filename");
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 8192];
+        assert!(stream.read(&mut request).unwrap() > 0);
+        let payload = "proxies: []\nproxy-groups: []\nrules: []\n";
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/yaml\r\nContent-Disposition: attachment; filename=Airport.yaml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", payload.len(), payload).unwrap();
+    });
+    let store = ProfileStore::new(root.join("store")).unwrap();
+    let record = store.add_remote("  ", format!("http://{address}/subscribe?token=secret"), "").await.unwrap();
+    server.join().unwrap();
+    assert_eq!(record.name, "Airport");
+    assert_eq!(store.load().unwrap().profiles[0].name, "Airport");
+    fs::remove_dir_all(root).unwrap();
+}

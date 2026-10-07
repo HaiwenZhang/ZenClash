@@ -4,6 +4,8 @@ use crate::pages::runtime::{
     default_pac_script, default_system_proxy_bypass, load_page, normalize_pac_script,
     normalize_system_proxy_bypass, normalize_system_proxy_host,
 };
+use gpui_kit::component::{ActiveTheme, WindowExt};
+use gpui_kit::{ParentElement, Styled, prelude::FluentBuilder};
 use zenclash_core::{CaptureOutcome, CapturePlan, SystemProxySettings};
 
 impl SystemProxyForm {
@@ -149,6 +151,36 @@ impl RuntimePage {
             bypass,
             pac_script,
         });
+        let owner = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let content = owner
+                .update(cx, |page, cx| {
+                    let theme = cx.theme().clone();
+                    page.system_proxy_editor
+                        .as_ref()
+                        .map(|editor| page.render_system_proxy_editor(editor, &theme, cx))
+                })
+                .ok()
+                .flatten();
+            let owner = owner.clone();
+            dialog
+                .title(zenclash_i18n::text("system_proxy.editor.edit"))
+                .bg(cx.theme().group_box)
+                .width(window.rem_size() * 38.)
+                .margin_top(window.rem_size() * 2.)
+                .when_some(content, |dialog, content| dialog.child(content))
+                .on_cancel(move |_, _, cx| {
+                    owner
+                        .update(cx, |page, cx| {
+                            if page.core_busy() {
+                                return false;
+                            }
+                            page.cancel_system_proxy_editor(cx);
+                            true
+                        })
+                        .unwrap_or(true)
+                })
+        });
         cx.notify();
     }
 
@@ -245,6 +277,11 @@ impl RuntimePage {
                 this.finish_mutation(token);
                 match result {
                     Ok((preferences, data)) => {
+                        if this.is_page_task_current(token) && this.system_proxy_editor.is_some() {
+                            let _ = cx.update_window(this.window_handle, |_, window, cx| {
+                                window.close_dialog(cx)
+                            });
+                        }
                         this.system_proxy_editor = None;
                         this.accept_preferences(
                             preferences,

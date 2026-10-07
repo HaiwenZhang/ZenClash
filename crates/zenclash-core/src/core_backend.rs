@@ -38,13 +38,15 @@ impl CoreKind {
         }
     }
 
-    /// Core-specific executable environment variable.
+    /// Active executable override for experimental cores. Mihomo uses managed discovery.
     #[must_use]
-    pub const fn binary_environment_variable(self) -> &'static str {
-        match self {
-            Self::Mihomo => "ZENCLASH_MIHOMO_BINARY",
-            Self::Meow => "ZENCLASH_MEOW_BINARY",
+    pub fn binary_environment_variable(self) -> Option<&'static str> {
+        if self == Self::Mihomo {
+            return None;
         }
+        ["ZENCLASH_CORE_BINARY", "ZENCLASH_MEOW_BINARY"]
+            .into_iter()
+            .find(|variable| std::env::var_os(variable).is_some())
     }
 
     /// Core-specific writable-home environment variable.

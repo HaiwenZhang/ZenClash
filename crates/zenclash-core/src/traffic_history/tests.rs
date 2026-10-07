@@ -278,7 +278,7 @@ fn sqlite_store_evicts_oldest_samples_at_the_global_budget() {
         .query_row(
             "SELECT MIN(timestamp_ms), MAX(timestamp_ms) FROM traffic_history",
             [],
-            |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
         )
         .unwrap();
     assert_eq!(range, (1_000_002, 2_000_001));

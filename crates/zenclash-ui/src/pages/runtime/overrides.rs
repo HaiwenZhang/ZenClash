@@ -288,9 +288,6 @@ impl RuntimePage {
                         cx.listener(|this, _, _, cx| this.copy_config_preview(true, cx)),
                     ))
             }))
-            .when(self.overrides.editor.original.is_some(), |this| {
-                this.child(self.render_profile_yaml_editor(theme, cx))
-            })
             .into_any_element()
     }
 

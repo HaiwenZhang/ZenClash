@@ -2,7 +2,7 @@ mod catalog;
 mod editor;
 mod forms;
 
-use gpui_kit::{Focusable, InteractiveElement, TestSupportExt};
+use gpui_kit::{InteractiveElement, TestSupportExt};
 
 use super::super::{
     Button, Disableable, FluentBuilder, IconName, IntoElement, ParentElement, RuntimeData,
@@ -33,32 +33,14 @@ impl RuntimePage {
             )
             .child(
                 Button::new("toggle-add-subscription")
-                    .icon(if self.profiles.forms.adding_subscription {
-                        IconName::Close
-                    } else {
-                        IconName::Plus
-                    })
-                    .label(if self.profiles.forms.adding_subscription {
-                        zenclash_i18n::text("profiles.actions.collapse_form")
-                    } else {
-                        zenclash_i18n::text("profiles.actions.add_remote")
-                    })
+                    .icon(IconName::Plus)
+                    .label(zenclash_i18n::text("profiles.actions.add_remote"))
                     .small()
                     .h_10()
                     .outline()
                     .disabled(self.core_busy())
                     .on_click(cx.listener(|this, _, window, cx| {
-                        if this.profiles.forms.adding_subscription {
-                            this.close_subscription_form(cx);
-                        } else {
-                            this.profiles.forms.adding_subscription = true;
-                            this.profiles
-                                .forms
-                                .subscription_name
-                                .focus_handle(cx)
-                                .focus(window, cx);
-                            cx.notify();
-                        }
+                        this.open_subscription_dialog(window, cx);
                     })),
             )
             .child(
@@ -91,9 +73,6 @@ impl RuntimePage {
                 gpui_kit::component::input::Input::new(&self.profiles.forms.search)
                     .prefix(gpui_kit::component::Icon::new(IconName::Search)),
             )
-            .when(self.profiles.forms.adding_subscription, |view| {
-                view.child(self.render_subscription_form(theme, cx))
-            })
             .when(
                 self.profiles.recovery.is_some() || self.profiles.pending_finalization.is_some(),
                 |view| view.child(self.render_profile_recovery(theme, cx)),

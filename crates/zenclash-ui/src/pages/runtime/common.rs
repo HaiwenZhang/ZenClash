@@ -1,7 +1,4 @@
-use super::{
-    App, Disableable, InteractiveElement, IntoElement, ParentElement, Styled, Switch, Window, div,
-    h_flex, px, v_flex,
-};
+use super::{InteractiveElement, IntoElement, ParentElement, Styled, div, h_flex, px, v_flex};
 use gpui_kit::{SharedString, StatefulInteractiveElement};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,39 +77,6 @@ pub(super) fn setting_card(
         )
 }
 
-pub(super) fn config_input_row(
-    label: impl Into<SharedString>,
-    description: impl Into<SharedString>,
-    input: impl IntoElement,
-    theme: &gpui_kit::component::Theme,
-) -> gpui_kit::AnyElement {
-    let label = label.into();
-    let description = description.into();
-    h_flex()
-        .min_h(px(64.))
-        .px_4()
-        .py_3()
-        .gap_5()
-        .items_start()
-        .justify_between()
-        .border_b_1()
-        .border_color(theme.border)
-        .child(
-            v_flex()
-                .w(px(210.))
-                .gap_1()
-                .child(div().text_sm().child(label))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(description),
-                ),
-        )
-        .child(div().flex_1().max_w(px(680.)).child(input))
-        .into_any_element()
-}
-
 pub(super) fn info_row(
     label: impl ToString,
     value: impl ToString,
@@ -144,65 +108,6 @@ pub(super) fn info_row(
                 } else {
                     value
                 }),
-        )
-        .into_any_element()
-}
-
-pub(super) fn setting_switch<F>(
-    label: impl Into<gpui_kit::SharedString>,
-    description: impl Into<gpui_kit::SharedString>,
-    checked: bool,
-    id: &'static str,
-    theme: &gpui_kit::component::Theme,
-    listener: F,
-) -> gpui_kit::AnyElement
-where
-    F: Fn(&bool, &mut Window, &mut App) + 'static,
-{
-    setting_switch_disabled(label, description, checked, id, theme, false, listener)
-}
-
-pub(super) fn setting_switch_disabled<F>(
-    label: impl Into<gpui_kit::SharedString>,
-    description: impl Into<gpui_kit::SharedString>,
-    checked: bool,
-    id: &'static str,
-    theme: &gpui_kit::component::Theme,
-    disabled: bool,
-    listener: F,
-) -> gpui_kit::AnyElement
-where
-    F: Fn(&bool, &mut Window, &mut App) + 'static,
-{
-    let label = label.into();
-    let description = description.into();
-    h_flex()
-        .min_h(px(58.))
-        .px_4()
-        .gap_4()
-        .justify_between()
-        .border_b_1()
-        .border_color(theme.border)
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .gap_1()
-                .child(div().text_sm().child(label.clone()))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(description),
-                ),
-        )
-        .child(
-            Switch::new(id)
-                .flex_shrink_0()
-                .accessibility_label(label)
-                .checked(checked)
-                .disabled(disabled)
-                .on_click(listener),
         )
         .into_any_element()
 }
@@ -275,14 +180,6 @@ pub(super) fn empty_state(
         .text_color(theme.muted_foreground)
         .child(message)
         .into_any_element()
-}
-
-pub(super) fn format_port(port: u16) -> String {
-    if port == 0 {
-        zenclash_i18n::text("common.status.not_listening")
-    } else {
-        format!("127.0.0.1:{port}")
-    }
 }
 
 pub(super) fn format_proxy(server: &str, port: u16, enabled: bool) -> String {

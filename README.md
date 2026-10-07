@@ -66,11 +66,10 @@ TUN 需要系统权限。开发中的服务模式已接通应用内首次安装�
 在仓库根目录运行（macOS / Linux）：
 
 ```sh
-ZENCLASH_MIHOMO_BINARY=/absolute/path/to/mihomo \
-  cargo run --locked -p zenclash-ui --bin zenclash
+cargo run --locked -p zenclash-ui --bin zenclash
 ```
 
-Windows PowerShell 先用 `$env:ZENCLASH_MIHOMO_BINARY = 'C:\path\to\mihomo.exe'` 设置内核路径，再运行相同的 `cargo run` 命令。
+Windows PowerShell 使用相同命令。Mihomo 自动从数据目录的 `mihomo/cores`、安装包资源、仓库 `bin` 或 `PATH` 查找，也可在“设置 → 运行内核”中选择文件；不再读取内核路径环境变量。Windows 默认托管路径为 `%LOCALAPPDATA%\ZenClash\mihomo\cores\mihomo.exe`。
 
 提交前运行格式检查与测试：
 

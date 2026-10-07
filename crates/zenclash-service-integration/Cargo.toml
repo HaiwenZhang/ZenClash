@@ -13,8 +13,8 @@ development-channel = ["zenclash-service/development-channel"]
 ipc-tests = ["hyper/server","zenclash-service/standalone", "zenclash-service/test"]
 
 [dependencies]
-anyhow = "1.0"
-arc-swap = "1.9"
+anyhow = "1.0.104"
+arc-swap = "1.9.2"
 getrandom = { workspace = true, features = ["std"] }
 parking_lot.workspace = true
 futures-util.workspace = true
@@ -32,7 +32,7 @@ tracing.workspace = true
 zenclash-service = { path = "../zenclash-service", features = ["client"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-service = "0.8"
+windows-service = "0.8.1"
 deelevate = "0.2.0"
 runas = "=1.2.0"
 windows-sys = { workspace = true, features = ["Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }

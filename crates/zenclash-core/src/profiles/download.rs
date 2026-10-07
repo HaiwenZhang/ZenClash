@@ -13,6 +13,7 @@ use super::{
 #[derive(Debug)]
 pub(super) struct DownloadedProfile {
     pub(super) payload: String,
+    pub(super) suggested_name: String,
     pub(super) metadata: SubscriptionMetadata,
 }
 
@@ -106,6 +107,7 @@ async fn download_with_client(
     }
     let response = request.send().await?.error_for_status()?;
     let metadata = parse_subscription_metadata(response.headers());
+    let suggested_name = downloaded_profile_name(response.headers(), response.url());
     if response
         .content_length()
         .is_some_and(|length| length > MAX_PROFILE_BYTES as u64)
@@ -129,7 +131,76 @@ async fn download_with_client(
     }
     let payload = String::from_utf8(payload)
         .map_err(|error| ProfileStoreError::InvalidYaml(format!("订阅内容不是 UTF-8：{error}")))?;
-    Ok(DownloadedProfile { payload, metadata })
+    Ok(DownloadedProfile {
+        payload,
+        metadata,
+        suggested_name,
+    })
+}
+
+fn downloaded_profile_name(headers: &reqwest::header::HeaderMap, url: &reqwest::Url) -> String {
+    let disposition = header_text(headers, "content-disposition");
+    let mut filename = None;
+    let mut extended = None;
+    if let Some(disposition) = disposition {
+        let mut quoted = false;
+        let mut escaped = false;
+        for parameter in disposition.split(|character| {
+            if escaped { escaped = false; return false; }
+            if quoted && character == '\\' { escaped = true; return false; }
+            if character == '"' { quoted = !quoted; }
+            character == ';' && !quoted
+        }).skip(1) {
+            let Some((key, value)) = parameter.trim().split_once('=') else {
+                continue;
+            };
+            let value = value.trim().trim_matches('"');
+            if key.trim().eq_ignore_ascii_case("filename*") {
+                if let Some((charset, remainder)) = value.split_once('\'')
+                    && charset.eq_ignore_ascii_case("utf-8")
+                    && let Some((_, value)) = remainder.split_once('\'')
+                {
+                    extended = percent_encoding::percent_decode_str(value)
+                        .decode_utf8()
+                        .ok()
+                        .map(|name| name.into_owned());
+                }
+            } else if key.trim().eq_ignore_ascii_case("filename") {
+                filename = Some(value.to_owned());
+            }
+        }
+    }
+    extended
+        .into_iter()
+        .chain(filename)
+        .chain(
+            url.path_segments()
+                .and_then(|mut parts| parts.next_back())
+                .and_then(|part| {
+                    percent_encoding::percent_decode_str(part)
+                        .decode_utf8()
+                        .ok()
+                        .map(|name| name.into_owned())
+                }),
+        )
+        .find_map(|name| subscription_file_name(&name))
+        .or_else(|| url.host_str().and_then(subscription_file_name))
+        .unwrap_or_else(|| "subscription".to_owned())
+}
+
+fn subscription_file_name(name: &str) -> Option<String> {
+    let name = name.rsplit(['/', '\\']).next()?.trim();
+    let name = name
+        .strip_suffix(".yaml")
+        .or_else(|| name.strip_suffix(".yml"))
+        .unwrap_or(name);
+    let name: String = name
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(128)
+        .collect();
+    let name = name.trim();
+    (!name.is_empty() && name != "." && name != "..").then(|| name.to_owned())
 }
 
 fn parse_subscription_metadata(headers: &reqwest::header::HeaderMap) -> SubscriptionMetadata {
@@ -241,5 +312,46 @@ mod tests {
 
         assert!(debug.contains("REDACTED"));
         assert!(!debug.contains("private-token"));
+    }
+}
+
+#[cfg(test)]
+mod filename_tests {
+    use super::*;
+
+    #[test]
+    fn utf8_response_filename_takes_priority_over_plain_filename_and_url() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "content-disposition",
+            "attachment; filename=airport.yaml; filename*=UTF-8''%E6%9C%BA%E5%9C%BA.yaml"
+                .parse()
+                .unwrap(),
+        );
+        let url = reqwest::Url::parse("https://example.com/subscribe?token=secret").unwrap();
+        assert_eq!(downloaded_profile_name(&headers, &url), "机场");
+    }
+
+    #[test]
+    fn quoted_filename_preserves_semicolons_and_ignores_path_components() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("content-disposition", "attachment; filename=\"folder/Airport; HK.yaml\"".parse().unwrap());
+        let url = reqwest::Url::parse("https://example.com/subscribe").unwrap();
+        assert_eq!(downloaded_profile_name(&headers, &url), "Airport; HK");
+    }
+
+    #[test]
+    fn filename_falls_back_to_decoded_final_url_without_query_or_credentials() {
+        let url =
+            reqwest::Url::parse("https://example.com/%E8%AE%A2%E9%98%85.yml?token=secret").unwrap();
+        assert_eq!(
+            downloaded_profile_name(&reqwest::header::HeaderMap::new(), &url),
+            "订阅"
+        );
+        let url = reqwest::Url::parse("https://example.com/?token=secret").unwrap();
+        assert_eq!(
+            downloaded_profile_name(&reqwest::header::HeaderMap::new(), &url),
+            "example.com"
+        );
     }
 }

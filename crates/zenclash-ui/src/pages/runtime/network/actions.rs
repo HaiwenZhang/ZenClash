@@ -196,10 +196,10 @@ impl RuntimePage {
         };
         let diagnostics =
             NetworkDiagnostics::new(self.client.clone(), self.operational_status.clone());
-        let payload = diagnostics.export(report, SupportSafe).json;
+        let payload = diagnostics.export(report, SupportSafe).markdown;
         let token = self.page_task_token_for(Page::Network);
         let receiver =
-            cx.prompt_for_new_path(&std::env::temp_dir(), Some("zenclash-network-report.json"));
+            cx.prompt_for_new_path(&std::env::temp_dir(), Some("zenclash-network-report.md"));
         cx.spawn(async move |this, cx| {
             let path = match receiver.await {
                 Ok(Ok(Some(path))) => path,

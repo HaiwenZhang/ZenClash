@@ -4,12 +4,13 @@ use gpui_kit::component::{ActiveTheme, WindowExt};
 impl RuntimePage {
     pub(super) fn render_diagnostic_step(
         &self,
-        step: &DiagnosticStep,
+        kind: DiagnosticStepKind,
+        step: Option<&DiagnosticStep>,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let kind = step.kind;
-        let succeeded = step.outcome.is_ok();
+        let succeeded = step.is_some_and(|step| step.outcome.is_ok());
+        let failed = step.is_some_and(|step| step.outcome.is_err());
         h_flex()
             .px_3()
             .py_2()
@@ -17,7 +18,7 @@ impl RuntimePage {
             .min_h(gpui_kit::rems(2.75))
             .border_b_1()
             .border_color(theme.border)
-            .when(!succeeded, |row| row.bg(theme.warning.opacity(0.08)))
+            .when(failed, |row| row.bg(theme.warning.opacity(0.08)))
             .child(
                 div()
                     .flex_1()
@@ -31,20 +32,30 @@ impl RuntimePage {
                     .gap_2()
                     .id(format!("diagnostic-status:{kind:?}"))
                     .test_support()
-                    .child(network_status_icon(succeeded, theme))
-                    .child(div().text_sm().child(zenclash_i18n::text(if succeeded {
-                        "network.latency.succeeded"
-                    } else {
-                        "network.latency.failed"
-                    }))),
+                    .when(step.is_some(), |row| {
+                        row.child(network_status_icon(succeeded, theme)).child(
+                            div().text_sm().child(zenclash_i18n::text(if succeeded {
+                                "network.latency.succeeded"
+                            } else {
+                                "network.latency.failed"
+                            })),
+                        )
+                    })
+                    .when(step.is_none(), |row| {
+                        row.child(
+                            div()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child("—"),
+                        )
+                    }),
             )
             .child(
-                div()
-                    .w_20()
-                    .text_sm()
-                    .child(format!("{} ms", step.duration_ms)),
+                div().w_20().text_sm().child(
+                    step.map_or_else(|| "—".into(), |step| format!("{} ms", step.duration_ms)),
+                ),
             )
-            .when(!succeeded, |row| {
+            .when(failed, |row| {
                 row.child(
                     Button::new(format!("retry-diagnostic:{kind:?}"))
                         .small()
@@ -60,6 +71,7 @@ impl RuntimePage {
                     .small()
                     .outline()
                     .label(zenclash_i18n::text("redesign.details"))
+                    .disabled(step.is_none())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_diagnostic_details(kind, window, cx)
                     })),

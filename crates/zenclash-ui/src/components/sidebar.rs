@@ -18,7 +18,7 @@ use crate::{
         NavigateRules, NavigateSettings, NavigateSniffer, NavigateSystemProxy, NavigateTraffic,
         NavigateTun, SetDarkTheme, SetLightTheme, ToggleSidebar,
     },
-    assets::{AppIcon, GROUP_ICON_PATH, RADIO_ICON_PATH, RULER_ICON_PATH},
+    assets::{AppIcon, GROUP_ICON_PATH, RADIO_ICON_PATH, RSS_ICON_PATH, RULER_ICON_PATH},
     pages::Page,
 };
 
@@ -202,26 +202,7 @@ impl RenderOnce for SidebarNavigation {
                                     .test_support()
                                     .size(rems(1.25))
                                     .flex_shrink_0()
-                                    .child(
-                                        if self.current_page == Page::Settings {
-                                            sidebar_icon(page)
-                                        } else {
-                                            match page {
-                                                Page::Profiles => Icon::new(
-                                                    gpui_kit::assets::IconName::NotebookTabs,
-                                                ),
-                                                Page::Network => {
-                                                    Icon::new(gpui_kit::assets::IconName::Activity)
-                                                }
-                                                Page::Logs => {
-                                                    Icon::new(gpui_kit::assets::IconName::FileText)
-                                                }
-                                                _ => sidebar_icon(page),
-                                            }
-                                        }
-                                        .size(rems(1.25))
-                                        .flex_shrink_0(),
-                                    ),
+                                    .child(sidebar_icon(page).size(rems(1.25)).flex_shrink_0()),
                             )
                             .when(!self.collapsed, |this| {
                                 this.child(div().min_w_0().text_ellipsis().child(page.label()))
@@ -361,7 +342,7 @@ impl RenderOnce for Sidebar {
                                 .gap_3()
                                 .child(div().size_2p5().flex_shrink_0().rounded_full().bg(
                                     if connected {
-                                        if self.current_page == Page::Settings {
+                                        if self.current_page.is_settings() {
                                             theme.success
                                         } else {
                                             theme.chart_3
@@ -379,7 +360,7 @@ impl RenderOnce for Sidebar {
                                                 div()
                                                     .text_sm()
                                                     .when(
-                                                        self.current_page != Page::Settings
+                                                        !self.current_page.is_settings()
                                                             && connected,
                                                         |label| label.text_color(theme.primary),
                                                     )
@@ -411,6 +392,7 @@ fn sidebar_icon(page: Page) -> Icon {
 
 const fn sidebar_icon_path(page: Page) -> Option<&'static str> {
     match page {
+        Page::Profiles => Some(RSS_ICON_PATH),
         Page::Proxies => Some(GROUP_ICON_PATH),
         Page::Connections => Some(RADIO_ICON_PATH),
         Page::Rules => Some(RULER_ICON_PATH),

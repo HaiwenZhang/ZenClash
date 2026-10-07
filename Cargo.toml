@@ -15,38 +15,38 @@ authors = ["ZenClash contributors"]
 license = "GPL-3.0-only"
 
 [workspace.dependencies]
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-cron = "0.15"
-futures-util = "0.3"
-getrandom = "0.3"
-flate2 = "1.1"
-gpui-kit = { version = "0.7", features = ["tree-sitter-yaml"] }
-http = "1.1"
-http-body-util = "0.1"
-hyper = { version = "1", features = ["client", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-libc = "0.2"
-objc2 = "0.6.4"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+cron = "0.17.0"
+futures-util = "0.3.34"
+getrandom = "0.4.3"
+flate2 = "1.1.10"
+gpui-kit = { version = "0.7.1", features = ["tree-sitter-yaml"] }
+http = "1.5.0"
+http-body-util = "0.1.5"
+hyper = { version = "1.12.0", features = ["client", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+libc = "0.2.190"
+objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false }
 objc2-foundation = { version = "0.3.2", default-features = false }
-parking_lot = "0.12"
-raw-window-handle = "0.6"
-percent-encoding = "2.3"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-rust-i18n = "4"
-rusqlite = { version = "0.32.1", features = ["bundled"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-serde_yaml = "0.9"
-sha2 = "0.10"
-socket2 = "0.6"
-thiserror = "1.0"
-tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tray-icon = "0.24.2"
-url = "2"
+parking_lot = "0.12.5"
+raw-window-handle = "0.6.2"
+percent-encoding = "2.3.2"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "rustls", "stream"] }
+rust-i18n = "4.2.4"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+serde_yaml = "0.9.34"
+sha2 = "0.11.0"
+socket2 = "0.6.5"
+thiserror = "2.0.21"
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tray-icon = "0.26.0"
+url = "2.5.8"
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",
@@ -57,7 +57,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_IO",
     "Win32_UI_WindowsAndMessaging",
 ] }
-zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 zenclash-i18n = { path = "crates/zenclash-i18n" }
 
 [profile.dev]

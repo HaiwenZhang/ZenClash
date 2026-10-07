@@ -45,10 +45,10 @@ pub async fn connect_stream(
     timeout_message: &str,
 ) -> Result<MihomoSocket, String> {
     let request = stream_request(endpoint, path, query)?;
-    let config = (path == "/logs").then(|| WebSocketConfig {
-        max_message_size: Some(128 * 1024),
-        max_frame_size: Some(128 * 1024),
-        ..WebSocketConfig::default()
+    let config = (path == "/logs").then(|| {
+        WebSocketConfig::default()
+            .max_message_size(Some(128 * 1024))
+            .max_frame_size(Some(128 * 1024))
     });
     tokio::time::timeout(
         CONNECT_TIMEOUT,
@@ -125,7 +125,7 @@ mod tests {
         let legal = r#"{"type":"info","payload":"legal frame"}"#;
         let (mut socket, server) = log_socket_fixture(vec![
             Message::Text(legal.into()),
-            Message::Binary(vec![b'x'; 128 * 1024 + 1]),
+            Message::Binary(vec![b'x'; 128 * 1024 + 1].into()),
         ])
         .await;
 

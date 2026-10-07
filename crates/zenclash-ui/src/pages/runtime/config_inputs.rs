@@ -49,6 +49,7 @@ pub(super) struct DnsInputs {
     pub proxy_server_nameserver: Entity<TextareaState>,
     pub direct_nameserver: Entity<TextareaState>,
     pub fallback: Entity<TextareaState>,
+    pub fallback_geoip: Entity<InputState>,
     pub fallback_geoip_code: Entity<InputState>,
     pub fallback_ipcidr: Entity<TextareaState>,
     pub fallback_domain: Entity<TextareaState>,
@@ -134,6 +135,40 @@ impl ConfigInputs {
         for (key, value) in submitted.values {
             if let Some(field) = self.fields.get_mut(key) {
                 field.baseline.accept(&field.input.value(cx), &value);
+            }
+        }
+    }
+
+    /// Discard only the fields owned by this page, preserving drafts on other tabs.
+    pub(super) fn reset_page(
+        &mut self,
+        page: crate::pages::Page,
+        window: &mut Window,
+        cx: &mut gpui_kit::App,
+    ) {
+        use crate::pages::Page;
+        for (&key, field) in &self.fields {
+            let matches = match page {
+                Page::Dns => key.starts_with("/dns/") || key == "/hosts",
+                Page::Tun => key.starts_with("/tun/"),
+                Page::Sniffer => key.starts_with("/sniffer/"),
+                Page::SystemProxy => matches!(
+                    key,
+                    "/port" | "/mixed-port" | "/socks-port" | "/bind-address"
+                ),
+                _ => false,
+            };
+            if !matches {
+                continue;
+            }
+            if let Some(input) = field.input.as_input() {
+                input.update(cx, |input, cx| {
+                    input.set_value(field.baseline.0.clone(), window, cx)
+                });
+            } else if let Some(input) = field.input.as_textarea() {
+                input.update(cx, |input, cx| {
+                    input.set_value(field.baseline.0.clone(), window, cx)
+                });
             }
         }
     }
@@ -316,7 +351,7 @@ impl DnsInputs {
         Self {
             enhanced_mode: factory.single(
                 "/dns/enhanced-mode",
-                config_string(config, "/dns/enhanced-mode", ""),
+                config_string(config, "/dns/enhanced-mode", "redir-host"),
                 "fake-ip / redir-host / normal",
             ),
             fake_ip_range: factory.single(
@@ -358,6 +393,15 @@ impl DnsInputs {
                 "/dns/fallback",
                 config_lines(config, "/dns/fallback"),
                 "Fallback DNS",
+            ),
+            fallback_geoip: factory.single(
+                "/dns/fallback-filter/geoip",
+                config
+                    .pointer("/dns/fallback-filter/geoip")
+                    .and_then(Value::as_bool)
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                "true / false",
             ),
             fallback_geoip_code: factory.single(
                 "/dns/fallback-filter/geoip-code",
@@ -472,6 +516,13 @@ impl DnsInputs {
             "/dns/fallback",
         );
         let mut fallback_filter = Map::new();
+        let geoip = text(&self.fallback_geoip, cx);
+        if !geoip.is_empty() {
+            let geoip = geoip
+                .parse::<bool>()
+                .map_err(|_| zenclash_i18n::text("settings_redesign.invalid_bool"))?;
+            fallback_filter.insert("geoip".into(), Value::Bool(geoip));
+        }
         insert_optional_string(
             &mut fallback_filter,
             "geoip-code",
@@ -628,7 +679,7 @@ impl TunInputs {
         Self {
             stack: factory.single(
                 "/tun/stack",
-                config_string(config, "/tun/stack", ""),
+                config_string(config, "/tun/stack", "gvisor"),
                 "gvisor / mixed / system",
             ),
             device: factory.single(

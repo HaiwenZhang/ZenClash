@@ -44,31 +44,10 @@ impl RuntimePage {
                         Some(zenclash_i18n::text("core_page.service.pending")),
                     );
                 }
-                if self.page == Page::Settings {
-                    add(
-                        "app-update",
-                        FeedbackKind::Warning,
-                        self.app_update.error.clone(),
-                    );
-                    if let Some(zenclash_core::AppUpdateStatus::Available { release, .. }) =
-                        &self.app_update.status
-                    {
-                        add(
-                            "app-update-available",
-                            FeedbackKind::Success,
-                            Some(zenclash_i18n::text_with(
-                                "settings.app_update.available",
-                                &[("version", release.tag.clone())],
-                            )),
-                        );
-                    }
-                    if let RuntimeData::Settings {
-                        autostart: Err(error),
-                        ..
-                    } = &self.data
-                    {
-                        add("autostart", FeedbackKind::Warning, Some(error.clone()));
-                    }
+                if self.page == Page::Settings
+                    && let RuntimeData::Settings { autostart: Err(error), .. } = &self.data
+                {
+                    add("autostart", FeedbackKind::Warning, Some(error.clone()));
                 }
             }
             Page::Profiles => add(

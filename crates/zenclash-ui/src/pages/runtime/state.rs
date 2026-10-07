@@ -6,6 +6,42 @@ use super::{
 use std::path::{Path, PathBuf};
 use zenclash_core::ProxyCatalog;
 
+/// Recently visited pages retain their last snapshot while a new read is pending.
+/// Move snapshots rather than cloning potentially large proxy and rule catalogs.
+#[derive(Default)]
+pub(super) struct PageSnapshots {
+    entries: std::collections::VecDeque<(Page, u64, RuntimeData)>,
+}
+
+impl PageSnapshots {
+    const CAPACITY: usize = 4;
+
+    pub(super) fn store(&mut self, page: Page, version: u64, data: RuntimeData) {
+        if matches!(data, RuntimeData::Empty) {
+            return;
+        }
+        self.entries
+            .retain(|(key, revision, _)| *key != page && *revision == version);
+        if self.entries.len() == Self::CAPACITY {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((page, version, data));
+    }
+
+    pub(super) fn take(&mut self, page: Page, version: u64) -> RuntimeData {
+        self.entries.retain(|(_, revision, _)| *revision == version);
+        self.entries
+            .iter()
+            .position(|(key, _, _)| *key == page)
+            .and_then(|index| self.entries.remove(index))
+            .map_or(RuntimeData::Empty, |(_, _, data)| data)
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) enum RuntimeData {
     Empty,
@@ -101,6 +137,49 @@ impl ConfigInputsTaskToken {
 mod tests {
     use super::*;
     use zenclash_core::{OperationalFailure, RecoveryAction};
+
+    #[test]
+    fn page_snapshots_never_restore_a_previous_runtime() {
+        let mut snapshots = PageSnapshots::default();
+        snapshots.store(Page::Dns, 1, RuntimeData::Config(RuntimeConfig::default()));
+        assert!(matches!(snapshots.take(Page::Dns, 2), RuntimeData::Empty));
+    }
+
+    #[test]
+    fn page_snapshots_bound_retained_pages_and_move_large_catalogs() {
+        let mut snapshots = PageSnapshots::default();
+        let catalog = std::sync::Arc::new(RuleCatalog::default());
+        snapshots.store(
+            Page::Rules,
+            1,
+            RuntimeData::Rules {
+                catalog: catalog.clone(),
+                config: None,
+                proxies: None,
+            },
+        );
+        let RuntimeData::Rules {
+            catalog: restored, ..
+        } = snapshots.take(Page::Rules, 1)
+        else {
+            panic!("expected retained rules");
+        };
+        assert!(std::sync::Arc::ptr_eq(&catalog, &restored));
+        for page in [
+            Page::Dns,
+            Page::Sniffer,
+            Page::Tun,
+            Page::Mihomo,
+            Page::Resources,
+        ] {
+            snapshots.store(page, 1, RuntimeData::Config(RuntimeConfig::default()));
+        }
+        assert!(matches!(snapshots.take(Page::Dns, 1), RuntimeData::Empty));
+        assert!(matches!(
+            snapshots.take(Page::Sniffer, 1),
+            RuntimeData::Config(_)
+        ));
+    }
 
     #[test]
     fn page_task_token_rejects_same_page_after_navigation_round_trip() {

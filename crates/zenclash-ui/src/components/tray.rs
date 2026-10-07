@@ -260,14 +260,17 @@ impl NetworkTrayIcon {
         install_native_event_handlers(event_sender);
         let icon = traffic_icon(0, 0)?;
         let (menu, commands) = build_menu(&TrayMenuState::default())?;
-        let tray = TrayIconBuilder::new()
+        let builder = TrayIconBuilder::new()
             .with_tooltip(zenclash_i18n::text_with(
                 "tray.tooltip",
                 &[("core", core_kind.display_name().to_owned())],
             ))
-            .with_title("↑ 0 B/s  ↓ 0 B/s")
-            .with_icon(icon)
-            .with_icon_as_template(true)
+            .with_title("↑ 0 B/s  ↓ 0 B/s");
+        #[cfg(target_os = "macos")]
+        let builder = builder.with_icon_templated(icon);
+        #[cfg(not(target_os = "macos"))]
+        let builder = builder.with_icon(icon);
+        let tray = builder
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
             .with_menu_on_right_click(native_menu_on_right_click())
@@ -306,9 +309,11 @@ impl NetworkTrayIcon {
             .set_tooltip(Some(format!("ZenClash · {title}")))
             .map_err(|error| error.to_string())?;
         let icon = traffic_icon(traffic.upload, traffic.download)?;
-        self.icon
-            .set_icon_with_as_template(Some(icon), true)
-            .map_err(|error| error.to_string())?;
+        #[cfg(target_os = "macos")]
+        let result = self.icon.set_icon_templated(Some(icon));
+        #[cfg(not(target_os = "macos"))]
+        let result = self.icon.set_icon(Some(icon));
+        result.map_err(|error| error.to_string())?;
         self.last_title = title;
         Ok(())
     }
