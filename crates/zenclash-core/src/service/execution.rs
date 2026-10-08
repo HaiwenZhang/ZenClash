@@ -43,20 +43,21 @@ impl CoreExecutionGuard {
 }
 
 /// Reads GUI privileges without prompting or changing execution mode.
+/// Test builds and `test-support` model an ordinary, unelevated GUI owner.
 #[must_use]
 pub fn current_process_elevated() -> bool {
-    // Unit fixtures model an ordinary GUI owner, even on administrator/root CI
-    // runners. Integration tests compile the library without cfg(test) and keep
-    // the native privilege query; admission's pure tests cover both privileges.
-    #[cfg(test)]
+    // UI tests compile core as a dependency without cfg(test). Keep their
+    // isolated owners unelevated too, including on administrator/root CI.
+    // Native integration tests without test-support retain the system query.
+    #[cfg(any(test, feature = "test-support"))]
     {
         false
     }
-    #[cfg(all(windows, not(test)))]
+    #[cfg(all(windows, not(any(test, feature = "test-support"))))]
     {
         windows::elevated().unwrap_or(false)
     }
-    #[cfg(all(unix, not(test)))]
+    #[cfg(all(unix, not(any(test, feature = "test-support"))))]
     {
         unsafe { libc::geteuid() == 0 }
     }
@@ -72,7 +73,7 @@ pub async fn check_sidecar_available() -> io::Result<()> {
         .map_err(io::Error::other)
 }
 
-#[cfg(all(windows, not(test)))]
+#[cfg(all(windows, not(any(test, feature = "test-support"))))]
 mod windows {
     use std::io;
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};

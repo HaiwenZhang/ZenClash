@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [features]
+# Isolated UI children and ordinary-user privilege fixtures. Never enable for production.
 test-support = []
 development-channel = ["zenclash-service/development-channel"]
 # Isolated Fork IPC and simulated core. Never enable for production packaging.

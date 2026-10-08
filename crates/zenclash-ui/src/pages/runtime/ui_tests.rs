@@ -13,6 +13,12 @@ use zenclash_core::MihomoProcess;
 #[cfg(target_os = "windows")]
 mod design_validation;
 
+#[test]
+fn core_dependency_models_ordinary_gui_privileges_for_ui_tests() {
+    // Core is a dependency here, so its own cfg(test) cannot isolate CI privileges.
+    assert!(!zenclash_core::current_process_elevated());
+}
+
 #[gpui_kit::test]
 fn returning_to_a_tab_renders_its_snapshot_while_controller_is_slow(cx: &mut TestAppContext) {
     let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
