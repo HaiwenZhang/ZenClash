@@ -74,7 +74,7 @@ pub struct ProxiesPage {
 }
 
 impl ProxiesPage {
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "windows"))]
     pub(in crate::pages) fn design_validation_fixture(
         client: MihomoClient,
         runtime: tokio::runtime::Handle,
@@ -145,7 +145,7 @@ impl ProxiesPage {
         Self::design_validation_catalog(client, runtime, catalog, "rule".into(), cx)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "windows"))]
     pub(in crate::pages) fn design_validation_catalog(
         client: MihomoClient,
         runtime: tokio::runtime::Handle,

@@ -18,6 +18,10 @@ async fn unanswered_and_cancelled_start_keep_native_stop_authority_without_adopt
 -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::temp_dir().join(format!("zenclash-pending-start-{}", std::process::id()));
     std::fs::create_dir_all(&root)?;
+    // Elevated Windows runners otherwise inherit Administrators as the owner,
+    // which native authentication correctly refuses for the caller's SID.
+    #[cfg(windows)]
+    crate::service::repair_app_data_root_owner(&root)?;
     let executable = std::env::current_exe()?;
     let target = executable
         .parent()
@@ -39,6 +43,13 @@ async fn unanswered_and_cancelled_start_keep_native_stop_authority_without_adopt
         core_path: core.to_string_lossy().into_owned(),
     };
     let server = zenclash_service::run_ipc_server().await?;
+    // Unix binds the socket when the spawned server task first runs.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while zenclash_service::get_version().await.is_err() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
     let session = Arc::new(ServiceSession::connect(&root).await?);
     let replacement = ServiceSession::connect(&root).await?;
     let workflow = async {
@@ -47,7 +58,8 @@ async fn unanswered_and_cancelled_start_keep_native_stop_authority_without_adopt
             native_start(&session, request).await?;
             Err(ServiceCallError::Transport(anyhow::anyhow!("lost start acknowledgement")))
         }).await;
-        assert!(lost.unwrap_err().mutation_result_unknown());
+        let lost = lost.unwrap_err();
+        assert!(lost.mutation_result_unknown(), "unexpected start refusal: {lost:?}");
         assert!(session.status().await?.core_pid.is_some());
         assert!(matches!(session.active_proof(), Err(ServiceCallError::StartUnconfirmed)));
         assert!(session.snapshot().is_none());

@@ -502,7 +502,7 @@ fn owned_ui_children(fixture: &Fixture) -> [Arc<MihomoProcess>; 2] {
             binary: executable,
             config_file: config,
             home_dir: directory.join("home"),
-            endpoint: zenclash_core::MihomoEndpoint::new("http://127.0.0.1:1", ""),
+            endpoint: fixture.core.client().endpoint().unwrap(),
             controller_override: None,
         })
         .unwrap()
@@ -530,7 +530,9 @@ fn exercise_stop_completion(cx: &mut TestAppContext, replace_owner: bool) {
     let (window, page) = open(cx, &fixture, Page::Settings);
     // Keep geometry fixed while asserting the stop command and publication race.
     cx.update(|cx| cx.set_reduce_motion(true));
-    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    fixture.settle(cx, &page, |page| {
+        !page.persistent_loading && !page.config_inputs_loading
+    });
     cx.update_window(window, |_, window, cx| {
         page.update(cx, |page, cx| {
             page.switch_to(Page::Mihomo, cx);
@@ -1194,24 +1196,34 @@ fn service_maintenance_confirmation_rejects_replaced_owner_before_native_work(
 ) {
     use gpui_kit::component::WindowExt;
 
-    let fixture = Fixture::new();
+    // Keep controller readback successful so it cannot race with the stale
+    // maintenance result that this test is asserting.
+    let controller = ControllerFixture::new(false);
+    let fixture = Fixture::with_controller(controller.url.clone());
     let [local, replacement] = owned_ui_children(&fixture);
     let runtime = fixture.runtime.as_ref().unwrap();
     runtime
         .block_on(fixture.core.switch_to_process(local))
         .unwrap();
     let (window, page) = open_service_tun(cx, &fixture);
-    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    fixture.settle(cx, &page, |page| {
+        !page.persistent_loading && !page.config_inputs_loading && !page.loading
+    });
     let preferences =
         zenclash_core::AppPreferencesStore::new(fixture.root.join("maintenance-preferences.json"));
     preferences
         .save(&zenclash_core::AppPreferences::default())
         .unwrap();
     cx.update_window(window, |_, window, cx| {
-        page.update(cx, |page, _| {
+        page.update(cx, |page, cx| {
+            // Exercise the offline service card while keeping later controller
+            // readback available during maintenance completion.
+            page.invalidate_page_load();
+            page.data = RuntimeData::Empty;
             page.preferences_store = Some(preferences.clone());
             page.preferences.system_proxy_enabled = true;
             page.preferences.language = zenclash_core::LanguagePreference::En;
+            cx.notify();
         });
         window.render_frame(cx);
         window.click("uninstall-service", cx);
@@ -2363,7 +2375,9 @@ fn exercise_delayed_yaml_save(cx: &mut TestAppContext, newer_mode: bool) {
         let (window, page) = open(cx, &fixture, Page::Override);
         fixture.settle(cx, &page, |page| !page.persistent_loading);
         let original = fs::read_to_string(&fixture.profile).unwrap();
-        let saved = "mixed-port: 7891\nrules: [MATCH,DIRECT]\n".to_owned();
+        // Listener admission is covered by core tests. Disable listeners here
+        // so concurrent UI fixtures cannot collide while testing saved paths.
+        let saved = "mixed-port: 0\nrules: [MATCH,DIRECT]\n".to_owned();
         let id = fixture.profiles.load().unwrap().active.unwrap();
         let token = cx
             .update_window(window, |_, window, cx| {
@@ -2402,7 +2416,7 @@ fn exercise_delayed_yaml_save(cx: &mut TestAppContext, newer_mode: bool) {
             .await
             .unwrap();
         let second_source = fixture.root.join("second.yaml");
-        fs::write(&second_source, "mixed-port: 7892\nrules: [MATCH,DIRECT]\n").unwrap();
+        fs::write(&second_source, "mixed-port: 0\nrules: [MATCH,DIRECT]\n").unwrap();
         let second = fixture.profiles.import_local(second_source).unwrap();
         let second_path = fixture.profiles.activate(&second.id).unwrap();
         let session = fixture.core.clone();

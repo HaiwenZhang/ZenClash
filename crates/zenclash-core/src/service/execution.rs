@@ -45,11 +45,18 @@ impl CoreExecutionGuard {
 /// Reads GUI privileges without prompting or changing execution mode.
 #[must_use]
 pub fn current_process_elevated() -> bool {
-    #[cfg(windows)]
+    // Unit fixtures model an ordinary GUI owner, even on administrator/root CI
+    // runners. Integration tests compile the library without cfg(test) and keep
+    // the native privilege query; admission's pure tests cover both privileges.
+    #[cfg(test)]
+    {
+        false
+    }
+    #[cfg(all(windows, not(test)))]
     {
         windows::elevated().unwrap_or(false)
     }
-    #[cfg(unix)]
+    #[cfg(all(unix, not(test)))]
     {
         unsafe { libc::geteuid() == 0 }
     }
@@ -65,7 +72,7 @@ pub async fn check_sidecar_available() -> io::Result<()> {
         .map_err(io::Error::other)
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(test)))]
 mod windows {
     use std::io;
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};

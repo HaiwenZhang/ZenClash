@@ -39,6 +39,9 @@ async fn application_start_reload_displacement_and_shutdown_use_the_actual_nativ
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(),
     ));
     std::fs::create_dir(&root)?;
+    // Native service authentication requires the caller's SID even on elevated CI.
+    #[cfg(windows)]
+    zenclash_core::service::repair_app_data_root_owner(&root)?;
     let home = root.join("home");
     std::fs::create_dir(&home)?;
     let profile = root.join("profile.yaml");

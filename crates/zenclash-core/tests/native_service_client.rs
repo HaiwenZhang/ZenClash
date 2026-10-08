@@ -10,7 +10,17 @@ async fn native_session_takeover_staging_and_stop_preserve_owner_proof() -> Resu
     let root =
         std::env::temp_dir().join(format!("zenclash-integration-ipc-{}", std::process::id()));
     std::fs::create_dir_all(&root)?;
+    // Native service authentication requires the caller's SID even on elevated CI.
+    #[cfg(windows)]
+    zenclash_core::service::repair_app_data_root_owner(&root)?;
     let server = zenclash_service::run_ipc_server().await?;
+    // Unix binds the socket when the spawned server task first runs.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while zenclash_service::get_version().await.is_err() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
     let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let first = ServiceSession::connect(&root).await?;
         let second = ServiceSession::connect(&root).await?;
