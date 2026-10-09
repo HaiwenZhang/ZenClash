@@ -10,12 +10,43 @@ use gpui_kit::{
     Pixels, Render, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window,
     WindowBounds, WindowKind, WindowOptions, div, point, px, size,
 };
-use zenclash_core::format_speed;
+use zenclash_core::{TrafficSnapshot, format_speed};
 
-use crate::{app::ZenClashApp, components::tray::TrayCommand};
+use crate::{
+    app::ZenClashApp,
+    components::{
+        sidebar::OutboundMode,
+        tray::{TrayCommand, TrayMenuState},
+    },
+};
+
+struct StatusPanelSnapshot {
+    state: TrayMenuState,
+    traffic: TrafficSnapshot,
+    mode: OutboundMode,
+    unavailable: bool,
+    error: Option<String>,
+}
+
+impl StatusPanelSnapshot {
+    fn new(app: &ZenClashApp) -> Self {
+        Self {
+            state: app.tray_state.clone(),
+            traffic: app.traffic_monitor.snapshot(),
+            mode: app.outbound_mode.displayed(),
+            unavailable: app.tray_error.is_some() || app.tray_state.mode.is_empty(),
+            error: app
+                .tray_command_error
+                .clone()
+                .or_else(|| app.mode_error.clone())
+                .or_else(|| app.tray_error.clone()),
+        }
+    }
+}
 
 struct StatusPanel {
     owner: WeakEntity<ZenClashApp>,
+    snapshot: StatusPanelSnapshot,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -56,6 +87,8 @@ impl ZenClashApp {
             )
         });
         let owner = cx.entity().downgrade();
+        // Opening the window paints immediately while the owner is still being updated.
+        let snapshot = StatusPanelSnapshot::new(self);
         let options = WindowOptions {
             window_bounds: bounds.map(WindowBounds::Windowed),
             display_id: display.map(|display| display.id()),
@@ -66,7 +99,7 @@ impl ZenClashApp {
             ..Default::default()
         };
         match gpui_kit::open_window(options, cx, |window, cx| {
-            let view = cx.new(|cx| {
+            let view = cx.new(|cx: &mut Context<StatusPanel>| {
                 let focus = cx.focus_handle();
                 focus.focus(window, cx);
                 let mut subscriptions =
@@ -76,10 +109,14 @@ impl ZenClashApp {
                         }
                     })];
                 if let Some(app) = owner.upgrade() {
-                    subscriptions.push(cx.observe(&app, |_, _, cx| cx.notify()));
+                    subscriptions.push(cx.observe(&app, |panel, owner, cx| {
+                        panel.snapshot = StatusPanelSnapshot::new(owner.read(cx));
+                        cx.notify();
+                    }));
                 }
                 StatusPanel {
                     owner,
+                    snapshot,
                     focus,
                     _subscriptions: subscriptions,
                 }
@@ -128,21 +165,13 @@ impl StatusPanel {
 
 impl Render for StatusPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(owner) = self.owner.upgrade() else {
-            return div().into_any_element();
-        };
-        let app = owner.read(cx);
-        let state = app.tray_state.clone();
-        let traffic = app.traffic_monitor.snapshot();
-        let unavailable = app.tray_error.is_some() || state.mode.is_empty();
-        let error = app
-            .tray_command_error
-            .clone()
-            .or_else(|| app.mode_error.clone())
-            .or_else(|| app.tray_error.clone());
+        let state = self.snapshot.state.clone();
+        let traffic = &self.snapshot.traffic;
+        let unavailable = self.snapshot.unavailable;
+        let error = self.snapshot.error.clone();
         let profiles_owner = self.owner.clone();
         let refresh_owner = self.owner.clone();
-        let mode = app.outbound_mode.displayed();
+        let mode = self.snapshot.mode;
         let mut content = v_flex()
             .gap_3()
             .p_4()
@@ -357,6 +386,68 @@ impl Render for StatusPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[gpui_kit::test]
+    fn tray_command_opens_and_renders_status_panel_while_owner_is_updating(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::component::Root;
+        use gpui_kit::test::TestWindowExt;
+        let fixture = crate::pages::runtime::ui_tests::Fixture::new();
+        let services = fixture.services();
+        let app_services = crate::app::AppServices {
+            initializing: true,
+            await_service_handoff: false,
+            profile_store: services.profile_store,
+            override_store: services.override_store,
+            preferences_store: None,
+            preferences: services.preferences.clone(),
+            core_kind: services.core_kind,
+            core_session: services.core_session,
+            client: services.client,
+            traffic_monitor: services.traffic_monitor,
+            log_monitor: services.log_monitor,
+            traffic_history_store: services.traffic_history_store,
+            traffic_history_session: None,
+            profile_path: services.profile_path,
+            controlled_config_store: services.controlled_config_store,
+            runtime: services.runtime,
+            startup_notice: None,
+            startup_error: None,
+            restart_after_exit: Default::default(),
+        };
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            crate::app::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let mut owner = None;
+        let main = cx.open_window(size(px(1280.), px(820.)), |window, cx| {
+            let preferences = app_services.preferences.clone();
+            let app = cx.new(|cx| {
+                ZenClashApp::new(app_services, None, None, None, preferences, window, cx)
+            });
+            owner = Some(app.clone());
+            Root::new(app, window, cx)
+        });
+        let owner = owner.unwrap();
+        cx.update(|cx| {
+            owner.update(cx, |app, cx| {
+                app.handle_tray_command(TrayCommand::ShowPanel, cx)
+            });
+        });
+        cx.run_until_parked();
+        let panel = cx.update(|cx| owner.read(cx).status_panel.unwrap());
+        cx.update_window(panel, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("panel-main").visible());
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(main.into(), |_, window, _| window.remove_window())
+            .unwrap();
+    }
+
     #[test]
     fn panel_flips_above_bottom_tray_and_stays_on_negative_origin_monitor() {
         let screen = Bounds::new(point(px(-1280.), px(0.)), size(px(1280.), px(800.)));

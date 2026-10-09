@@ -9,6 +9,8 @@ pub enum IpcCommand {
     InspectInstallation,
     #[strum(serialize = "/status")]
     Status,
+    #[strum(serialize = "/clash/heartbeat")]
+    Heartbeat,
     #[strum(serialize = "/clash/logs")]
     GetClashLogs,
 

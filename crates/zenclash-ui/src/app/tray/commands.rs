@@ -216,8 +216,8 @@ impl ZenClashApp {
                 }
                 match result {
                     Ok(Ok((outcome, generation))) => {
-                        if !generation
-                            .is_some_and(|generation| !this.profile_service.is_current(generation))
+                        if generation
+                            .is_none_or(|generation| this.profile_service.is_current(generation))
                         {
                             if let CaptureOutcome::RolledBack { failure, .. }
                             | CaptureOutcome::ReconcileNeeded { failure, .. } = &outcome

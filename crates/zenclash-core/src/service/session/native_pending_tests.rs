@@ -61,6 +61,8 @@ async fn unanswered_and_cancelled_start_keep_native_stop_authority_without_adopt
         let lost = lost.unwrap_err();
         assert!(lost.mutation_result_unknown(), "unexpected start refusal: {lost:?}");
         assert!(session.status().await?.core_pid.is_some());
+        tokio::time::sleep(zenclash_service::OWNER_SESSION_LEASE_TIMEOUT + Duration::from_secs(1)).await;
+        assert!(session.status().await?.core_pid.is_some(), "lost acknowledgement must not expire a live GUI's proposed session");
         assert!(matches!(session.active_proof(), Err(ServiceCallError::StartUnconfirmed)));
         assert!(session.snapshot().is_none());
         assert!(matches!(session.start(runtime.clone()).await, Err(ServiceCallError::StartUnconfirmed)));

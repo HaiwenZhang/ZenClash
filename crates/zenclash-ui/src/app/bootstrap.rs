@@ -104,7 +104,8 @@ fn open_main_window(
         )),
         titlebar: Some(TitleBar::title_bar_options()),
         window_min_size: Some(gpui_kit::size(px(720.), px(560.))),
-        app_owns_titlebar_drag: false,
+        // TitleBar handles macOS dragging and double clicks without AppKit duplicating them.
+        app_owns_titlebar_drag: cfg!(target_os = "macos"),
         ..Default::default()
     };
 

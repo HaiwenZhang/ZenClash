@@ -18,7 +18,6 @@ use zenclash_core::{
     RulesetBehavior, RulesetConverter, SystemNetworkSnapshot, TrafficMonitor, YamlOverrideStore,
 };
 
-#[cfg(feature = "test-support")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires ZENCLASH_MIHOMO_BINARY pointing to a real Mihomo executable"]
 async fn managed_ipc_carries_http_and_all_realtime_streams_across_restart() {
@@ -32,7 +31,10 @@ async fn managed_ipc_carries_http_and_all_realtime_streams_across_restart() {
     let launch = MihomoLaunchConfig::new(binary, &profile, root.join("home")).unwrap();
     assert!(launch.endpoint.ipc_path().is_some());
     assert!(launch.controller_override.is_none());
+    #[cfg(feature = "test-support")]
     let process = MihomoProcess::spawn_isolated_for_test(launch).unwrap();
+    #[cfg(not(feature = "test-support"))]
+    let process = MihomoProcess::spawn(launch).unwrap();
     process
         .wait_until_ready(Duration::from_secs(20))
         .await
@@ -55,7 +57,7 @@ async fn managed_ipc_carries_http_and_all_realtime_streams_across_restart() {
     );
     client.memory_snapshot().await.unwrap();
     client.connections_snapshot().await.unwrap();
-    let controller = zenclash_core::service::NativeController::new(
+    let controller = zenclash_core::service::NativeController::new_local(
         process.endpoint().ipc_path().unwrap().to_path_buf(),
         process.snapshot().pid.unwrap(),
         process.endpoint().secret.clone(),

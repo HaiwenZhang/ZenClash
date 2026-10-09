@@ -33,7 +33,7 @@ async fn pac_status(server: &PacServer) -> Result<String> {
 #[tokio::test]
 async fn application_start_reload_displacement_and_shutdown_use_the_actual_native_owner()
 -> Result<()> {
-    let root = std::env::temp_dir().join(format!(
+    let root = std::fs::canonicalize(std::env::temp_dir())?.join(format!(
         "zenclash-application-native-{}-{}",
         std::process::id(),
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(),

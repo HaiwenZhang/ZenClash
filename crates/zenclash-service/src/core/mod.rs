@@ -37,6 +37,8 @@ mod manager;
 #[cfg(feature = "standalone")]
 mod owner;
 #[cfg(feature = "standalone")]
+mod owner_lease;
+#[cfg(feature = "standalone")]
 mod process;
 #[cfg(feature = "standalone")]
 mod proxy;

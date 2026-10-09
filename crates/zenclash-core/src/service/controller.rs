@@ -20,6 +20,8 @@ pub struct NativeController {
     path: PathBuf,
     pid: u32,
     secret: String,
+    #[cfg(unix)]
+    expected_uid: libc::uid_t,
 }
 
 /// Status and bounded body returned by the native Mihomo controller.
@@ -48,9 +50,32 @@ pub enum NativeHttpError {
 }
 
 impl NativeController {
-    /// Creates a transport for one owned kernel process without performing I/O.
+    /// Creates a transport for a service-owned kernel without performing I/O.
+    /// Unix service kernels must run as root; isolated service fixtures use the test owner.
     pub fn new(path: PathBuf, pid: u32, secret: String) -> Self {
-        Self { path, pid, secret }
+        Self {
+            path,
+            pid,
+            secret,
+            #[cfg(all(unix, not(feature = "service-ipc-tests")))]
+            expected_uid: 0,
+            #[cfg(all(unix, feature = "service-ipc-tests"))]
+            // SAFETY: geteuid has no arguments or memory safety requirements.
+            expected_uid: unsafe { libc::geteuid() },
+        }
+    }
+
+    /// Creates a transport for a child owned by the current application user.
+    /// Peer verification still requires the exact owned PID before sending credentials.
+    pub fn new_local(path: PathBuf, pid: u32, secret: String) -> Self {
+        let controller = Self::new(path, pid, secret);
+        #[cfg(unix)]
+        let controller = Self {
+            // SAFETY: geteuid has no arguments or memory safety requirements.
+            expected_uid: unsafe { libc::geteuid() },
+            ..controller
+        };
+        controller
     }
 
     /// Sends an HTTP request directly to the owned kernel.
@@ -158,7 +183,7 @@ impl NativeController {
     #[cfg(unix)]
     async fn connect(&self) -> io::Result<tokio::net::UnixStream> {
         let stream = tokio::net::UnixStream::connect(&self.path).await?;
-        verify_kernel_peer(&stream, self.pid)?;
+        verify_kernel_peer(&stream, self.pid, self.expected_uid)?;
         Ok(stream)
     }
 }
@@ -318,7 +343,11 @@ impl NativeController {
 }
 
 #[cfg(unix)]
-fn verify_kernel_peer(stream: &tokio::net::UnixStream, expected_pid: u32) -> io::Result<()> {
+fn verify_kernel_peer(
+    stream: &tokio::net::UnixStream,
+    expected_pid: u32,
+    expected_uid: libc::uid_t,
+) -> io::Result<()> {
     let credentials = stream.peer_cred()?;
     #[cfg(target_os = "linux")]
     let pid = credentials.pid();
@@ -349,11 +378,6 @@ fn verify_kernel_peer(stream: &tokio::net::UnixStream, expected_pid: u32) -> io:
         }
         Some(pid)
     };
-    #[cfg(any(test, feature = "service-ipc-tests"))]
-    // SAFETY: geteuid has no arguments or memory safety requirements.
-    let expected_uid = unsafe { libc::geteuid() };
-    #[cfg(not(any(test, feature = "service-ipc-tests")))]
-    let expected_uid = 0;
     if credentials.uid() != expected_uid
         || pid.and_then(|pid| u32::try_from(pid).ok()) != Some(expected_pid)
     {
@@ -628,6 +652,64 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn a_local_socket_accepts_the_application_users_owned_pid() {
+        let directory =
+            std::env::temp_dir().join(format!("zenclash-controller-local-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("controller.sock");
+        let server = tokio::net::UnixListener::bind(&path).unwrap();
+        let fixture = tokio::spawn(async move {
+            let (mut stream, _) = server.accept().await.unwrap();
+            receive_request(&mut stream).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await
+                .unwrap();
+        });
+        let controller =
+            NativeController::new_local(path.clone(), std::process::id(), "private-secret".into());
+        let response = controller
+            .request("GET", "/version", None, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
+        fixture.await.unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[cfg(all(unix, not(feature = "service-ipc-tests")))]
+    #[tokio::test]
+    async fn a_service_socket_rejects_an_ordinary_user_before_sending_credentials() {
+        // A root test runner cannot model an ordinary-user impostor.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let directory =
+            std::env::temp_dir().join(format!("zenclash-controller-root-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("controller.sock");
+        let server = tokio::net::UnixListener::bind(&path).unwrap();
+        let fixture = tokio::spawn(async move {
+            let (mut stream, _) = server.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).await.unwrap();
+            bytes
+        });
+        let controller =
+            NativeController::new(path.clone(), std::process::id(), "private-secret".into());
+        let result = controller
+            .request("GET", "/version", None, Duration::from_secs(1))
+            .await;
+        assert!(matches!(result, Err(NativeHttpError::BeforeSend(ref error))
+            if error.kind() == io::ErrorKind::PermissionDenied));
+        assert!(fixture.await.unwrap().is_empty());
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn an_actual_socket_with_the_wrong_pid_receives_neither_body_nor_secret() {
         let directory =
             std::env::temp_dir().join(format!("zenclash-controller-peer-{}", std::process::id()));
@@ -640,7 +722,7 @@ mod tests {
             stream.read_to_end(&mut bytes).await.unwrap();
             bytes
         });
-        let controller = NativeController::new(
+        let controller = NativeController::new_local(
             path.clone(),
             std::process::id().wrapping_add(1),
             "private-secret".into(),

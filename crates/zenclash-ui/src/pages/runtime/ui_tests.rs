@@ -90,7 +90,7 @@ fn repeated_config_invalidations_finish_with_the_latest_form_values(cx: &mut Tes
         .unwrap();
 }
 
-pub(super) struct Fixture {
+pub(crate) struct Fixture {
     root: PathBuf,
     managed_process: Option<Arc<MihomoProcess>>,
     runtime: Option<tokio::runtime::Runtime>,
@@ -105,7 +105,7 @@ pub(super) struct Fixture {
 }
 
 impl Fixture {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::with_controller("http://127.0.0.1:1".to_owned())
     }
 
@@ -163,7 +163,7 @@ impl Fixture {
         }
     }
 
-    pub(super) fn services(&self) -> RuntimePageServices {
+    pub(crate) fn services(&self) -> RuntimePageServices {
         RuntimePageServices {
             profile_store: Some(self.profiles.clone()),
             override_store: Some(self.overrides.clone()),

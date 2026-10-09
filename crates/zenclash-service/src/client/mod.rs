@@ -177,6 +177,22 @@ pub async fn get_status(credentials: &OwnerCredentials) -> Result<Response<Servi
     protected_call(Verb::Get, IpcCommand::Status, credentials, None, (), None).await
 }
 
+/// Renews only the proved owner generation; status reads never extend ownership.
+///
+/// # Errors
+/// Returns native connection, timeout or decoding errors; refusals retain their response code.
+pub async fn heartbeat(credentials: &OwnerCredentials, session: &OwnerSessionProof) -> Result<Response<()>> {
+    protected_call(
+        Verb::Post,
+        IpcCommand::Heartbeat,
+        credentials,
+        Some(session),
+        (),
+        Some(crate::OWNER_SESSION_HEARTBEAT_INTERVAL),
+    )
+    .await
+}
+
 pub async fn is_reinstall_service_needed() -> bool {
     is_ipc_path_exists()
         && match get_version().await {

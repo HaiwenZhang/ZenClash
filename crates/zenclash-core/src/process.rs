@@ -456,7 +456,7 @@ impl MihomoProcess {
             .as_ref()
             .map(Child::id)
             .ok_or_else(|| MihomoError::Process("Local core is stopped".into()))?;
-        Ok(Some(crate::service::NativeController::new(
+        Ok(Some(crate::service::NativeController::new_local(
             path.to_path_buf(),
             pid,
             self.config.endpoint.secret.clone(),

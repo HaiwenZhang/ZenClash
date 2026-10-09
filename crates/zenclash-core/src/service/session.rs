@@ -4,6 +4,7 @@
 use anyhow::{Context as _, Result};
 use parking_lot::RwLock;
 use std::path::Path;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use zenclash_service::{
     MacosProxyConfig, OwnerCredentials, OwnerSessionProof, ProtocolInfo, ProxyApplyOutcome,
@@ -18,6 +19,78 @@ struct ActiveServiceSession {
     proof: OwnerSessionProof,
     supports_runtime_staging: bool,
     supports_runtime_file_read: bool,
+    _keepalive: Arc<SessionKeepalive>,
+}
+
+struct SessionKeepalive(tokio::task::JoinHandle<()>);
+
+enum RenewalProof {
+    Acknowledged(OwnerSessionProof),
+    Proposed(String),
+}
+
+impl SessionKeepalive {
+    fn start(credentials: OwnerCredentials, proof: OwnerSessionProof) -> Self {
+        Self::spawn(credentials, RenewalProof::Acknowledged(proof))
+    }
+
+    fn pending(credentials: OwnerCredentials, token: String) -> Self {
+        Self::spawn(credentials, RenewalProof::Proposed(token))
+    }
+
+    fn spawn(credentials: OwnerCredentials, authority: RenewalProof) -> Self {
+        Self(tokio::spawn(async move {
+            let mut renewed = false;
+            loop {
+                tokio::time::sleep(zenclash_service::OWNER_SESSION_HEARTBEAT_INTERVAL).await;
+                let proof = match &authority {
+                    RenewalProof::Acknowledged(proof) => proof.clone(),
+                    RenewalProof::Proposed(token) => {
+                        let Ok(response) = zenclash_service::get_status(&credentials).await else {
+                            continue;
+                        };
+                        let Some(status) = response
+                            .data
+                            .filter(|status| response.code == 0 && status.is_active)
+                        else {
+                            continue;
+                        };
+                        let Some(generation) = status.active_generation else {
+                            continue;
+                        };
+                        // Only the retained proposed token can renew this unconfirmed Start.
+                        // The status generation alone never grants controller authority.
+                        OwnerSessionProof {
+                            generation,
+                            token: token.clone(),
+                        }
+                    }
+                };
+                match zenclash_service::heartbeat(&credentials, &proof).await {
+                    Ok(response) if response.code == 0 => renewed = true,
+                    Ok(response)
+                        if response.code == ServiceErrorCode::StaleOwnerSession as u16
+                            || response.code == ServiceErrorCode::NotActive as u16
+                            || response.code == ServiceErrorCode::UnauthorizedOwner as u16 =>
+                    {
+                        if renewed || matches!(authority, RenewalProof::Acknowledged(_)) {
+                            break;
+                        }
+                    }
+                    Ok(response) => {
+                        tracing::warn!(code = response.code, "service ownership renewal refused")
+                    }
+                    Err(error) => tracing::warn!(%error, "service ownership renewal failed"),
+                }
+            }
+        }))
+    }
+}
+
+impl Drop for SessionKeepalive {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 fn generate_service_session_token() -> Result<String> {
@@ -123,6 +196,7 @@ pub struct ServiceSession {
     credentials: OwnerCredentials,
     active: RwLock<Option<ActiveServiceSession>>,
     pending_start: RwLock<Option<String>>,
+    pending_keepalive: RwLock<Option<SessionKeepalive>>,
     observed_status: RwLock<Option<ServiceStatusSnapshot>>,
     mutations: Mutex<()>,
 }
@@ -160,6 +234,7 @@ impl ServiceSession {
             credentials,
             active: RwLock::new(None),
             pending_start: RwLock::new(None),
+            pending_keepalive: RwLock::new(None),
             observed_status: RwLock::new(None),
             mutations: Mutex::new(()),
         })
@@ -206,25 +281,37 @@ impl ServiceSession {
         // Save before dispatch, so cancellation cannot abandon a possibly started core.
         // The previous acknowledged proof stays available for a definitive Start refusal.
         *self.pending_start.write() = Some(proposed_session_token.clone());
+        *self.pending_keepalive.write() = Some(SessionKeepalive::pending(
+            self.credentials.clone(),
+            proposed_session_token.clone(),
+        ));
         let result = match exchange(request).await {
             Ok(result) => result,
             Err(error) => {
                 if !error.mutation_result_unknown() {
                     self.pending_start.write().take();
+                    self.pending_keepalive.write().take();
                 }
                 return Err(error);
             }
         };
         // Commit authority before any further await, including optional capability discovery.
+        let proof = OwnerSessionProof {
+            generation: result.session.generation,
+            token: proposed_session_token,
+        };
+        let keepalive = Arc::new(SessionKeepalive::start(
+            self.credentials.clone(),
+            proof.clone(),
+        ));
         *self.active.write() = Some(ActiveServiceSession {
-            proof: OwnerSessionProof {
-                generation: result.session.generation,
-                token: proposed_session_token,
-            },
+            proof,
             supports_runtime_staging: false,
             supports_runtime_file_read: false,
+            _keepalive: keepalive,
         });
         self.pending_start.write().take();
+        self.pending_keepalive.write().take();
         let capabilities = probe_service_capabilities().await;
         if let Some(session) = self.active.write().as_mut() {
             session.supports_runtime_staging = capabilities.runtime_staging;
@@ -449,6 +536,7 @@ impl ServiceSession {
             let response = zenclash_service::stop_clash(&self.credentials, &proof).await?;
             check_response(response.code, response.message)?;
             self.pending_start.write().take();
+            self.pending_keepalive.write().take();
             self.active.write().take();
             self.observed_status.write().take();
             return Ok(());

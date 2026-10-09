@@ -60,7 +60,7 @@ mod tun;
 mod view;
 
 #[cfg(test)]
-mod ui_tests;
+pub(crate) mod ui_tests;
 
 use common::{
     contains_ascii_case_insensitive, context_note, empty_dash, empty_state, format_bytes,

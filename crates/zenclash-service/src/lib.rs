@@ -77,9 +77,13 @@ pub static IPC_AUTH_EXPECT: &str =
 
 pub static VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PROTOCOL_EPOCH: u16 = 2;
-pub const PROTOCOL_REVISION: u16 = 5;
-pub const MIN_SUPPORTED_CLIENT_REVISION: u16 = 5;
-pub const MIN_REQUIRED_SERVICE_REVISION: u16 = 5;
+pub const PROTOCOL_REVISION: u16 = 6;
+pub const MIN_SUPPORTED_CLIENT_REVISION: u16 = 6;
+pub const MIN_REQUIRED_SERVICE_REVISION: u16 = 6;
+/// A GUI-owned core is retired when its authenticated session stops renewing.
+pub const OWNER_SESSION_LEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Renew independently of window visibility or foreground UI work.
+pub const OWNER_SESSION_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 /// Revision that introduced `/clash/stage-runtime`.
 /// This is a capability gate, not the minimum compatible service revision.
 pub const MIN_SERVICE_REVISION_FOR_RUNTIME_STAGING: u16 = 2;

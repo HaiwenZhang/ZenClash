@@ -9,7 +9,7 @@ use gpui_kit::component::{
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
 };
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{ClickEvent, Pixels, RenderOnce, WindowControlArea, px};
+use gpui_kit::{ClickEvent, Pixels, RenderOnce, TestSupportExt, WindowControlArea, px};
 
 const MAIN_WINDOW_TITLE_BAR_SELECTOR: &str = "main-window-title-bar";
 const MAIN_WINDOW_DRAG_SELECTOR: &str = "main-window-drag-area";
@@ -161,7 +161,7 @@ impl RenderOnce for WindowsWindowControls {
 }
 
 fn uses_custom_title_bar(target_os: &str) -> bool {
-    matches!(target_os, "windows" | "linux")
+    matches!(target_os, "windows" | "linux" | "macos")
 }
 
 fn needs_native_window_drag(target_os: &str) -> bool {
@@ -178,7 +178,9 @@ fn main_window_title_bar(
     let on_close_window: WindowCloseListener = Rc::new(on_close_window);
     let linux_close_listener = on_close_window.clone();
     let title_bar = TitleBar::new()
-        .child(h_flex().px_3().child("ZenClash"))
+        .when(!cfg!(target_os = "macos"), |title_bar| {
+            title_bar.child(h_flex().px_3().child("ZenClash"))
+        })
         .on_close_window(move |event, window, cx| {
             linux_close_listener(event, window, cx);
         })
@@ -197,6 +199,7 @@ fn main_window_title_bar(
 
     div()
         .id(MAIN_WINDOW_TITLE_BAR_SELECTOR)
+        .test_support()
         .relative()
         .flex_shrink_0()
         .child(title_bar)
@@ -550,10 +553,73 @@ mod tests {
     }
 
     #[test]
-    fn custom_title_bar_policy_covers_windows_and_linux_only() {
+    fn custom_title_bar_policy_reserves_space_on_all_desktop_platforms() {
         let actual = ["windows", "linux", "macos"].map(uses_custom_title_bar);
 
-        assert_eq!(actual, [true, true, false]);
+        assert_eq!(actual, [true, true, true]);
+    }
+
+    #[gpui_kit::test]
+    fn title_bar_keeps_sidebar_and_content_below_window_controls(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::component::{Root, Theme};
+        use gpui_kit::prelude::FluentBuilder as _;
+        use gpui_kit::test::TestWindowExt;
+        use gpui_kit::{
+            AppContext, Context, InteractiveElement, ParentElement, Render, Styled, TestSupportExt,
+            div, px, size,
+        };
+
+        struct Shell {
+            collapsed: bool,
+        }
+        impl Render for Shell {
+            fn render(
+                &mut self,
+                _: &mut gpui_kit::Window,
+                _: &mut Context<Self>,
+            ) -> impl IntoElement {
+                super::v_flex()
+                    .size_full()
+                    .when(uses_custom_title_bar(std::env::consts::OS), |shell| {
+                        shell.child(main_window_title_bar(|_, _, _| {}))
+                    })
+                    .child(
+                        super::h_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .items_stretch()
+                            .child(super::Sidebar::new(super::Page::Home).collapsed(self.collapsed))
+                            .child(div().id("content").test_support().flex_1().min_w_0()),
+                    )
+            }
+        }
+
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        for font_size in [12., 16., 20.] {
+            cx.update(|cx| Theme::update(cx, |theme| theme.font_size = px(font_size)));
+            for window_size in [size(px(720.), px(560.)), size(px(1280.), px(820.))] {
+                for collapsed in [false, true] {
+                    let handle = cx.open_window(window_size, |window, cx| {
+                        let shell = cx.new(|_| Shell { collapsed });
+                        Root::new(shell, window, cx)
+                    });
+                    cx.update_window(handle.into(), |_, window, cx| {
+                        window.render_frame(cx);
+                        let title_bar = window.find(MAIN_WINDOW_TITLE_BAR_SELECTOR).bounds();
+                        assert_eq!(title_bar.size.height, gpui_kit::component::TITLE_BAR_HEIGHT);
+                        assert!(window.find("toggle-sidebar").bounds().top() >= title_bar.bottom());
+                        assert!(window.find("content").bounds().top() >= title_bar.bottom());
+                        window.remove_window();
+                    })
+                    .unwrap();
+                }
+            }
+        }
     }
 
     #[test]

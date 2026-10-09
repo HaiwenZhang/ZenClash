@@ -178,6 +178,7 @@ impl OwnerProxyTransition for StartOwnerTransition<'_> {
                     .take()
                     .context("prepared runtime disappeared during owner commit")?
                     .commit();
+                super::owner_lease::reset(Some(active.generation));
                 Ok(active)
             }
             Err(error) => self.rollback_commit_failure(error).await,
@@ -317,10 +318,20 @@ pub async fn run_ipc_server() -> Result<JoinHandle<Result<()>>> {
     *IPC_SHUTDOWN_DONE.lock().await = Some(done_rx);
 
     if let Some(mut server) = IPC_SERVER.lock().await.take() {
+        {
+            let _owner_guard = OWNER_LIFECYCLE_LOCK.lock().await;
+            super::owner_lease::initialize(
+                load_active_owner()
+                    .await
+                    .map_err(|error| kode_bridge::KodeBridgeError::custom(error.to_string()))?
+                    .map(|owner| owner.generation),
+            );
+        }
         let handle = tokio::spawn(async move {
             let res = tokio::select! {
                 res = server.serve() => res,
                 _ = &mut shutdown_rx => Ok(()),
+                _ = supervise_owner_lease() => Ok(()),
             };
 
             let _ = done_tx.send(());
@@ -332,6 +343,39 @@ pub async fn run_ipc_server() -> Result<JoinHandle<Result<()>>> {
             "IPC server not initialized".to_string(),
         ))
     }
+}
+
+async fn supervise_owner_lease() {
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        if let Err(error) = retire_expired_owner().await {
+            warn!("Failed to retire expired GUI ownership; cleanup will retry: {error:#}");
+        }
+    }
+}
+
+async fn retire_expired_owner() -> AnyResult<()> {
+    let _guard = OWNER_LIFECYCLE_LOCK.lock().await;
+    let Some(active) = load_active_owner().await? else {
+        return Ok(());
+    };
+    if !super::owner_lease::is_expired(active.generation) {
+        return Ok(());
+    }
+    info!(
+        generation = active.generation,
+        "GUI ownership expired; stopping its core"
+    );
+    let proxy_result = clear_proxy_with_direct_compensation().await;
+    // Even failed proxy restoration must not leave a dead GUI's TUN and listeners running.
+    CORE_MANAGER.lock().await.stop_core().await?;
+    persist_owner_core_stopped_by_key(&active.owner_key).await?;
+    proxy_result?;
+    clear_active_owner().await?;
+    super::owner_lease::reset(None);
+    Ok(())
 }
 
 ///
@@ -623,7 +667,7 @@ enum OwnerLifecycleGate<'a> {
 async fn enter_owner_lifecycle(
     owner: &AuthenticatedOwner,
     gate: OwnerLifecycleGate<'_>,
-) -> ControlFlow<Result<HttpResponse>, MutexGuard<'static, ()>> {
+) -> ControlFlow<Result<HttpResponse>, OwnerLifecycleGuard> {
     let lifecycle_guard = OWNER_LIFECYCLE_LOCK.lock().await;
     let gated = match gate {
         OwnerLifecycleGate::Unchecked => Ok(()),
@@ -631,8 +675,27 @@ async fn enter_owner_lifecycle(
         OwnerLifecycleGate::ActiveSession(proof) => require_active_session(owner, proof).await.map(|_| ()),
     };
     match gated {
-        Ok(()) => ControlFlow::Continue(lifecycle_guard),
+        Ok(()) => ControlFlow::Continue(OwnerLifecycleGuard {
+            _guard: lifecycle_guard,
+            generation: match gate {
+                OwnerLifecycleGate::ActiveSession(proof) => Some(proof.generation),
+                _ => None,
+            },
+        }),
         Err(error) => ControlFlow::Break(service_error(error)),
+    }
+}
+
+struct OwnerLifecycleGuard {
+    _guard: MutexGuard<'static, ()>,
+    generation: Option<u64>,
+}
+
+impl Drop for OwnerLifecycleGuard {
+    fn drop(&mut self) {
+        if let Some(generation) = self.generation {
+            super::owner_lease::renew(generation);
+        }
     }
 }
 
@@ -732,6 +795,21 @@ fn create_ipc_router() -> Result<Router> {
                 proxy_outcome,
             })
         })
+        .post(IpcCommand::Heartbeat.as_ref(), |ctx| async move {
+            let (request, owner) = match authenticate_request::<AuthenticatedSessionRequest<()>>(&ctx) {
+                ControlFlow::Continue(authenticated) => authenticated,
+                ControlFlow::Break(response) => return response,
+            };
+            let _guard = OWNER_LIFECYCLE_LOCK.lock().await;
+            if let Err(error) = require_active_session(&owner, &request.session).await {
+                return service_error(error);
+            }
+            if super::owner_lease::is_expired(request.session.generation) {
+                return service_error(ServiceError::stale_owner_session());
+            }
+            super::owner_lease::renew(request.session.generation);
+            ok_empty("Owner session renewed")
+        })
         .get(IpcCommand::GetClashLogs.as_ref(), |ctx| async move {
             trace!("Received GetClashLogs command");
             let (_request, owner) = match authenticate_request::<AuthenticatedRequest<()>>(&ctx) {
@@ -794,6 +872,7 @@ fn create_ipc_router() -> Result<Router> {
                 set_core_lifecycle_state(ServiceLifecycleState::Fatal);
                 return service_unavailable(format!("Failed to clear active owner: {}", e));
             }
+            super::owner_lease::reset(None);
             ok_empty("Core stopped successfully")
         })
         .put(IpcCommand::StageRuntime.as_ref(), |ctx| async move {

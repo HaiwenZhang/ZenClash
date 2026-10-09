@@ -134,36 +134,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let recovery_notices = preferences_recovery_notice.into_iter().collect::<Vec<_>>();
     let profile_store = ProfileStore::discover()?;
     let override_store = YamlOverrideStore::discover()?;
-    let pending = prepare_disconnected_startup(requested_core, None)?;
     let runtime_handle = runtime.handle().clone();
     let restart_after_exit = Arc::new(parking_lot::Mutex::new(None));
     let cancelled = Arc::new(AtomicBool::new(false));
     let cleanup: StartupCleanup = Arc::new(parking_lot::Mutex::new(None));
-    let pending_services = app::AppServices {
-        initializing: true,
-        await_service_handoff: false,
-        profile_store: None,
-        override_store: None,
-        preferences_store: preferences_store.clone(),
-        preferences: preferences.clone(),
-        core_kind: requested_core,
-        core_session: pending.session,
-        traffic_monitor: TrafficMonitor::start_with_client(&runtime_handle, pending.client.clone()),
-        log_monitor: LogMonitor::start_with_client(
-            &runtime_handle,
-            pending.client.clone(),
-            zenclash_core::MihomoLogLevel::Info,
-        ),
-        client: pending.client,
-        traffic_history_store: None,
-        traffic_history_session: None,
-        profile_path: None,
-        controlled_config_store: controlled_config_store.clone(),
-        runtime: runtime_handle.clone(),
-        startup_notice: Some(zenclash_i18n::text("startup.initializing")),
-        startup_error: None,
-        restart_after_exit: restart_after_exit.clone(),
-    };
     let inputs = StartupInputs {
         preferences_store,
         preferences,
@@ -174,6 +148,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         override_store,
         recovery_notices,
     };
+    let pending_services =
+        prepare_pending_services(&inputs, &runtime_handle, restart_after_exit.clone())?;
     let (finished_sender, finished_receiver) = tokio::sync::oneshot::channel();
     let worker_runtime = runtime.clone();
     let worker_cancelled = cancelled.clone();
@@ -253,6 +229,40 @@ struct StartupInputs {
     override_store: YamlOverrideStore,
     recovery_notices: Vec<String>,
 }
+
+fn prepare_pending_services(
+    inputs: &StartupInputs,
+    runtime: &tokio::runtime::Handle,
+    restart_after_exit: Arc<parking_lot::Mutex<Option<app::RestartRequest>>>,
+) -> Result<app::AppServices, Box<dyn std::error::Error>> {
+    let pending = prepare_disconnected_startup(inputs.requested_core, None)?;
+    Ok(app::AppServices {
+        initializing: true,
+        await_service_handoff: false,
+        profile_store: Some(inputs.profile_store.clone()),
+        override_store: Some(inputs.override_store.clone()),
+        preferences_store: inputs.preferences_store.clone(),
+        preferences: inputs.preferences.clone(),
+        core_kind: inputs.requested_core,
+        core_session: pending.session,
+        traffic_monitor: TrafficMonitor::start_with_client(runtime, pending.client.clone()),
+        log_monitor: LogMonitor::start_with_client(
+            runtime,
+            pending.client.clone(),
+            zenclash_core::MihomoLogLevel::Info,
+        ),
+        client: pending.client,
+        traffic_history_store: None,
+        traffic_history_session: None,
+        profile_path: None,
+        controlled_config_store: inputs.controlled_config_store.clone(),
+        runtime: runtime.clone(),
+        startup_notice: Some(zenclash_i18n::text("startup.initializing")),
+        startup_error: None,
+        restart_after_exit,
+    })
+}
+
 fn ensure_startup_active(cancelled: &AtomicBool) -> Result<(), Box<dyn std::error::Error>> {
     if cancelled.load(Ordering::Acquire) {
         return Err(std::io::Error::new(
@@ -1292,6 +1302,54 @@ mod tracing_tests {
         assert!(pending.profile.is_none());
         assert!(pending.initialization.is_none());
         assert!(pending.error.is_none());
+    }
+
+    #[test]
+    fn pending_gui_preserves_ready_configuration_libraries() {
+        let root = std::env::temp_dir().join(format!(
+            "zenclash-pending-libraries-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let inputs = super::StartupInputs {
+            preferences_store: None,
+            preferences: zenclash_core::AppPreferences::default(),
+            requested_core: CoreKind::Mihomo,
+            environment_core: None,
+            controlled_config_store: zenclash_core::ControlledConfigStore::new(
+                root.join("controlled"),
+            ),
+            profile_store: zenclash_core::ProfileStore::new(root.join("profiles")).unwrap(),
+            override_store: zenclash_core::YamlOverrideStore::new(root.join("overrides")).unwrap(),
+            recovery_notices: Vec::new(),
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let services = super::prepare_pending_services(
+            &inputs,
+            runtime.handle(),
+            std::sync::Arc::new(parking_lot::Mutex::new(None)),
+        )
+        .unwrap();
+        let profile_root = services
+            .profile_store
+            .as_ref()
+            .map(|store| store.root().to_path_buf());
+        let override_root = services
+            .override_store
+            .as_ref()
+            .map(|store| store.root().to_path_buf());
+        drop(services);
+        runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(profile_root, Some(root.join("profiles")), "配置仓库不可用");
+        assert_eq!(
+            override_root,
+            Some(root.join("overrides")),
+            "YAML 覆写仓库不可用"
+        );
     }
 
     #[test]

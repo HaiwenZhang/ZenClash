@@ -43,7 +43,11 @@ BUILD-MANIFEST.json 全部完成才构成交付。真实安装与原生 GUI 操�
 
 **接入状态（2026-10-05）：** `zenclash-core` 与 GUI 已改用`zenclash-core::service` 的所有者会话、原生 HTTP/WebSocket、Start/Stage/Stop 和安装维护接口，Windows GUI 编译通过。主应用打包脚本改为 `standalone,client` 并携带三个工具，四种打包载荷回归通过。2026-10-05 已生成阶段 Windows 安装包及同版对应源码，解压后的文件哈希与离线编译检查通过。持久共享 RunState/PAC 和核心事务已接通；后续策略/恢复收尾、修复的重新打包及三平台实机验收仍未完成；不能仅凭这些结果宣称安装包已验收。`crates/zenclash-service-bak` 是用户保留的旧实现备份，不参与构建。
 
-`ClashConfig`、`start_clash`、`/clash/...` 等名称沿用上游的内核控制接口语义。协议 epoch/revision 保持 2/5，但产品 IPC 地址、协议头和所有者令牌文件名均已改为 ZenClash；本 Fork 无需与 Clash Verge 服务互通。
+`ClashConfig`、`start_clash`、`/clash/...` 等名称沿用上游的内核控制接口语义。协议 epoch/revision 为 **2/6**，产品 IPC 地址、协议头和所有者令牌文件名均使用 ZenClash；本 Fork 无需与 Clash Verge 服务互通。GUI 与 helper 的最低兼容 revision 都是 6，旧安装需通过应用内“修复服务”更新。
+
+2026-10-10 的 GUI 生命周期修复新增 `/clash/heartbeat`：只有经过 OS 所有者认证、且 token 和 generation 匹配当前会话的请求才能续租。GUI 在 Tokio 后台每 2 秒续租，窗口隐藏或失焦不停止心跳；Start 回复丢失时，保留的 proposed token 仍可证明并维持其会话，不能仅凭 Status 接管其他会话。服务在 10 秒无续租后开始回收该会话的内核、代理状态和执行锁；待命服务进程继续运行。已准入的配置操作结束后会重新给 GUI 完整的续租窗口，避免服务处理时间误伤正常客户端。
+
+此修复通过 macOS 上的隔离 IPC、模拟内核退出/续租/替换测试和状态面板 UI 回归验证。真实 TUN 与已安装 helper 的管理员更新仍需安装后验证。崩溃前的代码段与保留符号后的构建逐字节一致；符号还原和 UI 回归都定位到状态面板首帧渲染读取正在更新的主界面实体，面板现改为持有并观察展示快照。
 
 ## 产品标识
 

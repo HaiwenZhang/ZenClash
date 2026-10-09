@@ -187,10 +187,10 @@ impl RuntimePage {
                 if this.page != Page::Home
                     || this.home.generation != generation
                     || this.core_session.generation() != generation
-                    || !this
+                    || this
                         .traffic_history_store
                         .as_ref()
-                        .is_some_and(|store| store.path() == source)
+                        .is_none_or(|store| store.path() != source)
                 {
                     return;
                 }

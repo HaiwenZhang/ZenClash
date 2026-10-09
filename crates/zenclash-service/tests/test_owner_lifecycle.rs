@@ -72,6 +72,14 @@ async fn restarting_an_owner_invalidates_the_previous_session() -> Result<()> {
 
     assert!(second.session.generation > first.session.generation);
     assert_eq!(
+        zenclash_service::heartbeat(&credentials, &first_session).await?.code,
+        ServiceErrorCode::StaleOwnerSession as u16
+    );
+    assert_eq!(
+        zenclash_service::heartbeat(&credentials, &second_session).await?.code,
+        0
+    );
+    assert_eq!(
         stop_clash(&credentials, &first_session).await?.code,
         ServiceErrorCode::StaleOwnerSession as u16
     );
@@ -81,6 +89,52 @@ async fn restarting_an_owner_invalidates_the_previous_session() -> Result<()> {
     assert_eq!(stop_clash(&credentials, &second_session).await?.code, 0);
 
     stop_server(server).await
+}
+
+#[tokio::test]
+#[serial]
+async fn exited_gui_owner_does_not_leave_a_running_core() -> Result<()> {
+    let server = start_server().await?;
+    let credentials = common::owner_credentials();
+    let token = "dd".repeat(32);
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_service-integration-driver"))
+        .arg("start")
+        .current_dir(&credentials.app_data_dir)
+        .env("ZENCLASH_TEST_SESSION_TOKEN", &token)
+        .output()
+        .await?;
+    anyhow::ensure!(output.status.success(), "isolated owner could not start its core");
+    let generation = std::str::from_utf8(&output.stdout)?.trim().parse()?;
+    let session = OwnerSessionProof { generation, token };
+    let deadline =
+        tokio::time::Instant::now() + zenclash_service::OWNER_SESSION_LEASE_TIMEOUT + std::time::Duration::from_secs(6);
+    let mut stopped = false;
+    while tokio::time::Instant::now() < deadline {
+        let status = get_status(&credentials).await?.data.context("status omitted data")?;
+        if !status.is_active && status.core_pid.is_none() && !status.desired_core_should_be_running {
+            stopped = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    if !stopped {
+        let _ = stop_clash(&credentials, &session).await;
+    } else {
+        common::wait_until("released core execution", async || {
+            zenclash_service::inspect_installation(&[])
+                .await
+                .is_ok_and(|status| !status.core_busy)
+        })
+        .await?;
+        let (_replacement, proof) = start(&credentials, &"ee".repeat(32)).await?;
+        assert_eq!(stop_clash(&credentials, &proof).await?.code, 0);
+    }
+    stop_server(server).await?;
+    assert!(
+        stopped,
+        "GUI exited but its service core and listener reservation stayed active"
+    );
+    Ok(())
 }
 
 #[cfg(unix)]
