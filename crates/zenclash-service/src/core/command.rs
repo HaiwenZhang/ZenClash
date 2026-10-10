@@ -27,6 +27,8 @@ pub enum IpcCommand {
     ReadRuntimeFile,
     #[strum(serialize = "/system-proxy")]
     SetSystemProxy,
+    #[strum(serialize = "/tun-dns")]
+    SetTunDns,
     #[strum(serialize = "/writer")]
     UpdateWriter,
     #[strum(serialize = "/magic")]

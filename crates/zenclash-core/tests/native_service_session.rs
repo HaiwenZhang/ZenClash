@@ -144,6 +144,11 @@ async fn application_start_reload_displacement_and_shutdown_use_the_actual_nativ
         let tun = client.runtime_config().await?.tun;
         ensure!(tun.enable && tun.auto_route && tun.auto_detect_interface);
         ensure!(tun.stack == "gvisor" && tun.dns_hijack == ["any:53"]);
+        #[cfg(target_os = "macos")]
+        ensure!(
+            zenclash_service::test_tun_dns_enabled(),
+            "TUN readback did not acquire the owned DNS resolver"
+        );
         let saved: serde_yaml::Value =
             serde_yaml::from_slice(&std::fs::read(store.runtime_path())?)?;
         ensure!(saved["dns"]["enable"] == true);
@@ -160,6 +165,11 @@ async fn application_start_reload_displacement_and_shutdown_use_the_actual_nativ
             )
             .await?;
         ensure!(!client.runtime_config().await?.tun.enable);
+        #[cfg(target_os = "macos")]
+        ensure!(
+            !zenclash_service::test_tun_dns_enabled(),
+            "disabling TUN did not release the owned DNS resolver"
+        );
         ensure!(observer.status().await?.active_generation == owner_generation);
         ensure!(
             session.run_state().mode == RunningMode::Service,
@@ -175,7 +185,8 @@ async fn application_start_reload_displacement_and_shutdown_use_the_actual_nativ
         replacement = Some(observer.clone());
         let replaced = observer
             .start(RuntimeBundle {
-                yaml: "mode: global\ntun: {enable: false}\n".into(),
+                yaml: "mode: global\ntun: {enable: true, auto-route: true, dns-hijack: [any:53]}\n"
+                    .into(),
                 assets: Vec::new(),
                 remote_providers: Vec::new(),
                 core_path: binary.to_string_lossy().into_owned(),
@@ -184,6 +195,14 @@ async fn application_start_reload_displacement_and_shutdown_use_the_actual_nativ
         ensure!(Some(replaced.session.generation) != owner_generation);
         let replacement_pid = observer.status().await?.core_pid;
         ensure!(replacement_pid.is_some());
+        observer
+            .controller_request("GET", "/configs", None, "", Duration::from_secs(3))
+            .await?;
+        #[cfg(target_os = "macos")]
+        ensure!(
+            zenclash_service::test_tun_dns_enabled(),
+            "replacement owner did not acquire its resolver"
+        );
         ensure!(
             client.version().await.is_err(),
             "displaced controller unexpectedly retained authority"
@@ -204,9 +223,22 @@ async fn application_start_reload_displacement_and_shutdown_use_the_actual_nativ
             surviving.core_pid == replacement_pid,
             "old application shutdown stopped its replacement"
         );
+        #[cfg(target_os = "macos")]
+        ensure!(
+            zenclash_service::test_tun_dns_enabled(),
+            "displaced application released the replacement's resolver"
+        );
         observer.stop().await?;
         ensure!(!observer.status().await?.is_active);
-        drop(zenclash_core::service::reserve_sidecar().await?);
+        #[cfg(target_os = "macos")]
+        ensure!(
+            !zenclash_service::test_tun_dns_enabled(),
+            "native Stop retained the resolver"
+        );
+        // This reservation is isolated from the real user core. A full Sidecar
+        // admission also checks host processes and correctly refuses when the
+        // user's real Mihomo is running alongside this controller-only fixture.
+        drop(zenclash_service::execution::CoreExecutionGuard::acquire()?);
         Ok::<_, anyhow::Error>(())
     })
     .await;

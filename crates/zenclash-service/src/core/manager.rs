@@ -379,11 +379,22 @@ impl CoreManager {
         }
 
         let execution = std::sync::Arc::new(crate::execution::CoreExecutionGuard::acquire()?);
+        let config_path = config.core_config.config_path.clone();
         let result = self.start_reserved_core(config, owner, execution.clone()).await;
         if result.is_ok() || self.running_pid.load(Ordering::Acquire) != 0 {
             *self.execution.lock().await = Some(execution);
         }
-        result
+        result?;
+        // CRITICAL REGRESSION: start/recovery cannot rely on a GUI readback to
+        // move macOS LAN DNS into TUN. A live core and route can still fail all
+        // domain-based requests without this lease; see core/tun_dns.rs.
+        if let Err(error) = super::tun_dns::apply_for_config(&config_path).await {
+            self.stop_core()
+                .await
+                .context("failed to retire core after TUN DNS setup failure")?;
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn start_reserved_core(
@@ -462,6 +473,11 @@ impl CoreManager {
         info!("Stopping core");
         LOG_RING.clear_logs();
 
+        // Restore the system resolver while the TUN routes still exist. The
+        // watchdog also releases it on an unexpected exit before any restart.
+        // Removing this cleanup can leave DNS pointing at the retired TUN path.
+        super::tun_dns::apply(false).await?;
+
         let watchdog_result = self.stop_watchdog(kill_by).await;
         let mut recovered_failed_child = false;
         // Bound first: an `if let` scrutinee would keep the lock through the block.
@@ -517,6 +533,7 @@ impl CoreManager {
 
         let handle = tokio::spawn(async move {
             let _execution = execution;
+            let _dns_retirement = super::tun_dns::RetirementGuard;
             let mut recovery_exhausted = false;
             let mut child_guard = Some(child_guard);
             let mut shutdown_rx = shutdown_rx;
@@ -558,6 +575,10 @@ impl CoreManager {
                         break;
                     }
                 };
+
+                if let Err(error) = super::tun_dns::apply(false).await {
+                    warn!("Failed to release TUN DNS after core exit: {error:#}");
+                }
 
                 let uptime = start_time_arc.lock().await.map(|t| t.elapsed()).unwrap_or_default();
                 let exit_reason = log_core_exit(&status, uptime);
@@ -663,6 +684,20 @@ impl CoreManager {
                                     return Err(anyhow!(
                                         "{record_error:#}; failed to terminate unrecorded restarted core: {kill_error:#}"
                                     ));
+                                }
+                                recovery_exhausted = true;
+                                break 'watchdog;
+                            }
+                            if let Err(error) = super::tun_dns::apply_for_config(&config.core_config.config_path).await
+                            {
+                                error!("Failed to restore TUN DNS after core restart: {error:#}");
+                                if let Err(kill_error) = new_guard.terminate(Duration::ZERO).await {
+                                    running_pid_arc.store(new_pid.unwrap_or_default(), Ordering::Release);
+                                    *failed_child_arc.lock().await = Some(new_guard);
+                                    set_core_lifecycle_state(ServiceLifecycleState::Fatal);
+                                    return Err(
+                                        kill_error.context("failed to retire core after TUN DNS recovery failure")
+                                    );
                                 }
                                 recovery_exhausted = true;
                                 break 'watchdog;

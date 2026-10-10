@@ -83,6 +83,24 @@ async fn restarting_an_owner_invalidates_the_previous_session() -> Result<()> {
         stop_clash(&credentials, &first_session).await?.code,
         ServiceErrorCode::StaleOwnerSession as u16
     );
+    assert_eq!(
+        zenclash_service::set_tun_dns(&credentials, &first_session, true)
+            .await?
+            .code,
+        ServiceErrorCode::StaleOwnerSession as u16
+    );
+    assert_eq!(
+        zenclash_service::set_tun_dns(&credentials, &second_session, true)
+            .await?
+            .code,
+        0
+    );
+    assert_eq!(
+        zenclash_service::set_tun_dns(&credentials, &second_session, false)
+            .await?
+            .code,
+        0
+    );
     let status = get_status(&credentials).await?.data.context("status omitted data")?;
     assert!(status.is_active);
     assert!(status.core_pid.is_some());

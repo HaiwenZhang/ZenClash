@@ -603,7 +603,7 @@ impl TrafficCaptureSession {
                 .await
         } else {
             // Readback failure after a durable save must retain the saved receipt.
-            match self.applied(CapturePlan::Tun).await {
+            match self.applied(CapturePlan::Tun, &before).await {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     recovery_warning = Some(error.to_string());
@@ -743,7 +743,7 @@ impl TrafficCaptureSession {
                 .failed_outcome(CapturePlan::Off, failure, rollback)
                 .await);
         }
-        self.applied(CapturePlan::Off).await
+        self.applied(CapturePlan::Off, &before).await
     }
 
     async fn apply_system_proxy(
@@ -759,6 +759,14 @@ impl TrafficCaptureSession {
                 .set_tun(false)
                 .await
                 .map_err(TrafficCaptureError::Backend)?;
+            let snapshot = self.snapshot_from_backend().await?;
+            if snapshot.tun.value().is_none_or(|tun| tun.configured) {
+                return Ok(CaptureOutcome::ReconcileNeeded {
+                    plan: Some(CapturePlan::SystemProxy),
+                    failure: zenclash_i18n::text("traffic_capture.errors.tun_disable_unconfirmed"),
+                    snapshot,
+                });
+            }
         }
         if let Err(failure) = self.backend.set_system_proxy(true, port).await {
             let rollback = if tun_was_configured {
@@ -770,7 +778,7 @@ impl TrafficCaptureSession {
                 .failed_outcome(CapturePlan::SystemProxy, failure, rollback)
                 .await);
         }
-        self.applied(CapturePlan::SystemProxy).await
+        self.applied(CapturePlan::SystemProxy, &before).await
     }
 
     async fn apply_tun(
@@ -800,7 +808,7 @@ impl TrafficCaptureSession {
                 .failed_outcome(CapturePlan::Tun, failure, rollback)
                 .await);
         }
-        self.applied(CapturePlan::Tun).await
+        self.applied(CapturePlan::Tun, &before).await
     }
 
     async fn restore_system_proxy(&self, before: &TrafficCaptureSnapshot) -> Result<(), String> {
@@ -817,11 +825,34 @@ impl TrafficCaptureSession {
         self.backend.set_system_proxy(true, port).await
     }
 
-    async fn applied(&self, plan: CapturePlan) -> Result<CaptureOutcome, TrafficCaptureError> {
-        Ok(CaptureOutcome::Applied {
-            plan,
-            snapshot: self.snapshot_from_backend().await?,
-        })
+    async fn applied(
+        &self,
+        plan: CapturePlan,
+        before: &TrafficCaptureSnapshot,
+    ) -> Result<CaptureOutcome, TrafficCaptureError> {
+        let snapshot = self.snapshot_from_backend().await?;
+        if !plan_matches(plan, &snapshot) {
+            return Ok(CaptureOutcome::ReconcileNeeded {
+                plan: Some(plan),
+                failure: zenclash_i18n::text("traffic_capture.errors.plan_unconfirmed"),
+                snapshot,
+            });
+        }
+        // Match Clash Verge's system-proxy cleanup. TUN teardown belongs to
+        // Mihomo; clearing every connection here also disrupts unrelated pools.
+        let retiring_system_proxy = system_proxy_is_owned_and_active(before)
+            && !system_proxy_is_owned_and_active(&snapshot);
+        if retiring_system_proxy && let Err(error) = self.backend.close_owned_connections().await {
+            return Ok(CaptureOutcome::ReconcileNeeded {
+                plan: Some(plan),
+                failure: zenclash_i18n::text_with(
+                    "traffic_capture.errors.connections_cleanup",
+                    &[("error", error)],
+                ),
+                snapshot,
+            });
+        }
+        Ok(CaptureOutcome::Applied { plan, snapshot })
     }
 
     async fn failed_outcome(
@@ -924,6 +955,7 @@ trait CaptureBackend: Send + Sync {
     fn set_system_proxy(&self, enabled: bool, port: u16) -> CaptureFuture<'_, ()>;
     fn set_tun(&self, enabled: bool) -> CaptureFuture<'_, ()>;
     fn ensure_tun_permission(&self) -> CaptureFuture<'_, ()>;
+    fn close_owned_connections(&self) -> CaptureFuture<'_, ()>;
     fn reconcile(&self) -> CaptureFuture<'_, ()>;
     fn release_owned(&self) -> CaptureFuture<'_, ()>;
 }
@@ -1103,6 +1135,24 @@ impl CaptureBackend for ProductionCaptureBackend {
         Box::pin(async move {
             self.core_session
                 .ensure_tun_permission()
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn close_owned_connections(&self) -> CaptureFuture<'_, ()> {
+        Box::pin(async move {
+            let client = self
+                .core_session
+                .client()
+                .pin_binding()
+                .map_err(|error| error.to_string())?;
+            if client.owned_core().is_none() || self.core_session.snapshot().running == Some(false)
+            {
+                return Ok(());
+            }
+            client
+                .close_all_connections()
                 .await
                 .map_err(|error| error.to_string())
         })
@@ -1816,7 +1866,9 @@ mod tests {
         system_proxy_port: Option<u16>,
         resynced_system_proxy_port: Option<u16>,
         tun_configured: bool,
+        ignore_tun_writes: bool,
         core_available: bool,
+        open_connections: usize,
         permission_error: Option<String>,
         permission_requests: usize,
         failures: VecDeque<&'static str>,
@@ -1844,7 +1896,9 @@ mod tests {
                     system_proxy_port: Some(7890),
                     resynced_system_proxy_port: Some(7890),
                     tun_configured: tun,
+                    ignore_tun_writes: false,
                     core_available: true,
+                    open_connections: 0,
                     permission_error: None,
                     permission_requests: 0,
                     failures: VecDeque::new(),
@@ -2020,7 +2074,9 @@ mod tests {
                 let operation = format!("tun:{enabled}");
                 state.operations.push(operation.clone());
                 Self::should_fail(&mut state, &operation)?;
-                state.tun_configured = enabled;
+                if !state.ignore_tun_writes {
+                    state.tun_configured = enabled;
+                }
                 Ok(())
             })
         }
@@ -2030,6 +2086,16 @@ mod tests {
                 let mut state = self.state.lock().unwrap();
                 state.permission_requests += 1;
                 state.permission_error.clone().map_or(Ok(()), Err)
+            })
+        }
+
+        fn close_owned_connections(&self) -> CaptureFuture<'_, ()> {
+            Box::pin(async move {
+                let mut state = self.state.lock().unwrap();
+                state.operations.push("close-connections".into());
+                Self::should_fail(&mut state, "close-connections")?;
+                state.open_connections = 0;
+                Ok(())
             })
         }
 
@@ -2253,6 +2319,163 @@ mod tests {
             ObservedCapturePlan::Advanced
         );
         assert_eq!(backend.operations(), ["reconcile"]);
+    }
+
+    #[tokio::test]
+    async fn a_tun_disable_not_confirmed_by_readback_cannot_enable_system_proxy() {
+        let backend = Arc::new(FakeBackend::new(
+            false,
+            SystemProxyOwnershipState::Unowned,
+            true,
+        ));
+        backend.state.lock().unwrap().ignore_tun_writes = true;
+        let session = TrafficCaptureSession::with_backend(backend.clone());
+
+        let outcome = session.apply(CapturePlan::SystemProxy).await.unwrap();
+
+        assert!(matches!(outcome, CaptureOutcome::ReconcileNeeded { .. }));
+        assert!(outcome.snapshot().tun.value().unwrap().configured);
+        assert!(!backend.state.lock().unwrap().system_proxy.actual.active());
+    }
+
+    #[tokio::test]
+    async fn connection_cleanup_failure_does_not_restore_disabled_capture() {
+        let backend = Arc::new(FakeBackend::new(
+            true,
+            SystemProxyOwnershipState::Owned,
+            true,
+        ));
+        backend.state.lock().unwrap().open_connections = 1;
+        backend.fail_next("close-connections");
+        let session = TrafficCaptureSession::with_backend(backend.clone());
+
+        let outcome = session.apply(CapturePlan::Off).await.unwrap();
+
+        assert!(matches!(outcome, CaptureOutcome::ReconcileNeeded { .. }));
+        assert_eq!(outcome.snapshot().observed_plan, ObservedCapturePlan::Off);
+        assert_eq!(backend.state.lock().unwrap().open_connections, 1);
+        assert_eq!(
+            backend.operations(),
+            ["system-proxy:false", "tun:false", "close-connections"]
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_cleanup_never_contacts_an_external_controller() {
+        let client =
+            crate::MihomoClient::new(crate::MihomoEndpoint::new("http://127.0.0.1:1", "")).unwrap();
+        let core_session = CoreSession::open(crate::CoreKind::Mihomo, client).unwrap();
+        let backend = ProductionCaptureBackend {
+            core_session,
+            controlled: ControlledConfigStore::new(
+                std::env::temp_dir().join("zenclash-external-connection-cleanup"),
+            ),
+            system_proxy: None,
+            profile: Arc::default(),
+        };
+
+        // An attempted request would fail against this unreachable external controller.
+        backend.close_owned_connections().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn turning_capture_off_closes_existing_connections_without_stopping_core() {
+        let backend = Arc::new(FakeBackend::new(
+            true,
+            SystemProxyOwnershipState::Owned,
+            false,
+        ));
+        backend.state.lock().unwrap().open_connections = 1;
+        let session = TrafficCaptureSession::with_backend(backend.clone());
+
+        let outcome = session.apply(CapturePlan::Off).await.unwrap();
+
+        assert_eq!(outcome.snapshot().observed_plan, ObservedCapturePlan::Off);
+        let state = backend.state.lock().unwrap();
+        assert_eq!(state.open_connections, 0);
+        assert!(state.core_available);
+    }
+
+    #[tokio::test]
+    async fn switching_from_tun_to_system_proxy_then_off_releases_both_capture_modes() {
+        // Native capture is simulated so this regression cannot change host routing.
+        let backend = Arc::new(FakeBackend::new(
+            false,
+            SystemProxyOwnershipState::Unowned,
+            true,
+        ));
+        backend.state.lock().unwrap().open_connections = 1;
+        let session = TrafficCaptureSession::with_backend(backend.clone());
+
+        let proxy = session.apply(CapturePlan::SystemProxy).await.unwrap();
+        assert_eq!(
+            proxy.snapshot().observed_plan,
+            ObservedCapturePlan::SystemProxy
+        );
+        assert!(!proxy.snapshot().tun.value().unwrap().configured);
+        assert_eq!(backend.state.lock().unwrap().open_connections, 1);
+
+        backend.state.lock().unwrap().open_connections = 1;
+        let off = session.apply(CapturePlan::Off).await.unwrap();
+        assert_eq!(off.snapshot().observed_plan, ObservedCapturePlan::Off);
+        let system_proxy = off.snapshot().system_proxy.value().unwrap();
+        assert!(!system_proxy.intent_enabled);
+        assert!(!system_proxy.actual.active());
+        assert_eq!(system_proxy.ownership, SystemProxyOwnershipState::Unowned);
+        assert!(!off.snapshot().tun.value().unwrap().configured);
+        assert_eq!(backend.state.lock().unwrap().open_connections, 0);
+    }
+
+    #[tokio::test]
+    async fn tun_off_then_on_does_not_clear_unrelated_connections() {
+        let backend = Arc::new(FakeBackend::new(
+            false,
+            SystemProxyOwnershipState::Unowned,
+            true,
+        ));
+        backend.state.lock().unwrap().open_connections = 1;
+        let session = TrafficCaptureSession::with_backend(backend.clone());
+
+        let off = session.apply(CapturePlan::Off).await.unwrap();
+        assert_eq!(off.snapshot().observed_plan, ObservedCapturePlan::Off);
+        let on = session.apply(CapturePlan::Tun).await.unwrap();
+        assert_eq!(
+            on.snapshot().observed_plan,
+            ObservedCapturePlan::TunConfigured
+        );
+        let state = backend.state.lock().unwrap();
+        assert_eq!(state.open_connections, 1);
+        assert!(state.core_available);
+    }
+
+    #[tokio::test]
+    async fn switching_from_system_proxy_to_tun_closes_old_connections_and_preserves_core() {
+        let backend = Arc::new(FakeBackend::new(
+            true,
+            SystemProxyOwnershipState::Owned,
+            false,
+        ));
+        backend.state.lock().unwrap().open_connections = 1;
+        let session = TrafficCaptureSession::with_backend(backend.clone());
+
+        let outcome = session.apply(CapturePlan::Tun).await.unwrap();
+
+        assert_eq!(
+            outcome.snapshot().observed_plan,
+            ObservedCapturePlan::TunConfigured
+        );
+        assert!(
+            !outcome
+                .snapshot()
+                .system_proxy
+                .value()
+                .unwrap()
+                .actual
+                .active()
+        );
+        let state = backend.state.lock().unwrap();
+        assert_eq!(state.open_connections, 0);
+        assert!(state.core_available);
     }
 
     #[tokio::test]

@@ -60,6 +60,10 @@ mod status;
 mod test_credentials;
 #[cfg(feature = "standalone")]
 mod trusted_core_location;
+#[cfg(feature = "standalone")]
+mod tun_dns;
+#[cfg(all(feature = "standalone", feature = "test"))]
+pub use tun_dns::test_tun_dns_enabled;
 #[cfg(all(feature = "standalone", unix))]
 mod unix_security;
 #[cfg(all(feature = "standalone", windows))]

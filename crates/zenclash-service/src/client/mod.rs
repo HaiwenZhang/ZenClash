@@ -362,6 +362,27 @@ pub async fn set_system_proxy(
     .await
 }
 
+/// Acquires or releases the temporary macOS resolver for the proved TUN owner.
+/// No permanent network-service DNS preferences are changed.
+///
+/// # Errors
+/// Returns native IPC errors; ownership and DNS write refusals retain their response code.
+pub async fn set_tun_dns(
+    credentials: &OwnerCredentials,
+    session: &OwnerSessionProof,
+    enabled: bool,
+) -> Result<Response<()>> {
+    protected_call(
+        Verb::Put,
+        IpcCommand::SetTunDns,
+        credentials,
+        Some(session),
+        enabled,
+        None,
+    )
+    .await
+}
+
 /// Inspects approved cores and global occupancy without exposing another owner's session.
 ///
 /// # Errors

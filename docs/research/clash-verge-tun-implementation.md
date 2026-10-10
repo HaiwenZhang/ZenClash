@@ -260,3 +260,37 @@ macOS 交叉检查发现卸载器残留对 `uninstall_old_service` 的导入与�
 3. 对服务维修、卸载、内核崩溃、GUI 退出和会话接管，核对恢复与资源清理。
 
 跨平台源码停止策略已适配，但当前项目的交付范围以 Windows 为主。没有复制参考 macOS 的公共 DNS 快照/恢复流程；Linux 参考应用的“启用时额外重启”与三平台真实安装、路由、网络验收仍需对应平台确认。本文不将源码编译或模拟内核测试称为网络验收，也不将以前生成的安装包称为包含本次修改。
+
+## 11. 2026-10-10 macOS 局域网 DNS 绕过 TUN 的实机排查
+
+Mihomo v1.19.32、系统代理 127.0.0.1:7890：`tun_tls_probe.sh system-proxy --proxy-port 7890 --count 1` 返回 HTTP 200，TLS 约 3.27 秒。临时启用与应用相同的 gVisor/utun1024/auto-route/any:53 设置后，`route get 1.1.1.1` 确认走 utun1024，但相同 ChatGPT 请求稳定在约 10 秒后发生 TLS `SSL_ERROR_SYSCALL`，Google 同样失败。每次探测都在 finally 中恢复原 TUN 设置。
+
+系统解析器仍指向局域网路由器的 IPv4/IPv6 地址；连接回读中两项 TUN HTTPS 请求的 host 为空，目标地址分别是 157.240.7.8 与 69.171.235.22。`dig @1.1.1.1` 经 TUN 返回 198.18.* Fake-IP；只给相同 curl 请求传入该解析结果，两域名立即返回 HTTP 200，TLS 分别约 0.50/0.16 秒。它证明该故障来自系统 DNS 路径，而不是这个场景中的 MTU 或 gVisor 传输。[上游 TUN 文档](https://wiki.metacubex.one/config/inbound/tun/)明确说明 macOS/Windows 无法自动劫持局域网 DNS。
+
+本次新增服务拥有的 macOS 临时 supplemental 默认解析器，向已验证可被 TUN DNS 劫持的 1.1.1.1 发送查询；不改写永久 DNS 偏好。使用 `SCDynamicStoreAddTemporaryValue`，拒绝覆盖别的会话已有的 key，正常关闭时显式撤销，helper 被终止时由 configd 自动删除。启用、重载与恢复后按实际 TUN 回读同步；服务启动和 watchdog 恢复从受控配置建立，停止及异常退出释放。队列在等待前提交，取消不能让旧 enable 晚于 stop 执行。协议升至 revision 7，旧客户端/服务不能静默跳过新步骤。
+
+捕获切换 39 项、运行恢复 10 项、DNS 回读规则 1 项、服务模拟库 108 项、旧会话拒绝 DNS 写入的真实隔离 IPC 回归 1 项均通过；Core 与 Service 严格 Clippy 通过。运行恢复夹具首次并行执行发生时间戳目录碰撞，增加进程内序号后重跑 10 项全部通过。release App `0.2.0-test.20261010-tun-dns` 已构建并通过签名校验。模拟测试不改变宿主 DNS。
+
+**验收仍未完成**：当前用户没有免密码管理员权限，普通用户临时动态 store 写入返回 SCError 1003。新服务的实际 DNS 接管、恢复、浏览器访问与 Codex 模型回答须更新管理员服务后验证；`--resolve` 对照成功不等于系统 DNS 修复已在安装版生效。尚未证实 Codex 原有耗时来自 WebSocket 回退。
+
+测试 App 已复制到 /Applications/ZenClash.app，四个可执行文件摘要与构建产物一致、签名复核通过；旧 App 完整备份在 /private/tmp/ZenClash-before-tun-dns-20261010.app。随后 `--prepare-install` 更新管理员服务的命令被自动审批审查拒绝，理由是用户尚未明确授权该特权服务变更及其范围，命令未执行。已请求这项具体授权，等待答复；仍运行原进程和原服务。最终只读复核确认 TUN 关闭，系统代理到 Google 返回 HTTP 200。
+
+### 11.1 隔离 IPC 的 DNS 同步链路与模型调用基线
+
+补审发现 `service-ipc-tests` 排除了 macOS 客户端的 DNS 同步逻辑，全功能严格 Clippy 因此报告该判定函数未使用。新增仅测试可见的模拟 DNS 状态，原生动态 store 仍完全排除；同一个受控配置读取步骤也进入模拟启动/恢复。实际应用 Start→Stage→Reload→回读回归首次失败于“未获得 DNS 解析器”，取消客户端测试路径的特殊跳过后，验证开启、关闭、替代 owner 接管、旧 owner 退出不撤销新解析器，以及 Stop 撤销。
+
+这项夹具只创建本地控制器，不创建 TUN；宿主已有真实 Mihomo 时，完整 Sidecar 准入会正确拒绝，因此最终只用独立测试执行锁验证夹具释放。调试期间还观测到 IPC listener 重建失败，未据此改动生产监听器；清除临时日志后连续三次完整回归通过，不宣称所有 CI 调度条件都已稳定。
+
+Codex CLI 0.162.0 使用已有 ChatGPT 登录、当前配置模型 gpt-6.1-sol、显式 HTTP 代理 127.0.0.1:7890，在临时只读目录发出一次仅回复 OK 的请求。使用[官方非交互文档](https://learn.chatgpt.com/docs/non-interactive-mode)所述的 `--ephemeral`，本次调用禁用 hooks、plugins 和 MCP 服务，不读取工作区。返回 OK，退出码 0，耗时 9.619 秒；未出现 WebSocket 重连/回退信息。这证明当前 CLI 的系统代理路径能完成模型调用，不证明桌面 App 的历史回退行为，也不替代 TUN 下的模型验收。只保存脱敏结果于 target/diagnostics/codex/system-proxy-baseline.json。
+
+### 11.2 获得授权后的安装版网络验收
+
+用户明确授权更新管理员服务、launchd 注册及服务内 Mihomo，并允许测试时关闭备用 Clash Verge。首次更新在 bootout 后立即进行所有权维护时遇到旧服务锁仍被占用，服务二进制尚未发布；退出旧 GUI、确认旧服务已停止后，同一受控安装器重试成功，公开协议实际回读为 epoch 2/revision 7，受保护 helper 摘要与测试 App 一致。
+
+本次手动安装先使用了 App 内的签名内核，但应用默认选择用户目录的现有内核。两者同为 v1.19.32，摘要分别为 bf496136997d79e2cad176ff221734e6ba3ba6e986b438862d065131ada09a40 与 3a4005e58ec7cbe86f8a347c2897ca9d246a26dcdea7c60c3894872b073fc9a6；真实 `/installation` 对实际选择返回 digest_mismatch。用同一安装器的 core-only 流程将服务副本对齐到应用当前选择后，准入返回 ready，重新启动 GUI 后真实服务内核 PID 74530、控制器 9090 正常响应。未覆盖用户的现有内核或订阅，也未把未匹配的摘要检查放宽。
+
+关闭 Clash Verge TUN 后，从 ZenClash GUI 开启 TUN，系统代理实际关闭，公网路由走 utun1024，macOS `scutil --dns` 首选 resolver 为 1.1.1.1、Supplemental、order 1。未用 `--resolve` 或显式代理：Google 两次 HTTPS 均为 HTTP 200，系统返回 198.18.0.9，TLS 0.173/0.166 秒；ChatGPT 两次为 HTTP 200，系统返回 198.18.0.7，TLS 4.115/4.995 秒。Safari 在该模式下重新加载 Google，页面正常显示搜索框。
+
+Codex 禁用大小写 HTTP/HTTPS/ALL_PROXY、NO_PROXY 设置为 *，以已有 ChatGPT 登录与 gpt-6.1-sol 实际返回 OK，退出码 0。首次 31.471 秒，日志显示模型列表刷新超时；随后 GUI 完成 TUN→系统代理→TUN 的完整切换：关闭 TUN 后路由恢复 en0、临时 resolver 撤销、原局域网 IPv4/IPv6 DNS 恢复，系统代理实际为 127.0.0.1:7890，ChatGPT HTTPS 和模型回答通过（19.191 秒）。重新启用 TUN 后原始 HTTPS 探针再次通过、真实模型回答通过（18.774 秒），无目录刷新或传输错误。没有观测到 WebSocket 重连/回退信息，不能将历史等待归因于该路径。
+
+最终保持 ZenClash TUN 开启、系统代理关闭、Clash Verge TUN 关闭。上述证据完成此台 macOS 的浏览器/模型连通性和 DNS 撤销、再接管验收；不代表 Windows/Linux 已验收，也不证明所有第三方 VPN、休眠或 DHCP 切换场景。新增 `scripts/diagnostics/codex_model_probe.py --route tun|proxy` 保留同一脱敏模型探针，默认不改变任何捕获设置。

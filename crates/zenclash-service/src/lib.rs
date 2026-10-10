@@ -44,7 +44,7 @@ pub use core::test_owner_credentials;
 #[cfg(all(feature = "test", unix))]
 pub use core::test_owner_credentials_for_uid;
 #[cfg(all(feature = "standalone", feature = "test"))]
-pub use core::{CoreWatchdogTestConfig, set_core_watchdog_config_for_tests};
+pub use core::{CoreWatchdogTestConfig, set_core_watchdog_config_for_tests, test_tun_dns_enabled};
 
 #[cfg(feature = "client")]
 pub use client::*;
@@ -83,9 +83,9 @@ pub static IPC_AUTH_EXPECT: &str =
 
 pub static VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PROTOCOL_EPOCH: u16 = 2;
-pub const PROTOCOL_REVISION: u16 = 6;
-pub const MIN_SUPPORTED_CLIENT_REVISION: u16 = 6;
-pub const MIN_REQUIRED_SERVICE_REVISION: u16 = 6;
+pub const PROTOCOL_REVISION: u16 = 7;
+pub const MIN_SUPPORTED_CLIENT_REVISION: u16 = 7;
+pub const MIN_REQUIRED_SERVICE_REVISION: u16 = 7;
 /// A GUI-owned core is retired when its authenticated session stops renewing.
 pub const OWNER_SESSION_LEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Renew independently of window visibility or foreground UI work.

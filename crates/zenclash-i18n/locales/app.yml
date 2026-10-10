@@ -2038,6 +2038,15 @@ logs:
 
 traffic_capture:
   errors:
+    tun_disable_unconfirmed:
+      zh-CN: 未能确认 TUN 已关闭，尚未启用系统代理。请检查 TUN 状态后重试。
+      en: TUN could not be confirmed off, so the system proxy was not enabled. Check TUN status and retry.
+    plan_unconfirmed:
+      zh-CN: 接管状态回读与请求不一致，请检查系统代理和 TUN 状态后重试。
+      en: Capture readback does not match the requested mode. Check system proxy and TUN status and retry.
+    connections_cleanup:
+      zh-CN: 接管模式已更新，但未能断开旧代理连接：%{error}
+      en: "Capture mode was updated, but old proxy connections could not be closed: %{error}"
     completion_task:
       zh-CN: 流量接管后台任务异常结束：%{error}
       en: "Traffic capture background task failed: %{error}"

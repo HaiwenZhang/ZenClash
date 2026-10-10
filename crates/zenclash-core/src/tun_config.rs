@@ -1,6 +1,12 @@
 // Adapted from Clash Verge Rev enhance/tun.rs, config/clash.rs and utils/init.rs
 // on 2026-10-07. GPL-3.0-only; see docs/research/clash-verge-tun-implementation.md.
 //! One TUN projection for local YAML, service staging and frozen recovery bundles.
+//!
+//! CRITICAL macOS regression (2026-10-10): these YAML defaults do not redirect
+//! the system's LAN DNS into TUN, even with `dns-hijack: [any:53]`. Keep the
+//! privileged resolver lifecycle in zenclash-service/src/core/tun_dns.rs and
+//! the config-readback synchronization in service/session.rs. Omitting them
+//! broke Google and ChatGPT model calls while system proxy remained usable.
 
 use serde_yaml::{Mapping, Value, mapping::Entry};
 

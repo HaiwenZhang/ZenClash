@@ -979,7 +979,9 @@ impl ControlledConfigStore {
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
         let (runtime, previous_mode) = if let Some(prepared) = prepared {
-            match prepared.apply(false).await {
+            // The reference client forces reloads when changing TUN configuration.
+            let force_reload = delta.get("tun").is_some();
+            match prepared.apply(force_reload).await {
                 Ok(runtime) => (Some(runtime), None),
                 Err(error) => {
                     let attempted = error.mutation_result_unknown();

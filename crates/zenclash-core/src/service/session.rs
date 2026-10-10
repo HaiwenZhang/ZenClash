@@ -353,9 +353,33 @@ impl ServiceSession {
         secret: &str,
         timeout: std::time::Duration,
     ) -> Result<crate::service::NativeHttpResponse, ServiceCallError> {
+        #[cfg(target_os = "macos")]
+        let _configuration_mutation = if path.split('?').next() == Some("/configs") {
+            Some(self.mutations.lock().await)
+        } else {
+            None
+        };
         let (proof, pid, controller) = self.controller_for_owner(secret).await?;
         let response = controller.request(method, path, body, timeout).await?;
         self.confirm_controller_owner(&proof, pid).await?;
+        #[cfg(target_os = "macos")]
+        if method == "GET" && path == "/configs" && (200..300).contains(&response.status) {
+            let config: serde_json::Value = serde_json::from_slice(&response.body)
+                .map_err(|_| ServiceCallError::MissingReply("TUN configuration readback"))?;
+            if let Some(enabled) = macos_tun_dns_required(&config) {
+                // CRITICAL REGRESSION (2026-10-10): accepted TUN configuration
+                // does not mean macOS system DNS enters TUN. LAN DNS can bypass
+                // `any:53`, breaking Google/ChatGPT while system proxy works.
+                // Keep this privileged readback step; see service core/tun_dns.rs.
+                // Every accepted load is followed by this readback, including
+                // initial service handoff, hot reload and recovery. Refuse to
+                // report success if the privileged DNS step failed.
+                let result =
+                    zenclash_service::set_tun_dns(&self.credentials, &proof, enabled).await?;
+                check_response(result.code, result.message)?;
+                self.confirm_controller_owner(&proof, pid).await?;
+            }
+        }
         Ok(response)
     }
 
@@ -625,6 +649,30 @@ impl ServiceSession {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn macos_tun_dns_required(config: &serde_json::Value) -> Option<bool> {
+    let tun = config.get("tun")?;
+    if !tun.get("enable")?.as_bool()? {
+        return Some(false);
+    }
+    // Respect custom routing and DNS capture. The temporary resolver is useful
+    // only if Mihomo can intercept UDP DNS sent to its fixed public address.
+    let captures_dns = tun.get("dns-hijack")?.as_array()?.iter().any(|value| {
+        matches!(
+            value.as_str(),
+            Some(
+                "any:53"
+                    | "udp://any:53"
+                    | "0.0.0.0:53"
+                    | "udp://0.0.0.0:53"
+                    | "1.1.1.1:53"
+                    | "udp://1.1.1.1:53"
+            )
+        )
+    });
+    Some(tun.get("auto-route").and_then(serde_json::Value::as_bool) != Some(false) && captures_dns)
+}
+
 fn check_response(code: u16, message: String) -> Result<(), ServiceCallError> {
     if code == 0 {
         Ok(())
@@ -659,6 +707,28 @@ async fn probe_service_capabilities() -> ServiceCapabilities {
 mod error_tests {
     use super::*;
     use crate::service::NativeHttpError;
+
+    #[test]
+    fn macos_lan_dns_is_replaced_only_for_confirmed_udp_tun_capture() {
+        assert_eq!(
+            macos_tun_dns_required(&serde_json::json!({"tun": {
+                "enable": true, "auto-route": true, "dns-hijack": ["any:53"]
+            }})),
+            Some(true)
+        );
+        for tun in [
+            serde_json::json!({"enable": false}),
+            serde_json::json!({"enable": true, "auto-route": false, "dns-hijack": ["any:53"]}),
+            serde_json::json!({"enable": true, "dns-hijack": []}),
+            serde_json::json!({"enable": true, "dns-hijack": ["tcp://any:53"]}),
+        ] {
+            assert_eq!(
+                macos_tun_dns_required(&serde_json::json!({"tun": tun})),
+                Some(false)
+            );
+        }
+        assert_eq!(macos_tun_dns_required(&serde_json::json!({})), None);
+    }
 
     #[test]
     fn controller_failure_keeps_the_send_boundary() {

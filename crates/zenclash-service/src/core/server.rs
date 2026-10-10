@@ -990,6 +990,24 @@ fn create_ipc_router() -> Result<Router> {
             }
             ok_empty("Update Writer successfully")
         })
+        .put(IpcCommand::SetTunDns.as_ref(), |ctx| async move {
+            let (request, owner) = match authenticate_request::<AuthenticatedSessionRequest<bool>>(&ctx) {
+                ControlFlow::Continue(authenticated) => authenticated,
+                ControlFlow::Break(response) => return response,
+            };
+            let _lifecycle_guard =
+                match enter_owner_lifecycle(&owner, OwnerLifecycleGate::ActiveSession(&request.session)).await {
+                    ControlFlow::Continue(guard) => guard,
+                    ControlFlow::Break(response) => return response,
+                };
+            if request.payload && CORE_MANAGER.lock().await.running_core_config().await.is_none() {
+                return service_unavailable("TUN DNS requires a running owned core");
+            }
+            match super::tun_dns::apply(request.payload).await {
+                Ok(()) => ok_empty("TUN DNS updated"),
+                Err(error) => service_unavailable(format!("Failed to update TUN DNS: {error:#}")),
+            }
+        })
         .put(IpcCommand::SetSystemProxy.as_ref(), |ctx| async move {
             trace!("Received SetSystemProxy command");
             let (request, owner) = match authenticate_request::<AuthenticatedSessionRequest<MacosProxyConfig>>(&ctx) {
