@@ -1358,12 +1358,19 @@ mod tests {
                         name: "group".into(),
                         ..Default::default()
                     },
-                    vec![ProxyNode {
-                        name: "node".into(),
-                        ..Default::default()
-                    }],
+                    [("z-node", 20), ("a-node", 10), ("m-node", 30)]
+                        .into_iter()
+                        .map(|(name, delay)| ProxyNode {
+                            name: name.into(),
+                            history: vec![DelayHistory {
+                                delay,
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        })
+                        .collect(),
                 )],
-                1,
+                3,
             ),
         );
         cx.update_window(window, |_, window, cx| {
@@ -1376,6 +1383,12 @@ mod tests {
             window.render_frame(cx);
             window.press("escape", cx);
             assert!(!page.read(cx).sort_by_latency);
+            let state = page.read(cx);
+            let catalog = state.catalog.as_ref().unwrap();
+            assert_eq!(
+                &*state.displayed_nodes(catalog, &catalog.groups()[0]),
+                &[0, 1, 2]
+            );
         })
         .unwrap();
         cx.run_until_parked();
@@ -1391,6 +1404,32 @@ mod tests {
             window.press("down", cx);
             window.press("enter", cx);
             assert!(page.read(cx).sort_by_latency);
+            let state = page.read(cx);
+            let catalog = state.catalog.as_ref().unwrap();
+            assert_eq!(
+                &*state.displayed_nodes(catalog, &catalog.groups()[0]),
+                &[1, 0, 2]
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("sort-proxies-by-latency", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("down", cx);
+            window.press("enter", cx);
+            let state = page.read(cx);
+            assert!(!state.sort_by_latency);
+            let catalog = state.catalog.as_ref().unwrap();
+            assert_eq!(
+                &*state.displayed_nodes(catalog, &catalog.groups()[0]),
+                &[0, 1, 2]
+            );
             window.remove_window();
         })
         .unwrap();

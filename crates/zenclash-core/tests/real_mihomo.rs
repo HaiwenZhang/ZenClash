@@ -20,6 +20,91 @@ use zenclash_core::{
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires ZENCLASH_MIHOMO_BINARY pointing to a real Mihomo executable"]
+async fn proxy_catalog_preserves_subscription_group_and_member_order_across_reload() {
+    let binary =
+        PathBuf::from(std::env::var_os("ZENCLASH_MIHOMO_BINARY").expect("real kernel binary"));
+    // macOS's per-user temp directory plus the socket filename can exceed the
+    // Unix socket path limit. Keep this isolated fixture under a short root.
+    let temp_root = if cfg!(target_os = "macos") {
+        PathBuf::from("/private/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    let root = temp_root.join(format!(
+        "zc-order-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    // Loopback-only dummy nodes; no DNS, TUN, system proxy or outbound requests.
+    let prefix = "mixed-port: 0\nexternal-controller: ''\nmode: rule\ndns: {enable: false}\nproxies:\n  - {name: z-node, type: http, server: 127.0.0.1, port: 9}\n  - {name: a-node, type: http, server: 127.0.0.1, port: 9}\nrules: ['MATCH,DIRECT']\nproxy-groups:\n";
+    let definitions = [
+        "  - {name: z-stream, type: select, proxies: [z-node, a-node, DIRECT]}\n",
+        "  - {name: a-backup, type: select, proxies: [a-node, z-node]}\n",
+        "  - {name: Proxy, type: select, proxies: [a-backup, z-stream, z-node]}\n",
+    ];
+    let payload = format!("{prefix}{}", definitions.concat());
+    let profile = root.join("profile.yaml");
+    fs::write(&profile, &payload).unwrap();
+    let launch = MihomoLaunchConfig::new(binary, &profile, root.join("home")).unwrap();
+    #[cfg(feature = "test-support")]
+    let process = MihomoProcess::spawn_isolated_for_test(launch).unwrap();
+    #[cfg(not(feature = "test-support"))]
+    let process = MihomoProcess::spawn(launch).unwrap();
+    process
+        .wait_until_ready(Duration::from_secs(20))
+        .await
+        .unwrap_or_else(|error| panic!("{error}\n{}", process.snapshot().logs.join("\n")));
+    let client = MihomoClient::from_process(process.clone()).unwrap();
+    for expected in [
+        ["z-stream", "a-backup", "Proxy"],
+        ["Proxy", "z-stream", "a-backup"],
+    ] {
+        if expected[0] == "Proxy" {
+            client
+                .reload_payload(
+                    format!(
+                        "{prefix}{}{}{}",
+                        definitions[2], definitions[0], definitions[1]
+                    ),
+                    true,
+                )
+                .await
+                .unwrap();
+        }
+        let catalog = client.proxy_catalog().await.unwrap();
+        assert_eq!(
+            catalog
+                .groups_for_mode("rule")
+                .map(|group| group.name.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        let group = catalog
+            .groups()
+            .iter()
+            .find(|group| group.name == "z-stream")
+            .unwrap();
+        assert_eq!(
+            group
+                .all
+                .iter()
+                .map(|id| id.controller_name())
+                .collect::<Vec<_>>(),
+            ["z-node", "a-node", "DIRECT"]
+        );
+    }
+    process.stop().unwrap();
+    drop(client);
+    drop(process);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires ZENCLASH_MIHOMO_BINARY pointing to a real Mihomo executable"]
 async fn managed_ipc_carries_http_and_all_realtime_streams_across_restart() {
     use futures_util::StreamExt as _;
     let binary =

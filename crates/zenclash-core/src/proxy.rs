@@ -402,6 +402,17 @@ impl RawProxy {
 impl From<RawProxyCatalog> for ProxyCatalog {
     fn from(raw: RawProxyCatalog) -> Self {
         let proxy_count = raw.proxies.len();
+        // `/proxies` is a JSON object, whose key order is not configuration order.
+        // Mihomo builds its synthetic GLOBAL members from the original proxies
+        // and proxy-groups declarations, before dependency-sorting the groups.
+        // Use controller keys, not display names, and never promote selectors
+        // or hidden groups ahead of the subscription's order.
+        let mut configured_order = HashMap::new();
+        if let Some(global) = raw.proxies.get("GLOBAL") {
+            for (position, name) in global.all.iter().enumerate() {
+                configured_order.entry(name.clone()).or_insert(position);
+            }
+        }
         let mut nodes = HashMap::with_capacity(proxy_count);
         let mut identities = HashMap::with_capacity(proxy_count);
         let mut pending_groups = Vec::new();
@@ -426,15 +437,19 @@ impl From<RawProxyCatalog> for ProxyCatalog {
                     hidden: proxy.hidden,
                     ..Default::default()
                 };
-                pending_groups.push((group, members));
+                let position = configured_order.get(&key).copied().unwrap_or(usize::MAX);
+                pending_groups.push((position, group, members));
             }
             let node = proxy.into_node(&key);
             let id = ProxyNodeId::new(key.clone(), node.provider_name.clone());
             identities.insert(key, id.clone());
             nodes.insert(id, Arc::new(node));
         }
+        // Stable fallback for controllers with no complete GLOBAL membership:
+        // retain map-key order for unknown groups rather than guessing intent.
+        pending_groups.sort_by_key(|(position, _, _)| *position);
         let mut groups = Vec::with_capacity(pending_groups.len());
-        for (mut group, members) in pending_groups {
+        for (_, mut group, members) in pending_groups {
             group.all = members
                 .into_iter()
                 .map(|name| {
@@ -455,40 +470,88 @@ impl From<RawProxyCatalog> for ProxyCatalog {
                 .collect();
             groups.push(group);
         }
-        groups.sort_by(|left, right| {
-            group_display_priority(left)
-                .cmp(&group_display_priority(right))
-                .then_with(|| left.name.cmp(&right.name))
-        });
         Self::with_nodes(groups, nodes, proxy_count)
     }
-}
-
-fn group_display_priority(group: &ProxyGroup) -> u8 {
-    if group.name.eq_ignore_ascii_case("GLOBAL") || is_primary_selector(group) {
-        0
-    } else if group.hidden {
-        2
-    } else {
-        1
-    }
-}
-
-fn is_primary_selector(group: &ProxyGroup) -> bool {
-    if !group.kind.eq_ignore_ascii_case("selector") {
-        return false;
-    }
-    let name = group.name.trim().to_ascii_lowercase();
-    group.name.contains("选择节点")
-        || group.name.contains("节点选择")
-        || matches!(name.as_str(), "proxy" | "proxies" | "代理")
-        || name.contains("select proxy")
-        || name.contains("proxy select")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_group_order_is_preserved_instead_of_name_or_selector_priority() {
+        // Mihomo's map keys are alphabetic; GLOBAL.all carries the configured
+        // order, deliberately different from both alphabetic and selector order.
+        let raw: RawProxyCatalog = serde_json::from_str(
+            r#"{"proxies":{
+                "GLOBAL":{"type":"Selector","all":["DIRECT","z-stream","a-backup","Proxy"]},
+                "Proxy":{"type":"Selector","all":["DIRECT"]},
+                "a-backup":{"type":"Selector","all":["DIRECT"]},
+                "z-stream":{"type":"Selector","all":["DIRECT"]}
+            }}"#,
+        )
+        .unwrap();
+        let catalog = ProxyCatalog::from(raw);
+        assert_eq!(
+            catalog
+                .groups_for_mode("rule")
+                .map(|group| group.name.as_str())
+                .collect::<Vec<_>>(),
+            ["z-stream", "a-backup", "Proxy"]
+        );
+    }
+
+    #[test]
+    fn configured_order_uses_controller_keys_and_hidden_filter_keeps_relative_order() {
+        let raw: RawProxyCatalog = serde_json::from_str(
+            r#"{"proxies":{
+                "GLOBAL":{"type":"Selector","all":["z-key","hidden","a-key"]},
+                "a-key":{"name":"First alphabetically","type":"Selector","all":["DIRECT"]},
+                "hidden":{"type":"Selector","hidden":true,"all":["DIRECT"]},
+                "z-key":{"name":"Last alphabetically","type":"Selector","all":["DIRECT"]}
+            }}"#,
+        )
+        .unwrap();
+        let mut catalog = ProxyCatalog::from(raw);
+        let names = |catalog: &ProxyCatalog| {
+            catalog
+                .groups_for_mode("rule")
+                .map(|group| group.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(&catalog),
+            ["Last alphabetically", "hidden", "First alphabetically"]
+        );
+        catalog.hide_hidden_groups();
+        assert_eq!(
+            names(&catalog),
+            ["Last alphabetically", "First alphabetically"]
+        );
+        let id = &catalog.groups_for_mode("rule").next().unwrap().all[0];
+        assert_eq!(catalog.referencing_groups(id), [0, 1]);
+    }
+
+    #[test]
+    fn group_members_keep_declared_order_instead_of_controller_map_order() {
+        let raw: RawProxyCatalog = serde_json::from_str(
+            r#"{"proxies":{
+                "Proxy":{"type":"Selector","all":["z-node","missing","a-node","z-node"]},
+                "a-node":{"provider-name":"subscription"},
+                "z-node":{"provider-name":"subscription"}
+            }}"#,
+        )
+        .unwrap();
+        let catalog = ProxyCatalog::from(raw);
+        assert_eq!(
+            catalog.groups()[0]
+                .all
+                .iter()
+                .map(ProxyNodeId::controller_name)
+                .collect::<Vec<_>>(),
+            ["z-node", "missing", "a-node", "z-node"]
+        );
+    }
 
     #[test]
     fn repeated_group_members_resolve_to_one_canonical_node_allocation() {
@@ -752,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn primary_selector_is_first_in_rule_mode_even_when_names_sort_later() {
+    fn missing_configured_order_does_not_guess_a_primary_selector() {
         let raw: RawProxyCatalog = serde_json::from_str(
             r#"{"proxies":{"DIRECT":{"name":"DIRECT","type":"Direct"},"OneDrive":{"name":"OneDrive","type":"Selector","all":["DIRECT"]},"🔰 选择节点":{"name":"🔰 选择节点","type":"Selector","all":["DIRECT"]},"GLOBAL":{"name":"GLOBAL","type":"Selector","all":["DIRECT"]}}}"#,
         )
@@ -764,7 +827,7 @@ mod tests {
                 .groups_for_mode("rule")
                 .next()
                 .map(|group| group.name.as_str()),
-            Some("🔰 选择节点")
+            Some("OneDrive")
         );
     }
 
