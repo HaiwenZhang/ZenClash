@@ -70,7 +70,7 @@ pub(super) fn app_icon() -> Result<Icon, String> {
         .as_bytes(0)
         .ok_or_else(|| "application mark has no image frame".to_owned())?;
     let mut rgba = bytes.to_vec();
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
         let alpha = u32::from(pixel[3]);
         for channel in &mut pixel[..3] {

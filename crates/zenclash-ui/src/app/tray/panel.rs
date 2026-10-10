@@ -254,10 +254,10 @@ mod tests {
         let owner = owner.unwrap();
         // The headless platform has no native application-hide implementation.
         // Reproduce the retained window state established by the close handler.
-        cx.update_window(main.into(), |_, window, cx| {
+        cx.update_window(main.into(), |_, _window, cx| {
             owner.update(cx, |app, cx| {
                 #[cfg(target_os = "macos")]
-                app.park_main_window(window);
+                app.park_main_window(_window);
                 app.release_hidden_page_data(cx);
             });
         })

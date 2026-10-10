@@ -11,7 +11,19 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/HaiwenZhang/ZenClash/releases">Download ZenClash</a> ·
+  <img src="https://img.shields.io/badge/rendering-GPUI-58752c" alt="Native GPUI rendering">
+  <img src="https://img.shields.io/badge/built_with-Rust-3178c6" alt="Built with Rust">
+  <img src="https://img.shields.io/badge/status-early_development-d77d8a" alt="Early development">
+  <img src="https://img.shields.io/badge/testing-welcome-58752c" alt="Testing welcome">
+</p>
+
+<p align="center">
+  <strong>ZenClash is in early development and has no official release yet.</strong><br>
+  Help us test it and share bugs and suggestions through Issues.
+</p>
+
+<p align="center">
+  <a href="https://github.com/HaiwenZhang/ZenClash/releases">Browse test builds</a> ·
   <a href="https://github.com/HaiwenZhang/ZenClash/issues">Feedback and ideas</a> ·
   <a href="README.md">简体中文</a>
 </p>
@@ -59,7 +71,7 @@ The system proxy works with browsers and applications that follow system proxy s
 
 ## Download and get started
 
-Visit **[Releases to download ZenClash](https://github.com/HaiwenZhang/ZenClash/releases)** and choose a build for your system and architecture.
+There is no official release yet. Visit **[Releases to browse ZenClash test builds](https://github.com/HaiwenZhang/ZenClash/releases)** and, if a build is available, choose one for your system and architecture. You can also build from source using the [development notes](docs/development) and help with testing.
 
 | Platform | Architecture |
 | --- | --- |

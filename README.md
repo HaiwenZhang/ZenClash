@@ -11,7 +11,19 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/HaiwenZhang/ZenClash/releases">立即下载</a> ·
+  <img src="https://img.shields.io/badge/rendering-GPUI-58752c" alt="GPUI 原生渲染">
+  <img src="https://img.shields.io/badge/built_with-Rust-3178c6" alt="使用 Rust 构建">
+  <img src="https://img.shields.io/badge/status-early_development-d77d8a" alt="早期开发阶段">
+  <img src="https://img.shields.io/badge/testing-welcome-58752c" alt="欢迎参与测试">
+</p>
+
+<p align="center">
+  <strong>项目仍处于早期开发阶段，尚未正式发布。</strong><br>
+  欢迎大家帮忙测试，并通过 Issue 反馈问题与建议。
+</p>
+
+<p align="center">
+  <a href="https://github.com/HaiwenZhang/ZenClash/releases">查看测试版本</a> ·
   <a href="https://github.com/HaiwenZhang/ZenClash/issues">反馈与建议</a> ·
   <a href="README_en.md">English</a>
 </p>
@@ -59,7 +71,7 @@
 
 ## 下载与开始使用
 
-前往 **[Releases 下载 ZenClash](https://github.com/HaiwenZhang/ZenClash/releases)**，选择与你的系统和架构匹配的文件。
+目前尚无正式 Release。欢迎前往 **[Releases 查看 ZenClash 测试版本](https://github.com/HaiwenZhang/ZenClash/releases)**，如有可用构建，请选择与你的系统和架构匹配的文件；也可以参考[开发文档](docs/development)自行构建并参与测试。
 
 | 平台 | 架构 |
 | --- | --- |
