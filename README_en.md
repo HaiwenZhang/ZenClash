@@ -1,117 +1,100 @@
 <p align="center">
-  <img src="platforms/macos/ZenClash.png" width="120" alt="ZenClash Logo">
+  <img src="platforms/macos/ZenClash.png" width="120" alt="ZenClash logo">
 </p>
 
 <h1 align="center">ZenClash</h1>
 
 <p align="center">
+  <strong>Native UI. Built for the desktop.</strong><br>
   A native Mihomo desktop client built with Rust and GPUI Kit<br>
-  Manage profiles, switch proxies, and monitor traffic on macOS, Windows, and Linux.
+  macOS · Windows · Linux
 </p>
 
 <p align="center">
-  <a href="README.md">简体中文</a> · English<br>
-  <a href="https://github.com/HaiwenZhang/ZenClash/releases">Download</a> ·
-  <a href="https://github.com/HaiwenZhang/ZenClash/issues">Report an issue</a> ·
-  <a href="LICENSE">GPL-3.0</a>
+  <a href="https://github.com/HaiwenZhang/ZenClash/releases">Download ZenClash</a> ·
+  <a href="https://github.com/HaiwenZhang/ZenClash/issues">Feedback and ideas</a> ·
+  <a href="README.md">简体中文</a>
 </p>
 
-> ZenClash is in early development. Feedback and contributions are welcome.
+**Native UI is at the heart of ZenClash.** Its interface is rendered natively by GPUI and built with Rust and GPUI Kit, bringing your profiles, proxy nodes, traffic, and connection status into one desktop window.
 
-![ZenClash home page](docs/home_en.png)
+Add a profile, choose a node, and turn on your proxy. When you want more control, explore rules, DNS settings, and YAML overrides.
 
-## Features
+![ZenClash: active nodes, proxy status, live traffic, and subscription usage](docs/home_en.png)
 
-- **Profiles and configuration**: Add subscriptions, import Clash/Mihomo YAML files, apply overrides, and back up or restore configurations.
-  Local profiles, disabled overrides, traffic history, and local preferences remain available while the core is offline; operations requiring the core report connection failures.
-  Edits made while the YAML editor is saving remain in the draft. Leaving the page does not cancel a submitted save.
-- **Proxies and routing**: Switch proxy groups and nodes, test latency, and choose Rule, Global, or Direct mode.
-  Proxy groups are paged eight at a time; the expanded group shows up to 24 nodes per page.
-- **Desktop integration**: System proxy, TUN, launch at login, and quick controls from the tray.
-- **Monitoring and diagnostics**: Live traffic, active connections, rules, logs, network diagnostics, and local usage history.
-- **Native interface**: Simplified Chinese and English, with light, dark, and system appearance modes.
-  The new desktop layout includes home area charts and metric trends, profile quota charts, connection and rule statistics, log details, and Settings section navigation. See the [UI implementation record](docs/development/ui-design-implementation.md) for current implementation and acceptance coverage. Home process traffic queries locally recorded samples from the last 24 hours; recording pauses or missing samples mean coverage may be incomplete.
+## Why try ZenClash?
 
-## Download and Install
+### A native interface designed for desktop use
 
-Download the executable archive for your platform from [Releases](https://github.com/HaiwenZhang/ZenClash/releases):
+Windows, keyboard controls, the menu bar, system tray, and theme switching are designed around everyday desktop use. GPUI renders the interface, while Rust handles UI interactions and application logic, keeping your regular proxy controls close at hand.
 
-| Platform | Architecture | Archive |
-| --- | --- | --- |
-| macOS | Apple Silicon | `.tar.gz` |
-| Windows | x86_64 | `.zip` |
-| Ubuntu 24.04 and newer | amd64 | `.tar.gz` |
-| Fedora 44 / Rocky Linux 8 | x86_64 | `.tar.gz` |
+### See your connection at a glance
 
-Archives include the Cargo-built GUI, privileged service, installation/removal tools, and default/recovery configurations.
-Archives bundle Mihomo for the target platform; the app discovers it automatically after extraction. Releases include `SHA256SUMS` to verify your download.
+The overview brings together your active node, routing mode, core status, transfer speeds, and traffic trends. When your subscription provides usage information, you can also see used traffic, remaining allowance, and expiry dates.
 
-After extraction, run `zenclash.exe` on Windows, `./zenclash` on Linux, or `./bin/zenclash` on macOS.
+### Find a node that works for you
 
-## Quick Start
+Search nodes, measure latency, sort results, or hide unavailable nodes. Test one node or an entire group. Results update as each node finishes, with failures reported together when the group is done.
 
-1. Open ZenClash and add a subscription URL or import a local YAML file in **Profiles**.
-2. Select a profile on Home, then open **Proxies** to choose a node and test its latency.
-3. Enable the system proxy or TUN as needed, then choose Rule, Global, or Direct mode.
+### Make it part of your desktop
 
-TUN requires system permissions. The service mode under development has an in-app first-install and enable flow, but native acceptance on all three platforms is still pending. Check the documentation for your version; use the system proxy to get started.
+A native desktop interface with light, dark, and system appearance, in Simplified Chinese or English. Use the menu bar or system tray to switch nodes, change modes, and check traffic without keeping the main window open.
 
-Managed Mihomo startup reports an error and exits when service status, ownership, or authorization prevents startup, including when the service is missing and saved TUN is enabled. Resolve the service or configuration issue described in the error, then restart. A missing service with confirmed TUN-off still permits normal local startup; the app does not automatically fall back to bypass a service rejection.
+### Follow the clues when a connection fails
 
-## Development
+Inspect connection destinations, processes, matched rules, and proxy chains. Use logs and network diagnostics to investigate problems, and local traffic history to review usage by application, host, and outbound route.
 
-You need the current Rust stable toolchain, your platform's native build tools, and a working Mihomo executable. On Linux, install dependencies with `sudo scripts/install_linux_build_deps.sh`.
+## Everyday controls, with room to customize
 
-The TUN service for all three platforms is being implemented according to the [development plan](docs/development/tun-service-plan.md). The in-app first-install and enable flow has initial integration and behavior tests. The TUN page now provides repair and uninstall confirmation controls, restoring the local core before maintenance; TUN can then be enabled again. Background preparation of ordinary core identity after direct Service startup is integrated; automatic capture restoration after repair, proxy preference persistence during maintenance, and UI synchronization are integrated, while the complete administrator maintenance flow and native acceptance on all three platforms remain unfinished, so the complete workflow is still in development. Packaging scripts for all three platforms now include the separate service artifact; see the [service packaging record](docs/development/tun-service-packaging.md) for deployment boundaries and validation commands.
+| What you want to do | What ZenClash offers |
+| --- | --- |
+| Manage multiple profiles | Subscription URLs, local YAML imports, manual and scheduled updates |
+| Choose a proxy node | Group switching, node search, latency testing, and sorting |
+| Change routing behavior | Rule, Global, and Direct modes; system proxy and TUN |
+| Review usage | Live traffic, subscription allowance, and local traffic history |
+| Customize your setup | YAML editing and overrides, DNS, rules, and core settings |
+| Move to another device | Local backup and restore |
 
-Run from the repository root on macOS or Linux:
+The system proxy works with browsers and applications that follow system proxy settings. TUN can capture traffic from more applications and requires the background service and system permissions. ZenClash uses one capture mode at a time, turning the other off when you switch.
 
-```sh
-cargo run --locked -p zenclash-ui --bin zenclash
-```
+## Download and get started
 
-Build release binaries directly:
+Visit **[Releases to download ZenClash](https://github.com/HaiwenZhang/ZenClash/releases)** and choose a build for your system and architecture.
 
-```sh
-cargo build --release --locked -p zenclash-ui --bin zenclash
-cargo build --release --locked -p zenclash-service --features standalone,client --bin zenclash-service --bin zenclash-service-install --bin zenclash-service-uninstall
-```
+| Platform | Architecture |
+| --- | --- |
+| macOS | Apple Silicon (arm64) |
+| Windows | x86_64 |
+| Linux | x86_64; builds for Ubuntu, Fedora, and Rocky Linux |
 
-Use the same command in Windows PowerShell. Mihomo is discovered from the data directory's `mihomo/cores`, bundled resources, the repository's `bin`, or `PATH`. You can also select a file in Settings → Runtime Core. Executable environment overrides are no longer read for Mihomo. The default managed Windows path is `%LOCALAPPDATA%\ZenClash\mihomo\cores\mihomo.exe`.
+Release packages include Mihomo. ZenClash discovers and prepares the core at startup. Check the release notes for package formats and system requirements. macOS users can follow the [installation guide](docs/installation/macos_en.md).
 
-Check formatting and run tests before submitting changes:
+**Three steps to get connected:**
 
-```sh
-cargo fmt --all -- --check
-cargo test --workspace --all-features --locked
-```
+1. **Add a profile:** paste your subscription URL in **Profiles**, or import a local Clash/Mihomo YAML file.
+2. **Choose a node:** apply the profile, then test and select a node in **Proxies**.
+3. **Turn on your proxy:** enable the system proxy or TUN in **Overview**, and choose Rule, Global, or Direct mode.
 
-See the [CI workflow](.github/workflows/ci.yml) for the full Clippy rules. Real-core integration tests are ignored by default and must be run explicitly with a core path configured.
+ZenClash is a client; bring your own subscription or proxy configuration. The project is under active development. Check the notes for your release for feature availability and platform compatibility.
 
-See the [Windows acceptance record (2026-10-04)](docs/development/windows-acceptance-2026-10-04.md) for the scope, fixes, and unverified items from the current device tests (in Chinese).
+## Keep control of your configuration
 
-Further reading: [packaging scripts](scripts) · [development and validation notes](docs/development) · [project guidelines](AGENTS.md) · [GPUI Kit migration and Windows acceptance](docs/development/gpui-kit-migration.md). The development notes and guidelines are primarily in Chinese.
+Imported YAML source files are preserved; customize your setup through overrides. Traffic history stays on your device, with recording and retention controls in Settings. Back up and restore your configuration and preferences when needed.
 
-## Data and Privacy
+On macOS, closing the main window leaves ZenClash available in the menu bar. Choose **Quit** from the menu when you want to stop it. A normal quit releases the proxy settings managed by ZenClash and stops the core it started.
 
-- Imported subscriptions and YAML source files are never rewritten in place.
-- Profile indexes reject unsafe paths, duplicate records, and managed-file symlinks. Reads and writes enforce the same size limit, including backups.
-- Mode changes and profile applications run serially, using the profile and override chain committed when execution starts.
-- A mode change that conflicts with an enabled YAML override is rejected with guidance to edit or disable that override. If a profile application result is uncertain, explicitly reapply the recorded profile’s current contents.
-- System proxies are released on the recorded network service. PAC replacement closes the old listener after native readback and preference persistence; failures restore state or retain listeners for recovery.
-- If proxy release or core shutdown fails during quit, the app remains running and shows the error. Fix the system permissions or proxy state, then retry quitting.
-- Traffic history stays local; you can disable it or change its retention period in Settings. At most 1,000,000 samples are retained, with the oldest observation timestamps evicted first. Normal exit awaits the final write; a failed write preserves the bounded pending queue for retry.
-- The log buffer and persistence queue limit both entry counts and serialized bytes. Oversized logs show an error, and filtering and display data are prepared in the background.
-- Cores started by ZenClash stop when the app exits normally.
-- Ordinary Mihomo startup and restart use the checked configuration snapshot. Later source-file changes cannot replace that launch input; a failed restart check preserves the current core.
-- Configurations, logs, and backups may contain subscription URLs or controller secrets. Redact them before sharing.
+## Help shape ZenClash
 
-## Contributing
+If this is the desktop proxy experience you have been looking for, give the project a **Star** and share it with someone who uses Mihomo.
 
-[Issues](https://github.com/HaiwenZhang/ZenClash/issues) and pull requests are welcome. When reporting a bug, include your OS version, ZenClash and Mihomo versions, steps to reproduce, and redacted logs.
+Have an idea or something that feels awkward? Open an [Issue](https://github.com/HaiwenZhang/ZenClash/issues) and tell us about your workflow. For bug reports, include system and app versions, reproduction steps, and redacted logs.
 
-## Acknowledgments and License
+To contribute code, start with the [development notes](docs/development), [build and packaging scripts](scripts), and [CI checks](.github/workflows/ci.yml). Pull requests for features, interactions, translations, and documentation are welcome.
 
-Thanks to [Mihomo](https://github.com/MetaCubeX/mihomo), [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), and [GPUI Kit](https://github.com/longbridge/gpui-kit).
+## Acknowledgments and license
 
-ZenClash is licensed under [GPL-3.0-only](LICENSE). Copyright © 2026 Haiwen Zhang.
+Thanks to the authors and contributors of [Mihomo](https://github.com/MetaCubeX/mihomo), [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), [GPUI Kit](https://github.com/longbridge/gpui-kit), and the open-source projects used and referenced by ZenClash.
+
+ZenClash is licensed under [GPL-3.0-only](LICENSE). Copyright © 2026 Haiwen Zhang and ZenClash contributors.
+
+See [NOTICE](NOTICE.md) and the [service documentation](crates/zenclash-service/README.md) for third-party provenance and modifications, and the [GPL distribution notes](docs/development/gpl-distribution.md) for corresponding source and redistribution details.

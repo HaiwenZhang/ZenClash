@@ -7,6 +7,26 @@ use std::{
 
 use zenclash_core::CoreKind;
 
+#[cfg(all(target_os = "macos", not(test)))]
+pub(super) fn hide_native_window(window: &gpui_kit::Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    // SAFETY: GPUI lends the live window's NSView, and window commands run on
+    // AppKit's main thread. The borrow does not transfer native ownership.
+    let view = unsafe { handle.ns_view.cast::<objc2_app_kit::NSView>().as_ref() };
+    if let Some(window) = view.window() {
+        // Hiding NSApplication alone leaves the retained NSWindow visible to
+        // AppKit's reopen policy, so GPUI may skip its no-visible-windows callback.
+        window.orderOut(None);
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub(super) fn toggle_window_maximized(window: &gpui_kit::Window) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};

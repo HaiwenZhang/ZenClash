@@ -722,7 +722,6 @@ impl ProxiesPage {
         self.presentation_tasks.track(&task);
         cx.spawn(async move |this, cx| {
             let mut failures = 0usize;
-            let mut first_error = None;
             while let Some(batch) = receive_batch(&mut receiver, || {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(50))
@@ -759,15 +758,8 @@ impl ProxiesPage {
                                     0,
                                     Some(super::DelayTestFailure::from_error(&error)),
                                 );
-                                first_error.get_or_insert(error);
                             }
                         }
-                    }
-                    if let Some(error) = &first_error {
-                        this.error = Some(zenclash_i18n::text_with(
-                            "proxies.errors.group_failed_detail",
-                            &[("count", failures.to_string()), ("error", error.clone())],
-                        ));
                     }
                     if !this.search_query.is_empty() {
                         this.prepare_search(cx);
@@ -789,7 +781,15 @@ impl ProxiesPage {
                     this.prepare_search(cx);
                 }
                 if let Err(error) = result {
-                    this.error = Some(error.to_string());
+                    this.error = Some(zenclash_i18n::text_with(
+                        "proxies.errors.group_delay_task",
+                        &[("error", error.to_string())],
+                    ));
+                } else if failures > 0 {
+                    this.error = Some(zenclash_i18n::text_with(
+                        "proxies.errors.group_failed",
+                        &[("group", group_name), ("count", failures.to_string())],
+                    ));
                 }
                 cx.notify();
             });

@@ -1,122 +1,100 @@
 <p align="center">
-  <img src="platforms/macos/ZenClash.png" width="120" alt="ZenClash Logo">
+  <img src="platforms/macos/ZenClash.png" width="120" alt="ZenClash 标志">
 </p>
 
 <h1 align="center">ZenClash</h1>
 
 <p align="center">
-  基于 Rust 与 GPUI Kit 的原生 Mihomo 桌面客户端<br>
-  在 macOS、Windows 和 Linux 上管理订阅、切换节点、查看流量。
+  <strong>原生 UI，为桌面而生。</strong><br>
+  用 Rust 和 GPUI Kit 构建的原生 Mihomo 桌面客户端<br>
+  macOS · Windows · Linux
 </p>
 
 <p align="center">
-  简体中文 · <a href="README_en.md">English</a><br>
-  <a href="https://github.com/HaiwenZhang/ZenClash/releases">下载</a> ·
-  <a href="https://github.com/HaiwenZhang/ZenClash/issues">问题反馈</a> ·
-  <a href="LICENSE">GPL-3.0</a>
+  <a href="https://github.com/HaiwenZhang/ZenClash/releases">立即下载</a> ·
+  <a href="https://github.com/HaiwenZhang/ZenClash/issues">反馈与建议</a> ·
+  <a href="README_en.md">English</a>
 </p>
 
-> 项目仍在早期开发中，欢迎试用与反馈。
+**原生 UI，是 ZenClash 的核心特色。** 界面由 GPUI 原生绘制，使用 Rust 和 GPUI Kit 构建，把订阅、节点、流量和连接状态放在一个清晰的桌面窗口里。
 
-![ZenClash 首页](docs/home.png)
+添加你的订阅，选择合适的节点，开启代理，就能开始使用；想进一步调整网络行为，也可以继续配置规则、DNS 和 YAML 覆写。
 
-## 特点
+![ZenClash：当前节点、代理状态、实时流量与订阅用量](docs/home.png)
 
-- **订阅与配置**：添加在线订阅、导入 Clash/Mihomo YAML，支持配置覆写与备份恢复。
-  内核离线时仍可管理本地配置、禁用的覆写、流量历史和本地偏好；需要内核的应用操作会报告连接失败。
-  YAML 编辑器保存期间继续编辑会保留新草稿，切换页面不会取消已提交的保存。
-- **节点与路由**：切换代理组和节点、测试延迟，支持规则、全局和直连模式。
-  代理组每页最多显示 8 组，展开组的节点每页最多显示 24 个。
-- **系统集成**：系统代理、TUN、开机启动和托盘快捷操作。
-- **流量与排障**：实时流量、活动连接、规则、日志、网络诊断与本地用量统计。
-- **原生界面**：支持简体中文、英文，以及浅色、深色和跟随系统主题。
-  新版桌面布局包含首页面积图与指标曲线、订阅额度图、连接与规则统计、日志详情和设置分区导航；当前实施与验收范围见 [UI 实现记录](docs/development/ui-design-implementation.md)。首页进程流量查询最近 24 小时的本地已记录样本，记录关闭或缺失时不代表完整覆盖。
+## 为什么试试 ZenClash？
 
-## 下载与安装
+### 原生界面，专注桌面体验
 
-从 [Releases](https://github.com/HaiwenZhang/ZenClash/releases) 下载对应平台的可执行文件压缩包：
+从窗口与键盘操作，到菜单栏、托盘和主题切换，ZenClash 围绕日常桌面使用来设计。GPUI 负责界面绘制，Rust 承载界面交互与应用逻辑，让常用的代理操作在桌面上顺手完成。
 
-| 平台 | 架构 | 压缩包 |
-| --- | --- | --- |
-| macOS | Apple Silicon | `.tar.gz` |
-| Windows | x86_64 | `.zip` |
-| Ubuntu 24.04 及以上 | amd64 | `.tar.gz` |
-| Fedora 44 / Rocky Linux 8 | x86_64 | `.tar.gz` |
+### 打开首页，就知道连接怎么样
 
-压缩包包含 Cargo 构建的 GUI、特权服务及安装/卸载工具，并附默认和恢复配置。
-压缩包内置对应平台的 Mihomo，解压后应用会自动发现内核，无需另行下载。Release 提供 `SHA256SUMS` 用于校验下载文件。
+当前节点、代理模式、内核运行状态、上传下载速度和流量趋势集中呈现。订阅提供额度信息时，还能查看已用流量、剩余额度和到期时间，让日常使用心中有数。
 
-解压后，Windows 运行 `zenclash.exe`，Linux 运行 `./zenclash`，macOS 运行 `./bin/zenclash`。
+### 节点多，也能方便地挑选
 
-## 快速开始
+搜索节点、测试延迟、按延迟排序，或隐藏不可用节点。支持单节点与整组测速，组测速完成后统一汇总失败数量；每个节点的测试结果仍会实时更新，方便测完再选。
 
-1. 打开 ZenClash，在「订阅管理」中添加订阅链接或导入本地 YAML。
-2. 返回首页选择配置，再到「代理组」选择节点并测速。
-3. 按需启用系统代理或 TUN，选择规则、全局或直连模式。
+### 日常操作，融入你的桌面
 
-TUN 需要系统权限。开发中的服务模式已接通应用内首次安装与开启入口，但三平台原生验收尚未完成；使用前请核对所用版本的说明，需要稳定代理时可先使用系统代理。
+使用原生桌面界面，支持浅色、深色与跟随系统主题，以及简体中文和英文。通过菜单栏或托盘切换节点、调整模式、查看流量，处理常用操作时无需一直打开主窗口。
 
-托管 Mihomo 启动因服务状态、占用或授权被拒绝时会报告原因并退出，服务缺失且已保存 TUN 开启时也如此。处理错误提示中的服务或配置问题后重新启动。服务缺失且确认 TUN 关闭时仍可正常启动本地内核；应用不会自动回退来绕过服务拒绝。
+### 连接有问题时，能找到线索
 
-## 开发
+查看活动连接的目标、进程、匹配规则和代理链，结合日志与网络诊断排查问题。本地流量历史还能帮助你回看哪些应用、主机和出站消耗了流量。
 
-准备当前 Rust stable 工具链、对应平台的原生构建工具，以及一个可执行的 Mihomo 内核。Linux 依赖可通过 `sudo scripts/install_linux_build_deps.sh` 安装。
+## 从日常使用，到按需调整
 
-三平台 TUN 服务正在按 [开发计划](docs/development/tun-service-plan.md) 实施。应用内首次安装与开启已有阶段接线和行为测试；TUN 页新增修复、卸载确认入口，维护前恢复本地内核，维护后可重新开启 TUN。直接以 Service 启动时已接入后台普通内核身份准备；修复后的自动捕获恢复、维护期间代理偏好保存和界面同步已有接线，完整管理员维护链路及三平台实机验收尚未完成，完整工作流仍在开发。三平台打包脚本已增加独立服务产物；其部署边界与验证入口见 [服务打包记录](docs/development/tun-service-packaging.md)。
+| 你想做什么 | ZenClash 提供什么 |
+| --- | --- |
+| 管理多个订阅 | 在线订阅、本地 YAML 导入、手动更新与定时更新 |
+| 选择合适的节点 | 代理组切换、节点搜索、延迟测试与排序 |
+| 切换网络行为 | 规则、全局、直连模式，系统代理与 TUN |
+| 查看用量 | 实时流量、订阅额度与本地流量历史 |
+| 调整配置 | YAML 编辑与覆写、DNS、规则和内核设置 |
+| 迁移到另一台设备 | 本地备份与恢复 |
 
-在仓库根目录运行（macOS / Linux）：
+系统代理适合日常浏览与支持系统代理的应用；TUN 可接管更多应用的网络流量，需要安装后台服务并授予系统权限。ZenClash 一次启用一种接入方式，切换时自动关闭另一种。
 
-```sh
-cargo run --locked -p zenclash-ui --bin zenclash
-```
+## 下载与开始使用
 
-直接构建发布程序：
+前往 **[Releases 下载 ZenClash](https://github.com/HaiwenZhang/ZenClash/releases)**，选择与你的系统和架构匹配的文件。
 
-```sh
-cargo build --release --locked -p zenclash-ui --bin zenclash
-cargo build --release --locked -p zenclash-service --features standalone,client --bin zenclash-service --bin zenclash-service-install --bin zenclash-service-uninstall
-```
+| 平台 | 架构 |
+| --- | --- |
+| macOS | Apple Silicon（arm64） |
+| Windows | x86_64 |
+| Linux | x86_64；提供 Ubuntu、Fedora 和 Rocky Linux 构建 |
 
-Windows PowerShell 使用相同命令。Mihomo 自动从数据目录的 `mihomo/cores`、安装包资源、仓库 `bin` 或 `PATH` 查找，也可在“设置 → 运行内核”中选择文件；不再读取内核路径环境变量。Windows 默认托管路径为 `%LOCALAPPDATA%\ZenClash\mihomo\cores\mihomo.exe`。
+发布包内置 Mihomo，应用启动时会自动发现并准备内核。安装文件的格式与系统要求以对应 Release 说明为准；macOS 用户可查看[安装指南](docs/installation/macos.md)。
 
-提交前运行格式检查与测试：
+**三步开始：**
 
-```sh
-cargo fmt --all -- --check
-cargo test --workspace --all-features --locked
-```
+1. **添加订阅**：在「订阅」中粘贴你的订阅链接，或导入本地 Clash/Mihomo YAML 文件。
+2. **选择节点**：应用配置后，在「代理」中测速并选择节点。
+3. **开启代理**：在「总览」启用系统代理或 TUN，按需选择规则、全局或直连模式。
 
-完整 Clippy 规则见 [CI 工作流](.github/workflows/ci.yml)。真实内核集成测试默认忽略，需要提供内核路径后显式运行。
+ZenClash 是客户端，需要你自行提供订阅或代理配置。项目正在持续迭代，具体功能与平台兼容性请查看所用版本的发布说明。
 
-本轮实机测试的范围、问题修复和未验证事项见 [Windows 验收记录（2026-10-04）](docs/development/windows-acceptance-2026-10-04.md)。
+## 你的配置，留在你的掌控中
 
-更多开发资料：[打包脚本](scripts) · [开发与验收文档](docs/development) · [项目规约](AGENTS.md) · [GPUI Kit 迁移与 Windows 验收](docs/development/gpui-kit-migration.md)。
+导入的 YAML 源文件不会被原地改写，调整可以通过配置覆写完成。流量历史保存在本地，记录开关与保留时间可在设置中调整；配置与偏好也可以备份和恢复。
 
-## 数据与隐私
+在 macOS 上，关闭主窗口后可继续通过菜单栏使用 ZenClash；需要结束运行时，从菜单中选择「退出」。正常退出会释放应用接管的代理并停止它启动的内核。
 
-- 导入的订阅与 YAML 源文件不会被原地改写。
-- 配置索引拒绝不安全路径、重复记录和托管文件符号链接；读写均限制索引大小，备份沿用相同校验。
-- 模式切换与配置应用串行执行，并使用执行时已提交的配置及覆写链。
-- 启用的 YAML 覆写固定了不同模式时，模式切换会拒绝冲突并提示修改或停用该覆写。配置应用结果无法确认时，可明确重新应用已记录订阅的当前内容。
-- 系统代理按接管时记录的网络服务释放；PAC 替换完成原生状态回读和偏好保存后才关闭旧服务，失败时恢复或保留待恢复服务。
-- 退出时若代理释放或内核停止失败，应用保持运行并显示错误；修复系统权限或代理状态后可重试退出。
-- 流量历史保存在本地，可在设置中关闭或调整保留时间；最多保留 1,000,000 条样本，超限时按观测时间淘汰最旧记录。正常退出会等待最后一批写入，写入失败时保留有界的待写队列并允许重试。
-- 日志缓冲与落盘队列同时限制条目数和序列化字节数；超大日志条目会显示错误，日志筛选和展示数据在后台准备。
-- ZenClash 启动的内核会随应用正常退出而停止。
-- 普通 Mihomo 启动和重启使用已检查的配置快照，源文件随后变化不会替换本次启动内容；重启检查失败保留原内核。
-- 配置、日志和备份可能包含订阅地址或控制器密钥，请在分享前脱敏。
+## 一起把 ZenClash 做得更好
 
-## 参与贡献
+如果你喜欢这样的桌面代理体验，欢迎给项目一个 **Star**，也欢迎分享给正在寻找 Mihomo 客户端的朋友。
 
-欢迎提交 [Issue](https://github.com/HaiwenZhang/ZenClash/issues) 和 Pull Request。报告问题时，请附上系统版本、ZenClash 与 Mihomo 版本、复现步骤及脱敏后的日志。
+用起来有不顺手的地方？欢迎提交 [Issue](https://github.com/HaiwenZhang/ZenClash/issues)，告诉我们你的使用场景与期望。报告故障时，请附系统和应用版本、复现步骤，以及脱敏后的日志。
 
-## 致谢与许可证
+想参与开发，可以从[开发文档](docs/development)、[构建与打包脚本](scripts)和 [CI 检查](.github/workflows/ci.yml)开始。欢迎提交 Pull Request，改进功能、交互、翻译和文档。
 
-感谢 [Mihomo](https://github.com/MetaCubeX/mihomo)、[GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) 和 [GPUI Kit](https://github.com/longbridge/gpui-kit)。
+## 致谢与许可
 
-ZenClash 采用 [GPL-3.0-only](LICENSE) 许可证。Copyright © 2026 Haiwen Zhang。
+感谢 [Mihomo](https://github.com/MetaCubeX/mihomo)、[GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui)、[GPUI Kit](https://github.com/longbridge/gpui-kit)，以及本项目使用和参考的开源项目的作者与贡献者。
 
+ZenClash 采用 [GPL-3.0-only](LICENSE) 许可证。Copyright © 2026 Haiwen Zhang and ZenClash contributors.
 
-`crates/zenclash-service` Fork 自 [clash-verge-rev/clash-verge-service-ipc](https://github.com/clash-verge-rev/clash-verge-service-ipc) 2.7.5，保留上游作者 Tunglies 及其他贡献者的声明和完整 GPL 第 3 版许可证；ZenClash 适配日期为 2026-10-04。来源、修改内容和接入状态见 [服务 README](crates/zenclash-service/README.md)、[修改声明](crates/zenclash-service/NOTICE.md) 和 [原始许可证](crates/zenclash-service/LICENSE)。
-
-分发包含该 Fork 的二进制时，须保留许可证和修改声明，并按 GPL 第 6 节提供与发布版本一致的完整对应源码，包含 ZenClash 的修改和必要构建/安装文件；只链接上游仓库不足以代替对应源码。具体发布操作见 [GPL 分发与对应源码](docs/development/gpl-distribution.md)。2026-10-08 起，CI 和 Release 直接用 Cargo 构建并归档可执行文件，移除许可整理和对应源码任务。历史记录：2026-10-05 已在本地生成阶段 Windows 安装包和同版完整对应源码，源码解压后的哈希、锁定依赖离线解析及 GUI/服务编译检查通过。交付文件位于 `dist/gpl-2026-10-05/`；尚未发布正式 Release 或完成三平台实机/TUN 验收。
+第三方代码的来源与修改声明见 [NOTICE](NOTICE.md) 和[服务说明](crates/zenclash-service/README.md)；对应源码与再分发说明见 [GPL 分发文档](docs/development/gpl-distribution.md)。

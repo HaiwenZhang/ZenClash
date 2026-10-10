@@ -1,7 +1,7 @@
 # Modified for the ZenClash fork on 2026-10-04; see NOTICE.md. GPL-3.0-only.
 [package]
 name = "zenclash-service"
-version = "2.7.5+zenclash.1"
+version = "2.7.5+zenclash.2"
 edition = "2024"
 authors = ["Tunglies", "ZenClash contributors"]
 license = "GPL-3.0-only"
@@ -69,6 +69,7 @@ standalone = [
     "dep:platform_lib",
     "dep:nix",
     "dep:windows-sys",
+    "dep:block2",
 ]
 client = [
     "kode-bridge/client",
@@ -80,6 +81,8 @@ client = [
     "response",
     "dep:platform_lib",
     "dep:windows-sys",
+    "dep:block2",
+    "dep:parking_lot",
 ]
 response = []
 test = [
@@ -118,6 +121,7 @@ parking_lot = { version = "0.12.5", optional = true }
 url = "2.5.8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = { version = "0.6.2", optional = true }
 sysproxy = { git = "https://github.com/clash-verge-rev/sysproxy-rs.git", branch = "main", default-features = false }
 
 [target.'cfg(unix)'.dependencies]

@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 1 || $# -gt 2 ]]; then
-  echo "Usage: $0 <output-path> [release-tag]" >&2
+if [[ $# -lt 1 || $# -gt 3 ]]; then
+  echo "Usage: $0 <output-path> [release-tag] [geoip.metadb|geosite.dat]" >&2
   exit 2
 fi
 
 output_path="$1"
 release_tag="${2:-${MIHOMO_GEODATA_VERSION:-latest}}"
-asset_name="geoip.metadb"
+asset_name="${3:-geoip.metadb}"
+case "${asset_name}" in
+  geoip.metadb|geosite.dat) ;;
+  *) echo "Unsupported Mihomo GeoData asset: ${asset_name}" >&2; exit 2 ;;
+esac
 api_url="https://api.github.com/repos/MetaCubeX/meta-rules-dat/releases/tags/${release_tag}"
 work_dir="$(mktemp -d)"
 release_json="${work_dir}/release.json"

@@ -13,9 +13,11 @@ RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 PROFILE_PATH="${ZENCLASH_CONFIG:-${PROJECT_ROOT}/platforms/common/default.yaml}"
 MIHOMO_PATH="${ZENCLASH_MIHOMO_BINARY:-}"
 GEODATA_PATH="${ZENCLASH_GEODATA_FILE:-}"
+GEOSITE_PATH="${ZENCLASH_GEOSITE_FILE:-}"
 CARGO_OUTPUT_ROOT="${CARGO_TARGET_DIR:-${PROJECT_ROOT}/target}"
 MIHOMO_WORK_DIR=""
 GEODATA_WORK_DIR=""
+GEOSITE_WORK_DIR=""
 
 cleanup() {
   if [[ -n "${MIHOMO_WORK_DIR}" ]]; then
@@ -23,6 +25,9 @@ cleanup() {
   fi
   if [[ -n "${GEODATA_WORK_DIR}" ]]; then
     rm -rf "${GEODATA_WORK_DIR}"
+  fi
+  if [[ -n "${GEOSITE_WORK_DIR}" ]]; then
+    rm -rf "${GEOSITE_WORK_DIR}"
   fi
 }
 trap cleanup EXIT
@@ -41,6 +46,17 @@ else
   GEODATA_WORK_DIR="$(mktemp -d)"
   GEODATA_PATH="${GEODATA_WORK_DIR}/geoip.metadb"
   bash "${SCRIPT_DIR}/download_mihomo_geodata.sh" "${GEODATA_PATH}"
+fi
+
+if [[ -n "${GEOSITE_PATH}" ]]; then
+  if [[ ! -f "${GEOSITE_PATH}" || ! -s "${GEOSITE_PATH}" ]]; then
+    echo "ZENCLASH_GEOSITE_FILE is not a nonempty regular file: ${GEOSITE_PATH}" >&2
+    exit 1
+  fi
+else
+  GEOSITE_WORK_DIR="$(mktemp -d)"
+  GEOSITE_PATH="${GEOSITE_WORK_DIR}/geosite.dat"
+  bash "${SCRIPT_DIR}/download_mihomo_geodata.sh" "${GEOSITE_PATH}" "${MIHOMO_GEODATA_VERSION:-latest}" geosite.dat
 fi
 
 if [[ -n "${MIHOMO_PATH}" ]]; then
@@ -102,6 +118,7 @@ done
 cp "${PROJECT_ROOT}/platforms/macos/Info.plist" "${CONTENTS_DIR}/Info.plist"
 cp "${MIHOMO_PATH}" "${RESOURCES_DIR}/mihomo"
 cp "${GEODATA_PATH}" "${RESOURCES_DIR}/geoip.metadb"
+cp "${GEOSITE_PATH}" "${RESOURCES_DIR}/geosite.dat"
 cp "${PROFILE_PATH}" "${RESOURCES_DIR}/profile.yaml"
 cp "${PROJECT_ROOT}/platforms/common/recovery.yaml" "${RESOURCES_DIR}/recovery.yaml"
 cp "${PROJECT_ROOT}/LICENSE" "${RESOURCES_DIR}/LICENSE.txt"

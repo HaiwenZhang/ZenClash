@@ -125,6 +125,7 @@ pub use owned_core::{CoreRuntimeBackend, CoreRuntimeDescriptor, CoreTunPermissio
 pub use preferences::{
     AppPreferences, AppPreferencesError, AppPreferencesResult, AppPreferencesStore,
     AppearancePreference, CoreBinaryPreferences, LanguagePreference, NetworkProbeRoutePreference,
+    TrayDisplayPreference,
 };
 pub use process::{
     MihomoLaunchConfig, MihomoProcess, MihomoProcessSnapshot, MihomoRuntimeResources,

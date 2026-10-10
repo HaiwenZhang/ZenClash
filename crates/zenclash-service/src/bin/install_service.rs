@@ -1348,6 +1348,34 @@ mod core_install_argument_tests {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_service_uses_on_demand_activation() -> anyhow::Result<()> {
+        let content = format!(
+            include_str!("../../resources/launchd.plist.tmpl"),
+            group_name = "staff",
+            service_id = zenclash_service::MACOS_SERVICE_ID,
+            app_bundle_id = zenclash_service::MACOS_APP_BUNDLE_ID,
+            service_binary = "/Library/PrivilegedHelperTools/fixture/zenclash-service",
+        );
+        for key in ["KeepAlive", "RunAtLoad"] {
+            let mut child = std::process::Command::new("/usr/bin/plutil")
+                .args(["-extract", key, "raw", "-o", "-", "-"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()?;
+            child.stdin.take().unwrap().write_all(content.as_bytes())?;
+            let output = child.wait_with_output()?;
+            assert!(output.status.success());
+            assert_eq!(
+                String::from_utf8(output.stdout)?.trim(),
+                "false",
+                "{key} must not keep an unused service running"
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn missing_launchd_service_skips_bootout() {
         let plan = classify_launchd_service_probe(

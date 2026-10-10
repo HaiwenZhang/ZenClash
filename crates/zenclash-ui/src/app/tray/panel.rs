@@ -1,39 +1,61 @@
+use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::{
     ActiveTheme, Disableable, Selectable, Sizable,
-    button::{Button, ButtonVariants},
-    h_flex,
-    menu::{DropdownMenu, PopupMenuItem},
-    v_flex,
+    button::{Button, ButtonCustomVariant, ButtonVariants},
+    chart::AreaChart,
+    h_flex, v_flex,
 };
 use gpui_kit::{
     AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement, ParentElement,
-    Pixels, Render, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window,
-    WindowBounds, WindowKind, WindowOptions, div, point, px, size,
+    Pixels, Render, Styled, Subscription, Task, WeakEntity, Window, WindowBounds, WindowKind,
+    WindowOptions, div, point, px, rems, size,
 };
 use zenclash_core::{TrafficSnapshot, format_speed};
 
 use crate::{
     app::ZenClashApp,
     components::{
+        mint_switch::MintSwitch,
         sidebar::OutboundMode,
         tray::{TrayCommand, TrayMenuState},
     },
 };
 
+mod traffic;
+mod view;
+pub(in crate::app) use traffic::TrafficHistory;
+use traffic::TrafficPoint;
+
 struct StatusPanelSnapshot {
     state: TrayMenuState,
     traffic: TrafficSnapshot,
+    points: Vec<TrafficPoint>,
     mode: OutboundMode,
+    mode_pending: bool,
+    capture_pending: bool,
+    current_node: Option<String>,
+    generation: u64,
     unavailable: bool,
     error: Option<String>,
 }
 
 impl StatusPanelSnapshot {
     fn new(app: &ZenClashApp) -> Self {
+        let generation = app.core_session.generation();
         Self {
             state: app.tray_state.clone(),
             traffic: app.traffic_monitor.snapshot(),
+            points: app.status_panel_traffic.points(generation),
             mode: app.outbound_mode.displayed(),
+            mode_pending: app.outbound_mode.is_pending(),
+            capture_pending: app.system_proxy_commands.is_running()
+                || app.tun_commands.is_running(),
+            current_node: app
+                .tray_current_node
+                .as_ref()
+                .filter(|(mode, _)| *mode == app.outbound_mode.displayed())
+                .map(|(_, node)| node.clone()),
+            generation,
             unavailable: app.tray_error.is_some() || app.tray_state.mode.is_empty(),
             error: app
                 .tray_command_error
@@ -49,6 +71,7 @@ struct StatusPanel {
     snapshot: StatusPanelSnapshot,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
+    _refresh_task: Option<Task<()>>,
 }
 
 impl ZenClashApp {
@@ -114,12 +137,15 @@ impl ZenClashApp {
                         cx.notify();
                     }));
                 }
-                StatusPanel {
+                let mut panel = StatusPanel {
                     owner,
                     snapshot,
                     focus,
                     _subscriptions: subscriptions,
-                }
+                    _refresh_task: None,
+                };
+                panel.start_refresh(cx);
+                panel
             });
             window.activate_window();
             view
@@ -136,7 +162,7 @@ impl ZenClashApp {
 
 fn panel_bounds(anchor: Bounds<Pixels>, screen: Bounds<Pixels>) -> Bounds<Pixels> {
     let width = px(420.).min(screen.size.width);
-    let height = px(560.).min(screen.size.height);
+    let height = px(500.).min(screen.size.height);
     let x = (anchor.right() - width)
         .max(screen.left())
         .min(screen.right() - width);
@@ -152,6 +178,25 @@ fn panel_bounds(anchor: Bounds<Pixels>, screen: Bounds<Pixels>) -> Bounds<Pixels
 }
 
 impl StatusPanel {
+    fn start_refresh(&mut self, cx: &mut Context<Self>) {
+        let owner = self.owner.clone();
+        // Automatic groups can change their current node without a UI command.
+        // The panel owns this task, so closing it stops catalog refreshes.
+        self._refresh_task = Some(cx.spawn(async move |_, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(5))
+                    .await;
+                if owner
+                    .update(cx, |app, cx| app.refresh_tray_menu(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+    }
+
     fn command(
         &self,
         command: TrayCommand,
@@ -163,238 +208,12 @@ impl StatusPanel {
     }
 }
 
-impl Render for StatusPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let state = self.snapshot.state.clone();
-        let traffic = &self.snapshot.traffic;
-        let unavailable = self.snapshot.unavailable;
-        let error = self.snapshot.error.clone();
-        let profiles_owner = self.owner.clone();
-        let refresh_owner = self.owner.clone();
-        let mode = self.snapshot.mode;
-        let mut content = v_flex()
-            .gap_3()
-            .p_4()
-            .child(zenclash_i18n::text("panel.local"))
-            .child(
-                h_flex()
-                    .justify_between()
-                    .child(
-                        div()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(zenclash_i18n::text("app.name")),
-                    )
-                    .child(
-                        Button::new("panel-main")
-                            .small()
-                            .ghost()
-                            .label(zenclash_i18n::text("tray.show_window"))
-                            .on_click(self.command(TrayCommand::ShowWindow)),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_4()
-                    .child(format!("↑ {}", format_speed(traffic.upload)))
-                    .child(format!("↓ {}", format_speed(traffic.download))),
-            )
-            .child(
-                h_flex().gap_2().children(
-                    [
-                        (
-                            "rule",
-                            crate::components::sidebar::OutboundMode::Rule,
-                            TrayCommand::SetRuleMode,
-                        ),
-                        (
-                            "global",
-                            crate::components::sidebar::OutboundMode::Global,
-                            TrayCommand::SetGlobalMode,
-                        ),
-                        (
-                            "direct",
-                            crate::components::sidebar::OutboundMode::Direct,
-                            TrayCommand::SetDirectMode,
-                        ),
-                    ]
-                    .into_iter()
-                    .map(|(id, value, command)| {
-                        Button::new(id)
-                            .small()
-                            .outline()
-                            .selected(mode == value)
-                            .disabled(unavailable)
-                            .label(value.label())
-                            .on_click(self.command(command))
-                    }),
-                ),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("panel-system-proxy")
-                            .small()
-                            .outline()
-                            .selected(state.system_proxy)
-                            .disabled(unavailable && !state.system_proxy)
-                            .label(zenclash_i18n::text("tray.system_proxy"))
-                            .on_click(self.command(TrayCommand::SetSystemProxy {
-                                enabled: !state.system_proxy,
-                                port: state.mixed_port,
-                            })),
-                    )
-                    .child(
-                        Button::new("panel-tun")
-                            .small()
-                            .outline()
-                            .selected(state.tun)
-                            .disabled(unavailable && !state.tun)
-                            .label(zenclash_i18n::text("navigation.tun.label"))
-                            .on_click(self.command(TrayCommand::SetTun(!state.tun))),
-                    ),
-            )
-            .child(
-                div()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(zenclash_i18n::text("tray.profiles")),
-            )
-            .child(
-                Button::new("panel-profile")
-                    .small()
-                    .outline()
-                    .disabled(unavailable)
-                    .label(state.profile_name.clone())
-                    .dropdown_caret(true)
-                    .dropdown_menu(move |mut menu, _, _| {
-                        for profile in &state.profiles {
-                            let owner = profiles_owner.clone();
-                            let id = profile.id.clone();
-                            menu = menu.item(
-                                PopupMenuItem::new(profile.name.clone())
-                                    .checked(profile.active)
-                                    .on_click(move |_, _, cx| {
-                                        let _ = owner.update(cx, |app, cx| {
-                                            app.handle_tray_command(
-                                                TrayCommand::SelectProfile { id: id.clone() },
-                                                cx,
-                                            )
-                                        });
-                                    }),
-                            );
-                        }
-                        menu
-                    }),
-            );
-        if let Some(error) = error {
-            content = content.child(div().text_color(cx.theme().danger).child(error));
-        } else if !traffic.connected {
-            content = content.child(zenclash_i18n::text("tray.core_offline"));
-        }
-        for group in state.groups {
-            let owner = self.owner.clone();
-            let name = group.name.clone();
-            content = content.child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(group.name.clone()),
-                    )
-                    .child(
-                        Button::new((gpui_kit::ElementId::from("panel-group"), name.clone()))
-                            .small()
-                            .outline()
-                            .label(group.now.clone())
-                            .disabled(unavailable || !group.selectable)
-                            .dropdown_caret(true)
-                            .dropdown_menu(move |mut menu, _, _| {
-                                for node in group.proxies.iter() {
-                                    let owner = owner.clone();
-                                    let group_name = name.clone();
-                                    let proxy = node.name.clone();
-                                    let label = node.delay.map_or_else(
-                                        || node.name.clone(),
-                                        |delay| format!("{} · {delay} ms", node.name),
-                                    );
-                                    menu = menu.item(
-                                        PopupMenuItem::new(label)
-                                            .checked(node.name == group.now)
-                                            .on_click(move |_, _, cx| {
-                                                let _ = owner.update(cx, |app, cx| {
-                                                    app.handle_tray_command(
-                                                        TrayCommand::SelectProxy {
-                                                            group: group_name.clone(),
-                                                            proxy: proxy.clone(),
-                                                        },
-                                                        cx,
-                                                    )
-                                                });
-                                            }),
-                                    );
-                                }
-                                let owner = owner.clone();
-                                menu.item(
-                                    PopupMenuItem::new(zenclash_i18n::text("tray.open_proxies"))
-                                        .on_click(move |_, _, cx| {
-                                            let _ = owner.update(cx, |app, cx| {
-                                                app.handle_tray_command(
-                                                    TrayCommand::OpenProxies,
-                                                    cx,
-                                                )
-                                            });
-                                        }),
-                                )
-                            }),
-                    ),
-            );
-        }
-        content = content.child(
-            Button::new("panel-refresh")
-                .small()
-                .ghost()
-                .label(zenclash_i18n::text("panel.refresh"))
-                .on_click(move |_, _, cx| {
-                    let _ = refresh_owner.update(cx, |app, cx| app.refresh_tray_menu(cx));
-                }),
-        );
-        v_flex()
-            .id("status-panel")
-            .track_focus(&self.focus)
-            .key_context("ZenClashStatusPanel")
-            .size_full()
-            .bg(cx.theme().popover)
-            .text_color(cx.theme().popover_foreground)
-            .text_sm()
-            .on_action(|_: &crate::app::CloseStatusPanel, window, cx| {
-                window.remove_window();
-                cx.stop_propagation();
-            })
-            .child(
-                div()
-                    .id("status-panel-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(content),
-            )
-            .into_any_element()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[gpui_kit::test]
-    fn tray_command_opens_and_renders_status_panel_while_owner_is_updating(
-        cx: &mut gpui_kit::TestAppContext,
-    ) {
-        use gpui_kit::component::Root;
-        use gpui_kit::test::TestWindowExt;
-        let fixture = crate::pages::runtime::ui_tests::Fixture::new();
+    fn app_services(fixture: &crate::pages::runtime::ui_tests::Fixture) -> crate::app::AppServices {
         let services = fixture.services();
-        let app_services = crate::app::AppServices {
+        crate::app::AppServices {
             initializing: true,
             await_service_handoff: false,
             profile_store: services.profile_store,
@@ -414,7 +233,54 @@ mod tests {
             startup_notice: None,
             startup_error: None,
             restart_after_exit: Default::default(),
-        };
+        }
+    }
+
+    #[gpui_kit::test]
+    fn application_reopen_restores_hidden_main_window(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::component::Root;
+        let fixture = crate::pages::runtime::ui_tests::Fixture::new();
+        let services = app_services(&fixture);
+        cx.executor().allow_parking();
+        cx.update(crate::app::init);
+        let mut owner = None;
+        let main = cx.open_window(size(px(1280.), px(820.)), |window, cx| {
+            let preferences = services.preferences.clone();
+            let app =
+                cx.new(|cx| ZenClashApp::new(services, None, None, None, preferences, window, cx));
+            owner = Some(app.clone());
+            Root::new(app, window, cx)
+        });
+        let owner = owner.unwrap();
+        // The headless platform has no native application-hide implementation.
+        // Reproduce the retained window state established by the close handler.
+        cx.update_window(main.into(), |_, window, cx| {
+            owner.update(cx, |app, cx| {
+                #[cfg(target_os = "macos")]
+                app.park_main_window(window);
+                app.release_hidden_page_data(cx);
+            });
+        })
+        .unwrap();
+        assert!(!cx.update(|cx| owner.read(cx).main_window_visible));
+        cx.update(crate::app::bootstrap::reopen_main_window);
+        assert!(cx.update(|cx| owner.read(cx).main_window_visible));
+        #[cfg(target_os = "macos")]
+        assert!(cx.update(|cx| owner.read(cx).main_window_memory.restore_size.is_none()));
+        cx.update(crate::app::bootstrap::reopen_main_window);
+        assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+        cx.update_window(main.into(), |_, window, _| window.remove_window())
+            .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn tray_command_opens_and_renders_status_panel_while_owner_is_updating(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::component::Root;
+        use gpui_kit::test::TestWindowExt;
+        let fixture = crate::pages::runtime::ui_tests::Fixture::new();
+        let app_services = app_services(&fixture);
         cx.executor().allow_parking();
         cx.update(|cx| {
             crate::app::init(cx);
@@ -432,6 +298,15 @@ mod tests {
         let owner = owner.unwrap();
         cx.update(|cx| {
             owner.update(cx, |app, cx| {
+                app.tray_state.mode = "rule".into();
+                app.tray_current_node = Some((OutboundMode::Rule, "🇭🇰 香港 · HK 01".into()));
+                app.status_panel_traffic.observe(&TrafficSnapshot {
+                    generation: app.core_session.generation(),
+                    updated_at_ms: 1_000,
+                    upload: 100,
+                    download: 200,
+                    ..Default::default()
+                });
                 app.handle_tray_command(TrayCommand::ShowPanel, cx)
             });
         });
@@ -439,11 +314,72 @@ mod tests {
         let panel = cx.update(|cx| owner.read(cx).status_panel.unwrap());
         cx.update_window(panel, |_, window, cx| {
             window.render_frame(cx);
-            assert!(window.find("panel-main").visible());
+            assert!(window.find("panel-traffic").visible());
+            assert!(window.find("panel-mode-rule").visible());
+            assert!(window.find("panel-mode-global").visible());
+            assert!(window.find("panel-mode-direct").visible());
+            assert!(window.find("panel-system-proxy").visible());
+            assert!(window.find("panel-tun").visible());
+            assert!(window.find("panel-current-node").visible());
+            let node = window.find("panel-current-node-name");
+            assert_eq!(node.label(), Some("🇭🇰 香港 · HK 01"));
+            assert_eq!(node.role(), Some(gpui_kit::Role::Status));
+            window.click("panel-current-node-name", cx);
+            assert!(!owner.read(cx).proxy_selection_commands.is_running());
+            assert!(
+                window
+                    .try_find((gpui_kit::ElementId::from("panel-group"), "first".to_owned()))
+                    .is_none()
+            );
+            assert!(node.visible());
+            assert!(node.bounds().bottom() <= window.viewport_size().height);
             window.press("escape", cx);
         })
         .unwrap();
         cx.run_until_parked();
+        assert!(cx.update_window(panel, |_, _, _| ()).is_err());
+        cx.update(|cx| {
+            owner.update(cx, |app, cx| {
+                app.handle_tray_command(TrayCommand::ShowPanel, cx)
+            });
+            let app = owner.read(cx);
+            assert_eq!(
+                app.status_panel_traffic
+                    .points(app.core_session.generation())
+                    .len(),
+                1
+            );
+        });
+        cx.update(|cx| {
+            owner.update(cx, |app, cx| {
+                app.handle_tray_command(
+                    TrayCommand::SetDisplay(zenclash_core::TrayDisplayPreference::Icon),
+                    cx,
+                )
+            });
+            assert_eq!(
+                owner.read(cx).preferences.tray_display,
+                zenclash_core::TrayDisplayPreference::Icon
+            );
+            assert_eq!(
+                owner.read(cx).tray_state.display,
+                zenclash_core::TrayDisplayPreference::Icon
+            );
+            assert!(owner.read(cx).preferences.traffic_tray_visible);
+            owner.update(cx, |app, cx| {
+                app.handle_tray_command(
+                    TrayCommand::SetDisplay(zenclash_core::TrayDisplayPreference::Traffic),
+                    cx,
+                )
+            });
+            assert_eq!(
+                owner.read(cx).preferences.tray_display,
+                zenclash_core::TrayDisplayPreference::Traffic
+            );
+        });
+        let reopened = cx.update(|cx| owner.read(cx).status_panel.unwrap());
+        cx.update_window(reopened, |_, window, _| window.remove_window())
+            .unwrap();
         cx.update_window(main.into(), |_, window, _| window.remove_window())
             .unwrap();
     }

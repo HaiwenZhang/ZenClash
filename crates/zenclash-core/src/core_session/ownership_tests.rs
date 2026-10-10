@@ -633,6 +633,7 @@ impl ChildFixture {
                 .as_nanos(),
         ));
         std::fs::create_dir_all(directory.join("home")).unwrap();
+        let directory = std::fs::canonicalize(directory).unwrap();
         let source = directory.join("child.rs");
         std::fs::write(
             &source,

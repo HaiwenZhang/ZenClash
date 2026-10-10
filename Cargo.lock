@@ -10398,9 +10398,10 @@ dependencies = [
 
 [[package]]
 name = "zenclash-service"
-version = "2.7.5+zenclash.1"
+version = "2.7.5+zenclash.2"
 dependencies = [
  "anyhow",
+ "block2 0.6.2",
  "flexi_logger",
  "http",
  "kode-bridge",

@@ -337,7 +337,6 @@ impl Render for ZenClashApp {
             .on_action(cx.listener(Self::on_hide_traffic_icon))
             .on_action(cx.listener(Self::on_show_status_menu))
             .on_action(cx.listener(Self::on_toggle_sidebar))
-            .on_action(cx.listener(Self::on_toggle_floating_window))
             .when(uses_custom_title_bar(std::env::consts::OS), |shell| {
                 shell.child(main_window_title_bar(
                     cx.listener(|this, _: &ClickEvent, _, cx| this.begin_quit(None, cx)),

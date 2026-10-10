@@ -187,6 +187,7 @@ impl Fixture {
                 .as_nanos()
         ));
         std::fs::create_dir(&root).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
         let core = root.join(format!("mihomo{}", std::env::consts::EXE_SUFFIX));
         std::fs::write(&core, b"fixture core").unwrap();
         let native = Arc::new(MockNative {

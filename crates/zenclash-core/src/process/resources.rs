@@ -7,7 +7,7 @@ use std::{
 
 use crate::{CoreKind, MihomoError, MihomoResult};
 
-const BUNDLED_MIHOMO_DATA_FILES: [&str; 1] = ["geoip.metadb"];
+const BUNDLED_MIHOMO_DATA_FILES: [&str; 2] = ["geoip.metadb", "geosite.dat"];
 
 pub(super) fn find_core_binary(kind: CoreKind) -> Option<PathBuf> {
     let stem = kind.executable_stem();
@@ -166,8 +166,15 @@ fn install_bundled_core_admitted(
 }
 
 pub(super) fn install_bundled_mihomo_data(home_dir: &Path) -> MihomoResult<()> {
+    seed_bundled_mihomo_data(home_dir, bundled_resource)
+}
+
+fn seed_bundled_mihomo_data(
+    home_dir: &Path,
+    find_bundled: impl Fn(&str) -> Option<PathBuf>,
+) -> MihomoResult<()> {
     for name in BUNDLED_MIHOMO_DATA_FILES {
-        if let Some(bundled) = bundled_resource(name) {
+        if let Some(bundled) = find_bundled(name) {
             install_bundled_data_file(&bundled, home_dir, name)?;
         }
     }
@@ -622,18 +629,34 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let bundled = root.join("packaged-geoip.metadb");
+        let resources = root.join("resources");
+        std::fs::create_dir_all(&resources).unwrap();
         let home = root.join("home");
-        std::fs::write(&bundled, b"packaged").unwrap();
+        std::fs::write(resources.join("geoip.metadb"), b"packaged IPs").unwrap();
+        std::fs::write(resources.join("geosite.dat"), b"packaged sites").unwrap();
 
-        install_bundled_data_file(&bundled, &home, "geoip.metadb").unwrap();
-        let managed = home.join("geoip.metadb");
-        assert_eq!(std::fs::read(&managed).unwrap(), b"packaged");
+        seed_bundled_mihomo_data(&home, |name| Some(resources.join(name))).unwrap();
+        assert_eq!(
+            std::fs::read(home.join("geoip.metadb")).unwrap(),
+            b"packaged IPs"
+        );
+        assert_eq!(
+            std::fs::read(home.join("geosite.dat")).unwrap(),
+            b"packaged sites"
+        );
 
-        std::fs::write(&managed, b"updated").unwrap();
-        install_bundled_data_file(&bundled, &home, "geoip.metadb").unwrap();
+        std::fs::write(home.join("geoip.metadb"), b"updated IPs").unwrap();
+        std::fs::write(home.join("geosite.dat"), b"updated sites").unwrap();
+        seed_bundled_mihomo_data(&home, |name| Some(resources.join(name))).unwrap();
 
-        assert_eq!(std::fs::read(managed).unwrap(), b"updated");
+        assert_eq!(
+            std::fs::read(home.join("geoip.metadb")).unwrap(),
+            b"updated IPs"
+        );
+        assert_eq!(
+            std::fs::read(home.join("geosite.dat")).unwrap(),
+            b"updated sites"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

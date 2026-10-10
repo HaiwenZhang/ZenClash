@@ -247,6 +247,10 @@ impl RuntimePage {
                             this.refresh(cx);
                             return;
                         }
+                        this.accept_home_capture_snapshot(
+                            zenclash_core::CapturePlan::Tun,
+                            outcome.capture().snapshot(),
+                        );
                         this.refresh(cx);
                         match outcome.capture() {
                             CaptureOutcome::RolledBack { failure, .. }

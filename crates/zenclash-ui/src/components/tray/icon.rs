@@ -46,6 +46,43 @@ pub(super) fn traffic_icon(upload: u64, download: u64) -> Result<Icon, String> {
     Icon::from_rgba(rgba, WIDTH, HEIGHT).map_err(|error| error.to_string())
 }
 
+pub(super) fn app_icon() -> Result<Icon, String> {
+    // Rasterize the existing brand asset at a native bitmap boundary; macOS
+    // applies its own menu-bar tint to the resulting template image.
+    let raster_size = if cfg!(target_os = "macos") { 36 } else { 18 };
+    let renderer = gpui_kit::SvgRenderer::new(std::sync::Arc::new(crate::assets::Assets));
+    let svg = include_str!("../../../assets/icons/zenclash-tray.svg");
+    #[cfg(not(target_os = "macos"))]
+    let svg = svg.replace("#000000", "#00BDA5");
+    let parsed = renderer
+        .parse_svg(svg.as_bytes())
+        .map_err(|error| error.to_string())?;
+    let image = renderer
+        .render_parsed(
+            &parsed,
+            gpui_kit::SvgSize::ExactSize(gpui_kit::size(
+                gpui_kit::DevicePixels(raster_size),
+                gpui_kit::DevicePixels(raster_size),
+            )),
+        )
+        .map_err(|error| error.to_string())?;
+    let bytes = image
+        .as_bytes(0)
+        .ok_or_else(|| "application mark has no image frame".to_owned())?;
+    let mut rgba = bytes.to_vec();
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+        let alpha = u32::from(pixel[3]);
+        for channel in &mut pixel[..3] {
+            *channel = (u32::from(*channel) * 255)
+                .checked_div(alpha)
+                .unwrap_or_default()
+                .min(255) as u8;
+        }
+    }
+    Icon::from_rgba(rgba, raster_size as u32, raster_size as u32).map_err(|error| error.to_string())
+}
+
 fn activity_height(bytes_per_second: u64) -> u32 {
     if bytes_per_second == 0 {
         return 1;

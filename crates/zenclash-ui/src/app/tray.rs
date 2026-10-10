@@ -1,12 +1,11 @@
 use super::{
-    AppContext, ClipboardItem, Context, EnvironmentShell, FloatingTrafficWindow, NetworkTrayIcon,
-    OutboundMode, Page, TitleBar, TrayClick, TrayCommand, TrayEvent, TrayMenuState, TrayProfile,
-    TrayProxyGroup, TrayProxyNode, WindowBounds, WindowKind, WindowOptions, ZenClashApp,
-    open_directory, px, tray_directories,
+    AppContext, ClipboardItem, Context, EnvironmentShell, NetworkTrayIcon, OutboundMode, Page,
+    TrayClick, TrayCommand, TrayEvent, TrayMenuState, TrayProfile, TrayProxyGroup, TrayProxyNode,
+    ZenClashApp, open_directory, tray_directories,
 };
 
 mod commands;
-mod panel;
+pub(in crate::app) mod panel;
 mod queue;
 mod refresh;
 mod window;

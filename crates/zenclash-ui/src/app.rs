@@ -5,7 +5,7 @@ use gpui_kit::component::{ActiveTheme, ThemeMode, TitleBar, WindowExt, h_flex, v
 use gpui_kit::{
     AnyWindowHandle, App, AppContext, ClipboardItem, Context, Entity, Focusable,
     InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, SharedString, Styled,
-    Subscription, Window, WindowBounds, WindowKind, WindowOptions, div, px,
+    Subscription, Window, WindowBounds, WindowOptions, div, px,
 };
 #[cfg(target_os = "macos")]
 use gpui_kit::{Pixels, Size};
@@ -28,7 +28,7 @@ mod view;
 
 pub use bootstrap::{
     BootstrappedApplication, create_main_window, create_main_window_with_pending_startup,
-    create_main_window_with_service_startup, init,
+    create_main_window_with_service_startup, init, reopen_main_window,
 };
 use platform::{open_directory, tray_directories};
 pub use traffic_history::TrafficHistorySession;
@@ -44,7 +44,6 @@ use tray::LatestCommandQueue;
 
 use crate::{
     components::{
-        floating::FloatingTrafficWindow,
         mode::OutboundModeCoordinator,
         sidebar::{OutboundMode, Sidebar},
         tray::{
@@ -103,7 +102,6 @@ mod action_types {
             HideTrafficIcon,
             ShowStatusMenu,
             ToggleSidebar,
-            ToggleFloatingWindow,
             CloseStatusPanel,
         ]
     );
@@ -132,9 +130,10 @@ pub struct ZenClashApp {
     main_window_visible: bool,
     #[cfg(target_os = "macos")]
     main_window_memory: MainWindowMemoryState,
-    floating_window: Option<AnyWindowHandle>,
     status_panel: Option<AnyWindowHandle>,
+    status_panel_traffic: tray::panel::TrafficHistory,
     tray_state: TrayMenuState,
+    tray_current_node: Option<(OutboundMode, String)>,
     tray_error: Option<String>,
     tray_command_error: Option<String>,
     mode_error: Option<String>,
@@ -373,9 +372,10 @@ impl ZenClashApp {
             main_window_visible: true,
             #[cfg(target_os = "macos")]
             main_window_memory: MainWindowMemoryState::default(),
-            floating_window: None,
             status_panel: None,
+            status_panel_traffic: tray::panel::TrafficHistory::default(),
             tray_state: TrayMenuState::default(),
+            tray_current_node: None,
             tray_error: None,
             tray_command_error: None,
             mode_error: None,
@@ -451,12 +451,13 @@ impl ZenClashApp {
         }
         let preferences = services.preferences.clone();
         let preferences_store = services.preferences_store.clone();
-        let network_tray =
-            NetworkTrayIcon::new(services.core_kind, services.traffic_monitor.clone())
-                .inspect_err(
-                    |error| tracing::warn!(%error, "failed to create native traffic tray icon"),
-                )
-                .ok();
+        let network_tray = NetworkTrayIcon::new(
+            services.core_kind,
+            services.traffic_monitor.clone(),
+            preferences.tray_display,
+        )
+        .inspect_err(|error| tracing::warn!(%error, "failed to create native traffic tray icon"))
+        .ok();
         if let Some(tray) = network_tray.as_ref()
             && let Err(error) = tray.set_visible(preferences.traffic_tray_visible)
         {
@@ -474,12 +475,8 @@ impl ZenClashApp {
         let window_visible = self.main_window_visible;
         #[cfg(target_os = "macos")]
         let window_memory = std::mem::take(&mut self.main_window_memory);
-        let floating_visible = self.floating_window.is_some();
-        // Auxiliary windows must follow the newly published runtime as well.
-        for handle in [self.floating_window.take(), self.status_panel.take()]
-            .into_iter()
-            .flatten()
-        {
+        // The status panel must follow the newly published runtime as well.
+        if let Some(handle) = self.status_panel.take() {
             let _ = cx.update_window(handle, |_, window, _| window.remove_window());
         }
         *self = Self::new(
@@ -499,9 +496,6 @@ impl ZenClashApp {
         self.navigate(page, cx);
         if !window_visible {
             self.release_hidden_page_data(cx);
-        }
-        if floating_visible {
-            self.toggle_floating_window(cx);
         }
         cx.notify();
     }
@@ -597,10 +591,17 @@ impl ZenClashApp {
                     ) {
                         tracing::warn!(%error, "failed to apply restored log persistence settings");
                     }
-                    if let Some(tray) = &this.network_tray
-                        && let Err(error) = tray.set_visible(this.preferences.traffic_tray_visible)
-                    {
-                        tracing::warn!(%error, "failed to apply restored tray visibility");
+                    let traffic = this.traffic_monitor.snapshot();
+                    if let Some(tray) = this.network_tray.as_mut() {
+                        if let Err(error) =
+                            tray.set_display(this.preferences.tray_display, &traffic)
+                        {
+                            tracing::warn!(%error, "failed to apply restored tray display");
+                        }
+                        if let Err(error) = tray.set_visible(this.preferences.traffic_tray_visible)
+                        {
+                            tracing::warn!(%error, "failed to apply restored tray visibility");
+                        }
                     }
                     let appearance = this.preferences.appearance;
                     let _ = cx.update_window(this.main_window, move |_, window, cx| {
@@ -737,11 +738,20 @@ impl ZenClashApp {
                         if refresh_tray {
                             this.refresh_tray_menu(cx);
                         }
-                        if let Some(traffic) = traffic
-                            && let Some(tray) = this.network_tray.as_mut()
-                            && let Err(error) = tray.update(&traffic)
-                        {
-                            tracing::warn!(%error, "failed to update native traffic tray");
+                        if let Some(traffic) = traffic {
+                            this.status_panel_traffic.observe(&traffic);
+                            if let Some(handle) = this.status_panel {
+                                if cx.update_window(handle, |_, _, _| ()).is_ok() {
+                                    cx.notify();
+                                } else {
+                                    this.status_panel = None;
+                                }
+                            }
+                            if let Some(tray) = this.network_tray.as_mut()
+                                && let Err(error) = tray.update(&traffic)
+                            {
+                                tracing::warn!(%error, "failed to update native traffic tray");
+                            }
                         }
                     })
                     .is_err()

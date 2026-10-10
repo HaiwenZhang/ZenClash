@@ -50,6 +50,26 @@ Windows 非提权进程下的入口权限行为有先失败再通过证据，未
 
 ## macOS 产物
 
+### 2026-10-10：按需启动与退出
+
+当前 macOS 安装器生成 `RunAtLoad=false`、`KeepAlive=false` 的 LaunchDaemon，并通过已注册的 Mach service 接受 XPC 唤醒。现有 Unix socket 继续承担版本探测和经过 owner/session 认证的控制操作，XPC 只负责启动与客户端连接生命周期。
+
+GUI 保持一条原生 XPC 连接。所有客户端断开、活跃 owner 已清理且内核已停止后，service 空闲约两秒退出；下次 IPC 调用通过 launchd 重新启动。GUI 异常终止时，现有十秒 owner 租约先停止内核与清理代理，随后执行空闲退出。退出决定与 owner 操作共享生命周期锁，并拒绝退出决定之后的新 Start。
+
+service 构建版本更新为 `2.7.5+zenclash.2`。已安装的旧 helper 和系统 plist 必须通过应用内“修复服务”更新；覆盖 `.app` 或重新打包 DMG 不会修改 `/Library` 中的旧安装。旧 helper 未声明按需唤醒能力时，客户端仍能查询其 Unix IPC 版本并展示修复入口。
+
+原生验证使用当前 macOS 用户的独立 LaunchAgent 和实际 XPC/launchd，覆盖仅注册不启动、保留其他客户端、保留活跃 owner、最后会话结束后退出和再次唤醒新 PID：
+
+```sh
+cargo +1.95.0 test -p zenclash-service --all-features --lib \
+  macos_activation::tests::launchd_starts_on_demand_exits_after_last_client_and_starts_again \
+  --locked -- --ignored --exact --nocapture
+```
+
+该测试不替代 root LaunchDaemon 安装或实际 TUN 流量验收。另有安装 plist 原生解析回归和服务退出后的 Start 准入回归。离线恢复不再访问占位控制器 `127.0.0.1:0`，已用持有系统代理的实际 capture 协调器及模拟 native backend 复现并锁定。
+
+本批服务全套回归、29 项系统代理回归、375 项 UI 回归、4 项翻译回归、client-only/standalone-only check 和严格 Clippy 通过。完整 core 库回归在既有 `cancelled_local_recovery_save_waiter_does_not_abandon_admitted_persistence` 用例挂起，已停止该次测试；用本批改动前、2026-10-10 01:44 构建的已有测试二进制执行同名用例，同样超过二十秒未结束。本批不声明 core 全库通过，该取消恢复用例另行处理。
+
 2026-10-03 已补充既有发布目标 `aarch64-apple-darwin` 的 service all-targets/all-features 交叉 check 和 CI 全部附加严格 lint，均退出 0；此前 Intel 目标的检查证据仍保留。此次只向当前开发 Rust 工具链添加对应目标标准库，不修改 Cargo 依赖、Rust 版本、签名、最低系统版本或发布目标。ARM64 和 Intel 交叉 check 都不验证 Apple SDK/framework 链接、App 签名或原生 API 运行，这些仍需 macOS 实机。
 
 [App 构建脚本](../../scripts/build_macos_app.sh) 使用原有 `aarch64-apple-darwin` 目标构建服务，校验非空、可执行及版本检查后，将 helper 放入 `Contents/MacOS/zenclash-service`，LaunchDaemon 资源放入 `Contents/Resources/org.zenclash.service.plist`。plist 中的服务路径仍指向管理员保护目录，打包不会向 `/Library/LaunchDaemons` 写文件。

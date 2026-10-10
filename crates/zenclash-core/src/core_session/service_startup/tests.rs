@@ -138,6 +138,7 @@ impl Fixture {
                 .as_nanos()
         ));
         std::fs::create_dir(&root).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
         let profile = root.join("profile.yaml");
         std::fs::write(
             &profile,

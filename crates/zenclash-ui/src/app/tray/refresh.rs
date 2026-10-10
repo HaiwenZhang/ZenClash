@@ -1,12 +1,13 @@
 use super::{
-    AppContext, Context, OutboundMode, TrayMenuState, TrayProfile, TrayProxyGroup, TrayProxyNode,
-    ZenClashApp, tray_directories,
+    Context, OutboundMode, TrayMenuState, TrayProfile, TrayProxyGroup, TrayProxyNode, ZenClashApp,
+    tray_directories,
 };
 use zenclash_core::{Observation, ProxyGroupBehavior, ProxyOperations, ProxyVisibility};
 
 struct TrayMenuSnapshot {
     config: zenclash_core::RuntimeConfig,
     groups: Vec<TrayProxyGroup>,
+    current_node: Option<String>,
     system_proxy: Result<bool, String>,
     profiles: Result<zenclash_core::ProfileCatalog, String>,
     mode_generation: u64,
@@ -50,11 +51,12 @@ impl ZenClashApp {
             });
             let (config, catalog, profiles) = tokio::join!(
                 client.runtime_config(),
-                proxy_operations.catalog(ProxyVisibility::VisibleOnly),
+                proxy_operations.catalog(ProxyVisibility::IncludeHidden),
                 profile_catalog_task
             );
             let config = config.map_err(|error| error.to_string())?;
             let catalog = catalog.map_err(|error| error.to_string())?;
+            let current_node = current_proxy_node(&catalog, OutboundMode::from_api(&config.mode));
             let groups = tray_proxy_groups(catalog, &config.mode);
             let system_proxy = match operational_status.snapshot().capture.system_proxy {
                 Observation::Fresh { value, .. } | Observation::Stale { value, .. } => {
@@ -75,6 +77,7 @@ impl ZenClashApp {
             Ok::<_, String>((
                 config,
                 groups,
+                current_node,
                 system_proxy,
                 profiles,
                 directories,
@@ -90,6 +93,7 @@ impl ZenClashApp {
                     Ok(Ok((
                         config,
                         groups,
+                        current_node,
                         system_proxy,
                         profiles,
                         directories,
@@ -99,6 +103,7 @@ impl ZenClashApp {
                             TrayMenuSnapshot {
                                 config,
                                 groups,
+                                current_node,
                                 system_proxy,
                                 profiles,
                                 mode_generation,
@@ -133,6 +138,7 @@ impl ZenClashApp {
         let TrayMenuSnapshot {
             config,
             groups,
+            current_node,
             system_proxy,
             profiles: profile_catalog,
             mode_generation,
@@ -185,21 +191,15 @@ impl ZenClashApp {
                 (profile_name, profiles)
             },
         );
-        let floating_visible = self
-            .floating_window
-            .is_some_and(|handle| cx.update_window(handle, |_, _, _| ()).is_ok());
-        if !floating_visible {
-            self.floating_window = None;
-        }
         let system_proxy = system_proxy.unwrap_or_else(|error| {
             tracing::warn!(%error, "failed to read system proxy state for tray menu");
             false
         });
         let state = TrayMenuState {
             mode: self.outbound_mode.displayed().api_value().into(),
+            display: self.preferences.tray_display,
             system_proxy,
             tun: config.tun.enable,
-            floating_visible,
             mixed_port,
             profile_name,
             profiles,
@@ -211,9 +211,34 @@ impl ZenClashApp {
         {
             tracing::warn!(%error, "failed to update tray menu");
         }
+        self.tray_current_node =
+            current_node.map(|node| (OutboundMode::from_api(&config.mode), node));
         self.tray_state = state;
         self.tray_error = None;
     }
+}
+
+fn current_proxy_node(catalog: &zenclash_core::ProxyCatalog, mode: OutboundMode) -> Option<String> {
+    if mode == OutboundMode::Direct {
+        return Some("DIRECT".into());
+    }
+    let mut group = catalog
+        .groups_for_mode(mode.api_value())
+        .find(|group| !group.hidden)?;
+    // Follow nested selectors to the actual node, with a bound for malformed cycles.
+    for _ in 0..=catalog.groups().len() {
+        if matches!(group.behavior, ProxyGroupBehavior::LoadBalance) {
+            return Some(zenclash_i18n::text("home.proxy.load_balance"));
+        }
+        if group.now.is_empty() {
+            return None;
+        }
+        match catalog.groups().iter().find(|next| next.name == group.now) {
+            Some(next) => group = next,
+            None => return Some(group.now.clone()),
+        }
+    }
+    None
 }
 
 fn tray_proxy_groups(
@@ -222,6 +247,7 @@ fn tray_proxy_groups(
 ) -> Vec<TrayProxyGroup> {
     catalog
         .groups_for_mode(outbound_mode)
+        .filter(|group| !group.hidden)
         .map(|group| {
             let selectable = matches!(
                 &group.behavior,
@@ -280,6 +306,81 @@ fn bounded_tray_proxy_nodes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn node_catalog() -> zenclash_core::ProxyCatalog {
+        use zenclash_core::{ProxyGroup, ProxyNode};
+        zenclash_core::ProxyCatalog::from_group_nodes(
+            [
+                ("GLOBAL", "PROXY", ProxyGroupBehavior::Selector),
+                ("PROXY", "Automatic", ProxyGroupBehavior::Selector),
+                (
+                    "Automatic",
+                    "🇭🇰 香港 · HK 01",
+                    ProxyGroupBehavior::Automatic { fixed: false },
+                ),
+            ]
+            .into_iter()
+            .map(|(name, now, behavior)| {
+                (
+                    ProxyGroup {
+                        name: name.into(),
+                        now: now.into(),
+                        behavior,
+                        ..Default::default()
+                    },
+                    vec![ProxyNode {
+                        name: now.into(),
+                        ..Default::default()
+                    }],
+                )
+            })
+            .collect(),
+            4,
+        )
+    }
+
+    #[test]
+    fn current_node_resolves_nested_selections_and_preserves_flags() {
+        let catalog = node_catalog();
+        assert_eq!(
+            current_proxy_node(&catalog, OutboundMode::Rule).as_deref(),
+            Some("🇭🇰 香港 · HK 01")
+        );
+        assert_eq!(
+            current_proxy_node(&catalog, OutboundMode::Global).as_deref(),
+            Some("🇭🇰 香港 · HK 01")
+        );
+        assert_eq!(
+            current_proxy_node(&catalog, OutboundMode::Direct).as_deref(),
+            Some("DIRECT")
+        );
+    }
+
+    #[test]
+    fn current_node_does_not_guess_through_cycles_or_load_balancing() {
+        let mut catalog = node_catalog();
+        catalog.set_group_selection("Automatic", "PROXY".into());
+        assert_eq!(current_proxy_node(&catalog, OutboundMode::Rule), None);
+        let balanced = zenclash_core::ProxyCatalog::from_group_nodes(
+            vec![(
+                zenclash_core::ProxyGroup {
+                    name: "PROXY".into(),
+                    now: "node".into(),
+                    behavior: ProxyGroupBehavior::LoadBalance,
+                    ..Default::default()
+                },
+                vec![zenclash_core::ProxyNode {
+                    name: "node".into(),
+                    ..Default::default()
+                }],
+            )],
+            2,
+        );
+        assert_eq!(
+            current_proxy_node(&balanced, OutboundMode::Rule),
+            Some(zenclash_i18n::text("home.proxy.load_balance"))
+        );
+    }
 
     #[test]
     fn bounded_tray_nodes_keep_the_current_member_without_retaining_the_full_group() {

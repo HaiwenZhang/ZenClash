@@ -4220,7 +4220,13 @@ mod tests {
 
     #[cfg(unix)]
     fn spawn_lifecycle_process(root: &std::path::Path, binary: PathBuf) -> Arc<MihomoProcess> {
-        spawn_lifecycle_process_with_endpoint(root, binary, MihomoEndpoint::default())
+        // These children intentionally never expose a ready controller. An isolated
+        // socket prevents an unrelated local Mihomo on port 9090 from satisfying readiness.
+        spawn_lifecycle_process_with_endpoint(
+            root,
+            binary,
+            MihomoEndpoint::local_ipc(root).unwrap(),
+        )
     }
 
     #[cfg(unix)]

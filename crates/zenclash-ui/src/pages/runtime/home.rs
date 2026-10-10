@@ -72,6 +72,7 @@ pub(super) struct HomeUiState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CaptureTransition {
+    generation: u64,
     displayed: CapturePlan,
     pending: bool,
     confirmed: Option<CaptureStatus>,
@@ -528,6 +529,11 @@ impl RuntimePage {
             .tun
             .value()
             .is_none_or(|tun| tun.observed != CapabilityState::Unsupported);
+        let capture_disabled_reason =
+            self.capture_control_disabled_reason(capture_presentation.pending);
+        let tun_disabled_reason = capture_disabled_reason.clone().or_else(|| {
+            (!tun_supported).then(|| zenclash_i18n::text("home.controls.tun_unsupported"))
+        });
         let capture_status = if capture_presentation.pending {
             zenclash_i18n::text("home.controls.capture_switching")
         } else {
@@ -786,6 +792,15 @@ impl RuntimePage {
                                                     .text_xs()
                                                     .text_color(theme.muted_foreground)
                                                     .child(port),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("home-system-proxy-status")
+                                                    .test_support()
+                                                    .role(gpui_kit::Role::Status)
+                                                    .aria_label(proxy_status.clone())
+                                                    .text_xs()
+                                                    .child(proxy_status),
                                             ),
                                     )
                                     .child(
@@ -794,7 +809,7 @@ impl RuntimePage {
                                                 "tray.system_proxy",
                                             ))
                                             .checked(capture_presentation.system_proxy_enabled)
-                                            .disabled(capture_presentation.pending)
+                                            .disabled(capture_disabled_reason.is_some())
                                             .on_click(cx.listener(|this, checked, window, cx| {
                                                 this.apply_home_capture_plan(
                                                     if *checked {
@@ -823,53 +838,83 @@ impl RuntimePage {
                                             .min_w_0()
                                             .gap_1()
                                             .child(
-                                                div()
-                                                    .text_sm()
+                                                Button::new("home-open-tun")
+                                                    .label(zenclash_i18n::text("home.controls.tun"))
+                                                    .small()
+                                                    .text()
                                                     .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                                    .child(zenclash_i18n::text(
-                                                        "home.controls.tun",
-                                                    )),
+                                                    .on_click(|_, window, cx| {
+                                                        window.dispatch_action(
+                                                            Box::new(crate::app::NavigateTun),
+                                                            cx,
+                                                        )
+                                                    }),
                                             )
                                             .child(
                                                 div()
+                                                    .id("home-tun-status")
+                                                    .test_support()
+                                                    .role(gpui_kit::Role::Status)
+                                                    .aria_label(tun_status.clone())
                                                     .text_xs()
-                                                    .text_color(theme.muted_foreground)
-                                                    .child(tun_status.clone()),
+                                                    .child(tun_status),
+                                            )
+                                            .when_some(
+                                                tun_disabled_reason.as_ref(),
+                                                |view, reason| {
+                                                    view.child(
+                                                        div()
+                                                            .id("home-tun-disabled-reason")
+                                                            .test_support()
+                                                            .role(gpui_kit::Role::Status)
+                                                            .aria_label(reason.clone())
+                                                            .text_xs()
+                                                            .text_color(theme.muted_foreground)
+                                                            .child(reason.clone()),
+                                                    )
+                                                },
                                             ),
                                     )
                                     .child(
-                                        Button::new("home-tun")
-                                            .label(zenclash_i18n::text(if tun_enabled {
-                                                "home.controls.tun_disable"
-                                            } else {
-                                                "home.controls.tun_enable"
-                                            }))
-                                            .tooltip(tun_status)
-                                            .outline()
-                                            .small()
-                                            .disabled(
-                                                capture_presentation.pending
-                                                    || !tun_supported
-                                                    || service_pending
-                                                    || self.core_busy()
-                                                    || self
-                                                        .profile_service
-                                                        .service_state()
-                                                        .is_some_and(|state| state.is_busy()),
-                                            )
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.apply_home_capture_plan(
-                                                    if tun_enabled {
-                                                        CapturePlan::Off
-                                                    } else {
-                                                        CapturePlan::Tun
-                                                    },
-                                                    window,
-                                                    cx,
-                                                );
-                                            })),
+                                        Switch::new("home-tun")
+                                            .accessibility_label(zenclash_i18n::text(
+                                                "home.controls.tun",
+                                            ))
+                                            .checked(tun_enabled)
+                                            .disabled(tun_disabled_reason.is_some())
+                                            .on_click(cx.listener(
+                                                move |this, checked, window, cx| {
+                                                    this.apply_home_capture_plan(
+                                                        if *checked {
+                                                            CapturePlan::Tun
+                                                        } else {
+                                                            CapturePlan::Off
+                                                        },
+                                                        window,
+                                                        cx,
+                                                    );
+                                                },
+                                            )),
                                     ),
                             ),
+                    )
+                    .when_some(self.home.action_error.as_ref(), |view, error| {
+                        view.child(
+                            div()
+                                .id("home-capture-error")
+                                .test_support()
+                                .role(gpui_kit::Role::Alert)
+                                .aria_label(error.clone())
+                                .text_sm()
+                                .text_color(theme.danger)
+                                .child(error.clone()),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(zenclash_i18n::text("home.controls.capture_exclusive")),
                     ),
             )
             .into_any_element()
@@ -1142,6 +1187,7 @@ impl RuntimePage {
             .as_ref()
             .and_then(|transition| transition.confirmed.clone());
         self.home.capture_transition = Some(CaptureTransition {
+            generation: self.core_session.generation(),
             displayed: plan,
             pending: true,
             confirmed,
@@ -1190,15 +1236,7 @@ impl RuntimePage {
                             Ok(None) => {}
                             Err(error) => this.home.action_error = Some(error),
                         }
-                        let snapshot = outcome.snapshot();
-                        this.home.capture_transition = Some(CaptureTransition {
-                            displayed: plan,
-                            pending: false,
-                            confirmed: Some(CaptureStatus {
-                                system_proxy: snapshot.system_proxy.clone(),
-                                tun: snapshot.tun.clone(),
-                            }),
-                        });
+                        this.accept_home_capture_snapshot(plan, outcome.snapshot());
                         if this.is_page_task_current(token) {
                             this.refresh(cx);
                         }
@@ -1219,9 +1257,34 @@ impl RuntimePage {
         let Some(transition) = self.home.capture_transition.as_ref() else {
             return;
         };
-        if !transition.pending && observed_capture_plan(capture) == Some(transition.displayed) {
+        let fresh = capture.system_proxy.is_fresh() && capture.tun.is_fresh();
+        let caught_up = fresh
+            && match transition.confirmed.as_ref() {
+                Some(confirmed) => {
+                    capture.system_proxy.observed_at_ms() >= confirmed.system_proxy.observed_at_ms()
+                        && capture.tun.observed_at_ms() >= confirmed.tun.observed_at_ms()
+                }
+                None => observed_capture_plan(capture) == Some(transition.displayed),
+            };
+        if !transition.pending && caught_up {
             self.home.capture_transition = None;
         }
+    }
+
+    pub(super) fn accept_home_capture_snapshot(
+        &mut self,
+        displayed: CapturePlan,
+        snapshot: &zenclash_core::TrafficCaptureSnapshot,
+    ) {
+        self.home.capture_transition = Some(CaptureTransition {
+            generation: self.core_session.generation(),
+            displayed,
+            pending: false,
+            confirmed: Some(CaptureStatus {
+                system_proxy: snapshot.system_proxy.clone(),
+                tun: snapshot.tun.clone(),
+            }),
+        });
     }
 
     pub(crate) fn begin_home_mode_transition(
@@ -1480,11 +1543,22 @@ fn describe_system_proxy(snapshot: &zenclash_core::SystemProxySessionSnapshot) -
     }
 }
 
-fn tun_status_text(capture: &CaptureStatus) -> String {
+pub(super) fn tun_status_text(capture: &CaptureStatus) -> String {
     match &capture.tun {
         Observation::Loading => zenclash_i18n::text("home.controls.tun_loading"),
         Observation::Failed { .. } => zenclash_i18n::text("home.controls.tun_unavailable"),
-        Observation::Fresh { value, .. } | Observation::Stale { value, .. } => describe_tun(value),
+        Observation::Fresh { value, .. } => describe_tun(value),
+        Observation::Stale {
+            value,
+            observed_at_ms,
+            ..
+        } => zenclash_i18n::text_with(
+            "home.controls.tun_stale",
+            &[
+                ("status", describe_tun(value)),
+                ("age", format_profile_age(observed_at_ms / 1_000)),
+            ],
+        ),
     }
 }
 
@@ -1707,6 +1781,13 @@ fn capture_presentation(
     confirmed_tun: bool,
     transition: Option<&CaptureTransition>,
 ) -> CapturePresentation {
+    if transition.is_some_and(|transition| !transition.pending && transition.confirmed.is_some()) {
+        return CapturePresentation {
+            system_proxy_enabled: confirmed_system_proxy,
+            tun_enabled: confirmed_tun,
+            pending: false,
+        };
+    }
     let Some(transition) = transition else {
         return CapturePresentation {
             system_proxy_enabled: confirmed_system_proxy,
@@ -2137,6 +2218,209 @@ mod tests {
         );
     }
 
+    #[gpui_kit::test]
+    fn disabled_home_tun_keeps_checked_state_and_explains_why(cx: &mut gpui_kit::TestAppContext) {
+        use super::super::ui_tests::{Fixture, open};
+        use gpui_kit::AppContext;
+        use gpui_kit::test::TestWindowExt;
+
+        let fixture = Fixture::new();
+        let (window, page) = open(cx, &fixture, Page::Home);
+        fixture.settle(cx, &page, |page| !page.persistent_loading);
+        cx.update_window(window, |_, window, cx| {
+            let token = page.update(cx, |page, _| {
+                let mut snapshot = page.operational_status.snapshot();
+                snapshot.capture.tun = Observation::Fresh {
+                    value: TunCaptureStatus {
+                        requested: true,
+                        configured: true,
+                        permission: CapabilityState::Active,
+                        runtime: TunRuntimeObservation {
+                            device_name: Some("utun9".into()),
+                            device: CapabilityState::Active,
+                            route: CapabilityState::Active,
+                            detail: String::new(),
+                        },
+                        observed: CapabilityState::Active,
+                    },
+                    observed_at_ms: 1,
+                };
+                page.home.design_validation = Some((snapshot, Default::default()));
+                page.begin_mutation(Page::Home).unwrap()
+            });
+            window.render_frame(cx);
+            assert_eq!(window.find("home-tun").checked(), Some(true));
+            assert_eq!(
+                window.find("home-tun-status").label(),
+                Some(zenclash_i18n::text("home.controls.tun_on").as_str())
+            );
+            assert_eq!(
+                window.find("home-tun-disabled-reason").label(),
+                Some(zenclash_i18n::text("tun.control.core_busy").as_str())
+            );
+            window.click("home-tun", cx);
+            assert!(page.read(cx).home.capture_transition.is_none());
+            page.update(cx, |page, cx| {
+                page.finish_mutation(token);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert_eq!(window.find("home-tun").checked(), Some(true));
+            assert!(window.try_find("home-tun-disabled-reason").is_none());
+            page.update(cx, |page, cx| {
+                let capture = &mut page.home.design_validation.as_mut().unwrap().0.capture;
+                capture.tun = Observation::Stale {
+                    value: capture.tun.value().unwrap().clone(),
+                    observed_at_ms: 1,
+                    failure: zenclash_core::OperationalFailure {
+                        message: "controller unavailable".into(),
+                        occurred_at_ms: 2,
+                    },
+                };
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert_eq!(window.find("home-tun").checked(), Some(true));
+            let expected = zenclash_i18n::text_with(
+                "home.controls.tun_stale",
+                &[
+                    ("status", zenclash_i18n::text("home.controls.tun_on")),
+                    ("age", format_profile_age(0)),
+                ],
+            );
+            assert_eq!(
+                window.find("home-tun-status").label(),
+                Some(expected.as_str())
+            );
+            window.remove_window();
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn fresh_tun_readback_replaces_a_completed_off_transition(cx: &mut gpui_kit::TestAppContext) {
+        use super::super::ui_tests::{Fixture, open};
+        use gpui_kit::AppContext;
+        use gpui_kit::test::TestWindowExt;
+        let fixture = Fixture::new();
+        let (window, page) = open(cx, &fixture, Page::Home);
+        fixture.settle(cx, &page, |page| !page.persistent_loading);
+        cx.update_window(window, |_, window, cx| {
+            page.update(cx, |page, cx| {
+                let capture = |enabled, time| CaptureStatus {
+                    system_proxy: Observation::Fresh {
+                        value: SystemProxySessionSnapshot {
+                            intent_enabled: false,
+                            actual: SystemProxyStatus::default(),
+                            ownership: SystemProxyOwnershipState::Unowned,
+                        },
+                        observed_at_ms: time,
+                    },
+                    tun: Observation::Fresh {
+                        value: TunCaptureStatus {
+                            requested: enabled,
+                            configured: enabled,
+                            permission: CapabilityState::Active,
+                            runtime: TunRuntimeObservation {
+                                device_name: Some("test-tun".into()),
+                                device: if enabled {
+                                    CapabilityState::Active
+                                } else {
+                                    CapabilityState::Inactive
+                                },
+                                route: if enabled {
+                                    CapabilityState::Active
+                                } else {
+                                    CapabilityState::Inactive
+                                },
+                                detail: String::new(),
+                            },
+                            observed: if enabled {
+                                CapabilityState::Active
+                            } else {
+                                CapabilityState::Inactive
+                            },
+                        },
+                        observed_at_ms: time,
+                    },
+                };
+                page.home.capture_transition = Some(CaptureTransition {
+                    generation: page.core_session.generation(),
+                    displayed: CapturePlan::Off,
+                    pending: false,
+                    confirmed: Some(capture(false, 1)),
+                });
+                let actual = capture(true, 2);
+                page.reconcile_home_capture_transition(&actual);
+                assert!(page.home.capture_transition.is_none());
+                // Service completion must publish readback before the slower global observer.
+                let readback = zenclash_core::TrafficCaptureSnapshot {
+                    system_proxy: actual.system_proxy.clone(),
+                    tun: actual.tun.clone(),
+                    observed_plan: zenclash_core::ObservedCapturePlan::TunConfigured,
+                    system_proxy_port: Some(7890),
+                    core_available: true,
+                };
+                page.accept_home_capture_snapshot(CapturePlan::Tun, &readback);
+                page.reconcile_home_capture_transition(&capture(false, 1));
+                assert!(
+                    page.home.capture_transition.is_some(),
+                    "old observer data must not replace service readback"
+                );
+                let mut snapshot = page.operational_status.snapshot();
+                snapshot.capture = capture(false, 1);
+                page.home.design_validation = Some((snapshot, Default::default()));
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert_eq!(window.find("home-tun").checked(), Some(true));
+            assert_eq!(
+                window.find("home-tun-status").label(),
+                Some(zenclash_i18n::text("home.controls.tun_on").as_str())
+            );
+            page.update(cx, |page, cx| {
+                // A failed attempt must display the actual off snapshot, even when TUN was requested.
+                let off = &page.home.design_validation.as_ref().unwrap().0.capture;
+                let mut readback = zenclash_core::TrafficCaptureSnapshot {
+                    system_proxy: off.system_proxy.clone(),
+                    tun: off.tun.clone(),
+                    observed_plan: zenclash_core::ObservedCapturePlan::Off,
+                    system_proxy_port: Some(7890),
+                    core_available: true,
+                };
+                if let Observation::Fresh { observed_at_ms, .. } = &mut readback.tun {
+                    *observed_at_ms = 4;
+                }
+                if let Observation::Fresh { observed_at_ms, .. } = &mut readback.system_proxy {
+                    *observed_at_ms = 4;
+                }
+                page.accept_home_capture_snapshot(CapturePlan::Tun, &readback);
+                let older = &mut page.home.design_validation.as_mut().unwrap().0.capture;
+                if let Observation::Fresh {
+                    value,
+                    observed_at_ms,
+                } = &mut older.tun
+                {
+                    value.requested = true;
+                    value.configured = true;
+                    value.observed = CapabilityState::Active;
+                    *observed_at_ms = 2;
+                }
+                let older = older.clone();
+                page.reconcile_home_capture_transition(&older);
+                assert!(
+                    page.home.capture_transition.is_some(),
+                    "an older matching target must not overwrite actual rollback readback"
+                );
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert_eq!(window.find("home-tun").checked(), Some(false));
+            window.remove_window();
+        })
+        .unwrap();
+    }
+
     #[test]
     fn traffic_chart_points_keep_upload_and_download_separate() {
         let samples = VecDeque::from([
@@ -2209,6 +2493,7 @@ mod tests {
     #[test]
     fn pending_system_proxy_transition_is_presented_before_platform_readback() {
         let transition = CaptureTransition {
+            generation: 0,
             displayed: CapturePlan::SystemProxy,
             pending: true,
             confirmed: None,
@@ -2229,6 +2514,7 @@ mod tests {
     #[test]
     fn pending_tun_transition_hides_stale_system_proxy_state() {
         let transition = CaptureTransition {
+            generation: 0,
             displayed: CapturePlan::Tun,
             pending: true,
             confirmed: None,
@@ -2249,6 +2535,7 @@ mod tests {
     #[test]
     fn pending_off_transition_clears_system_proxy_before_platform_readback() {
         let transition = CaptureTransition {
+            generation: 0,
             displayed: CapturePlan::Off,
             pending: true,
             confirmed: None,
@@ -2269,6 +2556,7 @@ mod tests {
     #[test]
     fn completed_transition_stays_visible_until_global_observation_catches_up() {
         let transition = CaptureTransition {
+            generation: 0,
             displayed: CapturePlan::SystemProxy,
             pending: false,
             confirmed: None,

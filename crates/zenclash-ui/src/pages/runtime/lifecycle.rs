@@ -635,7 +635,9 @@ impl RuntimePage {
                     .update(cx, |this, cx| {
                         this.reconcile_home_generation();
                         this.reconcile_home_capture_transition(&capture);
-                        if this.live_updates_enabled() && this.page == Page::Home {
+                        if this.live_updates_enabled()
+                            && matches!(this.page, Page::Home | Page::Tun)
+                        {
                             cx.notify();
                         }
                     })

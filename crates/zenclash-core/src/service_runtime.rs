@@ -611,7 +611,7 @@ mod tests {
                 u128::from_ne_bytes(random)
             ));
             std::fs::create_dir(&path).unwrap();
-            Self(path)
+            Self(std::fs::canonicalize(path).unwrap())
         }
     }
     impl Drop for TestHome {

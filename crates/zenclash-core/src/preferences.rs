@@ -32,6 +32,17 @@ pub enum AppearancePreference {
     Light,
 }
 
+/// Content shown by the native tray or menu-bar indicator.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrayDisplayPreference {
+    /// Display the live upload/download indicator, preserving existing preferences.
+    #[default]
+    Traffic,
+    /// Display only the ZenClash application mark.
+    Icon,
+}
+
 /// Language used by ZenClash's window, application menu, and native status menu.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -85,6 +96,8 @@ pub struct AppPreferences {
     pub language: LanguagePreference,
     /// Whether the live native traffic indicator is visible.
     pub traffic_tray_visible: bool,
+    /// Appearance of the visible tray indicator, independent from visibility.
+    pub tray_display: TrayDisplayPreference,
     /// Whether real Mihomo connection deltas are persisted for historical reports.
     pub traffic_history_enabled: bool,
     /// Number of days retained by the local traffic-history database.
@@ -153,6 +166,7 @@ impl Default for AppPreferences {
             appearance: AppearancePreference::System,
             language: LanguagePreference::ZhCn,
             traffic_tray_visible: true,
+            tray_display: TrayDisplayPreference::default(),
             traffic_history_enabled: true,
             traffic_retention_days: crate::DEFAULT_TRAFFIC_RETENTION_DAYS,
             log_file_enabled: true,
@@ -480,6 +494,7 @@ mod tests {
             appearance: AppearancePreference::Light,
             language: LanguagePreference::En,
             traffic_tray_visible: false,
+            tray_display: TrayDisplayPreference::Icon,
             ..AppPreferences::default()
         };
 
@@ -610,6 +625,7 @@ mod tests {
 
         let preferences = store.load().unwrap();
 
+        assert_eq!(preferences.tray_display, TrayDisplayPreference::Traffic);
         assert!(preferences.traffic_history_enabled);
         assert_eq!(preferences.language, LanguagePreference::ZhCn);
         assert_eq!(preferences.core_kind, CoreKind::Mihomo);

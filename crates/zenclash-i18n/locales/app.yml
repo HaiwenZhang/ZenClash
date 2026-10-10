@@ -835,6 +835,9 @@ home:
     capture_description:
       zh-CN: 系统代理适合普通桌面流量；TUN 可覆盖更多应用，但可能需要系统权限。
       en: System Proxy suits ordinary desktop traffic; TUN covers more apps but may require system permission.
+    capture_exclusive:
+      zh-CN: 系统代理与 TUN 在 ZenClash 中二选一，开启一种会自动关闭另一种。
+      en: ZenClash uses one capture mode at a time. Enabling System Proxy or TUN turns the other off.
     system_proxy_on:
       zh-CN: 系统流量正通过 ZenClash
       en: System traffic is routed through ZenClash
@@ -919,6 +922,9 @@ home:
     tun_unavailable:
       zh-CN: TUN 状态不可用
       en: TUN status unavailable
+    tun_stale:
+      zh-CN: "%{status} · 上次确认于 %{age}，当前状态待验证"
+      en: "%{status} · last confirmed %{age}; current state unverified"
     tun_unverified:
       zh-CN: TUN 已配置，运行状态待验证
       en: TUN is configured; runtime state is unverified
@@ -1777,8 +1783,8 @@ proxies:
       zh-CN: "%{count} 个节点延迟测试失败；首个错误：%{error}"
       en: "%{count} node delay tests failed; first error: %{error}"
     group_failed:
-      zh-CN: "%{count} 个节点延迟测试失败"
-      en: "%{count} node delay tests failed"
+      zh-CN: "「%{group}」组测速完成：%{count} 个节点失败"
+      en: "Delay tests finished for %{group}: %{count} nodes failed"
 
 logs:
   ui:
@@ -2299,6 +2305,13 @@ config_inputs:
       en: "%{label} port must be an integer from 0 to 65535"
 
 tun:
+  control:
+    core_busy:
+      zh-CN: 内核正在处理操作，完成后可切换接管方式
+      en: The core is busy. Capture controls will be available when it finishes.
+    confirm_service:
+      zh-CN: 服务结果待确认，确认后才能切换接管方式
+      en: Confirm the service result before switching capture modes.
   permissions:
     service_authority:
       zh-CN: 已核验后台服务权限；设备和路由仍需运行时验证
@@ -3726,6 +3739,9 @@ core_page:
     runtime_authority_unavailable:
       zh-CN: 无法确认当前内核的原生权限
       en: Native authority for the current core could not be confirmed.
+    offline_capture:
+      zh-CN: 内核未启动，接管状态暂不可用
+      en: The core is offline; capture state is unavailable
     external_install:
       zh-CN: 当前连接的是外部内核，无法安全替换其可执行文件
       en: The active core is external; ZenClash cannot safely replace its executable
@@ -4563,6 +4579,15 @@ outbound_mode:
     en: Direct Mode
 
 tray:
+  display:
+    zh-CN: 显示方式
+    en: Display mode
+  display_icon:
+    zh-CN: 应用图标
+    en: Application icon
+  display_traffic:
+    zh-CN: 实时流量
+    en: Live traffic
   show_panel:
     zh-CN: 打开状态面板
     en: Open status panel
@@ -4575,12 +4600,6 @@ tray:
   show_window:
     zh-CN: 显示主窗口
     en: Show Main Window
-  show_floating:
-    zh-CN: 显示悬浮窗
-    en: Show Floating Window
-  hide_floating:
-    zh-CN: 隐藏悬浮窗
-    en: Hide Floating Window
   system_proxy:
     zh-CN: 系统代理
     en: System Proxy
@@ -4890,11 +4909,11 @@ settings:
       en: Dark
   tray:
     title:
-      zh-CN: 状态栏流量图标
-      en: Status Bar Traffic Icon
+      zh-CN: 状态栏图标
+      en: Status bar icon
     description:
-      zh-CN: 显示实时上传、下载速率和动态箭头图标
-      en: Show live upload/download rates and the animated traffic icon
+      zh-CN: 显示 ZenClash 图标；可在图标菜单中选择应用图标或实时流量
+      en: Show the ZenClash indicator; choose its display mode from the icon menu
   language:
     save_error:
       zh-CN: 语言设置保存失败：%{error}
@@ -4922,14 +4941,6 @@ automatic:
   failed:
     zh-CN: "自动运行维护失败：%{error}"
     en: "Automatic runtime maintenance failed: %{error}"
-
-panel:
-  refresh:
-    zh-CN: "刷新状态"
-    en: "Refresh status"
-  local:
-    zh-CN: "本机控制器"
-    en: "Local controller"
 
 unified:
   settings:

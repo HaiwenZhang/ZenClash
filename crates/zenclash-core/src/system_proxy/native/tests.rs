@@ -275,6 +275,32 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn offline_startup_releases_owned_proxy_without_querying_the_placeholder_controller() {
+    let fixture = Fixture::new();
+    fixture.session.set_enabled(true, 7890).unwrap();
+    let core =
+        crate::CoreSession::open_offline(crate::CoreKind::Mihomo, fixture.root.clone(), None)
+            .unwrap();
+    let capture = crate::TrafficCaptureSession::new(
+        core,
+        crate::ControlledConfigStore::new(fixture.root.join("controlled")),
+        Some(fixture.session.clone()),
+        None,
+    );
+    let outcome = capture.reconcile().await.unwrap();
+    assert!(
+        matches!(outcome, crate::CaptureOutcome::Unchanged { .. }),
+        "offline startup must not report a request to 127.0.0.1:0: {outcome:?}"
+    );
+    assert!(!outcome.snapshot().core_available);
+    assert!(!fixture.session.snapshot().unwrap().actual.active());
+    assert!(
+        fixture.store.load().unwrap().system_proxy_enabled,
+        "offline recovery must preserve the user's enabled intent"
+    );
+}
+
+#[tokio::test]
 async fn maintenance_proxy_suspension_persists_off_across_reconciliation_and_reopen() {
     let fixture = Fixture::new();
     fixture.session.set_enabled(true, 7890).unwrap();

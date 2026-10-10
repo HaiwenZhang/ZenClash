@@ -1000,7 +1000,14 @@ impl CaptureBackend for ProductionCaptureBackend {
     fn snapshot(&self) -> CaptureFuture<'_, CaptureBackendSnapshot> {
         Box::pin(async move {
             let core = self.core_session.snapshot();
-            let config = self.core_session.client().runtime_config().await;
+            let offline = self.core_session.is_offline_recovery();
+            let config = if offline {
+                Err(crate::MihomoError::Process(zenclash_i18n::text(
+                    "core_page.errors.offline_capture",
+                )))
+            } else {
+                self.core_session.client().runtime_config().await
+            };
             let system_proxy = read_system_proxy(self.system_proxy.clone()).await;
             let (tun, system_proxy_port) = match config {
                 Ok(config) => {
@@ -1018,7 +1025,7 @@ impl CaptureBackend for ProductionCaptureBackend {
                 system_proxy,
                 tun,
                 system_proxy_port,
-                core_available: !core.managed || core.running == Some(true),
+                core_available: !offline && (!core.managed || core.running == Some(true)),
             })
         })
     }
@@ -1108,6 +1115,7 @@ impl CaptureBackend for ProductionCaptureBackend {
             };
             let core = self.core_session.snapshot();
             let running = (!core.managed || core.running == Some(true))
+                && !self.core_session.is_offline_recovery()
                 && !self.core_session.is_shutting_down();
             let port = if running {
                 self.core_session

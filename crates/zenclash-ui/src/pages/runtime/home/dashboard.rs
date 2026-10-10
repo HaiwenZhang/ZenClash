@@ -22,6 +22,14 @@ impl RuntimePage {
 
     pub(in crate::pages::runtime) fn reconcile_home_generation(&mut self) -> bool {
         let generation = self.core_session.generation();
+        if self
+            .home
+            .capture_transition
+            .as_ref()
+            .is_some_and(|transition| !transition.pending && transition.generation != generation)
+        {
+            self.home.capture_transition = None;
+        }
         if self.home.generation == generation {
             return false;
         }

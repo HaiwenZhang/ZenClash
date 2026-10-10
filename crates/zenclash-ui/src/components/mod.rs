@@ -1,6 +1,4 @@
 pub(crate) mod feedback;
-/// Compact floating traffic and outbound-mode window.
-pub mod floating;
 pub(crate) mod mint_switch;
 pub(crate) mod mode;
 /// Primary navigation sidebar and outbound-mode values.

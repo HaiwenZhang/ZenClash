@@ -30,6 +30,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::{
     future::Future,
     ops::ControlFlow,
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, MutexGuard, oneshot};
@@ -40,6 +41,7 @@ const IPC_MAX_RESTARTS: u32 = 10;
 const IPC_RESTART_WINDOW: Duration = Duration::from_secs(10);
 const IPC_MAX_BACKOFF: Duration = Duration::from_millis(500);
 const IPC_HANDLER_TIMEOUT: Duration = Duration::from_secs(25);
+static ADMISSION_CLOSED: AtomicBool = AtomicBool::new(false);
 /// Handler time a takeover needs after stopping the previous core.
 const TAKEOVER_RESERVE: Duration = CORE_IPC_READY_TIMEOUT.saturating_add(Duration::from_secs(4));
 /// Handler time a stop needs after the core has exited.
@@ -419,6 +421,7 @@ pub async fn run_ipc_supervisor_until_shutdown(shutdown: impl Future<Output = ()
 }
 
 async fn run_supervisor(shutdown: impl Future<Output = ()>) -> AnyResult<()> {
+    ADMISSION_CLOSED.store(false, Ordering::Release);
     set_service_lifecycle_state(ServiceLifecycleState::Starting);
     info!("Starting IPC server...");
 
@@ -432,12 +435,26 @@ async fn run_supervisor(shutdown: impl Future<Output = ()>) -> AnyResult<()> {
     set_service_lifecycle_state(ServiceLifecycleState::Running);
     info!("IPC server started successfully. Waiting for shutdown signal...");
 
+    #[cfg(all(target_os = "macos", not(feature = "test")))]
+    let activation = crate::macos_activation::ActivationListener::new(crate::MACOS_SERVICE_ID)?;
+    let idle = async {
+        #[cfg(all(target_os = "macos", not(feature = "test")))]
+        wait_for_macos_idle(&activation).await;
+        #[cfg(any(not(target_os = "macos"), feature = "test"))]
+        std::future::pending::<()>().await;
+    };
+    tokio::pin!(idle);
+
     let mut restart_timestamps: Vec<Instant> = Vec::new();
     let mut consecutive_attempt = 0u32;
     tokio::pin!(shutdown);
 
     loop {
         tokio::select! {
+            _ = &mut idle => {
+                info!("No GUI clients or core owner remain; exiting the on-demand service");
+                break;
+            }
             _ = &mut shutdown => {
                 info!("Shutdown signal received. Stopping IPC server...");
                 break;
@@ -489,6 +506,28 @@ async fn run_supervisor(shutdown: impl Future<Output = ()>) -> AnyResult<()> {
     stop_ipc_server().await?;
     server_handle.abort();
     Ok(())
+}
+
+#[cfg(all(target_os = "macos", not(feature = "test")))]
+async fn wait_for_macos_idle(activation: &crate::macos_activation::ActivationListener) {
+    let mut interval = tokio::time::interval(Duration::from_millis(200));
+    loop {
+        interval.tick().await;
+        let _owner = OWNER_LIFECYCLE_LOCK.lock().await;
+        let active = match load_active_owner().await {
+            Ok(owner) => owner.is_some(),
+            // Unreadable ownership must be recovered, never assumed empty.
+            Err(error) => {
+                warn!("Cannot determine service idleness: {error:#}");
+                continue;
+            }
+        };
+        let core_running = CORE_MANAGER.lock().await.status().await.core_pid.is_some();
+        if activation.prepare_idle_exit(active || core_running) {
+            ADMISSION_CLOSED.store(true, Ordering::Release);
+            return;
+        }
+    }
 }
 
 fn ipc_backoff_delay(attempt: u32) -> Duration {
@@ -669,6 +708,11 @@ async fn enter_owner_lifecycle(
     gate: OwnerLifecycleGate<'_>,
 ) -> ControlFlow<Result<HttpResponse>, OwnerLifecycleGuard> {
     let lifecycle_guard = OWNER_LIFECYCLE_LOCK.lock().await;
+    if ADMISSION_CLOSED.load(Ordering::Acquire) {
+        return ControlFlow::Break(service_unavailable(
+            "The idle service is exiting; reconnect to activate it",
+        ));
+    }
     let gated = match gate {
         OwnerLifecycleGate::Unchecked => Ok(()),
         OwnerLifecycleGate::ActiveOwner => require_active_owner(owner).await,
@@ -704,7 +748,10 @@ fn create_ipc_router() -> Result<Router> {
         .get(IpcCommand::Magic.as_ref(), |ctx| async move {
             trace!("Received Magic command");
             ipc_request_context_to_auth_context(&ctx)?;
-            Ok(HttpResponse::builder().text("Tunglies!").build())
+            let response = HttpResponse::builder().text("Tunglies!");
+            #[cfg(all(target_os = "macos", not(feature = "test")))]
+            let response = response.header("X-ZenClash-On-Demand", "1");
+            Ok(response.build())
         })
         .get(IpcCommand::GetVersion.as_ref(), |ctx| async move {
             ipc_request_context_to_auth_context(&ctx)?;
@@ -1094,6 +1141,28 @@ mod owner_lifecycle_tests {
             identity: OwnerIdentity::Unix { uid, gid: 20 },
             app_data_root: std::env::temp_dir(),
         }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn committed_idle_exit_rejects_a_new_authenticated_start() {
+        struct RestoreAdmission;
+        impl Drop for RestoreAdmission {
+            fn drop(&mut self) {
+                super::ADMISSION_CLOSED.store(false, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let _restore = RestoreAdmission;
+        let owner = owner(96_003);
+        assert!(matches!(
+            super::enter_owner_lifecycle(&owner, super::OwnerLifecycleGate::Unchecked).await,
+            std::ops::ControlFlow::Continue(_)
+        ));
+        super::ADMISSION_CLOSED.store(true, std::sync::atomic::Ordering::Release);
+        assert!(matches!(
+            super::enter_owner_lifecycle(&owner, super::OwnerLifecycleGate::Unchecked).await,
+            std::ops::ControlFlow::Break(_)
+        ));
     }
 
     struct RecordingTransition {

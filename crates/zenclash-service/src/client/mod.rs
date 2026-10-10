@@ -1,10 +1,7 @@
 // Modified for the ZenClash fork on 2026-10-05; see NOTICE.md. GPL-3.0-only.
 use std::{path::Path, sync::Arc, time::Duration};
 
-#[cfg(windows)]
 use anyhow::Result;
-#[cfg(unix)]
-use anyhow::{Result, anyhow};
 use kode_bridge::{ClientConfig, IpcHttpClient};
 use log::{debug, warn};
 use once_cell::sync::Lazy;
@@ -114,10 +111,15 @@ pub async fn set_config(config: Option<IpcConfig>) {
 pub async fn connect() -> Result<IpcHttpClient> {
     debug!("Connecting to IPC at {}", IPC_PATH);
 
-    #[cfg(unix)]
+    #[cfg(all(target_os = "macos", not(feature = "test")))]
+    if !Path::new(IPC_PATH).exists() {
+        crate::macos_activation::wake_service().await?;
+    }
+
+    #[cfg(all(unix, any(not(target_os = "macos"), feature = "test")))]
     {
         if let Err(err) = Path::metadata(IPC_PATH.as_ref()) {
-            return Err(anyhow!("IPC path unavailable: {err}"));
+            return Err(anyhow::anyhow!("IPC path unavailable: {err}"));
         }
     }
 
@@ -139,15 +141,45 @@ pub async fn connect() -> Result<IpcHttpClient> {
         },
     )?;
 
-    if let Err(e) = client
+    let greeting = client
         .get(IpcCommand::Magic.as_ref())
         .header(IPC_AUTH_HEADER_KEY, IPC_AUTH_EXPECT)
         .send()
-        .await
+        .await;
+    #[cfg(all(target_os = "macos", not(feature = "test")))]
+    let greeting = match greeting {
+        Ok(response) => Ok(response),
+        Err(_) => {
+            // A stale socket can survive a crash. XPC asks launchd to start its registered
+            // helper without administrator prompts; the helper repairs its own socket.
+            crate::macos_activation::wake_service().await?;
+            client
+                .get(IpcCommand::Magic.as_ref())
+                .header(IPC_AUTH_HEADER_KEY, IPC_AUTH_EXPECT)
+                .send()
+                .await
+        }
+    };
+    let greeting = match greeting {
+        Ok(response) => response,
+        Err(e) => {
+            warn!("Failed to connect to IPC server: {}", e);
+            return Err(anyhow::anyhow!("Failed to connect to IPC server: {}", e));
+        }
+    };
+    #[cfg(all(target_os = "macos", not(feature = "test")))]
+    if greeting
+        .headers()
+        .get("x-zenclash-on-demand")
+        .and_then(serde_json::Value::as_str)
+        == Some("1")
     {
-        warn!("Failed to connect to IPC server: {}", e);
-        return Err(anyhow::anyhow!("Failed to connect to IPC server: {}", e));
+        // Retain one native connection for this GUI process. Its death is observable even
+        // when the process crashes, and it protects preparation before a core owner exists.
+        crate::macos_activation::wake_service().await?;
     }
+    #[cfg(any(not(target_os = "macos"), feature = "test"))]
+    let _ = greeting;
 
     Ok(client)
 }

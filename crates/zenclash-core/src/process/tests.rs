@@ -99,7 +99,7 @@ async fn unobservable_local_restart_rejection_invalidates_the_lifecycle() {
     std::fs::create_dir_all(&directory).unwrap();
     let config = directory.join("profile.yaml");
     std::fs::write(&config, "tun: {enable: true}\n").unwrap();
-    let child = Command::new("/usr/bin/sleep").arg("30").spawn().unwrap();
+    let child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
     let pid = child.id() as libc::pid_t;
     let process = Arc::new(MihomoProcess {
         drop_gate: Mutex::new(None),
@@ -112,7 +112,7 @@ async fn unobservable_local_restart_rejection_invalidates_the_lifecycle() {
         recovery_asset_root: RwLock::new(None),
         config: MihomoLaunchConfig {
             kind: CoreKind::Mihomo,
-            binary: PathBuf::from("/usr/bin/sleep"),
+            binary: PathBuf::from("/bin/sleep"),
             config_file: config,
             home_dir: directory.clone(),
             endpoint: MihomoEndpoint::default(),

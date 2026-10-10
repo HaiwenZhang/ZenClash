@@ -77,6 +77,7 @@ printf 'Mihomo fixture\n'
 EOF
 chmod +x "${mock_bin}/"* "${test_root}/mihomo"
 printf 'geodata fixture\n' >"${test_root}/geoip.metadb"
+printf 'geosite fixture\n' >"${test_root}/geosite.dat"
 
 run_build() {
   # The fixed native plist utility is replaced only in this shell; the production
@@ -87,6 +88,7 @@ run_build() {
     ZENCLASH_OUTPUT_DIR="${test_root}/output" \
     ZENCLASH_MIHOMO_BINARY="${test_root}/mihomo" \
     ZENCLASH_GEODATA_FILE="${test_root}/geoip.metadb" \
+    ZENCLASH_GEOSITE_FILE="${3:-${test_root}/geosite.dat}" \
     MOCK_SIGN_LOG="${sign_log}" \
     MOCK_APP_DIR="${app_dir}" \
     APPLE_SIGNING_IDENTITY="${1:-}" \
@@ -96,6 +98,7 @@ run_build() {
 }
 
 assert_payload_and_order() {
+  cmp "${test_root}/geosite.dat" "${app_dir}/Contents/Resources/geosite.dat"
   cmp "${mock_target}/aarch64-apple-darwin/release/zenclash-service" \
     "${app_dir}/Contents/MacOS/zenclash-service"
   for tool in zenclash-service-install zenclash-service-uninstall; do
@@ -132,4 +135,14 @@ for failure in missing empty version empty_version whitespace_version; do
   cmp "${test_root}/accepted-helper" "${app_dir}/Contents/MacOS/zenclash-service"
   [[ "$(cat "${app_dir}/preserved-marker")" == 'preserve existing bundle' ]]
 done
-printf 'macOS helper payload regression test passed\n'
+touch "${test_root}/empty-geosite.dat"
+for geosite in "${test_root}/missing-geosite.dat" "${test_root}/empty-geosite.dat"; do
+  : >"${sign_log}"
+  if run_build '' '' "${geosite}" >"${test_root}/invalid-geosite.log" 2>&1; then
+    echo 'macOS packaging unexpectedly accepted missing or empty GeoSite' >&2
+    exit 1
+  fi
+  [[ ! -s "${sign_log}" ]]
+  [[ "$(cat "${app_dir}/preserved-marker")" == 'preserve existing bundle' ]]
+done
+printf 'macOS helper and GeoData payload regression test passed\n'

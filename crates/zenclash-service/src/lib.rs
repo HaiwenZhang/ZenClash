@@ -3,6 +3,12 @@ mod channel;
 mod core;
 #[cfg(any(feature = "client", feature = "standalone"))]
 pub mod execution;
+#[cfg(all(
+    target_os = "macos",
+    any(feature = "client", feature = "standalone"),
+    any(not(feature = "test"), test)
+))]
+mod macos_activation;
 #[cfg(any(feature = "client", feature = "standalone"))]
 pub mod management;
 

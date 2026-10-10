@@ -3,8 +3,30 @@ use gpui_kit::{Menu, MenuItem};
 use super::{
     App, AppContext, AppPreferences, AppPreferencesStore, AppServices, AppearancePreference,
     KeyBinding, LogMonitor, NetworkTrayIcon, Quit, SharedString, ShowStatusMenu, ThemeMode,
-    TitleBar, ToggleFloatingWindow, WindowBounds, WindowOptions, ZenClashApp, apply_zen_theme, px,
+    TitleBar, WindowBounds, WindowOptions, ZenClashApp, apply_zen_theme, px,
 };
+
+/// Restores the retained primary window when the running application is reopened.
+pub fn reopen_main_window(cx: &mut App) {
+    for handle in cx.windows() {
+        let app = cx
+            .update_window(handle, |root, _, cx| {
+                root.downcast::<gpui_kit::component::Root>()
+                    .ok()?
+                    .read(cx)
+                    .view()
+                    .clone()
+                    .downcast::<ZenClashApp>()
+                    .ok()
+            })
+            .ok()
+            .flatten();
+        if let Some(app) = app {
+            app.update(cx, |app, cx| app.show_main_window(cx));
+            break;
+        }
+    }
+}
 
 /// Registers `ZenClash` actions, native menus, and platform-appropriate key bindings.
 pub fn init(cx: &mut App) {
@@ -18,14 +40,12 @@ pub fn init(cx: &mut App) {
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-shift-m", ShowStatusMenu, None),
-            KeyBinding::new("cmd-shift-f", ToggleFloatingWindow, None),
         ]);
         refresh_native_app_menu(cx);
     } else {
         cx.bind_keys([
             KeyBinding::new("ctrl-q", Quit, None),
             KeyBinding::new("ctrl-shift-m", ShowStatusMenu, None),
-            KeyBinding::new("ctrl-shift-f", ToggleFloatingWindow, None),
         ]);
     }
 }
@@ -153,8 +173,11 @@ fn open_main_window(
                 let network_tray = if services.initializing {
                     None
                 } else {
-                    match NetworkTrayIcon::new(services.core_kind, services.traffic_monitor.clone())
-                    {
+                    match NetworkTrayIcon::new(
+                        services.core_kind,
+                        services.traffic_monitor.clone(),
+                        preferences.tray_display,
+                    ) {
                         Ok(tray) => {
                             if let Err(error) = tray.set_visible(preferences.traffic_tray_visible) {
                                 tracing::warn!(%error, "failed to restore traffic tray visibility");

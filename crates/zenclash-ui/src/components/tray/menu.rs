@@ -5,6 +5,8 @@ use std::{
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
+use zenclash_core::TrayDisplayPreference;
+
 use super::{EnvironmentShell, MAX_TRAY_PROXY_NODES, TrayCommand, TrayMenuState};
 
 static NEXT_MENU_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -69,14 +71,18 @@ pub(super) fn build_menu(
         zenclash_i18n::text("tray.show_panel"),
         TrayCommand::ShowPanel,
     );
-    let floating = builder.item(
-        if state.floating_visible {
-            zenclash_i18n::text("tray.hide_floating")
-        } else {
-            zenclash_i18n::text("tray.show_floating")
-        },
-        TrayCommand::ToggleFloatingWindow,
-    );
+    let display = Submenu::new(zenclash_i18n::text("tray.display"), true);
+    for (label, value) in [
+        ("tray.display_icon", TrayDisplayPreference::Icon),
+        ("tray.display_traffic", TrayDisplayPreference::Traffic),
+    ] {
+        let item = builder.check(
+            zenclash_i18n::text(label),
+            state.display == value,
+            TrayCommand::SetDisplay(value),
+        );
+        display.append(&item).map_err(|error| error.to_string())?;
+    }
     let rule = builder.check(
         zenclash_i18n::text("outbound_mode.rule_mode"),
         state.mode.eq_ignore_ascii_case("rule"),
@@ -106,7 +112,7 @@ pub(super) fn build_menu(
     menu.append_items(&[
         &show_panel,
         &show_window,
-        &floating,
+        &display,
         &rule,
         &global,
         &direct,

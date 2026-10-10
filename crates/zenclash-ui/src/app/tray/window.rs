@@ -1,11 +1,10 @@
-use super::{
-    AppContext, Context, FloatingTrafficWindow, OutboundMode, Page, TitleBar, WindowBounds,
-    WindowKind, WindowOptions, ZenClashApp, px,
-};
+use super::{AppContext, Context, OutboundMode, Page, ZenClashApp};
 
 impl ZenClashApp {
     #[cfg(target_os = "macos")]
     pub(in crate::app) fn park_main_window(&mut self, window: &mut gpui_kit::Window) {
+        #[cfg(not(test))]
+        super::super::platform::hide_native_window(window);
         let parked_size = self.main_window_memory.park(window.bounds().size);
         window.resize(parked_size);
     }
@@ -22,6 +21,8 @@ impl ZenClashApp {
 
     pub(in crate::app) fn release_hidden_page_data(&mut self, cx: &mut Context<Self>) {
         self.main_window_visible = false;
+        #[cfg(target_os = "macos")]
+        cx.set_activation_policy(gpui_kit::ActivationPolicy::Accessory);
         self.refresh_visible_proxies(cx);
         self.runtime_page.update(cx, |runtime_page, cx| {
             runtime_page.set_window_visible(false, cx);
@@ -29,6 +30,8 @@ impl ZenClashApp {
     }
 
     pub(in crate::app) fn show_main_window(&mut self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        cx.set_activation_policy(gpui_kit::ActivationPolicy::Regular);
         self.main_window_visible = true;
         self.runtime_page.update(cx, |runtime_page, cx| {
             runtime_page.set_window_visible(true, cx);
@@ -42,51 +45,6 @@ impl ZenClashApp {
         }
         cx.activate(true);
         let _ = cx.update_window(self.main_window, |_, window, _| window.activate_window());
-    }
-
-    pub(in crate::app) fn toggle_floating_window(&mut self, cx: &mut Context<Self>) {
-        if let Some(handle) = self.floating_window.take()
-            && cx
-                .update_window(handle, |_, window, _| window.remove_window())
-                .is_ok()
-        {
-            self.refresh_tray_menu(cx);
-            return;
-        }
-
-        let core_session = self.core_session.clone();
-        let controlled_config_store = self.controlled_config_store.clone();
-        let runtime = self.runtime.clone();
-        let traffic_monitor = self.traffic_monitor.clone();
-        let outbound_mode = self.outbound_mode.clone();
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(
-                gpui_kit::size(px(390.), px(230.)),
-                cx,
-            )),
-            titlebar: Some(TitleBar::title_bar_options()),
-            kind: WindowKind::Floating,
-            is_resizable: false,
-            is_minimizable: false,
-            ..Default::default()
-        };
-        match gpui_kit::open_window(options, cx, |window, cx| {
-            window.set_window_title("ZenClash Signal");
-            cx.new(|cx| {
-                FloatingTrafficWindow::new(
-                    core_session,
-                    controlled_config_store,
-                    runtime,
-                    traffic_monitor,
-                    outbound_mode,
-                    cx,
-                )
-            })
-        }) {
-            Ok((handle, _)) => self.floating_window = Some(handle),
-            Err(error) => tracing::warn!(%error, "failed to open floating traffic window"),
-        }
-        self.refresh_tray_menu(cx);
     }
 
     pub(in crate::app) fn navigate(&mut self, page: Page, cx: &mut Context<Self>) {

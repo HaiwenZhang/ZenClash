@@ -168,7 +168,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         result
     });
 
-    gpui_kit::application().with_assets(Assets).run(move |cx| {
+    let application = gpui_kit::application().with_assets(Assets);
+    application.on_reopen(app::reopen_main_window);
+    application.run(move |cx| {
         app::init(cx);
         app::create_main_window_with_pending_startup(pending_services, startup_task, cx);
         cx.activate(true);

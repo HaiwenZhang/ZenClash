@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tray_icon::{
     MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent, menu::MenuEvent,
 };
-use zenclash_core::{TrafficMonitor, TrafficSnapshot, format_speed};
+use zenclash_core::{TrafficMonitor, TrafficSnapshot, TrayDisplayPreference, format_speed};
 
 mod icon;
 #[cfg(target_os = "macos")]
@@ -18,7 +18,7 @@ mod menu;
 
 pub(crate) const MAX_TRAY_PROXY_NODES: usize = 24;
 
-use icon::traffic_icon;
+use icon::{app_icon, traffic_icon};
 use menu::build_menu;
 
 #[derive(Clone, Debug, Default)]
@@ -26,12 +26,12 @@ use menu::build_menu;
 pub struct TrayMenuState {
     /// Active Mihomo routing mode.
     pub mode: String,
+    /// User-selected content of the native indicator.
+    pub display: TrayDisplayPreference,
     /// Whether an operating-system proxy is enabled.
     pub system_proxy: bool,
     /// Whether Mihomo TUN is enabled.
     pub tun: bool,
-    /// Whether the compact traffic window is currently open.
-    pub floating_visible: bool,
     /// Preferred local proxy port exposed in environment commands.
     pub mixed_port: u16,
     /// Display name of the active managed profile.
@@ -123,12 +123,12 @@ impl EnvironmentShell {
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Application command encoded into a native menu item identifier.
 pub enum TrayCommand {
+    /// Select application branding or live traffic for the native indicator.
+    SetDisplay(TrayDisplayPreference),
     /// Open or close the local status panel, including on platforms without click events.
     ShowPanel,
     /// Activate the main `ZenClash` window.
     ShowWindow,
-    /// Open or close the compact traffic window.
-    ToggleFloatingWindow,
     /// Select rule routing mode.
     SetRuleMode,
     /// Select global routing mode.
@@ -242,6 +242,7 @@ pub struct NetworkTrayIcon {
     _native_traffic_updater: macos::NativeTrafficUpdater,
     icon: TrayIcon,
     last_title: String,
+    display: TrayDisplayPreference,
     commands: HashMap<String, TrayCommand>,
     events: Option<mpsc::UnboundedReceiver<NativeTrayEvent>>,
 }
@@ -255,17 +256,27 @@ impl NetworkTrayIcon {
     pub fn new(
         core_kind: zenclash_core::CoreKind,
         traffic_monitor: Arc<TrafficMonitor>,
+        display: TrayDisplayPreference,
     ) -> Result<Self, String> {
         let (event_sender, events) = mpsc::unbounded_channel();
         install_native_event_handlers(event_sender);
-        let icon = traffic_icon(0, 0)?;
-        let (menu, commands) = build_menu(&TrayMenuState::default())?;
+        let icon = match display {
+            TrayDisplayPreference::Traffic => traffic_icon(0, 0)?,
+            TrayDisplayPreference::Icon => app_icon()?,
+        };
+        let (menu, commands) = build_menu(&TrayMenuState {
+            display,
+            ..Default::default()
+        })?;
         let builder = TrayIconBuilder::new()
-            .with_tooltip(zenclash_i18n::text_with(
-                "tray.tooltip",
-                &[("core", core_kind.display_name().to_owned())],
-            ))
-            .with_title("↑ 0 B/s  ↓ 0 B/s");
+            .with_tooltip(match display {
+                TrayDisplayPreference::Icon => "ZenClash".to_owned(),
+                TrayDisplayPreference::Traffic => zenclash_i18n::text_with(
+                    "tray.tooltip",
+                    &[("core", core_kind.display_name().to_owned())],
+                ),
+            })
+            .with_title(indicator_title(display, &traffic_monitor.snapshot()));
         #[cfg(target_os = "macos")]
         let builder = builder.with_icon_templated(icon);
         #[cfg(not(target_os = "macos"))]
@@ -281,7 +292,12 @@ impl NetworkTrayIcon {
             tray.ns_status_item()
                 .ok_or_else(|| "macOS status item is unavailable".to_owned())?,
             traffic_monitor,
+            display,
         )?;
+        #[cfg(target_os = "macos")]
+        if display == TrayDisplayPreference::Icon {
+            tray.set_title(Some(""));
+        }
         #[cfg(not(target_os = "macos"))]
         drop(traffic_monitor);
         Ok(Self {
@@ -289,6 +305,7 @@ impl NetworkTrayIcon {
             _native_traffic_updater: native_traffic_updater,
             icon: tray,
             last_title: String::new(),
+            display,
             commands,
             events: Some(events),
         })
@@ -300,6 +317,9 @@ impl NetworkTrayIcon {
     ///
     /// Returns a platform error when a native property cannot be updated.
     pub fn update(&mut self, traffic: &TrafficSnapshot) -> Result<(), String> {
+        if self.display == TrayDisplayPreference::Icon {
+            return Ok(());
+        }
         let title = traffic_title(traffic);
         if title == self.last_title {
             return Ok(());
@@ -315,6 +335,50 @@ impl NetworkTrayIcon {
         let result = self.icon.set_icon(Some(icon));
         result.map_err(|error| error.to_string())?;
         self.last_title = title;
+        Ok(())
+    }
+
+    /// Changes indicator content immediately without changing visibility.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the platform icon or tooltip cannot be replaced.
+    pub fn set_display(
+        &mut self,
+        display: TrayDisplayPreference,
+        traffic: &TrafficSnapshot,
+    ) -> Result<(), String> {
+        if self.display == display {
+            return Ok(());
+        }
+        let icon = match display {
+            TrayDisplayPreference::Icon => app_icon()?,
+            TrayDisplayPreference::Traffic => traffic_icon(traffic.upload, traffic.download)?,
+        };
+        #[cfg(target_os = "macos")]
+        self.icon
+            .set_icon_templated(Some(icon))
+            .map_err(|error| error.to_string())?;
+        #[cfg(not(target_os = "macos"))]
+        self.icon
+            .set_icon(Some(icon))
+            .map_err(|error| error.to_string())?;
+        self.icon
+            .set_tooltip(Some(match display {
+                TrayDisplayPreference::Icon => "ZenClash".to_owned(),
+                TrayDisplayPreference::Traffic => format!("ZenClash · {}", traffic_title(traffic)),
+            }))
+            .map_err(|error| error.to_string())?;
+        self.display = display;
+        self.last_title.clear();
+        #[cfg(target_os = "macos")]
+        self._native_traffic_updater.set_display(display);
+        // Recompute native menu-bar width after the template's logical size is set.
+        self.icon
+            .set_title(Some(indicator_title(display, traffic).as_str()));
+        if display == TrayDisplayPreference::Traffic {
+            self.update(traffic)?;
+        }
         Ok(())
     }
 
@@ -334,6 +398,9 @@ impl NetworkTrayIcon {
                     .ns_status_item()
                     .ok_or_else(|| "macOS status item is unavailable".to_owned())?,
             );
+            if self.display == TrayDisplayPreference::Icon {
+                self.icon.set_title(Some(""));
+            }
         }
         Ok(())
     }
@@ -449,6 +516,13 @@ const fn right_click_action() -> Option<TrayClick> {
     Some(TrayClick::ShowMenu)
 }
 
+fn indicator_title(display: TrayDisplayPreference, traffic: &TrafficSnapshot) -> String {
+    match display {
+        TrayDisplayPreference::Icon => String::new(),
+        TrayDisplayPreference::Traffic => traffic_title(traffic),
+    }
+}
+
 fn traffic_title(traffic: &TrafficSnapshot) -> String {
     if traffic.connected {
         format!(
@@ -470,6 +544,25 @@ mod tests {
     fn windows_uses_native_right_click_menu_without_manual_reentry() {
         assert!(native_menu_on_right_click());
         assert_eq!(click_action(MouseButton::Right), None);
+    }
+
+    #[test]
+    fn icon_display_never_exposes_live_rates_or_offline_text() {
+        let traffic = TrafficSnapshot {
+            connected: true,
+            upload: 1_024,
+            download: 2_048,
+            ..Default::default()
+        };
+        assert_eq!(indicator_title(TrayDisplayPreference::Icon, &traffic), "");
+        assert_eq!(
+            indicator_title(TrayDisplayPreference::Icon, &TrafficSnapshot::default()),
+            ""
+        );
+        assert_eq!(
+            indicator_title(TrayDisplayPreference::Traffic, &traffic),
+            "↑ 1.0 KiB/s  ↓ 2.0 KiB/s"
+        );
     }
 
     #[test]

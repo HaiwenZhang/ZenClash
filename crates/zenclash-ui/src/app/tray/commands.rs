@@ -19,9 +19,9 @@ impl ZenClashApp {
         }
         self.tray_command_error = None;
         match command {
+            TrayCommand::SetDisplay(display) => self.set_tray_display(display, cx),
             TrayCommand::ShowPanel => self.toggle_status_panel(cx),
             TrayCommand::ShowWindow => self.show_main_window(cx),
-            TrayCommand::ToggleFloatingWindow => self.toggle_floating_window(cx),
             TrayCommand::SetRuleMode => self.set_mode(OutboundMode::Rule, cx),
             TrayCommand::SetGlobalMode => self.set_mode(OutboundMode::Global, cx),
             TrayCommand::SetDirectMode => self.set_mode(OutboundMode::Direct, cx),
@@ -71,6 +71,7 @@ impl ZenClashApp {
             }
             TrayCommand::Quit => self.begin_quit(None, cx),
         }
+        cx.notify();
     }
 
     fn set_system_proxy_from_tray(&mut self, enabled: bool, port: u16, cx: &mut Context<Self>) {

@@ -1,12 +1,14 @@
 use super::settings::forms::{
-    settings_input_row as config_input_row, settings_status, settings_switch as setting_switch,
+    settings_input_row as config_input_row, settings_switch as setting_switch,
 };
 use super::{
     Button, ButtonVariants, Context, Disableable, IconName, Input, IntoElement, ParentElement,
     RuntimeData, RuntimePage, Styled, context_note, h_flex, info_row, json, setting_card, v_flex,
 };
+use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::{ActiveTheme, WindowExt};
 use gpui_kit::prelude::FluentBuilder;
+use gpui_kit::{InteractiveElement, StatefulInteractiveElement};
 use zenclash_core::{
     CapabilityState, CaptureOutcome, CapturePlan, CoreTunPermissionStatus, Observation,
     ServiceHealthKind, ServicePhase,
@@ -23,29 +25,84 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let tun = self.config().cloned().unwrap_or_default().tun;
+        let snapshot = self.operational_status.snapshot();
+        let status = super::home::tun_status_text(&snapshot.capture);
+        let disabled_reason = self.capture_control_disabled_reason(false).or_else(|| {
+            snapshot
+                .capture
+                .tun
+                .value()
+                .filter(|tun| tun.observed == CapabilityState::Unsupported)
+                .map(|_| zenclash_i18n::text("home.controls.tun_unsupported"))
+        });
+        let enabled = self.controlled_bool("/tun/enable", tun.enable);
         v_flex()
             .gap_4()
-            .child(settings_status(
-                zenclash_i18n::text("tun.switches.enable"),
-                zenclash_i18n::text_with(
-                    "tun.switches.enable_description",
-                    &[("core", self.core_kind.display_name().to_owned())],
-                ),
-                self.controlled_bool("/tun/enable", tun.enable),
-                "tun-enable",
-                theme,
-                cx.listener(|this, checked, window, cx| {
-                    if *checked && this.profile_service.service_state().is_some() {
-                        this.request_service_tun(window, cx);
-                    } else {
-                        this.apply_tun_plan(
-                            *checked,
-                            zenclash_i18n::text("tun.notices.enabled"),
-                            cx,
-                        );
-                    }
-                }),
-            ))
+            .child(
+                v_flex()
+                    .p_5()
+                    .gap_3()
+                    .rounded(theme.radius_lg)
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.secondary)
+                    .child(
+                        h_flex()
+                            .gap_4()
+                            .child(
+                                gpui_kit::div()
+                                    .text_lg()
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                    .child(zenclash_i18n::text("tun.switches.enable")),
+                            )
+                            .child(
+                                crate::components::mint_switch::MintSwitch::new("tun-enable")
+                                    .accessibility_label(zenclash_i18n::text("tun.switches.enable"))
+                                    .checked(enabled)
+                                    .disabled(disabled_reason.is_some())
+                                    .on_click(cx.listener(|this, checked, window, cx| {
+                                        if *checked
+                                            && this.profile_service.service_state().is_some()
+                                        {
+                                            this.request_service_tun(window, cx);
+                                        } else {
+                                            this.apply_tun_plan(
+                                                *checked,
+                                                zenclash_i18n::text("tun.notices.enabled"),
+                                                cx,
+                                            );
+                                        }
+                                    })),
+                            ),
+                    )
+                    .child(
+                        gpui_kit::div()
+                            .id("tun-control-status")
+                            .test_support()
+                            .role(gpui_kit::Role::Status)
+                            .aria_label(status.clone())
+                            .text_sm()
+                            .child(status),
+                    )
+                    .when_some(disabled_reason, |view, reason| {
+                        view.child(
+                            gpui_kit::div()
+                                .id("tun-control-disabled-reason")
+                                .test_support()
+                                .role(gpui_kit::Role::Status)
+                                .aria_label(reason.clone())
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child(reason),
+                        )
+                    })
+                    .child(
+                        gpui_kit::div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(zenclash_i18n::text("home.controls.capture_exclusive")),
+                    ),
+            )
             .child(
                 h_flex()
                     .items_start()
@@ -68,6 +125,7 @@ impl RuntimePage {
                             .min_w_0()
                             .gap_4()
                             .when(compact, |view| view.w_full())
+                            .children(self.render_service_status(theme, cx))
                             .child(self.render_tun_permissions(theme, cx))
                             .child(self.render_tun_runtime(theme))
                             .child(
@@ -116,6 +174,30 @@ impl RuntimePage {
                     ),
             )
             .into_any_element()
+    }
+
+    pub(super) fn capture_control_disabled_reason(&self, pending: bool) -> Option<String> {
+        let phase = self
+            .profile_service
+            .service_state()
+            .map(|state| state.phase());
+        let key = if self.profile_service.pending_finalization().is_some()
+            || phase == Some(ServicePhase::Unconfirmed)
+        {
+            "tun.control.confirm_service"
+        } else {
+            match phase {
+                Some(ServicePhase::Checking) => "core_page.service.checking",
+                Some(ServicePhase::Authorizing) => "core_page.service.authorizing",
+                Some(ServicePhase::Switching) => "core_page.service.switching",
+                Some(ServicePhase::Enabling) => "core_page.service.enabling",
+                Some(ServicePhase::Restoring) => "core_page.service.restoring",
+                _ if pending => "home.controls.capture_switching",
+                _ if self.core_busy() => "tun.control.core_busy",
+                _ => return None,
+            }
+        };
+        Some(zenclash_i18n::text(key))
     }
 
     pub(super) fn render_service_status(

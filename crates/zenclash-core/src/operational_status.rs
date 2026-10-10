@@ -812,6 +812,15 @@ async fn refresh_status_with_tun_reader<F, R>(
         memory_read,
         native,
     );
+    // The memory stream can report zero when the same poll's connections
+    // response still reports memory, including for a privileged service core.
+    let memory = memory.or_else(|error| match &connections {
+        Ok(connections) if connections.memory > 0 => Ok(crate::MemorySnapshot {
+            inuse: connections.memory,
+            oslimit: 0,
+        }),
+        _ => Err(error),
+    });
     let tun = if refresh_platform {
         Some(match &config {
             Ok(config) => read_tun(expected.kind, config.clone()).await,
@@ -1101,6 +1110,100 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn zero_memory_stream_uses_the_same_samples_connection_memory() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let endpoint =
+            crate::MihomoEndpoint::new(format!("http://{}", listener.local_addr().unwrap()), "");
+        let server = std::thread::spawn(move || {
+            for _ in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                if request.starts_with("GET /memory ") {
+                    let key = request
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("sec-websocket-key")
+                                .then(|| value.trim())
+                        })
+                        .unwrap();
+                    let accept = tokio_tungstenite::tungstenite::handshake::derive_accept_key(
+                        key.as_bytes(),
+                    );
+                    write!(stream, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\n\r\n").unwrap();
+                    let body = br#"{"inuse":0,"oslimit":0}"#;
+                    stream
+                        .write_all(&[0x81, u8::try_from(body.len()).unwrap()])
+                        .unwrap();
+                    stream.write_all(body).unwrap();
+                    continue;
+                }
+                let body = if request.starts_with("GET /version ") {
+                    r#"{"version":"test"}"#
+                } else if request.starts_with("GET /connections ") {
+                    r#"{"connections":[],"memory":47000000,"uploadTotal":0,"downloadTotal":0}"#
+                } else {
+                    assert!(request.starts_with("GET /configs "));
+                    r#"{"mode":"rule"}"#
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let core = CoreSession::open(
+            CoreKind::Mihomo,
+            crate::MihomoClient::new(endpoint).unwrap(),
+        )
+        .unwrap();
+        let runtime = Handle::current();
+        let offline = crate::MihomoEndpoint::new("http://127.0.0.1:1", "");
+        let traffic = TrafficMonitor::start(&runtime, offline.clone());
+        let logs = LogMonitor::start(&runtime, offline, crate::MihomoLogLevel::Info);
+        let (snapshot, _) = watch::channel(OperationalSnapshot::default());
+        let status = Arc::new(OperationalStatus {
+            snapshot,
+            task: std::sync::OnceLock::new(),
+        });
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            Box::pin(refresh_status_with_tun_reader(
+                &status,
+                &core,
+                None,
+                &traffic,
+                &logs,
+                false,
+                |kind, config| async move { Ok(TunCaptureStatus::from_config(kind, &config)) },
+            )),
+        )
+        .await
+        .unwrap();
+        let snapshot = status.snapshot();
+        assert!(
+            snapshot.streams.memory.is_fresh(),
+            "a zero memory frame hid the connection endpoint's memory"
+        );
+        assert_eq!(snapshot.streams.memory.value().unwrap().memory, 47_000_000);
+        assert_eq!(
+            snapshot.streams.memory.value().unwrap().generation,
+            core.generation()
+        );
+        server.join().unwrap();
+    }
+
     #[tokio::test]
     async fn a_transition_during_the_final_platform_read_rejects_the_old_sample() {
         use std::io::{Read, Write};

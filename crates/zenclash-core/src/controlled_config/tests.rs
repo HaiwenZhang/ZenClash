@@ -15,10 +15,14 @@ fn test_root(name: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!(
-        "zenclash-controlled-{name}-{}-{sequence}",
-        std::process::id()
-    ))
+    // macOS exposes its temporary directory through /var, a symlink to /private/var.
+    // Recovery tests require real ancestors, just like the production security check.
+    fs::canonicalize(std::env::temp_dir())
+        .unwrap()
+        .join(format!(
+            "zenclash-controlled-{name}-{}-{sequence}",
+            std::process::id()
+        ))
 }
 
 fn write_profile(root: &Path) -> PathBuf {
@@ -221,7 +225,7 @@ async fn cancelled_local_recovery_save_waiter_does_not_abandon_admitted_persiste
     );
     let waiting_store = store.clone();
     let home = root.clone();
-    let waiter = tokio::spawn(async move {
+    let mut waiter = tokio::spawn(async move {
         bundle
             .with_local_geodata(&waiting_store, home, |recovery| async move {
                 recovery
@@ -231,11 +235,20 @@ async fn cancelled_local_recovery_save_waiter_does_not_abandon_admitted_persiste
             })
             .await
     });
-    entered.await.unwrap();
+    tokio::select! {
+        result = entered => result.expect("persistence commit gate was dropped before admission"),
+        result = &mut waiter => panic!("local recovery finished before reaching persistence: {result:?}"),
+        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("local recovery never reached the persistence commit gate"),
+    }
     waiter.abort();
     assert!(waiter.await.unwrap_err().is_cancelled());
     release.send(()).unwrap();
-    let _finished = store.lock_service_tun_mutation().await;
+    let _finished = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        store.lock_service_tun_mutation(),
+    )
+    .await
+    .expect("admitted persistence did not finish after caller cancellation");
     assert_eq!(
         store.load().unwrap()["tun"]["enable"].as_bool(),
         Some(false)

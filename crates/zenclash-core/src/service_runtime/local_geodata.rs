@@ -581,13 +581,13 @@ mod tests {
                 .await
                 .unwrap();
                 let start = tokio::time::timeout(
-                    Duration::from_millis(500),
-                    recovery.restart_local_process(&process, Duration::from_millis(200), None),
+                    Duration::from_secs(2),
+                    recovery.restart_local_process(&process, Duration::from_secs(1), None),
                 )
                 .await;
                 observed.store(matches!(start, Ok(Ok(()))), Ordering::SeqCst);
                 tokio::time::timeout(
-                    Duration::from_millis(500),
+                    Duration::from_secs(2),
                     recovery.persist_local_payload("tun:\n  enable: false\n".to_owned()),
                 )
                 .await

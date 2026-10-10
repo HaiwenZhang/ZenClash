@@ -739,6 +739,10 @@ fn home_service_feedback_saved_commit_has_keyboard_details_without_resubmission(
             window.find("home-service-pending").label(),
             Some(zenclash_i18n::text("core_page.service.pending").as_str())
         );
+        assert_eq!(
+            window.find("home-tun-disabled-reason").label(),
+            Some(zenclash_i18n::text("tun.control.confirm_service").as_str())
+        );
         window.click("home-tun", cx);
         window.click("home-tun", cx);
         assert!(page.read(cx).home.action_error.is_none());
@@ -757,12 +761,12 @@ fn home_service_feedback_saved_commit_has_keyboard_details_without_resubmission(
         let focus = page.read(cx).focus_handle.clone();
         window.focus(&focus, cx);
         for _ in 0..80 {
-            if window.find("home-service-details").focused() == Some(true) {
+            if window.find("home-open-tun").focused() == Some(true) {
                 break;
             }
             window.press("tab", cx);
         }
-        assert_eq!(window.find("home-service-details").focused(), Some(true));
+        assert_eq!(window.find("home-open-tun").focused(), Some(true));
         window.press("enter", cx);
     })
     .unwrap();
@@ -776,6 +780,22 @@ fn home_service_feedback_saved_commit_has_keyboard_details_without_resubmission(
         );
         assert_eq!(page.read(cx).page, Page::Tun);
         window.find("confirm-service-tun");
+        page.update(cx, |page, cx| {
+            let token = page.page_task_token_for(Page::Tun);
+            page.replace_page_data(token, RuntimeData::Config(RuntimeConfig::default()), cx);
+        });
+        window.render_frame(cx);
+        window.click("tun-enable", cx);
+        assert!(
+            page.read(cx)
+                .profile_service
+                .pending_finalization()
+                .is_some()
+        );
+        assert_eq!(
+            window.find("tun-control-disabled-reason").label(),
+            Some(zenclash_i18n::text("tun.control.confirm_service").as_str())
+        );
         page.update(cx, |page, cx| page.switch_to(Page::Home, cx));
         window.render_frame(cx);
         window.find("home-service-pending");
@@ -813,6 +833,10 @@ fn home_service_tun_immediate_rejection_survives_page_refresh(cx: &mut TestAppCo
             Some(expected.as_str())
         );
         assert_eq!(fixture.core.generation(), generation);
+        assert_eq!(
+            window.find("home-capture-error").label(),
+            Some(expected.as_str())
+        );
         assert!(!page.read(cx).core_busy());
         window.remove_window();
     })
@@ -867,7 +891,7 @@ fn home_service_tun_consent_cancel_preserves_local_owner_and_configuration(
         window.press("escape", cx);
         assert_eq!(
             window.find("home-tun").label(),
-            Some(zenclash_i18n::text("home.controls.tun_enable").as_str()),
+            Some(zenclash_i18n::text("home.controls.tun").as_str()),
         );
         assert_eq!(fixture.core.generation(), generation);
         assert_eq!(local.snapshot().pid, pid);

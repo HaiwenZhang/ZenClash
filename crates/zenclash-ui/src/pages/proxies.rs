@@ -637,6 +637,93 @@ mod tests {
     use gpui_kit::{AnyWindowHandle, AppContext, Entity, TestAppContext, size};
 
     #[gpui_kit::test]
+    fn group_delay_failures_notify_once_after_the_last_node(cx: &mut TestAppContext) {
+        use gpui_kit::component::WindowExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        cx.foreground_executor().clone().block_test(async {
+            cx.executor().allow_parking();
+            let catalog = ProxyCatalog::from_group_nodes(
+                vec![(
+                    ProxyGroup { name: "Proxy".into(), kind: "Selector".into(), ..Default::default() },
+                    ["first", "last"].into_iter().map(|name| ProxyNode {
+                        name: name.into(), kind: "Shadowsocks".into(), ..Default::default()
+                    }).collect(),
+                )],
+                2,
+            );
+            let (window, page, runtime) = open_catalog(cx, catalog);
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let (release, wait) = tokio::sync::oneshot::channel();
+            let server = runtime.spawn(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let mut wait = Some(wait);
+                let mut replies = tokio::task::JoinSet::new();
+                for _ in 0..2 {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut headers = Vec::new();
+                    while !headers.ends_with(b"\r\n\r\n") {
+                        headers.push(stream.read_u8().await.unwrap());
+                    }
+                    let request = String::from_utf8(headers).unwrap();
+                    let wait = if request.starts_with("GET /proxies/last/delay?") {
+                        wait.take()
+                    } else {
+                        assert!(request.starts_with("GET /proxies/first/delay?"));
+                        None
+                    };
+                    replies.spawn(async move {
+                        if let Some(wait) = wait { wait.await.unwrap(); }
+                        let body = r#"{"message":"Timeout"}"#;
+                        stream.write_all(format!("HTTP/1.1 504 Gateway Timeout\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                    });
+                }
+                while let Some(result) = replies.join_next().await { result.unwrap(); }
+            });
+            cx.update_window(window, |_, window, cx| {
+                page.update(cx, |page, cx| {
+                    page.client = MihomoClient::new(zenclash_core::MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+                    cx.notify();
+                });
+                window.render_frame(cx);
+                window.click((gpui_kit::ElementId::from("test-group"), "Proxy"), cx);
+            }).unwrap();
+            for _ in 0..200 {
+                cx.executor().advance_clock(std::time::Duration::from_millis(50));
+                if cx.update(|cx| page.read(cx).group_progress.get("Proxy") == Some(&(1, 2))) { break; }
+                runtime.spawn(async { tokio::time::sleep(std::time::Duration::from_millis(5)).await; }).await.unwrap();
+            }
+            cx.update_window(window, |_, window, cx| {
+                assert_eq!(page.read(cx).group_progress.get("Proxy"), Some(&(1, 2)));
+                assert_eq!(page.read(cx).test_failures.len(), 1);
+                assert!(page.read(cx).error.is_none(), "group failure feedback was published before all nodes finished");
+                assert!(window.notifications(cx).is_empty());
+            }).unwrap();
+            release.send(()).unwrap();
+            server.await.unwrap();
+            for _ in 0..200 {
+                cx.executor().advance_clock(std::time::Duration::from_millis(50));
+                if cx.update(|cx| !page.read(cx).group_progress.contains_key("Proxy")) { break; }
+                runtime.spawn(async { tokio::time::sleep(std::time::Duration::from_millis(5)).await; }).await.unwrap();
+            }
+            cx.update_window(window, |_, window, cx| {
+                assert!(!page.read(cx).group_progress.contains_key("Proxy"));
+                assert_eq!(page.read(cx).test_failures.len(), 2);
+                let error = page.read(cx).error.clone().unwrap();
+                assert_eq!(error, zenclash_i18n::text_with(
+                    "proxies.errors.group_failed",
+                    &[("group", "Proxy".into()), ("count", "2".into())],
+                ));
+                assert_eq!(window.notifications(cx).len(), 1);
+                assert_eq!(page.read(cx).feedback_notifications.current_message("proxy-error"), Some(error));
+                window.remove_window();
+            }).unwrap();
+        });
+    }
+
+    #[gpui_kit::test]
     fn localized_search_placeholder_refresh_preserves_the_input_and_query(cx: &mut TestAppContext) {
         let (window, page, _runtime) = open_catalog(cx, ProxyCatalog::default());
         cx.update_window(window, |_, window, cx| {

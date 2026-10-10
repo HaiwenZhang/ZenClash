@@ -4,8 +4,8 @@ use super::{
     NavigateProfiles, NavigateProxies, NavigateResources, NavigateRules, NavigateSettings,
     NavigateSniffer, NavigateSystemProxy, NavigateTraffic, NavigateTun, OutboundMode, Page, Quit,
     SetDarkTheme, SetDirectMode, SetGlobalMode, SetLightTheme, SetRuleMode, SetSystemTheme,
-    ShowStatusMenu, ShowTrafficIcon, ThemeMode, ToggleFloatingWindow, ToggleSidebar, Window,
-    ZenClashApp, apply_zen_theme,
+    ShowStatusMenu, ShowTrafficIcon, ThemeMode, ToggleSidebar, Window, ZenClashApp,
+    apply_zen_theme,
 };
 
 impl ZenClashApp {
@@ -260,6 +260,28 @@ impl ZenClashApp {
         cx.notify();
     }
 
+    pub(in crate::app) fn set_tray_display(
+        &mut self,
+        display: zenclash_core::TrayDisplayPreference,
+        cx: &mut Context<Self>,
+    ) {
+        let traffic = self.traffic_monitor.snapshot();
+        if let Some(tray) = self.network_tray.as_mut()
+            && let Err(error) = tray.set_display(display, &traffic)
+        {
+            self.tray_command_error = Some(error);
+            return;
+        }
+        self.update_preferences(move |preferences| preferences.tray_display = display, cx);
+        self.tray_state.display = display;
+        if let Some(tray) = self.network_tray.as_mut()
+            && let Err(error) = tray.update_menu(&self.tray_state)
+        {
+            tracing::warn!(%error, "failed to refresh tray display choices");
+        }
+        cx.notify();
+    }
+
     pub(super) fn on_show_traffic_icon(
         &mut self,
         _: &ShowTrafficIcon,
@@ -308,14 +330,5 @@ impl ZenClashApp {
     ) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
         cx.notify();
-    }
-
-    pub(super) fn on_toggle_floating_window(
-        &mut self,
-        _: &ToggleFloatingWindow,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.toggle_floating_window(cx);
     }
 }
