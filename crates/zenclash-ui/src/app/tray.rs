@@ -21,6 +21,10 @@ impl ZenClashApp {
         else {
             return;
         };
+        #[cfg(target_os = "linux")]
+        if let Some(tray) = self.network_tray.as_mut() {
+            tray.start_native_event_loop(cx);
+        }
         cx.spawn(async move |this, cx| {
             while let Some(event) = events.recv().await {
                 if this

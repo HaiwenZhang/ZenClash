@@ -238,6 +238,8 @@ fn install_native_event_handlers(sender: mpsc::UnboundedSender<NativeTrayEvent>)
 /// Native status-bar indicator. The arrows are rendered as a macOS template
 /// image and the live upload/download rates are shown beside it.
 pub struct NetworkTrayIcon {
+    #[cfg(target_os = "linux")]
+    native_event_loop: Option<gpui_kit::Task<()>>,
     #[cfg(target_os = "macos")]
     _native_traffic_updater: macos::NativeTrafficUpdater,
     icon: TrayIcon,
@@ -258,6 +260,15 @@ impl NetworkTrayIcon {
         traffic_monitor: Arc<TrafficMonitor>,
         display: TrayDisplayPreference,
     ) -> Result<Self, String> {
+        // GPUI uses its own Linux event loop; it does not initialize GTK for the tray.
+        #[cfg(target_os = "linux")]
+        {
+            if gtk::is_initialized() && !gtk::is_initialized_main_thread() {
+                return Err("The native tray must be created on the GTK main thread".into());
+            }
+            gtk::init()
+                .map_err(|error| format!("Failed to initialize the native tray: {error}"))?;
+        }
         let (event_sender, events) = mpsc::unbounded_channel();
         install_native_event_handlers(event_sender);
         let icon = match display {
@@ -301,6 +312,8 @@ impl NetworkTrayIcon {
         #[cfg(not(target_os = "macos"))]
         drop(traffic_monitor);
         Ok(Self {
+            #[cfg(target_os = "linux")]
+            native_event_loop: None,
             #[cfg(target_os = "macos")]
             _native_traffic_updater: native_traffic_updater,
             icon: tray,
@@ -309,6 +322,31 @@ impl NetworkTrayIcon {
             commands,
             events: Some(events),
         })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn start_native_event_loop(&mut self, cx: &gpui_kit::App) {
+        if self.native_event_loop.is_some() {
+            return;
+        }
+        // AppIndicator's D-Bus registration and menu callbacks need GTK dispatch
+        // on the same thread as construction. Dropping the tray cancels this task.
+        self.native_event_loop = Some(cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+                cx.update(|_| {
+                    // Bound each turn so GTK activity cannot starve GPUI's event loop.
+                    for _ in 0..32 {
+                        if !gtk::events_pending() {
+                            break;
+                        }
+                        gtk::main_iteration_do(false);
+                    }
+                });
+            }
+        }));
     }
 
     /// Updates the title, tooltip, and activity bars when throughput changes.
