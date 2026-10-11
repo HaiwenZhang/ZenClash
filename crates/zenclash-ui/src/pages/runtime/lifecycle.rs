@@ -842,7 +842,7 @@ impl RuntimePage {
         }
     }
 
-    pub(super) const fn live_updates_enabled(&self) -> bool {
+    pub(crate) const fn live_updates_enabled(&self) -> bool {
         self.ui_visibility.updates_enabled()
     }
 

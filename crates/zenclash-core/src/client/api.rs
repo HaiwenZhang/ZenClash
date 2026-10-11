@@ -34,10 +34,10 @@ impl MihomoClient {
             while let Some(frame) = stream.next().await {
                 match frame.map_err(MihomoError::Process)? {
                     tokio_tungstenite::tungstenite::Message::Text(text) => {
-                        return serde_json::from_str(&text).map_err(MihomoError::Decode);
+                        return super::request::decode_response(path, text.as_bytes(), false);
                     }
                     tokio_tungstenite::tungstenite::Message::Binary(bytes) => {
-                        return serde_json::from_slice(&bytes).map_err(MihomoError::Decode);
+                        return super::request::decode_response(path, &bytes, false);
                     }
                     tokio_tungstenite::tungstenite::Message::Close(_) => break,
                     _ => {}
@@ -930,6 +930,31 @@ mod verification_tests {
         assert_eq!(memory.inuse, 47_000_000);
         let _ = release.send(());
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn memory_stream_decode_error_identifies_its_endpoint_and_field() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            socket
+                .send(Message::Text(r#"{"inuse":"bad-memory"}"#.into()))
+                .await
+                .unwrap();
+        });
+        let client =
+            MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+        let error = client.memory_snapshot().await.unwrap_err();
+        server.await.unwrap();
+        assert!(!error.mutation_result_unknown());
+        assert!(
+            matches!(error, MihomoError::ResponseDecode { endpoint, field_path, .. }
+            if endpoint == "/memory" && field_path == "inuse")
+        );
     }
 
     struct SwitchOnUnlock(Mutex<Option<SwitchFuture>>);

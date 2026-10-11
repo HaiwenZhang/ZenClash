@@ -9,6 +9,30 @@ use super::{api::encode_path_segment, *};
 use crate::DnsRecordType;
 
 #[tokio::test]
+async fn response_decode_error_identifies_the_endpoint_and_nested_field() {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 2048];
+        assert!(stream.read(&mut request).unwrap() > 0);
+        let body = r#"{"tun":{"dns-hijack":"any:53"},"secret":"private-controller-secret"}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+    let error = client.runtime_config().await.unwrap_err().to_string();
+    server.join().unwrap();
+    assert!(error.contains("/configs"), "{error}");
+    assert!(error.contains("tun.dns-hijack"), "{error}");
+    assert!(!error.contains("private-controller-secret"), "{error}");
+}
+
+#[tokio::test]
 async fn replacing_an_external_binding_does_not_run_its_previous_validator() {
     let directory = std::env::temp_dir().join(format!(
         "zenclash-stale-validator-{}-{}",

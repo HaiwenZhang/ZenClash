@@ -170,6 +170,7 @@ impl MihomoClient {
         }
         Ok(ApiReply {
             response,
+            endpoint: path.split('?').next().unwrap_or(path).to_owned(),
             binding: self.binding.clone(),
             generation: binding.generation,
         })
@@ -183,6 +184,7 @@ enum ReplyBody {
 
 pub(super) struct ApiReply {
     response: ReplyBody,
+    endpoint: String,
     binding: std::sync::Arc<super::ControllerBinding>,
     generation: u64,
 }
@@ -190,14 +192,48 @@ pub(super) struct ApiReply {
 impl ApiReply {
     pub(super) async fn json<T: DeserializeOwned>(self) -> MihomoResult<T> {
         let value = match self.response {
-            ReplyBody::Direct(response) => response.json().await?,
-            ReplyBody::Service(value) => serde_json::from_slice(&value)?,
+            ReplyBody::Direct(response) => {
+                let bytes = response.bytes().await?;
+                decode_response(&self.endpoint, &bytes, true)?
+            }
+            ReplyBody::Service(value) => decode_response(&self.endpoint, &value, false)?,
         };
         if !self.binding.is_current(self.generation) {
             return Err(MihomoError::StaleTransport);
         }
         Ok(value)
     }
+}
+
+pub(super) fn decode_response<T: DeserializeOwned>(
+    endpoint: &str,
+    bytes: &[u8],
+    outcome_unknown: bool,
+) -> MihomoResult<T> {
+    let endpoint = endpoint.split('?').next().unwrap_or(endpoint);
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let value = serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+        let path = error.path().to_string();
+        MihomoError::ResponseDecode {
+            endpoint: endpoint.to_owned(),
+            field_path: if path.is_empty() || path == "." {
+                "$".to_owned()
+            } else {
+                path
+            },
+            source: error.into_inner(),
+            outcome_unknown,
+        }
+    })?;
+    deserializer
+        .end()
+        .map_err(|source| MihomoError::ResponseDecode {
+            endpoint: endpoint.to_owned(),
+            field_path: "$".to_owned(),
+            source,
+            outcome_unknown,
+        })?;
+    Ok(value)
 }
 
 pub(super) async fn ensure_success(response: Response) -> MihomoResult<Response> {
@@ -248,7 +284,45 @@ fn error_message(payload: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::error_message;
+    use super::{decode_response, error_message};
+    use crate::{ConnectionsSnapshot, RuntimeConfig};
+
+    #[test]
+    fn decode_error_identifies_nested_field_without_query_credentials() {
+        let error = decode_response::<RuntimeConfig>(
+            "/configs?token=private-query-secret",
+            br#"{"tun":{"dns-hijack":"any:53"}}"#,
+            false,
+        )
+        .unwrap_err();
+        assert!(!error.mutation_result_unknown());
+        let message = error.to_string();
+        assert!(message.contains("/configs at tun.dns-hijack"), "{message}");
+        assert!(!message.contains("private-query-secret"), "{message}");
+    }
+
+    #[test]
+    fn decode_error_identifies_array_entry() {
+        let error = decode_response::<ConnectionsSnapshot>(
+            "/connections",
+            br#"{"connections":[{"metadata":{"destinationPort":[]}}]}"#,
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("connections[0].metadata.destinationPort"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn decode_error_rejects_trailing_json_and_preserves_http_uncertainty() {
+        let error = decode_response::<RuntimeConfig>("/configs", b"{}{}", true).unwrap_err();
+        assert!(error.mutation_result_unknown());
+        assert!(error.to_string().contains("/configs at $"), "{error}");
+    }
 
     #[test]
     fn error_message_extracts_mihomo_json_message() {

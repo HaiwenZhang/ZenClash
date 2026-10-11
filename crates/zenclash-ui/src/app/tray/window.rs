@@ -59,6 +59,18 @@ impl ZenClashApp {
         });
     }
 
+    #[cfg(target_os = "linux")]
+    pub(in crate::app) fn restore_main_window_after_activation(&mut self, cx: &mut Context<Self>) {
+        // A taskbar/compositor restore does not pass through the tray's show command.
+        // Resume retained data without activating the window again inside its callback.
+        self.main_window_visible = true;
+        self.runtime_page.update(cx, |runtime_page, cx| {
+            runtime_page.set_window_visible(true, cx);
+        });
+        self.refresh_visible_proxies(cx);
+        cx.notify();
+    }
+
     pub(in crate::app) fn show_main_window(&mut self, cx: &mut Context<Self>) {
         #[cfg(target_os = "macos")]
         cx.set_activation_policy(gpui_kit::ActivationPolicy::Regular);

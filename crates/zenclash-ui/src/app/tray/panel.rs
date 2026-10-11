@@ -360,6 +360,52 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    #[gpui_kit::test]
+    fn taskbar_activation_restores_hidden_main_window_data(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::component::Root;
+        let fixture = crate::pages::runtime::ui_tests::Fixture::new();
+        let services = app_services(&fixture);
+        cx.executor().allow_parking();
+        cx.update(crate::app::init);
+        let mut owner = None;
+        let main = cx.open_window(size(px(1280.), px(820.)), |window, cx| {
+            let preferences = services.preferences.clone();
+            let app =
+                cx.new(|cx| ZenClashApp::new(services, None, None, None, preferences, window, cx));
+            owner = Some(app.clone());
+            Root::new(app, window, cx)
+        });
+        let owner = owner.unwrap();
+        cx.update_window(main.into(), |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        assert!(cx.update(|cx| owner.read(cx).runtime_page.read(cx).live_updates_enabled()));
+        cx.update_window(main.into(), |_, window, cx| {
+            owner.update(cx, |app, cx| app.hide_main_window_in(window, cx));
+        })
+        .unwrap();
+        assert!(!cx.update(|cx| owner.read(cx).main_window_visible));
+        assert!(!cx.update(|cx| owner.read(cx).runtime_page.read(cx).live_updates_enabled()));
+        gpui_kit::VisualTestContext::from_window(main.into(), cx).deactivate_window();
+
+        // Native activation models taskbar/compositor restore, without a tray command.
+        cx.update_window(main.into(), |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(owner.read(cx).main_window_visible);
+            assert!(owner.read(cx).runtime_page.read(cx).live_updates_enabled());
+            assert_eq!(owner.read(cx).main_window, main.into());
+            assert_eq!(
+                owner.read(cx).quit_state,
+                crate::app::system_proxy::QuitState::Idle
+            );
+        });
+        cx.update_window(main.into(), |_, window, _| window.remove_window())
+            .unwrap();
+    }
+
     #[gpui_kit::test]
     fn tray_command_opens_and_renders_status_panel_while_owner_is_updating(
         cx: &mut gpui_kit::TestAppContext,

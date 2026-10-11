@@ -2234,7 +2234,16 @@ async fn recover_managed_core(session: &CoreSession, policy: CoreRecoveryPolicy)
 }
 
 pub(crate) fn should_restart_after_hot_reload(error: &ControlledConfigError) -> bool {
-    matches!(error, ControlledConfigError::Profile(MihomoError::Http(_)))
+    matches!(
+        error,
+        ControlledConfigError::Profile(
+            MihomoError::Http(_)
+                | MihomoError::ResponseDecode {
+                    outcome_unknown: true,
+                    ..
+                }
+        )
+    )
 }
 
 #[cfg(test)]
@@ -3678,6 +3687,20 @@ mod tests {
         });
 
         assert!(!should_restart_after_hot_reload(&error));
+    }
+
+    #[test]
+    fn annotated_decode_errors_preserve_transport_restart_policy() {
+        for outcome_unknown in [false, true] {
+            let source = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+            let error = ControlledConfigError::Profile(MihomoError::ResponseDecode {
+                endpoint: "/configs".into(),
+                field_path: "$".into(),
+                source,
+                outcome_unknown,
+            });
+            assert_eq!(should_restart_after_hot_reload(&error), outcome_unknown);
+        }
     }
 
     #[cfg(unix)]

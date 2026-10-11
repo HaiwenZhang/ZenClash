@@ -191,8 +191,7 @@ pub struct ProxyCatalog {
 impl ProxyCatalog {
     /// Constructs a catalog from resolved groups, deduplicating controller name and provider.
     ///
-    /// Use [`RawProxyCatalog`] for controller responses whose map key differs
-    /// from the display name. This constructor uses each node name as its key.
+    /// This constructor uses each node name as its controller key.
     #[must_use]
     pub fn from_group_nodes(groups: Vec<(ProxyGroup, Vec<ProxyNode>)>, proxy_count: usize) -> Self {
         let mut nodes: HashMap<ProxyNodeId, Arc<ProxyNode>> = HashMap::new();

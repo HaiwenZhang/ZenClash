@@ -407,6 +407,13 @@ impl ZenClashApp {
                 appearance_subscription,
             ],
         };
+        #[cfg(target_os = "linux")]
+        app._subscriptions
+            .push(cx.observe_window_activation(window, |this, window, cx| {
+                if window.is_window_active() && !this.main_window_visible {
+                    this.restore_main_window_after_activation(cx);
+                }
+            }));
         if !initializing {
             app.start_traffic_updates(cx);
             app.restore_system_proxy(cx);

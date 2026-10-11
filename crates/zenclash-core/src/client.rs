@@ -74,6 +74,19 @@ pub enum MihomoError {
     /// The controller's JSON response does not match the requested schema.
     #[error("invalid Mihomo response: {0}")]
     Decode(#[from] serde_json::Error),
+    /// Response decoding failure annotated with its endpoint and JSON field path.
+    #[error("invalid Mihomo response from {endpoint} at {field_path}: {source}")]
+    ResponseDecode {
+        /// Controller route without query parameters or authentication information.
+        endpoint: String,
+        /// Nested JSON field or array entry that could not be decoded.
+        field_path: String,
+        /// Original JSON decoding failure, retaining line and column information.
+        #[source]
+        source: serde_json::Error,
+        /// Whether the original transport classified decoding failure as uncertain.
+        outcome_unknown: bool,
+    },
     /// Non-success response returned by Mihomo, including its bounded message.
     #[error("Mihomo API returned HTTP {status}: {message}")]
     Api {
@@ -621,6 +634,9 @@ impl MihomoError {
             | Self::RuntimeOutcomeUnknown
             | Self::RuntimePartiallyApplied(_) => true,
             Self::Service(error) => error.mutation_result_unknown(),
+            Self::ResponseDecode {
+                outcome_unknown, ..
+            } => *outcome_unknown,
             Self::Native(crate::service::NativeHttpError::OutcomeUnknown(_)) => true,
             Self::Native(crate::service::NativeHttpError::BudgetExceeded { request_sent }) => {
                 *request_sent

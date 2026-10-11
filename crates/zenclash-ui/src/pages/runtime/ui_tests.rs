@@ -500,6 +500,11 @@ fn owned_ui_children(fixture: &Fixture) -> [Arc<MihomoProcess>; 2] {
         let directory = fixture.root.join(format!("owned-{index}"));
         fs::create_dir_all(&directory).unwrap();
         let executable = directory.join(binary.file_name().unwrap());
+        // Retain distinct owner paths without opening the executable for writing
+        // immediately before exec on Linux (which can fail with ETXTBSY).
+        #[cfg(target_os = "linux")]
+        fs::hard_link(&binary, &executable).unwrap();
+        #[cfg(not(target_os = "linux"))]
         fs::copy(&binary, &executable).unwrap();
         let config = directory.join("profile.yaml");
         fs::write(&config, "rules: [MATCH,DIRECT]\n").unwrap();
