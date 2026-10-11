@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use super::deserialize_null_default;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -85,7 +86,11 @@ pub struct TunConfig {
     #[serde(default)]
     pub stack: String,
     /// DNS destinations intercepted by TUN.
-    #[serde(default, rename = "dns-hijack")]
+    #[serde(
+        default,
+        rename = "dns-hijack",
+        deserialize_with = "deserialize_null_default"
+    )]
     pub dns_hijack: Vec<String>,
     /// Whether Mihomo installs routes automatically.
     #[serde(default, rename = "auto-route")]

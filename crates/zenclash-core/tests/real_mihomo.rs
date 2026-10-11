@@ -19,6 +19,62 @@ use zenclash_core::{
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(feature = "test-support")]
+#[ignore = "requires ZENCLASH_MIHOMO_BINARY pointing to a real Mihomo executable"]
+async fn runtime_config_accepts_real_mihomo_null_tun_dns_hijack() {
+    let binary =
+        PathBuf::from(std::env::var_os("ZENCLASH_MIHOMO_BINARY").expect("real kernel binary"));
+    let temp_root = if cfg!(target_os = "macos") {
+        PathBuf::from("/private/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    let root = temp_root.join(format!(
+        "zc-null-config-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let profile = root.join("profile.yaml");
+    fs::write(&profile, "mixed-port: 0\nexternal-controller: ''\nmode: rule\ntun: {enable: false, dns-hijack: null}\ndns: {enable: false}\nrules: ['MATCH,DIRECT']\n").unwrap();
+    let process = MihomoProcess::spawn_isolated_for_test(
+        MihomoLaunchConfig::new(binary, &profile, root.join("home")).unwrap(),
+    )
+    .unwrap();
+    process
+        .wait_until_ready(Duration::from_secs(20))
+        .await
+        .unwrap();
+    let controller = zenclash_core::service::NativeController::new_local(
+        process.endpoint().ipc_path().unwrap().to_path_buf(),
+        process.snapshot().pid.unwrap(),
+        process.endpoint().secret.clone(),
+    );
+    let response = controller
+        .request("GET", "/configs", None, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let raw: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(raw["tun"]["dns-hijack"], serde_json::Value::Null);
+
+    let client = MihomoClient::from_process(process.clone()).unwrap();
+    let config = client
+        .runtime_config()
+        .await
+        .expect("nullable /configs response must decode");
+    assert!(config.tun.dns_hijack.is_empty());
+    assert!(!config.tun.enable);
+    assert_eq!(config.mode, "rule");
+    process.stop().unwrap();
+    drop(client);
+    drop(process);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires ZENCLASH_MIHOMO_BINARY pointing to a real Mihomo executable"]
 async fn proxy_catalog_preserves_subscription_group_and_member_order_across_reload() {
     let binary =

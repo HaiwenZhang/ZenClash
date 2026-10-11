@@ -101,6 +101,10 @@ fn materialize(
         // Native upstream caches are core-owned; do not declare the same path as a
         // copied asset. Retain their bytes locally for a possible sidecar recovery.
         if !remote.iter().any(|provider| provider.path == asset.path) {
+            // The service requires canonical sources; on Windows this also adds
+            // the verbatim prefix and normalizes nested asset separators.
+            #[cfg(windows)]
+            let source = fs::canonicalize(&source).map_err(io_error)?;
             native_assets.push(zenclash_service::RuntimeAsset {
                 source: source.to_string_lossy().into_owned(),
                 destination: destination.to_owned(),
@@ -155,4 +159,84 @@ fn private_write(path: &Path, bytes: &[u8]) -> MihomoResult<()> {
 
 fn io_error(error: std::io::Error) -> MihomoError {
     MihomoError::Process(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::service_runtime::tests::TestHome;
+
+    fn bundle() -> ServiceRuntimeBundle {
+        ServiceRuntimeBundle {
+            yaml: "mode: rule\nproxy-providers:\n  local: {type: file, path: assets/providers/0.yaml}\n".into(),
+            assets: vec![
+                RuntimeAsset {
+                    path: "assets/providers/0.yaml".into(),
+                    bytes: Arc::from(&b"proxies: []\n"[..]),
+                },
+                RuntimeAsset {
+                    path: "assets/tls/1.pem".into(),
+                    bytes: Arc::from(&b"certificate"[..]),
+                },
+                RuntimeAsset {
+                    path: "assets/geodata/GeoIP.dat".into(),
+                    bytes: Arc::from(&b"geodata"[..]),
+                },
+            ],
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ordinary_home_emits_canonical_native_asset_sources() {
+        let home = TestHome::new();
+        let ordinary_home = std::env::temp_dir().join(home.0.file_name().unwrap());
+        let frozen = materialize(&bundle(), &ordinary_home, &ordinary_home.join("mihomo")).unwrap();
+
+        let expected: Vec<_> = ["assets/providers/0.yaml", "assets/tls/1.pem", "GeoIP.dat"]
+            .into_iter()
+            .map(|destination| {
+                (
+                    destination.to_owned(),
+                    fs::canonicalize(frozen.root().join(destination))
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            })
+            .collect();
+        let actual: Vec<_> = frozen
+            .native
+            .assets
+            .iter()
+            .map(|asset| (asset.destination.clone(), asset.source.clone()))
+            .collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn canonical_home_emits_canonical_nested_native_asset_sources() {
+        let home = TestHome::new();
+        let frozen = materialize(&bundle(), &home.0, &home.0.join("mihomo")).unwrap();
+
+        let expected: Vec<_> = ["assets/providers/0.yaml", "assets/tls/1.pem", "GeoIP.dat"]
+            .into_iter()
+            .map(|destination| {
+                (
+                    destination.to_owned(),
+                    fs::canonicalize(frozen.root().join(destination))
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            })
+            .collect();
+        let actual: Vec<_> = frozen
+            .native
+            .assets
+            .iter()
+            .map(|asset| (asset.destination.clone(), asset.source.clone()))
+            .collect();
+        assert_eq!(actual, expected);
+    }
 }

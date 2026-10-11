@@ -8,7 +8,7 @@ use once_cell::sync::Lazy;
 use tokio::sync::RwLock;
 
 #[cfg(all(windows, any(not(feature = "test"), test)))]
-mod windows_identity;
+pub(crate) mod windows_identity;
 
 use crate::{
     AuthenticatedRequest, AuthenticatedSessionRequest, IPC_AUTH_EXPECT, IPC_PATH, IpcCommand,
@@ -110,6 +110,11 @@ pub async fn set_config(config: Option<IpcConfig>) {
 /// Returns native connection, serialization, timeout or HTTP decoding errors. Service refusals remain in the returned response code.
 pub async fn connect() -> Result<IpcHttpClient> {
     debug!("Connecting to IPC at {}", IPC_PATH);
+
+    #[cfg(all(windows, not(feature = "test")))]
+    if tokio::task::spawn_blocking(crate::windows_activation::registered_service_can_activate).await?? {
+        crate::windows_activation::wake_service().await?;
+    }
 
     #[cfg(all(target_os = "macos", not(feature = "test")))]
     if !Path::new(IPC_PATH).exists() {

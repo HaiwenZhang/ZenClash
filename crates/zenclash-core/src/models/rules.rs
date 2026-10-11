@@ -1,10 +1,11 @@
+use super::deserialize_null_default;
 use serde::{Deserialize, Serialize};
 
 /// Rule list returned by Mihomo's `/rules` endpoint.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RuleCatalog {
     /// Rules in Mihomo evaluation order.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub rules: Vec<Rule>,
 }
 

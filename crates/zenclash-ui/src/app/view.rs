@@ -338,9 +338,17 @@ impl Render for ZenClashApp {
             .on_action(cx.listener(Self::on_show_status_menu))
             .on_action(cx.listener(Self::on_toggle_sidebar))
             .when(uses_custom_title_bar(std::env::consts::OS), |shell| {
-                shell.child(main_window_title_bar(
-                    cx.listener(|this, _: &ClickEvent, _, cx| this.begin_quit(None, cx)),
-                ))
+                shell.child(main_window_title_bar(cx.listener(
+                    |this, _: &ClickEvent, window, cx| {
+                        #[cfg(target_os = "macos")]
+                        {
+                            let _ = window;
+                            this.begin_quit(None, cx);
+                        }
+                        #[cfg(any(target_os = "windows", target_os = "linux"))]
+                        this.hide_main_window_in(window, cx);
+                    },
+                )))
             })
             .child(
                 h_flex()

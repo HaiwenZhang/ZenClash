@@ -41,7 +41,7 @@ fn verify_registered_service_process_id_inner(pipe_process_id: u32) -> Result<()
 }
 
 #[cfg(not(feature = "test"))]
-pub(super) fn verify_registered_service_process_id(pipe_process_id: u32) -> std::io::Result<()> {
+pub(crate) fn verify_registered_service_process_id(pipe_process_id: u32) -> std::io::Result<()> {
     verify_registered_service_process_id_inner(pipe_process_id).map_err(std::io::Error::other)
 }
 

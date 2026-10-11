@@ -437,10 +437,30 @@ async fn run_supervisor(shutdown: impl Future<Output = ()>) -> AnyResult<()> {
 
     #[cfg(all(target_os = "macos", not(feature = "test")))]
     let activation = crate::macos_activation::ActivationListener::new(crate::MACOS_SERVICE_ID)?;
+    #[cfg(all(windows, not(feature = "test")))]
+    let activation = match crate::windows_activation::registered_service_can_activate() {
+        Ok(true) => Some(crate::windows_activation::ActivationListener::new()?),
+        Ok(false) => None,
+        Err(error) => {
+            warn!("Cannot verify Windows pipe activation; keeping the service resident: {error:#}");
+            None
+        }
+    };
+    #[cfg(all(windows, not(feature = "test")))]
+    let idle_failure = parking_lot::Mutex::new(None);
     let idle = async {
         #[cfg(all(target_os = "macos", not(feature = "test")))]
         wait_for_macos_idle(&activation).await;
-        #[cfg(any(not(target_os = "macos"), feature = "test"))]
+        #[cfg(all(windows, not(feature = "test")))]
+        if let Some(activation) = activation.as_ref() {
+            if let Err(error) = wait_for_windows_idle(activation).await {
+                crate::windows_service_begin_stopping();
+                *idle_failure.lock() = Some(error);
+            }
+        } else {
+            std::future::pending::<()>().await;
+        }
+        #[cfg(any(all(not(target_os = "macos"), not(windows)), feature = "test"))]
         std::future::pending::<()>().await;
     };
     tokio::pin!(idle);
@@ -505,7 +525,38 @@ async fn run_supervisor(shutdown: impl Future<Output = ()>) -> AnyResult<()> {
 
     stop_ipc_server().await?;
     server_handle.abort();
+    #[cfg(all(windows, not(feature = "test")))]
+    if let Some(error) = idle_failure.lock().take() {
+        set_service_lifecycle_state(ServiceLifecycleState::Fatal);
+        return Err(error);
+    }
     Ok(())
+}
+
+#[cfg(all(windows, not(feature = "test")))]
+async fn wait_for_windows_idle(activation: &crate::windows_activation::ActivationListener) -> AnyResult<()> {
+    let mut interval = tokio::time::interval(Duration::from_millis(200));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        if activation.is_failed() {
+            return Err(anyhow!("Windows service activation listener exited unexpectedly"));
+        }
+        let _owner = OWNER_LIFECYCLE_LOCK.lock().await;
+        let active = match load_active_owner().await {
+            Ok(owner) => owner.is_some(),
+            Err(error) => {
+                activation.prepare_idle_exit(true);
+                warn!("Cannot determine Windows service idleness: {error:#}");
+                continue;
+            }
+        };
+        let core_running = CORE_MANAGER.lock().await.status().await.core_pid.is_some();
+        if activation.prepare_idle_exit(active || core_running) {
+            ADMISSION_CLOSED.store(true, Ordering::Release);
+            return Ok(());
+        }
+    }
 }
 
 #[cfg(all(target_os = "macos", not(feature = "test")))]

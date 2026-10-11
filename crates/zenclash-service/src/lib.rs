@@ -9,6 +9,13 @@ pub mod execution;
     any(not(feature = "test"), test)
 ))]
 mod macos_activation;
+#[cfg(all(windows, any(feature = "client", feature = "standalone")))]
+mod windows_activation;
+#[cfg(all(windows, any(feature = "client", feature = "standalone")))]
+pub use windows_activation::{
+    configure_windows_service_activation, windows_service_begin_stopping, windows_service_can_activate,
+    windows_service_is_stopping,
+};
 #[cfg(any(feature = "client", feature = "standalone"))]
 pub mod management;
 

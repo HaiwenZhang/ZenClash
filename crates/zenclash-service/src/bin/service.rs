@@ -70,8 +70,17 @@ fn run_service() -> platform_lib::Result<()> {
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
         match control_event {
             ServiceControl::Stop | ServiceControl::Shutdown => {
+                zenclash_service::windows_service_begin_stopping();
                 let _ = shutdown_tx.try_send(());
                 ServiceControlHandlerResult::NoError
+            }
+            ServiceControl::TriggerEvent => {
+                if zenclash_service::windows_service_is_stopping() {
+                    // Ask SCM to queue this wake until the current instance has exited.
+                    ServiceControlHandlerResult::Other(windows_sys::Win32::Foundation::ERROR_SHUTDOWN_IN_PROGRESS)
+                } else {
+                    ServiceControlHandlerResult::NoError
+                }
             }
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
             _ => ServiceControlHandlerResult::NotImplemented,
@@ -83,7 +92,9 @@ fn run_service() -> platform_lib::Result<()> {
     status_handle.set_service_status(ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
         current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        controls_accepted: ServiceControlAccept::STOP
+            | ServiceControlAccept::SHUTDOWN
+            | ServiceControlAccept::TRIGGER_EVENT,
         exit_code: ServiceExitCode::Win32(0),
         checkpoint: 0,
         wait_hint: Duration::default(),

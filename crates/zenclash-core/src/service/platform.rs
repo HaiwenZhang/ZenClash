@@ -53,7 +53,7 @@ fn open_registered_service() -> Result<Option<windows_service::service::Service>
         WindowsServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
     match manager.open_service(
         zenclash_service::WINDOWS_SERVICE_NAME,
-        ServiceAccess::QUERY_STATUS,
+        ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG,
     ) {
         Ok(service) => Ok(Some(service)),
         Err(WindowsServiceError::Winapi(error))
@@ -75,7 +75,7 @@ pub fn trusted_service_evidence() -> Result<bool> {
 }
 
 /// Whether IPC cannot succeed until the service is started again. A service that is starting, or
-/// that the SCM has not started yet this boot, is left to the IPC retries, which wait for it.
+/// that SCM can trigger-start, or has not started yet this boot, is left to IPC activation/retries.
 #[cfg(windows)]
 ///
 /// # Errors
@@ -91,6 +91,7 @@ pub fn service_stopped() -> Result<bool> {
         .query_status()
         .context("failed to query Windows service status")?;
     Ok(status.current_state == ServiceState::Stopped
+        && !zenclash_service::windows_service_can_activate(&service)?
         && status.exit_code != ServiceExitCode::Win32(ERROR_SERVICE_NEVER_STARTED))
 }
 

@@ -64,6 +64,83 @@ fn decodes_null_mihomo_connection_collection_as_empty() {
 }
 
 #[test]
+fn decodes_null_tun_dns_hijack_without_losing_runtime_settings() {
+    let config: RuntimeConfig = serde_json::from_str(
+        r#"{"mixed-port":7890,"mode":"rule","tun":{"enable":true,"stack":"mixed","dns-hijack":null,"auto-route":true},"sniffing":false}"#,
+    ).unwrap();
+
+    assert_eq!(
+        config.tun,
+        TunConfig {
+            enable: true,
+            stack: "mixed".into(),
+            auto_route: true,
+            ..Default::default()
+        }
+    );
+    assert_eq!(config.system_proxy_port(), Some(7890));
+}
+
+#[test]
+fn decodes_null_connection_chains_as_empty() {
+    let snapshot: ConnectionsSnapshot = serde_json::from_str(
+        r#"{"connections":[{"id":"direct","chains":null}],"downloadTotal":12}"#,
+    )
+    .unwrap();
+
+    assert_eq!(snapshot.connections[0].chains, Vec::<String>::new());
+    assert_eq!(snapshot.connections[0].id, "direct");
+}
+
+#[test]
+fn decodes_null_provider_proxies_as_empty() {
+    let catalog: ProviderCatalog =
+        serde_json::from_str(r#"{"providers":{"empty":{"name":"empty","proxies":null}}}"#).unwrap();
+
+    assert!(catalog.providers["empty"].proxies.is_empty());
+}
+
+#[test]
+fn decodes_null_rule_collection_as_empty() {
+    let catalog: RuleCatalog = serde_json::from_str(r#"{"rules":null}"#).unwrap();
+
+    assert!(catalog.rules.is_empty());
+}
+
+#[test]
+fn decodes_null_dns_questions_and_answers_as_empty() {
+    let response: DnsQueryResponse =
+        serde_json::from_str(r#"{"Status":3,"Question":null,"Answer":null}"#).unwrap();
+
+    assert_eq!(
+        response,
+        DnsQueryResponse {
+            status: 3,
+            ..Default::default()
+        }
+    );
+}
+
+#[test]
+fn null_collection_compatibility_preserves_non_empty_arrays() {
+    let config: RuntimeConfig =
+        serde_json::from_str(r#"{"tun":{"dns-hijack":["any:53","tcp://any:53"]}}"#).unwrap();
+
+    assert_eq!(config.tun.dns_hijack, ["any:53", "tcp://any:53"]);
+}
+
+#[test]
+fn null_collection_compatibility_rejects_non_array_values() {
+    for value in [r#""any:53""#, "{}", "42", "true"] {
+        let response = format!(r#"{{"tun":{{"dns-hijack":{value}}}}}"#);
+        assert!(
+            serde_json::from_str::<RuntimeConfig>(&response).is_err(),
+            "{response}"
+        );
+    }
+}
+
+#[test]
 fn decodes_rule_provider_conversion_metadata() {
     let catalog: ProviderCatalog = serde_json::from_str(
         r#"{"providers":{"domains":{"name":"domains","vehicleType":"HTTP","behavior":"domain","format":"mrs","ruleCount":42}}}"#,

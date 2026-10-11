@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use super::deserialize_null_default;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -30,7 +31,7 @@ pub struct Provider {
     #[serde(default, rename = "testUrl")]
     pub test_url: String,
     /// Raw provider proxy entries.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub proxies: Vec<Value>,
     /// Number of rules in a rule provider.
     #[serde(default, rename = "ruleCount")]

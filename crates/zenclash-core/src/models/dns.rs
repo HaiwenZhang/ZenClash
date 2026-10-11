@@ -1,3 +1,4 @@
+use super::deserialize_null_default;
 use serde::{Deserialize, Serialize};
 
 /// DNS record kinds supported by Mihomo's controller query endpoint.
@@ -72,9 +73,9 @@ pub struct DnsQueryResponse {
     #[serde(default, rename = "CD")]
     pub checking_disabled: bool,
     /// Questions echoed by the resolver.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub question: Vec<DnsQuestion>,
     /// Resource records returned by the resolver.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub answer: Vec<DnsAnswer>,
 }

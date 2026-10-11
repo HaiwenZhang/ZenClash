@@ -333,7 +333,7 @@ struct RawProxy {
     kind: String,
     #[serde(default)]
     now: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::models::deserialize_null_default")]
     all: Vec<String>,
     #[serde(default)]
     alive: Option<bool>,
@@ -347,7 +347,7 @@ struct RawProxy {
     mptcp: bool,
     #[serde(default)]
     smux: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::models::deserialize_null_default")]
     history: Vec<DelayHistory>,
     #[serde(default, rename = "provider-name")]
     provider_name: Option<String>,
@@ -477,6 +477,18 @@ impl From<RawProxyCatalog> for ProxyCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn null_proxy_members_and_history_decode_as_empty_collections() {
+        let raw: RawProxyCatalog = serde_json::from_str(
+            r#"{"proxies":{"empty":{"name":"empty","type":"Selector","all":null,"history":null}}}"#,
+        )
+        .unwrap();
+
+        let proxy = &raw.proxies["empty"];
+        assert!(proxy.all.is_empty());
+        assert!(proxy.history.is_empty());
+    }
 
     #[test]
     fn configured_group_order_is_preserved_instead_of_name_or_selector_priority() {

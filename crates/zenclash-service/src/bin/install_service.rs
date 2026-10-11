@@ -905,16 +905,11 @@ fn main() -> anyhow::Result<()> {
 
     let manager_access = ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE;
     let service_manager = ServiceManager::local_computer(None::<&str>, manager_access)?;
-    let start_type = if cfg!(feature = "development-channel") {
-        ServiceStartType::OnDemand
-    } else {
-        ServiceStartType::AutoStart
-    };
     let service_info = ServiceInfo {
         name: OsString::from(zenclash_service::WINDOWS_SERVICE_NAME),
         display_name: OsString::from(zenclash_service::SERVICE_DISPLAY_NAME),
         service_type: ServiceType::OWN_PROCESS,
-        start_type,
+        start_type: ServiceStartType::OnDemand,
         error_control: ServiceErrorControl::Normal,
         executable_path: target.clone(),
         launch_arguments: vec![],
@@ -940,6 +935,8 @@ fn main() -> anyhow::Result<()> {
                     .to_string_lossy()
                     .trim_matches('"')
                     == target.to_string_lossy()
+                && service.query_config()?.start_type == ServiceStartType::OnDemand
+                && zenclash_service::windows_service_can_activate(&service)?
                 && installed_payload_matches(
                     &source,
                     &target,
@@ -979,6 +976,7 @@ fn main() -> anyhow::Result<()> {
             install_service_cores(&options.cores)?;
             publish_staged_binary(&staged, &target)?;
             service.change_config(&service_info)?;
+            zenclash_service::configure_windows_service_activation(&service)?;
             configure_windows_service_recovery(&service)?;
             service.start(&Vec::<&OsStr>::new())?;
             wait_for_service_ready()?;
@@ -995,6 +993,7 @@ fn main() -> anyhow::Result<()> {
     let service = service_manager.create_service(&service_info, start_access)?;
 
     service.set_description("ZenClash Service manages the Mihomo core")?;
+    zenclash_service::configure_windows_service_activation(&service)?;
     configure_windows_service_recovery(&service)?;
     service.start(&Vec::<&OsStr>::new())?;
     wait_for_service_ready()?;

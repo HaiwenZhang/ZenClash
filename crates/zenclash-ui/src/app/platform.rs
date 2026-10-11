@@ -28,6 +28,38 @@ pub(super) fn hide_native_window(window: &gpui_kit::Window) {
 }
 
 #[cfg(target_os = "windows")]
+#[cfg(not(test))]
+pub(super) fn hide_native_window(window: &gpui_kit::Window) {
+    set_native_window_visibility(window, false);
+}
+
+#[cfg(all(target_os = "windows", not(test)))]
+pub(super) fn show_native_window(window: &gpui_kit::Window) {
+    set_native_window_visibility(window, true);
+}
+
+#[cfg(all(target_os = "windows", not(test)))]
+fn set_native_window_visibility(window: &gpui_kit::Window, visible: bool) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOW, ShowWindowAsync};
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return;
+    };
+    // SAFETY: the borrowed handle belongs to this live GPUI window. Queue the
+    // change on its owning UI thread without re-entering the current GPUI update.
+    unsafe {
+        ShowWindowAsync(
+            handle.hwnd.get() as _,
+            if visible { SW_SHOW } else { SW_HIDE },
+        )
+    };
+}
+
+#[cfg(target_os = "windows")]
 pub(super) fn toggle_window_maximized(window: &gpui_kit::Window) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows_sys::Win32::UI::WindowsAndMessaging::{SW_MAXIMIZE, SW_RESTORE, ShowWindowAsync};

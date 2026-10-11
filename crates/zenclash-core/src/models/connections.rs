@@ -1,5 +1,6 @@
 use std::fmt;
 
+use super::deserialize_null_default;
 use serde::{
     Deserialize, Serialize,
     de::{IgnoredAny, SeqAccess, Visitor},
@@ -120,7 +121,7 @@ pub struct Connection {
     #[serde(default)]
     pub start: String,
     /// Proxy chain selected for this connection.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub chains: Vec<String>,
     /// Rule type that matched the connection.
     #[serde(default)]
@@ -163,14 +164,6 @@ pub struct ConnectionMetadata {
     /// Process name owning the connection, when available.
     #[serde(default)]
     pub process: String,
-}
-
-fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de> + Default,
-{
-    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 fn deserialize_connection_count<'de, D>(deserializer: D) -> Result<usize, D::Error>

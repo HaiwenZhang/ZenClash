@@ -76,6 +76,29 @@ fn keep_main_window_alive_when_closed(
     });
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn keep_main_window_alive_when_closed(
+    window: &gpui_kit::Window,
+    app: gpui_kit::WeakEntity<ZenClashApp>,
+    cx: &App,
+) {
+    window.on_window_should_close(cx, move |window, cx| {
+        retain_main_window_on_close(window, &app, cx)
+    });
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub(in crate::app) fn retain_main_window_on_close(
+    window: &mut gpui_kit::Window,
+    app: &gpui_kit::WeakEntity<ZenClashApp>,
+    cx: &mut App,
+) -> bool {
+    let _ = app.update(cx, |app, cx| {
+        app.hide_main_window_in(window, cx);
+    });
+    false
+}
+
 /// Opens the primary `ZenClash` window and installs the native traffic tray.
 pub fn create_main_window(services: AppServices, cx: &mut App) {
     open_main_window(services, None, None, cx);
@@ -213,16 +236,7 @@ fn open_main_window(
                     })
                     .detach();
                 }
-                #[cfg(target_os = "macos")]
                 keep_main_window_alive_when_closed(window, app.downgrade(), cx);
-                #[cfg(target_os = "windows")]
-                {
-                    let app_for_native_close = app.downgrade();
-                    window.on_window_should_close(cx, move |_, cx| {
-                        let _ = app_for_native_close.update(cx, |app, cx| app.begin_quit(None, cx));
-                        false
-                    });
-                }
                 let app_for_global_quit = app.downgrade();
                 cx.on_action(move |_: &Quit, cx| {
                     let _ = app_for_global_quit.update(cx, |app, cx| app.begin_quit(None, cx));
