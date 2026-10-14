@@ -14,8 +14,9 @@ use zenclash_core::{
     LogMonitor, LogStreamFormat, LogTimeSource, MihomoClient, MihomoEndpoint, MihomoLaunchConfig,
     MihomoLogLevel, MihomoProcess, NetworkLatencyTarget, NetworkProbeRoute, NetworkProbeService,
     Observation, OperationalStatus, ProfileApplication, ProfileApplyOutcome, ProfileChange,
-    ProfileStore, ProxyGroupBehavior, ProxyOperations, ProxyVisibility, RemoteProfileOptions,
-    RulesetBehavior, RulesetConverter, SystemNetworkSnapshot, TrafficMonitor, YamlOverrideStore,
+    ProfileStore, ProxyCatalog, ProxyGroupBehavior, ProxyOperations, ProxyVisibility,
+    RemoteProfileOptions, RulesetBehavior, RulesetConverter, SystemNetworkSnapshot, TrafficMonitor,
+    YamlOverrideStore,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -115,6 +116,7 @@ async fn proxy_catalog_preserves_subscription_group_and_member_order_across_relo
         .await
         .unwrap_or_else(|error| panic!("{error}\n{}", process.snapshot().logs.join("\n")));
     let client = MihomoClient::from_process(process.clone()).unwrap();
+    wait_for_real_proxy_groups(&client, &["z-stream", "a-backup", "Proxy"]).await;
     for expected in [
         ["z-stream", "a-backup", "Proxy"],
         ["Proxy", "z-stream", "a-backup"],
@@ -157,6 +159,77 @@ async fn proxy_catalog_preserves_subscription_group_and_member_order_across_relo
     drop(client);
     drop(process);
     fs::remove_dir_all(root).unwrap();
+}
+
+async fn wait_for_real_proxy_groups(client: &MihomoClient, expected: &[&str]) -> ProxyCatalog {
+    // /version can respond before Mihomo applies its initial proxy configuration.
+    // Wait for membership only; the caller must still assert order without retries.
+    let mut observed = Vec::new();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let catalog = client.proxy_catalog().await.expect("read real Mihomo proxy catalog");
+            observed = catalog.groups_for_mode("rule")
+                .map(|group| group.controller_name().to_owned())
+                .collect::<Vec<_>>();
+            if expected.iter().all(|name| observed.iter().any(|key| key == name)) {
+                return catalog;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("real Mihomo proxy groups did not become ready: expected {expected:?}, last observed {observed:?}"))
+}
+
+#[tokio::test]
+async fn proxy_group_readiness_waits_for_initial_configuration_without_waiting_for_order() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = MihomoClient::new(MihomoEndpoint::new(
+        format!("http://{}", listener.local_addr().unwrap()),
+        "",
+    ))
+    .unwrap();
+    let server = tokio::spawn(async move {
+        for (path, body) in [
+            ("/version", r#"{"version":"starting","meta":true}"#),
+            (
+                "/proxies",
+                r#"{"proxies":{"DIRECT":{"type":"Direct"},"GLOBAL":{"type":"Selector","all":["DIRECT"]}}}"#,
+            ),
+            (
+                "/proxies",
+                r#"{"proxies":{
+                "GLOBAL":{"type":"Selector","all":["DIRECT","Proxy","z-stream","a-backup"]},
+                "Proxy":{"type":"Selector","all":["DIRECT"]},
+                "z-stream":{"type":"Selector","all":["DIRECT"]},
+                "a-backup":{"type":"Selector","all":["DIRECT"]}
+            }}"#,
+            ),
+        ] {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+            }
+            assert!(request.starts_with(format!("GET {path} ").as_bytes()));
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        }
+    });
+
+    client.version().await.unwrap();
+    let catalog = wait_for_real_proxy_groups(&client, &["z-stream", "a-backup", "Proxy"]).await;
+    assert_eq!(
+        catalog
+            .groups_for_mode("rule")
+            .map(|group| group.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Proxy", "z-stream", "a-backup"]
+    );
+    server.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
