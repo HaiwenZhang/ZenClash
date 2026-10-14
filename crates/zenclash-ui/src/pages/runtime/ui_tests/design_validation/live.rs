@@ -299,7 +299,7 @@ fn physical_nodes(catalog: &ProxyCatalog) -> Vec<(String, Option<String>)> {
 }
 
 fn open_proxy_connections(port: u16) -> (Vec<std::net::TcpStream>, Option<u16>) {
-    use std::io::{Read, Write};
+    use std::io::Write;
     let request = |authority: &str,
                    connect: bool|
      -> std::io::Result<(std::net::TcpStream, Option<u16>)> {

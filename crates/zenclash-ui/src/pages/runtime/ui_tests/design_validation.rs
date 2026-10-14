@@ -2,9 +2,10 @@
 
 use super::*;
 use gpui_kit::base::TestSupportExt;
-use gpui_kit::component::{ActiveTheme, Root, ThemeMode};
+use gpui_kit::component::{ActiveTheme, Root, ThemeMode, WindowExt};
 use gpui_kit::{AnyView, Bounds, Render, WindowBounds, WindowOptions, point, size};
 use std::{cell::RefCell, rc::Rc};
+use zenclash_core::{Observation, RuleCatalog};
 
 mod live;
 

@@ -394,14 +394,43 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn output_rejects_an_oversized_stream_without_waiting_for_process_exit() {
-        let started = Instant::now();
-        let result = output_with_timeout(
-            "/bin/sh",
-            &["-c", "head -c 1048577 /dev/zero; sleep 1"],
-            Duration::from_secs(2),
-        );
+        let mut command = Command::new("/bin/sh");
+        // The owned stdin pipe keeps the shell alive until it is explicitly killed.
+        // This checks early rejection without depending on CI scheduling latency.
+        command
+            .args(["-c", "head -c 1048577 /dev/zero; read -r release"])
+            .stdin(Stdio::piped());
+        let result = output_from_command(command, "/bin/sh", Duration::from_secs(5));
         assert!(matches!(result, Err(message) if message.contains("1 MiB")));
-        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_collection_rejects_an_oversized_stream_while_the_child_is_alive() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "head -c 1048577 /dev/zero; read -r release"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let result = collect_child_output(
+            &mut child,
+            "/bin/sh",
+            Instant::now(),
+            Duration::from_secs(5),
+        );
+        let status = child.try_wait();
+        // Clean up before asserting so a failing assertion cannot orphan the shell.
+        abort_child(&mut child);
+
+        assert!(matches!(result, Err(PlatformCommandError::Io {
+            stage: PlatformCommandStage::ReadStdout, source, ..
+        }) if source.kind() == io::ErrorKind::InvalidData));
+        assert!(
+            status.unwrap().is_none(),
+            "collection must reject before exit"
+        );
     }
 
     #[test]

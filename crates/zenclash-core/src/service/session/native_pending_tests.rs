@@ -1,6 +1,8 @@
 // ZenClash native session safety regression, 2026-10-04. GPL-3.0-only.
 use super::*;
-use std::{path::PathBuf, sync::Arc, time::Duration};
+#[cfg(unix)]
+use std::path::PathBuf;
+use std::{sync::Arc, time::Duration};
 
 async fn native_start(
     session: &ServiceSession,
