@@ -6,6 +6,7 @@ use super::SystemProxyMode;
 use gpui_kit::component::input::TextareaState;
 
 mod actions;
+pub(in crate::pages::runtime) mod runtime_read;
 mod view;
 
 pub(super) struct SystemProxyEditorState {
@@ -22,3 +23,6 @@ struct SystemProxyForm {
     bypass: Vec<String>,
     pac_script: String,
 }
+
+#[cfg(test)]
+mod ui_tests;

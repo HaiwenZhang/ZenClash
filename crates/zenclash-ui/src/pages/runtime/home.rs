@@ -1,3 +1,4 @@
+use crate::outbound_mode::OutboundMode;
 use std::{
     collections::VecDeque,
     time::{SystemTime, UNIX_EPOCH},
@@ -19,27 +20,29 @@ use gpui_kit::{
 use zenclash_core::{
     CapabilityState, CaptureOutcome, CapturePlan, CaptureStatus, ConnectionPolicy, Observation,
     OperationalSnapshot, ProcessRecoveryStatus, ProcessStatus, ProxyCatalog, ProxyGroup,
-    ProxyGroupBehavior, ProxyOperations, RuntimeConfig, StreamStatus, StreamStatuses,
-    SubscriptionUsage, SystemProxyOwnershipState, TrafficSample, format_speed,
+    ProxyGroupBehavior, RuntimeConfig, StreamStatus, StreamStatuses, SubscriptionUsage,
+    SystemProxyOwnershipState, TrafficSample, format_speed,
 };
 
 use crate::{
     app::{NavigateProfiles, NavigateSystemProxy, SetDirectMode, SetGlobalMode, SetRuleMode},
-    components::{
-        mint_switch::MintSwitch as Switch, sidebar::OutboundMode, wave_percentage::WavePercentage,
-    },
+    components::{mint_switch::MintSwitch as Switch, wave_percentage::WavePercentage},
 };
 
 use super::{
-    Context, FluentBuilder, Page, ProxySelectionChanged, RuntimeData, RuntimePage, context_note,
-    format_bytes, format_profile_age, normalized_fraction,
+    Context, FluentBuilder, Page, PageSnapshotData, ProxySelectionChanged, RuntimePage,
+    context_note, format_bytes, format_profile_age, normalized_fraction,
 };
 
 mod dashboard;
+pub(in crate::pages::runtime) mod dashboard_read;
+mod menu_size;
+use menu_size::HomeMenuSize;
 #[cfg(test)]
 mod flow;
 #[cfg(test)]
 mod history;
+mod proxy_selection;
 mod selector;
 mod traffic;
 #[cfg(all(test, target_os = "windows"))]
@@ -52,7 +55,7 @@ const MIN_TRAFFIC_CHART_CEILING: u64 = 1_024;
 #[derive(Default)]
 pub(super) struct HomeUiState {
     pub(super) profile_switching: Option<String>,
-    pub(super) proxy_switching: Option<(String, String)>,
+    pub(super) proxy_selection: crate::proxy_selection::ProxySelectionUiState,
     pub(super) proxy_error: Option<String>,
     capture_transition: Option<CaptureTransition>,
     pub(super) action_error: Option<String>,
@@ -68,6 +71,21 @@ pub(super) struct HomeUiState {
     history: history::HomeHistoryState,
     #[cfg(test)]
     design_validation: Option<(OperationalSnapshot, zenclash_core::TrafficSnapshot)>,
+}
+
+impl HomeUiState {
+    pub(in crate::pages::runtime) fn begin_profile_operation(&mut self, marker: String) {
+        self.profile_switching = Some(marker);
+        self.action_error = None;
+    }
+
+    pub(in crate::pages::runtime) fn finish_profile_operation(&mut self) {
+        self.profile_switching = None;
+    }
+
+    pub(in crate::pages::runtime) fn show_profile_error(&mut self, error: String) {
+        self.action_error = Some(error);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -127,8 +145,10 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let fallback_config = RuntimeConfig::default();
-        let config = match &self.data {
-            RuntimeData::Dashboard { config, .. } => config.value().unwrap_or(&fallback_config),
+        let config = match self.page_observation.data() {
+            PageSnapshotData::Dashboard { config, .. } => {
+                config.value().unwrap_or(&fallback_config)
+            }
             _ => &fallback_config,
         };
         let operational = self.home_operational_snapshot();
@@ -284,10 +304,10 @@ impl RuntimePage {
                 || zenclash_i18n::text("home.profile.expiry_unavailable"),
                 subscription_expiry,
             );
-        let active_id = self.profiles.catalog.active.clone();
+        let active_id = self.profiles.catalog().active.clone();
         let mut profiles = self
             .profiles
-            .catalog
+            .catalog()
             .profiles
             .iter()
             .take(HOME_PROFILE_PICKER_LIMIT)
@@ -298,7 +318,7 @@ impl RuntimePage {
         {
             profiles.push((active.id.clone(), active.name.clone()));
         }
-        let can_switch = self.profiles.store.is_some() && !profiles.is_empty();
+        let can_switch = self.profiles.store().is_some() && !profiles.is_empty();
         let runtime_page = cx.entity().downgrade();
         let profile_switch_tooltip =
             zenclash_i18n::text_with("home.profile.switch_current", &[("name", name.clone())]);
@@ -317,11 +337,9 @@ impl RuntimePage {
             .tooltip(profile_switch_tooltip)
             .loading(self.home.profile_switching.is_some())
             .disabled(self.core_busy() || !can_switch)
-            .dropdown_menu(move |mut menu, _, _| {
-                menu = menu
-                    .min_w(px(240.))
-                    .max_w(px(420.))
-                    .max_h(px(360.))
+            .dropdown_menu(move |menu, window, cx| {
+                let mut menu = HomeMenuSize::PROFILE_PICKER
+                    .apply_to(menu, window, cx)
                     .scrollable(true);
                 for (id, name) in &profiles {
                     let is_active = active_id.as_deref() == Some(id.as_str());
@@ -441,12 +459,13 @@ impl RuntimePage {
                                                             .child(zenclash_i18n::text(key)),
                                                     )
                                                     .child(
-                                                        div().text_size(px(26.)).font_bold().child(
-                                                            bytes.map_or_else(
+                                                        div()
+                                                            .text_size(gpui_kit::rems(1.625))
+                                                            .font_bold()
+                                                            .child(bytes.map_or_else(
                                                                 || "—".to_owned(),
                                                                 format_bytes,
-                                                            ),
-                                                        ),
+                                                            )),
                                                     )
                                             },
                                         ),
@@ -493,7 +512,7 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let transition = self.home.capture_transition.as_ref();
-        let service_pending = self.profile_service.pending_finalization().is_some();
+        let service_pending = self.application_commands.pending_finalization().is_some();
         let effective_capture = transition
             .and_then(|transition| transition.confirmed.as_ref())
             .unwrap_or(capture);
@@ -650,8 +669,8 @@ impl RuntimePage {
                                                         inset: false,
                                                         color: orb_color.opacity(0.38),
                                                         offset: gpui_kit::point(px(0.), px(0.)),
-                                                        blur_radius: px(14.),
-                                                        spread_radius: px(3.),
+                                                        blur_radius: theme.font_size * 0.875,
+                                                        spread_radius: theme.font_size * 0.1875,
                                                     }],
                                                 ),
                                             ),
@@ -667,7 +686,7 @@ impl RuntimePage {
                                             .flex_wrap()
                                             .child(
                                                 div()
-                                                    .text_size(px(26.))
+                                                    .text_size(gpui_kit::rems(1.625))
                                                     .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                                     .child(runtime_status),
                                             )
@@ -732,11 +751,11 @@ impl RuntimePage {
                     })
                     .children(
                         home_service_feedback(
-                            self.profile_service
+                            self.application_commands
                                 .service_state()
                                 .map(|state| state.phase()),
                             service_pending,
-                            self.profile_service.service_tun_warning(),
+                            self.application_commands.service_tun_warning(),
                             theme,
                         )
                         .map(|feedback| {
@@ -1095,70 +1114,6 @@ impl RuntimePage {
             .into_any_element()
     }
 
-    fn change_home_proxy(&mut self, group: String, proxy: String, cx: &mut Context<Self>) {
-        if self.page != Page::Home
-            || self.home.profile_switching.is_some()
-            || self.home.proxy_switching.is_some()
-        {
-            return;
-        }
-        self.invalidate_page_load();
-        let token = self.page_task_token_for(Page::Home);
-        self.home.proxy_switching = Some((group.clone(), proxy.clone()));
-        self.home.proxy_error = None;
-        let client = self.client.clone();
-        let task_group = group.clone();
-        let task_proxy = proxy.clone();
-        let task = self.runtime.spawn(async move {
-            ProxyOperations::new(client)
-                .apply_selection(&task_group, &task_proxy, ConnectionPolicy::KeepExisting)
-                .await
-                .map_err(|error| error.to_string())
-        });
-        cx.spawn(async move |this, cx| {
-            let result = task
-                .await
-                .map_err(|error| {
-                    zenclash_i18n::text_with(
-                        "proxies.errors.switch_task",
-                        &[("error", error.to_string())],
-                    )
-                })
-                .and_then(|result| result);
-            let _ = this.update(cx, |this, cx| {
-                if this.home.proxy_switching.as_ref() != Some(&(group.clone(), proxy.clone())) {
-                    return;
-                }
-                this.home.proxy_switching = None;
-                match result {
-                    Ok(receipt) => {
-                        for warning in receipt.warnings {
-                            tracing::warn!(%warning, "home proxy selection completed with a warning");
-                        }
-                        cx.emit(ProxySelectionChanged);
-                        if this.is_page_task_current(token) {
-                            apply_home_proxy_selection(&mut this.data, &group, &proxy);
-                            this.prepare_home_projection();
-                            this.notice = Some(zenclash_i18n::text_with(
-                                "home.proxy.switched",
-                                &[("name", proxy.clone())],
-                            ));
-                            this.refresh(cx);
-                        }
-                    }
-                    Err(error) => {
-                        if this.is_page_task_current(token) {
-                            this.home.proxy_error = Some(error);
-                        }
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
     fn apply_home_capture_plan(
         &mut self,
         plan: CapturePlan,
@@ -1319,17 +1274,6 @@ impl RuntimePage {
             cx.notify();
         }
     }
-}
-
-fn apply_home_proxy_selection(data: &mut RuntimeData, group_name: &str, proxy_name: &str) -> bool {
-    let RuntimeData::Dashboard { proxies, .. } = data else {
-        return false;
-    };
-    let catalog = match proxies {
-        Observation::Fresh { value, .. } | Observation::Stale { value, .. } => value,
-        Observation::Loading | Observation::Failed { .. } => return false,
-    };
-    catalog.set_group_selection(group_name, proxy_name.to_owned())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2049,11 +1993,7 @@ mod tests {
     fn rule_mode_summary_uses_the_primary_group_current_node() {
         let catalog = ProxyCatalog::from_group_nodes(
             vec![(
-                ProxyGroup {
-                    name: "Proxy".into(),
-                    now: "HK 01".into(),
-                    ..ProxyGroup::default()
-                },
+                ProxyGroup::new("Proxy").with_current_member("HK 01"),
                 vec![ProxyNode {
                     name: "HK 01".into(),
                     kind: "Hysteria2".into(),
@@ -2079,46 +2019,10 @@ mod tests {
     }
 
     #[test]
-    fn acknowledged_home_proxy_selection_updates_the_local_group_immediately() {
-        let mut data = RuntimeData::Dashboard {
-            config: Observation::Loading,
-            proxies: Observation::Fresh {
-                value: ProxyCatalog::from_group_nodes(
-                    vec![(
-                        ProxyGroup {
-                            name: "Proxy".into(),
-                            now: "HK 01".into(),
-                            behavior: ProxyGroupBehavior::Automatic { fixed: false },
-                            ..ProxyGroup::default()
-                        },
-                        Vec::new(),
-                    )],
-                    1,
-                ),
-                observed_at_ms: 10,
-            },
-        };
-
-        assert!(apply_home_proxy_selection(&mut data, "Proxy", "US 02"));
-        let RuntimeData::Dashboard { proxies, .. } = data else {
-            panic!("expected dashboard data");
-        };
-        let group = &proxies.value().expect("fresh proxy catalog").groups()[0];
-        assert_eq!(group.now, "US 02");
-        assert_eq!(
-            group.behavior,
-            ProxyGroupBehavior::Automatic { fixed: true }
-        );
-    }
-
-    #[test]
     fn load_balance_summary_does_not_offer_a_fake_manual_selection() {
-        let group = ProxyGroup {
-            name: "Balance".into(),
-            behavior: ProxyGroupBehavior::LoadBalance,
-            now: "HK 01".into(),
-            ..ProxyGroup::default()
-        };
+        let group = ProxyGroup::new("Balance")
+            .with_behavior(ProxyGroupBehavior::LoadBalance)
+            .with_current_member("HK 01");
         let catalog = ProxyCatalog::from_group_nodes(
             vec![(
                 group.clone(),
@@ -2220,7 +2124,9 @@ mod tests {
 
     #[gpui_kit::test]
     fn disabled_home_tun_keeps_checked_state_and_explains_why(cx: &mut gpui_kit::TestAppContext) {
-        use super::super::ui_tests::{Fixture, open};
+        use super::super::test_support::{
+            RuntimePageFixture as Fixture, open_runtime_page_window as open,
+        };
         use gpui_kit::AppContext;
         use gpui_kit::test::TestWindowExt;
 
@@ -2299,7 +2205,9 @@ mod tests {
 
     #[gpui_kit::test]
     fn fresh_tun_readback_replaces_a_completed_off_transition(cx: &mut gpui_kit::TestAppContext) {
-        use super::super::ui_tests::{Fixture, open};
+        use super::super::test_support::{
+            RuntimePageFixture as Fixture, open_runtime_page_window as open,
+        };
         use gpui_kit::AppContext;
         use gpui_kit::test::TestWindowExt;
         let fixture = Fixture::new();
@@ -2574,3 +2482,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod ui_tests;

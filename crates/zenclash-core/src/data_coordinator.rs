@@ -71,6 +71,10 @@ impl Drop for DataWriteLease {
 }
 
 impl DataWriteLease {
+    pub(crate) fn scopes(&self) -> &[PathBuf] {
+        &self.inner.paths
+    }
+
     pub(crate) fn shared(paths: impl IntoIterator<Item = PathBuf>) -> Self {
         acquire(paths, false)
     }
@@ -224,6 +228,29 @@ impl DataWriteAccess {
         let access = self.clone();
         tokio::task::spawn_blocking(move || access.acquire()).await
     }
+}
+
+/// Publishes memory while no active or waiting root restore overlaps cached read scopes.
+/// Keeps the existing coordinator guard through the callback, without registering a lease.
+/// Neither acquisition nor release waits or resolves filesystem aliases; callbacks must not
+/// acquire data/store/session locks or perform I/O (a caller may try_lock its store transaction).
+pub(crate) fn publish_if_data_available<T>(
+    scopes: &[PathBuf],
+    publish: impl FnOnce() -> T,
+) -> Option<T> {
+    let state = coordinator().state.try_lock()?;
+    if state
+        .active
+        .iter()
+        .any(|lease| lease.exclusive && overlapping(scopes, &lease.paths))
+        || state
+            .waiting_restores
+            .iter()
+            .any(|lease| overlapping(scopes, &lease.paths))
+    {
+        return None;
+    }
+    Some(publish())
 }
 
 fn coordinator() -> &'static Coordinator {
@@ -406,6 +433,40 @@ fn lexical_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn memory_publication_holds_the_original_coordinator_guard_and_releases_without_relocking() {
+        let root = test_root("memory-publication-guard");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(guard_held) = publish_if_data_available(std::slice::from_ref(&root), || {
+                coordinator().state.try_lock().is_none()
+            }) {
+                assert!(guard_held);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "coordinator never became available"
+            );
+            thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn memory_publication_rejects_an_active_restore_or_busy_coordinator_without_waiting() {
+        let root = test_root("memory-publication-busy");
+        let restoring = DataWriteLease::exclusive([root.clone()]);
+        assert!(
+            publish_if_data_available(std::slice::from_ref(&root), || panic!(
+                "active restore publication ran"
+            ))
+            .is_none()
+        );
+        drop(restoring);
+        let _state = coordinator().state.lock();
+        assert!(publish_if_data_available(&[root], || panic!("busy publication ran")).is_none());
+    }
+
     use super::*;
     use std::{
         sync::mpsc,

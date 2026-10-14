@@ -518,7 +518,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_cancels_an_inflight_sample_and_commits_the_pending_delta() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
 
         let database = TestDatabase::new("final-flush");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -527,8 +527,11 @@ mod tests {
         let server = tokio::spawn(async move {
             for sample in 1..=3 {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = [0; 4096];
-                let count = stream.read(&mut request).await.unwrap();
+                let request = zenclash_core::test_support::read_controller_request(&mut stream)
+                    .await
+                    .unwrap()
+                    .into_bytes();
+                let count = request.len();
                 assert!(request[..count].starts_with(b"GET /connections "));
                 if sample == 3 {
                     inflight.send(()).unwrap();

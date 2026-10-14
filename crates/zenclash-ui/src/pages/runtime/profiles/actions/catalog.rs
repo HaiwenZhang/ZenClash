@@ -14,7 +14,7 @@ impl RuntimePage {
     ) {
         let Some(profile) = self
             .profiles
-            .catalog
+            .catalog()
             .profiles
             .iter()
             .find(|profile| profile.id == id)
@@ -44,6 +44,8 @@ impl RuntimePage {
         let name = profile.name.clone();
         let url = url.clone();
         let user_agent = user_agent.clone();
+        let route = options.route();
+        let fixed_update_interval = options.fixed_update_interval;
         self.profiles
             .forms
             .request_name
@@ -67,8 +69,8 @@ impl RuntimePage {
         self.profiles.forms.update_cron.update(cx, |input, cx| {
             input.set_value(update_cron, window, cx);
         });
-        self.profiles.forms.editing_route = options.route();
-        self.profiles.forms.editing_fixed_update_interval = options.fixed_update_interval;
+        self.profiles.forms.editing_route = route;
+        self.profiles.forms.editing_fixed_update_interval = fixed_update_interval;
         self.profiles.forms.editing_profile_id = Some(id);
         self.error = None;
         let owner = cx.entity().downgrade();
@@ -86,7 +88,7 @@ impl RuntimePage {
                 .bg(cx.theme().group_box)
                 .margin_top(
                     ((window.viewport_size().height - window.rem_size() * 35.) / 2.)
-                        .max(gpui_kit::px(16.)),
+                        .max(window.rem_size()),
                 )
                 .when_some(content, |dialog, content| dialog.child(content))
                 .on_cancel(move |_, _, cx| {
@@ -123,7 +125,7 @@ impl RuntimePage {
         let Some(id) = self.profiles.forms.editing_profile_id.clone() else {
             return;
         };
-        let Some(store) = self.profiles.store.clone() else {
+        let Some(store) = self.profiles.store().cloned() else {
             self.error = Some(zenclash_i18n::text("profiles.errors.store_unavailable"));
             cx.notify();
             return;
@@ -242,12 +244,12 @@ impl RuntimePage {
         route: zenclash_core::RemoteProfileRoute,
         cx: &mut Context<Self>,
     ) {
-        let Some(store) = self.profiles.store.clone() else {
+        let Some(store) = self.profiles.store().cloned() else {
             return;
         };
         let Some(profile) = self
             .profiles
-            .catalog
+            .catalog()
             .profiles
             .iter()
             .find(|profile| profile.id == id)
@@ -313,7 +315,7 @@ impl RuntimePage {
         interval_minutes: u32,
         cx: &mut Context<Self>,
     ) {
-        let Some(store) = self.profiles.store.clone() else {
+        let Some(store) = self.profiles.store().cloned() else {
             return;
         };
         let Some(token) = self.begin_mutation(Page::Profiles) else {
@@ -371,12 +373,12 @@ impl RuntimePage {
     }
 
     pub(in super::super) fn update_all_managed_profiles(&mut self, cx: &mut Context<Self>) {
-        let Some(store) = self.profiles.store.clone() else {
+        let Some(store) = self.profiles.store().cloned() else {
             return;
         };
         let ids = self
             .profiles
-            .catalog
+            .catalog()
             .profiles
             .iter()
             .filter(|profile| profile.is_remote())
@@ -389,7 +391,7 @@ impl RuntimePage {
             return;
         };
         let controlled = self.controlled_config_store.clone();
-        let service = self.profile_service.clone();
+        let commands = self.application_commands.clone();
         let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
             let mut errors = Vec::new();
@@ -400,7 +402,7 @@ impl RuntimePage {
                     .spawn(workflow::update_remote(
                         store.clone(),
                         controlled.clone(),
-                        service.clone(),
+                        commands.clone(),
                         id,
                     ))
                     .await
@@ -423,7 +425,10 @@ impl RuntimePage {
                                 if let Some(warning) = outcome.receipt.warning() {
                                     errors.push(format!("{name}: {warning}"));
                                 }
-                                if page.profile_service.is_current(outcome.refresh_version) {
+                                if page
+                                    .application_commands
+                                    .is_current(outcome.refresh_version)
+                                {
                                     match outcome.refresh {
                                         Ok(data) => {
                                             page.replace_page_data(token, data, cx);
@@ -439,8 +444,8 @@ impl RuntimePage {
                         }
                         page.reload_profile_catalog(cx);
                         cx.notify();
-                        page.profiles.recovery.is_none()
-                            && page.profiles.pending_finalization.is_none()
+                        page.profiles.recovery().is_none()
+                            && page.profiles.pending_finalization().is_none()
                     })
                     .unwrap_or(false);
                 if !keep_going {
@@ -467,17 +472,17 @@ impl RuntimePage {
     }
 
     pub(in super::super) fn update_managed_profile(&mut self, id: String, cx: &mut Context<Self>) {
-        let Some(store) = self.profiles.store.clone() else {
+        let Some(store) = self.profiles.store().cloned() else {
             return;
         };
         let Some(token) = self.begin_mutation(Page::Profiles) else {
             return;
         };
         let controlled = self.controlled_config_store.clone();
-        let core_runtime = self.profile_service.clone();
+        let commands = self.application_commands.clone();
         let task = self
             .runtime
-            .spawn(workflow::update_remote(store, controlled, core_runtime, id));
+            .spawn(workflow::update_remote(store, controlled, commands, id));
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
@@ -498,7 +503,10 @@ impl RuntimePage {
                             cx.notify();
                             return;
                         }
-                        if !this.profile_service.is_current(outcome.refresh_version) {
+                        if !this
+                            .application_commands
+                            .is_current(outcome.refresh_version)
+                        {
                             this.refresh(cx);
                             cx.notify();
                             return;
@@ -539,7 +547,7 @@ impl RuntimePage {
     }
 
     pub(in super::super) fn delete_managed_profile(&mut self, id: String, cx: &mut Context<Self>) {
-        let Some(store) = self.profiles.store.clone() else {
+        let Some(store) = self.profiles.store().cloned() else {
             return;
         };
         let Some(token) = self.begin_mutation(Page::Profiles) else {

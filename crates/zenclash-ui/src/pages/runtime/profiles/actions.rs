@@ -43,7 +43,7 @@ impl RuntimePage {
                 .bg(cx.theme().group_box)
                 .margin_top(
                     ((window.viewport_size().height - window.rem_size() * 28.) / 2.)
-                        .max(gpui_kit::px(16.)),
+                        .max(window.rem_size()),
                 )
                 .close_button(!busy)
                 .overlay_closable(!busy)
@@ -72,7 +72,7 @@ impl RuntimePage {
         if !self.profiles.forms.adding_subscription || self.core_busy() {
             return;
         }
-        self.profiles.forms.adding_subscription = false;
+        self.profiles.forms.close_subscription();
         self.restore_page_focus(Page::Profiles, cx);
         cx.notify();
     }
@@ -81,10 +81,10 @@ impl RuntimePage {
         let Some(token) = self.begin_mutation(Page::Profiles) else {
             return;
         };
-        let service = self.profile_service.clone();
+        let commands = self.application_commands.clone();
         let task = self
             .runtime
-            .spawn(async move { service.confirm_service_runtime(version).await });
+            .spawn(async move { commands.confirm_service_runtime(version).await });
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
@@ -100,13 +100,13 @@ impl RuntimePage {
                 match result {
                     Ok(()) => {
                         if this.is_page_task_current(token)
-                            && this.profile_service.pending_finalization().is_none()
+                            && this.application_commands.pending_finalization().is_none()
                         {
                             this.notice = Some(zenclash_i18n::text("profiles.recovery.confirmed"));
                         }
                     }
                     Err(error) => {
-                        if this.profile_service.pending_finalization() == Some(version) {
+                        if this.application_commands.pending_finalization() == Some(version) {
                             this.set_profile_page_error(token, error);
                         }
                     }
@@ -129,9 +129,9 @@ impl RuntimePage {
         };
         let client = self.client.clone();
         let controlled = self.controlled_config_store.clone();
-        let core_runtime = self.profile_service.clone();
+        let commands = self.application_commands.clone();
         let task = self.runtime.spawn(async move {
-            let outcome = workflow::reload_effective(controlled, &core_runtime).await?;
+            let outcome = workflow::reload_effective(controlled, &commands).await?;
             load_page(client, Page::Profiles)
                 .await
                 .map(|data| (outcome.generation, data))
@@ -149,23 +149,15 @@ impl RuntimePage {
                 match result {
                     Ok((runtime_version, data)) => {
                         this.synchronize_committed_profile(cx);
-                        if !this.profile_service.is_current(runtime_version) {
+                        if !this.application_commands.is_current(runtime_version) {
                             this.refresh(cx);
                             return;
                         }
                         if this.replace_page_data(token, data, cx) {
-                            this.notice =
-                                Some(if this.core_kind.capabilities().full_config_reload {
-                                    zenclash_i18n::text_with(
-                                        "profiles.notices.reloaded",
-                                        &[("core", this.core_kind.display_name().to_owned())],
-                                    )
-                                } else {
-                                    zenclash_i18n::text_with(
-                                        "profiles.notices.restarted",
-                                        &[("core", this.core_kind.display_name().to_owned())],
-                                    )
-                                });
+                            this.notice = Some(zenclash_i18n::text_with(
+                                "profiles.notices.reloaded",
+                                &[("core", this.core_kind.display_name().to_owned())],
+                            ));
                         }
                     }
                     Err(error) => this.set_profile_page_error(token, error),
@@ -178,33 +170,17 @@ impl RuntimePage {
     }
 
     pub(in super::super) fn reload_profile_catalog(&mut self, cx: &mut Context<Self>) {
-        let Some(store) = self.profiles.store.clone() else {
+        let Some(read) = self.profiles.start_read(&self.runtime) else {
             return;
         };
-        let generation = self.profiles.begin_read();
-        let task = self.runtime.spawn_blocking(move || {
-            let started = std::time::Instant::now();
-            let result = store.load().map_err(|error| error.to_string());
-            tracing::debug!(
-                elapsed_ms = started.elapsed().as_millis(),
-                "loaded profile catalog"
-            );
-            result
-        });
-        self.profiles.read_task.replace(&task);
         cx.spawn(async move |this, cx| {
-            let result = task
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|result| result);
+            let completion = read.finish().await;
             let _ = this.update(cx, |this, cx| {
-                if this.profiles.generation != generation {
+                let Some(result) = this.profiles.complete_read(completion) else {
                     return;
-                }
+                };
                 match result {
-                    Ok(catalog) => {
-                        this.profiles.accept_catalog(generation, catalog);
-                    }
+                    Ok(()) => {}
                     Err(error) if this.page == Page::Profiles => this.error = Some(error),
                     Err(error) => {
                         tracing::warn!(%error, "failed to reload profile catalog");
@@ -217,10 +193,10 @@ impl RuntimePage {
     }
 
     fn import_local_profile_for_page(&mut self, path: PathBuf, page: Page, cx: &mut Context<Self>) {
-        let Some(store) = self.profiles.store.clone() else {
+        let Some(store) = self.profiles.store().cloned() else {
             let error = zenclash_i18n::text("profiles.errors.store_unavailable");
             if page == Page::Home {
-                self.home.action_error = Some(error);
+                self.home.show_profile_error(error);
             } else {
                 self.error = Some(error);
             }
@@ -231,17 +207,12 @@ impl RuntimePage {
             return;
         };
         if page == Page::Home {
-            self.home.profile_switching = Some("local-import".into());
-            self.home.action_error = None;
+            self.home.begin_profile_operation("local-import".into());
         }
         let controlled = self.controlled_config_store.clone();
-        let core_runtime = self.profile_service.clone();
+        let commands = self.application_commands.clone();
         let task = self.runtime.spawn(workflow::import_local(
-            store,
-            controlled,
-            core_runtime,
-            path,
-            page,
+            store, controlled, commands, path, page,
         ));
         cx.spawn(async move |this, cx| {
             let result = task
@@ -255,7 +226,7 @@ impl RuntimePage {
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.finish_mutation(token);
-                this.home.profile_switching = None;
+                this.home.finish_profile_operation();
                 match result {
                     Ok(outcome) => this.apply_profile_activation(
                         outcome,
@@ -278,7 +249,7 @@ impl RuntimePage {
     }
 
     pub(super) fn add_remote_profile(&mut self, cx: &mut Context<Self>) {
-        let Some(store) = self.profiles.store.clone() else {
+        let Some(store) = self.profiles.store().cloned() else {
             self.profiles.forms.subscription_error =
                 Some(zenclash_i18n::text("profiles.errors.store_unavailable"));
             cx.notify();
@@ -337,15 +308,9 @@ impl RuntimePage {
             return;
         };
         let controlled = self.controlled_config_store.clone();
-        let core_runtime = self.profile_service.clone();
+        let commands = self.application_commands.clone();
         let task = self.runtime.spawn(workflow::add_remote(
-            store,
-            controlled,
-            core_runtime,
-            name,
-            url,
-            user_agent,
-            options,
+            store, controlled, commands, name, url, user_agent, options,
         ));
         cx.spawn(async move |this, cx| {
             let result = task
@@ -362,8 +327,7 @@ impl RuntimePage {
                 match result {
                     Ok(outcome) => {
                         this.profiles.forms.subscription_error = None;
-                        let was_adding = this.profiles.forms.adding_subscription;
-                        this.profiles.forms.adding_subscription = false;
+                        let was_adding = this.profiles.forms.close_subscription();
                         if was_adding && this.is_page_task_current(token) {
                             let _ = cx.update_window(this.window_handle, |_, window, cx| {
                                 window.close_dialog(cx)
@@ -409,24 +373,19 @@ impl RuntimePage {
         page: Page,
         cx: &mut Context<Self>,
     ) {
-        let Some(store) = self.profiles.store.clone() else {
+        let Some(store) = self.profiles.store().cloned() else {
             return;
         };
         let Some(token) = self.begin_mutation(page) else {
             return;
         };
         if page == Page::Home {
-            self.home.profile_switching = Some(id.clone());
-            self.home.action_error = None;
+            self.home.begin_profile_operation(id.clone());
         }
         let controlled = self.controlled_config_store.clone();
-        let core_runtime = self.profile_service.clone();
+        let commands = self.application_commands.clone();
         let task = self.runtime.spawn(workflow::activate_existing_for_page(
-            store,
-            controlled,
-            core_runtime,
-            id,
-            page,
+            store, controlled, commands, id, page,
         ));
         cx.spawn(async move |this, cx| {
             let result = task
@@ -440,7 +399,7 @@ impl RuntimePage {
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.finish_mutation(token);
-                this.home.profile_switching = None;
+                this.home.finish_profile_operation();
                 match result {
                     Ok(outcome) => this.apply_profile_activation(
                         outcome,
@@ -556,7 +515,7 @@ impl RuntimePage {
     fn set_profile_page_error(&mut self, token: PageTaskToken, error: String) {
         self.synchronize_profile_recovery();
         if token.page == Page::Home && self.is_page_task_current(token) {
-            self.home.action_error = Some(error);
+            self.home.show_profile_error(error);
         } else {
             self.set_page_error(token, error);
         }

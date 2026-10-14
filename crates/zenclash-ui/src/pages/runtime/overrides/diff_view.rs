@@ -2,7 +2,7 @@ use gpui_kit::{AnyElement, FontWeight};
 use zenclash_core::{ConfigDiffEntry, ConfigDiffKind, ConfigDiffReport};
 
 use super::super::{
-    FluentBuilder, IntoElement, ParentElement, Styled, div, empty_state, h_flex, px, setting_card,
+    FluentBuilder, IntoElement, ParentElement, Styled, div, empty_state, h_flex, setting_card,
     v_flex,
 };
 
@@ -72,7 +72,7 @@ fn render_diff_entry(entry: &ConfigDiffEntry, theme: &gpui_kit::component::Theme
                         .py_0p5()
                         .rounded_full()
                         .bg(color.opacity(0.12))
-                        .text_size(px(10.))
+                        .text_size(gpui_kit::rems(0.625))
                         .text_color(color)
                         .child(label),
                 )
@@ -115,7 +115,7 @@ fn value_column(
         .gap_1()
         .child(
             div()
-                .text_size(px(10.))
+                .text_size(gpui_kit::rems(0.625))
                 .text_color(theme.muted_foreground)
                 .child(label),
         )

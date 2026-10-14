@@ -1,30 +1,14 @@
-use std::path::PathBuf;
+use crate::application_commands::BackupRestoreReceipt;
 
-use zenclash_core::{
-    AppPreferences, ControlledConfigStore, ProfileCatalog, ProfileStore, YamlOverrideCatalog,
-    YamlOverrideStore,
-};
-
-use super::super::RuntimeData;
+use super::super::PageSnapshotData;
 
 mod actions;
 mod view;
 mod workflow;
 
 pub(in crate::pages::runtime) struct RestoreOutcome {
-    pub(in crate::pages::runtime) data_root: PathBuf,
-    pub(in crate::pages::runtime) preferences: AppPreferences,
-    pub(in crate::pages::runtime) catalog: ProfileCatalog,
-    pub(in crate::pages::runtime) profile_store: ProfileStore,
-    pub(in crate::pages::runtime) controlled_store: ControlledConfigStore,
-    pub(in crate::pages::runtime) controlled_config: serde_json::Value,
-    pub(in crate::pages::runtime) override_store: YamlOverrideStore,
-    pub(in crate::pages::runtime) override_catalog: YamlOverrideCatalog,
-    pub(in crate::pages::runtime) runtime_version: u64,
-    pub(in crate::pages::runtime) page_data: RuntimeData,
-    pub(in crate::pages::runtime) file_count: usize,
-    pub(in crate::pages::runtime) payload_bytes: u64,
-    pub(in crate::pages::runtime) cleanup_warning: Option<String>,
+    pub(in crate::pages::runtime) restored: BackupRestoreReceipt,
+    pub(in crate::pages::runtime) page_data: PageSnapshotData,
 }
 
 pub(super) fn format_backup_size(bytes: u64) -> String {
@@ -54,3 +38,6 @@ mod tests {
         assert_eq!(format_backup_size(2_621_440), "2.5 MiB");
     }
 }
+
+#[cfg(test)]
+mod ui_tests;

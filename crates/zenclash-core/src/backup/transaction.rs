@@ -7,7 +7,7 @@ use std::{
 use super::{BackupError, BackupRestoreTransaction, BackupResult, PreparedBackupRestore};
 
 pub(super) const LIVE_ITEMS: [&str; 4] = [
-    "preferences.json",
+    super::PREFERENCES_PATH,
     "controlled-config",
     "profiles",
     "yaml-overrides",
@@ -48,10 +48,7 @@ pub(super) fn activate(
             BackupError::Transaction(zenclash_i18n::text("core_page.service.stale"))
         })?;
         if current.runtime_descriptor().backend() != crate::CoreRuntimeBackend::Local
-            || (
-                current.runtime_descriptor().binding_generation(),
-                current.generation(),
-            ) != expected
+            || current.runtime_revision() != expected
         {
             return Err(BackupError::Transaction(zenclash_i18n::text(
                 "core_page.service.stale",
@@ -71,6 +68,8 @@ pub(super) fn activate(
     let rollback_root = create_unique_directory(parent, ".zenclash-backup-rollback")?;
     let remove_empty_data_root = !prepared.data_root.exists();
     fs::create_dir_all(&prepared.data_root)?;
+    crate::AppPreferencesStore::new(prepared.data_root.join(super::PREFERENCES_PATH))
+        .invalidate_observations();
     let mut installed = Vec::new();
     let mut preserved = Vec::new();
     for item in LIVE_ITEMS {
@@ -194,6 +193,8 @@ fn restore_previous(
     preserved: &mut Vec<&'static str>,
     remove_empty_data_root: bool,
 ) -> BackupResult<()> {
+    crate::AppPreferencesStore::new(data_root.join(super::PREFERENCES_PATH))
+        .invalidate_observations();
     while let Some(item) = installed.last() {
         remove_path(&data_root.join(item))?;
         installed.pop();

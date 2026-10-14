@@ -242,6 +242,250 @@ fn sqlite_store_rejects_unbounded_trend_queries() {
 }
 
 #[test]
+fn overview_keeps_totals_rankings_and_trend_consistent_during_retention() {
+    use std::sync::{Arc, Barrier};
+
+    let path = test_database("concurrent-overview");
+    let store = TrafficHistoryStore::new(&path);
+    let rows = (0..256)
+        .map(|_| entry(1, "Inner", "fixture.invalid", "DIRECT", "fixture", 1, 2))
+        .collect::<Vec<_>>();
+    store.insert_and_cleanup(&rows, 0).unwrap();
+    let ready = Arc::new(Barrier::new(2));
+    let writer = store.clone();
+    let writer_ready = ready.clone();
+    let writes = std::thread::spawn(move || {
+        writer_ready.wait();
+        for revision in 2..66 {
+            let rows = (0..256)
+                .map(|_| {
+                    entry(
+                        revision,
+                        "Inner",
+                        "fixture.invalid",
+                        "DIRECT",
+                        "fixture",
+                        revision,
+                        revision * 2,
+                    )
+                })
+                .collect::<Vec<_>>();
+            writer.insert_and_cleanup(&rows, revision).unwrap();
+        }
+    });
+    let query = TrafficHistoryQuery {
+        dimension: TrafficDimension::Host,
+        start_ms: 0,
+        end_ms: 100,
+        bucket_ms: 101,
+    };
+    ready.wait();
+    let mut inconsistent = None;
+    for _ in 0..200 {
+        let overview = store.overview(&query).unwrap();
+        let ranked = overview
+            .rankings
+            .iter()
+            .map(|rank| rank.upload)
+            .sum::<u64>();
+        let trended = overview.trend.iter().map(|point| point.upload).sum::<u64>();
+        if overview.totals.upload != ranked || ranked != trended {
+            inconsistent = Some((overview.totals.upload, ranked, trended));
+            break;
+        }
+    }
+    writes.join().unwrap();
+    cleanup_database(&path);
+    assert_eq!(
+        inconsistent, None,
+        "one overview must use one database snapshot"
+    );
+}
+
+#[test]
+fn historical_snapshot_includes_the_selected_drill_down_for_each_dimension() {
+    let path = test_database("selected-snapshot");
+    let store = TrafficHistoryStore::new(&path);
+    store
+        .insert_and_cleanup(
+            &[
+                entry(1_000, "Inner", "one.example", "香港 01", "curl", 10, 20),
+                entry(1_200, "remote", "one.example", "香港 01", "browser", 5, 15),
+                entry(2_200, "Inner", "two.example", "DIRECT", "curl", 30, 10),
+            ],
+            0,
+        )
+        .unwrap();
+    for (dimension, parent, detail, parent_total, detail_total) in [
+        (TrafficDimension::Host, "one.example", "Inner", 50, 30),
+        (TrafficDimension::SourceIp, "Inner", "one.example", 70, 30),
+        (TrafficDimension::Outbound, "香港 01", "one.example", 50, 50),
+        (TrafficDimension::Process, "curl", "one.example", 70, 30),
+    ] {
+        let query = TrafficHistoryQuery {
+            dimension,
+            start_ms: 1_000,
+            end_ms: 2_999,
+            bucket_ms: 1_000,
+        };
+        let snapshot = store
+            .query(
+                &query,
+                &TrafficHistorySelection::Detail {
+                    parent: parent.into(),
+                    detail: detail.into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(snapshot.overview.totals.total, 90);
+        assert_eq!(
+            snapshot.details.iter().map(|row| row.total).sum::<u64>(),
+            parent_total
+        );
+        assert_eq!(snapshot.proxy_stats[0].label, "香港 01");
+        assert_eq!(snapshot.proxy_stats[0].total, detail_total);
+
+        let parent_only = store
+            .query(
+                &query,
+                &TrafficHistorySelection::Parent {
+                    parent: parent.into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(parent_only.details, snapshot.details);
+        assert!(parent_only.proxy_stats.is_empty());
+        let overview_only = store
+            .query(&query, &TrafficHistorySelection::Overview)
+            .unwrap();
+        assert_eq!(overview_only.overview, snapshot.overview);
+        assert!(overview_only.details.is_empty() && overview_only.proxy_stats.is_empty());
+    }
+    cleanup_database(&path);
+}
+
+#[test]
+fn historical_snapshot_preserves_empty_selected_labels() {
+    let path = test_database("empty-selected-labels");
+    let store = TrafficHistoryStore::new(&path);
+    store
+        .insert_and_cleanup(&[entry(1, "", "", "DIRECT", "", 7, 11)], 0)
+        .unwrap();
+    let snapshot = store
+        .query(
+            &TrafficHistoryQuery {
+                dimension: TrafficDimension::Host,
+                start_ms: 0,
+                end_ms: 2,
+                bucket_ms: 3,
+            },
+            &TrafficHistorySelection::Detail {
+                parent: String::new(),
+                detail: String::new(),
+            },
+        )
+        .unwrap();
+    assert_eq!(snapshot.details[0].label, "");
+    assert_eq!(snapshot.proxy_stats[0].total, 18);
+    cleanup_database(&path);
+}
+
+#[test]
+fn historical_snapshot_remains_consistent_during_recording_cleanup_and_clear() {
+    use std::sync::{Arc, Barrier};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let path = test_database("concurrent-selected-snapshot");
+    let store = TrafficHistoryStore::new(&path);
+    // Future observations remain admissible after clear writes its time watermark.
+    let start_ms = u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+        + 60_000;
+    store
+        .insert_and_cleanup(
+            &[entry(
+                start_ms,
+                "Inner",
+                "fixture.invalid",
+                "DIRECT",
+                "fixture",
+                1,
+                2,
+            )],
+            0,
+        )
+        .unwrap();
+    let ready = Arc::new(Barrier::new(2));
+    let writer = store.clone();
+    let writer_ready = ready.clone();
+    let writes = std::thread::spawn(move || {
+        writer_ready.wait();
+        for revision in 1..65 {
+            if revision % 8 == 0 {
+                writer.clear().unwrap();
+            }
+            let timestamp = start_ms + revision;
+            let rows = (0..256)
+                .map(|_| {
+                    entry(
+                        timestamp,
+                        "Inner",
+                        "fixture.invalid",
+                        "DIRECT",
+                        "fixture",
+                        revision,
+                        revision * 2,
+                    )
+                })
+                .collect::<Vec<_>>();
+            writer.insert_and_cleanup(&rows, timestamp).unwrap();
+        }
+    });
+    let query = TrafficHistoryQuery {
+        dimension: TrafficDimension::Host,
+        start_ms,
+        end_ms: start_ms + 100,
+        bucket_ms: 101,
+    };
+    let selection = TrafficHistorySelection::Detail {
+        parent: "fixture.invalid".into(),
+        detail: "Inner".into(),
+    };
+    ready.wait();
+    let mut inconsistent = None;
+    for _ in 0..200 {
+        let snapshot = store.query(&query, &selection).unwrap();
+        let totals = [
+            snapshot.overview.totals.total,
+            snapshot.overview.rankings.iter().map(|row| row.total).sum(),
+            snapshot
+                .overview
+                .trend
+                .iter()
+                .map(|row| row.upload + row.download)
+                .sum(),
+            snapshot.details.iter().map(|row| row.total).sum(),
+            snapshot.proxy_stats.iter().map(|row| row.total).sum(),
+        ];
+        if totals.iter().any(|&total| total != totals[0]) {
+            inconsistent = Some(totals);
+            break;
+        }
+    }
+    writes.join().unwrap();
+    cleanup_database(&path);
+    assert_eq!(
+        inconsistent, None,
+        "all selected history facts must use one snapshot"
+    );
+}
+
+#[test]
 fn sqlite_store_evicts_oldest_samples_at_the_global_budget() {
     let path = test_database("global-budget");
     let store = TrafficHistoryStore::new(&path);

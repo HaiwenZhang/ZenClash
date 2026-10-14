@@ -10,54 +10,20 @@ use super::super::{
     Page, RuntimeConfigApplied, RuntimePage, format_bytes, info_row, load_page, setting_card,
 };
 
-#[derive(Default)]
-pub(crate) struct CoreReleaseState {
-    releases: Vec<MihomoRelease>,
-    loading: bool,
-    pub(in crate::pages::runtime) error: Option<String>,
-}
-
 impl RuntimePage {
     fn fetch_core_releases(&mut self, cx: &mut Context<Self>) {
         if !self.core_kind.capabilities().core_upgrade {
-            self.core_releases.error = Some(zenclash_i18n::text_with(
-                "core_page.errors.release_unsupported",
-                &[("core", self.core_kind.display_name().to_owned())],
-            ));
+            self.core_releases.reject_unsupported(self.core_kind);
             cx.notify();
             return;
         }
-        if self.core_releases.loading {
+        let Some(read) = self.core_releases.start_read(&self.runtime) else {
             return;
-        }
-        self.core_releases.loading = true;
-        self.core_releases.error = None;
-        let task = self.runtime.spawn(async {
-            MihomoReleaseService::new()
-                .map_err(|error| error.to_string())?
-                .releases(12)
-                .await
-                .map_err(|error| error.to_string())
-        });
+        };
         cx.spawn(async move |this, cx| {
-            let result = task
-                .await
-                .map_err(|error| {
-                    zenclash_i18n::text_with(
-                        "core_page.errors.release_list_task",
-                        &[("error", error.to_string())],
-                    )
-                })
-                .and_then(|result| result);
+            let completion = read.finish().await;
             let _ = this.update(cx, |this, cx| {
-                this.core_releases.loading = false;
-                match result {
-                    Ok(releases) => {
-                        this.core_releases.releases = releases;
-                        this.core_releases.error = None;
-                    }
-                    Err(error) => this.core_releases.error = Some(error),
-                }
+                this.core_releases.complete_read(completion);
                 cx.notify();
             });
         })
@@ -116,7 +82,7 @@ impl RuntimePage {
                     Ok((outcome, refreshed)) => {
                         // The executable transition committed even if its page has since closed.
                         cx.emit(RuntimeConfigApplied);
-                        if !this.profile_service.is_current(outcome.generation) {
+                        if !this.application_commands.is_current(outcome.generation) {
                             this.invalidate_page_load();
                             this.refresh(cx);
                             return;
@@ -153,7 +119,7 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let releases = self.core_releases.releases.clone();
+        let releases = self.core_releases.releases().to_vec();
         setting_card(
             zenclash_i18n::text("core_page.maintenance.versioned_title"),
             theme,
@@ -233,18 +199,18 @@ impl RuntimePage {
             h_flex().justify_end().p_4().child(
                 Button::new("fetch-mihomo-releases")
                     .icon(crate::assets::AppIcon::RefreshCw)
-                    .label(zenclash_i18n::text(if self.core_releases.loading {
+                    .label(zenclash_i18n::text(if self.core_releases.is_loading() {
                         "core_page.maintenance.loading_versions"
-                    } else if self.core_releases.releases.is_empty() {
+                    } else if self.core_releases.releases().is_empty() {
                         "core_page.maintenance.load_versions"
                     } else {
                         "core_page.maintenance.refresh_versions"
                     }))
                     .small()
                     .primary()
-                    .loading(self.core_releases.loading)
+                    .loading(self.core_releases.is_loading())
                     .disabled(
-                        self.core_releases.loading
+                        self.core_releases.is_loading()
                             || self.core_busy()
                             || !self.core_kind.capabilities().core_upgrade,
                     )

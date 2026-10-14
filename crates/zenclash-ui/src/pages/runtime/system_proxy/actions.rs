@@ -361,7 +361,7 @@ impl RuntimePage {
         cx.spawn(async move |this, cx| {
             let message = task.await.unwrap_or_else(|_| unavailable_message(None));
             let _ = this.update(cx, |this, cx| {
-                if this.profile_service.is_current(version) {
+                if this.application_commands.is_current(version) {
                     this.set_page_error(token, message);
                     cx.notify();
                 }

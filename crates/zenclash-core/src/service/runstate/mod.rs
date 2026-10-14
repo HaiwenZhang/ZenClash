@@ -1,9 +1,9 @@
 // Forked from Clash Verge Rev; adapted for ZenClash on 2026-10-04.
 // GPL-3.0-only; see NOTICE.md and UPSTREAM.json.
-//! The single answer to how the Core runs and what backs it.
+//! Versioned service health, session intent and privileged-operation admission.
 //!
-//! Core lifecycle stays in `CoreManager`; this module owns its state, service health, pending
-//! actions, and the privileged-operation lock. Reads differ only in freshness.
+//! `CoreSession` owns core lifecycle transitions. This store retains health and pending
+//! actions, projects running-mode facts through its host, and makes read freshness explicit.
 
 mod env;
 use crate::service::health;

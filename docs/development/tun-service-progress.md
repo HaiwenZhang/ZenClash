@@ -46,7 +46,7 @@ Windows 旧注册迁移核对确认：现有 SCM 模块能验证固定 LocalSyst
 
 新增默认忽略的 [真实恢复专项](../../crates/zenclash-core/tests/real_local_recovery.rs)。首次执行揭示夹具的外部 binary 不在恢复租约内，负例仅检查 is_err 曾误通过；复制正式 binary 到独立 home 后再运行。实际 Windows 红测随后证实生产问题：原 home 保持不变，但双槽 provider 位于其外，Mihomo v1.19.30 在配置预检中以 SAFE_PATHS 拒绝。授权生成恢复资源不等于 Mihomo 允许读取它们，普通 Rust 子进程夹具未覆盖该正式内核规则。
 
-[恢复准入](../../crates/zenclash-core/src/service_runtime/local_geodata.rs) 在租约、普通 binary 与 TUN-off 检查后，只为准确受控双槽 runtime.yaml 设置私有内存许可；[Process](../../crates/zenclash-core/src/process.rs) 和 [Validator](../../crates/zenclash-core/src/core_validation.rs) 给预检与启动传入两个固定槽的 SAFE_PATHS，覆盖继承的宽泛路径并移除继承的 SKIP_SAFE_PATH_CHECK。仍使用原 home，普通非恢复 owner 默认无此许可，meow 行为不变；许可根纳入 Data 协调，没有新增依赖、协议、用户设置或持久结构。
+[恢复准入](../../crates/zenclash-core/src/service_runtime/local_geodata.rs) 在租约、普通 binary 与 TUN-off 检查后，只为准确受控双槽 runtime.yaml 设置私有内存许可；[Process](../../crates/zenclash-core/src/managed_core_process.rs) 和 [Validator](../../crates/zenclash-core/src/core_validation.rs) 给预检与启动传入两个固定槽的 SAFE_PATHS，覆盖继承的宽泛路径并移除继承的 SKIP_SAFE_PATH_CHECK。仍使用原 home，普通非恢复 owner 默认无此许可；许可根纳入 Data 协调，没有新增依赖、协议、用户设置或持久结构。
 
 单槽初版通过恢复启动和普通重启，但新增真实轮换热重载回归再次实际失败，slot1 被原 slot0 许可拒绝；改为两个准确固定槽后通过。成功用例删除测试原始源及 provider 后消费 held-node，普通重启 PID 更换，热重载到另一槽读取 held-next 且 PID 不变；无效代理组和双槽/home 之外的 provider 均在实际预检阶段拒绝，没有活动子进程。Mihomo 并不保证损坏的 file-provider 内容使启动失败，因此失败用例改用明确无效的代理组类型，没有把非致命 provider 错误当作生产 bug。夹具同步回收进程后清理临时目录，默认忽略且不自动下载内核。
 
@@ -56,7 +56,7 @@ Windows 旧注册迁移核对确认：现有 SCM 模块能验证固定 LocalSyst
 
 ### 2026-10-04 直接重启的配置语义与当前维护验证
 
-核对 [GUI 直接重启](../../crates/zenclash-ui/src/pages/runtime/mihomo.rs)、[Process 冻结输入](../../crates/zenclash-core/src/process.rs) 与 [Manager 自动配置交接](../../crates/zenclash-core/src/service_manager/tun.rs)，确认直接重启使用当前生成文件，而自动配置交接重建 profile/controlled patch/overrides；Frozen profile 也会再次叠加后两层。不能简单用 ReapplyCurrent 替代原重启或重复合并已经生效的 YAML。已在 [core 接入 §5.6](tun-service-core-integration.md#56-managed-local-配置的-tun-准入与剩余缺口) 写入具体候选、授权、陈旧拒绝与恢复契约，并提出保留生成配置或改为重建的产品选择。该项待回复，尚无直接重启自动交接生产代码；已确认的普通配置自动授权保持有效。
+核对 [GUI 直接重启](../../crates/zenclash-ui/src/pages/runtime/mihomo.rs)、[Process 冻结输入](../../crates/zenclash-core/src/managed_core_process.rs) 与 [Manager 自动配置交接](../../crates/zenclash-core/src/service_manager/tun.rs)，确认直接重启使用当前生成文件，而自动配置交接重建 profile/controlled patch/overrides；Frozen profile 也会再次叠加后两层。不能简单用 ReapplyCurrent 替代原重启或重复合并已经生效的 YAML。已在 [core 接入 §5.6](tun-service-core-integration.md#56-managed-local-配置的-tun-准入与剩余缺口) 写入具体候选、授权、陈旧拒绝与恢复契约，并提出保留生成配置或改为重建的产品选择。该项待回复，尚无直接重启自动交接生产代码；已确认的普通配置自动授权保持有效。
 
 当前 Windows 服务库完整 **319 通过/0 失败/1 默认忽略**（320 项），覆盖已有维护准入、原子锁、旧 v2 拒绝、缓存回读、停止与响应未知等行为。当前 UI 库串行全量 **314 通过/0 失败/1 默认忽略**（315 项），binary **12 项通过**，包括共享维护准备、等待者取消、陈旧收据拒绝与无 owner 退出提示。构建仅有链接器创建 import library 的 linker_messages 提示。没有执行管理员服务、真实 TUN、完整可见 GUI 操作或 macOS/Linux 原生维护；测试通过不能替代这些验收。本轮生产代码未改动，文档路径及差异空白检查通过。跨会话缓存、Linux 有效注册查询依赖及直接重启语义待选择，四项目标仍未完成。
 
@@ -64,7 +64,7 @@ Windows 旧注册迁移核对确认：现有 SCM 模块能验证固定 LocalSyst
 
 三项 Windows 普通子进程回归先实际失败：TUN-on 配置在停止前被拒绝，但运行、显式停止与网络暂停阶段均变为 Unknown。[CoreSession 维护](../../crates/zenclash-core/src/core_session.rs) 现在仅在 Local 原生前后观察可信且 PID、运行状态及退出原因未变化时，恢复原阶段、停止意图与网络暂停资格，不推进 generation；网络暂停回归随后实际执行恢复并启动子进程。Service 的未知结果处理未放宽，退出意图仍最终覆盖。直接 GUI 重启的 Manager 自动授权交接仍未完成。
 
-首审发现公开进程快照会把原生查询错误降为无 PID 的停止观察，可能被误判为未变化。新增 Unix 实际子进程回归，终止并回收测试自己的 sleep 后让 Child 查询返回 ECHILD，初版确实错误保留 Stable。[Process](../../crates/zenclash-core/src/process.rs) 新增内部可返回错误的观察接口，公开 snapshot 的接口及失败回退保持不变；无法可信观察的准入后失败标记 Unknown 并推进 generation。前置观察任务异常仍在准入前返回，不把它描述为已执行维护。独立审查两轮额度已使用，最终审查未发现新的功能性 bug 或重大漏洞。
+首审发现公开进程快照会把原生查询错误降为无 PID 的停止观察，可能被误判为未变化。新增 Unix 实际子进程回归，终止并回收测试自己的 sleep 后让 Child 查询返回 ECHILD，初版确实错误保留 Stable。[Process](../../crates/zenclash-core/src/managed_core_process.rs) 新增内部可返回错误的观察接口，公开 snapshot 的接口及失败回退保持不变；无法可信观察的准入后失败标记 Unknown 并推进 generation。前置观察任务异常仍在准入前返回，不把它描述为已执行维护。独立审查两轮额度已使用，最终审查未发现新的功能性 bug 或重大漏洞。
 
 最终 Windows core 全库 **663 通过/0 失败/2 默认忽略**（665 项）；core/UI all-targets/all-features check、core 严格 CI Clippy 与 workspace fmt 通过。最终 Linux GNU ELF 共 712 项，以 WSL 普通用户执行上述生命周期回归 **3 项通过**、ECHILD 回归 **1 项通过**、已退出快照回归 **1 项通过**、冻结配置组 **9 项通过**，共 **14 项通过/0 失败**。使用普通 Rust/sleep 子进程、临时目录及 loopback，没有真实 Mihomo、管理员服务、TUN/路由修改或 macOS 原生验收。没有新增依赖、用户文案或持久化结构；跨会话缓存与 Linux 查询依赖方案仍待选择，整体四项目标保持开发中。
 
@@ -80,7 +80,7 @@ Windows 旧注册迁移核对确认：现有 SCM 模块能验证固定 LocalSyst
 
 两项 Linux 行为回归先实际失败：候选配置预检后将托管源改为 `tun.enable=true`，原升级实现停止旧内核后重新打开该源，导致候选启动被 Local 准入拒绝，旧内核回滚也被同一源拒绝，最终没有运行中的内核。本批不是仅按源码推断问题。
 
-[升级事务](../../crates/zenclash-core/src/core_update/workflow.rs) 现在在下载完成后读取并检查一次配置，候选预检、启动、激活失败恢复与旧内核回滚共用同一个 `Arc<str>`。[Process](../../crates/zenclash-core/src/process.rs) 的共享重启路径保留后台阻塞池、数据租约、取消与未就绪清理；传入冻结配置仍执行 Local TUN 检查，非 Mihomo 拒绝使用该路径。测试确认候选及回滚旧内核实际读到原始字节，变化后的源保持原样；新增普通 Rust 子进程回归确认源删除后仍能重启，TUN-on 冻结内容在验证和停止前被拒绝并保留旧 PID。独立普通重启仍读取当时源内容，无新增依赖或持久结构。
+[升级事务](../../crates/zenclash-core/src/core_update/workflow.rs) 现在在下载完成后读取并检查一次配置，候选预检、启动、激活失败恢复与旧内核回滚共用同一个 `Arc<str>`。[Process](../../crates/zenclash-core/src/managed_core_process.rs) 的共享重启路径保留后台阻塞池、数据租约、取消与未就绪清理；传入冻结配置仍执行 Local TUN 检查，非 Mihomo 拒绝使用该路径。测试确认候选及回滚旧内核实际读到原始字节，变化后的源保持原样；新增普通 Rust 子进程回归确认源删除后仍能重启，TUN-on 冻结内容在验证和停止前被拒绝并保留旧 PID。独立普通重启仍读取当时源内容，无新增依赖或持久结构。
 
 Windows 本批初版完整 core 库 **658 通过/0 失败/2 默认忽略**；最后仅补充两项行为测试及复用已有双语内部类型错误文案，最终构建（662 项）的新增测试 **2 通过/660 未选中**，未重复报告为最终全库执行。最终 core/UI all-targets/all-features check、core 严格 CI Clippy、workspace fmt 与差异空白检查通过。独立审查 **2/2** 均未发现功能性 bug 或重大漏洞。
 
@@ -104,7 +104,7 @@ Windows UI binary 全部 **12 项通过**（扩展拒绝分类及新增 unknown 
 
 ### 2026-10-04 Local/Mihomo 启动配置冻结
 
-[Process](../../crates/zenclash-core/src/process.rs) 现在把一次有界读取后的配置同时用于最终 TUN 判定、重启预检和内核启动。通过 [文件输入](../../crates/zenclash-core/src/process/input.rs) 将冻结内容作为 stdin 交给 Mihomo `-f -`，保留原 home；Unix 立即 unlink，Windows 使用 delete-on-close，避免管道写入阻塞和无人管理的后台写任务。启动及验证移除 `CLASH_CONFIG_STRING`，防止该环境变量覆盖已检查内容；meow 继续使用原文件参数。未新增依赖或用户持久化格式。依据固定 [Mihomo v1.19.30 main.go](https://raw.githubusercontent.com/MetaCubeX/mihomo/v1.19.30/main.go)，没有改动固定内核版本与发布流程。
+[Process](../../crates/zenclash-core/src/managed_core_process.rs) 现在把一次有界读取后的配置同时用于最终 TUN 判定、重启预检和内核启动。通过 [文件输入](../../crates/zenclash-core/src/managed_core_process/input.rs) 将冻结内容作为 stdin 交给 Mihomo `-f -`，保留原 home；Unix 立即 unlink，Windows 使用 delete-on-close，避免管道写入阻塞和无人管理的后台写任务。启动及验证移除 `CLASH_CONFIG_STRING`，防止该环境变量覆盖已检查内容。未新增依赖或用户持久化格式。依据固定 [Mihomo v1.19.30 main.go](https://raw.githubusercontent.com/MetaCubeX/mihomo/v1.19.30/main.go)，没有改动固定内核版本与发布流程。
 
 两个普通真实子进程回归先失败：启动读取到检查后的 TUN-on 源；重启丢失已预检候选。初版清除启动环境但遗漏验证环境，环境回归再次失败；修正后六项 Windows 回归通过，覆盖源替换、环境覆盖、取消保留原 PID、启动失败清理及大输入无管道阻塞。首审发现 Unix FIFO 打开可能永久阻塞；改为 `O_NONBLOCK` 后核对同一 handle 的普通文件类型，Windows 另检查磁盘类型。新增 Unix FIFO 拒绝、旧 PID 保留及清理回归；该新增回归没有修改前红测记录。第二轮审查通过，本批达到 **2/2**。
 
@@ -130,21 +130,21 @@ Core 完整 CI 严格 Clippy、UI `-D warnings` Clippy、workspace all-targets/a
 
 最初新增三项行为回归实际 **0 通过/3 失败**（`merged_` 筛选另含两项既有通过），分别为 Service 候选判定、覆写继承值优先级和资源持有。初版展开后的 Windows Core **645 通过/0 失败/2 默认忽略**。首审发现库单次 `apply_merge()` 会把下一层 `<<` 复制到已处理的映射，链式默认值仍漏展开。链式扩展实际 **3 通过/2 失败**：候选准备因中间多次展开而通过，不代表共用判定无漏判；ordered override 和 bundle 失败。修正为统一后序展开，先处理子映射/序列，再消费当前 merge，保留显式键与 merge 序列先者优先，设置 128 深度上限。补充显式关闭 TUN、合并序列、无效 merge、深度和底层 loopback 链式回归。第二轮审查通过，已达 **2/2**。
 
-最终 Windows Core 串行全库 **647 通过/0 失败/2 默认忽略**（649 项），随后严格 lint 发现新增测试不必要的路径复制，改为借用并通过 Core 完整 CI 严格 Clippy，最终 Windows 合并专项 **7 项通过**；本批没有第三次审查。最终 workspace all-targets/all-features check、workspace fmt、差异空白检查以及两份专项文档的 143 个本地链接检查通过。最终 Linux GNU ELF 共 692 项，在普通 WSL 用户下执行合并专项 8 项、Local TUN 4 项、External/meow 各 1 项、双槽恢复 8 项及 GeoData 恢复 11 项，共 **33 项通过**；包含最后测试借用修正，仅隔离测试进程代理环境，没有安装工具链。本批不修改 UI 布局，未重跑 UI 全库，也没有管理员服务、系统授权、真实 Mihomo/TUN 或 macOS 验收。备份激活前授权、启动文件冻结、GUI 丢失服务 owner 的恢复、跨会话缓存/身份、旧服务迁移及受保护内核升级仍未完成，整体四项目标保持开发中。
+最终 Windows Core 串行全库 **647 通过/0 失败/2 默认忽略**（649 项），随后严格 lint 发现新增测试不必要的路径复制，改为借用并通过 Core 完整 CI 严格 Clippy，最终 Windows 合并专项 **7 项通过**；本批没有第三次审查。最终 workspace all-targets/all-features check、workspace fmt、差异空白检查以及两份专项文档的 143 个本地链接检查通过。最终 Linux GNU ELF 共 692 项，在普通 WSL 用户下执行合并专项 8 项、Local TUN 4 项、External 与已退役实验后端各 1 项、双槽恢复 8 项及 GeoData 恢复 11 项，共 **33 项通过**；包含最后测试借用修正，仅隔离测试进程代理环境，没有安装工具链。本批不修改 UI 布局，未重跑 UI 全库，也没有管理员服务、系统授权、真实 Mihomo/TUN 或 macOS 验收。备份激活前授权、启动文件冻结、GUI 丢失服务 owner 的恢复、跨会话缓存/身份、旧服务迁移及受保护内核升级仍未完成，整体四项目标保持开发中。
 
 ### 2026-10-04 普通 Local 执行边界的 TUN 检查
 
-新增 [tun_admission](../../crates/zenclash-core/src/tun_admission.rs)，仅约束实际 Local/Mihomo。客户端完整 payload 在普通验证和派发前检查，PATCH 在派发前检查；普通 [Process](../../crates/zenclash-core/src/process.rs) 首次启动及重启读取有界配置，重启在预检前后检查，未经交接的 TUN 开启返回 `ServiceRequired`，不归为发送结果未知，拒绝重启保持原 PID。首次拒绝不创建 home。GUI 已接的 Manager 自动授权流程继续负责交接，底层检查不执行系统授权，也不替代它。External、Service、meow 排除；验证未激活配置不受此执行政策限制。新增错误文案已同步中英文，未新增依赖或持久化格式。
+新增 [tun_admission](../../crates/zenclash-core/src/tun_admission.rs)，仅约束实际 Local/Mihomo。客户端完整 payload 在普通验证和派发前检查，PATCH 在派发前检查；普通 [Process](../../crates/zenclash-core/src/managed_core_process.rs) 首次启动及重启读取有界配置，重启在预检前后检查，未经交接的 TUN 开启返回 `ServiceRequired`，不归为发送结果未知，拒绝重启保持原 PID。首次拒绝不创建 home。GUI 已接的 Manager 自动授权流程继续负责交接，底层检查不执行系统授权，也不替代它。External、Service 排除；验证未激活配置不受此执行政策限制。新增错误文案已同步中英文，未新增依赖或持久化格式。
 
 六项新增行为测试中，最初 Local PATCH、完整重载和重启三项实际红测 **0 通过/3 失败**。首审发现 JSON 大小写字段与 YAML merge 两项 P1；扩展 loopback 回归后实际 **2 通过/2 失败**。修正为展开 YAML merge 后检查最终 TUN，并逐一检查 JSON 所有大小写匹配成员，任何启用请求都拒绝。回归覆盖根级/嵌套 merge、大小写及同名变体并存。第二轮只读审查通过，达到 **2/2**。随后严格 lint 发现新增测试未处理读取字节数，补上非零断言并复验，没有第三次审查。
 
-Windows Core 串行全库 **642 通过/0 失败/2 默认忽略**（644 项），在最后读取字节数断言修正之前执行。修正后的 Windows TUN 专项 **27 项通过**，Core 完整 CI 严格 Clippy 通过。Core/UI all-targets/all-features check、workspace fmt 和差异空白检查通过。最终 Linux GNU ELF 共 687 项；普通 WSL 用户执行 Local 准入 4 项、External/meow 各 1 项、双槽恢复 8 项和 GeoData 恢复 11 项，共 **25 项通过**，包含最后断言修正。测试仅隔离进程代理环境，没有安装工具链、服务或开启真实 TUN。本轮不修改 UI 布局，也未重跑 UI 全库。
+Windows Core 串行全库 **642 通过/0 失败/2 默认忽略**（644 项），在最后读取字节数断言修正之前执行。修正后的 Windows TUN 专项 **27 项通过**，Core 完整 CI 严格 Clippy 通过。Core/UI all-targets/all-features check、workspace fmt 和差异空白检查通过。最终 Linux GNU ELF 共 687 项；普通 WSL 用户执行 Local 准入 4 项、External 与已退役实验后端各 1 项、双槽恢复 8 项和 GeoData 恢复 11 项，共 **25 项通过**，包含最后断言修正。测试仅隔离进程代理环境，没有安装工具链、服务或开启真实 TUN。本轮不修改 UI 布局，也未重跑 UI 全库。
 
 本批只是执行边界兜底。普通启动仍读取可变路径，最终检查到内核读取之间的窗口没有冻结；备份先激活恢复数据、再进入可能授权的配置流程，exclusive lease 内等待授权仍待调整。GUI 丢失服务 owner 的恢复、跨会话缓存/身份、旧服务迁移及受保护内核升级也未完成。三平台原生服务、系统授权、真实 Mihomo/TUN 与 macOS 均未在本批验收，四项目标保持开发中。
 
 ### 2026-10-04 目录自动授权与服务试运行后的比较提交
 
-[ProfileService](../../crates/zenclash-ui/src/profile_service.rs) 的导入、订阅下载/更新、激活和编辑复用 [ProfileApplication::apply_with_service](../../crates/zenclash-core/src/profiles/application.rs)。实际 Local/Mihomo 的最终有效候选开启 TUN 时，授权前仅持有候选与资源；[Manager](../../crates/zenclash-core/src/service_manager/tun.rs) 在健康查询前核对原候选 binding/generation，再使用既有授权和捕获交接。非 TUN、inactive、External/Service/meow 沿原目录事务。普通 `apply_prepared` 拒绝需要 Service 的候选，GUI 则进入自动授权流程，不能从普通应用绕过。
+[ProfileService](../../crates/zenclash-ui/src/profile_service.rs) 的导入、订阅下载/更新、激活和编辑复用 [ProfileApplication::apply_with_service](../../crates/zenclash-core/src/profiles/application.rs)。实际 Local/Mihomo 的最终有效候选开启 TUN 时，授权前仅持有候选与资源；[Manager](../../crates/zenclash-core/src/service_manager/tun.rs) 在健康查询前核对原候选 binding/generation，再使用既有授权和捕获交接。非 TUN、inactive、External/Service 沿原目录事务。普通 `apply_prepared` 拒绝需要 Service 的候选，GUI 则进入自动授权流程，不能从普通应用绕过。
 
 目录是同一个 Core 交接事务中的 one-shot participant：profiles root 纳入共同 Data lease，停止旧 Local 前比较目录与受管源；Service trial 和 TUN 回读成功后再次比较提交，使用 held 基础源生成 staging 和托管源。完整目录应用只核对 controlled 层、不改写它。目录失败经原缓存回滚及 held Local 恢复；目录成功之后才标记缓存 durable、发布 committed profile/override 身份及确认 Service revision。Commit 未确认保留目录收据。UI owned 完成任务分别发布目录结果与同版本捕获警告，页面不再等待也不丢失已准入业务完成。
 
@@ -206,7 +206,7 @@ Windows Core 串行全库 **642 通过/0 失败/2 默认忽略**（644 项），
 
 ### 2026-10-04 普通配置候选冻结与重启边界
 
-共享 GUI 配置入口的 `try_apply_service_config` 现在区分 Local 与 Service 接受结果。最终 TUN 关闭的 Local/Mihomo 配置也保留检查时的完整候选，不再返回后由普通路径重新读取源文件。实际应用在同一会话身份、binding/generation、controlled patch 和运行缓存复核后，使用候选字节；源文件变为 TUN 开启或 override 被删除不会改变本次应用内容。无运行缓存的首次普通应用仍可成功；完整应用不新增 controlled patch 文件。External/Service/meow 仍使用原路径。
+共享 GUI 配置入口的 `try_apply_service_config` 现在区分 Local 与 Service 接受结果。最终 TUN 关闭的 Local/Mihomo 配置也保留检查时的完整候选，不再返回后由普通路径重新读取源文件。实际应用在同一会话身份、binding/generation、controlled patch 和运行缓存复核后，使用候选字节；源文件变为 TUN 开启或 override 被删除不会改变本次应用内容。无运行缓存的首次普通应用仍可成功；完整应用不新增 controlled patch 文件。External/Service 仍使用原路径。
 
 热重载遇到传输失败时，只有实际 owner 的启动配置路径等于托管运行缓存路径才允许回退重启；其余启动路径保留当前子进程并报告失败，避免重启从变化的订阅源加载未检查配置。PATCH 的持久化失败恢复确切旧缓存及旧运行 payload，不重新合并源文件。owned 完成任务持有事务与写权限，成功后发布完整 committed 配置身份及 generation。
 
@@ -218,7 +218,7 @@ Windows Core 串行全库 **642 通过/0 失败/2 默认忽略**（644 项），
 
 [ProfileService](../../crates/zenclash-ui/src/profile_service.rs) 的完整 override 重载、重应用及 [运行页手动 PATCH](../../crates/zenclash-ui/src/pages/runtime/lifecycle.rs) 接入 `try_apply_service_config`。实际 Local/Mihomo 的最终有效配置开启 TUN 时，冻结源配置、controlled patch、有序 overrides 及确切旧运行缓存对应资源，再使用既有授权/捕获/交接事务应用完整候选。自动候选保持实际 DNS 与其他配置，不能用固定 TUN+DNS delta 代替；成功后保存候选 controlled patch、精确启动缓存和新 committed profile/override 身份，完整接受按既有语义取代旧 pending backup。保存收据、待确认状态及捕获警告在 owned 业务完成任务内发布，页面取消等待不丢失。
 
-非 TUN 候选返回普通路径，不要求旧缓存；External/Service/meow 不被 Local 自动分支替换。候选在授权前核对与 capture 使用同一 store root，消费再次核对；核心错误保持类型，无 committed profile 的重应用仍为空操作。首审发现存储错配、普通路径缓存要求和错误类型丢失三项，已修复；二审发现首次完整应用仍依赖旧 profile，已改为候选身份。本批审查达到 2/2，最后修正不进行第三次审查。新增两项 core 子进程/候选测试和一项 UI 业务测试通过，没有实际红测记录；最终 Windows core 全库 **612 通过/0 失败/2 默认忽略**（614 项）、UI 全库 **312 通过/0 失败/1 默认忽略**（313 项）通过；core/UI all-targets/all-features check、core 完整 CI 严格 Clippy、UI 标准严格 Clippy、workspace fmt 与差异空白检查通过。最新 Linux GNU ELF 的配置候选/存储身份 2 项、Manager 8 项与普通恢复 4 项，共 14 项通过；普通子进程复用已有 target 下限定输入编译桥，没有安装 Linux 工具链。两份更新专项文档的 116 个本地链接有效。最后的首次应用修正经 Windows 全库及 Linux 相关测试复验，没有第三次独立审查。
+非 TUN 候选返回普通路径，不要求旧缓存；External/Service 不被 Local 自动分支替换。候选在授权前核对与 capture 使用同一 store root，消费再次核对；核心错误保持类型，无 committed profile 的重应用仍为空操作。首审发现存储错配、普通路径缓存要求和错误类型丢失三项，已修复；二审发现首次完整应用仍依赖旧 profile，已改为候选身份。本批审查达到 2/2，最后修正不进行第三次审查。新增两项 core 子进程/候选测试和一项 UI 业务测试通过，没有实际红测记录；最终 Windows core 全库 **612 通过/0 失败/2 默认忽略**（614 项）、UI 全库 **312 通过/0 失败/1 默认忽略**（313 项）通过；core/UI all-targets/all-features check、core 完整 CI 严格 Clippy、UI 标准严格 Clippy、workspace fmt 与差异空白检查通过。最新 Linux GNU ELF 的配置候选/存储身份 2 项、Manager 8 项与普通恢复 4 项，共 14 项通过；普通子进程复用已有 target 下限定输入编译桥，没有安装 Linux 工具链。两份更新专项文档的 116 个本地链接有效。最后的首次应用修正经 Windows 全库及 Linux 相关测试复验，没有第三次独立审查。
 
 本批只覆盖上述共享业务入口。托管订阅的 ProfileApplication 目录事务、直接 Core/client 调用、备份/重启/内核更新，以及普通路径检查后源文件从 TUN-off 变为 on 的竞争仍未统一准入。冻结资源后真实授权/Service Start/失败恢复未串联验收，不能以候选测试证明 GUI 自动交接全链路完成；真实管理员服务、Mihomo/TUN 和 macOS 实机未执行。
 
@@ -350,13 +350,13 @@ Windows core 全库 **574 通过/0 失败/2 默认忽略**；全目标/全 featu
 
 ### 2026-10-03 原 Local 启动描述随服务 owner 保留
 
-Local→Service 的 TUN 交接现在核对原 home 一致性，并用 `RuntimeSession::from_local` 保留原 `MihomoLaunchConfig` 值；常规同 home 的服务绑定切换也传递该描述。仅保存路径、内核种类与普通 controller 启动信息，不永久保留旧进程 Arc，不读取或采用 protected helper binary。服务直接启动仍无 Local 描述；源 YAML 删除、服务 Release 清理运行状态后，原启动描述保持。原 YAML 路径只是身份，后续恢复仍必须物化 accepted bundle 的字节、重新核对普通可执行文件。
+Local→Service 的 TUN 交接现在核对原 home 一致性，并用 `RuntimeSession::from_local` 保留原 `CoreLaunchConfig` 值；常规同 home 的服务绑定切换也传递该描述。仅保存路径、内核种类与普通 controller 启动信息，不永久保留旧进程 Arc，不读取或采用 protected helper binary。服务直接启动仍无 Local 描述；源 YAML 删除、服务 Release 清理运行状态后，原启动描述保持。原 YAML 路径只是身份，后续恢复仍必须物化 accepted bundle 的字节、重新核对普通可执行文件。
 
 `CoreSession::local_recovery_launch` 通过借用当前 watch 读取已准备内存，返回当前 Local 描述或 Service 持有的描述；External 返回 None。行为测试覆盖源删除后元数据保留、Release 后保留、直接 Service 不构造 Local 描述，以及 getter 不增加进程 Arc 计数和切换 External 后清除恢复描述。限定生产改动与两项会话测试的独立首审 PASS（1/2），随后追加 getter 行为测试；Windows core 全库 **566 通过/0 失败/2 默认忽略**，Windows/普通 WSL Linux 会话模块各 **38 项通过**，Linux getter 专项 **1 项通过**。Windows 全目标/全 feature check、完整 CI 严格 lint、workspace fmt 与差异检查通过；Linux 最新源码重新编译及专项执行通过，未验证 macOS 原生或管理员服务。此批尚未组合完整 Stop/导出/物化/Release/发布/启动事务，也未接 GUI 修复/卸载。
 
 ### 2026-10-03 恢复前创建并发布停止的 Local owner
 
-新增 `MihomoProcess::prepare_stopped`，只构造内存中的停止 owner，不读文件、不启动子进程、不授予启动权限。维护恢复可先把该 owner 发布到共享绑定，再通过既有 `LocalGeoDataRecovery` 与持有租约进行普通启动；就绪失败或外层等待取消时，所有者仍可由会话退出路径触达。该入口不做配置或可执行文件校验，授权启动路径仍必须执行原有校验。
+新增 `ManagedCoreProcess::prepare_stopped`，只构造内存中的停止 owner，不读文件、不启动子进程、不授予启动权限。维护恢复可先把该 owner 发布到共享绑定，再通过既有 `LocalGeoDataRecovery` 与持有租约进行普通启动；就绪失败或外层等待取消时，所有者仍可由会话退出路径触达。该入口不做配置或可执行文件校验，授权启动路径仍必须执行原有校验。
 
 两个新增行为测试使用真实普通 Rust 子进程与 HTTP 就绪夹具，验证发布前无新 PID、启动成功后 session shutdown 回收新 PID，以及无效可执行路径启动失败后保持新 owner 和回滚旧 GeoData。限定本批独立首审 PASS（1/2），Windows 全目标/全 feature check 与完整 CI 严格 lint 通过；Windows core 全库 **563 通过/0 失败/2 默认忽略**，Windows/普通 WSL Linux 恢复模块各 **10 项通过**，workspace fmt 与差异检查通过。Linux 复用上一批临时限定输入编译桥，未执行管理员服务或真实 Mihomo/TUN；macOS 原生未验证。本批尚未新增 GUI 维护调用，原 Local 启动描述保留、服务 Stop/Release 与新 Local owner 的整体接线仍待实施。
 

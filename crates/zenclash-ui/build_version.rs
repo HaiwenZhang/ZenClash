@@ -28,7 +28,7 @@ mod tests {
 
     #[test]
     fn rejects_other_cores_and_missing_version() {
-        for output in ["", "Mihomo Meta", "Meow Meta v1.0", "v1.19.30"] {
+        for output in ["", "Mihomo Meta", "Other Proxy v1.0", "v1.19.30"] {
             assert_eq!(mihomo_version(output), None);
         }
     }

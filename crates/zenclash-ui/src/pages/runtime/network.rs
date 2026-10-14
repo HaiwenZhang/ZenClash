@@ -4,8 +4,10 @@ use std::collections::HashSet;
 
 mod actions;
 mod ai;
+mod diagnostic_query;
 mod dialogs;
 mod model;
+pub(in crate::pages::runtime) mod runtime_read;
 
 use model::{
     format_asn, format_coordinates, format_proxy_flags, join_present, latency_color,
@@ -13,29 +15,23 @@ use model::{
 };
 
 use super::{
-    AppContext, Button, ButtonVariants, Context, DiagnosticData, DiagnosticReport, DiagnosticRoute,
-    DiagnosticStep, DiagnosticStepKind, Disableable, Entity, FluentBuilder, IconName, Input,
-    InputState, IntoElement, NetworkLatencyTarget, NetworkProbeRoutePreference,
-    NetworkProbeSnapshot, ParentElement, PublicIpProvider, RuntimeConfig, RuntimeData, RuntimePage,
-    Selectable, Sizable, Styled, SystemNetworkSnapshot, Window, div, empty_dash, h_flex, json, px,
-    v_flex,
+    AppContext, Button, ButtonVariants, Context, DiagnosticData, DiagnosticRoute, DiagnosticStep,
+    DiagnosticStepKind, Disableable, Entity, FluentBuilder, IconName, Input, InputState,
+    IntoElement, NetworkLatencyTarget, NetworkProbeRoutePreference, NetworkProbeSnapshot,
+    PageSnapshotData, ParentElement, PublicIpProvider, RuntimeConfig, RuntimePage, Selectable,
+    Sizable, Styled, SystemNetworkSnapshot, Window, div, empty_dash, h_flex, json, v_flex,
 };
 
-#[derive(Debug)]
-pub(super) struct NetworkProbeUiState {
+pub(super) struct NetworkDiagnosticsUiState {
     pub(super) latency_name: Entity<InputState>,
     pub(super) latency_url: Entity<InputState>,
     pub(super) dns_name: Entity<InputState>,
-    pub(super) snapshot: Option<NetworkProbeSnapshot>,
-    pub(super) report: Option<DiagnosticReport>,
-    pub(super) loading: bool,
-    pub(super) revision: u64,
-    pub(super) task: super::loader::PageReadTask,
+    pub(super) query: diagnostic_query::NetworkDiagnosticQueryState,
     cache_confirmation: Option<DnsCacheAction>,
     adding_target: bool,
 }
 
-impl NetworkProbeUiState {
+impl NetworkDiagnosticsUiState {
     pub(super) fn new(window: &mut Window, cx: &mut Context<RuntimePage>) -> Self {
         Self {
             latency_name: cx.new(|cx| {
@@ -50,11 +46,7 @@ impl NetworkProbeUiState {
                     .default_value("example.com")
                     .placeholder(zenclash_i18n::text("runtime.placeholders.dns_name"))
             }),
-            snapshot: None,
-            report: None,
-            loading: false,
-            revision: 0,
-            task: super::loader::PageReadTask::default(),
+            query: diagnostic_query::NetworkDiagnosticQueryState::default(),
             cache_confirmation: None,
             adding_target: false,
         }
@@ -82,19 +74,24 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let (config, system) = match &self.data {
-            RuntimeData::Network { config, system } => (config.clone(), system.clone()),
+        let (config, system) = match self.page_observation.data() {
+            PageSnapshotData::Network { config, system } => (config.clone(), system.clone()),
             _ => (RuntimeConfig::default(), SystemNetworkSnapshot::default()),
         };
-        let snapshot = self.network_probe.snapshot.clone().unwrap_or_default();
+        let snapshot = self
+            .network_diagnostics
+            .query
+            .snapshot()
+            .cloned()
+            .unwrap_or_default();
         let steps = self
-            .network_probe
-            .report
-            .as_ref()
+            .network_diagnostics
+            .query
+            .report()
             .map(|report| report.steps.as_slice())
             .unwrap_or_default();
         let passed = steps.iter().filter(|step| step.outcome.is_ok()).count();
-        let elapsed = self.network_probe.report.as_ref().and_then(|report| {
+        let elapsed = self.network_diagnostics.query.report().and_then(|report| {
             report
                 .steps
                 .iter()
@@ -120,9 +117,9 @@ impl RuntimePage {
                                 "redesign.check_passed",
                                 &[(
                                     "count",
-                                    self.network_probe
-                                        .report
-                                        .as_ref()
+                                    self.network_diagnostics
+                                        .query
+                                        .report()
                                         .map_or_else(|| "—".into(), |_| passed.to_string()),
                                 )],
                             )),
@@ -134,7 +131,7 @@ impl RuntimePage {
                                 "redesign.check_failed",
                                 &[(
                                     "count",
-                                    self.network_probe.report.as_ref().map_or_else(
+                                    self.network_diagnostics.query.report().map_or_else(
                                         || "—".into(),
                                         |_| (steps.len() - passed).to_string(),
                                     ),
@@ -191,7 +188,7 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
-        let report = self.network_probe.report.as_ref();
+        let report = self.network_diagnostics.query.report();
         let checked_at = report
             .and_then(|report| report.steps.iter().map(|step| step.completed_at_ms).max())
             .filter(|timestamp| *timestamp > 0)
@@ -275,7 +272,7 @@ impl RuntimePage {
         let ip_version = info
             .and_then(|info| info.ip.parse::<std::net::IpAddr>().ok())
             .map(|ip| if ip.is_ipv4() { "IPv4" } else { "IPv6" });
-        let checked_at = public_ip_checked_at(snapshot, self.network_probe.report.as_ref())
+        let checked_at = public_ip_checked_at(snapshot, self.network_diagnostics.query.report())
             .and_then(|timestamp| i64::try_from(timestamp).ok())
             .and_then(chrono::DateTime::from_timestamp_millis)
             .map(|time| {
@@ -295,10 +292,12 @@ impl RuntimePage {
                                 .small()
                                 .outline()
                                 .label(zenclash_i18n::text("network.public_ip.refresh"))
-                                .disabled(self.network_probe.loading || self.core_busy())
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.refresh_network_probe(cx)),
-                                ),
+                                .disabled(
+                                    self.network_diagnostics.query.is_loading() || self.core_busy(),
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.refresh_network_diagnostics(cx)
+                                })),
                         )
                         .child(
                             Button::new("network-options")
@@ -314,7 +313,7 @@ impl RuntimePage {
             .when(expanded, |card| {
                 card.child(
                     h_flex()
-                        .min_h(px(58.))
+                        .min_h(gpui_kit::rems(3.625))
                         .px_4()
                         .gap_3()
                         .justify_between()
@@ -330,7 +329,7 @@ impl RuntimePage {
                                     .disabled(
                                         self.mutation_busy(
                                             crate::pages::runtime::busy::MutationDomain::Network,
-                                        ) || self.network_probe.loading,
+                                        ) || self.network_diagnostics.query.is_loading(),
                                     )
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.persist_network_preference(
@@ -345,7 +344,7 @@ impl RuntimePage {
                         .child(
                             Button::new("refresh-network-probe")
                                 .icon(crate::assets::AppIcon::RefreshCw)
-                                .label(if self.network_probe.loading {
+                                .label(if self.network_diagnostics.query.is_loading() {
                                     zenclash_i18n::text("network.public_ip.probing")
                                 } else {
                                     zenclash_i18n::text("network.public_ip.refresh")
@@ -353,9 +352,11 @@ impl RuntimePage {
                                 .small()
                                 .h_10()
                                 .primary()
-                                .disabled(self.network_probe.loading || self.core_busy())
+                                .disabled(
+                                    self.network_diagnostics.query.is_loading() || self.core_busy(),
+                                )
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.refresh_network_probe(cx);
+                                    this.refresh_network_diagnostics(cx);
                                 })),
                         ),
                 )
@@ -380,8 +381,8 @@ impl RuntimePage {
                             .text_2xl()
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .child(model::public_exit_label(
-                                self.network_probe.snapshot.as_ref(),
-                                self.network_probe.loading,
+                                self.network_diagnostics.query.snapshot(),
+                                self.network_diagnostics.query.is_loading(),
                             )),
                     )
                     .when_some(ip_version.filter(|_| expanded), |row, version| {
@@ -500,7 +501,7 @@ impl RuntimePage {
                                     == through_mihomo,
                             )
                             .disabled(
-                                self.network_probe.loading
+                                self.network_diagnostics.query.is_loading()
                                     || self.mutation_busy(
                                         crate::pages::runtime::busy::MutationDomain::Network,
                                     ),
@@ -536,9 +537,13 @@ impl RuntimePage {
                             .outline()
                             .small()
                             .label(zenclash_i18n::text("network.latency.retest"))
-                            .loading(self.network_probe.loading)
-                            .disabled(self.network_probe.loading || self.core_busy())
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh_network_probe(cx))),
+                            .loading(self.network_diagnostics.query.is_loading())
+                            .disabled(
+                                self.network_diagnostics.query.is_loading() || self.core_busy(),
+                            )
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.refresh_network_diagnostics(cx)),
+                            ),
                     ),
             )
             .child(
@@ -681,8 +686,10 @@ impl RuntimePage {
                         .outline()
                         .label(zenclash_i18n::text("common.actions.retry"))
                         .tooltip(zenclash_i18n::text("redesign.recheck_all"))
-                        .disabled(self.network_probe.loading || self.core_busy())
-                        .on_click(cx.listener(|this, _, _, cx| this.refresh_network_probe(cx))),
+                        .disabled(self.network_diagnostics.query.is_loading() || self.core_busy())
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.refresh_network_diagnostics(cx)),
+                        ),
                 )
             })
             .child(
@@ -726,7 +733,7 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let capture = self.network_probe.report.as_ref().and_then(|report| {
+        let capture = self.network_diagnostics.query.report().and_then(|report| {
             match report
                 .step(DiagnosticStepKind::Capture)?
                 .outcome
@@ -750,7 +757,11 @@ impl RuntimePage {
         network_card(zenclash_i18n::text("redesign.local_network"), theme)
             .child(network_capability_row(
                 "IPv6",
-                matches!(self.data, RuntimeData::Network { .. }).then_some(config.ipv6),
+                matches!(
+                    self.page_observation.data(),
+                    PageSnapshotData::Network { .. }
+                )
+                .then_some(config.ipv6),
                 theme,
             ))
             .child(network_capability_row(
@@ -782,7 +793,7 @@ impl RuntimePage {
             .when(expanded, |card| {
                 card.child(
                     h_flex()
-                        .min_h(px(58.))
+                        .min_h(gpui_kit::rems(3.625))
                         .px_4()
                         .gap_3()
                         .justify_between()
@@ -916,7 +927,12 @@ fn network_capability_row(
                             this.child(gpui_kit::component::Icon::new(IconName::Check).size_4())
                         })
                         .when(enabled != Some(true), |this| {
-                            this.child(div().w_2().h(px(1.)).bg(theme.primary_foreground))
+                            this.child(
+                                div()
+                                    .w_2()
+                                    .h(gpui_kit::rems(0.0625))
+                                    .bg(theme.primary_foreground),
+                            )
                         }),
                 )
                 .child(enabled.map_or_else(
@@ -1112,3 +1128,6 @@ fn network_status_icon(succeeded: bool, theme: &gpui_kit::component::Theme) -> g
             .size_3(),
         )
 }
+
+#[cfg(test)]
+mod ui_tests;

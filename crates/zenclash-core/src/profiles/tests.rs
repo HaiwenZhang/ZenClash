@@ -9,6 +9,8 @@ use std::{
 
 use super::*;
 
+mod payload_metadata;
+
 fn test_root(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "zenclash-profile-test-{name}-{}-{}",
@@ -448,8 +450,10 @@ async fn remote_profile_uses_authorized_http_proxy_and_persists_response_metadat
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0_u8; 8_192];
-        let length = stream.read(&mut request).unwrap();
+        let request = crate::test_support::read_controller_request_blocking(&mut stream)
+            .unwrap()
+            .into_bytes();
+        let length = request.len();
         let request = String::from_utf8_lossy(&request[..length]);
         assert!(request.starts_with("GET http://subscription.invalid/profile.yaml HTTP/1.1"));
         assert!(request.contains("authorization: Bearer integration-secret\r\n"));
@@ -538,8 +542,10 @@ async fn remote_profile_retries_a_failed_direct_request_through_mihomo_proxy() {
     let expected_request_target = expected_url.clone();
     let server = thread::spawn(move || {
         let (mut stream, _) = proxy.accept().unwrap();
-        let mut request = [0_u8; 8_192];
-        let length = stream.read(&mut request).unwrap();
+        let request = crate::test_support::read_controller_request_blocking(&mut stream)
+            .unwrap()
+            .into_bytes();
+        let length = request.len();
         let request = String::from_utf8_lossy(&request[..length]);
         assert!(request.starts_with(&format!("GET {expected_request_target} HTTP/1.1")));
         assert!(request.contains("authorization: Bearer fallback-secret\r\n"));

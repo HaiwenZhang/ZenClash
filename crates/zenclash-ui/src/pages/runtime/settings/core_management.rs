@@ -1,46 +1,13 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::super::{
-    Button, ButtonVariants, Context, CoreBinaryInfo, CoreKind, Disableable, FluentBuilder,
-    IconName, IntoElement, MihomoLaunchConfig, ParentElement, PathPromptOptions, RuntimeData,
-    RuntimePage, Selectable, Sizable, Styled, div, h_flex, px, setting_card, v_flex,
+    Button, ButtonVariants, Context, CoreKind, Disableable, FluentBuilder, IconName, IntoElement,
+    PageSnapshotData, ParentElement, PathPromptOptions, RuntimePage, Selectable, Sizable, Styled,
+    div, h_flex, setting_card, v_flex,
 };
 
-#[derive(Default)]
-pub(in crate::pages::runtime) struct CoreManagementUiState {
-    mihomo: CoreProbeState,
-    meow: CoreProbeState,
-}
-
-#[derive(Default)]
-struct CoreProbeState {
-    checking: bool,
-    source: String,
-    info: Option<CoreBinaryInfo>,
-    error: Option<String>,
-}
-
-impl CoreManagementUiState {
-    fn get(&self, kind: CoreKind) -> &CoreProbeState {
-        match kind {
-            CoreKind::Mihomo => &self.mihomo,
-            CoreKind::Meow => &self.meow,
-        }
-    }
-
-    fn get_mut(&mut self, kind: CoreKind) -> &mut CoreProbeState {
-        match kind {
-            CoreKind::Mihomo => &mut self.mihomo,
-            CoreKind::Meow => &mut self.meow,
-        }
-    }
-}
-
-struct CoreProbeResult {
-    kind: CoreKind,
-    source: String,
-    result: Result<CoreBinaryInfo, String>,
-}
+mod probe;
+pub(in crate::pages::runtime) use probe::CoreManagementUiState;
 
 impl RuntimePage {
     pub(in crate::pages::runtime) fn render_core_management(
@@ -50,8 +17,7 @@ impl RuntimePage {
     ) -> impl IntoElement {
         let kind = self.preferences.core_kind;
         let custom = self.preferences.core_binaries.path(kind).is_some();
-        let state = self.core_management.get(kind);
-        let locked = binary_environment_override(kind).is_some();
+        let state = &self.core_management;
         let path = self
             .preferences
             .core_binaries
@@ -59,7 +25,7 @@ impl RuntimePage {
             .map(|p| p.display().to_string())
             .or_else(|| {
                 state
-                    .info
+                    .info()
                     .as_ref()
                     .map(|info| info.path.display().to_string())
             })
@@ -70,7 +36,7 @@ impl RuntimePage {
                     .gap_3()
                     .p_4()
                     .child(
-                        Button::new(("auto-core-binary", core_index(kind)))
+                        Button::new("auto-core-binary")
                             .flex_1()
                             .h_20()
                             .outline()
@@ -84,7 +50,7 @@ impl RuntimePage {
                                         .active(theme.sidebar_accent),
                                 )
                             })
-                            .disabled(self.core_busy() || state.checking || locked)
+                            .disabled(self.core_busy() || state.is_checking())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if custom {
                                     this.use_automatic_core_binary(kind, cx);
@@ -92,14 +58,14 @@ impl RuntimePage {
                             })),
                     )
                     .child(
-                        Button::new(("select-core-binary", core_index(kind)))
+                        Button::new("select-core-binary")
                             .flex_1()
                             .h_20()
                             .outline()
                             .selected(custom)
                             .icon(IconName::FolderOpen)
                             .label(zenclash_i18n::text("settings_redesign.custom_core"))
-                            .disabled(self.core_busy() || state.checking || locked)
+                            .disabled(self.core_busy() || state.is_checking())
                             .on_click(
                                 cx.listener(move |this, _, _, cx| {
                                     this.choose_core_binary(kind, cx)
@@ -122,12 +88,6 @@ impl RuntimePage {
                 kind.display_name(),
                 theme,
             ))
-            .when(locked, |view| {
-                view.child(super::super::context_note(
-                    zenclash_i18n::text("core_management.summary.environment_override"),
-                    theme,
-                ))
-            })
             .child(
                 h_flex()
                     .p_4()
@@ -137,13 +97,13 @@ impl RuntimePage {
                             .outline()
                             .small()
                             .label(zenclash_i18n::text("core_management.summary.refresh"))
-                            .disabled(self.core_busy() || state.checking)
+                            .disabled(self.core_busy() || state.is_checking())
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.refresh_core_management(cx)),
                             ),
                     )
                     .child(
-                        Button::new("manage-core-kinds")
+                        Button::new("manage-core-binary")
                             .outline()
                             .small()
                             .label(zenclash_i18n::text("settings_redesign.manage_cores"))
@@ -160,11 +120,6 @@ impl RuntimePage {
                                             v_flex()
                                                 .child(page.render_core_binary_row(
                                                     CoreKind::Mihomo,
-                                                    &theme,
-                                                    cx,
-                                                ))
-                                                .child(page.render_core_binary_row(
-                                                    CoreKind::Meow,
                                                     &theme,
                                                     cx,
                                                 ))
@@ -194,18 +149,16 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let state = self.core_management.get(kind);
-        let requested = self.preferences.core_kind == kind;
+        let state = &self.core_management;
         let running = self.core_kind == kind && self.runtime_core_available();
-        let index = core_index(kind);
-        let (status, status_color, path, version) = if state.checking {
+        let (status, status_color, path, version) = if state.is_checking() {
             (
                 zenclash_i18n::text("core_management.status.checking"),
                 theme.primary,
                 zenclash_i18n::text("core_management.status.checking_version"),
                 String::new(),
             )
-        } else if let Some(info) = state.info.as_ref() {
+        } else if let Some(info) = state.info().as_ref() {
             (
                 zenclash_i18n::text("core_management.status.available"),
                 theme.success,
@@ -217,16 +170,15 @@ impl RuntimePage {
                 zenclash_i18n::text("core_management.status.unavailable"),
                 theme.danger,
                 state
-                    .error
+                    .error()
                     .clone()
                     .unwrap_or_else(|| zenclash_i18n::text("core_management.status.not_checked")),
                 String::new(),
             )
         };
-        let environment_locked = binary_environment_override(kind).is_some();
 
         h_flex()
-            .min_h(px(104.))
+            .min_h(gpui_kit::rems(6.5))
             .px_4()
             .py_3()
             .gap_4()
@@ -236,14 +188,14 @@ impl RuntimePage {
             .border_color(theme.border)
             .child(
                 h_flex()
-                    .min_w(px(0.))
+                    .min_w_0()
                     .flex_1()
                     .gap_3()
                     .items_start()
                     .child(
                         div()
                             .mt_1()
-                            .size(px(10.))
+                            .size(gpui_kit::rems(0.625))
                             .rounded_full()
                             .bg(status_color)
                             .border_1()
@@ -251,7 +203,7 @@ impl RuntimePage {
                     )
                     .child(
                         v_flex()
-                            .min_w(px(0.))
+                            .min_w_0()
                             .flex_1()
                             .gap_1()
                             .child(
@@ -269,37 +221,23 @@ impl RuntimePage {
                                             zenclash_i18n::text("core_management.status.running"),
                                             theme.primary,
                                         ))
-                                    })
-                                    .when(requested, |row| {
-                                        row.child(status_badge(
-                                            zenclash_i18n::text("core_management.status.next"),
-                                            theme.warning,
-                                        ))
-                                    })
-                                    .when(kind.is_experimental(), |row| {
-                                        row.child(status_badge(
-                                            zenclash_i18n::text(
-                                                "core_management.status.experimental",
-                                            ),
-                                            theme.warning,
-                                        ))
                                     }),
                             )
                             .child(div().text_xs().text_color(theme.muted_foreground).child(
                                 zenclash_i18n::text_with(
                                     "core_management.status.source",
-                                    &[("source", empty_source(&state.source))],
+                                    &[("source", empty_source(state.source()))],
                                 ),
                             ))
                             .child(
                                 div()
-                                    .max_w(px(610.))
+                                    .max_w(gpui_kit::rems(38.125))
                                     .overflow_hidden()
                                     .text_ellipsis()
                                     .whitespace_nowrap()
                                     .font_family(theme.mono_font_family.clone())
                                     .text_xs()
-                                    .text_color(if state.info.is_some() {
+                                    .text_color(if state.info().is_some() {
                                         theme.foreground
                                     } else {
                                         theme.danger
@@ -322,54 +260,31 @@ impl RuntimePage {
                     .gap_2()
                     .items_end()
                     .child(
-                        Button::new(("select-core-binary", index))
+                        Button::new("select-core-binary")
                             .label(zenclash_i18n::text("core_management.actions.select_file"))
                             .icon(IconName::FolderOpen)
                             .small()
                             .outline()
-                            .disabled(self.core_busy() || state.checking || environment_locked)
+                            .disabled(self.core_busy() || state.is_checking())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.choose_core_binary(kind, cx);
                             })),
                     )
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new(("auto-core-binary", index))
-                                    .label(zenclash_i18n::text("core_management.actions.automatic"))
-                                    .small()
-                                    .ghost()
-                                    .disabled(
-                                        self.core_busy()
-                                            || state.checking
-                                            || environment_locked
-                                            || self.preferences.core_binaries.path(kind).is_none(),
-                                    )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.use_automatic_core_binary(kind, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new(("activate-core", index))
-                                    .label(if requested {
-                                        zenclash_i18n::text("core_management.actions.selected")
-                                    } else {
-                                        zenclash_i18n::text("core_management.actions.use_next")
-                                    })
-                                    .small()
-                                    .outline()
-                                    .selected(requested)
-                                    .disabled(
-                                        self.core_busy()
-                                            || state.checking
-                                            || state.info.is_none()
-                                            || requested,
-                                    )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.set_preferred_core(kind, cx);
-                                    })),
-                            ),
+                        h_flex().gap_2().child(
+                            Button::new("auto-core-binary")
+                                .label(zenclash_i18n::text("core_management.actions.automatic"))
+                                .small()
+                                .ghost()
+                                .disabled(
+                                    self.core_busy()
+                                        || state.is_checking()
+                                        || self.preferences.core_binaries.path(kind).is_none(),
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.use_automatic_core_binary(kind, cx);
+                                })),
+                        ),
                     ),
             )
             .into_any_element()
@@ -385,11 +300,11 @@ impl RuntimePage {
         }
         self.core_session.runtime_descriptor().backend()
             == zenclash_core::CoreRuntimeBackend::Direct
-            && self.data_runtime_version == self.core_session.generation()
+            && self.page_observation.configuration_generation() == self.core_session.generation()
             && matches!(
-                self.data,
-                RuntimeData::Core { .. }
-                    | RuntimeData::Settings {
+                self.page_observation.data(),
+                PageSnapshotData::Core { .. }
+                    | PageSnapshotData::Settings {
                         config: Some(_),
                         ..
                     }
@@ -397,60 +312,12 @@ impl RuntimePage {
     }
 
     pub(in crate::pages::runtime) fn refresh_core_management(&mut self, cx: &mut Context<Self>) {
-        for kind in [CoreKind::Mihomo, CoreKind::Meow] {
-            let state = self.core_management.get_mut(kind);
-            state.checking = true;
-            state.error = None;
-        }
-        let binaries = self.preferences.core_binaries.clone();
-        let task = self.runtime.spawn(async move {
-            tokio::task::spawn_blocking(move || {
-                [CoreKind::Mihomo, CoreKind::Meow]
-                    .map(|kind| probe_core_binary(kind, binaries.path(kind)))
-            })
-            .await
-            .map_err(|error| {
-                zenclash_i18n::text_with(
-                    "core_management.errors.detection_task",
-                    &[("error", error.to_string())],
-                )
-            })
-        });
+        let preferred = self.preferences.core_binaries.mihomo.clone();
+        let read = self.core_management.start_read(&self.runtime, preferred);
         cx.spawn(async move |this, cx| {
-            let result = task.await.map_err(|error| {
-                zenclash_i18n::text_with(
-                    "core_management.errors.detection_task",
-                    &[("error", error.to_string())],
-                )
-            });
+            let completion = read.finish().await;
             let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok(Ok(results)) => {
-                        for result in results {
-                            let state = this.core_management.get_mut(result.kind);
-                            state.checking = false;
-                            state.source = result.source;
-                            match result.result {
-                                Ok(info) => {
-                                    state.info = Some(info);
-                                    state.error = None;
-                                }
-                                Err(error) => {
-                                    state.info = None;
-                                    state.error = Some(error);
-                                }
-                            }
-                        }
-                    }
-                    Ok(Err(error)) | Err(error) => {
-                        for kind in [CoreKind::Mihomo, CoreKind::Meow] {
-                            let state = this.core_management.get_mut(kind);
-                            state.checking = false;
-                            state.info = None;
-                            state.error = Some(error.clone());
-                        }
-                    }
-                }
+                this.core_management.complete_read(completion);
                 cx.notify();
             });
         })
@@ -515,7 +382,7 @@ impl RuntimePage {
         let Some(token) = self.begin_mutation(self.page) else {
             return;
         };
-        self.core_management.get_mut(kind).checking = true;
+        self.core_management.begin_validation();
         let task = self.runtime.spawn(async move {
             tokio::task::spawn_blocking(move || {
                 let info = zenclash_core::validate_core_binary(kind, path)
@@ -550,11 +417,7 @@ impl RuntimePage {
                 this.finish_mutation(token);
                 match result {
                     Ok((info, preferences)) => {
-                        let state = this.core_management.get_mut(kind);
-                        state.checking = false;
-                        state.source = zenclash_i18n::text("core_management.source.custom");
-                        state.info = Some(info);
-                        state.error = None;
+                        this.core_management.accept_validated(info);
                         if this.is_page_task_current(token) {
                             this.notice = Some(zenclash_i18n::text_with(
                                 "core_management.notices.validated",
@@ -568,9 +431,7 @@ impl RuntimePage {
                         );
                     }
                     Err(error) => {
-                        let state = this.core_management.get_mut(kind);
-                        state.checking = false;
-                        state.error = Some(error.clone());
+                        this.core_management.validation_failed(error.clone());
                         this.set_page_error(token, error);
                     }
                 }
@@ -641,143 +502,6 @@ impl RuntimePage {
         .detach();
         cx.notify();
     }
-
-    fn set_preferred_core(&mut self, kind: CoreKind, cx: &mut Context<Self>) {
-        let Some(info) = self.core_management.get(kind).info.clone() else {
-            self.error = Some(zenclash_i18n::text_with(
-                "core_management.errors.not_validated",
-                &[("core", kind.display_name().to_owned())],
-            ));
-            cx.notify();
-            return;
-        };
-        let Some(store) = self.preferences_store.clone() else {
-            self.error = Some(zenclash_i18n::text(
-                "core_management.errors.preferences_unavailable",
-            ));
-            cx.notify();
-            return;
-        };
-        let Some(token) = self.begin_mutation(self.page) else {
-            return;
-        };
-        let task = self.runtime.spawn(async move {
-            tokio::task::spawn_blocking(move || {
-                zenclash_core::validate_core_binary(kind, &info.path)
-                    .map_err(|error| error.to_string())?;
-                store
-                    .update(|preferences| preferences.core_kind = kind)
-                    .map_err(|error| error.to_string())
-            })
-            .await
-            .map_err(|error| {
-                zenclash_i18n::text_with(
-                    "core_management.errors.switch_task",
-                    &[("error", error.to_string())],
-                )
-            })?
-        });
-        cx.spawn(async move |this, cx| {
-            let result = task
-                .await
-                .map_err(|error| {
-                    zenclash_i18n::text_with(
-                        "core_management.errors.switch_task",
-                        &[("error", error.to_string())],
-                    )
-                })
-                .and_then(|result| result);
-            let _ = this.update(cx, |this, cx| {
-                this.finish_mutation(token);
-                match result {
-                    Ok(preferences) => {
-                        if this.is_page_task_current(token) {
-                            this.notice = Some(if kind == this.core_kind {
-                                zenclash_i18n::text_with(
-                                    "core_management.notices.already_current",
-                                    &[("core", kind.display_name().to_owned())],
-                                )
-                            } else {
-                                zenclash_i18n::text_with(
-                                    "core_management.notices.preferred",
-                                    &[("core", kind.display_name().to_owned())],
-                                )
-                            });
-                        }
-                        this.accept_preferences(
-                            preferences,
-                            crate::pages::runtime::PreferenceScope::CoreKind,
-                            cx,
-                        );
-                    }
-                    Err(error) => {
-                        let state = this.core_management.get_mut(kind);
-                        state.info = None;
-                        state.error = Some(error.clone());
-                        this.set_page_error(token, error);
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-}
-
-fn probe_core_binary(kind: CoreKind, preferred: Option<&Path>) -> CoreProbeResult {
-    let source = binary_source(kind, preferred);
-    let result = project_root()
-        .and_then(|root| {
-            MihomoLaunchConfig::discover_for_kind_with_binary(root, kind, preferred)
-                .map_err(|error| error.to_string())
-        })
-        .and_then(|launch| {
-            zenclash_core::validate_core_binary(kind, launch.binary)
-                .map_err(|error| error.to_string())
-        });
-    CoreProbeResult {
-        kind,
-        source,
-        result,
-    }
-}
-
-fn project_root() -> Result<PathBuf, String> {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-        .ok_or_else(|| zenclash_i18n::text("core_management.errors.workspace"))
-}
-
-fn binary_environment_override(kind: CoreKind) -> Option<&'static str> {
-    kind.binary_environment_variable()
-}
-
-fn binary_source(kind: CoreKind, preferred: Option<&Path>) -> String {
-    binary_environment_override(kind).map_or_else(
-        || {
-            if preferred.is_some() {
-                zenclash_i18n::text("core_management.source.custom")
-            } else {
-                zenclash_i18n::text("core_management.source.automatic")
-            }
-        },
-        |variable| {
-            zenclash_i18n::text_with(
-                "core_management.source.environment",
-                &[("variable", variable.to_owned())],
-            )
-        },
-    )
-}
-
-fn core_index(kind: CoreKind) -> usize {
-    match kind {
-        CoreKind::Mihomo => 0,
-        CoreKind::Meow => 1,
-    }
 }
 
 fn empty_source(source: &str) -> String {
@@ -791,12 +515,12 @@ fn empty_source(source: &str) -> String {
 fn status_badge(label: String, color: gpui_kit::Hsla) -> gpui_kit::AnyElement {
     div()
         .px_2()
-        .py(px(2.))
+        .py(gpui_kit::rems(0.125))
         .rounded_full()
         .border_1()
         .border_color(color.opacity(0.4))
         .bg(color.opacity(0.09))
-        .text_size(px(10.))
+        .text_size(gpui_kit::rems(0.625))
         .font_weight(gpui_kit::FontWeight::SEMIBOLD)
         .text_color(color)
         .child(label)

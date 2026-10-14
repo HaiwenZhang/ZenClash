@@ -1,0 +1,859 @@
+use std::{
+    io::{BufRead, BufReader},
+    path::PathBuf,
+    process::{Child, Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
+
+use parking_lot::{Mutex, RwLock};
+
+use crate::{
+    CoreCapabilities, CoreConfigValidator, CoreKind, MihomoClient, MihomoEndpoint, MihomoError,
+    MihomoResult,
+};
+
+mod input;
+mod launch_config;
+mod launch_logs;
+use launch_logs::{LaunchLogHistory, LaunchLogIdentity};
+mod mihomo_resources;
+mod resources;
+
+#[cfg(test)]
+mod tests;
+
+pub use launch_config::CoreLaunchConfig;
+pub use mihomo_resources::MihomoRuntimeResources;
+pub use resources::bundled_recovery_profile;
+pub(crate) use resources::service_core_source;
+
+const MAX_LOG_LINES: usize = 1_000;
+#[cfg(unix)]
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Owns a managed Mihomo child, execution reservation, and bounded output history.
+pub struct ManagedCoreProcess {
+    child: Mutex<Option<Child>>,
+    started_at_secs: AtomicU64,
+    execution: Mutex<Option<crate::service::CoreExecutionGuard>>,
+    isolated_test_child: bool,
+    logs: Arc<RwLock<LaunchLogHistory>>,
+    last_exit_reason: RwLock<Option<String>>,
+    config: CoreLaunchConfig,
+    recovery_asset_root: RwLock<Option<PathBuf>>,
+    #[cfg(test)]
+    drop_gate: Mutex<Option<TestDropGate>>,
+}
+
+#[cfg(test)]
+struct TestDropGate {
+    started: std::sync::mpsc::Sender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+pub(crate) struct TestDropPause {
+    started: std::sync::mpsc::Receiver<()>,
+    resume: Option<std::sync::mpsc::Sender<()>>,
+}
+
+#[cfg(test)]
+impl TestDropPause {
+    pub(crate) fn wait_started(&self) {
+        self.started.recv_timeout(Duration::from_secs(2)).unwrap();
+    }
+
+    pub(crate) fn resume(&mut self) {
+        if let Some(resume) = self.resume.take() {
+            let _ = resume.send(());
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestDropPause {
+    fn drop(&mut self) {
+        self.resume();
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Point-in-time state of a locally managed core child.
+pub struct CoreProcessSnapshot {
+    /// Runtime core implementation represented by this process.
+    pub kind: CoreKind,
+    /// Whether the child is still running.
+    pub running: bool,
+    /// Live process identifier, absent after exit or stop.
+    pub pid: Option<u32>,
+    /// Unix timestamp of the current live child's successful spawn.
+    pub started_at_secs: Option<u64>,
+    /// Last unexpected child exit status observed through the owned handle.
+    pub exit_reason: Option<String>,
+    /// Executable used to launch the child.
+    pub binary: PathBuf,
+    /// Original startup source; Local Mihomo receives a frozen copy through stdin.
+    pub config_file: PathBuf,
+    /// Writable data directory used by the selected managed core.
+    pub home_dir: PathBuf,
+    /// Most recent bounded stdout and stderr lines.
+    pub logs: Vec<String>,
+}
+
+impl ManagedCoreProcess {
+    /// Creates an owned, stopped runtime without filesystem or process operations.
+    ///
+    /// Recovery callers publish this owner before invoking the authorized restart
+    /// path, so shutdown can still reach a child whose readiness fails or is cancelled.
+    /// This performs no executable or configuration validation and grants no startup authority.
+    #[must_use]
+    pub fn prepare_stopped(config: CoreLaunchConfig) -> Arc<Self> {
+        Arc::new(Self {
+            child: Mutex::new(None),
+            started_at_secs: AtomicU64::new(0),
+            execution: Mutex::new(None),
+            isolated_test_child: false,
+            logs: Arc::new(RwLock::new(LaunchLogHistory::default())),
+            last_exit_reason: RwLock::new(None),
+            config,
+            recovery_asset_root: RwLock::new(None),
+            #[cfg(test)]
+            drop_gate: Mutex::new(None),
+        })
+    }
+
+    /// Starts the selected managed core and attaches bounded output collectors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the data directory, child process, or collector
+    /// threads cannot be created. A partially started child is terminated.
+    pub fn spawn(config: CoreLaunchConfig) -> MihomoResult<Arc<Self>> {
+        Self::spawn_inner(config, false)
+    }
+
+    /// Starts a synthetic UI test child outside the production kernel slot.
+    /// Never used by application startup, service handover or real-core acceptance.
+    ///
+    /// # Errors
+    /// Reports the same child/configuration failures as ordinary spawning.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn spawn_isolated_for_test(config: CoreLaunchConfig) -> MihomoResult<Arc<Self>> {
+        Self::spawn_inner(config, true)
+    }
+
+    fn spawn_inner(config: CoreLaunchConfig, isolated_test_child: bool) -> MihomoResult<Arc<Self>> {
+        let _write_lease =
+            crate::data_coordinator::DataWriteLease::shared(launch_write_scopes(&config));
+        let payload = local_launch_payload(&config)?;
+        let input = payload
+            .as_deref()
+            .map(|payload| input::snapshot(&config.home_dir, payload))
+            .transpose()?;
+        let logs = Arc::new(RwLock::new(LaunchLogHistory::default()));
+        let execution = reserve_execution(config.kind, isolated_test_child)?;
+        let child = spawn_child(&config, logs.clone(), input, None)?;
+
+        Ok(Arc::new(Self {
+            child: Mutex::new(Some(child)),
+            started_at_secs: AtomicU64::new(unix_timestamp_secs()),
+            execution: Mutex::new(execution),
+            isolated_test_child,
+            logs,
+            last_exit_reason: RwLock::new(None),
+            config,
+            recovery_asset_root: RwLock::new(None),
+            #[cfg(test)]
+            drop_gate: Mutex::new(None),
+        }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_last_drop_for_test(&self) -> TestDropPause {
+        let (started, observed) = std::sync::mpsc::channel();
+        let (resume, resumed) = std::sync::mpsc::channel();
+        let previous = self.drop_gate.lock().replace(TestDropGate {
+            started,
+            resume: resumed,
+        });
+        assert!(previous.is_none());
+        TestDropPause {
+            started: observed,
+            resume: Some(resume),
+        }
+    }
+
+    /// Checks a single startup snapshot before stopping and restarting the child.
+    ///
+    /// Local Mihomo receives the exact checked bytes, even if the source changes.
+    /// Existing bounded logs remain available and new stdout/stderr collectors
+    /// append to the same history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the old process cannot be stopped or the new child
+    /// and its output collectors cannot be started. After a spawn failure the
+    /// process remains stopped so callers can report and retry safely.
+    pub fn restart(&self) -> MihomoResult<()> {
+        let lease = crate::data_coordinator::DataWriteLease::shared(self.write_scopes());
+        self.restart_with_write_lease(&lease, None)
+    }
+
+    fn restart_with_write_lease(
+        &self,
+        lease: &crate::data_coordinator::DataWriteLease,
+        cancelled: Option<&AtomicBool>,
+    ) -> MihomoResult<()> {
+        let payload = local_launch_payload(&self.config)?;
+        self.restart_payload_with_write_lease(lease, cancelled, payload.as_deref())
+    }
+
+    pub(crate) fn read_launch_payload(&self) -> MihomoResult<String> {
+        local_launch_payload(&self.config)?.ok_or_else(|| {
+            MihomoError::Process(zenclash_i18n::text(
+                "core_page.errors.runtime_kind_mismatch",
+            ))
+        })
+    }
+
+    fn restart_payload_with_write_lease(
+        &self,
+        lease: &crate::data_coordinator::DataWriteLease,
+        cancelled: Option<&AtomicBool>,
+        payload: Option<&str>,
+    ) -> MihomoResult<()> {
+        if let Some(payload) = payload {
+            if self.kind() != CoreKind::Mihomo {
+                return Err(MihomoError::Process(zenclash_i18n::text(
+                    "core_page.errors.runtime_kind_mismatch",
+                )));
+            }
+            crate::tun_admission::ensure_local_yaml(self.kind(), payload)?;
+        }
+        let validator = self.config_validator().with_write_lease(lease);
+        let validation = match payload {
+            Some(payload) => validator.validate_payload(payload),
+            None => validator.validate_file(&self.config.config_file),
+        };
+        validation.map_err(|error| {
+            MihomoError::Process(format!("重启前配置预检失败，当前内核保持运行：{error}"))
+        })?;
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Err(MihomoError::Process("内核重启在配置预检后已取消".into()));
+        }
+        let input = payload
+            .map(|payload| input::snapshot(&self.config.home_dir, payload))
+            .transpose()?;
+        let mut child_slot = self.child.lock();
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Err(MihomoError::Process("内核重启在配置预检后已取消".into()));
+        }
+        stop_child(&mut child_slot)?;
+        let mut execution = self.execution.lock();
+        if execution.is_none() {
+            *execution = reserve_execution(self.kind(), self.isolated_test_child)?;
+        }
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Err(MihomoError::Process("内核重启在创建子进程前已取消".into()));
+        }
+        let child = spawn_child(
+            &self.config,
+            self.logs.clone(),
+            input,
+            self.recovery_asset_root.read().as_deref(),
+        )?;
+        *self.last_exit_reason.write() = None;
+        self.started_at_secs
+            .store(unix_timestamp_secs(), Ordering::Relaxed);
+        *child_slot = Some(child);
+        Ok(())
+    }
+
+    /// Restarts the managed child away from an async caller and waits for its controller.
+    ///
+    /// This is the single lifecycle transition for runtime callers. Blocking
+    /// process operations run on Tokio's blocking pool before readiness is
+    /// checked asynchronously.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation, stop, spawn, task, early-exit, or readiness errors.
+    pub async fn restart_and_wait(self: &Arc<Self>, timeout: Duration) -> MihomoResult<()> {
+        self.restart_and_wait_until(timeout, None).await
+    }
+
+    pub(crate) async fn restart_and_wait_until(
+        self: &Arc<Self>,
+        timeout: Duration,
+        cancelled: Option<Arc<AtomicBool>>,
+    ) -> MihomoResult<()> {
+        let lease = crate::data_coordinator::DataWriteLease::shared_async(self.write_scopes())
+            .await
+            .map_err(|error| MihomoError::Process(error.to_string()))?;
+        self.restart_and_wait_until_with_lease(timeout, cancelled, &lease)
+            .await
+    }
+
+    pub(crate) async fn restart_and_wait_until_with_lease(
+        self: &Arc<Self>,
+        timeout: Duration,
+        cancelled: Option<Arc<AtomicBool>>,
+        lease: &crate::data_coordinator::DataWriteLease,
+    ) -> MihomoResult<()> {
+        self.restart_and_wait_with_input(timeout, cancelled, lease, None)
+            .await
+    }
+
+    pub(crate) async fn restart_and_wait_with_payload(
+        self: &Arc<Self>,
+        timeout: Duration,
+        cancelled: Option<Arc<AtomicBool>>,
+        lease: &crate::data_coordinator::DataWriteLease,
+        payload: Arc<str>,
+    ) -> MihomoResult<()> {
+        self.restart_and_wait_with_input(timeout, cancelled, lease, Some(payload))
+            .await
+    }
+
+    async fn restart_and_wait_with_input(
+        self: &Arc<Self>,
+        timeout: Duration,
+        cancelled: Option<Arc<AtomicBool>>,
+        lease: &crate::data_coordinator::DataWriteLease,
+        payload: Option<Arc<str>>,
+    ) -> MihomoResult<()> {
+        if cancelled
+            .as_ref()
+            .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+        {
+            return Err(MihomoError::Process(
+                "内核重启在停止阶段开始前已取消".into(),
+            ));
+        }
+        let process = self.clone();
+        let access =
+            crate::data_coordinator::DataWriteAccess::new(&self.config.home_dir).authorized(lease);
+        let write_lease = access.acquire();
+        let worker_cancelled = cancelled.clone();
+        tokio::task::spawn_blocking(move || match payload.as_deref() {
+            Some(payload) => process.restart_payload_with_write_lease(
+                &write_lease,
+                worker_cancelled.as_deref(),
+                Some(payload),
+            ),
+            None => process.restart_with_write_lease(&write_lease, worker_cancelled.as_deref()),
+        })
+        .await
+        .map_err(|error| MihomoError::Process(format!("内核重启后台任务异常结束：{error}")))??;
+        let ready = self.wait_until_ready_until(timeout, cancelled).await;
+        if let Err(error) = ready {
+            let stop = self.stop_async().await;
+            return Err(match stop {
+                Ok(()) => MihomoError::Process(format!("{error}；已停止未就绪内核")),
+                Err(stop) => MihomoError::Process(format!("{error}；停止未就绪内核失败：{stop}")),
+            });
+        }
+        Ok(())
+    }
+
+    /// Polls the real `/version` endpoint until it responds, the child exits,
+    /// or the supplied timeout elapses.
+    ///
+    /// # Errors
+    ///
+    /// Returns the last process log when the selected core exits early, or a timeout error.
+    pub async fn wait_until_ready(&self, timeout: Duration) -> MihomoResult<()> {
+        self.wait_until_ready_until(timeout, None).await
+    }
+
+    async fn wait_until_ready_until(
+        &self,
+        timeout: Duration,
+        cancelled: Option<Arc<AtomicBool>>,
+    ) -> MihomoResult<()> {
+        let client = MihomoClient::new(self.config.endpoint.clone())?;
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if cancelled
+                .as_ref()
+                .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+            {
+                return Err(MihomoError::Process("等待内核控制器时收到停止请求".into()));
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(self.readiness_timeout_error());
+            }
+            if tokio::time::timeout(readiness_attempt_timeout(remaining), async {
+                if let Some(controller) = self.native_controller()? {
+                    let response = controller
+                        .request("GET", "/version", None, remaining)
+                        .await
+                        .map_err(|error| MihomoError::Process(error.to_string()))?;
+                    if response.status != 200 {
+                        return Err(MihomoError::Process(
+                            "Native controller is not ready".into(),
+                        ));
+                    }
+                    serde_json::from_slice::<crate::VersionInfo>(&response.body)?;
+                    Ok(())
+                } else {
+                    client.version().await.map(|_| ())
+                }
+            })
+            .await
+            .is_ok_and(|result| result.is_ok())
+            {
+                return Ok(());
+            }
+            if let Some(error) = self.logs.read().current_listener_error() {
+                return Err(MihomoError::Process(error));
+            }
+            if !self.is_running() {
+                let message = self.logs.read().current_last_line().unwrap_or_else(|| {
+                    format!("{} 在控制器就绪前退出", self.config.kind.display_name())
+                });
+                return Err(MihomoError::Process(message));
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(self.readiness_timeout_error());
+            }
+            tokio::time::sleep(remaining.min(Duration::from_millis(100))).await;
+        }
+    }
+
+    fn readiness_timeout_error(&self) -> MihomoError {
+        MihomoError::Process(format!(
+            "等待 {} 控制器 {} 超时",
+            self.config.kind.display_name(),
+            self.config.endpoint.controller
+        ))
+    }
+
+    /// Returns the controller endpoint assigned to this process.
+    #[must_use]
+    pub const fn endpoint(&self) -> &MihomoEndpoint {
+        &self.config.endpoint
+    }
+
+    pub(crate) fn native_controller(
+        &self,
+    ) -> MihomoResult<Option<crate::service::NativeController>> {
+        let Some(path) = self.config.endpoint.ipc_path() else {
+            return Ok(None);
+        };
+        let pid = self
+            .child
+            .lock()
+            .as_ref()
+            .map(Child::id)
+            .ok_or_else(|| MihomoError::Process("Local core is stopped".into()))?;
+        Ok(Some(crate::service::NativeController::new_local(
+            path.to_path_buf(),
+            pid,
+            self.config.endpoint.secret.clone(),
+        )))
+    }
+
+    /// Returns the concrete runtime core owned by this process.
+    #[must_use]
+    pub const fn kind(&self) -> CoreKind {
+        self.config.kind
+    }
+
+    /// Returns the feature contract for the concrete runtime core.
+    #[must_use]
+    pub const fn capabilities(&self) -> CoreCapabilities {
+        self.config.capabilities()
+    }
+
+    /// Returns a target-core validator bound to this managed process.
+    #[must_use]
+    pub fn config_validator(&self) -> CoreConfigValidator {
+        CoreConfigValidator::new(
+            self.config.kind,
+            self.config.binary.clone(),
+            self.config.home_dir.clone(),
+        )
+        .with_recovery_asset_root(self.recovery_asset_root.read().clone())
+    }
+
+    pub(crate) fn write_scopes(&self) -> Vec<PathBuf> {
+        let mut scopes = launch_write_scopes(&self.config);
+        scopes.extend(self.recovery_asset_root.read().clone());
+        scopes
+    }
+
+    pub(crate) fn set_recovery_asset_root(&self, root: Option<PathBuf>) {
+        *self.recovery_asset_root.write() = root;
+    }
+
+    /// Returns immutable launch metadata without waiting for process transitions.
+    #[must_use]
+    pub const fn launch_config(&self) -> &CoreLaunchConfig {
+        &self.config
+    }
+
+    /// Copies bounded output history without acquiring the process lifecycle lock.
+    #[must_use]
+    pub fn recent_logs(&self) -> Vec<String> {
+        self.logs.read().recent_messages()
+    }
+
+    /// Checks whether the child has not exited yet.
+    /// Run off the UI thread: a concurrent stop or restart can hold the child lock.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        let mut child = self.child.lock();
+        child.as_mut().is_some_and(|child| match child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(status)) => {
+                *self.last_exit_reason.write() = Some(format!("内核退出状态：{status}"));
+                false
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to query managed core process status");
+                false
+            }
+        })
+    }
+
+    /// Captures process paths, live PID, running state, and recent logs.
+    #[must_use]
+    pub fn snapshot(&self) -> CoreProcessSnapshot {
+        self.try_snapshot().unwrap_or_else(|error| {
+            tracing::warn!(%error, "failed to snapshot managed core process status");
+            self.observed_snapshot(false, None, None)
+        })
+    }
+
+    pub(crate) fn try_snapshot(&self) -> std::io::Result<CoreProcessSnapshot> {
+        let (running, pid, started_at_secs) = {
+            let mut child = self.child.lock();
+            match child.as_mut() {
+                Some(process) => match process.try_wait()? {
+                    None => (
+                        true,
+                        Some(process.id()),
+                        Some(self.started_at_secs.load(Ordering::Relaxed)).filter(|time| *time > 0),
+                    ),
+                    Some(status) => {
+                        *self.last_exit_reason.write() = Some(format!("内核退出状态：{status}"));
+                        (false, None, None)
+                    }
+                },
+                None => (false, None, None),
+            }
+        };
+        Ok(self.observed_snapshot(running, pid, started_at_secs))
+    }
+
+    fn observed_snapshot(
+        &self,
+        running: bool,
+        pid: Option<u32>,
+        started_at_secs: Option<u64>,
+    ) -> CoreProcessSnapshot {
+        CoreProcessSnapshot {
+            kind: self.config.kind,
+            running,
+            pid,
+            started_at_secs,
+            exit_reason: self.last_exit_reason.read().clone(),
+            binary: self.config.binary.clone(),
+            config_file: self.config.config_file.clone(),
+            home_dir: self.config.home_dir.clone(),
+            logs: self.logs.read().recent_messages(),
+        }
+    }
+
+    /// Terminates and reaps the child while retaining its handle on failure so
+    /// callers may retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when status inspection, termination, or waiting fails.
+    pub fn stop(&self) -> MihomoResult<()> {
+        let mut child = self.child.lock();
+        stop_child(&mut child)?;
+        self.execution.lock().take();
+        Ok(())
+    }
+
+    /// Stops and reaps the managed child without blocking an async caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns process or blocking-task failures. Repeated calls are safe.
+    pub async fn stop_async(self: &Arc<Self>) -> MihomoResult<()> {
+        let process = self.clone();
+        tokio::task::spawn_blocking(move || process.stop())
+            .await
+            .map_err(|error| MihomoError::Process(format!("内核停止后台任务异常结束：{error}")))?
+    }
+}
+
+fn unix_timestamp_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
+fn launch_write_scopes(config: &CoreLaunchConfig) -> Vec<PathBuf> {
+    let mut scopes = vec![config.home_dir.clone(), config.config_file.clone()];
+    scopes.push(
+        config
+            .binary
+            .parent()
+            .map_or_else(|| config.binary.clone(), std::path::Path::to_path_buf),
+    );
+    if let Ok(binary) = std::fs::canonicalize(&config.binary)
+        && let Some(parent) = binary.parent()
+    {
+        // Release staging and replacement use the executable's physical parent,
+        // which can differ from the parent of its discovered symlink.
+        scopes.push(parent.to_path_buf());
+    }
+    scopes
+}
+
+fn stop_child(child: &mut Option<Child>) -> MihomoResult<()> {
+    let Some(process) = child.as_mut() else {
+        return Ok(());
+    };
+    if process
+        .try_wait()
+        .map_err(|error| MihomoError::Process(format!("查询内核状态失败：{error}")))?
+        .is_none()
+    {
+        stop_running_child(process)?;
+    }
+    child.take();
+    Ok(())
+}
+
+#[cfg(unix)]
+fn stop_running_child(process: &mut Child) -> MihomoResult<()> {
+    let pid = libc::pid_t::try_from(process.id())
+        .map_err(|_| MihomoError::Process("内核进程 ID 超出平台范围".into()))?;
+    // SAFETY: `pid` comes from the live `Child` handle and SIGTERM does not
+    // access memory in this process.
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if process
+            .try_wait()
+            .map_err(|status| MihomoError::Process(format!("查询内核状态失败：{status}")))?
+            .is_some()
+        {
+            return Ok(());
+        }
+        return Err(MihomoError::Process(format!(
+            "向内核发送 SIGTERM 失败：{error}"
+        )));
+    }
+
+    let deadline = std::time::Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT;
+    loop {
+        if process
+            .try_wait()
+            .map_err(|error| MihomoError::Process(format!("等待内核退出失败：{error}")))?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(25)));
+    }
+
+    tracing::warn!(pid, "managed core ignored SIGTERM; forcing termination");
+    process
+        .kill()
+        .map_err(|error| MihomoError::Process(format!("强制停止内核失败：{error}")))?;
+    process
+        .wait()
+        .map_err(|error| MihomoError::Process(format!("等待强制停止的内核退出失败：{error}")))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn stop_running_child(process: &mut Child) -> MihomoResult<()> {
+    process
+        .kill()
+        .map_err(|error| MihomoError::Process(format!("停止内核失败：{error}")))?;
+    process
+        .wait()
+        .map_err(|error| MihomoError::Process(format!("等待内核退出失败：{error}")))?;
+    Ok(())
+}
+
+fn readiness_attempt_timeout(remaining: Duration) -> Duration {
+    remaining.min(Duration::from_millis(750))
+}
+
+fn spawn_child(
+    config: &CoreLaunchConfig,
+    logs: Arc<RwLock<LaunchLogHistory>>,
+    input: Option<std::fs::File>,
+    recovery_asset_root: Option<&std::path::Path>,
+) -> MihomoResult<Child> {
+    std::fs::create_dir_all(&config.home_dir)
+        .map_err(|error| MihomoError::Process(error.to_string()))?;
+    let mut command = Command::new(&config.binary);
+    configure_child_command(&mut command);
+    if config.kind == CoreKind::Mihomo {
+        crate::core_validation::configure_recovery_assets(&mut command, recovery_asset_root)
+            .map_err(|error| MihomoError::Process(error.to_string()))?;
+    }
+    command.arg("-d").arg(&config.home_dir).arg("-f");
+    if let Some(input) = input {
+        // Mihomo's config-string environment takes precedence over -f, including stdin.
+        command
+            .env_remove("CLASH_CONFIG_STRING")
+            .arg("-")
+            .stdin(Stdio::from(input));
+    } else {
+        command.arg(&config.config_file);
+    }
+    if let Some(path) = config.endpoint.ipc_path() {
+        command
+            .arg(if cfg!(windows) {
+                "-ext-ctl-pipe"
+            } else {
+                "-ext-ctl-unix"
+            })
+            .arg(path)
+            .arg("--secret")
+            .arg(&config.endpoint.secret);
+        #[cfg(windows)]
+        command.env(
+            "LISTEN_NAMEDPIPE_SDDL",
+            crate::service::current_user_pipe_sddl()
+                .map_err(|error| MihomoError::Process(error.to_string()))?,
+        );
+    } else if let Some(controller) = &config.controller_override {
+        command
+            .arg("--ext-ctl")
+            .arg(controller)
+            .arg("--secret")
+            .arg(&config.endpoint.secret);
+    }
+    let launch = logs.write().begin_launch();
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            MihomoError::Process(format!("无法启动 {}：{error}", config.binary.display()))
+        })?;
+    let collectors = (|| {
+        if let Some(stdout) = child.stdout.take() {
+            collect_output(stdout, "INFO", logs.clone(), launch.clone())?;
+        }
+        if let Some(stderr) = child.stderr.take() {
+            collect_output(stderr, "CORE", logs, launch)?;
+        }
+        Ok::<_, MihomoError>(())
+    })();
+    if let Err(error) = collectors {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    Ok(child)
+}
+
+fn local_launch_payload(config: &CoreLaunchConfig) -> MihomoResult<Option<String>> {
+    if config.kind != CoreKind::Mihomo {
+        return Ok(None);
+    }
+    let payload = input::read_config(&config.config_file)?;
+    crate::tun_admission::ensure_local_yaml(config.kind, &payload)?;
+    Ok(Some(payload))
+}
+
+#[cfg(target_os = "windows")]
+fn configure_child_command(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn configure_child_command(_command: &mut Command) {}
+
+impl Drop for ManagedCoreProcess {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        if let Some(gate) = self.drop_gate.get_mut().take() {
+            let _ = gate.started.send(());
+            // A panicking/cancelled test releases its RAII sender; timeout is the final bound.
+            let _ = gate.resume.recv_timeout(Duration::from_secs(2));
+        }
+        if let Err(error) = self.stop() {
+            tracing::warn!(%error, "failed to stop managed core while dropping process owner");
+            // Never advertise a free kernel slot while termination is unconfirmed.
+            if let Some(guard) = self.execution.get_mut().take()
+                && let Some(mut child) = self.child.get_mut().take()
+            {
+                guard.release_after_exit(move || match child.try_wait() {
+                    Ok(Some(_)) => true,
+                    Ok(None) => {
+                        let _ = child.kill();
+                        child.wait().is_ok()
+                    }
+                    Err(_) => false,
+                });
+            }
+        }
+    }
+}
+
+fn reserve_execution(
+    kind: CoreKind,
+    isolated_test_child: bool,
+) -> MihomoResult<Option<crate::service::CoreExecutionGuard>> {
+    // Unit fixtures intentionally run many isolated synthetic children in parallel.
+    // Native reservation itself is exercised in zenclash-service and real-core tests.
+    if kind != CoreKind::Mihomo || cfg!(test) || isolated_test_child {
+        return Ok(None);
+    }
+    crate::service::CoreExecutionGuard::acquire()
+        .map(Some)
+        .map_err(|error| MihomoError::Process(error.to_string()))
+}
+
+fn collect_output(
+    reader: impl std::io::Read + Send + 'static,
+    label: &'static str,
+    logs: Arc<RwLock<LaunchLogHistory>>,
+    launch: LaunchLogIdentity,
+) -> MihomoResult<()> {
+    std::thread::Builder::new()
+        .name(format!("zenclash-core-{label}"))
+        .spawn(move || {
+            for line in BufReader::new(reader).lines() {
+                let line = match line {
+                    Ok(line) => line,
+                    Err(error) => {
+                        tracing::warn!(%error, stream = label, "failed to read managed core output");
+                        break;
+                    }
+                };
+                logs.write().record(&launch, label, &line);
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| {
+            MihomoError::Process(format!("无法启动内核 {label} 日志收集线程：{error}"))
+        })
+}

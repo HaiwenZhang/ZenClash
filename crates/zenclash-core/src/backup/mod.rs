@@ -91,6 +91,21 @@ pub struct BackupDataSnapshot {
     pub overrides: crate::YamlOverrideCatalog,
 }
 
+/// A coherent backup-data read and the preferences source captured during that read.
+#[derive(Clone, Debug)]
+pub struct ObservedBackupSnapshot {
+    snapshot: BackupDataSnapshot,
+    preferences: crate::AppPreferencesObservation,
+}
+
+impl ObservedBackupSnapshot {
+    /// Moves the data and its preferences publication source to the consumer.
+    #[must_use]
+    pub fn into_parts(self) -> (BackupDataSnapshot, crate::AppPreferencesObservation) {
+        (self.snapshot, self.preferences)
+    }
+}
+
 /// Coordinates local backup export and transactional restore for one data root.
 #[derive(Clone, Debug)]
 pub struct BackupManager {
@@ -129,7 +144,7 @@ impl BackupManager {
 
     /// Reads authoritative state without observing an unfinished restore.
     ///
-    /// Run on a blocking worker. The shared root and physical managed-directory
+    /// Run on a blocking worker. The exclusive root and physical managed-directory
     /// scopes remain reserved throughout the read; store construction reuses
     /// that authority instead of acquiring a nested lease.
     ///
@@ -137,18 +152,34 @@ impl BackupManager {
     ///
     /// Returns filesystem or persisted-data decoding errors.
     pub fn read_snapshot(&self) -> BackupResult<BackupDataSnapshot> {
+        Ok(self.read_observed_snapshot()?.snapshot)
+    }
+
+    /// Reads all backup facts and preferences eligibility under the same original root scope.
+    /// Run on a blocking worker. No write authority escapes in the returned observation.
+    ///
+    /// # Errors
+    /// Returns filesystem or persisted-data decoding errors.
+    pub fn read_observed_snapshot(&self) -> BackupResult<ObservedBackupSnapshot> {
         let mut scopes = transaction::write_scopes(&self.data_root);
         scopes.push(self.data_root.clone());
-        let lease = crate::data_coordinator::DataWriteLease::shared(scopes);
+        let lease = crate::data_coordinator::DataWriteLease::exclusive(scopes);
         let profiles = crate::ProfileStore::open(self.data_root.join("profiles"), Some(&lease))?;
         let overrides =
             crate::YamlOverrideStore::open(self.data_root.join("yaml-overrides"), Some(&lease))?;
-        Ok(BackupDataSnapshot {
-            preferences: AppPreferencesStore::new(self.data_root.join(PREFERENCES_PATH)).load()?,
+        let preferences = AppPreferencesStore::new(self.data_root.join(PREFERENCES_PATH))
+            .with_write_lease(&lease)
+            .observe()?;
+        let snapshot = BackupDataSnapshot {
+            preferences: preferences.preferences().clone(),
             profiles: profiles.load()?,
             controlled_config: ControlledConfigStore::new(self.data_root.join("controlled-config"))
                 .load_json()?,
             overrides: overrides.load()?,
+        };
+        Ok(ObservedBackupSnapshot {
+            snapshot,
+            preferences,
         })
     }
 
@@ -185,7 +216,10 @@ pub struct PreparedBackupRestore {
     staging_root: PathBuf,
     file_count: usize,
     payload_bytes: u64,
-    previous_runtime: Option<((u64, u64), crate::CoreRestoreSnapshot)>,
+    previous_runtime: Option<(
+        crate::core_session::RuntimeConfigurationRevision,
+        crate::CoreRestoreSnapshot,
+    )>,
 }
 
 impl std::fmt::Debug for PreparedBackupRestore {
@@ -203,7 +237,7 @@ impl std::fmt::Debug for PreparedBackupRestore {
 impl PreparedBackupRestore {
     pub(crate) fn retain_runtime(
         &mut self,
-        expected: (u64, u64),
+        expected: crate::core_session::RuntimeConfigurationRevision,
         snapshot: crate::CoreRestoreSnapshot,
     ) {
         self.previous_runtime = Some((expected, snapshot));
@@ -344,6 +378,19 @@ impl std::fmt::Debug for BackupRestoreTransaction {
 }
 
 impl BackupRestoreTransaction {
+    /// Reads preferences under this restore's existing data authority.
+    /// The returned observation cannot publish while the restore is active and carries no write lease.
+    ///
+    /// # Errors
+    /// Returns a preferences read or validation error.
+    pub fn observe_preferences(&self) -> BackupResult<crate::AppPreferencesObservation> {
+        Ok(
+            AppPreferencesStore::new(self.data_root.join(PREFERENCES_PATH))
+                .with_write_lease(&self.lease)
+                .observe()?,
+        )
+    }
+
     /// Returns the committed runtime captured after exclusion and before disk activation.
     ///
     /// Present only for [`PreparedBackupRestore::activate_for_session`]. The

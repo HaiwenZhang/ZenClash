@@ -79,7 +79,7 @@ impl CoreSession {
         }
         let session = self.clone();
         self.complete_service_initialization(async move {
-            let _run_attempt = session.begin_core_run_attempt();
+            let _availability_pause = session.pause_pac_availability();
             let _lease = lease;
             let _store_mutation = store.lock_service_tun_mutation().await;
             client.ensure_binding_current()?;

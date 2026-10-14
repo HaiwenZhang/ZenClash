@@ -48,7 +48,8 @@ impl PublicIpProvider {
 /// Route used for public network diagnostics.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum NetworkProbeRoute {
-    /// Connect without an application-configured proxy.
+    /// Connect without an HTTP proxy, including ambient environment/system proxies.
+    /// Operating-system routing, including an active TUN, still applies.
     #[default]
     Direct,
     /// Send HTTP and HTTPS diagnostics through a local Mihomo HTTP endpoint.
@@ -215,6 +216,8 @@ impl NetworkProbeService {
         request_timeout: Duration,
     ) -> NetworkProbeResult<Self> {
         let mut builder = reqwest::Client::builder()
+            // Diagnostic routes are explicit; inherited proxies cannot select a path.
+            .no_proxy()
             .user_agent(concat!("ZenClash/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(connect_timeout)
             .timeout(request_timeout)
@@ -605,5 +608,124 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, NetworkProbeError::ResponseTooLarge { .. }));
+    }
+
+    #[tokio::test]
+    async fn ambient_proxy_fixture_child() {
+        let Ok(target) = std::env::var("ZENCLASH_PROBE_FIXTURE_TARGET") else {
+            return;
+        };
+        let route = match std::env::var("ZENCLASH_PROBE_FIXTURE_EXPLICIT_PORT") {
+            Ok(port) => NetworkProbeRoute::MihomoHttp {
+                host: "127.0.0.1".into(),
+                port: port.parse().unwrap(),
+            },
+            Err(_) => NetworkProbeRoute::Direct,
+        };
+        let service = NetworkProbeService::with_timeouts(
+            route,
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let result = service
+            .measure_latency(NetworkLatencyTarget::new("fixture", target).unwrap())
+            .await;
+        assert!(
+            result.error.is_none(),
+            "local probe failed: {:?}",
+            result.error
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_and_explicit_mihomo_probes_ignore_ambient_proxy_settings() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn responder() -> (u16, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let hits = Arc::new(AtomicUsize::new(0));
+            let count = hits.clone();
+            let task = tokio::spawn(async move {
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut bytes = [0; 2048];
+                    let received = stream.read(&mut bytes).await.unwrap();
+                    assert!(received > 0, "fixture received an empty request");
+                    count.fetch_add(1, Ordering::SeqCst);
+                    stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                }
+            });
+            (port, hits, task)
+        }
+
+        let (target_port, target_hits, target_task) = responder().await;
+        let (ambient_port, ambient_hits, ambient_task) = responder().await;
+        let (explicit_port, explicit_hits, explicit_task) = responder().await;
+        for explicit in [false, true] {
+            let output = tokio::task::spawn_blocking(move || {
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command
+                    .args([
+                        "--exact",
+                        "network::probe::tests::ambient_proxy_fixture_child",
+                        "--nocapture",
+                    ])
+                    .env(
+                        "ZENCLASH_PROBE_FIXTURE_TARGET",
+                        format!("http://127.0.0.1:{target_port}/fixture"),
+                    );
+                for name in [
+                    "HTTP_PROXY",
+                    "http_proxy",
+                    "HTTPS_PROXY",
+                    "https_proxy",
+                    "ALL_PROXY",
+                    "all_proxy",
+                ] {
+                    command.env(name, format!("http://127.0.0.1:{ambient_port}"));
+                }
+                command.env("NO_PROXY", "").env("no_proxy", "");
+                if explicit {
+                    command.env(
+                        "ZENCLASH_PROBE_FIXTURE_EXPLICIT_PORT",
+                        explicit_port.to_string(),
+                    );
+                } else {
+                    command.env_remove("ZENCLASH_PROBE_FIXTURE_EXPLICIT_PORT");
+                }
+                command.output().unwrap()
+            })
+            .await
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated fixture failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        target_task.abort();
+        ambient_task.abort();
+        explicit_task.abort();
+        assert_eq!(
+            target_hits.load(Ordering::SeqCst),
+            1,
+            "Direct must reach the target itself"
+        );
+        assert_eq!(
+            explicit_hits.load(Ordering::SeqCst),
+            1,
+            "Mihomo must use its explicit route"
+        );
+        assert_eq!(
+            ambient_hits.load(Ordering::SeqCst),
+            0,
+            "ambient proxies must not receive diagnostic requests"
+        );
     }
 }

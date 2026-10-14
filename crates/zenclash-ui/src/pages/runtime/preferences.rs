@@ -18,8 +18,6 @@ pub enum PreferenceScope {
     SystemProxy,
     /// Executable selection for one backend.
     CoreBinary(CoreKind),
-    /// Backend selected for the next application start.
-    CoreKind,
 }
 
 impl PreferenceScope {
@@ -66,12 +64,109 @@ impl PreferenceScope {
                     .path(kind)
                     .map(std::path::Path::to_path_buf),
             ),
-            Self::CoreKind => current.core_kind = saved.core_kind,
         }
     }
 }
 
 impl RuntimePage {
+    #[cfg(test)]
+    pub(crate) fn presented_preferences(&self) -> &AppPreferences {
+        &self.preferences
+    }
+
+    pub(crate) fn merge_preferences_from_app(
+        &mut self,
+        preferences: &AppPreferences,
+        scopes: &[PreferenceScope],
+        previews: crate::preference_previews::PreferencePreviews,
+        cx: &mut Context<Self>,
+    ) {
+        for scope in scopes {
+            scope.apply(&mut self.preferences, preferences);
+        }
+        self.preference_previews = previews;
+        self.preference_previews.apply(&mut self.preferences);
+        cx.notify();
+    }
+
+    pub(crate) fn set_preference_previews(
+        &mut self,
+        previews: crate::preference_previews::PreferencePreviews,
+        cx: &mut Context<Self>,
+    ) {
+        self.preference_previews = previews;
+        self.preference_previews.apply(&mut self.preferences);
+        cx.notify();
+    }
+
+    pub(crate) fn report_preferences_refresh_error(
+        &mut self,
+        error: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.error = Some(error);
+        cx.notify();
+    }
+
+    pub(in crate::pages::runtime) fn publish_restored_preferences(
+        &mut self,
+        observation: zenclash_core::AppPreferencesObservation,
+        token: super::PageTaskToken,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .preferences_store
+            .as_ref()
+            .is_some_and(|store| !observation.belongs_to(store))
+        {
+            self.finish_mutation(token);
+            self.set_page_error(
+                token,
+                zenclash_core::AppPreferencesError::ConcurrentModification.to_string(),
+            );
+            return;
+        }
+        let accepted = observation
+            .publish_if_current(|preferences| {
+                self.preferences = preferences.clone();
+                self.preference_previews.apply(&mut self.preferences);
+                self.system_proxy_editor = None;
+                cx.emit(PreferencesRestored::restored(observation.clone()));
+            })
+            .is_some();
+        if accepted {
+            self.finish_mutation(token);
+            return;
+        }
+        let path = observation.path().to_owned();
+        let task = self.runtime.spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::task::spawn_blocking(move || {
+                zenclash_core::AppPreferencesStore::new(path).observe()
+            })
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(observation) => this.publish_restored_preferences(observation, token, cx),
+                    Err(error) => {
+                        this.finish_mutation(token);
+                        this.set_page_error(token, error);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn accept_preferences(
         &mut self,
         preferences: AppPreferences,
@@ -79,7 +174,7 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) {
         scope.apply(&mut self.preferences, &preferences);
-        cx.emit(PreferencesRestored { preferences, scope });
+        cx.emit(PreferencesRestored::new(preferences, scope));
     }
 }
 
@@ -106,11 +201,11 @@ mod tests {
     }
 
     #[test]
-    fn saving_one_backend_path_preserves_the_other_backend_selection() {
-        let mut current = AppPreferences::default();
-        current
-            .core_binaries
-            .set(CoreKind::Meow, Some("new-meow".into()));
+    fn saving_core_binary_preserves_unrelated_preferences() {
+        let mut current = AppPreferences {
+            appearance: AppearancePreference::Dark,
+            ..Default::default()
+        };
         let mut saved = AppPreferences::default();
         saved
             .core_binaries
@@ -120,10 +215,7 @@ mod tests {
             current.core_binaries.path(CoreKind::Mihomo),
             Some(std::path::Path::new("new-mihomo"))
         );
-        assert_eq!(
-            current.core_binaries.path(CoreKind::Meow),
-            Some(std::path::Path::new("new-meow"))
-        );
+        assert_eq!(current.appearance, AppearancePreference::Dark);
     }
 
     #[test]

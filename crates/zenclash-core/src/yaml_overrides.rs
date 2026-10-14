@@ -3,6 +3,7 @@
 use std::{
     collections::HashSet,
     fs,
+    io::Read,
     path::{Component, Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -17,9 +18,10 @@ use crate::profiles::atomic_write;
 #[cfg(test)]
 mod tests;
 
-const MAX_OVERRIDE_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_OVERRIDE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
 const MAX_OVERRIDE_COUNT: usize = 1_024;
+const MAX_IMPORT_BYTES: usize = 256 * 1024 * 1024;
 
 /// One managed YAML override in effective application order.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -84,7 +86,10 @@ impl YamlOverrideStore {
     ///
     /// Returns an error when the data directory cannot be found or created.
     pub fn discover() -> YamlOverrideResult<Self> {
-        Self::new(default_data_dir()?.join("yaml-overrides"))
+        let path = crate::AppDataPaths::discover()
+            .ok_or(YamlOverrideError::MissingDataDirectory)?
+            .yaml_overrides();
+        Self::new(path)
     }
 
     /// Opens a store rooted at `root`.
@@ -122,7 +127,15 @@ impl YamlOverrideStore {
         self.load_unlocked()
     }
 
+    // Backup export validates each payload under its own aggregate read budget.
+    pub(crate) fn load_catalog_metadata(&self) -> YamlOverrideResult<YamlOverrideCatalog> {
+        let _transaction = self.transaction.lock();
+        self.load_catalog_metadata_unlocked()
+    }
+
     /// Imports YAML files or the immediate YAML children of directories.
+    /// A batch is limited to 1,024 files and 256 MiB of uncompressed payloads;
+    /// each YAML file remains limited to 4 MiB.
     ///
     /// Every candidate is read and parsed before any managed file is written.
     ///
@@ -266,6 +279,46 @@ impl YamlOverrideStore {
     ///
     /// Returns an error for absent IDs or failed file/manifest transactions.
     pub fn delete(&self, id: &str) -> YamlOverrideResult<()> {
+        self.delete_checked(id, |_| Ok(())).map(drop)
+    }
+
+    /// Deletes a record only while it remains disabled in the current catalog.
+    /// Returns the resulting catalog from the same store transaction.
+    ///
+    /// # Errors
+    /// Returns an error for an enabled or absent record, or failed persistence/rollback.
+    pub fn delete_disabled(&self, id: &str) -> YamlOverrideResult<YamlOverrideCatalog> {
+        self.delete_checked(id, |record| {
+            if record.enabled {
+                return Err(YamlOverrideError::Invalid(zenclash_i18n::text(
+                    "overrides.errors.disable_before_delete",
+                )));
+            }
+            Ok(())
+        })
+    }
+
+    /// Removes an imported record only if its identity and enablement are unchanged.
+    ///
+    /// # Errors
+    /// Returns an error for concurrent modification, an absent record, or failed persistence.
+    pub fn discard_imported(&self, expected: &YamlOverrideRecord) -> YamlOverrideResult<()> {
+        self.delete_checked(&expected.id, |record| {
+            if record != expected {
+                return Err(YamlOverrideError::Transaction(
+                    "导入的覆写已被其他任务修改，不能自动删除".into(),
+                ));
+            }
+            Ok(())
+        })
+        .map(drop)
+    }
+
+    fn delete_checked(
+        &self,
+        id: &str,
+        validate: impl FnOnce(&YamlOverrideRecord) -> YamlOverrideResult<()>,
+    ) -> YamlOverrideResult<YamlOverrideCatalog> {
         let _write_lease = self.write_access.acquire();
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
@@ -274,6 +327,7 @@ impl YamlOverrideStore {
             .iter()
             .position(|record| record.id == id)
             .ok_or_else(|| YamlOverrideError::NotFound(id.into()))?;
+        validate(&catalog.items[index])?;
         let record = catalog.items.remove(index);
         let path = self.files_dir().join(&record.file_name);
         let payload = read_bounded(&path, MAX_OVERRIDE_BYTES)?;
@@ -286,7 +340,7 @@ impl YamlOverrideStore {
                 ))),
             };
         }
-        Ok(())
+        Ok(catalog)
     }
 
     /// Resolves enabled managed files in application order.
@@ -367,6 +421,14 @@ impl YamlOverrideStore {
     }
 
     fn load_unlocked(&self) -> YamlOverrideResult<YamlOverrideCatalog> {
+        let catalog = self.load_catalog_metadata_unlocked()?;
+        for record in &catalog.items {
+            validate_override_payload(&self.managed_path(record))?;
+        }
+        Ok(catalog)
+    }
+
+    fn load_catalog_metadata_unlocked(&self) -> YamlOverrideResult<YamlOverrideCatalog> {
         let path = self.manifest_path();
         if !path.exists() {
             return Ok(YamlOverrideCatalog::default());
@@ -374,9 +436,6 @@ impl YamlOverrideStore {
         let bytes = read_bounded(&path, MAX_MANIFEST_BYTES)?;
         let catalog = serde_json::from_slice(&bytes)?;
         validate_catalog(&catalog, &self.files_dir())?;
-        for record in &catalog.items {
-            validate_override_payload(&self.managed_path(record))?;
-        }
         Ok(catalog)
     }
 
@@ -413,12 +472,14 @@ fn collect_candidates(
                     continue;
                 }
                 if metadata.is_file() && is_yaml_path(&child) {
+                    ensure_import_count(files.len() + children.len() + 1)?;
                     children.push(child);
                 }
             }
             children.sort();
             files.extend(children);
         } else if path.is_file() && is_yaml_path(&path) {
+            ensure_import_count(files.len() + 1)?;
             files.push(path);
         } else {
             return Err(YamlOverrideError::Invalid(format!(
@@ -427,10 +488,14 @@ fn collect_candidates(
             )));
         }
     }
+    let mut payload_bytes = 0;
     files
         .into_iter()
         .map(|path| {
-            let payload = validate_override_payload(&path)?;
+            let limit = MAX_OVERRIDE_BYTES.min(MAX_IMPORT_BYTES - payload_bytes);
+            let payload = read_bounded(&path, limit)?;
+            validate_override_bytes(&path, &payload)?;
+            payload_bytes += payload.len();
             let name = path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -441,9 +506,23 @@ fn collect_candidates(
         .collect()
 }
 
+fn ensure_import_count(count: usize) -> YamlOverrideResult<()> {
+    if count > MAX_OVERRIDE_COUNT {
+        return Err(YamlOverrideError::Invalid(format!(
+            "单次导入的 YAML 覆写数量不能超过 {MAX_OVERRIDE_COUNT}"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_override_payload(path: &Path) -> YamlOverrideResult<Vec<u8>> {
     let payload = read_bounded(path, MAX_OVERRIDE_BYTES)?;
-    let value: serde_yaml::Value = serde_yaml::from_slice(&payload)
+    validate_override_bytes(path, &payload)?;
+    Ok(payload)
+}
+
+pub(crate) fn validate_override_bytes(path: &Path, payload: &[u8]) -> YamlOverrideResult<()> {
+    let value: serde_yaml::Value = serde_yaml::from_slice(payload)
         .map_err(|error| YamlOverrideError::Invalid(format!("{}：{error}", path.display())))?;
     if !value.is_mapping() {
         return Err(YamlOverrideError::Invalid(format!(
@@ -451,7 +530,7 @@ fn validate_override_payload(path: &Path) -> YamlOverrideResult<Vec<u8>> {
             path.display()
         )));
     }
-    Ok(payload)
+    Ok(())
 }
 
 fn validate_catalog_reordering(
@@ -535,10 +614,26 @@ fn cleanup_created_files(paths: &[PathBuf]) -> YamlOverrideResult<()> {
 }
 
 fn read_bounded(path: &Path, limit: usize) -> YamlOverrideResult<Vec<u8>> {
-    if fs::metadata(path)?.len() > limit as u64 {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(YamlOverrideError::Invalid(format!(
+            "{} 不是普通文件",
+            path.display()
+        )));
+    }
+    if metadata.len() > limit as u64 {
         return Err(oversized(path, limit));
     }
-    let bytes = fs::read(path)?;
+    let mut bytes = Vec::new();
+    file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
     if bytes.len() > limit {
         return Err(oversized(path, limit));
     }
@@ -547,9 +642,9 @@ fn read_bounded(path: &Path, limit: usize) -> YamlOverrideResult<Vec<u8>> {
 
 fn oversized(path: &Path, limit: usize) -> YamlOverrideError {
     YamlOverrideError::Invalid(format!(
-        "{} 超过 {} MiB 限制",
+        "{} 超过 {} 字节的可用读取预算",
         path.display(),
-        limit / 1024 / 1024
+        limit
     ))
 }
 
@@ -582,27 +677,4 @@ fn unique_override_id(catalog: &YamlOverrideCatalog, name: &str) -> YamlOverride
         })
         .find(|candidate| catalog.items.iter().all(|record| record.id != *candidate))
         .ok_or_else(|| YamlOverrideError::Transaction("无法生成唯一覆写 ID".into()))
-}
-
-fn default_data_dir() -> YamlOverrideResult<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .ok_or(YamlOverrideError::MissingDataDirectory)?;
-    if cfg!(target_os = "macos") {
-        Ok(home
-            .join("Library")
-            .join("Application Support")
-            .join("ZenClash"))
-    } else if cfg!(target_os = "windows") {
-        Ok(std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or(home.join("AppData").join("Local"))
-            .join("ZenClash"))
-    } else {
-        Ok(std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or(home.join(".local").join("share"))
-            .join("zenclash"))
-    }
 }

@@ -1,12 +1,11 @@
 use std::{fs, path::Path};
 
-use super::{AutostartError, AutostartResult, AutostartStatus, home_dir, required_entry_path};
+use super::{AutostartError, AutostartResult, AutostartStatus, required_entry_path};
 use crate::profiles::atomic_write;
 
 pub(super) fn default_entry_path() -> AutostartResult<Option<std::path::PathBuf>> {
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or(home_dir()?.join(".config"));
+    let config = crate::application_paths::user_configuration_directory()
+        .ok_or_else(|| AutostartError::Path("无法确定用户主目录".into()))?;
     Ok(Some(config.join("autostart/zenclash.desktop")))
 }
 

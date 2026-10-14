@@ -16,8 +16,8 @@ use std::{
 use tracing_subscriber::{EnvFilter, filter::Directive};
 use zenclash_core::{
     AppInstanceLock, AppPreferences, AppPreferencesStore, ControlledConfigStore,
-    CoreInitializationOutcome, CoreKind, CoreSession, EffectiveConfigIntent, LogMonitor,
-    MihomoClient, MihomoEndpoint, MihomoLaunchConfig, MihomoProcess, MihomoRuntimeResources,
+    CoreInitializationOutcome, CoreKind, CoreLaunchConfig, CoreSession, EffectiveConfigIntent,
+    LogMonitor, ManagedCoreProcess, MihomoClient, MihomoEndpoint, MihomoRuntimeResources,
     ProfileStore, ServiceHealthKind, TrafficHistoryStore, TrafficMonitor, YamlOverrideStore,
     bundled_recovery_profile,
 };
@@ -40,14 +40,14 @@ struct RecoveredCore {
     kind: CoreKind,
     binary: Option<PathBuf>,
     endpoint: MihomoEndpoint,
-    process: Option<Arc<MihomoProcess>>,
+    process: Option<Arc<ManagedCoreProcess>>,
     profile: Option<PathBuf>,
     startup_notice: Option<String>,
 }
 
 struct BootstrappedCore {
     endpoint: MihomoEndpoint,
-    process: Option<Arc<MihomoProcess>>,
+    process: Option<Arc<ManagedCoreProcess>>,
     profile: Option<PathBuf>,
     startup_notice: Option<String>,
 }
@@ -55,7 +55,7 @@ struct BootstrappedCore {
 struct CoreStartupState {
     kind: CoreKind,
     endpoint: MihomoEndpoint,
-    process: Option<Arc<MihomoProcess>>,
+    process: Option<Arc<ManagedCoreProcess>>,
     profile: Option<PathBuf>,
     notice: Option<String>,
     error: Option<String>,
@@ -327,7 +327,7 @@ fn prepare_application(
                 .map(PathBuf::from)
                 .or(profile_store.active_path()?)
                 .or_else(|| {
-                    let candidate = root.join("platforms/common/default.yaml");
+                    let candidate = zenclash_core::WorkspaceResources::new(&root).default_profile();
                     candidate.is_file().then_some(candidate)
                 });
             Some(runtime.block_on(MihomoRuntimeResources::prepare(root, selected))?)
@@ -762,21 +762,16 @@ fn prepare_legacy_startup(
     )?;
     if startup_error.is_none()
         && mihomo_process.is_none()
-        && core_kind.capabilities().full_config_reload
+        && let Some(profile) = profile_path.as_ref()
+        && let Err(error) = runtime.block_on(core_session.apply(
+            controlled_config_store,
+            EffectiveConfigIntent::ActivateProfile {
+                profile: profile.clone(),
+                overrides: override_paths.to_vec(),
+            },
+        ))
     {
-        if let Some(profile) = profile_path.as_ref()
-            && let Err(error) = runtime.block_on(core_session.apply(
-                controlled_config_store,
-                EffectiveConfigIntent::ActivateProfile {
-                    profile: profile.clone(),
-                    overrides: override_paths.to_vec(),
-                },
-            ))
-        {
-            tracing::warn!(%error, core = %core_kind, "initial core configuration synchronization failed");
-        }
-    } else if !core_kind.capabilities().full_config_reload {
-        tracing::info!(core = %core_kind, "skipping unsupported full configuration hot reload");
+        tracing::warn!(%error, core = %core_kind, "initial core configuration synchronization failed");
     }
     // The shared binding now owns this bootstrap child.
     drop(mihomo_process);
@@ -910,7 +905,8 @@ fn bootstrap_core(
 
     if std::env::var_os("ZENCLASH_CONTROLLER").is_some() {
         let profile_path = selected_profile.or_else(|| {
-            let candidate = project_root.join("platforms/common/default.yaml");
+            let candidate =
+                zenclash_core::WorkspaceResources::new(project_root.as_path()).default_profile();
             candidate.is_file().then_some(candidate)
         });
         return Ok(BootstrappedCore {
@@ -921,7 +917,7 @@ fn bootstrap_core(
         });
     }
 
-    let discovered = match MihomoLaunchConfig::discover_for_kind_with_binary_and_config(
+    let discovered = match CoreLaunchConfig::discover_for_kind_with_binary_and_config(
         &project_root,
         core_kind,
         preferred_binary,
@@ -971,7 +967,7 @@ fn bootstrap_core(
             .join("、");
         zenclash_i18n::text_with("startup.listener_fallback", &[("changes", changes)])
     });
-    let launch = match MihomoLaunchConfig::for_kind(
+    let launch = match CoreLaunchConfig::for_kind(
         core_kind,
         discovered.binary,
         effective_path,
@@ -1014,7 +1010,7 @@ fn bootstrap_core(
         })?;
         let launch = launch.clone().with_controller_endpoint(controller);
         let endpoint = launch.endpoint.clone();
-        let process = MihomoProcess::spawn(launch).map_err(|error| {
+        let process = ManagedCoreProcess::spawn(launch).map_err(|error| {
             std::io::Error::other(zenclash_i18n::text_with(
                 "startup.managed_spawn",
                 &[
@@ -1097,13 +1093,13 @@ fn selected_profile(project_root: &Path) -> Option<PathBuf> {
                 .flatten()
         })
         .or_else(|| {
-            let candidate = project_root.join("platforms/common/default.yaml");
+            let candidate = zenclash_core::WorkspaceResources::new(project_root).default_profile();
             candidate.is_file().then_some(candidate)
         })
 }
 
 fn offline_core_state(requested_core: CoreKind, error: &std::io::Error) -> CoreStartupState {
-    tracing::error!(%error, core = %requested_core, "all eligible cores failed; opening recovery UI without a controller");
+    tracing::error!(%error, core = %requested_core, "all eligible Mihomo binaries failed; opening recovery UI without a controller");
     let profile = project_root()
         .ok()
         .and_then(|project_root| selected_profile(&project_root));
@@ -1138,9 +1134,6 @@ fn recover_core(
     }
     if requested_core != CoreKind::Mihomo || requested_binary.is_some() {
         candidates.push((CoreKind::Mihomo, None));
-    }
-    if requested_core != CoreKind::Meow || requested_binary.is_some() {
-        candidates.push((CoreKind::Meow, None));
     }
 
     let mut failures = vec![initial_error.to_string()];
@@ -1187,11 +1180,11 @@ fn recover_safe_profile(
     requested_core: CoreKind,
     requested_binary: Option<&Path>,
     controlled_config_store: &ControlledConfigStore,
-    allow_alternate_cores: bool,
+    allow_binary_fallback: bool,
     cause: &std::io::Error,
 ) -> std::io::Result<CoreStartupState> {
     let recovery_profile = bundled_recovery_profile()
-        .unwrap_or(project_root()?.join("platforms/common/recovery.yaml"));
+        .unwrap_or(zenclash_core::WorkspaceResources::new(project_root()?).recovery_profile());
     if !recovery_profile.is_file() {
         return Err(std::io::Error::other(zenclash_i18n::text_with(
             "startup.recovery_missing",
@@ -1202,14 +1195,15 @@ fn recover_safe_profile(
         )));
     }
     let mut candidates = vec![(requested_core, requested_binary.map(Path::to_path_buf))];
-    if allow_alternate_cores {
+    if allow_binary_fallback {
         if let Some(kind) = preferences.last_known_good_core {
             let candidate = (kind, preferences.last_known_good_binary.clone());
             if !candidates.contains(&candidate) {
                 candidates.push(candidate);
             }
         }
-        for kind in [CoreKind::Mihomo, CoreKind::Meow] {
+        {
+            let kind = CoreKind::Mihomo;
             let candidate = (kind, None);
             if !candidates.contains(&candidate) {
                 candidates.push(candidate);

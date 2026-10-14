@@ -10,7 +10,7 @@ use super::{
     CoreUpdateError, CoreUpdateResult, PreparedCoreUpdate, service::MihomoReleaseService,
     transaction::CoreUpdateTransaction,
 };
-use crate::{MihomoClient, MihomoProcess, VersionInfo, data_coordinator::DataWriteLease};
+use crate::{ManagedCoreProcess, MihomoClient, VersionInfo, data_coordinator::DataWriteLease};
 
 pub(crate) struct InstalledCore {
     pub(crate) version: VersionInfo,
@@ -22,7 +22,7 @@ impl MihomoReleaseService {
     pub(crate) async fn install_prepared(
         &self,
         prepared: PreparedCoreUpdate,
-        process: Arc<MihomoProcess>,
+        process: Arc<ManagedCoreProcess>,
         client: MihomoClient,
         cancelled: Arc<AtomicBool>,
         lease: &DataWriteLease,
@@ -160,7 +160,7 @@ pub(crate) async fn wait_for_cancellation(cancelled: Option<Arc<AtomicBool>>) {
     }
 }
 
-async fn stop_process(process: Arc<MihomoProcess>) -> CoreUpdateResult<()> {
+async fn stop_process(process: Arc<ManagedCoreProcess>) -> CoreUpdateResult<()> {
     process
         .stop_async()
         .await
@@ -168,7 +168,7 @@ async fn stop_process(process: Arc<MihomoProcess>) -> CoreUpdateResult<()> {
 }
 
 async fn restart_process(
-    process: Arc<MihomoProcess>,
+    process: Arc<ManagedCoreProcess>,
     cancelled: &Arc<AtomicBool>,
     lease: &DataWriteLease,
     payload: Arc<str>,
@@ -191,7 +191,7 @@ async fn restart_process(
 }
 
 async fn restart_after_activation_failure(
-    process: Arc<MihomoProcess>,
+    process: Arc<ManagedCoreProcess>,
     activation_error: String,
     cancelled: &Arc<AtomicBool>,
     lease: &DataWriteLease,
@@ -216,7 +216,7 @@ async fn restart_after_activation_failure(
 }
 
 async fn rollback_rejected_core(
-    process: Arc<MihomoProcess>,
+    process: Arc<ManagedCoreProcess>,
     transaction: CoreUpdateTransaction,
     rejection: CoreUpdateError,
     cancelled: &Arc<AtomicBool>,

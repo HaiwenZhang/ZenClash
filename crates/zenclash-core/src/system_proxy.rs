@@ -6,13 +6,22 @@ use parking_lot::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-mod command;
+mod configuration;
+mod error;
+pub use configuration::SystemProxyConfiguration;
+use configuration::SystemProxyConfigurationKind;
 #[cfg(any(target_os = "linux", test))]
 mod linux;
 #[cfg(any(target_os = "macos", test))]
 mod macos;
 mod native;
+mod summary;
+use error::invalid_setting;
+pub use error::{
+    NativePropertyListError, SystemProxyBackendKind, SystemProxyBackendUnavailable,
+    SystemProxyError, SystemProxySetting, SystemProxyTransactionCause, SystemProxyValidationError,
+};
+pub use summary::{PacProxyStatus, ProxyEndpointStatus, SystemProxyStatus, SystemProxySummary};
 mod pac;
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 mod unsupported;
@@ -31,7 +40,10 @@ use windows as platform;
 use crate::{AppPreferences, AppPreferencesError, AppPreferencesStore, MihomoError, MihomoResult};
 
 use native::{NativeProxyBackend, PlatformProxyBackend, ownership_service};
-pub use pac::{PacServer, PacServerStatus, default_pac_script, normalize_pac_script};
+pub use pac::{
+    PacError, PacServer, PacServerOperation, PacServerStatus, default_pac_script,
+    normalize_pac_script,
+};
 
 const MAX_BYPASS_ENTRIES: usize = 64;
 const MAX_BYPASS_ENTRY_BYTES: usize = 253;
@@ -47,32 +59,7 @@ pub enum SystemProxyMode {
     Pac,
 }
 
-/// Current HTTP and HTTPS proxy state reported by the desktop operating system.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SystemProxyStatus {
-    /// Human-readable network service or desktop proxy backend name.
-    pub service: String,
-    /// Whether the HTTP proxy is enabled.
-    pub enabled: bool,
-    /// HTTP proxy host.
-    pub server: String,
-    /// HTTP proxy port.
-    pub port: u16,
-    /// Whether the HTTPS proxy is enabled.
-    pub secure_enabled: bool,
-    /// HTTPS proxy host.
-    pub secure_server: String,
-    /// HTTPS proxy port.
-    pub secure_port: u16,
-    /// Native proxy-bypass entries reported by the operating system.
-    pub bypass: Vec<String>,
-    /// Whether automatic proxy configuration is enabled.
-    pub auto_enabled: bool,
-    /// Automatic proxy configuration URL reported by the OS.
-    pub auto_url: String,
-}
-
-/// Exact native proxy state last applied and verified by ZenClash.
+/// Persisted managed-endpoint claim, separate from complete in-memory native snapshots.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum SystemProxyOwnership {
@@ -114,7 +101,7 @@ pub struct SystemProxySessionSnapshot {
     /// Whether the user asked ZenClash to keep system proxying enabled.
     pub intent_enabled: bool,
     /// Current native proxy state reported by the operating system.
-    pub actual: SystemProxyStatus,
+    pub actual: SystemProxySummary,
     /// Whether the current native state is still owned by ZenClash.
     pub ownership: SystemProxyOwnershipState,
 }
@@ -130,41 +117,42 @@ pub(crate) fn validate_system_proxy_ownership(
             bypass,
         } => {
             if *port == 0 {
-                return Err(MihomoError::Process("系统代理所有权端口不能为 0".into()));
+                return Err(invalid_setting(
+                    SystemProxySetting::Port,
+                    SystemProxyValidationError::ZeroPort,
+                ));
             }
             if normalize_system_proxy_host(host)? != *host {
-                return Err(MihomoError::Process(
-                    "系统代理所有权主机不是规范形式".into(),
+                return Err(invalid_setting(
+                    SystemProxySetting::Ownership,
+                    SystemProxyValidationError::NotCanonical,
                 ));
             }
             if normalize_system_proxy_bypass(bypass)? != *bypass {
-                return Err(MihomoError::Process(
-                    "系统代理所有权绕过规则不是规范形式".into(),
+                return Err(invalid_setting(
+                    SystemProxySetting::Ownership,
+                    SystemProxyValidationError::NotCanonical,
                 ));
             }
             service
         }
         SystemProxyOwnership::Pac { service, url } => {
             if normalize_pac_url(url)? != *url {
-                return Err(MihomoError::Process(
-                    "系统代理所有权 PAC URL 不是规范形式".into(),
+                return Err(invalid_setting(
+                    SystemProxySetting::Ownership,
+                    SystemProxyValidationError::NotCanonical,
                 ));
             }
             service
         }
     };
     if service.trim().is_empty() || service.len() > 256 || service.trim() != service {
-        return Err(MihomoError::Process("系统代理所有权服务名称无效".into()));
+        return Err(invalid_setting(
+            SystemProxySetting::Ownership,
+            SystemProxyValidationError::InvalidService,
+        ));
     }
     Ok(())
-}
-
-impl SystemProxyStatus {
-    /// Returns whether either manual or automatic system proxying is active.
-    #[must_use]
-    pub const fn active(&self) -> bool {
-        self.auto_enabled || self.enabled || self.secure_enabled
-    }
 }
 
 /// Controller for the platform's active desktop system-proxy service.
@@ -180,6 +168,7 @@ pub struct SystemProxyController {
     operation: Arc<Mutex<()>>,
     native: Arc<dyn NativeProxyBackend>,
     recovery: Arc<Mutex<Option<native::NativeRecovery>>>,
+    accepted_native: Arc<Mutex<Option<native::NativeAcceptedOwnership>>>,
 }
 
 impl Default for SystemProxyController {
@@ -297,7 +286,7 @@ pub enum SystemProxySessionError {
     MissingOwnership,
     /// Persistence failed after a native write and recovery was attempted.
     #[error("系统代理事务失败：{0}")]
-    Transaction(String),
+    Transaction(#[source] Box<SystemProxyError>),
 }
 
 /// Result type for system-proxy intent transactions.
@@ -326,11 +315,16 @@ impl SystemProxySession {
         let _operation = self.controller.begin_operation();
         let preferences = self.store.load()?;
         let service = self.controller.native.detect_service()?;
-        let actual = self.controller.native.status(&service)?;
-        let ownership = match preferences.system_proxy_ownership.as_ref() {
-            Some(ownership)
-                if system_proxy_status_matches_ownership(&service, &actual, ownership) =>
-            {
+        let observed = self
+            .controller
+            .native
+            .capture(native::NativeProxyTarget::Service(&service))?;
+        let actual = self.controller.native.display_summary(&observed)?;
+        let claim = self
+            .controller
+            .current_native_claim(preferences.system_proxy_ownership.as_ref());
+        let ownership = match claim.as_ref() {
+            Some(ownership) if self.controller.claim_matches_native(ownership, &observed)? => {
                 SystemProxyOwnershipState::Owned
             }
             Some(_) => SystemProxyOwnershipState::Lost,
@@ -358,18 +352,19 @@ impl SystemProxySession {
         }
         let operation = self.controller.begin_operation();
         let expected = self.store.load()?;
+        let claim = self
+            .controller
+            .current_native_claim(expected.system_proxy_ownership.as_ref());
         let settings = SystemProxySettings::from_preferences(&expected);
         let transaction = if enabled {
             let service = self.controller.native.detect_service()?;
             Some(self.controller.stage_native(
                 service,
-                true,
-                port,
-                &settings,
-                expected.system_proxy_ownership.as_ref(),
+                SystemProxyConfiguration::enabled(&settings, port),
+                claim.as_ref(),
             )?)
         } else {
-            operation.stage_release(expected.system_proxy_ownership.as_ref())?
+            operation.stage_release(claim.as_ref())?
         };
         let ownership = transaction
             .as_ref()
@@ -385,9 +380,9 @@ impl SystemProxySession {
                 Ok(preferences)
             }
             Err(error) => match transaction {
-                Some(transaction) => Err(SystemProxySessionError::Transaction(
-                    transaction.rollback(&error.to_string()).to_string(),
-                )),
+                Some(transaction) => Err(SystemProxySessionError::Transaction(Box::new(
+                    transaction.rollback(error.into()),
+                ))),
                 None => Err(error.into()),
             },
         }
@@ -406,6 +401,9 @@ impl SystemProxySession {
         let settings = settings.normalized()?;
         let _operation = self.controller.begin_operation();
         let expected = self.store.load()?;
+        let claim = self
+            .controller
+            .current_native_claim(expected.system_proxy_ownership.as_ref());
         let active = expected.system_proxy_enabled;
         if active && port == 0 {
             return Err(SystemProxySessionError::MissingPort);
@@ -414,10 +412,8 @@ impl SystemProxySession {
             let service = self.controller.native.detect_service()?;
             Some(self.controller.stage_native(
                 service,
-                true,
-                port,
-                &settings,
-                expected.system_proxy_ownership.as_ref(),
+                SystemProxyConfiguration::enabled(&settings, port),
+                claim.as_ref(),
             )?)
         } else {
             None
@@ -438,9 +434,9 @@ impl SystemProxySession {
                 Ok(preferences)
             }
             Err(error) => match transaction {
-                Some(transaction) => Err(SystemProxySessionError::Transaction(
-                    transaction.rollback(&error.to_string()).to_string(),
-                )),
+                Some(transaction) => Err(SystemProxySessionError::Transaction(Box::new(
+                    transaction.rollback(error.into()),
+                ))),
                 None => Err(error.into()),
             },
         }
@@ -460,11 +456,45 @@ impl SystemProxySession {
         port: Option<u16>,
     ) -> SystemProxySessionResult<SystemProxyReconcileOutcome> {
         let operation = self.controller.begin_operation();
-        let preferences = self.store.load()?;
+        let mut preferences = self.store.load()?;
+        preferences.system_proxy_ownership = self
+            .controller
+            .current_native_claim(preferences.system_proxy_ownership.as_ref());
         let native = if core_available && port.is_some() {
             let service = self.controller.native.detect_service()?;
-            let status = self.controller.native.status(&service)?;
-            Some((service, status))
+            let observed = self
+                .controller
+                .native
+                .capture(native::NativeProxyTarget::Service(&service))?;
+            if preferences
+                .system_proxy_ownership
+                .as_ref()
+                .is_some_and(|ownership| {
+                    self.controller.claim_targets_snapshot(ownership, &observed)
+                })
+                && !self.controller.claim_matches_native(
+                    preferences
+                        .system_proxy_ownership
+                        .as_ref()
+                        .ok_or(SystemProxySessionError::MissingOwnership)?,
+                    &observed,
+                )?
+            {
+                return Ok(SystemProxyReconcileOutcome::OwnershipLost);
+            }
+            let decision_service = preferences
+                .system_proxy_ownership
+                .as_ref()
+                .filter(|claim| {
+                    self.controller
+                        .claim_matches_native(claim, &observed)
+                        .unwrap_or(false)
+                })
+                .map_or_else(
+                    || service.clone(),
+                    |claim| native::ownership_service(claim).to_owned(),
+                );
+            Some((service, decision_service, observed.summary().clone()))
         } else {
             None
         };
@@ -474,7 +504,7 @@ impl SystemProxySession {
             port,
             native
                 .as_ref()
-                .map(|(service, status)| (service.as_str(), status)),
+                .map(|(_, service, status)| (service.as_str(), status)),
         );
         let restore_port = match decision {
             SystemProxyReconcileDecision::Unchanged => {
@@ -507,14 +537,12 @@ impl SystemProxySession {
 
         let settings = SystemProxySettings::from_preferences(&preferences);
         let service = match native {
-            Some((service, _)) => service,
+            Some((service, _, _)) => service,
             None => self.controller.native.detect_service()?,
         };
         let transaction = self.controller.stage_native(
             service,
-            true,
-            restore_port,
-            &settings,
+            SystemProxyConfiguration::enabled(&settings, restore_port),
             preferences.system_proxy_ownership.as_ref(),
         )?;
         let ownership = transaction
@@ -524,9 +552,9 @@ impl SystemProxySession {
         if let Err(error) = self.store.update(|preferences| {
             preferences.system_proxy_ownership = Some(ownership.clone());
         }) {
-            return Err(SystemProxySessionError::Transaction(
-                transaction.rollback(&error.to_string()).to_string(),
-            ));
+            return Err(SystemProxySessionError::Transaction(Box::new(
+                transaction.rollback(error.into()),
+            )));
         }
         transaction.commit();
         Ok(SystemProxyReconcileOutcome::Restored)
@@ -541,10 +569,10 @@ impl SystemProxySession {
         let operation = self.controller.begin_operation();
         self.controller.recover_native()?;
         let preferences = self.store.load()?;
-        if !preferences.system_proxy_enabled {
-            return Ok(false);
-        }
-        let Some(ownership) = preferences.system_proxy_ownership.as_ref() else {
+        let claim = self
+            .controller
+            .current_native_claim(preferences.system_proxy_ownership.as_ref());
+        let Some(ownership) = claim.as_ref() else {
             return Ok(false);
         };
         let transaction = operation.stage_release(Some(ownership))?;
@@ -563,7 +591,7 @@ fn decide_system_proxy_reconcile(
     preferences: &AppPreferences,
     core_available: bool,
     port: Option<u16>,
-    native: Option<(&str, &SystemProxyStatus)>,
+    native: Option<(&str, &SystemProxySummary)>,
 ) -> SystemProxyReconcileDecision {
     if !preferences.system_proxy_enabled {
         return SystemProxyReconcileDecision::Unchanged;
@@ -601,7 +629,7 @@ fn decide_system_proxy_reconcile(
             SystemProxyReconcileDecision::Restore
         };
     }
-    if !system_proxy_status_matches_ownership(service, actual, ownership) {
+    if !system_proxy_summary_matches_claim(service, actual, ownership) {
         return SystemProxyReconcileDecision::OwnershipLost;
     }
     match ownership {
@@ -623,6 +651,7 @@ impl SystemProxyController {
             operation: Arc::default(),
             native: Arc::new(PlatformProxyBackend),
             recovery: Arc::default(),
+            accepted_native: Arc::default(),
         }
     }
 
@@ -655,27 +684,30 @@ impl SystemProxyController {
         bypass: &[String],
         pac_script: &str,
     ) -> MihomoResult<()> {
-        self.begin_operation()
-            .set_enabled(enabled, mode, host, port, bypass, pac_script)
+        self.apply_configuration(SystemProxyConfiguration::from_legacy(
+            enabled, mode, host, port, bypass, pac_script,
+        ))
+        .map(drop)
+    }
+
+    /// Applies a named desired configuration under the original shared operation lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation, detection, PAC, native write, or readback errors.
+    pub fn apply_configuration(
+        &self,
+        configuration: SystemProxyConfiguration<'_>,
+    ) -> MihomoResult<Option<SystemProxyOwnership>> {
+        self.begin_operation().apply_configuration(configuration)
     }
 
     fn apply_unlocked(
         &self,
-        enabled: bool,
-        mode: SystemProxyMode,
-        host: &str,
-        port: u16,
-        bypass: &[String],
-        pac_script: &str,
+        configuration: SystemProxyConfiguration<'_>,
     ) -> MihomoResult<Option<SystemProxyOwnership>> {
         let service = self.native.detect_service()?;
-        let settings = SystemProxySettings {
-            mode,
-            host: host.into(),
-            bypass: bypass.into(),
-            pac_script: pac_script.into(),
-        };
-        let transaction = self.stage_native(service, enabled, port, &settings, None)?;
+        let transaction = self.stage_native(service, configuration, None)?;
         let ownership = transaction.ownership.clone();
         transaction.commit();
         Ok(ownership)
@@ -710,8 +742,10 @@ impl SystemProxyOperation<'_> {
         bypass: &[String],
         pac_script: &str,
     ) -> MihomoResult<()> {
-        self.apply(enabled, mode, host, port, bypass, pac_script)
-            .map(drop)
+        self.apply_configuration(SystemProxyConfiguration::from_legacy(
+            enabled, mode, host, port, bypass, pac_script,
+        ))
+        .map(drop)
     }
 
     /// Applies native proxy state and returns verified ownership when enabled.
@@ -729,8 +763,21 @@ impl SystemProxyOperation<'_> {
         bypass: &[String],
         pac_script: &str,
     ) -> MihomoResult<Option<SystemProxyOwnership>> {
-        self.controller
-            .apply_unlocked(enabled, mode, host, port, bypass, pac_script)
+        self.apply_configuration(SystemProxyConfiguration::from_legacy(
+            enabled, mode, host, port, bypass, pac_script,
+        ))
+    }
+
+    /// Applies named native state while retaining this operation's original lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation, detection, PAC, native write, or readback errors.
+    pub fn apply_configuration(
+        &self,
+        configuration: SystemProxyConfiguration<'_>,
+    ) -> MihomoResult<Option<SystemProxyOwnership>> {
+        self.controller.apply_unlocked(configuration)
     }
 
     /// Disables the native proxy only if it still matches ZenClash's last
@@ -749,9 +796,9 @@ impl SystemProxyOperation<'_> {
     }
 }
 
-fn system_proxy_status_matches_ownership(
+fn system_proxy_summary_matches_claim(
     service: &str,
-    status: &SystemProxyStatus,
+    status: &SystemProxySummary,
     ownership: &SystemProxyOwnership,
 ) -> bool {
     match ownership {
@@ -762,13 +809,13 @@ fn system_proxy_status_matches_ownership(
             bypass,
         } => {
             service == owned_service
-                && !status.auto_enabled
-                && status.enabled
-                && status.secure_enabled
-                && status.server == *host
-                && status.secure_server == *host
-                && status.port == *port
-                && status.secure_port == *port
+                && !status.pac().is_enabled()
+                && status.http().is_enabled()
+                && status.https().is_enabled()
+                && status.http().host() == *host
+                && status.https().host() == *host
+                && status.http().port() == *port
+                && status.https().port() == *port
                 && status.bypass == *bypass
         }
         SystemProxyOwnership::Pac {
@@ -776,10 +823,10 @@ fn system_proxy_status_matches_ownership(
             url,
         } => {
             service == owned_service
-                && status.auto_enabled
-                && status.auto_url == *url
-                && !status.enabled
-                && !status.secure_enabled
+                && status.pac().is_enabled()
+                && status.pac().url() == *url
+                && !status.http().is_enabled()
+                && !status.https().is_enabled()
         }
     }
 }
@@ -807,7 +854,7 @@ impl SystemProxyManager {
     ///
     /// Returns an error when the platform command fails or its settings cannot
     /// be queried.
-    pub fn status(&self) -> MihomoResult<SystemProxyStatus> {
+    pub fn status(&self) -> MihomoResult<SystemProxySummary> {
         platform::status(&self.service)
     }
 
@@ -844,7 +891,10 @@ impl SystemProxyManager {
     ) -> MihomoResult<()> {
         let server = if enabled {
             if port == 0 {
-                return Err(MihomoError::Process("系统代理端口不能为 0".into()));
+                return Err(invalid_setting(
+                    SystemProxySetting::Port,
+                    SystemProxyValidationError::ZeroPort,
+                ));
             }
             normalize_system_proxy_host(server)?
         } else {
@@ -855,28 +905,18 @@ impl SystemProxyManager {
         let status = self.status()?;
         if !enabled {
             if status.active() {
-                return Err(MihomoError::Process(
-                    "系统代理关闭后状态回读仍显示为启用".into(),
-                ));
+                return Err(SystemProxyError::VerificationFailed.into());
             }
             return Ok(());
         }
-        let endpoint_matches = status.enabled
-            && status.secure_enabled
-            && status.server == server
-            && status.secure_server == server
-            && status.port == port
-            && status.secure_port == port;
+        let endpoint_matches = status.http().is_enabled()
+            && status.https().is_enabled()
+            && status.http().host() == server
+            && status.https().host() == server
+            && status.http().port() == port
+            && status.https().port() == port;
         if !endpoint_matches || status.bypass != bypass {
-            return Err(MihomoError::Process(format!(
-                "系统代理写后回读不一致：期望 {server}:{port} / {:?}，实际 HTTP {}:{}、HTTPS {}:{} / {:?}",
-                bypass,
-                status.server,
-                status.port,
-                status.secure_server,
-                status.secure_port,
-                status.bypass
-            )));
+            return Err(SystemProxyError::VerificationFailed.into());
         }
         Ok(())
     }
@@ -899,16 +939,11 @@ impl SystemProxyManager {
         platform::set_pac_enabled(&self.service, enabled, &url)?;
         let status = self.status()?;
         if enabled {
-            if !status.auto_enabled || status.auto_url != url {
-                return Err(MihomoError::Process(format!(
-                    "PAC 写后回读不一致：期望 {url}，实际启用={}、URL={}",
-                    status.auto_enabled, status.auto_url
-                )));
+            if !status.pac().is_enabled() || status.pac().url() != url {
+                return Err(SystemProxyError::VerificationFailed.into());
             }
         } else if status.active() {
-            return Err(MihomoError::Process(
-                "系统代理关闭后状态回读仍显示为启用".into(),
-            ));
+            return Err(SystemProxyError::VerificationFailed.into());
         }
         Ok(())
     }
@@ -921,12 +956,26 @@ impl SystemProxyManager {
 /// Returns an error for an empty, oversized, or syntactically unsafe host.
 pub fn normalize_system_proxy_host(host: &str) -> MihomoResult<String> {
     let host = host.trim();
-    if host.is_empty() || host.len() > MAX_BYPASS_ENTRY_BYTES {
-        return Err(MihomoError::Process("系统代理主机无效".into()));
+    if host.is_empty() {
+        return Err(invalid_setting(
+            SystemProxySetting::Host,
+            SystemProxyValidationError::Empty,
+        ));
+    }
+    if host.len() > MAX_BYPASS_ENTRY_BYTES {
+        return Err(invalid_setting(
+            SystemProxySetting::Host,
+            SystemProxyValidationError::TooLong {
+                maximum: MAX_BYPASS_ENTRY_BYTES,
+            },
+        ));
     }
     if let Ok(address) = host.parse::<IpAddr>() {
         if address.is_unspecified() {
-            return Err(MihomoError::Process("系统代理主机不能是未指定地址".into()));
+            return Err(invalid_setting(
+                SystemProxySetting::Host,
+                SystemProxyValidationError::UnspecifiedAddress,
+            ));
         }
         return Ok(host.to_owned());
     }
@@ -939,23 +988,29 @@ pub fn normalize_system_proxy_host(host: &str) -> MihomoResult<String> {
                 })
         });
     if !valid {
-        return Err(MihomoError::Process(format!(
-            "系统代理主机格式无效：{host}"
-        )));
+        return Err(invalid_setting(
+            SystemProxySetting::Host,
+            SystemProxyValidationError::InvalidSyntax,
+        ));
     }
     Ok(host.to_owned())
 }
 
 fn normalize_pac_url(value: &str) -> MihomoResult<String> {
-    let url = reqwest::Url::parse(value.trim())
-        .map_err(|error| MihomoError::Process(format!("PAC URL 无效：{error}")))?;
+    let url = reqwest::Url::parse(value.trim()).map_err(|error| {
+        invalid_setting(
+            SystemProxySetting::PacUrl,
+            SystemProxyValidationError::InvalidPacUrl(error),
+        )
+    })?;
     if url.scheme() != "http"
         || !url.username().is_empty()
         || url.password().is_some()
         || url.host_str().is_none()
     {
-        return Err(MihomoError::Process(
-            "PAC URL 必须是无凭据的 HTTP 地址".into(),
+        return Err(invalid_setting(
+            SystemProxySetting::PacUrl,
+            SystemProxyValidationError::UnsafePacUrl,
         ));
     }
     Ok(url.to_string())
@@ -1029,14 +1084,18 @@ pub fn normalize_system_proxy_bypass(entries: &[String]) -> MihomoResult<Vec<Str
             continue;
         }
         if entry.len() > MAX_BYPASS_ENTRY_BYTES {
-            return Err(MihomoError::Process(format!(
-                "系统代理绕过规则超过 {MAX_BYPASS_ENTRY_BYTES} 字节：{entry}"
-            )));
+            return Err(invalid_setting(
+                SystemProxySetting::Bypass,
+                SystemProxyValidationError::TooLong {
+                    maximum: MAX_BYPASS_ENTRY_BYTES,
+                },
+            ));
         }
         if !is_valid_bypass_entry(entry) {
-            return Err(MihomoError::Process(format!(
-                "系统代理绕过规则格式无效：{entry}"
-            )));
+            return Err(invalid_setting(
+                SystemProxySetting::Bypass,
+                SystemProxyValidationError::InvalidSyntax,
+            ));
         }
         if normalized
             .iter()
@@ -1045,9 +1104,12 @@ pub fn normalize_system_proxy_bypass(entries: &[String]) -> MihomoResult<Vec<Str
             continue;
         }
         if normalized.len() >= MAX_BYPASS_ENTRIES {
-            return Err(MihomoError::Process(format!(
-                "系统代理绕过规则最多支持 {MAX_BYPASS_ENTRIES} 条"
-            )));
+            return Err(invalid_setting(
+                SystemProxySetting::Bypass,
+                SystemProxyValidationError::TooMany {
+                    maximum: MAX_BYPASS_ENTRIES,
+                },
+            ));
         }
         normalized.push(entry.to_owned());
     }
@@ -1098,7 +1160,7 @@ mod tests {
         SystemProxyReconcileDecision, SystemProxyReleaseReason, SystemProxySession,
         SystemProxySessionError, SystemProxySettings, SystemProxyStatus,
         decide_system_proxy_reconcile, normalize_system_proxy_bypass, normalize_system_proxy_host,
-        system_proxy_status_matches_ownership,
+        system_proxy_summary_matches_claim,
     };
     use crate::{AppPreferences, AppPreferencesStore};
 
@@ -1217,10 +1279,10 @@ mod tests {
         let mut replaced = owned.clone();
         replaced.port = 8080;
 
-        assert!(system_proxy_status_matches_ownership(
+        assert!(system_proxy_summary_matches_claim(
             "Wi-Fi", &owned, &ownership
         ));
-        assert!(!system_proxy_status_matches_ownership(
+        assert!(!system_proxy_summary_matches_claim(
             "Wi-Fi", &replaced, &ownership
         ));
     }

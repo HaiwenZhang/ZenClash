@@ -1,8 +1,8 @@
 //! Serialized, bounded persistence for the live Mihomo log stream.
 
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    fs::{self, File},
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -16,7 +16,7 @@ use std::{
 use parking_lot::RwLock;
 use thiserror::Error;
 
-use super::{LogEntry, format_log_entries};
+use super::{LogEntry, format_log_entries, private_io};
 
 const MEBIBYTE: u64 = 1024 * 1024;
 const MIN_MAX_MEBIBYTES: u16 = 1;
@@ -326,17 +326,13 @@ impl BoundedLogFile {
             let start = data.len().saturating_sub(max_bytes);
             let mut tail = data[start..].to_vec();
             trim_partial_utf8_prefix(&mut tail);
-            fs::write(&config.path, &tail)?;
+            private_io::replace(&config.path, &tail)?;
             self.size = u64::try_from(tail.len()).unwrap_or(u64::MAX);
             return Ok(self.size);
         }
         let data_bytes = u64::try_from(data.len()).unwrap_or(u64::MAX);
         if self.size.saturating_add(data_bytes) <= config.max_bytes {
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&config.path)?
-                .write_all(&data)?;
+            private_io::append(&config.path, &data)?;
             self.size = self.size.saturating_add(data_bytes);
             return Ok(self.size);
         }
@@ -381,7 +377,7 @@ impl BoundedLogFile {
             rewritten.drain(..start);
             trim_partial_utf8_prefix(&mut rewritten);
         }
-        fs::write(&config.path, &rewritten)?;
+        private_io::replace(&config.path, &rewritten)?;
         self.size = u64::try_from(rewritten.len()).unwrap_or(u64::MAX);
         Ok(self.size)
     }
@@ -461,6 +457,61 @@ mod tests {
     fn append_entry(sender: &LogFileSender, entry: Arc<LogEntry>) {
         let bytes = super::super::log_entry_bytes(&entry);
         sender.append(entry, bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_log_permission_fixture_child() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var_os("ZENCLASH_LOG_PERMISSION_FIXTURE_CHILD").is_none() {
+            return;
+        }
+        // SAFETY: This dedicated test process has no other log/permission tests.
+        unsafe {
+            libc::umask(0o022);
+        }
+        let path = test_path("private-permissions");
+        let config = LogFileConfig::from_bytes(path.clone(), true, 180);
+        let mut writer = BoundedLogFile::default();
+        writer.append(&config, &entry("first", 1)).unwrap();
+        let created_mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        writer.append(&config, &entry("second", 2)).unwrap();
+        let appended_mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        writer
+            .append(&config, &entry(&"old".repeat(30), 3))
+            .unwrap();
+        writer.append(&config, &entry("latest", 4)).unwrap();
+        let compacted_mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        writer
+            .append(&config, &entry(&"long".repeat(100), 5))
+            .unwrap();
+        let replaced_mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        fs::remove_file(path).unwrap();
+        assert_eq!(
+            (created_mode, appended_mode, compacted_mode, replaced_mode),
+            (0o600, 0o600, 0o600, 0o600)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_log_creation_append_and_rewrite_are_private_under_permissive_umask() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "logs::file::tests::raw_log_permission_fixture_child",
+                "--nocapture",
+            ])
+            .env("ZENCLASH_LOG_PERMISSION_FIXTURE_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

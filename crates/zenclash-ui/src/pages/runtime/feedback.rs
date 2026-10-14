@@ -1,4 +1,4 @@
-use super::{Context, Page, RuntimeData, RuntimePage, Window};
+use super::{Context, Page, PageSnapshotData, RuntimePage, Window};
 use crate::components::feedback::{Feedback, FeedbackKind};
 
 impl RuntimePage {
@@ -31,12 +31,15 @@ impl RuntimePage {
                 add(
                     "service-tun",
                     FeedbackKind::Error,
-                    self.profile_service.service_tun_warning(),
+                    self.application_commands.service_tun_warning(),
                 );
-                if self.profile_service.pending_finalization().is_some()
-                    || self.profile_service.service_state().is_some_and(|state| {
-                        state.phase() == zenclash_core::ServicePhase::Unconfirmed
-                    })
+                if self.application_commands.pending_finalization().is_some()
+                    || self
+                        .application_commands
+                        .service_state()
+                        .is_some_and(|state| {
+                            state.phase() == zenclash_core::ServicePhase::Unconfirmed
+                        })
                 {
                     add(
                         "service-pending",
@@ -45,10 +48,10 @@ impl RuntimePage {
                     );
                 }
                 if self.page == Page::Settings
-                    && let RuntimeData::Settings {
+                    && let PageSnapshotData::Settings {
                         autostart: Err(error),
                         ..
-                    } = &self.data
+                    } = self.page_observation.data()
                 {
                     add("autostart", FeedbackKind::Warning, Some(error.clone()));
                 }
@@ -62,12 +65,12 @@ impl RuntimePage {
                 add(
                     "public-ip",
                     FeedbackKind::Error,
-                    self.network_probe
-                        .snapshot
-                        .as_ref()
+                    self.network_diagnostics
+                        .query
+                        .snapshot()
                         .and_then(|snapshot| snapshot.public_ip_error.clone()),
                 );
-                if let RuntimeData::Network { system, .. } = &self.data {
+                if let PageSnapshotData::Network { system, .. } = self.page_observation.data() {
                     add(
                         "system-network",
                         FeedbackKind::Warning,
@@ -79,7 +82,7 @@ impl RuntimePage {
                 add(
                     "core-release",
                     FeedbackKind::Error,
-                    self.core_releases.error.clone(),
+                    self.core_releases.error().clone(),
                 );
                 if self.core_session.runtime_descriptor().backend()
                     == zenclash_core::CoreRuntimeBackend::Service
@@ -90,7 +93,8 @@ impl RuntimePage {
                         Some(zenclash_i18n::text("core_page.maintenance.service_upgrade")),
                     );
                 }
-                if !self.loading && matches!(self.data, RuntimeData::Empty) {
+                if !self.loading && matches!(self.page_observation.data(), PageSnapshotData::Empty)
+                {
                     add(
                         "core-unavailable",
                         FeedbackKind::Error,
@@ -102,14 +106,14 @@ impl RuntimePage {
                 add(
                     "service-tun",
                     FeedbackKind::Error,
-                    self.profile_service.service_tun_warning(),
+                    self.application_commands.service_tun_warning(),
                 );
-                if let RuntimeData::Tun {
+                if let PageSnapshotData::Tun {
                     permissions:
                         zenclash_core::Observation::Failed { failure, .. }
                         | zenclash_core::Observation::Stale { failure, .. },
                     ..
-                } = &self.data
+                } = self.page_observation.data()
                 {
                     add(
                         "tun-permissions",
@@ -154,8 +158,7 @@ impl RuntimePage {
         if self.page == Page::Override
             && self
                 .overrides
-                .preview
-                .as_ref()
+                .preview()
                 .is_some_and(|preview| preview.is_truncated())
         {
             add(

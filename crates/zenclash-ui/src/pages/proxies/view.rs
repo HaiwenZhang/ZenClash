@@ -24,7 +24,11 @@ impl ProxiesPage {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let visible = &self.visible_group_indices;
-        let selected = super::presentation::selected_group_index(catalog, visible, &self.expanded);
+        let selected = super::presentation::selected_group_index(
+            catalog,
+            visible,
+            self.selected_group.as_deref(),
+        );
         let Some(selected) = selected else {
             return div().into_any_element();
         };
@@ -56,7 +60,7 @@ impl ProxiesPage {
             )
             .children(visible.iter().map(|&index| {
                 let item = &catalog.groups()[index];
-                let name = item.name.clone();
+                let name = item.controller_name().to_owned();
                 Button::new((gpui_kit::ElementId::from("toggle-group"), name.clone()))
                     .accessibility_label(item.name.clone())
                     .tooltip(item.name.clone())
@@ -104,7 +108,7 @@ impl ProxiesPage {
                     .min_w_0()
                     .justify_start()
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.expanded.contains(&name) {
+                        if this.selected_group.as_deref() != Some(name.as_str()) {
                             this.toggle_group(&name, cx);
                         }
                     }))
@@ -122,12 +126,13 @@ impl ProxiesPage {
                     .gap_3()
                     .when(compact, |column| {
                         let owner = cx.entity().downgrade();
-                        let choices = catalog
-                            .groups()
+                        let choices = self
+                            .visible_group_indices
                             .iter()
-                            .enumerate()
-                            .filter(|(index, _)| self.visible_group_indices.contains(index))
-                            .map(|(_, group)| group.name.clone())
+                            .map(|&index| {
+                                let group = &catalog.groups()[index];
+                                (group.controller_name().to_owned(), group.name.clone())
+                            })
                             .collect::<Vec<_>>();
                         column.child(
                             Button::new("compact-proxy-group")
@@ -135,19 +140,21 @@ impl ProxiesPage {
                                 .outline()
                                 .dropdown_caret(true)
                                 .dropdown_menu(move |mut menu, _, _| {
-                                    for name in &choices {
-                                        let name = name.clone();
+                                    for (key, label) in &choices {
+                                        let name = key.clone();
+                                        let label = label.clone();
                                         let owner = owner.clone();
-                                        menu =
-                                            menu.item(PopupMenuItem::new(name.clone()).on_click(
-                                                move |_, _, cx| {
-                                                    let _ = owner.update(cx, |page, cx| {
-                                                        if !page.expanded.contains(&name) {
-                                                            page.toggle_group(&name, cx);
-                                                        }
-                                                    });
-                                                },
-                                            ));
+                                        menu = menu.item(PopupMenuItem::new(label).on_click(
+                                            move |_, _, cx| {
+                                                let _ = owner.update(cx, |page, cx| {
+                                                    if page.selected_group.as_deref()
+                                                        != Some(name.as_str())
+                                                    {
+                                                        page.toggle_group(&name, cx);
+                                                    }
+                                                });
+                                            },
+                                        ));
                                     }
                                     menu
                                 }),
@@ -174,7 +181,7 @@ impl ProxiesPage {
                     let group = catalog
                         .groups()
                         .iter()
-                        .find(|group| group.name == group_name)?;
+                        .find(|group| group.controller_name() == group_name)?;
                     catalog.node(&id)?;
                     Some(page.render_node_details(catalog, group, &id, &theme, cx))
                 })
@@ -268,7 +275,7 @@ impl ProxiesPage {
                                     div()
                                         .id(proxy_element_id(
                                             "inspector-node-name",
-                                            &group.name,
+                                            group.controller_name(),
                                             id,
                                         ))
                                         .test_support()
@@ -347,7 +354,11 @@ impl ProxiesPage {
                             .w_full()
                             .child(
                                 gpui_kit::component::chart::AreaChart::new(points.clone())
-                                    .id(proxy_element_id("delay-history-fill", &group.name, id))
+                                    .id(proxy_element_id(
+                                        "delay-history-fill",
+                                        group.controller_name(),
+                                        id,
+                                    ))
                                     .interactive(false)
                                     .x(|point| point.0.clone())
                                     .y(|point| f64::from(point.1))
@@ -365,7 +376,11 @@ impl ProxiesPage {
                             .child(
                                 div().absolute().inset_0().child(
                                     gpui_kit::component::chart::LineChart::new(points)
-                                        .id(proxy_element_id("delay-history", &group.name, id))
+                                        .id(proxy_element_id(
+                                            "delay-history",
+                                            group.controller_name(),
+                                            id,
+                                        ))
                                         .x(|point| point.0.clone())
                                         .y(|point| f64::from(point.1))
                                         .y_domain(0., chart_ceiling)
@@ -435,32 +450,31 @@ impl ProxiesPage {
                         )),
                 )
                 .child(
-                    Button::new(proxy_element_id("inspector-test", &group.name, id))
-                        .icon(IconName::Play)
-                        .label(zenclash_i18n::text("proxies.actions.test"))
-                        .outline()
-                        .small()
-                        .h_10()
-                        .disabled(
-                            self.proxy_selection_blocked(&group.name)
-                                || self
-                                    .testing
-                                    .get(&group.name)
-                                    .is_some_and(|nodes| nodes.contains(id)),
-                        )
-                        .on_click(cx.listener({
-                            let group_name = group.name.clone();
-                            let node_id = id.clone();
-                            let url = group.test_url.clone();
-                            move |this, _, _, cx| {
-                                this.test_proxy(
-                                    group_name.clone(),
-                                    node_id.clone(),
-                                    url.clone(),
-                                    cx,
-                                )
-                            }
-                        })),
+                    Button::new(proxy_element_id(
+                        "inspector-test",
+                        group.controller_name(),
+                        id,
+                    ))
+                    .icon(IconName::Play)
+                    .label(zenclash_i18n::text("proxies.actions.test"))
+                    .outline()
+                    .small()
+                    .h_10()
+                    .disabled(
+                        self.proxy_selection_blocked(group.controller_name())
+                            || self
+                                .testing
+                                .get(group.controller_name())
+                                .is_some_and(|nodes| nodes.contains(id)),
+                    )
+                    .on_click(cx.listener({
+                        let group_name = group.controller_name().to_owned();
+                        let node_id = id.clone();
+                        let url = group.test_url.clone();
+                        move |this, _, _, cx| {
+                            this.test_proxy(group_name.clone(), node_id.clone(), url.clone(), cx)
+                        }
+                    })),
                 )
             })
             .when(node.is_none(), |this| {
@@ -491,10 +505,10 @@ impl ProxiesPage {
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
         let automatic = matches!(group.behavior, ProxyGroupBehavior::Automatic { .. });
-        let name = group.name.clone();
+        let name = group.controller_name().to_owned();
         let url = group.test_url.clone();
-        let restoring_name = group.name.clone();
-        let pending = self.measuring_and_restoring_auto.as_deref() == Some(&group.name);
+        let restoring_name = group.controller_name().to_owned();
+        let pending = self.measuring_and_restoring_auto.as_deref() == Some(group.controller_name());
         v_flex()
             .p_3()
             .gap_2()
@@ -550,11 +564,11 @@ impl ProxiesPage {
             .child(
                 Button::new((
                     gpui_kit::ElementId::from("measure-restore-auto"),
-                    group.name.clone(),
+                    group.controller_name().to_owned(),
                 ))
                 .icon(crate::assets::AppIcon::RefreshCw)
                 .label(zenclash_i18n::text("proxies.actions.measure_restore_auto"))
-                .h(gpui_kit::px(40.))
+                .h(gpui_kit::rems(2.5))
                 .outline()
                 .small()
                 .w_full()
@@ -573,7 +587,7 @@ impl ProxiesPage {
                     view.child(
                         Button::new((
                             gpui_kit::ElementId::from("restore-auto"),
-                            group.name.clone(),
+                            group.controller_name().to_owned(),
                         ))
                         .label(zenclash_i18n::text("proxies.actions.restore_auto"))
                         .small()
@@ -596,7 +610,7 @@ impl ProxiesPage {
             super::presentation::selected_group_index(
                 catalog,
                 &self.visible_group_indices,
-                &self.expanded,
+                self.selected_group.as_deref(),
             )
             .map(|index| catalog.groups()[index].name.clone())
         });
@@ -611,9 +625,9 @@ impl ProxiesPage {
             .child(
                 h_flex().gap_1().children(
                     [
-                        crate::components::sidebar::OutboundMode::Rule,
-                        crate::components::sidebar::OutboundMode::Global,
-                        crate::components::sidebar::OutboundMode::Direct,
+                        crate::outbound_mode::OutboundMode::Rule,
+                        crate::outbound_mode::OutboundMode::Global,
+                        crate::outbound_mode::OutboundMode::Direct,
                     ]
                     .into_iter()
                     .map(|mode| {
@@ -623,7 +637,7 @@ impl ProxiesPage {
                             .selected(self.outbound_mode == mode.api_value())
                             .disabled(self.operation_pending())
                             .on_click(move |_, window, cx| {
-                                use crate::components::sidebar::OutboundMode;
+                                use crate::outbound_mode::OutboundMode;
                                 match mode {
                                     OutboundMode::Rule => window
                                         .dispatch_action(Box::new(crate::app::SetRuleMode), cx),
@@ -701,7 +715,7 @@ impl ProxiesPage {
                     } else {
                         "proxies.actions.original_order"
                     }))
-                    .h(gpui_kit::px(44.))
+                    .h(gpui_kit::rems(2.75))
                     .small()
                     .outline()
                     .dropdown_caret(true)
@@ -787,17 +801,25 @@ impl ProxiesPage {
                             .child(group_behavior_label(&group.behavior)),
                     ),
             )
+            .when_some(
+                self.switching.status_text(group.controller_name()),
+                |this, status| {
+                    this.child(
+                        div()
+                            .id((
+                                gpui_kit::ElementId::from("proxy-selection-status"),
+                                group.controller_name().to_owned(),
+                            ))
+                            .test_support()
+                            .px_3()
+                            .pb_2()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(status),
+                    )
+                },
+            )
             .when(expanded, |this| {
-                let nodes = self.displayed_nodes(catalog, group);
-
-                let focus_handles = nodes
-                    .iter()
-                    .filter_map(|&index| {
-                        self.node_focus
-                            .get(&(group.name.clone(), group.all[index].clone()))
-                            .cloned()
-                    })
-                    .collect::<Vec<_>>();
                 this.child(
                     v_flex()
                         .flex_1()
@@ -819,56 +841,7 @@ impl ProxiesPage {
                                 })
                                 .child(self.render_node_filters(cx)),
                         )
-                        .child(
-                            div()
-                                .grid()
-                                .grid_cols(columns)
-                                .on_key_down(move |event, window, cx| {
-                                    let Some(index) = focus_handles
-                                        .iter()
-                                        .position(|handle| handle.is_focused(window))
-                                    else {
-                                        return;
-                                    };
-                                    let step = match event.keystroke.key.as_str() {
-                                        "left" => -1,
-                                        "right" => 1,
-                                        "up" => -isize::try_from(columns).unwrap_or(1),
-                                        "down" => isize::try_from(columns).unwrap_or(1),
-                                        _ => return,
-                                    };
-                                    let target = index
-                                        .saturating_add_signed(step)
-                                        .min(focus_handles.len().saturating_sub(1));
-                                    focus_handles[target].focus(window, cx);
-                                    cx.stop_propagation();
-                                })
-                                .p_3()
-                                .gap_3()
-                                .when(!self.search_query.is_empty() && nodes.is_empty(), |body| {
-                                    body.child(
-                                        div()
-                                            .id("proxy-search-feedback")
-                                            .test_support()
-                                            .pt_4()
-                                            .text_sm()
-                                            .text_color(theme.muted_foreground)
-                                            .child(zenclash_i18n::text(
-                                                if self.search_projection.is_none() {
-                                                    "common.actions.loading"
-                                                } else {
-                                                    "proxies.design.no_matches"
-                                                },
-                                            )),
-                                    )
-                                })
-                                .children(nodes.iter().filter_map(|&index| {
-                                    let id = &group.all[index];
-                                    catalog
-                                        .node(id)
-                                        .map(|node| self.render_proxy(group, id, node, theme, cx))
-                                })),
-                        ),
+                        .child(self.render_node_grid(catalog, group, columns, cx)),
                 )
             })
             .into_any_element()
@@ -888,19 +861,19 @@ impl ProxiesPage {
         let selectable = group_allows_manual_selection(&group.behavior);
         let testing = self
             .testing
-            .get(&group.name)
+            .get(group.controller_name())
             .is_some_and(|nodes| nodes.contains(id));
         let switching = self
             .switching
-            .proxy_pending(&group.name, id.controller_name());
-        let selection_blocked = self.proxy_selection_blocked(&group.name);
-        let group_name = group.name.clone();
+            .proxy_pending(group.controller_name(), id.controller_name());
+        let selection_blocked = self.proxy_selection_blocked(group.controller_name());
+        let group_name = group.controller_name().to_owned();
         let proxy_name = id.controller_name().to_owned();
-        let delay_group = group.name.clone();
+        let delay_group = group.controller_name().to_owned();
         let delay_proxy = id.clone();
         let test_url = group.test_url.clone();
         let delay = proxy.latest_delay();
-        let failure = self.test_failures.get(id);
+        let failure = self.catalog_presentation.failure(id);
         let delay_color = match (failure, delay) {
             (Some(_), _) => theme.danger,
             (None, Some(0)) => theme.danger,
@@ -921,6 +894,9 @@ impl ProxiesPage {
         };
         v_flex()
             .relative()
+            .when_some(self.node_grid.card_focus_scope(id), |card, scope| {
+                card.track_focus(scope)
+            })
             .flex_basis(gpui_kit::rems(12.))
             .flex_grow(1.)
             .min_w_0()
@@ -937,78 +913,90 @@ impl ProxiesPage {
                 theme.group_box
             })
             .child(
-                gpui_kit::base::Button::new(proxy_element_id("select-proxy", &group.name, id))
-                    .when_some(
-                        self.node_focus.get(&(group.name.clone(), id.clone())),
-                        |button, focus| button.track_focus(focus),
-                    )
-                    .accessibility_label(proxy.name.clone())
-                    .rounded(theme.radius)
-                    .hover(|style| style.bg(theme.list_hover))
-                    .focus(|style| style.border_2().border_color(theme.ring))
-                    .styles(|styles| styles.disabled(|style| style.opacity(0.6)))
-                    .w_full()
-                    .h_auto()
-                    .p_4()
-                    .selected(selected)
-                    .disabled(!selected && (selection_blocked || !selectable))
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .min_w_0()
-                            .gap_3()
-                            .text_left()
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .justify_between()
-                                    .child(
+                gpui_kit::base::Button::new(proxy_element_id(
+                    "select-proxy",
+                    group.controller_name(),
+                    id,
+                ))
+                .when_some(
+                    self.node_focus
+                        .get(&(group.controller_name().to_owned(), id.clone())),
+                    |button, focus| button.track_focus(focus),
+                )
+                .accessibility_label(proxy.name.clone())
+                .rounded(theme.radius)
+                .hover(|style| style.bg(theme.list_hover))
+                .focus(|style| style.border_2().border_color(theme.ring))
+                .styles(|styles| styles.disabled(|style| style.opacity(0.6)))
+                .w_full()
+                .h_auto()
+                .p_4()
+                .selected(selected)
+                .disabled(!selected && (selection_blocked || !selectable))
+                .child(
+                    v_flex()
+                        .w_full()
+                        .min_w_0()
+                        .gap_3()
+                        .text_left()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_ellipsis()
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                        .child(proxy.name.clone()),
+                                )
+                                .when(selected, |row| {
+                                    row.child(
                                         div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_ellipsis()
-                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                            .child(proxy.name.clone()),
+                                            .id(proxy_element_id(
+                                                "current-proxy",
+                                                group.controller_name(),
+                                                id,
+                                            ))
+                                            .test_support()
+                                            .child(Icon::new(IconName::Check).size_4()),
                                     )
-                                    .when(selected, |row| {
-                                        row.child(
-                                            div()
-                                                .id(proxy_element_id(
-                                                    "current-proxy",
-                                                    &group.name,
-                                                    id,
-                                                ))
-                                                .test_support()
-                                                .child(Icon::new(IconName::Check).size_4()),
-                                        )
-                                    }),
-                            )
-                            .child(div().text_lg().text_color(delay_color).child(if switching {
-                                zenclash_i18n::text("proxies.actions.switching")
-                            } else {
-                                delay_text
-                            }))
-                            .child(div().text_xs().text_color(theme.muted_foreground).child(
-                                format!("{}{}", proxy.kind, if proxy.udp { " · UDP" } else { "" }),
-                            )),
-                    )
-                    .on_click(cx.listener({
-                        let id = id.clone();
-                        let focus = self
-                            .node_focus
-                            .get(&(group.name.clone(), id.clone()))
-                            .cloned();
-                        move |this, _, window, cx| {
-                            if selected {
-                                if let Some(focus) = &focus {
-                                    focus.focus(window, cx);
-                                }
-                                this.open_node_details(group_name.clone(), id.clone(), window, cx);
-                            } else {
-                                this.change_proxy(group_name.clone(), proxy_name.clone(), cx);
+                                }),
+                        )
+                        .child(div().text_lg().text_color(delay_color).child(if switching {
+                            zenclash_i18n::text("proxies.actions.switching")
+                        } else {
+                            delay_text
+                        }))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(format!(
+                                    "{}{}",
+                                    proxy.kind,
+                                    if proxy.udp { " · UDP" } else { "" }
+                                )),
+                        ),
+                )
+                .on_click(cx.listener({
+                    let id = id.clone();
+                    let focus = self
+                        .node_focus
+                        .get(&(group.controller_name().to_owned(), id.clone()))
+                        .cloned();
+                    move |this, _, window, cx| {
+                        if selected {
+                            if let Some(focus) = &focus {
+                                focus.focus(window, cx);
                             }
+                            this.open_node_details(group_name.clone(), id.clone(), window, cx);
+                        } else {
+                            this.change_proxy(group_name.clone(), proxy_name.clone(), cx);
                         }
-                    })),
+                    }
+                })),
             )
             .child(
                 h_flex()
@@ -1017,7 +1005,7 @@ impl ProxiesPage {
                     .pb_3()
                     .gap_2()
                     .child(
-                        Button::new(proxy_element_id("test-proxy", &group.name, id))
+                        Button::new(proxy_element_id("test-proxy", group.controller_name(), id))
                             .icon(IconName::Play)
                             .label(zenclash_i18n::text("proxies.actions.test"))
                             .small()
@@ -1037,18 +1025,19 @@ impl ProxiesPage {
                     )
                     .child(
                         details_button(
-                            proxy_element_id("proxy-node-details", &group.name, id),
+                            proxy_element_id("proxy-node-details", group.controller_name(), id),
                             zenclash_i18n::text("unified.proxies.details"),
-                            &self.details_focus[&(group.name.clone(), id.clone())],
+                            &self.details_focus[&(group.controller_name().to_owned(), id.clone())],
                             theme,
                         )
                         .flex_1()
                         .min_w_0()
                         .on_click(cx.listener({
-                            let group_name = group.name.clone();
+                            let group_name = group.controller_name().to_owned();
                             let id = id.clone();
-                            let focus =
-                                self.details_focus[&(group.name.clone(), id.clone())].clone();
+                            let focus = self.details_focus
+                                [&(group.controller_name().to_owned(), id.clone())]
+                                .clone();
                             move |this, _, window, cx| {
                                 focus.focus(window, cx);
                                 this.open_node_details(group_name.clone(), id.clone(), window, cx)
@@ -1176,9 +1165,7 @@ mod tests {
     fn latency_filter_keeps_untested_nodes_and_sorts_before_paging() {
         let catalog = ProxyCatalog::from_group_nodes(
             vec![(
-                ProxyGroup {
-                    ..Default::default()
-                },
+                ProxyGroup::new(String::new()),
                 vec![
                     ProxyNode {
                         name: "unknown".into(),

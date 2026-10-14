@@ -69,7 +69,15 @@ pub async fn run() -> Result<()> {
 }
 
 fn read_config(path: &str) -> Result<serde_json::Value> {
-    let mut config: serde_json::Value = serde_yaml::from_str(&std::fs::read_to_string(path)?)?;
+    let payload = if path == "-" {
+        use std::io::Read as _;
+        let mut payload = String::new();
+        std::io::stdin().read_to_string(&mut payload)?;
+        payload
+    } else {
+        std::fs::read_to_string(path)?
+    };
+    let mut config: serde_json::Value = serde_yaml::from_str(&payload)?;
     config
         .as_object_mut()
         .context("fixture config must be a mapping")?

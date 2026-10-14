@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::service::{ServiceSession, health::PendingAction, maintenance::maintain_service};
 
@@ -25,7 +25,7 @@ impl ServiceManager {
     ) -> Result<crate::ServiceTunOutcome, ServiceManagerError> {
         self.complete(ServiceOperation::EnableTun, move |manager| async move {
             let mut request = manager.request_enable_tun()?.with_authorization();
-            if prepared.expected_runtime() != (request.intent.binding, request.intent.generation) {
+            if prepared.expected_runtime() != request.runtime_revision {
                 return Err(ServiceManagerError::Stale);
             }
             manager.capture.note_capture_intent();
@@ -43,7 +43,7 @@ impl ServiceManager {
     pub async fn try_apply_service_config(
         &self,
         store: &crate::ControlledConfigStore,
-        intent: crate::EffectiveConfigIntent,
+        configuration_intent: crate::EffectiveConfigIntent,
     ) -> Result<Option<ServiceConfigOutcome>, ServiceManagerError> {
         if self.session.kind() != CoreKind::Mihomo
             || self.session.runtime_descriptor().backend() != CoreRuntimeBackend::Local
@@ -68,11 +68,7 @@ impl ServiceManager {
                 .await;
             let prepared = manager
                 .session
-                .prepare_service_config(
-                    &store,
-                    (request.intent.binding, request.intent.generation),
-                    intent,
-                )
+                .prepare_service_config(&store, request.runtime_revision, configuration_intent)
                 .await
                 .map_err(|error| ServiceManagerError::Runtime(Box::new(error)))?;
             drop(_capture);
@@ -121,20 +117,19 @@ impl ServiceManager {
         &self,
         mut request: ServiceTunRequest,
     ) -> Result<crate::ServiceTunOutcome, ServiceManagerError> {
-        self.check_intent(request.intent)?;
+        self.check_runtime_revision(request.runtime_revision)?;
         if request.backend == CoreRuntimeBackend::Local && request.prepared_config.is_none() {
             let store = self
                 .capture
                 .controlled_store()
                 .ok_or(ServiceManagerError::Unsupported)?;
             let _capture = self.session.capture_publication_gate().lock_owned().await;
-            self.check_intent(request.intent)?;
+            self.check_runtime_revision(request.runtime_revision)?;
             request.prepared_config = Some(
                 self.session
                     .prepare_service_tun(
                         &store,
-                        request.intent.binding,
-                        request.intent.generation,
+                        request.runtime_revision,
                         self.capture.current_profile(),
                         request.recovery_bundle.clone(),
                     )
@@ -150,11 +145,11 @@ impl ServiceManager {
                 .source_home
                 .as_ref()
                 .ok_or(ServiceManagerError::Unsupported)?;
-            self.check_intent(request.intent)?;
+            self.check_runtime_revision(request.runtime_revision)?;
             let service = ServiceSession::connect(source_home)
                 .await
                 .map_err(ServiceManagerError::Connection)?;
-            if let Err(error) = self.check_intent(request.intent) {
+            if let Err(error) = self.check_runtime_revision(request.runtime_revision) {
                 service
                     .stop()
                     .await
@@ -168,8 +163,7 @@ impl ServiceManager {
         self.capture
             .enable_service_tun_with_bundle(
                 service,
-                request.intent.binding,
-                request.intent.generation,
+                request.runtime_revision,
                 request.recovery_bundle,
                 request.expected_capture_revision,
                 request.prepared_config,
@@ -182,11 +176,11 @@ impl ServiceManager {
         &self,
         request: &ServiceTunRequest,
     ) -> Result<(), ServiceManagerError> {
-        self.check_intent(request.intent)?;
+        self.check_runtime_revision(request.runtime_revision)?;
         let health = self.observe_health().await;
         self.state
             .send_modify(|state| state.health = Some(Arc::new(health.clone())));
-        self.check_intent(request.intent)?;
+        self.check_runtime_revision(request.runtime_revision)?;
         let action = match health {
             ServiceHealth::Ready => None,
             ServiceHealth::NotInstalled => Some(PendingAction::Install),
@@ -205,7 +199,7 @@ impl ServiceManager {
                 .as_ref()
                 .ok_or(ServiceManagerError::Unsupported)?;
             self.authorize_action(
-                request.intent,
+                request.runtime_revision,
                 action,
                 maintain_service(action, helper, Some(core.clone())),
             )
@@ -217,62 +211,18 @@ impl ServiceManager {
                 return Err(ServiceManagerError::Health(health));
             }
         }
-        self.check_intent(request.intent)
+        self.check_runtime_revision(request.runtime_revision)
     }
 }
 
 pub(super) async fn bundled_helper() -> Result<PathBuf, ServiceManagerError> {
     tokio::task::spawn_blocking(|| {
         let executable = std::env::current_exe()?;
-        helper_for_executable(&executable)
+        crate::application_paths::service_installation_helper(&executable)
     })
     .await
     .map_err(ServiceManagerError::Completion)?
     .map_err(ServiceManagerError::Sources)
-}
-
-fn helper_for_executable(executable: &Path) -> std::io::Result<PathBuf> {
-    if !executable.is_absolute() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "application executable path is not absolute",
-        ));
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let directory = executable.parent().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "application directory missing",
-            )
-        })?;
-        Ok(directory.join("zenclash-service-install.exe"))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let directory = executable.parent().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "application directory missing",
-            )
-        })?;
-        let contents = directory.parent().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "bundle contents missing")
-        })?;
-        if directory.file_name() != Some(std::ffi::OsStr::new("MacOS"))
-            || contents.file_name() != Some(std::ffi::OsStr::new("Contents"))
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "application service requires its installed bundle",
-            ));
-        }
-        Ok(directory.join("zenclash-service-install"))
-    }
-    #[cfg(target_os = "linux")]
-    {
-        Ok(PathBuf::from("/usr/lib/zenclash/zenclash-service-install"))
-    }
 }
 
 #[cfg(test)]
@@ -281,7 +231,7 @@ mod tests {
 
     #[tokio::test]
     async fn directory_service_candidate_rejects_new_generation_before_native_health() {
-        let fixture = crate::core_session::ownership_tests::ChildFixture::new(
+        let fixture = crate::core_session::test_support::OwnedCoreFixture::new(
             "geodata-directory-manager-stale",
         )
         .await;
@@ -301,10 +251,10 @@ mod tests {
         let prepared = session
             .prepare_service_profile_config(
                 &store,
-                (
-                    session.runtime_descriptor().binding_generation(),
-                    session.generation(),
-                ),
+                crate::core_session::RuntimeConfigurationRevision {
+                    binding_generation: session.runtime_descriptor().binding_generation(),
+                    configuration_generation: session.generation(),
+                },
                 home.join("profiles/new.yaml"),
                 std::sync::Arc::from("tun: {enable: true}\n"),
                 vec![],
@@ -315,7 +265,7 @@ mod tests {
             panic!("TUN candidate requires service")
         };
         let pid = fixture.process.snapshot().pid;
-        session.mark_runtime_unknown();
+        session.invalidate_runtime_observations();
         assert!(matches!(
             manager.apply_service_profile(prepared).await,
             Err(ServiceManagerError::Stale)
@@ -333,7 +283,7 @@ mod tests {
     #[tokio::test]
     async fn service_config_applies_ordinary_candidate_without_native_health_or_authorization() {
         let fixture =
-            crate::core_session::ownership_tests::ChildFixture::new("geodata-config-local-apply")
+            crate::core_session::test_support::OwnedCoreFixture::new("geodata-config-local-apply")
                 .await;
         let session = CoreSession::open(
             CoreKind::Mihomo,
@@ -371,7 +321,7 @@ mod tests {
 
     #[tokio::test]
     async fn service_config_rejects_another_store_before_health_or_authorization() {
-        let fixture = crate::core_session::ownership_tests::ChildFixture::new(
+        let fixture = crate::core_session::test_support::OwnedCoreFixture::new(
             "geodata-config-store-identity",
         )
         .await;
@@ -409,7 +359,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_tun_candidate_is_rejected_before_native_health_or_authorization() {
-        let fixture = crate::core_session::ownership_tests::ChildFixture::new(
+        let fixture = crate::core_session::test_support::OwnedCoreFixture::new(
             "geodata-tun-preflight-rejection",
         )
         .await;

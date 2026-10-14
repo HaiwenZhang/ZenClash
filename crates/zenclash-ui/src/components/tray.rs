@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     path::PathBuf,
     sync::{Arc, OnceLock},
 };
@@ -11,7 +10,9 @@ use tray_icon::{
 };
 use zenclash_core::{TrafficMonitor, TrafficSnapshot, TrayDisplayPreference, format_speed};
 
+mod command_bindings;
 mod icon;
+use command_bindings::TrayCommandBindings;
 #[cfg(target_os = "macos")]
 mod macos;
 mod menu;
@@ -57,7 +58,10 @@ pub struct TrayProfile {
 
 #[derive(Clone, Debug, Default)]
 /// One selectable Mihomo proxy group shown as a submenu.
+#[non_exhaustive]
 pub struct TrayProxyGroup {
+    /// Controller group key; may differ from its user-facing label.
+    pub controller_name: String,
     /// Whether the group accepts an explicit member selection.
     pub selectable: bool,
     /// Whether a whole-group delay test must restore automatic selection.
@@ -72,6 +76,16 @@ pub struct TrayProxyGroup {
     pub test_url: Option<String>,
     /// Selectable group members.
     pub proxies: Arc<[TrayProxyNode]>,
+}
+
+impl TrayProxyGroup {
+    pub(crate) fn controller_name(&self) -> &str {
+        if self.controller_name.is_empty() {
+            &self.name
+        } else {
+            &self.controller_name
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -245,7 +259,7 @@ pub struct NetworkTrayIcon {
     icon: TrayIcon,
     last_title: String,
     display: TrayDisplayPreference,
-    commands: HashMap<String, TrayCommand>,
+    commands: TrayCommandBindings,
     events: Option<mpsc::UnboundedReceiver<NativeTrayEvent>>,
 }
 
@@ -319,7 +333,7 @@ impl NetworkTrayIcon {
             icon: tray,
             last_title: String::new(),
             display,
-            commands,
+            commands: TrayCommandBindings::new(commands, None),
             events: Some(events),
         })
     }
@@ -449,9 +463,17 @@ impl NetworkTrayIcon {
     ///
     /// Returns an error if any native menu item cannot be created or appended.
     pub fn update_menu(&mut self, state: &TrayMenuState) -> Result<(), String> {
+        self.update_menu_with_observation(state, None)
+    }
+
+    pub(crate) fn update_menu_with_observation(
+        &mut self,
+        state: &TrayMenuState,
+        observation: Option<zenclash_core::CoreObservationIdentity>,
+    ) -> Result<(), String> {
         let (menu, commands) = build_menu(state)?;
         self.icon.set_menu(Some(Box::new(menu)));
-        self.commands = commands;
+        self.commands = TrayCommandBindings::new(commands, observation);
         Ok(())
     }
 
@@ -463,11 +485,7 @@ impl NetworkTrayIcon {
 
     pub(crate) fn resolve_event(&self, event: NativeTrayEvent) -> Option<TrayEvent> {
         match event {
-            NativeTrayEvent::Menu(event) => self
-                .commands
-                .get(event.id().as_ref())
-                .cloned()
-                .map(TrayEvent::Command),
+            NativeTrayEvent::Menu(event) => self.commands.resolve(event.id().as_ref()),
             NativeTrayEvent::Click(TrayIconEvent::Click { id, button, .. })
                 if id == self.icon.id() =>
             {
@@ -522,7 +540,7 @@ impl Drop for NetworkTrayIcon {
 }
 
 pub(crate) enum TrayEvent {
-    Command(TrayCommand),
+    Command(TrayCommand, Option<zenclash_core::CoreObservationIdentity>),
     Click(TrayClick),
 }
 

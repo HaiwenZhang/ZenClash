@@ -19,7 +19,7 @@ pub struct PreparedServiceBackupConfig {
 
 impl ServiceManager {
     /// Freezes a Local backup candidate and completes necessary native authorization.
-    /// Returns no configuration for External, Service or experimental owners.
+    /// Returns no configuration for External or Service owners.
     /// No backup admission, data activation or kernel handover occurs here.
     ///
     /// # Errors
@@ -69,27 +69,20 @@ impl ServiceManager {
         if candidate.data_root.join("controlled-config") != store.root() {
             return Err(ServiceManagerError::Unsupported);
         }
-        self.check_intent(request.intent)?;
+        self.check_runtime_revision(request.runtime_revision)?;
         let (config, previous) = {
             let _capture = self.session.capture_publication_gate().lock_owned().await;
             self.session
-                .prepare_service_backup_config(
-                    &store,
-                    (request.intent.binding, request.intent.generation),
-                    &candidate,
-                )
+                .prepare_service_backup_config(&store, request.runtime_revision, &candidate)
                 .await
                 .map_err(|error| ServiceManagerError::Runtime(Box::new(error)))?
         };
         if config.requires_service() {
             request = authorize(self.clone(), request.with_authorization()).await?;
         }
-        self.check_intent(request.intent)?;
+        self.check_runtime_revision(request.runtime_revision)?;
         request.allow_authorization = false;
-        prepared.retain_runtime(
-            (request.intent.binding, request.intent.generation),
-            previous.clone(),
-        );
+        prepared.retain_runtime(request.runtime_revision, previous.clone());
         Ok((
             prepared,
             Some(PreparedServiceBackupConfig {
@@ -116,7 +109,7 @@ impl ServiceManager {
         if !self.owns_profile_application(&self.session, store) {
             return Err(ServiceManagerError::Unsupported);
         }
-        self.check_intent(prepared.request.intent)?;
+        self.check_runtime_revision(prepared.request.runtime_revision)?;
         CoreSession::validate_backup_snapshot(&prepared.previous, previous)
             .map_err(|error| ServiceManagerError::Runtime(Box::new(error)))?;
         let lease = store
@@ -126,7 +119,7 @@ impl ServiceManager {
         let store = store.with_write_lease(&lease);
         self.complete(ServiceOperation::EnableTun, move |manager| async move {
             let _lease = lease;
-            manager.check_intent(prepared.request.intent)?;
+            manager.check_runtime_revision(prepared.request.runtime_revision)?;
             let worker_lease = store
                 .acquire_write_lease()
                 .await
@@ -136,7 +129,7 @@ impl ServiceManager {
                 .await
                 .map_err(ServiceManagerError::Completion)?
                 .map_err(backup_failure)?;
-            manager.check_intent(prepared.request.intent)?;
+            manager.check_runtime_revision(prepared.request.runtime_revision)?;
             match prepared.config {
                 PreparedConfig::Local(config) => manager
                     .session

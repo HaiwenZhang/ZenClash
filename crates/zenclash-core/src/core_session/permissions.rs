@@ -92,7 +92,7 @@ impl CoreSession {
     ) -> Result<(), CoreSessionError> {
         self.ensure_not_shutting_down()?;
         let client = self.client.pin_binding()?;
-        let lease = self.acquire_process_write_lease(&client).await?;
+        let lease = self.acquire_runtime_write_lease(&client).await?;
         let transition = self.transition.clone().lock_owned().await;
         client.ensure_binding_current()?;
         self.ensure_not_shutting_down()?;
@@ -139,7 +139,7 @@ impl CoreSession {
     #[cfg(any(unix, test))]
     pub(super) async fn restart_after_tun_grant(
         &self,
-        process: &Arc<MihomoProcess>,
+        process: &Arc<ManagedCoreProcess>,
         lease: &DataWriteLease,
         timeout: Duration,
     ) -> Result<(), CoreSessionError> {

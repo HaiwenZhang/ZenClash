@@ -1,218 +1,34 @@
 use super::settings::forms::settings_switch as setting_switch;
 use super::{
     Button, ButtonVariants, Context, Disableable, FluentBuilder, IconName, InteractiveElement,
-    IntoElement, Page, ParentElement, ProviderCatalog, ProviderKind, RuntimeConfig, RuntimeData,
-    RuntimePage, Sizable, Styled, div, empty_dash, empty_state, format_profile_age, h_flex,
-    info_row, json, load_page, px, setting_card, v_flex,
+    IntoElement, PageSnapshotData, PageTaskToken, ParentElement, ProviderCatalog, ProviderKind,
+    RuntimeConfig, RuntimePage, Sizable, Styled, div, empty_dash, empty_state, format_profile_age,
+    h_flex, info_row, json, setting_card, v_flex,
 };
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme, WindowExt};
 
+mod action_context;
+mod builtin_actions;
+pub(in crate::pages::runtime) mod catalog_read;
+mod provider_actions;
+use builtin_actions::BuiltinResource;
 mod ruleset;
+#[cfg(test)]
+mod test_support;
 
-pub(super) use ruleset::RulesetUiState;
-
-#[derive(Clone, Copy)]
-enum BuiltinResource {
-    GeoData,
-    ExternalUi,
-}
+mod state;
+pub(super) use state::ResourcesState;
 
 impl RuntimePage {
-    fn update_builtin_resource(&mut self, resource: BuiltinResource, cx: &mut Context<Self>) {
-        let supported = match resource {
-            BuiltinResource::GeoData => self.core_kind.capabilities().geodata_update,
-            BuiltinResource::ExternalUi => self.core_kind.capabilities().external_ui_update,
-        };
-        if !supported {
-            self.error = Some(zenclash_i18n::text_with(
-                "resources.errors.unsupported",
-                &[("core", self.core_kind.display_name().to_owned())],
-            ));
-            cx.notify();
-            return;
-        }
-        let Some(token) = self.begin_mutation(Page::Resources) else {
-            return;
-        };
-        let client = self.client.clone();
-        let session = self.core_session.clone();
-        let task = self.runtime.spawn(async move {
-            match resource {
-                BuiltinResource::GeoData => session.update_geodata().await,
-                BuiltinResource::ExternalUi => session.update_external_ui().await,
-            }
-            .map_err(|error| error.to_string())?;
-            load_page(client, Page::Resources).await
-        });
-        cx.spawn(async move |this, cx| {
-            let result = task
-                .await
-                .map_err(|error| {
-                    zenclash_i18n::text_with(
-                        "resources.errors.builtin_task",
-                        &[("error", error.to_string())],
-                    )
-                })
-                .and_then(|result| result);
-            let _ = this.update(cx, |this, cx| {
-                this.finish_mutation(token);
-                match result {
-                    Ok(data) => {
-                        if this.replace_page_data(token, data, cx) {
-                            this.notice = Some(match resource {
-                                BuiltinResource::GeoData => {
-                                    zenclash_i18n::text("resources.notices.geodata")
-                                }
-                                BuiltinResource::ExternalUi => {
-                                    zenclash_i18n::text("resources.notices.external_ui")
-                                }
-                            });
-                        }
-                    }
-                    Err(error) => this.set_page_error(token, error),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn update_provider(&mut self, name: String, is_rule: bool, cx: &mut Context<Self>) {
-        let Some(token) = self.begin_mutation(Page::Resources) else {
-            return;
-        };
-        let operations = self.provider_operations.clone();
-        let client = self.client.clone();
-        let task = self.runtime.spawn(async move {
-            operations
-                .update(
-                    if is_rule {
-                        ProviderKind::Rule
-                    } else {
-                        ProviderKind::Proxy
-                    },
-                    &name,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-            load_page(client, Page::Resources).await
-        });
-        cx.spawn(async move |this, cx| {
-            let result = match task.await {
-                Ok(result) => result,
-                Err(error) => Err(zenclash_i18n::text_with(
-                    "resources.errors.provider_task",
-                    &[("error", error.to_string())],
-                )),
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.finish_mutation(token);
-                match result {
-                    Ok(data) => {
-                        if this.replace_page_data(token, data, cx) {
-                            this.notice = Some(zenclash_i18n::text("resources.notices.provider"));
-                        }
-                    }
-                    Err(error) => this.set_page_error(token, error),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn update_all_providers(&mut self, cx: &mut Context<Self>) {
-        let RuntimeData::Resources { proxy, rules, .. } = &self.data else {
-            return;
-        };
-        let targets = proxy
-            .providers
-            .keys()
-            .map(|name| (ProviderKind::Proxy, name.clone()))
-            .chain(
-                rules
-                    .providers
-                    .keys()
-                    .map(|name| (ProviderKind::Rule, name.clone())),
-            )
-            .collect::<Vec<_>>();
-        let Some(token) = self.begin_mutation(Page::Resources) else {
-            return;
-        };
-        let operations = self.provider_operations.clone();
-        let client = self.client.clone();
-        let task = self.runtime.spawn(async move {
-            let mut errors = Vec::new();
-            for (kind, name) in targets {
-                if let Err(error) = operations.update(kind, &name).await {
-                    errors.push(format!("{name}: {error}"));
-                }
-            }
-            (load_page(client, Page::Resources).await, errors)
-        });
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                this.finish_mutation(token);
-                match result {
-                    Ok((data, errors)) => {
-                        match data {
-                            Ok(data) => {
-                                this.replace_page_data(token, data, cx);
-                            }
-                            Err(error) => this.set_page_error(token, error),
-                        }
-                        if !errors.is_empty() {
-                            this.set_page_error(token, errors.join("\n"));
-                        }
-                    }
-                    Err(error) => this.set_page_error(token, error.to_string()),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn healthcheck_provider(&mut self, name: String, cx: &mut Context<Self>) {
-        let Some(token) = self.begin_mutation(Page::Resources) else {
-            return;
-        };
-        let operations = self.provider_operations.clone();
-        let client = self.client.clone();
-        let task = self.runtime.spawn(async move {
-            operations
-                .healthcheck_proxy(&name)
-                .await
-                .map_err(|error| error.to_string())?;
-            load_page(client, Page::Resources).await
-        });
-        cx.spawn(async move |this, cx| {
-            let result = match task.await {
-                Ok(result) => result,
-                Err(error) => Err(zenclash_i18n::text_with(
-                    "resources.errors.healthcheck_task",
-                    &[("error", error.to_string())],
-                )),
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.finish_mutation(token);
-                match result {
-                    Ok(data) => {
-                        if this.replace_page_data(token, data, cx) {
-                            this.notice =
-                                Some(zenclash_i18n::text("resources.notices.healthcheck"));
-                        }
-                    }
-                    Err(error) => this.set_page_error(token, error),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+    #[cfg(test)]
+    pub(super) fn accept_completed_resource_page(
+        &mut self,
+        token: PageTaskToken,
+        observed: super::page_observation::ObservedPage,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.is_page_task_current(token) && self.accept_page_observation(observed, cx)
     }
 
     pub(super) fn render_resources(
@@ -223,8 +39,8 @@ impl RuntimePage {
         let fallback_config = RuntimeConfig::default();
         let fallback_proxy = ProviderCatalog::default();
         let fallback_rules = ProviderCatalog::default();
-        let (config, proxy, rules) = match &self.data {
-            RuntimeData::Resources {
+        let (config, proxy, rules) = match self.page_observation.data() {
+            PageSnapshotData::Resources {
                 config,
                 proxy,
                 rules,
@@ -242,7 +58,7 @@ impl RuntimePage {
                             .pb_3()
                             .gap_3()
                             .child(gpui_kit::component::input::Input::new(
-                                &self.settings_navigation.resource_search,
+                                self.resources.search(),
                             ))
                             .child(
                                 Button::new("update-all-providers")
@@ -288,8 +104,8 @@ impl RuntimePage {
                                 )),
                             ),
                     )
-                    .child(self.render_provider_section(proxy, false, theme, cx))
-                    .child(self.render_provider_section(rules, true, theme, cx)),
+                    .child(self.render_provider_section(proxy, ProviderKind::Proxy, theme, cx))
+                    .child(self.render_provider_section(rules, ProviderKind::Rule, theme, cx)),
             )
             .child(
                 Button::new("open-ruleset-converter")
@@ -453,18 +269,13 @@ impl RuntimePage {
     fn render_provider_section(
         &self,
         catalog: &ProviderCatalog,
-        is_rule: bool,
+        kind: ProviderKind,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<RuntimePage>,
     ) -> gpui_kit::AnyElement {
         let mutating = self.core_busy();
         let operations = &self.provider_operations;
-        let query = self
-            .settings_navigation
-            .resource_search
-            .read(cx)
-            .value()
-            .to_lowercase();
+        let query = self.resources.query(cx);
         let count = catalog
             .providers
             .iter()
@@ -502,22 +313,15 @@ impl RuntimePage {
                                     provider.name.as_str()
                                 };
                                 let display_name = name.to_owned();
-                                let name_for_click = key.clone();
-                                let name_for_healthcheck = key.clone();
-                                let status = operations.status(
-                                    if is_rule {
-                                        ProviderKind::Rule
-                                    } else {
-                                        ProviderKind::Proxy
-                                    },
-                                    key,
-                                );
-                                let item_count = if is_rule {
+                                let provider_key_for_update = key.clone();
+                                let provider_key_for_healthcheck = key.clone();
+                                let status = operations.status(kind, key);
+                                let item_count = if kind == ProviderKind::Rule {
                                     provider.rule_count
                                 } else {
                                     provider.proxies.len()
                                 };
-                                let metadata = if is_rule {
+                                let metadata = if kind == ProviderKind::Rule {
                                     let behavior = empty_dash(&provider.behavior);
                                     let format = empty_dash(&provider.format).to_ascii_uppercase();
                                     zenclash_i18n::text_with(
@@ -555,7 +359,7 @@ impl RuntimePage {
                                             ("update", provider_action_summary(&status.update)),
                                             (
                                                 "health",
-                                                if is_rule {
+                                                if kind == ProviderKind::Rule {
                                                     zenclash_i18n::text(
                                                         "resources.providers.not_applicable",
                                                     )
@@ -568,14 +372,14 @@ impl RuntimePage {
                                 });
                                 h_flex()
                                     .id((
-                                        if is_rule {
+                                        if kind == ProviderKind::Rule {
                                             "rule-provider"
                                         } else {
                                             "proxy-provider"
                                         },
                                         index,
                                     ))
-                                    .min_h(px(58.))
+                                    .min_h(gpui_kit::rems(3.625))
                                     .flex_wrap()
                                     .py_2()
                                     .px_4()
@@ -591,7 +395,7 @@ impl RuntimePage {
                                             .child(display_name.clone()),
                                     )
                                     .child(div().w_16().text_sm().child(zenclash_i18n::text(
-                                        if is_rule {
+                                        if kind == ProviderKind::Rule {
                                             "settings_redesign.resource_rule"
                                         } else {
                                             "settings_redesign.resource_proxy"
@@ -613,7 +417,7 @@ impl RuntimePage {
                                             .gap_2()
                                             .child(
                                                 Button::new(gpui_kit::SharedString::from(format!(
-                                                    "provider-details-{is_rule}-{key}"
+                                                    "provider-details-{kind:?}-{key}"
                                                 )))
                                                 .label(zenclash_i18n::text("redesign.details"))
                                                 .small()
@@ -657,7 +461,7 @@ impl RuntimePage {
                                                     );
                                                 }),
                                             )
-                                            .when(!is_rule, |row| {
+                                            .when(kind == ProviderKind::Proxy, |row| {
                                                 row.child(
                                                     Button::new(gpui_kit::SharedString::from(
                                                         format!("healthcheck-provider-{key}"),
@@ -671,7 +475,7 @@ impl RuntimePage {
                                                     .disabled(mutating)
                                                     .on_click(cx.listener(move |this, _, _, cx| {
                                                         this.healthcheck_provider(
-                                                            name_for_healthcheck.clone(),
+                                                            provider_key_for_healthcheck.clone(),
                                                             cx,
                                                         );
                                                     })),
@@ -679,7 +483,7 @@ impl RuntimePage {
                                             })
                                             .child(
                                                 Button::new(gpui_kit::SharedString::from(format!(
-                                                    "update-provider-{is_rule}-{key}"
+                                                    "update-provider-{kind:?}-{key}"
                                                 )))
                                                 .icon(crate::assets::AppIcon::RefreshCw)
                                                 .label(zenclash_i18n::text(
@@ -689,8 +493,8 @@ impl RuntimePage {
                                                 .disabled(mutating)
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     this.update_provider(
-                                                        name_for_click.clone(),
-                                                        is_rule,
+                                                        provider_key_for_update.clone(),
+                                                        kind,
                                                         cx,
                                                     );
                                                 })),

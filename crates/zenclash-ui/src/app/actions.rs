@@ -1,44 +1,16 @@
+use super::menu_preferences::MenuPreferenceChange;
 use super::{
-    AppPreferences, AppearancePreference, Context, HideTrafficIcon, NavigateConnections,
-    NavigateDns, NavigateHome, NavigateLogs, NavigateMihomo, NavigateNetwork, NavigateOverride,
-    NavigateProfiles, NavigateProxies, NavigateResources, NavigateRules, NavigateSettings,
-    NavigateSniffer, NavigateSystemProxy, NavigateTraffic, NavigateTun, OutboundMode, Page, Quit,
-    SetDarkTheme, SetDirectMode, SetGlobalMode, SetLightTheme, SetRuleMode, SetSystemTheme,
-    ShowStatusMenu, ShowTrafficIcon, ThemeMode, ToggleSidebar, Window, ZenClashApp,
-    apply_zen_theme,
+    AppearancePreference, Context, HideTrafficIcon, NavigateConnections, NavigateDns, NavigateHome,
+    NavigateLogs, NavigateMihomo, NavigateNetwork, NavigateOverride, NavigateProfiles,
+    NavigateProxies, NavigateResources, NavigateRules, NavigateSettings, NavigateSniffer,
+    NavigateSystemProxy, NavigateTraffic, NavigateTun, OutboundMode, Page, Quit, SetDarkTheme,
+    SetDirectMode, SetGlobalMode, SetLightTheme, SetRuleMode, SetSystemTheme, ShowStatusMenu,
+    ShowTrafficIcon, ThemeMode, ToggleSidebar, Window, ZenClashApp, apply_zen_theme,
 };
 
 impl ZenClashApp {
     pub(super) fn on_quit(&mut self, _: &Quit, _: &mut Window, cx: &mut Context<Self>) {
         self.begin_quit(None, cx);
-    }
-
-    fn update_preferences(
-        &mut self,
-        mutate: impl Fn(&mut AppPreferences) + Send + 'static,
-        cx: &mut Context<Self>,
-    ) {
-        mutate(&mut self.preferences);
-        let preferences = self.preferences.clone();
-        self.runtime_page.update(cx, |page, cx| {
-            page.preferences_restored_from_app(preferences, cx);
-        });
-        let Some(store) = self.preferences_store.clone() else {
-            return;
-        };
-        let previous = self.preferences_save_task.take();
-        self.preferences_save_task = Some(self.runtime.spawn(async move {
-            if let Some(previous) = previous {
-                let _ = previous.await;
-            }
-            match tokio::task::spawn_blocking(move || store.update(mutate)).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "failed to update application preferences")
-                }
-                Err(error) => tracing::warn!(%error, "preference worker failed"),
-            }
-        }));
     }
 
     pub(super) fn on_navigate_home(
@@ -191,7 +163,7 @@ impl ZenClashApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_mode(OutboundMode::Rule, cx);
+        self.request_outbound_mode(OutboundMode::Rule, cx);
     }
 
     pub(super) fn on_set_global_mode(
@@ -200,7 +172,7 @@ impl ZenClashApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_mode(OutboundMode::Global, cx);
+        self.request_outbound_mode(OutboundMode::Global, cx);
     }
 
     pub(super) fn on_set_direct_mode(
@@ -209,7 +181,7 @@ impl ZenClashApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_mode(OutboundMode::Direct, cx);
+        self.request_outbound_mode(OutboundMode::Direct, cx);
     }
 
     pub(super) fn on_set_light_theme(
@@ -219,10 +191,8 @@ impl ZenClashApp {
         cx: &mut Context<Self>,
     ) {
         apply_zen_theme(ThemeMode::Light, Some(window), cx);
-        self.update_preferences(
-            |preferences| {
-                preferences.appearance = AppearancePreference::Light;
-            },
+        self.update_menu_preference(
+            MenuPreferenceChange::Appearance(AppearancePreference::Light),
             cx,
         );
         cx.notify();
@@ -235,10 +205,8 @@ impl ZenClashApp {
         cx: &mut Context<Self>,
     ) {
         apply_zen_theme(ThemeMode::from(window.appearance()), Some(window), cx);
-        self.update_preferences(
-            |preferences| {
-                preferences.appearance = AppearancePreference::System;
-            },
+        self.update_menu_preference(
+            MenuPreferenceChange::Appearance(AppearancePreference::System),
             cx,
         );
         cx.notify();
@@ -251,10 +219,8 @@ impl ZenClashApp {
         cx: &mut Context<Self>,
     ) {
         apply_zen_theme(ThemeMode::Dark, Some(window), cx);
-        self.update_preferences(
-            |preferences| {
-                preferences.appearance = AppearancePreference::Dark;
-            },
+        self.update_menu_preference(
+            MenuPreferenceChange::Appearance(AppearancePreference::Dark),
             cx,
         );
         cx.notify();
@@ -272,10 +238,11 @@ impl ZenClashApp {
             self.tray_command_error = Some(error);
             return;
         }
-        self.update_preferences(move |preferences| preferences.tray_display = display, cx);
+        self.update_menu_preference(MenuPreferenceChange::TrayDisplay(display), cx);
         self.tray_state.display = display;
         if let Some(tray) = self.network_tray.as_mut()
-            && let Err(error) = tray.update_menu(&self.tray_state)
+            && let Err(error) =
+                tray.update_menu_with_observation(&self.tray_state, self.tray_observation.clone())
         {
             tracing::warn!(%error, "failed to refresh tray display choices");
         }
@@ -293,7 +260,7 @@ impl ZenClashApp {
         {
             tracing::warn!(%error, "failed to show native traffic tray");
         }
-        self.update_preferences(|preferences| preferences.traffic_tray_visible = true, cx);
+        self.update_menu_preference(MenuPreferenceChange::TrayVisibility(true), cx);
         cx.notify();
     }
 
@@ -308,7 +275,7 @@ impl ZenClashApp {
         {
             tracing::warn!(%error, "failed to hide native traffic tray");
         }
-        self.update_preferences(|preferences| preferences.traffic_tray_visible = false, cx);
+        self.update_menu_preference(MenuPreferenceChange::TrayVisibility(false), cx);
         cx.notify();
     }
 

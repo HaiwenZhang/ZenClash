@@ -3,10 +3,29 @@ use std::{
     io::{Read, Write},
     net::TcpStream,
     path::PathBuf,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
 };
 
 use super::*;
+
+mod configuration;
+mod summary;
+
+static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn create_fixture_directory() -> PathBuf {
+    loop {
+        let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("zenclash-native-{}-{sequence}", std::process::id()));
+        match std::fs::create_dir(&root) {
+            Ok(()) => return root,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("cannot create native proxy fixture directory: {error}"),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 enum Fault {
@@ -20,16 +39,28 @@ enum Fault {
     ExternalCachedHttps,
     ExternalCachedPac,
     PartialHostWrite,
+    ExternalHidden,
+}
+
+#[derive(Debug)]
+struct CaptureReplacement {
+    remaining: usize,
+    actual: SystemProxyStatus,
 }
 
 #[derive(Debug)]
 struct FixtureState {
     active: String,
     services: HashMap<String, SystemProxyStatus>,
+    service_ids: HashMap<String, String>,
+    attributes: HashMap<String, std::collections::BTreeMap<String, Vec<u8>>>,
     faults: VecDeque<Fault>,
     fail_read: bool,
     writes: Vec<String>,
     break_preferences: Option<PathBuf>,
+    replacement_on_capture: Option<CaptureReplacement>,
+    display_override: Option<SystemProxySummary>,
+    fail_display: bool,
 }
 
 #[derive(Debug)]
@@ -40,10 +71,15 @@ impl FixtureBackend {
         Self(Mutex::new(FixtureState {
             active: "Wi-Fi".into(),
             services: HashMap::new(),
+            service_ids: HashMap::new(),
+            attributes: HashMap::new(),
             faults: VecDeque::new(),
             fail_read: false,
             writes: Vec::new(),
             break_preferences: None,
+            replacement_on_capture: None,
+            display_override: None,
+            fail_display: false,
         }))
     }
 
@@ -99,6 +135,13 @@ impl FixtureBackend {
             actual.secure_enabled = false;
             actual.auto_enabled = false;
         }
+        if matches!(fault, Some(Fault::ExternalHidden)) {
+            state
+                .attributes
+                .entry(service.into())
+                .or_default()
+                .insert("proxy-auth".into(), b"external credential change".to_vec());
+        }
         state.fail_read = matches!(fault, Some(Fault::Readback));
         if let Some(path) = state.break_preferences.take() {
             std::fs::remove_file(&path).unwrap();
@@ -113,6 +156,7 @@ impl FixtureBackend {
                     | Fault::ExternalCachedHttps
                     | Fault::ExternalCachedPac
                     | Fault::PartialHostWrite
+                    | Fault::ExternalHidden
             )
         ) {
             return Err(MihomoError::Process(
@@ -124,54 +168,163 @@ impl FixtureBackend {
 }
 
 impl NativeProxyBackend for FixtureBackend {
-    fn restore_snapshot(&self, previous: &SystemProxyStatus) -> MihomoResult<()> {
-        self.write(&previous.service, |status| *status = previous.clone())
-    }
-
     fn detect_service(&self) -> MihomoResult<String> {
         Ok(self.0.lock().active.clone())
     }
-    fn status(&self, service: &str) -> MihomoResult<SystemProxyStatus> {
+    fn display_summary(&self, observed: &NativeProxySnapshot) -> MihomoResult<SystemProxySummary> {
+        let state = self.0.lock();
+        if state.fail_display {
+            return Err(SystemProxyError::ObservationUnstable.into());
+        }
+        Ok(state
+            .display_override
+            .as_ref()
+            .unwrap_or(observed.summary())
+            .clone())
+    }
+    fn capture(&self, target: NativeProxyTarget<'_>) -> MihomoResult<NativeProxySnapshot> {
         let mut state = self.0.lock();
+        let service = match target {
+            NativeProxyTarget::Service(service) => service.to_owned(),
+            NativeProxyTarget::Captured(NativeProxySnapshot::Fixture { target_id, .. }) => state
+                .service_ids
+                .iter()
+                .find(|(_, id)| *id == target_id)
+                .map(|(name, _)| name.clone())
+                .unwrap_or_else(|| target_id.clone()),
+            NativeProxyTarget::Captured(_) => return Err(pending_recovery()),
+        };
+        if let Some(replacement) = &mut state.replacement_on_capture {
+            replacement.remaining -= 1;
+        }
+        if state
+            .replacement_on_capture
+            .as_ref()
+            .is_some_and(|replacement| replacement.remaining == 0)
+        {
+            let replacement = state.replacement_on_capture.take().unwrap();
+            state.services.insert(service.clone(), replacement.actual);
+        }
         if std::mem::take(&mut state.fail_read) {
             return Err(MihomoError::Process("fixture readback failed".into()));
         }
-        Ok(state
-            .services
-            .get(service)
-            .cloned()
-            .unwrap_or_else(|| SystemProxyStatus {
-                service: service.into(),
-                ..Default::default()
-            }))
-    }
-    fn set_manual(
-        &self,
-        service: &str,
-        enabled: bool,
-        host: &str,
-        port: u16,
-        bypass: &[String],
-    ) -> MihomoResult<()> {
-        self.write(service, |status| {
-            status.auto_enabled = false;
-            status.enabled = enabled;
-            status.secure_enabled = enabled;
-            if enabled {
-                status.server = host.into();
-                status.secure_server = host.into();
-                status.port = port;
-                status.secure_port = port;
-                status.bypass = bypass.into();
-            }
+        Ok(NativeProxySnapshot::Fixture {
+            target_id: state
+                .service_ids
+                .get(&service)
+                .cloned()
+                .unwrap_or_else(|| service.clone()),
+            summary: state
+                .services
+                .get(&service)
+                .cloned()
+                .unwrap_or_else(|| SystemProxyStatus {
+                    service: service.clone(),
+                    ..Default::default()
+                }),
+            attributes: state.attributes.get(&service).cloned().unwrap_or_default(),
         })
     }
-    fn set_pac(&self, service: &str, url: &str) -> MihomoResult<()> {
-        self.write(service, |status| {
-            status.enabled = false;
-            status.secure_enabled = false;
-            status.auto_enabled = true;
-            status.auto_url = url.into();
+    fn apply(
+        &self,
+        expected: &NativeProxySnapshot,
+        change: &NativeProxyChange<'_>,
+    ) -> NativeWriteAttempt {
+        let mut desired = expected.summary().clone();
+        desired.enabled = false;
+        desired.secure_enabled = false;
+        desired.auto_enabled = false;
+        match change {
+            NativeProxyChange::Disable => {}
+            NativeProxyChange::Pac { url } => {
+                desired.auto_enabled = true;
+                desired.auto_url = (*url).into();
+            }
+            NativeProxyChange::Manual { host, port, bypass } => {
+                desired.enabled = true;
+                desired.secure_enabled = true;
+                desired.server = (*host).into();
+                desired.secure_server = (*host).into();
+                desired.port = *port;
+                desired.secure_port = *port;
+                desired.bypass = (*bypass).into();
+            }
+        }
+        self.attempt(expected, desired)
+    }
+    fn restore(
+        &self,
+        expected: &NativeProxySnapshot,
+        previous: &NativeProxySnapshot,
+    ) -> NativeWriteAttempt {
+        self.attempt(expected, previous.summary().clone())
+    }
+}
+
+impl FixtureBackend {
+    fn status(&self, service: &str) -> MihomoResult<SystemProxyStatus> {
+        self.capture(NativeProxyTarget::Service(service))
+            .map(|snapshot| snapshot.summary().clone())
+    }
+    fn attempt(
+        &self,
+        expected: &NativeProxySnapshot,
+        mut desired: SystemProxyStatus,
+    ) -> NativeWriteAttempt {
+        NativeWriteAttempt::run(expected, |witness| {
+            let actual = self.capture(NativeProxyTarget::Captured(expected))?;
+            if !actual.same_state(expected)? {
+                return Err(pending_recovery());
+            }
+            let NativeProxySnapshot::Fixture {
+                target_id,
+                attributes,
+                ..
+            } = expected
+            else {
+                return Err(pending_recovery());
+            };
+            desired.service.clone_from(&actual.summary().service);
+            // This fixture models separately written flags and fields, including
+            // a failure after only the HTTP host or HTTP enable step.
+            let mut progress = expected.summary().clone();
+            progress.enabled = false;
+            progress.secure_enabled = false;
+            progress.auto_enabled = false;
+            witness.record(NativeProxySnapshot::Fixture {
+                target_id: target_id.clone(),
+                summary: progress.clone(),
+                attributes: attributes.clone(),
+            });
+            progress.server.clone_from(&desired.server);
+            witness.record(NativeProxySnapshot::Fixture {
+                target_id: target_id.clone(),
+                summary: progress,
+                attributes: attributes.clone(),
+            });
+            let mut cached = desired.clone();
+            cached.enabled = false;
+            cached.secure_enabled = false;
+            cached.auto_enabled = false;
+            witness.record(NativeProxySnapshot::Fixture {
+                target_id: target_id.clone(),
+                summary: cached,
+                attributes: attributes.clone(),
+            });
+            let mut http_only = desired.clone();
+            http_only.secure_enabled = false;
+            witness.record(NativeProxySnapshot::Fixture {
+                target_id: target_id.clone(),
+                summary: http_only,
+                attributes: attributes.clone(),
+            });
+            witness.record(NativeProxySnapshot::Fixture {
+                target_id: target_id.clone(),
+                summary: desired.clone(),
+                attributes: attributes.clone(),
+            });
+            self.write(&desired.service, |summary| *summary = desired.clone())?;
+            self.capture(NativeProxyTarget::Captured(expected))
         })
     }
 }
@@ -186,14 +339,8 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "zenclash-native-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        // Reserve a directory we own; timestamps are not unique across threads.
+        let root = create_fixture_directory();
         let backend = Arc::new(FixtureBackend::new());
         let controller = SystemProxyController {
             native: backend.clone(),
@@ -236,6 +383,59 @@ impl Drop for Fixture {
         self.controller.pac_server.stop();
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+fn a_restored_native_failure_retains_the_original_transaction_cause() {
+    let fixture = Fixture::new();
+    fixture.backend.0.lock().faults.push_back(Fault::Reject);
+    let error = fixture.session.set_enabled(true, 7890).unwrap_err();
+    assert!(
+        matches!(error, SystemProxySessionError::Native(MihomoError::SystemProxy(error))
+        if matches!(error.as_ref(), SystemProxyError::RecoveryConfirmed { cause }
+            if matches!(cause.as_ref(), SystemProxyTransactionCause::Native(MihomoError::Process(message))
+                if message == "fixture write rejected")))
+    );
+    assert!(!fixture.backend.status("Wi-Fi").unwrap().active());
+}
+
+#[test]
+fn persistence_failure_retains_the_preference_io_cause_after_native_restore() {
+    let fixture = Fixture::new();
+    fixture.store.save(&AppPreferences::default()).unwrap();
+    fixture.backend.0.lock().break_preferences = Some(fixture.root.join("preferences.json"));
+    let error = fixture.session.set_enabled(true, 7890).unwrap_err();
+    assert!(matches!(error, SystemProxySessionError::Transaction(error)
+        if matches!(error.as_ref(), SystemProxyError::RecoveryConfirmed { cause }
+            if matches!(cause.as_ref(), SystemProxyTransactionCause::Preferences(AppPreferencesError::Io(source))
+                if source.raw_os_error().is_some()))));
+    assert!(!fixture.backend.status("Wi-Fi").unwrap().active());
+}
+
+#[test]
+fn unconfirmed_recovery_retains_all_failure_causes_and_blocks_new_mutations() {
+    let fixture = Fixture::new();
+    fixture
+        .backend
+        .0
+        .lock()
+        .faults
+        .extend([Fault::PartialWrite, Fault::Reject, Fault::Reject]);
+    let error = fixture.session.set_enabled(true, 7890).unwrap_err();
+    assert!(
+        matches!(error, SystemProxySessionError::Native(MihomoError::SystemProxy(error))
+        if matches!(error.as_ref(), SystemProxyError::RecoveryUnconfirmed {
+            cause, recovery, release_failure: Some(release),
+        } if matches!(cause.as_ref(), SystemProxyTransactionCause::Native(MihomoError::Process(_)))
+            && matches!(recovery.as_ref(), MihomoError::Process(_))
+            && matches!(release.as_ref(), MihomoError::Process(_))))
+    );
+    assert!(fixture.controller.recovery.lock().is_some());
+    assert!(
+        matches!(fixture.session.set_enabled(true, 7890).unwrap_err(),
+        SystemProxySessionError::Native(MihomoError::SystemProxy(error))
+        if matches!(error.as_ref(), SystemProxyError::RecoveryPending))
+    );
 }
 
 fn read_pac(status: &PacServerStatus) -> String {
@@ -387,12 +587,15 @@ async fn maintenance_proxy_suspension_save_failure_restores_the_previous_live_pa
     let observed = fixture.observed_proxy();
     let before = fixture.backend.status("Wi-Fi").unwrap();
     fixture.backend.0.lock().break_preferences = Some(fixture.root.join("preferences.json"));
+    let error = fixture
+        .capture()
+        .suspend_maintenance_proxy_admitted(&observed)
+        .await
+        .unwrap_err();
     assert!(
-        fixture
-            .capture()
-            .suspend_maintenance_proxy_admitted(&observed)
-            .await
-            .is_err()
+        matches!(error, crate::TrafficCaptureError::SystemProxy(SystemProxySessionError::Transaction(error))
+        if matches!(error.as_ref(), SystemProxyError::RecoveryConfirmed { cause }
+            if matches!(cause.as_ref(), SystemProxyTransactionCause::Preferences(AppPreferencesError::Io(_)))))
     );
     assert_eq!(fixture.backend.status("Wi-Fi").unwrap(), before);
     assert_eq!(fixture.controller.pac_status().unwrap(), listener);
@@ -995,7 +1198,7 @@ fn failed_restore_retry_preserves_external_changes_to_inactive_cached_fields() {
 }
 
 #[test]
-fn a_successful_restore_call_with_incorrect_disabled_values_remains_retryable() {
+fn an_unrecognized_restore_value_cannot_authorize_overwriting_it_on_retry() {
     let fixture = Fixture::new();
     let before = external_snapshot(false, false, false);
     {
@@ -1009,8 +1212,16 @@ fn a_successful_restore_call_with_incorrect_disabled_values_remains_retryable() 
     assert_ne!(fixture.backend.status("Wi-Fi").unwrap(), before);
     assert!(fixture.controller.recovery.lock().is_some());
 
+    let unrecognized = fixture.backend.status("Wi-Fi").unwrap();
+    assert!(fixture.session.release_owned().is_err());
+    assert_eq!(fixture.backend.status("Wi-Fi").unwrap(), unrecognized);
+    fixture
+        .backend
+        .0
+        .lock()
+        .services
+        .insert("Wi-Fi".into(), before.clone());
     assert!(!fixture.session.release_owned().unwrap());
-
     assert_eq!(fixture.backend.status("Wi-Fi").unwrap(), before);
     assert!(fixture.controller.recovery.lock().is_none());
 }
@@ -1062,4 +1273,192 @@ fn a_failed_migration_restores_both_services_and_keeps_the_old_owned_pac_alive()
     assert!(fixture.session.release_owned().unwrap());
     assert!(!fixture.backend.status("Wi-Fi").unwrap().active());
     assert_eq!(fixture.backend.status("Ethernet").unwrap(), external);
+}
+
+#[test]
+fn hidden_external_attributes_block_initial_rollback_and_retry() {
+    let fixture = Fixture::new();
+    fixture
+        .backend
+        .0
+        .lock()
+        .faults
+        .push_back(Fault::ExternalHidden);
+    assert!(fixture.session.set_enabled(true, 7890).is_err());
+    let summary = fixture.backend.status("Wi-Fi").unwrap();
+    let writes = fixture.backend.0.lock().writes.clone();
+    assert!(fixture.session.release_owned().is_err());
+    assert_eq!(fixture.backend.status("Wi-Fi").unwrap(), summary);
+    assert_eq!(fixture.backend.0.lock().writes, writes);
+    assert_eq!(
+        fixture.backend.0.lock().attributes["Wi-Fi"]["proxy-auth"],
+        b"external credential change"
+    );
+}
+
+#[test]
+fn a_hidden_change_after_failed_restore_never_becomes_retry_authority() {
+    let fixture = Fixture::new();
+    let before = external_snapshot(true, true, false);
+    {
+        let mut state = fixture.backend.0.lock();
+        state.services.insert("Wi-Fi".into(), before.clone());
+        state
+            .faults
+            .extend([Fault::PartialWrite, Fault::Reject, Fault::Reject]);
+    }
+    assert!(fixture.session.set_enabled(true, 7890).is_err());
+    let writes = fixture.backend.0.lock().writes.len();
+    fixture
+        .backend
+        .0
+        .lock()
+        .attributes
+        .entry("Wi-Fi".into())
+        .or_default()
+        .insert("SOCKS-auth".into(), b"external secret".to_vec());
+    assert!(fixture.session.release_owned().is_err());
+    assert!(fixture.session.release_owned().is_err());
+    assert_eq!(fixture.backend.0.lock().writes.len(), writes);
+    fixture.backend.0.lock().attributes.clear();
+    assert!(!fixture.session.release_owned().unwrap());
+    assert_eq!(fixture.backend.status("Wi-Fi").unwrap(), before);
+}
+
+#[test]
+fn a_hidden_change_invalidates_same_process_ownership_and_preserves_pac() {
+    let fixture = Fixture::new();
+    let listener = fixture.start_pac();
+    fixture
+        .backend
+        .0
+        .lock()
+        .attributes
+        .entry("Wi-Fi".into())
+        .or_default()
+        .insert("proxy-auth".into(), b"private external value".to_vec());
+    assert_eq!(
+        fixture.session.snapshot().unwrap().ownership,
+        SystemProxyOwnershipState::Lost
+    );
+    let writes = fixture.backend.0.lock().writes.len();
+    assert_eq!(
+        fixture.session.reconcile(true, Some(7890)).unwrap(),
+        SystemProxyReconcileOutcome::OwnershipLost
+    );
+    assert!(fixture.session.release_owned().is_err());
+    assert_eq!(fixture.backend.0.lock().writes.len(), writes);
+    assert!(read_pac(&listener).contains("127.0.0.1:7890"));
+    let captured = fixture
+        .backend
+        .capture(NativeProxyTarget::Service("Wi-Fi"))
+        .unwrap();
+    assert!(!format!("{captured:?}").contains("private external value"));
+}
+
+#[test]
+fn a_renamed_service_remains_owned_and_releases_by_its_captured_identity() {
+    let fixture = Fixture::new();
+    fixture.session.set_enabled(true, 7890).unwrap();
+    {
+        let mut state = fixture.backend.0.lock();
+        let mut service = state.services.remove("Wi-Fi").unwrap();
+        service.service = "Renamed Wi-Fi".into();
+        state.services.insert(service.service.clone(), service);
+        state
+            .service_ids
+            .insert("Renamed Wi-Fi".into(), "Wi-Fi".into());
+        state.active = "Renamed Wi-Fi".into();
+    }
+    assert_eq!(
+        fixture.session.snapshot().unwrap().ownership,
+        SystemProxyOwnershipState::Owned
+    );
+    assert_eq!(
+        fixture.session.reconcile(true, Some(7890)).unwrap(),
+        SystemProxyReconcileOutcome::Unchanged
+    );
+    assert!(fixture.session.release_owned().unwrap());
+    assert!(!fixture.backend.status("Renamed Wi-Fi").unwrap().active());
+    assert!(!fixture.backend.0.lock().services.contains_key("Wi-Fi"));
+}
+
+#[test]
+fn clearing_persistent_metadata_does_not_erase_a_live_owned_proxy() {
+    let fixture = Fixture::new();
+    let listener = fixture.start_pac();
+    fixture
+        .store
+        .update(|preferences| {
+            preferences.system_proxy_enabled = false;
+            preferences.system_proxy_ownership = None;
+        })
+        .unwrap();
+    let observed = fixture.session.snapshot().unwrap();
+    assert!(!observed.intent_enabled);
+    assert_eq!(observed.ownership, SystemProxyOwnershipState::Owned);
+    assert!(fixture.session.release_owned().unwrap());
+    assert!(!fixture.backend.status("Wi-Fi").unwrap().active());
+    assert!(TcpStream::connect(listener.address).is_err());
+}
+
+#[test]
+fn release_uses_the_snapshot_that_granted_authority_not_a_later_baseline() {
+    let fixture = Fixture::new();
+    fixture.session.set_enabled(true, 7890).unwrap();
+    let external = SystemProxyStatus {
+        service: "Wi-Fi".into(),
+        server: "foreign.local".into(),
+        secure_server: "foreign.local".into(),
+        ..external_snapshot(true, true, false)
+    };
+    let writes = fixture.backend.0.lock().writes.len();
+    fixture.backend.0.lock().replacement_on_capture = Some(CaptureReplacement {
+        remaining: 2,
+        actual: external.clone(),
+    });
+    assert!(fixture.session.release_owned().is_err());
+    assert_eq!(fixture.backend.status("Wi-Fi").unwrap(), external);
+    assert_eq!(fixture.backend.0.lock().writes.len(), writes);
+}
+
+#[test]
+fn failed_restore_keeps_a_candidate_even_when_stored_values_already_match() {
+    let fixture = Fixture::new();
+    let before = fixture
+        .backend
+        .capture(NativeProxyTarget::Service("Wi-Fi"))
+        .unwrap();
+    let transaction = fixture
+        .controller
+        .stage_native(
+            "Wi-Fi".into(),
+            SystemProxyConfiguration::enabled(
+                &SystemProxySettings {
+                    mode: SystemProxyMode::Pac,
+                    host: "127.0.0.1".into(),
+                    bypass: Vec::new(),
+                    pac_script: default_pac_script().into(),
+                },
+                7890,
+            ),
+            None,
+        )
+        .unwrap();
+    let candidate = transaction.candidate.as_ref().unwrap().status().clone();
+    fixture.backend.0.lock().faults.push_back(Fault::Readback);
+    transaction.rollback(
+        crate::AppPreferencesError::Io(std::io::Error::other("preference write failed")).into(),
+    );
+    assert!(
+        fixture
+            .backend
+            .capture(NativeProxyTarget::Service("Wi-Fi"))
+            .unwrap()
+            .same_state(&before)
+            .unwrap()
+    );
+    assert!(read_pac(&candidate).contains("FindProxyForURL"));
+    assert!(!fixture.session.release_owned().unwrap());
+    assert!(TcpStream::connect(candidate.address).is_err());
 }

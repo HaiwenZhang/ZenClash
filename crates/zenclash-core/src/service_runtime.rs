@@ -476,6 +476,7 @@ fn invalid(message: &str) -> MihomoError {
 
 #[cfg(test)]
 mod tests {
+    use super::test_support::TestHome;
     use super::*;
 
     #[tokio::test]
@@ -599,25 +600,6 @@ mod tests {
             .find(|asset| asset.path == "assets/geodata/country.mmdb")
             .unwrap();
         assert_eq!(mmdb.bytes.as_ref(), b"selected db");
-    }
-
-    pub(super) struct TestHome(pub(super) PathBuf);
-    impl TestHome {
-        pub(super) fn new() -> Self {
-            let mut random = [0_u8; 16];
-            getrandom::fill(&mut random).unwrap();
-            let path = std::env::temp_dir().join(format!(
-                "zenclash-service-bundle-{:x}",
-                u128::from_ne_bytes(random)
-            ));
-            std::fs::create_dir(&path).unwrap();
-            Self(std::fs::canonicalize(path).unwrap())
-        }
-    }
-    impl Drop for TestHome {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
     }
 
     #[tokio::test]
@@ -827,3 +809,6 @@ mod tests {
         assert_eq!(bundle.assets[0].path, next.assets[0].path);
     }
 }
+
+#[cfg(test)]
+mod test_support;

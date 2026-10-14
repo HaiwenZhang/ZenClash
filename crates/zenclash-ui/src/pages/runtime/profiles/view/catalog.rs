@@ -33,14 +33,14 @@ impl RuntimePage {
             .profiles
             .forms
             .catalog_view
-            .is_current(&self.profiles.catalog)
+            .is_current(self.profiles.catalog())
         {
             return card.child(empty_state(
                 zenclash_i18n::text("common.actions.loading"),
                 theme,
             ));
         }
-        if self.profiles.catalog.profiles.is_empty() {
+        if self.profiles.catalog().profiles.is_empty() {
             return card.child(empty_state(
                 zenclash_i18n::text("profiles.catalog.empty"),
                 theme,
@@ -88,10 +88,7 @@ impl RuntimePage {
                                         },
                                     )
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.profiles
-                                            .forms
-                                            .catalog_view
-                                            .set_filter(filter, &this.profiles.catalog);
+                                        this.profiles.set_catalog_filter(filter);
                                         cx.notify();
                                     }))
                             }),
@@ -105,7 +102,7 @@ impl RuntimePage {
                 .visible_indices()
                 .iter()
                 .filter_map(|&index| {
-                    self.profiles.catalog.profiles.get(index).map(|profile| {
+                    self.profiles.catalog().profiles.get(index).map(|profile| {
                         v_flex()
                             .gap_2()
                             .child(self.render_managed_profile(profile, theme, cx))
@@ -180,7 +177,7 @@ impl RuntimePage {
             .profiles
             .forms
             .catalog_view
-            .is_current(&self.profiles.catalog)
+            .is_current(self.profiles.catalog())
         {
             return setting_card(zenclash_i18n::text("profiles.catalog.title"), theme).child(
                 empty_state(zenclash_i18n::text("common.actions.loading"), theme),
@@ -191,13 +188,13 @@ impl RuntimePage {
             .forms
             .catalog_view
             .selected_index()
-            .and_then(|index| self.profiles.catalog.profiles.get(index));
+            .and_then(|index| self.profiles.catalog().profiles.get(index));
         let Some(profile) = profile else {
             return setting_card(zenclash_i18n::text("profiles.catalog.title"), theme).child(
                 empty_state(zenclash_i18n::text("profiles.catalog.empty"), theme),
             );
         };
-        let active = self.profiles.catalog.active.as_deref() == Some(profile.id.as_str());
+        let active = self.profiles.catalog().active.as_deref() == Some(profile.id.as_str());
         v_flex()
             .rounded(theme.radius_lg)
             .border_1()
@@ -283,14 +280,14 @@ impl RuntimePage {
     ) -> gpui_kit::Div {
         let mut card = setting_card(zenclash_i18n::text("profiles.recovery.title"), theme).child(
             div().px_4().py_3().text_sm().child(zenclash_i18n::text(
-                if self.profiles.pending_finalization.is_some() {
+                if self.profiles.pending_finalization().is_some() {
                     "profiles.recovery.pending_description"
                 } else {
                     "profiles.recovery.description"
                 },
             )),
         );
-        if let Some(version) = self.profiles.pending_finalization {
+        if let Some(version) = self.profiles.pending_finalization() {
             return card.child(
                 h_flex().px_4().pb_3().child(
                     Button::new("confirm-service-profile")
@@ -303,17 +300,17 @@ impl RuntimePage {
                 ),
             );
         }
-        if let Some(recovery) = &self.profiles.recovery {
+        if let Some(recovery) = &self.profiles.recovery() {
             let known = recovery.last_known_good.as_ref().and_then(|version| {
                 self.profiles
-                    .catalog
+                    .catalog()
                     .profiles
                     .iter()
                     .find(|profile| profile.id == version.profile_id)
             });
             let target = known.or_else(|| {
                 self.profiles
-                    .catalog
+                    .catalog()
                     .profiles
                     .iter()
                     .find(|profile| profile.id == recovery.attempted.profile_id)
@@ -345,7 +342,7 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
-        let active = self.profiles.catalog.active.as_deref() == Some(profile.id.as_str());
+        let active = self.profiles.catalog().active.as_deref() == Some(profile.id.as_str());
         let selected = self.profiles.forms.catalog_view.is_selected(&profile.id);
         let show_id = profile.id.clone();
         let expiry_hint = profile.subscription.usage.as_ref().map_or_else(
@@ -637,7 +634,7 @@ impl RuntimePage {
                             let can_delete = menu_owner.upgrade().is_some_and(|page| {
                                 let page = page.read(cx);
                                 !page.core_busy()
-                                    && page.profiles.catalog.active.as_deref()
+                                    && page.profiles.catalog().active.as_deref()
                                         != Some(menu_id.as_str())
                             });
                             if remote {

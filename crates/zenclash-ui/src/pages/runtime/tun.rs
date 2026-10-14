@@ -2,8 +2,8 @@ use super::settings::forms::{
     settings_input_row as config_input_row, settings_switch as setting_switch,
 };
 use super::{
-    Button, ButtonVariants, Context, Disableable, IconName, Input, IntoElement, ParentElement,
-    RuntimeData, RuntimePage, Styled, context_note, h_flex, info_row, json, setting_card, v_flex,
+    Button, ButtonVariants, Context, Disableable, IconName, Input, IntoElement, PageSnapshotData,
+    ParentElement, RuntimePage, Styled, context_note, h_flex, info_row, json, setting_card, v_flex,
 };
 use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::{ActiveTheme, WindowExt};
@@ -15,6 +15,7 @@ use zenclash_core::{
 };
 
 mod maintenance;
+pub(in crate::pages::runtime) mod runtime_read;
 mod service;
 
 impl RuntimePage {
@@ -62,7 +63,7 @@ impl RuntimePage {
                                     .disabled(disabled_reason.is_some())
                                     .on_click(cx.listener(|this, checked, window, cx| {
                                         if *checked
-                                            && this.profile_service.service_state().is_some()
+                                            && this.application_commands.service_state().is_some()
                                         {
                                             this.request_service_tun(window, cx);
                                         } else {
@@ -178,10 +179,10 @@ impl RuntimePage {
 
     pub(super) fn capture_control_disabled_reason(&self, pending: bool) -> Option<String> {
         let phase = self
-            .profile_service
+            .application_commands
             .service_state()
             .map(|state| state.phase());
-        let key = if self.profile_service.pending_finalization().is_some()
+        let key = if self.application_commands.pending_finalization().is_some()
             || phase == Some(ServicePhase::Unconfirmed)
         {
             "tun.control.confirm_service"
@@ -205,7 +206,7 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::Div> {
-        let state = self.profile_service.service_state()?;
+        let state = self.application_commands.service_state()?;
         let status = match state.health() {
             Some(ServiceHealthKind::Ready) => "core_page.service.ready",
             Some(ServiceHealthKind::NotInstalled) => "core_page.service.missing",
@@ -260,8 +261,8 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::Div> {
-        let state = self.profile_service.service_state()?;
-        let status = if self.profile_service.pending_finalization().is_some() {
+        let state = self.application_commands.service_state()?;
+        let status = if self.application_commands.pending_finalization().is_some() {
             "core_page.service.pending"
         } else {
             match state.phase() {
@@ -290,7 +291,7 @@ impl RuntimePage {
                     theme,
                 ))
                 .children(
-                    self.profile_service
+                    self.application_commands
                         .service_tun_warning()
                         .map(|warning| context_note(warning, theme)),
                 )
@@ -347,9 +348,10 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
-        let permissions = match &self.data {
-            RuntimeData::Tun { permissions, .. }
-                if self.data_runtime_version == self.core_session.generation() =>
+        let permissions = match self.page_observation.data() {
+            PageSnapshotData::Tun { permissions, .. }
+                if self.page_observation.configuration_generation()
+                    == self.core_session.generation() =>
             {
                 Some(permissions)
             }
@@ -431,7 +433,7 @@ impl RuntimePage {
     }
 
     fn grant_tun_permissions(&mut self, window: &mut gpui_kit::Window, cx: &mut Context<Self>) {
-        if self.profile_service.service_state().is_some() {
+        if self.application_commands.service_state().is_some() {
             self.request_service_tun(window, cx);
             return;
         }

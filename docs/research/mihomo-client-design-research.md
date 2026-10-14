@@ -344,7 +344,7 @@
 
 #### H. Structured logs
 
-[`logs.rs`](../../crates/zenclash-core/src/logs.rs) 当前消费普通 `/logs` 消息并使用本地接收时间。建议支持 `format=structured`，保留内核时间和 fields，实现 level/模块筛选与脱敏复制；旧兼容内核或 meow-rs 不支持时回退普通格式。这是中优先级的 API adapter 改进，不应阻塞 P0。
+[`logs.rs`](../../crates/zenclash-core/src/logs.rs) 当前消费普通 `/logs` 消息并使用本地接收时间。建议支持 `format=structured`，保留内核时间和 fields，实现 level/模块筛选与脱敏复制；旧兼容内核不支持时回退普通格式。这是中优先级的 API adapter 改进，不应阻塞 P0。
 
 #### I. 端到端诊断与支持包
 

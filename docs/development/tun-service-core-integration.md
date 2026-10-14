@@ -10,8 +10,8 @@
 
 | 所有者 | 接入前基线与约束 | 服务接入后保留的责任 |
 | --- | --- | --- |
-| `CoreSession` | `client`、`Option<Arc<MihomoProcess>>`、`transition`、已提交 profile/overrides、generation、shutdown、network suspension、恢复状态 | 唯一业务切换与恢复策略；同一个 transition gate 串行配置、换后端、升级与退出 |
-| `MihomoProcess` | 本地 child handle、固定 launch config、stdout/stderr、有界日志、exit reason；同步底层进程操作放在后台 | 继续作为本地进程实现；独立本地 API 不因服务接入而假装拥有远程进程句柄 |
+| `CoreSession` | `client`、`Option<Arc<ManagedCoreProcess>>`、`transition`、已提交 profile/overrides、generation、shutdown、network suspension、恢复状态 | 唯一业务切换与恢复策略；同一个 transition gate 串行配置、换后端、升级与退出 |
+| `ManagedCoreProcess` | 本地 child handle、固定 launch config、stdout/stderr、有界日志、exit reason；同步底层进程操作放在后台 | 继续作为本地进程实现；独立本地 API 不因服务接入而假装拥有远程进程句柄 |
 | `MihomoClient` | HTTP client、endpoint/secret、mutation gate、validator、共享连接缓存与 delay semaphore | Direct/Service 两种通信入口；所有 clone 看见同一个当前通信绑定；服务模式不能获取高权限 HTTP secret/address |
 | `ControlledConfigStore` | 用户目录的 override/runtime cache、listener fallback、写租约与提交事务 | 保持源订阅不变、持久化提交/回滚顺序和准确的 `attempted` 语义；服务资源包与用户缓存成对提交 |
 | `TrafficCaptureSession` | 用户捕获意图、业务门锁、`ProductionCaptureBackend`；协调系统代理/TUN、失败回滚 | 仅显式 TUN 请求触发服务安装；安装、后端切换、配置开启和实际网卡/路由回读形成事务 |
@@ -20,9 +20,9 @@
 | `ZenClashApp` | 应用级 core/capture/status、Tokio runtime、页面、托盘、quit task | 持有安装/修复/卸载任务和待完成 TUN 意图；页面切换或窗口隐藏不销毁业务任务 |
 | `zenclash-service` | 经原生校验的会话、受保护内核与 runtime、租约、子进程、受限 API | 只执行和报告事实，不与 `CoreSession` 竞争自动恢复策略；未知 IPC 结果不触发第二份内核 |
 
-引用实现：[CoreSession](../../crates/zenclash-core/src/core_session.rs)、[本地进程](../../crates/zenclash-core/src/process.rs)、[客户端](../../crates/zenclash-core/src/client.rs)、[配置事务](../../crates/zenclash-core/src/controlled_config.rs)、[捕获协调](../../crates/zenclash-core/src/traffic_capture.rs)、[应用所有者](../../crates/zenclash-ui/src/app.rs)。
+引用实现：[CoreSession](../../crates/zenclash-core/src/core_session.rs)、[本地进程](../../crates/zenclash-core/src/managed_core_process.rs)、[客户端](../../crates/zenclash-core/src/client.rs)、[配置事务](../../crates/zenclash-core/src/controlled_config.rs)、[捕获协调](../../crates/zenclash-core/src/traffic_capture.rs)、[应用所有者](../../crates/zenclash-ui/src/app.rs)。
 
-当前实际 owner 由 [ControllerBinding](../../crates/zenclash-core/src/client/transport.rs) 随通信绑定一起发布，`CoreSession` 持业务准入、generation 与生命周期，应用级 `ServiceManager` 持维护命令及待开启意图。上表中的 `Option<Arc<MihomoProcess>>` 是接入前字段；当前 Session 和 UI 页面不另存一份可替代绑定的进程 owner。
+当前实际 owner 由 [ControllerBinding](../../crates/zenclash-core/src/client/transport.rs) 随通信绑定一起发布，`CoreSession` 持业务准入、generation 与生命周期，应用级 `ServiceManager` 持维护命令及待开启意图。上表中的 `Option<Arc<ManagedCoreProcess>>` 是接入前字段；当前 Session 和 UI 页面不另存一份可替代绑定的进程 owner。
 
 ## 2. 本地进程调用清单
 
@@ -30,7 +30,7 @@
 
 | 文件 | 函数或字段 | 现有进程调用和接入要求 |
 | --- | --- | --- |
-| [process.rs](../../crates/zenclash-core/src/process.rs) | `spawn`、`restart`、`restart_with_write_lease` | 本地创建/停止 child、预检配置、附加日志；保持本地实现 |
+| [managed_core_process.rs](../../crates/zenclash-core/src/managed_core_process.rs) | `spawn`、`restart`、`restart_with_write_lease` | 本地创建/停止 child、预检配置、附加日志；保持本地实现 |
 | 同上 | `restart_and_wait_until_with_lease`、`wait_until_ready_until` | 后台重启，轮询 `/version`，取消或未就绪时停止；服务 facade 提供等价异步行为 |
 | 同上 | `endpoint`、`launch_config`、`config_validator`、`write_scopes` | 仅表示真实本地元数据；不能用假的 HTTP endpoint、假的本地 binary 或 GUI 直读服务私密目录填空 |
 | 同上 | `snapshot`、`recent_logs`、`is_running`、`stop_async`、`Drop` | 本地观察与回收；服务版观察读缓存/后台刷新，显式释放待 service 确认 |
@@ -45,7 +45,7 @@
 | 同上 | `supervise_managed_core`、`recover_managed_core` | 有界 3 次恢复、capture release/reconcile、取消；服务 IPC 未知状态不得被当作 child 确实退出 |
 | [automatic.rs](../../crates/zenclash-core/src/core_session/automatic.rs) | `request_shutdown`、`suspend_for_network`、`resume_after_network`、`restart_changed_source` | 网络恢复、源变化 generation/revision 校验、串行重启；所有路径使用同一 facade 与已提交后端，不自动退回普通本地内核 |
 | [controlled_config.rs](../../crates/zenclash-core/src/controlled_config.rs) | `RuntimeApplicationRecovery::Restart`、`RuntimeApplicationTransaction::rollback` | 回滚启动缓存后再重启；服务回滚还需要上一已接受资源 revision |
-| 同上 | `apply_json_update_with_restart[_for_session]`、`restart_with_overrides[_for_session]`、`stage_profile_restart` | 当前参数为 `Arc<MihomoProcess>`；迁移到同一 managed facade，不另造服务专用复制事务 |
+| 同上 | `apply_json_update_with_restart[_for_session]`、`restart_with_overrides[_for_session]`、`stage_profile_restart` | 当前参数为 `Arc<ManagedCoreProcess>`；迁移到同一 managed facade，不另造服务专用复制事务 |
 | 同上 | `accept_runtime_payload_with_restart_for_session`、`restore_exact_runtime_payload`、`rollback_cache_and_restart` | 使用 validator、write scopes 和当前 applied bytes；服务重新准备 bundle，禁止重算已被删除或更改的原订阅来伪装恢复 |
 | [core_update/workflow.rs](../../crates/zenclash-core/src/core_update/workflow.rs) | `install_prepared`、`stop_process`、`restart_process`、`restart_after_activation_failure`、`rollback_rejected_core` | 现有用户 binary 文件事务 + 真实 `/version`；服务升级必须经过授权副本部署，不能直接让 root 执行下载目录 |
 | [operational_status.rs](../../crates/zenclash-core/src/operational_status.rs) | `ProcessStatus::from_snapshot`、后台 process 采样 | 通过 session 取得观察，不直接在 render 做 native IPC |
@@ -55,7 +55,7 @@
 | [mihomo/maintenance.rs](../../crates/zenclash-ui/src/pages/runtime/mihomo/maintenance.rs) | managed 检查与维护命令 | 同一 `CoreSession::maintain`，服务模式不伪装 external，不从页面单独启动另一份内核 |
 | [system_proxy/actions.rs](../../crates/zenclash-ui/src/pages/runtime/system_proxy/actions.rs) | listener 失败日志提取 | 使用 facade 有界日志快照，不能保留旧本地日志引用 |
 
-`MihomoProcess` 的生产类型引用集中在上述入口，以及 [core 的 re-export](../../crates/zenclash-core/src/lib.rs)。核心安装文件 [core_installation.rs](../../crates/zenclash-core/src/core_installation.rs) 的 `validate_core_binary` 是用户候选来源的检查，不是管理员批准副本的最终授权。
+`ManagedCoreProcess` 的生产类型引用集中在上述入口，以及 [core 的 re-export](../../crates/zenclash-core/src/lib.rs)。核心安装文件 [core_installation.rs](../../crates/zenclash-core/src/core_installation.rs) 的 `validate_core_binary` 是用户候选来源的检查，不是管理员批准副本的最终授权。
 
 ### 当前生命周期调用点补充（2026-10-02）
 
@@ -70,7 +70,13 @@
 | 首次服务交接 | [service_tun.rs](../../crates/zenclash-core/src/core_session/service_tun.rs) 在同一 Capture/Session 准入中停止 Local A，发布 Service；失败恢复仍使用被冻结的 A 描述与实际进程 |
 | 权限与授权后重启 | [permissions.rs](../../crates/zenclash-core/src/core_session/permissions.rs) 动态区分当前 Local 与 Service。Local 的旧 `request_grant` 及授权后 restart 仍在；首页统一服务接线见 §5.1，不能据 Session 准入就认定所有配置生命周期均已使用 ServiceManager |
 | 快照、页面与恢复 | [operational_status.rs](../../crates/zenclash-core/src/operational_status.rs) 后台转换当前 Session 进程事实；页面使用 `runtime_descriptor` 的内存元数据或当前 owner 的后台日志；[automatic.rs](../../crates/zenclash-core/src/core_session/automatic.rs) 的监督及源变化恢复继续使用同一 Session |
-| 退出 | `CoreSession::shutdown`、[app/system_proxy.rs](../../crates/zenclash-ui/src/app/system_proxy.rs) 显式退出、[app/bootstrap.rs](../../crates/zenclash-ui/src/app/bootstrap.rs) 原生 quit observer 和 main event-loop 返回后的收尾共同覆盖正常出口；[process.rs](../../crates/zenclash-core/src/process.rs) 的 Drop 只作底层兜底 |
+| 退出 | `CoreSession::shutdown`、[app/system_proxy.rs](../../crates/zenclash-ui/src/app/system_proxy.rs) 显式退出、[app/bootstrap.rs](../../crates/zenclash-ui/src/app/bootstrap.rs) 原生 quit observer 和 main event-loop 返回后的收尾共同覆盖正常出口；[managed_core_process.rs](../../crates/zenclash-core/src/managed_core_process.rs) 的 Drop 只作底层兜底 |
+
+### 当前实现定位（2026-10-12）
+
+上表保留接入前的规划基线。当前运行时写入准入方法名为 `acquire_runtime_write_lease`；观察代次失效为 `invalidate_runtime_observations`，可用性暂停由 `pause_pac_availability` 返回 `PacAvailabilityPauseGuard`。这些名称分别表达租约、读身份失效和暂时停止发布可用性，不表示创建新生命周期所有者。
+
+`CoreSession` 的状态和通用准入仍位于 [core_session.rs](../../crates/zenclash-core/src/core_session.rs)。当前私有实现按职责定位到 [configuration_application.rs](../../crates/zenclash-core/src/core_session/configuration_application.rs)、[backup_restore.rs](../../crates/zenclash-core/src/core_session/backup_restore.rs)、[maintenance.rs](../../crates/zenclash-core/src/core_session/maintenance.rs)、[supervision.rs](../../crates/zenclash-core/src/core_session/supervision.rs) 和 [updates.rs](../../crates/zenclash-core/src/core_session/updates.rs)。普通 Local 冻结应用跟随配置应用实现，Service/TUN 准备与交接仍在 [service_tun.rs](../../crates/zenclash-core/src/core_session/service_tun.rs)。本批验证与范围见 [重构记录](../reviews/architecture-refactoring-batch21.txt)。
 
 ## 3. 客户端、热载与流入口
 
@@ -120,7 +126,7 @@ Windows 内核管道仅对 `ERROR_PIPE_BUSY` 作有界异步重试；打开、�
 
 ## 4. 运行绑定与身份
 
-保持现有本地 `MihomoProcess`，由唯一控制器绑定同时持有真实通信后端和进程所有权。实现使用 crate 私有 `OwnedCore::Local/Service`；External 不持有受管进程。`ManagedCore` 在前期梳理中表示这一边界，不要求再新增一层同名结构。
+保持现有本地 `ManagedCoreProcess`，由唯一控制器绑定同时持有真实通信后端和进程所有权。实现使用 crate 私有 `OwnedCore::Local/Service`；External 不持有受管进程。`ManagedCore` 在前期梳理中表示这一边界，不要求再新增一层同名结构。
 
 `CoreSession` 和 `MihomoClient` 读取同一个运行绑定，更换后端由 session 的串行入口发布；旧的 client/page/history/monitor clone 读取同一当前绑定。不能只改 `CoreSession.client` 而把现有 clone 留在旧 controller，也不能由每个页面各自切换。session 移除独立的旧进程字段，维护和退出按实际 owner 分派；本轮仍在迁移和验证中。
 
@@ -132,7 +138,7 @@ UI 使用 `CoreSession::runtime_descriptor` 读取已准备的类型、执行方
 
 | seam | 用途 |
 | --- | --- |
-| `ManagedCore::from_local(Arc<MihomoProcess>)` | 兼容当前 bootstrap、本地测试与显式实验 meow |
+| `ManagedCore::from_local(Arc<ManagedCoreProcess>)` | 兼容当前 bootstrap与本地测试 |
 | `ManagedCore::from_service(Arc<ServiceClient>, source_metadata)` | 只为已验证的 Mihomo 服务会话构造，不创建假的本地 child |
 | `ManagedCore::observe().await` | 后台刷新状态与日志；IPC 失败形成未知观察，不当作真实 exit |
 | `ManagedCore::snapshot()` | 仅读内存；服务 DTO 缺失不能解释成 `running=false` |
@@ -162,9 +168,9 @@ UI 使用 `CoreSession::runtime_descriptor` 读取已准备的类型、执行方
 
 安装程序超时不能当作已取消：Windows 提权进程可能仍在运行。保持未知/等待回读状态，禁止并行重复安装或卸载。授权明确取消才结束意图并恢复原捕获模式。
 
-外部 controller 不接管；meow 不升级为 Mihomo 服务或伪装 TUN 能力。其他账户/实例的 `Occupied` 是独立状态，不应调用 Stop/Release 试图清除对方。
+外部 controller 不接管；其他账户/实例的 `Occupied` 是独立状态，不应调用 Stop/Release 试图清除对方。
 
-2026-10-02 补充只读核对：正式 `ZenClashApp::new` 始终注入 Manager，TUN 页和托盘开启的 Manager 分支失败后返回，首页已统一；未找到正常主应用直接触发旧授权的调用者。但独立页面构造仍有无 Manager 的 `capture.apply(Tun)` fallback，公开 core 捕获/权限 API 也可到达 Unix `chown`/`chmod 4755`。该能力不能据 GUI 接线完成而标记为已退休。Local 权限分支还支持实验 meow，接口收尾应单独明确兼容行为，不能顺带收窄实验后端。
+2026-10-02 补充只读核对：正式 `ZenClashApp::new` 始终注入 Manager，TUN 页和托盘开启的 Manager 分支失败后返回，首页已统一；未找到正常主应用直接触发旧授权的调用者。但独立页面构造仍有无 Manager 的 `capture.apply(Tun)` fallback，公开 core 捕获/权限 API 也可到达 Unix `chown`/`chmod 4755`。该能力不能据 GUI 接线完成而标记为已退休。
 
 启动拒绝 setid/file capabilities 与旧权限清理是两件事。现有服务安装复制批准的 bytes，不清除源内核权限；§7.1 所要求的所属文件识别、服务验证、停止旧内核和权限清理仍未实现。本轮未调用任何旧授权或修改权限。
 
@@ -193,7 +199,7 @@ UI 使用 `CoreSession::runtime_descriptor` 读取已准备的类型、执行方
 
 main/UI 接线复用以下 core 入口，不改变用户数据库、订阅 YAML 格式或依赖方向：
 
-- [MihomoRuntimeResources::prepare](../../crates/zenclash-core/src/process/discovery.rs) 在后台选择原配置/home 并准备普通权限 GeoData，不发现、复制、校验或启动 Local binary。
+- [MihomoRuntimeResources::prepare](../../crates/zenclash-core/src/managed_core_process/mihomo_resources.rs) 在后台选择原配置/home 并准备普通权限 GeoData，不发现、复制、校验或启动 Local binary。
 - [CoreSession::initialize_service_runtime](../../crates/zenclash-core/src/core_session/service_startup.rs) 在已有已验证服务绑定的同一 session 上执行首次配置事务。`CoreInitializationOutcome` 分别保留 `saved`、`failure`、`commit_pending` 与 `listener_fallbacks`；保存完成后 Commit 确认失败不能丢失收据。取消外层等待不丢弃已准入任务，Start 未知时保留 owner 供 shutdown 收尾。
 - [MihomoClient::connect_service](../../crates/zenclash-core/src/client.rs) 建立经过身份校验的服务执行绑定；main 将初始化结果传给 App/ProfileService，启动和退出继续持有同一个 CoreSession。普通 Local 启动另检查执行文件，拒绝 Unix setuid/setgid 与 Linux file capabilities；WSL 普通用户下执行文件检查 4 项通过，包括实际权限位拒绝及 xattr 读取失败，不代表旧权限迁移已完成。
 
@@ -229,7 +235,7 @@ TUN 页已通过标准 Kit 按钮和确认框调用上述业务入口；已有�
 
 2026-10-04 初始 Local→Service 交接失败的回滚也使用授权前持有的 previous bundle，不再重启原配置/资源路径。没有 accepted Service snapshot 的失败试运行可从已持有资源生成 TUN-off 双槽 Local 配置，保留原 home；确认 Release 后再激活 GeoData、发布并启动新 owner，保存确切恢复缓存。生产外层 store mutation guard 连续传入文件生成和 GeoData 完成任务，避免再次获取同一把锁；guard 必须属于同一 store。源删除、持外层锁、Release 未知与退出停止已有普通进程行为验证；不代表管理员服务或真实 TUN 失败恢复已验收，见 [实施记录](tun-service-progress.md)。
 
-2026-10-04 真实 Mihomo 恢复路径修正：正式 v1.19.30 的 [路径规则](https://raw.githubusercontent.com/MetaCubeX/mihomo/v1.19.30/constant/path.go) 默认只允许原 home 内 provider，双槽资源位于受控 store 下；真实普通权限回归已证实此前生成配置在预检阶段被拒绝。恢复准入现在在普通 binary、租约覆盖与 TUN-off 检查后，仅为准确 `store.root()/local-runtime/{slot0,slot1}/runtime.yaml` 设置对应双槽根的内存许可。[Process](../../crates/zenclash-core/src/process.rs) 与 [预检](../../crates/zenclash-core/src/core_validation.rs) 共同把该根下两个固定槽作为完整路径列表传入 Mihomo 的 `SAFE_PATHS`，覆盖继承的 SAFE_PATHS 并移除继承的 SKIP_SAFE_PATH_CHECK，继续使用原 home；后续同一 Local owner 重启和校验保留该许可。普通非恢复 owner 不设置此许可，meow 保持原路径；没有新增依赖、用户设置、协议或持久结构。对应资源根纳入数据协调范围。真实 file-provider 消费与外槽拒绝证据见 [实施记录](tun-service-progress.md)，不代表真实 GeoData/TLS 或管理员维护完成。
+2026-10-04 真实 Mihomo 恢复路径修正：正式 v1.19.30 的 [路径规则](https://raw.githubusercontent.com/MetaCubeX/mihomo/v1.19.30/constant/path.go) 默认只允许原 home 内 provider，双槽资源位于受控 store 下；真实普通权限回归已证实此前生成配置在预检阶段被拒绝。恢复准入现在在普通 binary、租约覆盖与 TUN-off 检查后，仅为准确 `store.root()/local-runtime/{slot0,slot1}/runtime.yaml` 设置对应双槽根的内存许可。[Process](../../crates/zenclash-core/src/managed_core_process.rs) 与 [预检](../../crates/zenclash-core/src/core_validation.rs) 共同把该根下两个固定槽作为完整路径列表传入 Mihomo 的 `SAFE_PATHS`，覆盖继承的 SAFE_PATHS 并移除继承的 SKIP_SAFE_PATH_CHECK，继续使用原 home；后续同一 Local owner 重启和校验保留该许可。普通非恢复 owner 不设置此许可；没有新增依赖、用户设置、协议或持久结构。对应资源根纳入数据协调范围。真实 file-provider 消费与外槽拒绝证据见 [实施记录](tun-service-progress.md)，不代表真实 GeoData/TLS 或管理员维护完成。
 
 ### 5.6 Managed Local 配置的 TUN 准入与剩余缺口
 
@@ -237,13 +243,13 @@ TUN 页已通过标准 Kit 按钮和确认框调用上述业务入口；已有�
 
 2026-10-04 普通内核升级配置冻结：[升级事务](../../crates/zenclash-core/src/core_update/workflow.rs) 在下载完成后、有权消费当前配置时读取一次 Local/Mihomo payload，执行 TUN 准入及候选预检；候选启动、激活失败恢复和旧内核回滚都复用同一份内容，不再重新打开原配置。候选和旧内核各自仍执行配置验证，取消、未就绪清理及原 home 保持原有语义。源变化或删除不会改变本次升级的启动内容；独立普通重启仍读取其当时的配置。此批不实现 Service 受保护升级、旧包注册迁移或直接重启的自动授权交接，验证结果见 [实施记录](tun-service-progress.md)。
 
-2026-10-04 启动冻结：普通 [Process](../../crates/zenclash-core/src/process.rs) 的 Mihomo 启动/重启只读取一次配置，最终 TUN 检查、重启预检及启动复用该 payload。[输入实现](../../crates/zenclash-core/src/process/input.rs) 使用自动清理的文件句柄作为 stdin，沿用 Mihomo `-f -`，保留原 home；不依赖管道写入任务。启动与验证清除 `CLASH_CONFIG_STRING`，避免它替换已检查内容。Unix 非阻塞打开后核对同一 handle 的普通文件类型，Windows 另核对磁盘类型；读取保持 16 MiB 上限。取消、无效输入和快照准备失败均发生在停止旧进程前。依据为固定 [Mihomo v1.19.30 main.go](https://raw.githubusercontent.com/MetaCubeX/mihomo/v1.19.30/main.go)；meow 沿原文件参数。此批关闭启动文件替换窗口，不代表 GUI 丢失 Service owner、跨会话缓存身份、旧服务迁移和受保护升级已完成。验证结果见 [实施记录](tun-service-progress.md)。
+2026-10-04 启动冻结：普通 [Process](../../crates/zenclash-core/src/managed_core_process.rs) 的 Mihomo 启动/重启只读取一次配置，最终 TUN 检查、重启预检及启动复用该 payload。[输入实现](../../crates/zenclash-core/src/managed_core_process/input.rs) 使用自动清理的文件句柄作为 stdin，沿用 Mihomo `-f -`，保留原 home；不依赖管道写入任务。启动与验证清除 `CLASH_CONFIG_STRING`，避免它替换已检查内容。Unix 非阻塞打开后核对同一 handle 的普通文件类型，Windows 另核对磁盘类型；读取保持 16 MiB 上限。取消、无效输入和快照准备失败均发生在停止旧进程前。依据为固定 [Mihomo v1.19.30 main.go](https://raw.githubusercontent.com/MetaCubeX/mihomo/v1.19.30/main.go)。此批关闭启动文件替换窗口，不代表 GUI 丢失 Service owner、跨会话缓存身份、旧服务迁移和受保护升级已完成。验证结果见 [实施记录](tun-service-progress.md)。
 
 2026-10-04 最新备份接线：[workflow](../../crates/zenclash-ui/src/pages/runtime/settings/backup/workflow.rs) 在 `begin_backup_restore` 与激活之前冻结 Local/Mihomo 的最终归档候选和旧资源，必要时完成 Manager 系统授权；授权等待不持数据写权限或捕获门。激活持 exclusive lease 后先比较旧运行缓存、源身份、绑定及版本，再替换数据；消费再次比较归档候选，沿冻结候选应用，禁止在此阶段再次弹授权。CaptureBackend 使用传入的授权 store，借用本次备份租约。旧 held snapshot 进入外层事务，Service 回滚复用 bundle，Local 回滚生成 §5.5 双槽 TUN-off 配置；会话内存跟踪热重载后活动槽，未知结果保留待确认文件且只复用同一候选重试。没有新增用户持久化格式，原始源不改写。分层验证与原生验证边界见 [实施记录](tun-service-progress.md)；下述历次分析保留各批时间边界。
 
 2026-10-04 自动准备与执行兜底复用同一个最终 YAML TUN 判定。基础源和每个 ordered override 在层合并前分别展开 YAML merge，保证覆写层继承的值按已有层顺序覆盖；Service bundle 与本地 proxy provider YAML 在资源重写前展开 merge，以持有真正生效的 provider/TLS 字节。完整展开复用 [profile.rs](../../crates/zenclash-core/src/profile.rs) 的后序函数：先展开默认映射，再消费当前 merge；保留显式键和 merge 序列先者优先，限制深度为 128。单次库 `apply_merge()` 不能保证链式 merge 完整，不再直接作为这些入口的最终判定。原订阅及 override 文件不改写。此修复解决 merge 候选被当普通配置而在底层拒绝的问题，仍不是备份激活前授权流程的实现。
 
-2026-10-04 底层补上 [tun_admission](../../crates/zenclash-core/src/tun_admission.rs) 政策：实际 Local/Mihomo 的完整 payload 在普通验证/派发之前展开 YAML merge 并检查最终 TUN；PATCH 在派发前检查 Go JSON 接受的大小写字段变体，任何启用请求均拒绝。普通 Process 首次启动及重启读取有界启动配置；重启在验证前后检查，拒绝发生在停止旧进程之前。返回结构化 `ServiceRequired`，不当作结果未知或重启理由。External、Service 和 meow 不受此 Mihomo Local 政策限制；该低层拒绝不替代 GUI 已接的 Manager 自动授权流程。启动文件仍未冻结，检查到内核读取之间的改写窗口以及备份 exclusive lease 内等待授权仍待解决，不能宣称所有入口完成统一准入。
+2026-10-04 底层补上 [tun_admission](../../crates/zenclash-core/src/tun_admission.rs) 政策：实际 Local/Mihomo 的完整 payload 在普通验证/派发之前展开 YAML merge 并检查最终 TUN；PATCH 在派发前检查 Go JSON 接受的大小写字段变体，任何启用请求均拒绝。普通 Process 首次启动及重启读取有界启动配置；重启在验证前后检查，拒绝发生在停止旧进程之前。返回结构化 `ServiceRequired`，不当作结果未知或重启理由。External、Service 不受此 Mihomo Local 政策限制；该低层拒绝不替代 GUI 已接的 Manager 自动授权流程。启动文件仍未冻结，检查到内核读取之间的改写窗口以及备份 exclusive lease 内等待授权仍待解决，不能宣称所有入口完成统一准入。
 
 当前生产接线（2026-10-04 最新批次）：GUI 托管目录操作通过 `apply_with_service` 先冻结最终候选。Local/Mihomo 最终 TUN 开启时交给 Manager 授权及既有 Service trial；同一 Core completion 在停止前和试运行后比较目录/源，试运行成功后保存目录和运行缓存，完整应用不改写 controlled 层。失败恢复 held Local；成功但 Commit 未确认保留 durable source/runtime 收据及捕获警告。无运行尝试的陈旧候选是拒绝，不从其他事务的全局 generation 推断本次未知状态；运行尝试的结果版本在捕获门内固定。直接普通目录消费拒绝需要 Service 的候选。上述生产接线已有分层回归，真实管理员服务/Mihomo/TUN 全链路未验收，不能据此认为全部入口准入完成。下面保留历次分析及其时间边界，当前验证见 [实施记录](tun-service-progress.md)。
 
@@ -254,7 +260,7 @@ TUN 页已通过标准 Kit 按钮和确认框调用上述业务入口；已有�
 | 订阅导入、激活、更新及编辑 | ProfileService → [ProfileApplication](../../crates/zenclash-core/src/profiles/application.rs) 最终候选；需要 Service 时经 Manager 授权与 Core 目录 participant；其他候选沿原事务 |
 | 完整 apply 与 PATCH | Session 沿 pinned owner 应用；[client/api.rs](../../crates/zenclash-core/src/client/api.rs) 普通完整 payload 与直接 PATCH 派发前检查实际 Local/Mihomo；GUI 共享入口继续自动授权 |
 | 备份导入 | [backup/workflow.rs](../../crates/zenclash-ui/src/pages/runtime/settings/backup/workflow.rs) → ProfileService → Manager 激活前准备与授权，激活后消费冻结候选；外层失败使用旧 held snapshot 恢复 |
-| 更新、监督及显式重启 | [core_update/workflow.rs](../../crates/zenclash-core/src/core_update/workflow.rs) 和 [process.rs](../../crates/zenclash-core/src/process.rs) 已冻结一次读取后的启动配置，普通升级预检、候选启动及回滚复用冻结内容，候选 validator 继承当前恢复 owner 的双槽许可；Process 拒绝 Local TUN-on。直接 GUI 重启自动授权交接仍未接入，不能以底层拒绝代表完成 |
+| 更新、监督及显式重启 | [core_update/workflow.rs](../../crates/zenclash-core/src/core_update/workflow.rs) 和 [managed_core_process.rs](../../crates/zenclash-core/src/managed_core_process.rs) 已冻结一次读取后的启动配置，普通升级预检、候选启动及回滚复用冻结内容，候选 validator 继承当前恢复 owner 的双槽许可；Process 拒绝 Local TUN-on。直接 GUI 重启自动授权交接仍未接入，不能以底层拒绝代表完成 |
 
 2026-10-04 直接重启接线前置核对：现有 [GUI 重启](../../crates/zenclash-ui/src/pages/runtime/mihomo.rs) 直接调用 `CoreSession::maintain(Restart)`；Process 读取当前 launch config 指定的生成文件，并不重新合并已选择订阅。`ServiceManager::try_apply_service_config` 经 `prepare_service_config_source` 重新合并 profile、controlled patch 和 overrides。即使传 Frozen profile，`prepare_service_config_update` 仍再次叠加 controlled patch/overrides，因此不能把已生效生成 YAML 当作普通 profile 直接传入，也不能简单以 `ReapplyCurrent` 替代原重启。
 
@@ -262,7 +268,7 @@ TUN 页已通过标准 Kit 按钮和确认框调用上述业务入口；已有�
 
 判断必须基于最终 effective 配置：源 profile → controlled patch → 有序 YAML overrides。源 `tun.enable=true` 可以被后层覆盖为 false，源 false 也可以被覆盖为 true；不能只检查订阅源。Mihomo normalizer 不关闭 TUN，`-t` 只验证配置，不能代替运行时服务准入。这些配置链未调用旧 `request_grant`；遗留公开 `TrafficCaptureSession::apply(Tun)` 的授权路径是另一项待迁移边界。
 
-建议复用一个 core 私有政策函数，只对实际 Local owner + Mihomo 生效：完整 payload 在验证、缓存和发送前检查最终 YAML；PATCH 在发送前检查启用请求；ControlledConfig 重启在最终合并后、写缓存前检查，Process 重启再检查真实启动缓存。现有单点不能同时覆盖 HTTP 与进程启动，不能仅按 endpoint 或 core kind 推断所有权。Service 保持受控 revision 事务，External 不获得本地控制能力，meow 保持实验后端边界。
+建议复用一个 core 私有政策函数，只对实际 Local owner + Mihomo 生效：完整 payload 在验证、缓存和发送前检查最终 YAML；PATCH 在发送前检查启用请求；ControlledConfig 重启在最终合并后、写缓存前检查，Process 重启再检查真实启动缓存。现有单点不能同时覆盖 HTTP 与进程启动，不能仅按 endpoint 或 core kind 推断所有权。Service 保持受控 revision 事务，External 不获得本地控制能力。
 
 2026-10-04 目录候选已拆为 `ProfileApplication::prepare_change` 与 `apply_prepared`，既有 apply 复用。准备后仅持有源字节、目录/源比较和会话版本，不保留 staging 或 Data 写租约；消费等待新的全范围租约后再核对目录/源，Core transition 内复核 binding/generation。原导入源删除可用 held 内容，受管源或目录修改拒绝，跨会话及新运行操作后的陈旧候选拒绝。提交与失败恢复仍用原单一事务。这为授权期间释放准入提供前置；随后 Local/Mihomo 已接共同配置准备以冻结最终 effective 配置和 TUN 前后资源，Manager 自动授权与 Service trial 仍未接入；不能用一次性配置接受先行保存运行缓存来替代目录的比较提交，验证边界见 [实施记录](tun-service-progress.md)。
 
@@ -276,7 +282,7 @@ TUN 页已通过标准 Kit 按钮和确认框调用上述业务入口；已有�
 
 2026-10-03 用户已确认产品行为：配置操作进入授权及服务交接流程，成功后再应用。不得以只拒绝并提示代替该选择。需复用 ServiceManager 与捕获的完成任务，在停止 Local 前准备并验证最终 effective 候选及资源，取消授权或交接失败保留原进程和配置；来源、controlled patch 与有序 overrides 必须在同一事务中固定。尚未完成自动配置接线，不把现有显式开启服务入口计作本项已实现。启动/恢复/内核更新等没有交互窗口的路径也必须经过同一明确准入，不能依赖 OS 报错后再处理。
 
-后续行为回归应复用普通 HTTP/子进程 fixture：有效 false→true 时零发送、零重启，原 PID、缓存、持久化与 generation 保持；覆盖 override 正反覆盖、PATCH、备份、更新及自动恢复，并证明 Service/External/meow 不误拒。既有缓存回滚和确切备份恢复测试不能替代这些新增准入证据。
+后续行为回归应复用普通 HTTP/子进程 fixture：有效 false→true 时零发送、零重启，原 PID、缓存、持久化与 generation 保持；覆盖 override 正反覆盖、PATCH、备份、更新及自动恢复，并证明 Service/External 不误拒。既有缓存回滚和确切备份恢复测试不能替代这些新增准入证据。
 
 ## 6. 行为测试与基线证据
 
@@ -296,7 +302,7 @@ TUN 页已通过标准 Kit 按钮和确认框调用上述业务入口；已有�
 
 新增服务接入测试按可观察行为分层：
 
-1. local、service 与 external 三种执行方式给出一致所有权；external/meow 始终不会触发服务安装或切换。
+1. local、service 与 external 三种执行方式给出一致所有权；external 始终不会触发服务安装或切换。
 2. 初次 TUN 授权取消、未就绪、bundle/target `-t` 拒绝时，原本地 PID/配置/捕获保持；停止旧内核后候选失败时恢复上一真实方式。
 3. 每个已有 clone 在切换后请求新的 service transport；旧 Direct response、旧 event frame 不更新当前 generation。
 4. file provider/TLS/GeoData 被源端删除或更改后，rollback 仍恢复上一 accepted revision 与资源；原订阅和 bundle 不被 root 原地改写。
@@ -334,7 +340,7 @@ TUN 页已通过标准 Kit 按钮和确认框调用上述业务入口；已有�
 
 - Partial `PATCH /configs`（尤其 mode/TUN/listener）成功后，full bundle/revision 需要同步持久化其配置事实；现有 mode 仍保持 partial 更新语义，不能直接改成完整 reload。下一阶段应增加受控 patch revision 事务并复用原资源，覆盖先改 mode 再 full reload 失败的回滚用例。
 - Tailscale、ZeroTier 的 state-dir 身份目录迁移尚未实现。不能静默重建已有身份，也不能把用户目录交给服务以 root 读取或写入；在专门迁移完成前，服务端需要明确拒绝这些 stateful 配置（包括隐式默认目录）。
-- ManagedCore 启动和后端迁移仍在后续阶段：真实 service Start/Commit 成功后用 `adopt_service_runtime` 移交原 bundle，核验 applied/committed revision；不创建假的 `MihomoProcess`。
+- ManagedCore 启动和后端迁移仍在后续阶段：真实 service Start/Commit 成功后用 `adopt_service_runtime` 移交原 bundle，核验 applied/committed revision；不创建假的 `ManagedCoreProcess`。
 - 本阶段行为测试验证 shared owner、候选资源快照和提交确认丢失恢复，不构成 Windows/macOS/Linux 真实服务、TUN、路由或退出实机验收。
 
 本阶段 Windows 验证：`cargo check -p zenclash-core --all-targets --locked` 和 `cargo clippy -p zenclash-core --all-targets --locked -- -D warnings` 通过；最新完整 `cargo test -p zenclash-core --lib --locked --quiet` 为 426 通过、0 失败、2 忽略。此前完整运行中既有 `direct_patch_rollback_invalidates_reads_of_the_temporary_runtime` 有一次等待测试 HTTP 请求的五秒超时，单项和完整重跑均通过，未放宽 timeout 或断言。新增 7 项 service revision 所有者行为测试、2 项持久化后确认失败/取消的启动缓存测试和 2 项真实文件持久化取消门栓测试。相关 Rust 文件已格式化，文档 45 个本地链接和 `git diff --check` 检查通过。首审发现的持久化取消窗口与 unknown candidate 阻塞快照恢复问题已修复，第 2 轮独立审查确认通过；其同时指出备份外层事务与 Finalizing 组合的另一处 P1，收尾如下，同阶段不再开启第 3 次子代理审查，由主代理手工复核。

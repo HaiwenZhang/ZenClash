@@ -419,6 +419,42 @@ async fn export_reads_complete_provider_cache_before_native_stop_retires_proof()
 }
 
 #[tokio::test]
+async fn confirmed_stop_retains_complete_cache_for_later_maintenance_export() {
+    let fixture = Fixture::new();
+    fixture.accept("proxy-providers:\n  p:\n    type: http\n    url: https://example.invalid/sub\n    path: cache.yaml\n").await;
+    *fixture.native.cache.lock() = Some(b"cache-at-stop".to_vec());
+    fixture.runtime.stop_confirmed().await.unwrap();
+    assert!(!fixture.native.running.load(Ordering::SeqCst));
+    *fixture.native.cache.lock() = Some(b"new-untrusted-cache".to_vec());
+    let bundle = fixture.runtime.stop_and_export().await.unwrap();
+    let providers = bundle.cache_providers().unwrap();
+    let frozen = FrozenRuntime::prepare(
+        bundle,
+        fixture.root.clone(),
+        Some(fixture.native.core.clone()),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read(frozen.root().join(&providers[0].path)).unwrap(),
+        b"cache-at-stop"
+    );
+    let calls = fixture.native.calls.lock();
+    let stop = calls.iter().position(|call| call == "stop").unwrap();
+    assert!(calls[..stop].iter().any(|call| call.starts_with("read ")));
+    assert!(
+        calls[stop + 1..]
+            .iter()
+            .all(|call| !call.starts_with("read "))
+    );
+    assert_eq!(
+        calls.iter().filter(|call| call.as_str() == "stop").count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn changing_cache_metadata_rejects_export_without_stopping_the_native_owner() {
     let fixture = Fixture::new();
     fixture.accept("proxy-providers:\n  p:\n    type: http\n    url: https://example.invalid/sub\n    path: cache.yaml\n").await;
@@ -434,4 +470,121 @@ async fn changing_cache_metadata_rejects_export_without_stopping_the_native_owne
             .any(|call| call == "stop")
     );
     assert!(fixture.native.running.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn stopped_export_cannot_cross_release_or_another_active_runtime() {
+    let fixture = Fixture::new();
+    fixture.accept("mode: rule\n").await;
+    fixture.runtime.stop_confirmed().await.unwrap();
+    fixture.native.generation.fetch_add(1, Ordering::SeqCst);
+    fixture.native.running.store(true, Ordering::SeqCst);
+    assert!(fixture.runtime.stop_and_export().await.is_err());
+    assert!(fixture.runtime.release_owned().await.is_err());
+    assert_eq!(
+        fixture
+            .native
+            .calls
+            .lock()
+            .iter()
+            .filter(|call| call.as_str() == "stop")
+            .count(),
+        1
+    );
+    fixture.native.running.store(false, Ordering::SeqCst);
+    assert!(
+        fixture.runtime.stop_and_export().await.is_ok(),
+        "preflight rejection retains recovery resources"
+    );
+    fixture.runtime.release_owned().await.unwrap();
+    assert!(fixture.runtime.stop_and_export().await.is_err());
+}
+
+#[tokio::test]
+async fn failed_cache_export_cannot_publish_a_confirmed_stopped_record() {
+    let fixture = Fixture::new();
+    fixture.accept("proxy-providers:\n  p:\n    type: http\n    url: https://example.invalid/sub\n    path: cache.yaml\n").await;
+    *fixture.native.cache.lock() = Some(b"changing-cache".to_vec());
+    fixture.native.cache_changes.store(true, Ordering::SeqCst);
+    assert!(fixture.runtime.stop_confirmed().await.is_err());
+    assert!(fixture.native.running.load(Ordering::SeqCst));
+    assert!(fixture.runtime.state.lock().await.stopped_export.is_none());
+    assert!(
+        fixture
+            .native
+            .calls
+            .lock()
+            .iter()
+            .all(|call| call != "stop")
+    );
+}
+
+#[tokio::test]
+async fn restarting_invalidates_the_prior_stopped_confirmation() {
+    let fixture = Fixture::new();
+    fixture.accept("mode: rule\n").await;
+    fixture.runtime.stop_confirmed().await.unwrap();
+    fixture.native.start_refused.store(true, Ordering::SeqCst);
+    assert!(
+        fixture
+            .runtime
+            .restart_accepted(&AtomicBool::new(false))
+            .await
+            .is_err()
+    );
+    assert!(fixture.runtime.state.lock().await.stopped_export.is_none());
+    assert!(fixture.runtime.stop_and_export().await.is_err());
+}
+
+#[tokio::test]
+async fn stopping_an_unaccepted_start_cleans_up_without_publishing_export_authority() {
+    let fixture = Fixture::new();
+    let applied = fixture
+        .runtime
+        .prepare("mode: rule\n")
+        .await
+        .unwrap()
+        .apply(true)
+        .await
+        .unwrap();
+    drop(applied);
+    fixture.runtime.stop_confirmed().await.unwrap();
+    assert!(!fixture.native.running.load(Ordering::SeqCst));
+    let state = fixture.runtime.state.lock().await;
+    assert!(state.active.is_none());
+    assert!(state.stopped_export.is_none());
+    drop(state);
+    assert!(fixture.runtime.stop_and_export().await.is_err());
+}
+
+#[tokio::test]
+async fn restart_after_stop_retains_captured_provider_bytes_for_recovery() {
+    let fixture = Fixture::new();
+    fixture.accept("proxy-providers:\n  p:\n    type: http\n    url: https://example.invalid/sub\n    path: cache.yaml\n").await;
+    *fixture.native.cache.lock() = Some(b"cache-at-stop".to_vec());
+    fixture.runtime.stop_confirmed().await.unwrap();
+    *fixture.native.cache.lock() = Some(b"untrusted-later-cache".to_vec());
+    fixture
+        .runtime
+        .restart_accepted(&AtomicBool::new(false))
+        .await
+        .unwrap();
+    let state = fixture.runtime.state.lock().await;
+    let active = state.active.as_ref().unwrap();
+    let providers = active.bundle.cache_providers().unwrap();
+    assert_eq!(providers.len(), 1);
+    assert_eq!(
+        std::fs::read(active.frozen.root().join(&providers[0].path)).unwrap(),
+        b"cache-at-stop"
+    );
+    let starts = fixture.native.starts.lock();
+    let restarted = starts.last().unwrap();
+    assert_eq!(restarted.remote_providers[0].destination, providers[0].path);
+    assert!(
+        restarted
+            .assets
+            .iter()
+            .all(|asset| asset.destination != providers[0].path)
+    );
+    assert!(state.stopped_export.is_none());
 }

@@ -1,10 +1,18 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use zenclash_core::{TrafficAggregate, TrafficDimension, TrafficOverview};
+use std::sync::Arc;
+use zenclash_core::{TrafficDimension, TrafficHistorySelection, TrafficHistorySnapshot};
 
-use super::loader::PageReadTask;
+use super::page_observation::PageReadTask;
 
 mod actions;
+mod model;
+pub(super) use model::TrafficHistory;
+mod query_presentation;
+use query_presentation::{TrafficHistoryPresentation, TrafficHistoryQueryPlan};
 mod view;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -48,28 +56,26 @@ impl TrafficRange {
 }
 
 #[derive(Debug, Default)]
-pub(super) struct TrafficHistoryUiState {
+struct TrafficHistoryQueryState {
     pub(super) range: TrafficRange,
     pub(super) dimension: TrafficDimension,
-    pub(super) overview: TrafficOverview,
-    pub(super) details: Vec<TrafficAggregate>,
-    pub(super) proxy_stats: Vec<TrafficAggregate>,
-    pub(super) selected_parent: Option<String>,
-    pub(super) selected_detail: Option<String>,
+    selected_parent: Option<String>,
+    selected_detail: Option<String>,
     pub(super) loading: bool,
     pub(super) clear_confirmation: bool,
-    pub(super) last_success_at_ms: Option<u64>,
     pub(super) last_error: Option<String>,
-    revision: u64,
-    request_generation: u64,
+    presentation: Option<TrafficHistoryPresentation>,
+    query_revision: u64,
+    request_sequence: u64,
     task: PageReadTask,
     query_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct HistoryRequest {
-    generation: u64,
-    revision: u64,
+#[derive(Debug)]
+struct TrafficHistoryReadIdentity {
+    plan: Arc<TrafficHistoryQueryPlan>,
+    request_sequence: u64,
+    query_revision: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,41 +86,131 @@ enum TrafficHistoryFreshness {
     Failed,
 }
 
-impl TrafficHistoryUiState {
-    fn begin_query(&mut self) -> HistoryRequest {
-        self.request_generation = self.request_generation.wrapping_add(1);
+impl TrafficHistoryQueryState {
+    pub(super) fn begin_query(
+        &mut self,
+        source: PathBuf,
+        end_ms: u64,
+    ) -> TrafficHistoryReadIdentity {
+        self.request_sequence = self.request_sequence.wrapping_add(1);
         self.loading = true;
-        HistoryRequest {
-            generation: self.request_generation,
-            revision: self.revision,
+        let selection = match (self.selected_parent.clone(), self.selected_detail.clone()) {
+            (Some(parent), Some(detail)) => TrafficHistorySelection::Detail { parent, detail },
+            (Some(parent), None) => TrafficHistorySelection::Parent { parent },
+            (None, _) => TrafficHistorySelection::Overview,
+        };
+        TrafficHistoryReadIdentity {
+            plan: Arc::new(TrafficHistoryQueryPlan::new(
+                source,
+                self.range,
+                self.dimension,
+                selection,
+                end_ms,
+            )),
+            request_sequence: self.request_sequence,
+            query_revision: self.query_revision,
         }
+    }
+
+    pub(super) fn completed_query(&self) -> Option<&TrafficHistoryPresentation> {
+        self.presentation.as_ref()
+    }
+
+    fn presentation_for_source(
+        &self,
+        source: Option<&Path>,
+    ) -> Option<&TrafficHistoryPresentation> {
+        self.completed_query()
+            .filter(|presentation| source == Some(presentation.plan().source()))
+    }
+
+    fn can_inspect(&self, source: Option<&Path>) -> bool {
+        self.presentation.as_ref().is_some_and(|presentation| {
+            presentation
+                .plan()
+                .matches_scope(source, self.range, self.dimension)
+        })
+    }
+
+    fn change_range(&mut self, range: TrafficRange) -> bool {
+        if self.range == range {
+            return false;
+        }
+        self.range = range;
+        self.reset_selection();
+        true
+    }
+
+    fn change_dimension(&mut self, dimension: TrafficDimension) -> bool {
+        if self.dimension == dimension {
+            return false;
+        }
+        self.dimension = dimension;
+        self.reset_selection();
+        true
+    }
+
+    fn select_parent(&mut self, label: String, source: Option<&Path>) -> bool {
+        if !self.can_inspect(source) {
+            return false;
+        }
+        self.selected_parent = Some(label);
+        self.selected_detail = None;
+        self.query_revision = self.query_revision.wrapping_add(1);
+        true
+    }
+
+    fn can_select_detail(&self, source: Option<&Path>) -> bool {
+        self.can_inspect(source)
+            && self
+                .presentation
+                .as_ref()
+                .and_then(TrafficHistoryPresentation::selected_parent)
+                .is_some_and(|parent| self.selected_parent.as_deref() == Some(parent))
+    }
+
+    fn select_detail(&mut self, label: String, source: Option<&Path>) -> bool {
+        if !self.can_select_detail(source) {
+            return false;
+        }
+        self.selected_detail = Some(label);
+        self.query_revision = self.query_revision.wrapping_add(1);
+        true
+    }
+
+    fn reset_selection(&mut self) {
+        self.selected_parent = None;
+        self.selected_detail = None;
+        self.query_revision = self.query_revision.wrapping_add(1);
     }
 
     pub(super) fn cancel_query(&mut self) {
         self.task.cancel();
-        self.request_generation = self.request_generation.wrapping_add(1);
+        self.request_sequence = self.request_sequence.wrapping_add(1);
         self.loading = false;
     }
 
-    fn complete_query(
+    pub(super) fn complete_query(
         &mut self,
-        token: HistoryRequest,
-        result: Result<TrafficHistoryPayload, String>,
+        token: &TrafficHistoryReadIdentity,
+        source: Option<&Path>,
+        result: Result<TrafficHistorySnapshot, String>,
         observed_at_ms: u64,
     ) -> bool {
-        if token.generation != self.request_generation || !self.loading {
+        if token.request_sequence != self.request_sequence || !self.loading {
             return false;
         }
         self.loading = false;
-        if token.revision != self.revision {
+        if token.query_revision != self.query_revision || source != Some(token.plan.source()) {
             return true;
         }
         match result {
             Ok(payload) => {
-                self.overview = payload.overview;
-                self.details = payload.details;
-                self.proxy_stats = payload.proxy_stats;
-                self.last_success_at_ms = Some(observed_at_ms);
+                self.presentation = Some(TrafficHistoryPresentation::new(
+                    token.plan.clone(),
+                    payload,
+                    observed_at_ms,
+                ));
                 self.last_error = None;
             }
             Err(error) => self.last_error = Some(error),
@@ -122,8 +218,15 @@ impl TrafficHistoryUiState {
         false
     }
 
-    fn freshness(&self) -> TrafficHistoryFreshness {
-        match (self.last_success_at_ms, self.last_error.is_some()) {
+    fn freshness(&self, source: Option<&Path>) -> TrafficHistoryFreshness {
+        if self.loading {
+            return TrafficHistoryFreshness::Loading;
+        }
+        match (
+            self.presentation_for_source(source)
+                .map(TrafficHistoryPresentation::observed_at_ms),
+            self.last_error.is_some(),
+        ) {
             (Some(observed_at_ms), false) => TrafficHistoryFreshness::Fresh { observed_at_ms },
             (Some(observed_at_ms), true) => TrafficHistoryFreshness::Stale { observed_at_ms },
             (None, true) => TrafficHistoryFreshness::Failed,
@@ -133,24 +236,14 @@ impl TrafficHistoryUiState {
 
     pub(super) fn release_results(&mut self) {
         self.cancel_query();
-        self.overview = TrafficOverview::default();
-        self.details = Vec::new();
-        self.proxy_stats = Vec::new();
+        self.presentation = None;
         self.selected_parent = None;
         self.selected_detail = None;
         self.loading = false;
         self.clear_confirmation = false;
-        self.last_success_at_ms = None;
         self.last_error = None;
-        self.revision = self.revision.wrapping_add(1);
+        self.query_revision = self.query_revision.wrapping_add(1);
     }
-}
-
-#[derive(Debug)]
-struct TrafficHistoryPayload {
-    overview: TrafficOverview,
-    details: Vec<TrafficAggregate>,
-    proxy_stats: Vec<TrafficAggregate>,
 }
 
 fn dimension_label(dimension: TrafficDimension) -> String {
@@ -170,131 +263,11 @@ fn unix_millis() -> u64 {
     u64::try_from(millis).unwrap_or(u64::MAX)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_old_completion_cannot_change_the_loading_or_error_of_a_reopened_page() {
-        for result in [
-            Ok(TrafficHistoryPayload {
-                overview: TrafficOverview::default(),
-                details: vec![TrafficAggregate::default()],
-                proxy_stats: Vec::new(),
-            }),
-            Err("old query failed".into()),
-        ] {
-            let mut state = TrafficHistoryUiState::default();
-            let old = state.begin_query();
-            state.release_results();
-            let current = state.begin_query();
-            assert!(!state.complete_query(old, result, 1));
-            assert!(state.loading);
-            assert!(state.last_error.is_none());
-            assert!(state.details.is_empty());
-            state.complete_query(
-                current,
-                Ok(TrafficHistoryPayload {
-                    overview: TrafficOverview::default(),
-                    details: Vec::new(),
-                    proxy_stats: Vec::new(),
-                }),
-                2,
-            );
-            assert!(!state.loading);
-            assert_eq!(state.last_success_at_ms, Some(2));
-        }
-    }
-
-    #[test]
-    fn cancelling_a_hidden_query_prevents_publishing_or_requesting_another_query() {
-        let mut state = TrafficHistoryUiState::default();
-        let token = state.begin_query();
-        state.revision += 1;
-        state.cancel_query();
-        assert!(!state.complete_query(token, Err("hidden query failed".into()), 1));
-        assert!(!state.loading);
-        assert!(state.last_error.is_none());
-    }
-
-    #[test]
-    fn changing_query_selection_requests_one_refresh_without_publishing_old_data() {
-        let mut state = TrafficHistoryUiState::default();
-        let token = state.begin_query();
-        state.revision += 1;
-        assert!(state.complete_query(token, Err("obsolete selection failed".into()), 1));
-        assert!(state.last_error.is_none());
-        assert_eq!(state.last_success_at_ms, None);
-        assert!(!state.complete_query(token, Err("duplicate completion".into()), 2));
-    }
-
-    #[test]
-    fn history_ranges_produce_the_expected_bounded_bucket_counts() {
-        let expected = [12_u64, 24, 28, 30];
-        for (range, expected_count) in TrafficRange::ALL.into_iter().zip(expected) {
-            let count = range.duration_ms().saturating_sub(1) / range.bucket_ms() + 1;
-            assert_eq!(count, expected_count);
-            assert!(count <= 512);
-        }
-    }
-
-    #[test]
-    fn every_traffic_dimension_has_a_distinct_user_label() {
-        let labels = [
-            dimension_label(TrafficDimension::Host),
-            dimension_label(TrafficDimension::SourceIp),
-            dimension_label(TrafficDimension::Outbound),
-            dimension_label(TrafficDimension::Process),
-        ];
-        assert!(labels.iter().all(|label| !label.is_empty()));
-        assert_eq!(
-            labels
-                .iter()
-                .collect::<std::collections::HashSet<_>>()
-                .len(),
-            4
-        );
-    }
-
-    #[test]
-    fn historical_data_becomes_stale_instead_of_disappearing_after_failure() {
-        let state = TrafficHistoryUiState {
-            last_success_at_ms: Some(5_000),
-            last_error: Some("database busy".into()),
-            ..TrafficHistoryUiState::default()
-        };
-
-        assert_eq!(
-            state.freshness(),
-            TrafficHistoryFreshness::Stale {
-                observed_at_ms: 5_000
-            }
-        );
-    }
-
-    #[test]
-    fn leaving_traffic_releases_derived_results_but_keeps_the_user_selection() {
-        let mut state = TrafficHistoryUiState {
-            range: TrafficRange::Week,
-            dimension: TrafficDimension::Outbound,
-            details: vec![TrafficAggregate::default()],
-            proxy_stats: vec![TrafficAggregate::default()],
-            selected_parent: Some("Proxy".into()),
-            selected_detail: Some("Node".into()),
-            last_success_at_ms: Some(5_000),
-            revision: 7,
-            ..TrafficHistoryUiState::default()
-        };
-
-        state.release_results();
-
-        assert_eq!(state.range, TrafficRange::Week);
-        assert_eq!(state.dimension, TrafficDimension::Outbound);
-        assert!(state.details.is_empty());
-        assert!(state.proxy_stats.is_empty());
-        assert_eq!(state.selected_parent, None);
-        assert_eq!(state.selected_detail, None);
-        assert_eq!(state.last_success_at_ms, None);
-        assert_eq!(state.revision, 8);
+impl TrafficHistoryReadIdentity {
+    pub(super) fn plan(&self) -> Arc<TrafficHistoryQueryPlan> {
+        self.plan.clone()
     }
 }
+
+#[cfg(test)]
+mod tests;

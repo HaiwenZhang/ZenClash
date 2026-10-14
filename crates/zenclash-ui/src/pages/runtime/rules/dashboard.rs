@@ -6,23 +6,23 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, WindowExt};
 
-impl RuntimePage {
+impl RulesView {
     pub(super) fn rule_dashboard(
         &self,
         compact: bool,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let Some(projection) = &self.rules.projection else {
+        let Some(projection) = &self.projection else {
             return v_flex()
                 .gap_3()
                 .child(
-                    Input::new(&self.rules.filter)
+                    Input::new(&self.filter_input)
                         .prefix(gpui_kit::component::Icon::new(IconName::Search))
                         .small(),
                 )
                 .child(empty_state(
-                    zenclash_i18n::text(if self.rules.projecting {
+                    zenclash_i18n::text(if self.projecting {
                         "runtime.empty.loading"
                     } else {
                         "runtime.empty.unavailable"
@@ -32,25 +32,25 @@ impl RuntimePage {
                 .into_any_element();
         };
         let rules = &projection.snapshot.rules;
-        let show_results = !self.rules.projecting && projection.query == self.rules.query;
+        let show_results = !self.projecting && projection.filter == self.filters;
         let indices = if show_results {
             projection.indices.as_slice()
         } else {
             &[]
         };
-        let page = list_page(indices.len(), self.rules.page, RULES_PER_PAGE);
+        let page = list_page(indices.len(), self.page_index, RULES_PER_PAGE);
         let filters = h_flex().gap_2().flex_wrap().children(
             [
                 (
                     true,
                     "unified.rules.all_types",
-                    self.rules.worker.kind.clone(),
+                    self.filters.rule_kind.clone(),
                     projection.types.clone(),
                 ),
                 (
                     false,
                     "unified.rules.all_policies",
-                    self.rules.worker.policy.clone(),
+                    self.filters.policy.clone(),
                     projection.policies.clone(),
                 ),
             ]
@@ -73,15 +73,15 @@ impl RuntimePage {
                             PopupMenuItem::new(label)
                                 .checked(value == selected)
                                 .on_click(move |_, _, cx| {
-                                    let _ = owner.update(cx, |page, cx| {
+                                    let _ = owner.update(cx, |view, cx| {
                                         if is_kind {
-                                            page.rules.worker.kind = value.clone();
+                                            view.filters.rule_kind = value.clone();
                                         } else {
-                                            page.rules.worker.policy = value.clone();
+                                            view.filters.policy = value.clone();
                                         }
-                                        page.rules.page = 0;
-                                        page.rules.projection = None;
-                                        page.update_rule_presentation(cx);
+                                        view.page_index = 0;
+                                        view.projection = None;
+                                        view.update_rule_presentation(cx);
                                         cx.notify();
                                     });
                                 }),
@@ -106,7 +106,7 @@ impl RuntimePage {
                     .flex_wrap()
                     .child(
                         div().flex_1().min_w(gpui_kit::rems(12.)).child(
-                            Input::new(&self.rules.filter)
+                            Input::new(&self.filter_input)
                                 .prefix(gpui_kit::component::Icon::new(IconName::Search)),
                         ),
                     )
@@ -114,11 +114,11 @@ impl RuntimePage {
                     .child(
                         gpui_kit::component::checkbox::Checkbox::new("rules-disabled-filter")
                             .label(zenclash_i18n::text("redesign.only_disabled"))
-                            .checked(self.rules.worker.disabled_only)
+                            .checked(self.filters.disabled_only)
                             .on_click(cx.listener(|this, checked, _, cx| {
-                                this.rules.worker.disabled_only = *checked;
-                                this.rules.page = 0;
-                                this.rules.projection = None;
+                                this.filters.disabled_only = *checked;
+                                this.page_index = 0;
+                                this.projection = None;
                                 this.update_rule_presentation(cx);
                                 cx.notify();
                             })),
@@ -127,7 +127,7 @@ impl RuntimePage {
             .when(!compact, |table| table.child(rule_columns(theme)));
         let mut rows = v_flex().gap_0().when(indices.is_empty(), |this| {
             this.child(empty_state(
-                zenclash_i18n::text(if self.rules.projecting {
+                zenclash_i18n::text(if self.projecting {
                     "runtime.empty.loading"
                 } else if !show_results {
                     "runtime.empty.unavailable"
@@ -161,7 +161,7 @@ impl RuntimePage {
                         if show_results {
                             pagination_summary(page, indices.len())
                         } else {
-                            zenclash_i18n::text(if self.rules.projecting {
+                            zenclash_i18n::text(if self.projecting {
                                 "runtime.empty.loading"
                             } else {
                                 "runtime.empty.unavailable"
@@ -222,7 +222,7 @@ impl RuntimePage {
             .iter()
             .filter(|rule| {
                 rule.index
-                    .and_then(|index| self.rules.confirmed_disabled.get(&index).copied())
+                    .and_then(|index| self.confirmed_disabled.get(&index).copied())
                     .unwrap_or_else(|| rule.extra.as_ref().is_some_and(|stats| stats.disabled))
             })
             .count();
@@ -297,18 +297,17 @@ impl RuntimePage {
     }
 
     fn open_rule_details(&mut self, position: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.rules.selected = Some(position);
-        self.rules.details = self
-            .rules
+        self.selected = Some(position);
+        self.details = self
             .projection
             .as_ref()
             .map(|projection| projection.snapshot.clone());
         let owner = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, window, cx| {
             let content = owner
-                .update(cx, |page, cx| {
+                .update(cx, |view, cx| {
                     let theme = cx.theme().clone();
-                    page.render_rule_details(&theme, cx)
+                    view.render_rule_details(&theme, cx)
                 })
                 .ok();
             let close_owner = owner.clone();
@@ -318,11 +317,11 @@ impl RuntimePage {
                 .width(window.rem_size() * 34.)
                 .margin_top(
                     ((window.viewport_size().height - window.rem_size() * 36.) / 2.)
-                        .max(gpui_kit::px(16.)),
+                        .max(window.rem_size()),
                 )
                 .when_some(content, |dialog, content| dialog.child(content))
                 .on_close(move |_, _, cx| {
-                    let _ = close_owner.update(cx, |page, _| page.rules.details = None);
+                    let _ = close_owner.update(cx, |view, _| view.details = None);
                 })
         });
         cx.notify();
@@ -333,30 +332,34 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let Some(snapshot) = &self.rules.details else {
+        let Some(snapshot) = &self.details else {
             return empty_state(zenclash_i18n::text("runtime.empty.unavailable"), theme)
                 .into_any_element();
         };
         let rules = &snapshot.rules;
-        let current = matches!(&self.data, RuntimeData::Rules { catalog, .. } if std::sync::Arc::ptr_eq(catalog, snapshot));
+        let current = self
+            .source
+            .as_ref()
+            .is_some_and(|source| Arc::ptr_eq(&source.catalog, snapshot));
         let mut inspector = v_flex()
             .id("rule-inspector")
             .test_support()
             .gap_3()
             .min_w_0();
         if let Some((position, rule)) = self
-            .rules
             .selected
             .and_then(|position| rules.get(position).map(|rule| (position, rule)))
         {
             let disabled = rule
                 .index
-                .and_then(|index| self.rules.confirmed_disabled.get(&index).copied())
+                .and_then(|index| self.confirmed_disabled.get(&index).copied())
                 .or_else(|| rule.extra.as_ref().map(|stats| stats.disabled));
-            let outlet = match &self.data {
-                RuntimeData::Rules { proxies, .. } => rule_outlet(proxies.as_ref(), &rule.proxy),
-                _ => None,
-            };
+            let outlet = rule_outlet(
+                self.source
+                    .as_ref()
+                    .and_then(|source| source.proxies.as_ref()),
+                &rule.proxy,
+            );
             let payload = if rule.payload.is_empty() {
                 &rule.kind
             } else {
@@ -415,15 +418,16 @@ impl RuntimePage {
                                                 .checked(disabled == Some(false))
                                                 .disabled(
                                                     !current
-                                                        || self.rules.pending.contains(&index)
-                                                        || !self
-                                                            .core_kind
-                                                            .capabilities()
-                                                            .rule_toggle,
+                                                        || self.pending_toggles.contains(&index)
+                                                        || !self.context.is_some_and(|context| {
+                                                            context.toggle_supported
+                                                        }),
                                                 )
                                                 .on_click(cx.listener(
                                                     move |this, checked, _, cx| {
-                                                        this.set_rule_enabled(index, *checked, cx)
+                                                        this.request_rule_enabled(
+                                                            index, *checked, cx,
+                                                        )
                                                     },
                                                 )),
                                         )
@@ -446,10 +450,9 @@ impl RuntimePage {
                         ),
                 )
                 .when_some(
-                    match &self.data {
-                        RuntimeData::Rules { config, .. } => config.as_ref(),
-                        _ => None,
-                    },
+                    self.source
+                        .as_ref()
+                        .and_then(|source| source.config.as_ref()),
                     |view, config| {
                         view.child(detail("rules.summary.mode", config.mode.clone(), theme))
                     },
@@ -575,13 +578,10 @@ impl RuntimePage {
                             .outline()
                             .label(zenclash_i18n::text("redesign.copy_rule"))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                if let Some(rule) =
-                                    this.rules.details.as_ref().and_then(|snapshot| {
-                                        this.rules
-                                            .selected
-                                            .and_then(|position| snapshot.rules.get(position))
-                                    })
-                                {
+                                if let Some(rule) = this.details.as_ref().and_then(|snapshot| {
+                                    this.selected
+                                        .and_then(|position| snapshot.rules.get(position))
+                                }) {
                                     let content = if rule.payload.is_empty() {
                                         format!("{},{}", rule.kind, rule.proxy)
                                     } else {
@@ -598,7 +598,7 @@ impl RuntimePage {
                             .primary()
                             .label(zenclash_i18n::text("common.actions.close"))
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.rules.details = None;
+                                this.details = None;
                                 window.close_dialog(cx);
                             })),
                     ),
@@ -617,9 +617,9 @@ impl RuntimePage {
         let identity = rule.index.unwrap_or(position);
         let disabled = rule
             .index
-            .and_then(|index| self.rules.confirmed_disabled.get(&index).copied())
+            .and_then(|index| self.confirmed_disabled.get(&index).copied())
             .unwrap_or_else(|| rule.extra.as_ref().is_some_and(|stats| stats.disabled));
-        let active = self.rules.selected == Some(position);
+        let active = self.selected == Some(position);
         let mut row = h_flex()
             .id(("rule-row", identity))
             .test_support()
@@ -709,11 +709,13 @@ impl RuntimePage {
                             ))
                             .checked(!disabled)
                             .disabled(
-                                self.rules.pending.contains(&index)
-                                    || !self.core_kind.capabilities().rule_toggle,
+                                self.pending_toggles.contains(&index)
+                                    || !self
+                                        .context
+                                        .is_some_and(|context| context.toggle_supported),
                             )
                             .on_click(cx.listener(move |this, checked, _, cx| {
-                                this.set_rule_enabled(index, *checked, cx)
+                                this.request_rule_enabled(index, *checked, cx)
                             })),
                     )
                     .child(div().text_xs().child(zenclash_i18n::text(if disabled {
@@ -822,7 +824,11 @@ fn rule_outlet(catalog: Option<&zenclash_core::ProxyCatalog>, policy: &str) -> O
     let catalog = catalog?;
     let mut current = policy;
     for _ in 0..=catalog.groups().len() {
-        let Some(group) = catalog.groups().iter().find(|group| group.name == current) else {
+        let Some(group) = catalog
+            .groups()
+            .iter()
+            .find(|group| group.controller_name() == current)
+        else {
             let id = zenclash_core::ProxyNodeId::new(current.to_owned(), None);
             return catalog.node(&id).map(|node| node.name.clone());
         };
@@ -842,7 +848,7 @@ fn rule_outlet(catalog: Option<&zenclash_core::ProxyCatalog>, policy: &str) -> O
         if !catalog
             .groups()
             .iter()
-            .any(|candidate| candidate.name == group.now)
+            .any(|candidate| candidate.controller_name() == group.now)
         {
             return group
                 .all
@@ -927,21 +933,15 @@ mod tests {
         let catalog = ProxyCatalog::from_group_nodes(
             vec![
                 (
-                    ProxyGroup {
-                        name: "Route".into(),
-                        now: "Auto".into(),
-                        behavior: ProxyGroupBehavior::Selector,
-                        ..Default::default()
-                    },
+                    ProxyGroup::new("Route")
+                        .with_current_member("Auto")
+                        .with_behavior(ProxyGroupBehavior::Selector),
                     vec![],
                 ),
                 (
-                    ProxyGroup {
-                        name: "Auto".into(),
-                        now: "Actual node".into(),
-                        behavior: ProxyGroupBehavior::Automatic { fixed: false },
-                        ..Default::default()
-                    },
+                    ProxyGroup::new("Auto")
+                        .with_current_member("Actual node")
+                        .with_behavior(ProxyGroupBehavior::Automatic { fixed: false }),
                     vec![ProxyNode {
                         name: "Actual node".into(),
                         provider_name: Some("Provider".into()),
@@ -949,21 +949,15 @@ mod tests {
                     }],
                 ),
                 (
-                    ProxyGroup {
-                        name: "Balance".into(),
-                        now: "Actual node".into(),
-                        behavior: ProxyGroupBehavior::LoadBalance,
-                        ..Default::default()
-                    },
+                    ProxyGroup::new("Balance")
+                        .with_current_member("Actual node")
+                        .with_behavior(ProxyGroupBehavior::LoadBalance),
                     vec![],
                 ),
                 (
-                    ProxyGroup {
-                        name: "Cycle".into(),
-                        now: "Cycle".into(),
-                        behavior: ProxyGroupBehavior::Selector,
-                        ..Default::default()
-                    },
+                    ProxyGroup::new("Cycle")
+                        .with_current_member("Cycle")
+                        .with_behavior(ProxyGroupBehavior::Selector),
                     vec![],
                 ),
             ],

@@ -31,7 +31,7 @@ impl LocalGeoDataRecovery {
     /// After failure callers must confirm child termination before allowing GeoData rollback.
     pub async fn restart_local_process(
         &self,
-        process: &Arc<crate::MihomoProcess>,
+        process: &Arc<crate::ManagedCoreProcess>,
         timeout: std::time::Duration,
         cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> MihomoResult<()> {
@@ -43,7 +43,7 @@ impl LocalGeoDataRecovery {
 
     pub(crate) async fn validate_local_process(
         &self,
-        process: &Arc<crate::MihomoProcess>,
+        process: &Arc<crate::ManagedCoreProcess>,
     ) -> MihomoResult<()> {
         let lease = self.admitted_lease(process).await?;
         let validator = process.config_validator().with_write_lease(&lease);
@@ -60,7 +60,7 @@ impl LocalGeoDataRecovery {
 
     async fn admitted_lease(
         &self,
-        process: &Arc<crate::MihomoProcess>,
+        process: &Arc<crate::ManagedCoreProcess>,
     ) -> MihomoResult<crate::data_coordinator::DataWriteLease> {
         let access = self.access.clone();
         let home = self.home.clone();
@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn geodata_previous_file_respects_remaining_backup_budget() {
-        let home = super::super::tests::TestHome::new();
+        let home = super::super::test_support::TestHome::new();
         let path = home.0.join("GeoIP.dat");
         fs::write(&path, [1, 2]).unwrap();
         assert!(read_previous(&path, 1).is_err());
@@ -371,7 +371,7 @@ mod tests {
 
     #[tokio::test]
     async fn geodata_recovery_rejects_uncovered_home_without_panicking_or_writing() {
-        let home = super::super::tests::TestHome::new();
+        let home = super::super::test_support::TestHome::new();
         let ordinary_home = home.0.join("ordinary");
         fs::create_dir(&ordinary_home).unwrap();
         fs::write(ordinary_home.join("GeoIP.dat"), b"original").unwrap();
@@ -403,10 +403,10 @@ mod tests {
     #[tokio::test]
     async fn geodata_recovery_published_stopped_owner_starts_and_session_shutdown_reaps_it() {
         let fixture =
-            crate::core_session::ownership_tests::ChildFixture::new("geodata-new-owner").await;
+            crate::core_session::test_support::OwnedCoreFixture::new("geodata-new-owner").await;
         fixture.process.stop_async().await.unwrap();
         let process =
-            crate::MihomoProcess::prepare_stopped(fixture.process.launch_config().clone());
+            crate::ManagedCoreProcess::prepare_stopped(fixture.process.launch_config().clone());
         assert!(process.snapshot().pid.is_none());
         let client = crate::MihomoClient::from_process(fixture.process.clone()).unwrap();
         let session = crate::CoreSession::open(crate::CoreKind::Mihomo, client.clone()).unwrap();
@@ -440,12 +440,12 @@ mod tests {
     #[tokio::test]
     async fn geodata_recovery_published_stopped_owner_failure_keeps_owner_and_rolls_back_files() {
         let fixture =
-            crate::core_session::ownership_tests::ChildFixture::new("geodata-new-owner-failure")
+            crate::core_session::test_support::OwnedCoreFixture::new("geodata-new-owner-failure")
                 .await;
         fixture.process.stop_async().await.unwrap();
         let mut launch = fixture.process.launch_config().clone();
         launch.binary = launch.home_dir.join("missing-mihomo");
-        let process = crate::MihomoProcess::prepare_stopped(launch);
+        let process = crate::ManagedCoreProcess::prepare_stopped(launch);
         let client = crate::MihomoClient::from_process(fixture.process.clone()).unwrap();
         let session = crate::CoreSession::open(crate::CoreKind::Mihomo, client.clone()).unwrap();
         let mutation = client.lock_runtime_binding().await.unwrap();
@@ -480,7 +480,7 @@ mod tests {
     #[tokio::test]
     async fn geodata_recovery_expired_authority_cannot_start_a_child_or_acquire_a_new_lease() {
         let fixture =
-            crate::core_session::ownership_tests::ChildFixture::new("geodata-expired-authority")
+            crate::core_session::test_support::OwnedCoreFixture::new("geodata-expired-authority")
                 .await;
         fixture.process.stop_async().await.unwrap();
         let home = fixture.process.launch_config().home_dir.clone();
@@ -519,7 +519,7 @@ mod tests {
     #[tokio::test]
     async fn geodata_recovery_enabled_tun_rejects_start_and_restores_named_files() {
         let fixture =
-            crate::core_session::ownership_tests::ChildFixture::new("geodata-tun-rejection").await;
+            crate::core_session::test_support::OwnedCoreFixture::new("geodata-tun-rejection").await;
         fixture.process.stop_async().await.unwrap();
         let home = fixture.process.launch_config().home_dir.clone();
         fs::write(home.join("GeoIP.dat"), b"old geoip").unwrap();
@@ -555,7 +555,7 @@ mod tests {
             time::Duration,
         };
         let fixture =
-            crate::core_session::ownership_tests::ChildFixture::new("geodata-restart-authority")
+            crate::core_session::test_support::OwnedCoreFixture::new("geodata-restart-authority")
                 .await;
         fixture.process.stop_async().await.unwrap();
         let home = fixture.process.launch_config().home_dir.clone();
@@ -613,7 +613,7 @@ mod tests {
 
     #[tokio::test]
     async fn geodata_recovery_success_preserves_mmdb_selection_and_unrelated_files() {
-        let home = super::super::tests::TestHome::new();
+        let home = super::super::test_support::TestHome::new();
         fs::write(home.0.join("geoip.metadb"), b"old selected").unwrap();
         fs::write(home.0.join("unrelated"), b"untouched").unwrap();
         let store = crate::ControlledConfigStore::new(home.0.join("controlled"));
@@ -636,7 +636,7 @@ mod tests {
 
     #[tokio::test]
     async fn geodata_recovery_failure_restores_prior_bytes_and_prior_absence() {
-        let home = super::super::tests::TestHome::new();
+        let home = super::super::test_support::TestHome::new();
         fs::write(home.0.join("GeoIP.dat"), b"old geoip").unwrap();
         let store = crate::ControlledConfigStore::new(home.0.join("controlled"));
         let result = bundle(&[("GeoIP.dat", b"new geoip"), ("geosite.dat", b"new sites")])
@@ -651,7 +651,7 @@ mod tests {
 
     #[tokio::test]
     async fn geodata_recovery_preflight_rejects_bad_later_destination_before_any_write() {
-        let home = super::super::tests::TestHome::new();
+        let home = super::super::test_support::TestHome::new();
         fs::write(home.0.join("GeoIP.dat"), b"old geoip").unwrap();
         fs::create_dir(home.0.join("ASN.mmdb")).unwrap();
         let store = crate::ControlledConfigStore::new(home.0.join("controlled"));
@@ -668,7 +668,7 @@ mod tests {
 
     #[tokio::test]
     async fn geodata_recovery_cancelled_waiter_retains_gate_until_completion_and_rollback() {
-        let home = super::super::tests::TestHome::new();
+        let home = super::super::test_support::TestHome::new();
         fs::write(home.0.join("GeoIP.dat"), b"old geoip").unwrap();
         let store = crate::ControlledConfigStore::new(home.0.join("controlled"));
         let owned_store = store.clone();

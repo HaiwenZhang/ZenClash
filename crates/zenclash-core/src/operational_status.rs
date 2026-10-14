@@ -96,6 +96,15 @@ impl<T> Observation<T> {
         }
     }
 
+    /// Returns current successful evidence; stale data remains available through `value`.
+    #[must_use]
+    pub const fn fresh_value(&self) -> Option<&T> {
+        match self {
+            Self::Fresh { value, .. } => Some(value),
+            _ => None,
+        }
+    }
+
     /// Returns the timestamp of the current or last-successful value.
     #[must_use]
     pub const fn observed_at_ms(&self) -> Option<u64> {
@@ -289,8 +298,6 @@ impl ProcessStatus {
 pub enum ControllerCompatibility {
     /// The selected core exposes the expected production Mihomo protocol.
     Compatible,
-    /// The selected experimental core exposes only its declared compatible subset.
-    Limited,
 }
 
 /// Successful controller observation.
@@ -335,21 +342,8 @@ pub struct TunCaptureStatus {
 }
 
 impl TunCaptureStatus {
-    fn from_config(kind: CoreKind, config: &RuntimeConfig) -> Self {
-        if kind == CoreKind::Meow {
-            return Self {
-                requested: false,
-                configured: false,
-                permission: CapabilityState::Unsupported,
-                runtime: crate::TunRuntimeObservation {
-                    device_name: None,
-                    device: CapabilityState::Unsupported,
-                    route: CapabilityState::Unsupported,
-                    detail: "meow-rs 未声明 TUN 能力".into(),
-                },
-                observed: CapabilityState::Unsupported,
-            };
-        }
+    #[cfg(test)]
+    fn from_config(_kind: CoreKind, config: &RuntimeConfig) -> Self {
         let runtime = if config.tun.enable {
             crate::TunRuntimeObservation {
                 device_name: (!config.tun.device.trim().is_empty())
@@ -375,13 +369,10 @@ impl TunCaptureStatus {
     }
 
     pub(crate) fn from_platform(
-        kind: CoreKind,
+        _kind: CoreKind,
         config: &RuntimeConfig,
         permission: Option<&crate::TunPermissionStatus>,
     ) -> Self {
-        if kind == CoreKind::Meow {
-            return Self::from_config(kind, config);
-        }
         let runtime = crate::TunRuntimeObserver::observe(&config.tun);
         let permission = permission.map_or(CapabilityState::Unknown, |status| {
             if status.granted {
@@ -435,11 +426,11 @@ impl CaptureStatus {
     #[must_use]
     pub fn is_active(&self) -> bool {
         self.system_proxy
-            .value()
+            .fresh_value()
             .is_some_and(|snapshot| snapshot.actual.active())
             || self
                 .tun
-                .value()
+                .fresh_value()
                 .is_some_and(|snapshot| snapshot.observed == CapabilityState::Active)
     }
 }
@@ -620,8 +611,12 @@ impl OperationalSnapshot {
         if !has_profile {
             return FirstRunStage::NoProfile;
         }
-        let process_ready = self.process.value().is_some_and(|process| process.running);
-        if !process_ready || self.controller.value().is_none() {
+        let Some(process) = self.process.fresh_value().filter(|process| process.running) else {
+            return FirstRunStage::CoreUnavailable;
+        };
+        if !self.controller.fresh_value().is_some_and(|controller| {
+            controller.authenticated && controller.generation == process.generation
+        }) {
             return FirstRunStage::CoreUnavailable;
         }
         let system_proxy = self.capture.system_proxy.value();
@@ -632,9 +627,18 @@ impl OperationalSnapshot {
         if !capture_selected {
             return FirstRunStage::CaptureNotSelected;
         }
-        let capture_active = system_proxy.is_some_and(|proxy| {
-            proxy.actual.active() && proxy.ownership == crate::SystemProxyOwnershipState::Owned
-        }) || tun.is_some_and(|tun| tun.observed == CapabilityState::Active);
+        let capture_active = self
+            .capture
+            .system_proxy
+            .fresh_value()
+            .is_some_and(|proxy| {
+                proxy.actual.active() && proxy.ownership == crate::SystemProxyOwnershipState::Owned
+            })
+            || self
+                .capture
+                .tun
+                .fresh_value()
+                .is_some_and(|tun| tun.observed == CapabilityState::Active);
         if !capture_active {
             return FirstRunStage::CaptureUnconfirmed;
         }
@@ -642,10 +646,7 @@ impl OperationalSnapshot {
             Observation::Loading => FirstRunStage::PathUnknown,
             Observation::Fresh { value, .. }
                 if value.route == ObservedPathRoute::Mihomo
-                    && self
-                        .process
-                        .value()
-                        .is_some_and(|process| value.generation == process.generation) =>
+                    && value.generation == process.generation =>
             {
                 FirstRunStage::Ready
             }
@@ -705,7 +706,7 @@ pub(crate) async fn observe_runtime_tun(
     kind: CoreKind,
     config: RuntimeConfig,
 ) -> Result<TunCaptureStatus, String> {
-    if kind == CoreKind::Meow || !config.tun.enable {
+    if !config.tun.enable {
         return tokio::task::spawn_blocking(move || {
             TunCaptureStatus::from_platform(kind, &config, None)
         })
@@ -835,6 +836,14 @@ async fn refresh_status_with_tun_reader<F, R>(
             logs.synchronize_generation(current.generation);
             let now = now_ms();
             let mut next = status.snapshot();
+            if !next.process.value().is_some_and(|previous| {
+                previous.kind == current.kind && previous.generation == current.generation
+            }) {
+                reset_old_generation_streams(&mut next.streams, current.generation);
+                next.controller = Observation::Loading;
+                next.capture.tun = Observation::Loading;
+                next.path = Observation::Loading;
+            }
             next.process = if current.managed && current.running.is_none() {
                 Observation::Failed {
                     failure: OperationalFailure {
@@ -869,11 +878,7 @@ async fn refresh_status_with_tun_reader<F, R>(
                 version.map(|version| ControllerStatus {
                     version,
                     authenticated: true,
-                    compatibility: if current.kind == CoreKind::Mihomo {
-                        ControllerCompatibility::Compatible
-                    } else {
-                        ControllerCompatibility::Limited
-                    },
+                    compatibility: ControllerCompatibility::Compatible,
                     generation: current.generation,
                 }),
                 now,
@@ -888,16 +893,8 @@ async fn refresh_status_with_tun_reader<F, R>(
                 );
             }
             if let Some(tun) = tun {
-                next.capture.tun = Observation::record(
-                    &Observation::Loading,
-                    tun,
-                    now,
-                    if current.kind == CoreKind::Meow {
-                        RecoveryAction::Unsupported
-                    } else {
-                        RecoveryAction::ReviewCapture
-                    },
-                );
+                next.capture.tun =
+                    Observation::record(&next.capture.tun, tun, now, RecoveryAction::ReviewCapture);
             }
             next.streams.traffic = observe_traffic(
                 &generation_observation(&next.streams.traffic, current.generation),
@@ -1206,7 +1203,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_transition_during_the_final_platform_read_rejects_the_old_sample() {
-        use std::io::{Read, Write};
+        use std::io::Write;
 
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let endpoint =
@@ -1214,8 +1211,10 @@ mod tests {
         let server = std::thread::spawn(move || {
             for index in 0..6 {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0_u8; 8_192];
-                let length = stream.read(&mut request).unwrap();
+                let request = crate::test_support::read_controller_request_blocking(&mut stream)
+                    .unwrap()
+                    .into_bytes();
+                let length = request.len();
                 let request = String::from_utf8_lossy(&request[..length]);
                 let body = if request.starts_with("GET /version ") {
                     r#"{"version":"test"}"#
@@ -1294,6 +1293,105 @@ mod tests {
         assert!(snapshot.streams.connections.value().is_none());
         assert!(snapshot.streams.memory.value().is_none());
         server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_transition_between_polls_discards_tun_when_the_next_read_is_failed_or_skipped() {
+        use std::io::Write;
+
+        for refresh_platform in [false, true] {
+            let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let endpoint = crate::MihomoEndpoint::new(
+                format!("http://{}", listener.local_addr().unwrap()),
+                "",
+            );
+            let server = std::thread::spawn(move || {
+                for _ in 0..4 {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let request =
+                        crate::test_support::read_controller_request_blocking(&mut stream)
+                            .unwrap()
+                            .into_bytes();
+                    let length = request.len();
+                    let request = String::from_utf8_lossy(&request[..length]);
+                    let body = if request.starts_with("GET /version ") {
+                        r#"{"version":"test"}"#
+                    } else if request.starts_with("GET /connections ") {
+                        r#"{"connections":[],"uploadTotal":0,"downloadTotal":0}"#
+                    } else if request.starts_with("GET /configs ") {
+                        r#"{"mode":"rule","tun":{"enable":true}}"#
+                    } else {
+                        assert!(request.starts_with("GET /memory "));
+                        "{}"
+                    };
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                }
+            });
+            let core = CoreSession::open(
+                CoreKind::Mihomo,
+                crate::MihomoClient::new(endpoint).unwrap(),
+            )
+            .unwrap();
+            let mut previous = controllable_snapshot();
+            if let Observation::Fresh { value, .. } = &mut previous.process {
+                value.generation = core.generation();
+            }
+            if let Observation::Fresh { value, .. } = &mut previous.controller {
+                value.generation = core.generation();
+            }
+            if let Observation::Fresh { value, .. } = &mut previous.capture.tun {
+                value.requested = true;
+                value.configured = true;
+                value.observed = CapabilityState::Active;
+            }
+            previous.path = Observation::Fresh {
+                value: PathStatus {
+                    route: ObservedPathRoute::Mihomo,
+                    target: "old-probe".into(),
+                    generation: core.generation(),
+                },
+                observed_at_ms: 1,
+            };
+            let (snapshot, _) = watch::channel(previous);
+            let status = OperationalStatus {
+                snapshot,
+                task: std::sync::OnceLock::new(),
+            };
+            core.invalidate_runtime_observations();
+            let runtime = Handle::current();
+            let offline = crate::MihomoEndpoint::new("http://127.0.0.1:1", "");
+            let traffic = TrafficMonitor::start(&runtime, offline.clone());
+            let logs = LogMonitor::start(&runtime, offline, crate::MihomoLogLevel::Info);
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                Box::pin(refresh_status_with_tun_reader(
+                    &status,
+                    &core,
+                    None,
+                    &traffic,
+                    &logs,
+                    refresh_platform,
+                    |_, _| async { Err("new TUN observation unavailable".into()) },
+                )),
+            )
+            .await
+            .unwrap();
+            let current = status.snapshot();
+            assert!(current.capture.tun.value().is_none());
+            assert!(!current.capture.is_active());
+            assert_eq!(current.path, Observation::Loading);
+            assert_eq!(
+                current.controller.fresh_value().unwrap().generation,
+                core.generation()
+            );
+            assert_ne!(current.first_run_stage(true), FirstRunStage::Ready);
+            server.join().unwrap();
+        }
     }
 
     #[tokio::test]
@@ -1489,13 +1587,6 @@ mod tests {
     }
 
     #[test]
-    fn meow_tun_status_is_explicitly_unsupported() {
-        let status = TunCaptureStatus::from_config(CoreKind::Meow, &RuntimeConfig::default());
-
-        assert_eq!(status.observed, CapabilityState::Unsupported);
-    }
-
-    #[test]
     fn async_result_from_an_old_generation_is_rejected() {
         let expected = CoreSessionSnapshot {
             kind: CoreKind::Mihomo,
@@ -1644,6 +1735,115 @@ mod tests {
             observed_at_ms: 4,
         };
         assert_eq!(snapshot.first_run_stage(true), FirstRunStage::Ready);
+    }
+
+    #[test]
+    fn stale_or_foreign_generation_evidence_cannot_declare_ready() {
+        let mut ready = controllable_snapshot();
+        if let Observation::Fresh { value, .. } = &mut ready.capture.tun {
+            value.requested = true;
+            value.configured = true;
+            value.observed = CapabilityState::Active;
+        }
+        ready.path = Observation::Fresh {
+            value: PathStatus {
+                route: ObservedPathRoute::Mihomo,
+                target: "probe".into(),
+                generation: 7,
+            },
+            observed_at_ms: 2,
+        };
+        assert_eq!(ready.first_run_stage(true), FirstRunStage::Ready);
+        let mut stale_controller = ready.clone();
+        stale_controller.controller = Observation::record(
+            &stale_controller.controller,
+            Err::<ControllerStatus, _>("controller failed"),
+            3,
+            RecoveryAction::InspectCore,
+        );
+        assert_eq!(
+            stale_controller.first_run_stage(true),
+            FirstRunStage::CoreUnavailable
+        );
+        let mut foreign_controller = ready.clone();
+        if let Observation::Fresh { value, .. } = &mut foreign_controller.controller {
+            value.generation = 6;
+        }
+        assert_eq!(
+            foreign_controller.first_run_stage(true),
+            FirstRunStage::CoreUnavailable
+        );
+        let mut stale_process = ready.clone();
+        stale_process.process = Observation::record(
+            &stale_process.process,
+            Err::<ProcessStatus, _>("process failed"),
+            3,
+            RecoveryAction::InspectCore,
+        );
+        assert_eq!(
+            stale_process.first_run_stage(true),
+            FirstRunStage::CoreUnavailable
+        );
+        let mut stale_tun = ready;
+        stale_tun.capture.tun = Observation::record(
+            &stale_tun.capture.tun,
+            Err::<TunCaptureStatus, _>("tun failed"),
+            3,
+            RecoveryAction::ReviewCapture,
+        );
+        assert!(!stale_tun.capture.is_active());
+        assert_eq!(
+            stale_tun.first_run_stage(true),
+            FirstRunStage::CaptureUnconfirmed
+        );
+        assert!(
+            stale_tun.capture.tun.value().is_some(),
+            "retain last successful data for display"
+        );
+    }
+
+    #[test]
+    fn stale_proxy_is_unconfirmed_but_independent_fresh_tun_still_proves_capture() {
+        let mut snapshot = controllable_snapshot();
+        snapshot.capture.system_proxy = Observation::Fresh {
+            value: SystemProxySessionSnapshot {
+                intent_enabled: true,
+                actual: SystemProxyStatus {
+                    enabled: true,
+                    secure_enabled: true,
+                    port: 7890,
+                    secure_port: 7890,
+                    ..Default::default()
+                },
+                ownership: SystemProxyOwnershipState::Owned,
+            },
+            observed_at_ms: 1,
+        };
+        snapshot.capture.system_proxy = Observation::record(
+            &snapshot.capture.system_proxy,
+            Err::<SystemProxySessionSnapshot, _>("native read failed"),
+            2,
+            RecoveryAction::ReviewCapture,
+        );
+        assert!(
+            snapshot
+                .capture
+                .system_proxy
+                .value()
+                .unwrap()
+                .actual
+                .active()
+        );
+        assert!(!snapshot.capture.is_active());
+        assert_eq!(
+            snapshot.first_run_stage(true),
+            FirstRunStage::CaptureUnconfirmed
+        );
+        if let Observation::Fresh { value, .. } = &mut snapshot.capture.tun {
+            value.observed = CapabilityState::Active;
+        }
+        assert!(snapshot.capture.is_active());
+        assert_eq!(snapshot.first_run_stage(true), FirstRunStage::PathUnknown);
     }
 
     #[test]

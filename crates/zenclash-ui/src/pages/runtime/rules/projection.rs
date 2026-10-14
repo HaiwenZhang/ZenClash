@@ -5,11 +5,11 @@ use std::sync::{
 
 use zenclash_core::RuleCatalog;
 
-use super::rule_matches;
+use super::{RuleFilterSelection, rule_matches};
 
 pub(super) struct RuleProjection {
     pub(super) snapshot: Arc<RuleCatalog>,
-    pub(super) query: String,
+    pub(super) filter: RuleFilterSelection,
     pub(super) indices: Vec<usize>,
     pub(super) types: Vec<String>,
     pub(super) policies: Vec<String>,
@@ -17,12 +17,9 @@ pub(super) struct RuleProjection {
 
 #[derive(Default)]
 pub(super) struct ProjectionWorker {
-    pub(super) kind: Option<String>,
-    pub(super) policy: Option<String>,
-    pub(super) disabled_only: bool,
     generation: Arc<AtomicU64>,
     gate: Arc<tokio::sync::Mutex<()>>,
-    task: super::super::loader::PageReadTask,
+    task: super::super::page_observation::PageReadTask,
 }
 
 impl ProjectionWorker {
@@ -47,7 +44,7 @@ impl ProjectionWorker {
         &mut self,
         runtime: &tokio::runtime::Handle,
         snapshot: Arc<RuleCatalog>,
-        query: String,
+        filter: RuleFilterSelection,
     ) -> (
         u64,
         tokio::task::JoinHandle<Result<Option<RuleProjection>, String>>,
@@ -56,9 +53,7 @@ impl ProjectionWorker {
         let generation = self.generation.load(Ordering::Acquire);
         let current = self.generation.clone();
         let gate = self.gate.clone();
-        let kind = self.kind.clone();
-        let policy = self.policy.clone();
-        let disabled_only = self.disabled_only;
+
         let task = runtime.spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(80)).await;
             let permit = gate.lock_owned().await;
@@ -75,10 +70,17 @@ impl ProjectionWorker {
                         return None;
                     }
                     policies.insert(rule.proxy.clone());
-                    if (!disabled_only || rule.extra.as_ref().is_some_and(|stats| stats.disabled))
-                        && rule_matches(rule, &query)
-                        && kind.as_ref().is_none_or(|kind| *kind == rule.kind)
-                        && policy.as_ref().is_none_or(|policy| *policy == rule.proxy)
+                    if (!filter.disabled_only
+                        || rule.extra.as_ref().is_some_and(|stats| stats.disabled))
+                        && rule_matches(rule, &filter.query)
+                        && filter
+                            .rule_kind
+                            .as_ref()
+                            .is_none_or(|kind| *kind == rule.kind)
+                        && filter
+                            .policy
+                            .as_ref()
+                            .is_none_or(|policy| *policy == rule.proxy)
                     {
                         indices.push(index);
                     }
@@ -86,7 +88,7 @@ impl ProjectionWorker {
                 }
                 (current.load(Ordering::Acquire) == generation).then_some(RuleProjection {
                     snapshot,
-                    query,
+                    filter,
                     indices,
                     types: kinds.keys().cloned().collect(),
                     policies: policies.into_iter().collect(),
@@ -113,7 +115,10 @@ mod tests {
     #[tokio::test]
     async fn disabled_filter_excludes_unknown_and_enabled_rules() {
         let mut worker = ProjectionWorker::default();
-        worker.disabled_only = true;
+        let filter = RuleFilterSelection {
+            disabled_only: true,
+            ..Default::default()
+        };
         let snapshot = Arc::new(RuleCatalog {
             rules: vec![
                 zenclash_core::Rule {
@@ -130,7 +135,7 @@ mod tests {
                 zenclash_core::Rule::default(),
             ],
         });
-        let (_, task) = worker.start(&tokio::runtime::Handle::current(), snapshot, String::new());
+        let (_, task) = worker.start(&tokio::runtime::Handle::current(), snapshot, filter);
         assert_eq!(task.await.unwrap().unwrap().unwrap().indices, [0]);
     }
 
@@ -158,7 +163,14 @@ mod tests {
             ],
         });
         let mut worker = ProjectionWorker::default();
-        let (_, task) = worker.start(&tokio::runtime::Handle::current(), source, "match".into());
+        let (_, task) = worker.start(
+            &tokio::runtime::Handle::current(),
+            source,
+            RuleFilterSelection {
+                query: "match".into(),
+                ..Default::default()
+            },
+        );
         let projection = task.await.unwrap().unwrap().unwrap();
         assert_eq!(projection.indices, [0]);
         assert_eq!(projection.types, ["DomainSuffix"]);
@@ -184,9 +196,13 @@ mod tests {
             .collect(),
         });
         let mut worker = ProjectionWorker::default();
-        worker.kind.replace("DOMAIN".into());
-        worker.policy.replace("Proxy".into());
-        let (_, task) = worker.start(&tokio::runtime::Handle::current(), source, "example".into());
+        let filter = RuleFilterSelection {
+            rule_kind: Some("DOMAIN".into()),
+            policy: Some("Proxy".into()),
+            query: "example".into(),
+            ..Default::default()
+        };
+        let (_, task) = worker.start(&tokio::runtime::Handle::current(), source, filter);
         let projection = task.await.unwrap().unwrap().unwrap();
         assert_eq!(projection.indices, [1, 3]);
         assert_eq!(projection.policies, ["DIRECT", "Proxy"]);
@@ -205,17 +221,31 @@ mod tests {
     async fn replacing_the_query_and_snapshot_rejects_a_completed_old_projection() {
         let mut worker = ProjectionWorker::default();
         let runtime = tokio::runtime::Handle::current();
-        let (old, task) = worker.start(&runtime, snapshot("old"), "old".into());
+        let (old, task) = worker.start(
+            &runtime,
+            snapshot("old"),
+            RuleFilterSelection {
+                query: "old".into(),
+                ..Default::default()
+            },
+        );
         let old_projection = task.await.unwrap().unwrap().unwrap();
         let source = snapshot("new");
-        let (latest, task) = worker.start(&runtime, source.clone(), "missing".into());
+        let (latest, task) = worker.start(
+            &runtime,
+            source.clone(),
+            RuleFilterSelection {
+                query: "missing".into(),
+                ..Default::default()
+            },
+        );
         let projection = task.await.unwrap().unwrap().unwrap();
         assert!(!worker.is_current(old));
         assert_eq!(old_projection.indices, [0]);
         assert!(worker.is_current(latest));
         assert!(Arc::ptr_eq(&projection.snapshot, &source));
         assert!(projection.indices.is_empty());
-        assert_eq!(projection.query, "missing");
+        assert_eq!(projection.filter.query, "missing");
     }
 
     #[tokio::test]
@@ -224,7 +254,7 @@ mod tests {
         let (generation, task) = worker.start(
             &tokio::runtime::Handle::current(),
             snapshot("old"),
-            String::new(),
+            RuleFilterSelection::default(),
         );
         worker.cancel();
         assert!(task.await.err().is_some_and(|error| error.is_cancelled()));
@@ -245,7 +275,10 @@ mod tests {
         let (generation, task) = worker.start(
             &tokio::runtime::Handle::current(),
             snapshot,
-            "example".into(),
+            RuleFilterSelection {
+                query: "example".into(),
+                ..Default::default()
+            },
         );
         let projection = task.await.unwrap().unwrap().unwrap();
         let page =

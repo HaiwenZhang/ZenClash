@@ -1,85 +1,138 @@
 use super::*;
 
+mod snapshot;
+pub(super) use snapshot::*;
+
 pub(super) trait NativeProxyBackend: Send + Sync + std::fmt::Debug {
     fn detect_service(&self) -> MihomoResult<String>;
-    fn status(&self, service: &str) -> MihomoResult<SystemProxyStatus>;
-    fn set_manual(
+    fn capture(&self, target: NativeProxyTarget<'_>) -> MihomoResult<NativeProxySnapshot>;
+    fn display_summary(&self, observed: &NativeProxySnapshot) -> MihomoResult<SystemProxySummary> {
+        Ok(observed.summary().clone())
+    }
+    fn apply(
         &self,
-        service: &str,
-        enabled: bool,
-        host: &str,
-        port: u16,
-        bypass: &[String],
-    ) -> MihomoResult<()>;
-    fn set_pac(&self, service: &str, url: &str) -> MihomoResult<()>;
-    fn restore_snapshot(&self, previous: &SystemProxyStatus) -> MihomoResult<()>;
+        expected: &NativeProxySnapshot,
+        change: &NativeProxyChange<'_>,
+    ) -> NativeWriteAttempt;
+    fn restore(
+        &self,
+        expected: &NativeProxySnapshot,
+        previous: &NativeProxySnapshot,
+    ) -> NativeWriteAttempt;
+}
+
+struct ManualProxySettings {
+    host: String,
+    port: std::num::NonZeroU16,
+    bypass: Vec<String>,
+}
+impl ManualProxySettings {
+    fn new(settings: &SystemProxySettings, port: u16) -> MihomoResult<Self> {
+        Ok(Self {
+            host: normalize_system_proxy_host(&settings.host)?,
+            port: std::num::NonZeroU16::new(port).ok_or_else(|| {
+                invalid_setting(
+                    SystemProxySetting::Port,
+                    SystemProxyValidationError::ZeroPort,
+                )
+            })?,
+            bypass: normalize_system_proxy_bypass(&settings.bypass)?,
+        })
+    }
 }
 
 #[derive(Debug)]
 pub(super) struct PlatformProxyBackend;
 
+impl NativeProxyBackend for PlatformProxyBackend {
+    fn detect_service(&self) -> MihomoResult<String> {
+        platform::detect()
+    }
+    fn capture(&self, target: NativeProxyTarget<'_>) -> MihomoResult<NativeProxySnapshot> {
+        platform::capture(target)
+    }
+    fn apply(
+        &self,
+        expected: &NativeProxySnapshot,
+        change: &NativeProxyChange<'_>,
+    ) -> NativeWriteAttempt {
+        platform::apply(expected, change)
+    }
+    fn restore(
+        &self,
+        expected: &NativeProxySnapshot,
+        previous: &NativeProxySnapshot,
+    ) -> NativeWriteAttempt {
+        platform::restore(expected, previous)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct NativeAcceptedOwnership {
+    claim: SystemProxyOwnership,
+    snapshot: NativeProxySnapshot,
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct NativeRecovery {
-    snapshots: Vec<RecoverySnapshot>,
-    attempted: Option<SystemProxyOwnership>,
-    previous_ownership: Option<SystemProxyOwnership>,
+    entries: Vec<NativeTransactionEntry>,
 }
 
 #[derive(Clone, Debug)]
-struct RecoverySnapshot {
-    previous: SystemProxyStatus,
-    observed: Option<SystemProxyStatus>,
+struct NativeTransactionEntry {
+    previous: NativeProxySnapshot,
+    witness: NativeMutationWitness,
+    observed: Option<NativeProxySnapshot>,
+    attempted_restore: bool,
 }
 
-impl NativeProxyBackend for PlatformProxyBackend {
-    fn restore_snapshot(&self, previous: &SystemProxyStatus) -> MihomoResult<()> {
-        platform::restore_snapshot(previous)
-    }
-
-    fn detect_service(&self) -> MihomoResult<String> {
-        SystemProxyManager::detect().map(|manager| manager.service)
-    }
-
-    fn status(&self, service: &str) -> MihomoResult<SystemProxyStatus> {
-        SystemProxyManager {
-            service: service.into(),
+impl NativeTransactionEntry {
+    fn new(previous: NativeProxySnapshot) -> Self {
+        Self {
+            witness: NativeMutationWitness::new(&previous),
+            previous,
+            observed: None,
+            attempted_restore: false,
         }
-        .status()
     }
-
-    fn set_manual(
-        &self,
-        service: &str,
-        enabled: bool,
-        host: &str,
-        port: u16,
-        bypass: &[String],
-    ) -> MihomoResult<()> {
-        SystemProxyManager {
-            service: service.into(),
+    fn accept_attempt(&mut self, attempt: NativeWriteAttempt) -> MihomoResult<NativeProxySnapshot> {
+        self.witness.append(attempt.witness);
+        let actual = attempt.result?;
+        if !self.witness.permits(&actual)? {
+            return Err(verification_failure());
         }
-        .set_enabled_with_bypass(enabled, host, port, bypass)
+        self.observed = Some(actual.clone());
+        Ok(actual)
     }
-
-    fn set_pac(&self, service: &str, url: &str) -> MihomoResult<()> {
-        SystemProxyManager {
-            service: service.into(),
+    fn permits_retry(&self, actual: &NativeProxySnapshot) -> MihomoResult<bool> {
+        if self.previous.same_state(actual)? {
+            return Ok(true);
         }
-        .set_pac_enabled(true, url)
+        self.observed
+            .as_ref()
+            .map_or(Ok(false), |observed| observed.same_state(actual))
     }
 }
 
 #[must_use]
 pub(super) struct NativeProxyTransaction<'a> {
     controller: &'a SystemProxyController,
-    previous: Vec<SystemProxyStatus>,
+    entries: Vec<NativeTransactionEntry>,
     candidate: Option<pac::RunningPacServer>,
     pub(super) ownership: Option<SystemProxyOwnership>,
-    previous_ownership: Option<SystemProxyOwnership>,
 }
 
 impl NativeProxyTransaction<'_> {
     pub(super) fn commit(self) {
+        *self.controller.accepted_native.lock() = self.ownership.as_ref().and_then(|claim| {
+            self.entries
+                .last()
+                .and_then(|entry| entry.observed.clone())
+                .map(|snapshot| NativeAcceptedOwnership {
+                    claim: claim.clone(),
+                    snapshot,
+                })
+        });
         if let Some(candidate) = self.candidate {
             self.controller.pac_server.commit(candidate);
         } else {
@@ -87,226 +140,202 @@ impl NativeProxyTransaction<'_> {
         }
     }
 
-    pub(super) fn rollback(self, error: &str) -> MihomoError {
-        let permitted = self.previous.iter().try_for_each(|previous| {
-            let actual = self.controller.native.status(&previous.service)?;
-            if !self.controller.can_restore_native(
-                previous,
-                &actual,
-                None,
-                self.ownership.as_ref(),
-                self.previous_ownership.as_ref(),
-            ) {
-                return Err(MihomoError::Process(zenclash_i18n::text(
-                    "system_proxy.errors.pending_recovery",
-                )));
+    fn change(
+        &mut self,
+        index: usize,
+        change: &NativeProxyChange<'_>,
+    ) -> MihomoResult<NativeProxySnapshot> {
+        let entry = &mut self.entries[index];
+        let attempt = self.controller.native.apply(&entry.previous, change);
+        entry.accept_attempt(attempt)
+    }
+
+    pub(super) fn rollback(mut self, cause: SystemProxyTransactionCause) -> SystemProxyError {
+        let restored = self.controller.restore_entries(&mut self.entries, false);
+        let recovery_error = match restored {
+            Ok(()) => {
+                return SystemProxyError::RecoveryConfirmed {
+                    cause: Box::new(cause),
+                };
             }
-            Ok(())
-        });
-        let preflight_allowed = permitted.is_ok();
-        let restored = permitted.and_then(|()| {
-            self.previous
-                .iter()
-                .rev()
-                .try_for_each(|status| self.controller.restore_native(status))
-        });
-        if restored.is_ok() {
-            return MihomoError::Process(zenclash_i18n::text_with(
-                "system_proxy.errors.recovered_failure",
-                &[("error", error.into())],
-            ));
-        }
-        let released = self.previous.iter().try_for_each(|previous| {
-            let actual = self.controller.native.status(&previous.service)?;
-            if actual == *previous || !actual.active() {
+            Err(error) => error,
+        };
+        let released = self.entries.iter_mut().try_for_each(|entry| {
+            let actual = self
+                .controller
+                .native
+                .capture(NativeProxyTarget::Captured(&entry.previous))?;
+            if actual.same_state(&entry.previous)? || !actual.summary().active() {
                 return Ok(());
             }
-            if !self.controller.can_restore_native(
-                previous,
-                &actual,
-                None,
-                self.ownership.as_ref(),
-                self.previous_ownership.as_ref(),
-            ) {
-                return Err(MihomoError::Process(zenclash_i18n::text(
-                    "system_proxy.errors.pending_recovery",
-                )));
+            if !entry.witness.permits(&actual)? {
+                return Err(ownership_changed());
             }
-            self.controller
+            let attempt = self
+                .controller
                 .native
-                .set_manual(&previous.service, false, "", 0, &[])?;
-            if self.controller.native.status(&previous.service)?.active() {
-                return Err(MihomoError::Process(zenclash_i18n::text(
-                    "system_proxy.errors.verification",
-                )));
+                .apply(&actual, &NativeProxyChange::Disable);
+            let verified = entry.accept_attempt(attempt)?;
+            if verified.summary().active() {
+                return Err(verification_failure());
             }
             Ok(())
         });
-        if released.is_err()
-            && let Some(candidate) = self.candidate
-        {
+        // Stored preferences may already equal the original while native Apply
+        // or refresh failed. Keep the candidate until recovery is confirmed.
+        if let Some(candidate) = self.candidate {
             self.controller.pac_server.retain_for_recovery(candidate);
         }
-        // A safety disable is not restoration. Keep the original configuration
-        // and any old PAC listener it needs until a verified retry succeeds.
+        for entry in &mut self.entries {
+            // A failed read or an unexpected field gives no authority. In
+            // particular, do not trust a whole observation just because an
+            // earlier preflight happened to pass.
+            entry.observed = self
+                .controller
+                .native
+                .capture(NativeProxyTarget::Captured(&entry.previous))
+                .ok()
+                .filter(|actual| entry.witness.permits(actual).unwrap_or(false));
+        }
         *self.controller.recovery.lock() = Some(NativeRecovery {
-            snapshots: self
-                .previous
-                .into_iter()
-                .map(|previous| {
-                    let observed = self
-                        .controller
-                        .native
-                        .status(&previous.service)
-                        .ok()
-                        .filter(|actual| {
-                            preflight_allowed
-                                || self.controller.can_restore_native(
-                                    &previous,
-                                    actual,
-                                    None,
-                                    self.ownership.as_ref(),
-                                    self.previous_ownership.as_ref(),
-                                )
-                        });
-                    RecoverySnapshot { observed, previous }
-                })
-                .collect(),
-            attempted: self.ownership,
-            previous_ownership: self.previous_ownership,
+            entries: self.entries,
         });
-        MihomoError::Process(zenclash_i18n::text_with(
-            "system_proxy.errors.recovery_failure",
-            &[
-                ("error", error.into()),
-                (
-                    "recovery",
-                    restored.expect_err("failed recovery").to_string(),
-                ),
-                (
-                    "release",
-                    released.map_or_else(|error| error.to_string(), |()| "OK".into()),
-                ),
-            ],
-        ))
+        SystemProxyError::RecoveryUnconfirmed {
+            cause: Box::new(cause),
+            recovery: Box::new(recovery_error),
+            release_failure: released.err().map(Box::new),
+        }
     }
 }
 
 impl SystemProxyController {
-    fn restore_native(&self, previous: &SystemProxyStatus) -> MihomoResult<()> {
-        self.native.restore_snapshot(previous)?;
-        if self.native.status(&previous.service)? != *previous {
-            return Err(MihomoError::Process(zenclash_i18n::text(
-                "system_proxy.errors.verification",
-            )));
-        }
-        Ok(())
+    pub(super) fn current_native_claim(
+        &self,
+        persisted: Option<&SystemProxyOwnership>,
+    ) -> Option<SystemProxyOwnership> {
+        self.accepted_native
+            .lock()
+            .as_ref()
+            .map(|accepted| accepted.claim.clone())
+            .or_else(|| persisted.cloned())
     }
 
-    fn can_restore_native(
+    pub(super) fn claim_targets_snapshot(
         &self,
-        previous: &SystemProxyStatus,
-        actual: &SystemProxyStatus,
-        observed: Option<&SystemProxyStatus>,
-        attempted: Option<&SystemProxyOwnership>,
-        previous_ownership: Option<&SystemProxyOwnership>,
+        claim: &SystemProxyOwnership,
+        actual: &NativeProxySnapshot,
     ) -> bool {
-        if actual == previous {
-            return true;
-        }
-        if let Some(observed) = observed {
-            // Disabled endpoint caches and PAC URLs are external configuration
-            // too. A retry may overwrite only the complete failure observation.
-            if actual != observed {
-                return false;
-            }
-            if !actual.active() {
-                return true;
-            }
-        }
-        let mut known_http = actual.server == previous.server && actual.port == previous.port;
-        let mut known_https = actual.secure_server == previous.secure_server
-            && actual.secure_port == previous.secure_port;
-        let mut known_http_host = actual.server == previous.server;
-        let mut known_http_port = actual.port == previous.port;
-        let mut known_https_host = actual.secure_server == previous.secure_server;
-        let mut known_https_port = actual.secure_port == previous.secure_port;
-        let mut known_pac = actual.auto_url == previous.auto_url
-            || self.pac_server.owns_url(&actual.auto_url)
-            || (!actual.auto_enabled && actual.auto_url.is_empty());
-        let mut known_bypass = actual.bypass == previous.bypass;
-        for ownership in attempted.into_iter().chain(previous_ownership) {
-            match ownership {
-                SystemProxyOwnership::Manual {
-                    service,
-                    host,
-                    port,
-                    bypass,
-                } if *service == actual.service => {
-                    known_http |= actual.server == *host && actual.port == *port;
-                    known_https |= actual.secure_server == *host && actual.secure_port == *port;
-                    // GNOME writes host and port separately while mode is off.
-                    known_http_host |= actual.server == *host;
-                    known_http_port |= actual.port == *port;
-                    known_https_host |= actual.secure_server == *host;
-                    known_https_port |= actual.secure_port == *port;
-                    known_bypass |= actual.bypass == *bypass;
-                }
-                SystemProxyOwnership::Pac { service, url } if *service == actual.service => {
-                    known_pac |= actual.auto_url == *url;
-                }
-                _ => {}
-            }
-        }
-        if observed.is_none()
-            && !(known_http_host
-                && known_http_port
-                && known_https_host
-                && known_https_port
-                && known_pac
-                && known_bypass)
+        self.accepted_native
+            .lock()
+            .as_ref()
+            .filter(|accepted| accepted.claim == *claim)
+            .map_or_else(
+                || ownership_service(claim) == actual.summary().service,
+                |accepted| accepted.snapshot.same_target(actual),
+            )
+    }
+
+    pub(super) fn claim_matches_native(
+        &self,
+        claim: &SystemProxyOwnership,
+        actual: &NativeProxySnapshot,
+    ) -> MihomoResult<bool> {
+        let accepted = self.accepted_native.lock();
+        if let Some(accepted) = accepted
+            .as_ref()
+            .filter(|accepted| accepted.claim == *claim)
         {
-            return false;
+            return Ok(
+                accepted.snapshot.same_target(actual) && accepted.snapshot.same_state(actual)?
+            );
         }
-        (!actual.enabled || known_http)
-            && (!actual.secure_enabled || known_https)
-            && (!actual.auto_enabled || known_pac)
-            && (!(actual.enabled || actual.secure_enabled) || known_bypass)
+        Ok(
+            system_proxy_summary_matches_claim(&actual.summary().service, actual.summary(), claim)
+                && actual.legacy_release_is_safe(),
+        )
+    }
+
+    fn capture_claimed_target(
+        &self,
+        claim: &SystemProxyOwnership,
+    ) -> MihomoResult<NativeProxySnapshot> {
+        let captured = self
+            .accepted_native
+            .lock()
+            .as_ref()
+            .filter(|accepted| accepted.claim == *claim)
+            .map(|accepted| accepted.snapshot.clone());
+        match captured {
+            Some(captured) => self.native.capture(NativeProxyTarget::Captured(&captured)),
+            None => self
+                .native
+                .capture(NativeProxyTarget::Service(ownership_service(claim))),
+        }
+    }
+
+    fn restore_entries(
+        &self,
+        entries: &mut [NativeTransactionEntry],
+        retry: bool,
+    ) -> MihomoResult<()> {
+        for entry in entries.iter_mut() {
+            entry.attempted_restore = false;
+        }
+        let current = entries
+            .iter()
+            .map(|entry| {
+                let actual = self
+                    .native
+                    .capture(NativeProxyTarget::Captured(&entry.previous))?;
+                let permitted = if retry {
+                    entry.permits_retry(&actual)?
+                } else {
+                    entry.witness.permits(&actual)?
+                };
+                if !permitted {
+                    return Err(ownership_changed());
+                }
+                Ok(actual)
+            })
+            .collect::<MihomoResult<Vec<_>>>()?;
+        // Every target passed before any restore. The adapter checks again
+        // immediately before its actual writes (inside the macOS native lock).
+        for (entry, actual) in entries.iter_mut().zip(current).rev() {
+            if !entry.witness.has_steps() && entry.previous.same_state(&actual)? {
+                continue;
+            }
+            let attempt = self.native.restore(&actual, &entry.previous);
+            entry.attempted_restore = attempt.witness.has_steps();
+            let verified = entry.accept_attempt(attempt)?;
+            if !entry.previous.same_state(&verified)? {
+                return Err(verification_failure());
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn recover_native(&self) -> MihomoResult<()> {
         let Some(mut recovery) = self.recovery.lock().clone() else {
             return Ok(());
         };
-        // Validate every affected service before changing any of them.
-        for snapshot in &recovery.snapshots {
-            let actual = self.native.status(&snapshot.previous.service)?;
-            if (snapshot.observed.is_none() && actual != snapshot.previous)
-                || !self.can_restore_native(
-                    &snapshot.previous,
-                    &actual,
-                    snapshot.observed.as_ref(),
-                    recovery.attempted.as_ref(),
-                    recovery.previous_ownership.as_ref(),
-                )
-            {
-                return Err(MihomoError::Process(zenclash_i18n::text(
-                    "system_proxy.errors.pending_recovery",
-                )));
+        if let Err(error) = self.restore_entries(&mut recovery.entries, true) {
+            for entry in &mut recovery.entries {
+                if !entry.attempted_restore {
+                    continue;
+                }
+                entry.observed = self
+                    .native
+                    .capture(NativeProxyTarget::Captured(&entry.previous))
+                    .ok()
+                    .filter(|actual| entry.witness.permits(actual).unwrap_or(false));
             }
-        }
-        for snapshot in recovery.snapshots.iter_mut().rev() {
-            // Reapply even an equal snapshot: a failed native refresh or commit
-            // cannot be declared recovered merely because its stored values match.
-            if let Err(error) = self.restore_native(&snapshot.previous) {
-                snapshot.observed = self.native.status(&snapshot.previous.service).ok();
-                *self.recovery.lock() = Some(recovery);
-                return Err(error);
-            }
+            *self.recovery.lock() = Some(recovery);
+            return Err(error);
         }
         let keep_running = self.pac_server.status().is_some_and(|running| {
-            recovery.snapshots.iter().any(|snapshot| {
-                snapshot.previous.auto_enabled && snapshot.previous.auto_url == running.url
+            recovery.entries.iter().any(|entry| {
+                let previous = entry.previous.summary();
+                previous.pac().is_enabled() && previous.pac().url() == running.url
             })
         });
         self.pac_server.discard_retained();
@@ -320,24 +349,32 @@ impl SystemProxyController {
     pub(super) fn stage_native<'a>(
         &'a self,
         service: String,
-        enabled: bool,
-        port: u16,
-        settings: &SystemProxySettings,
+        configuration: SystemProxyConfiguration<'_>,
         previous_ownership: Option<&SystemProxyOwnership>,
     ) -> MihomoResult<NativeProxyTransaction<'a>> {
         if self.recovery.lock().is_some() {
-            return Err(MihomoError::Process(zenclash_i18n::text(
-                "system_proxy.errors.pending_recovery",
-            )));
+            return Err(pending_recovery());
         }
-        let actual = self.native.status(&service)?;
-        let candidate = if enabled && settings.mode == SystemProxyMode::Pac {
-            Some(
-                self.pac_server
-                    .prepare(&settings.host, &settings.pac_script, port)?,
-            )
-        } else {
-            None
+        let enabled = configuration.is_enabled();
+        let manual = match &configuration.kind {
+            SystemProxyConfigurationKind::Enabled { settings, port }
+                if settings.mode == SystemProxyMode::Manual =>
+            {
+                Some(ManualProxySettings::new(settings, *port)?)
+            }
+            _ => None,
+        };
+        let actual = self.native.capture(NativeProxyTarget::Service(&service))?;
+        let candidate = match &configuration.kind {
+            SystemProxyConfigurationKind::Enabled { settings, port }
+                if settings.mode == SystemProxyMode::Pac =>
+            {
+                Some(
+                    self.pac_server
+                        .prepare(&settings.host, &settings.pac_script, *port)?,
+                )
+            }
+            _ => None,
         };
         let ownership = if !enabled {
             None
@@ -349,73 +386,93 @@ impl SystemProxyController {
         } else {
             Some(SystemProxyOwnership::Manual {
                 service: service.clone(),
-                host: normalize_system_proxy_host(&settings.host)?,
-                port,
-                bypass: normalize_system_proxy_bypass(&settings.bypass)?,
+                host: manual
+                    .as_ref()
+                    .ok_or_else(verification_failure)?
+                    .host
+                    .clone(),
+                port: manual.as_ref().ok_or_else(verification_failure)?.port.get(),
+                bypass: manual
+                    .as_ref()
+                    .ok_or_else(verification_failure)?
+                    .bypass
+                    .clone(),
             })
         };
         let mut transaction = NativeProxyTransaction {
             controller: self,
-            previous: Vec::new(),
+            entries: Vec::new(),
             candidate,
             ownership,
-            previous_ownership: previous_ownership.cloned(),
         };
         if let Some(ownership) = previous_ownership {
-            let old_service = ownership_service(ownership);
-            if old_service != service {
-                let previous = self.native.status(old_service)?;
-                if system_proxy_status_matches_ownership(old_service, &previous, ownership) {
-                    transaction.previous.push(previous);
-                    let release = self
-                        .native
-                        .set_manual(old_service, false, "", 0, &[])
-                        .and_then(|()| {
-                            if self.native.status(old_service)?.active() {
-                                return Err(MihomoError::Process(zenclash_i18n::text(
-                                    "system_proxy.errors.verification",
-                                )));
-                            }
-                            Ok(())
-                        });
-                    if let Err(error) = release {
-                        return Err(transaction.rollback(&error.to_string()));
+            let previous = self.capture_claimed_target(ownership)?;
+            if !previous.same_target(&actual) {
+                if system_proxy_summary_matches_claim(
+                    ownership_service(ownership),
+                    previous.summary(),
+                    ownership,
+                ) {
+                    if !self.claim_matches_native(ownership, &previous)? {
+                        return Err(ownership_changed());
                     }
-                } else if status_references_owned_endpoint(&previous, ownership) {
-                    return Err(MihomoError::Process(zenclash_i18n::text(
-                        "system_proxy.errors.pending_recovery",
-                    )));
+                    transaction
+                        .entries
+                        .push(NativeTransactionEntry::new(previous));
+                } else if status_references_owned_endpoint(previous.summary(), ownership) {
+                    return Err(ownership_changed());
                 }
             }
         }
-        transaction.previous.push(actual);
+        transaction
+            .entries
+            .push(NativeTransactionEntry::new(actual));
+        // Complete preflight includes the destination before disabling the old target.
+        for entry in &transaction.entries {
+            if !self
+                .native
+                .capture(NativeProxyTarget::Captured(&entry.previous))?
+                .same_state(&entry.previous)?
+            {
+                return Err(ownership_changed());
+            }
+        }
         let result = (|| {
-            if !enabled {
-                self.native.set_manual(&service, false, "", 0, &[])?;
-            } else if let Some(candidate) = &transaction.candidate {
-                self.native.set_pac(&service, &candidate.status().url)?;
+            let index = transaction.entries.len() - 1;
+            if index > 0 {
+                let released = transaction.change(0, &NativeProxyChange::Disable)?;
+                if released.summary().active() {
+                    return Err(verification_failure());
+                }
+            }
+            let candidate_url = transaction
+                .candidate
+                .as_ref()
+                .map(|candidate| candidate.status().url.clone());
+            let change = if !enabled {
+                NativeProxyChange::Disable
+            } else if let Some(url) = &candidate_url {
+                NativeProxyChange::Pac { url }
             } else {
-                self.native
-                    .set_manual(&service, true, &settings.host, port, &settings.bypass)?;
-            }
-            let actual = self.native.status(&service)?;
-            if !enabled && actual.active() {
-                return Err(MihomoError::Process(zenclash_i18n::text(
-                    "system_proxy.errors.verification",
-                )));
-            }
-            if transaction.ownership.as_ref().is_some_and(|ownership| {
-                !system_proxy_status_matches_ownership(&service, &actual, ownership)
-            }) {
-                return Err(MihomoError::Process(zenclash_i18n::text(
-                    "system_proxy.errors.verification",
-                )));
+                NativeProxyChange::Manual {
+                    host: &manual.as_ref().ok_or_else(verification_failure)?.host,
+                    port: manual.as_ref().ok_or_else(verification_failure)?.port.get(),
+                    bypass: &manual.as_ref().ok_or_else(verification_failure)?.bypass,
+                }
+            };
+            let verified = transaction.change(index, &change)?;
+            if (!enabled && verified.summary().active())
+                || transaction.ownership.as_ref().is_some_and(|ownership| {
+                    !system_proxy_summary_matches_claim(&service, verified.summary(), ownership)
+                })
+            {
+                return Err(verification_failure());
             }
             Ok(())
         })();
         match result {
             Ok(()) => Ok(transaction),
-            Err(error) => Err(transaction.rollback(&error.to_string())),
+            Err(error) => Err(transaction.rollback(error.into()).into()),
         }
     }
 }
@@ -432,42 +489,59 @@ impl SystemProxyOperation<'_> {
         let Some(ownership) = ownership else {
             return Ok(None);
         };
-        let service = ownership_service(ownership);
-        let actual = self.controller.native.status(service)?;
-        if !system_proxy_status_matches_ownership(service, &actual, ownership) {
-            if status_references_owned_endpoint(&actual, ownership)
-                || (actual.auto_enabled && self.controller.pac_server.owns_url(&actual.auto_url))
+        let actual = self.controller.capture_claimed_target(ownership)?;
+        if !self.controller.claim_matches_native(ownership, &actual)? {
+            if status_references_owned_endpoint(actual.summary(), ownership)
+                || (actual.summary().pac().is_enabled()
+                    && self
+                        .controller
+                        .pac_server
+                        .owns_url(actual.summary().pac().url()))
             {
-                return Err(MihomoError::Process(zenclash_i18n::text(
-                    "system_proxy.errors.pending_recovery",
-                )));
+                return Err(ownership_changed());
             }
             self.controller.pac_server.stop();
             return Ok(None);
         }
-        let settings = SystemProxySettings {
-            mode: SystemProxyMode::Manual,
-            host: String::new(),
-            bypass: Vec::new(),
-            pac_script: String::new(),
+        // Carry exactly the snapshot that granted release authority. Recapturing
+        // here would authorize a foreign replacement as a fresh baseline.
+        let mut transaction = NativeProxyTransaction {
+            controller: self.controller,
+            entries: vec![NativeTransactionEntry::new(actual)],
+            candidate: None,
+            ownership: None,
         };
-        self.controller
-            .stage_native(service.into(), false, 0, &settings, None)
-            .map(Some)
+        let result = transaction
+            .change(0, &NativeProxyChange::Disable)
+            .and_then(|actual| {
+                if actual.summary().active() {
+                    Err(verification_failure())
+                } else {
+                    Ok(())
+                }
+            });
+        match result {
+            Ok(()) => Ok(Some(transaction)),
+            Err(error) => Err(transaction.rollback(error.into()).into()),
+        }
     }
 }
 
 fn status_references_owned_endpoint(
-    actual: &SystemProxyStatus,
+    actual: &SystemProxySummary,
     ownership: &SystemProxyOwnership,
 ) -> bool {
     match ownership {
-        SystemProxyOwnership::Pac { url, .. } => actual.auto_enabled && actual.auto_url == *url,
+        SystemProxyOwnership::Pac { url, .. } => {
+            actual.pac().is_enabled() && actual.pac().url() == *url
+        }
         SystemProxyOwnership::Manual { host, port, .. } => {
-            (actual.enabled && actual.server == *host && actual.port == *port)
-                || (actual.secure_enabled
-                    && actual.secure_server == *host
-                    && actual.secure_port == *port)
+            (actual.http().is_enabled()
+                && actual.http().host() == *host
+                && actual.http().port() == *port)
+                || (actual.https().is_enabled()
+                    && actual.https().host() == *host
+                    && actual.https().port() == *port)
         }
     }
 }

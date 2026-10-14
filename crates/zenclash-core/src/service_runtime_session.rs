@@ -109,7 +109,7 @@ pub(crate) struct RuntimeSession<T: RuntimeTransport> {
     source_home: PathBuf,
     core_source: Option<PathBuf>,
     controller_secret: parking_lot::RwLock<String>,
-    local_launch: Option<crate::MihomoLaunchConfig>,
+    local_launch: Option<crate::CoreLaunchConfig>,
     state: Arc<Mutex<RuntimeState>>,
 }
 
@@ -126,6 +126,8 @@ struct RuntimeState {
     candidate: Option<(RuntimeSnapshot, CandidatePhase)>,
     closing: bool,
     released: bool,
+    // Written only after complete cache export and confirmed retirement of this owner.
+    stopped_export: Option<Arc<ServiceRuntimeBundle>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -166,7 +168,7 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
             state: Arc::new(Mutex::new(RuntimeState::default())),
         })
     }
-    pub(crate) fn from_local(client: Arc<T>, launch: crate::MihomoLaunchConfig) -> Arc<Self> {
+    pub(crate) fn from_local(client: Arc<T>, launch: crate::CoreLaunchConfig) -> Arc<Self> {
         Arc::new(Self {
             client,
             source_home: launch.home_dir.clone(),
@@ -176,7 +178,7 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
             state: Arc::new(Mutex::new(RuntimeState::default())),
         })
     }
-    pub(crate) fn local_launch(&self) -> Option<&crate::MihomoLaunchConfig> {
+    pub(crate) fn local_launch(&self) -> Option<&crate::CoreLaunchConfig> {
         self.local_launch.as_ref()
     }
     pub(crate) fn core_source(&self) -> Option<&Path> {
@@ -333,6 +335,7 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
                 self.load_snapshot(&candidate, true, false).await?;
                 self.confirm_controller().await?;
                 state.active = state.candidate.take().map(|(snapshot, _)| snapshot);
+                state.stopped_export = None;
                 Ok(())
             }
             Some(CandidatePhase::Applied | CandidatePhase::Uncertain) => Err(unknown()),
@@ -435,11 +438,16 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
     }
     pub(crate) async fn stop_confirmed(&self) -> MihomoResult<()> {
         let mut state = self.state.lock().await;
-        if state.closing {
+        if state.closing || state.released {
             return Err(unknown());
         }
         self.confirm_finalizing_locked(&mut state).await?;
-        self.confirm_stop().await
+        // Startup cleanup has no accepted candidate to export. Native Stop still
+        // uses this session's authority, including an unanswered Start attempt.
+        if state.candidate.is_some() || state.active.is_none() {
+            return self.confirm_stop().await;
+        }
+        self.stop_and_export_locked(&mut state).await.map(|_| ())
     }
     pub(crate) async fn stop_and_export(&self) -> MihomoResult<Arc<ServiceRuntimeBundle>> {
         let mut state = self.state.lock().await;
@@ -447,8 +455,18 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
             return Err(unknown());
         }
         self.confirm_finalizing_locked(&mut state).await?;
+        self.stop_and_export_locked(&mut state).await
+    }
+    async fn stop_and_export_locked(
+        &self,
+        state: &mut RuntimeState,
+    ) -> MihomoResult<Arc<ServiceRuntimeBundle>> {
         if state.candidate.is_some() {
             return Err(unknown());
+        }
+        if let Some(bundle) = state.stopped_export.as_ref() {
+            self.confirm_no_active_runtime().await?;
+            return Ok(bundle.clone());
         }
         let active = state.active.as_ref().ok_or_else(no_snapshot)?;
         let status = self.client.status().await?;
@@ -477,7 +495,15 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
             .map_err(|_| unknown())??;
         self.confirm_stop().await?;
         state.active.as_mut().ok_or_else(no_snapshot)?.bundle = bundle.clone();
+        state.stopped_export = Some(bundle.clone());
         Ok(bundle)
+    }
+    async fn confirm_no_active_runtime(&self) -> MihomoResult<()> {
+        let status = self.client.status().await?;
+        if status.is_active || status.core_pid.is_some() {
+            return Err(unknown());
+        }
+        Ok(())
     }
     pub(crate) async fn restart_accepted(
         &self,
@@ -485,11 +511,17 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
     ) -> MihomoResult<()> {
         let mut state = self.state.lock().await;
         self.reconcile_locked(&mut state).await?;
-        let active = state.active.as_ref().ok_or_else(no_snapshot)?.clone();
+        let mut active = state.active.as_ref().ok_or_else(no_snapshot)?.clone();
         self.confirm_stop().await?;
         if cancelled.load(std::sync::atomic::Ordering::Acquire) {
             return Err(unknown());
         }
+        if let Some(bundle) = state.stopped_export.clone() {
+            active = self.freeze(bundle, active.delta.clone()).await?;
+            state.active = Some(active.clone());
+        }
+        // A new Start attempt cannot reuse the preceding stopped confirmation.
+        state.stopped_export = None;
         // Stop has changed the runtime. A subsequent rejected Start is not a no-effect restart.
         self.load_snapshot(&active, true, true)
             .await
@@ -500,9 +532,13 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
         if state.released {
             return Ok(());
         }
+        if state.stopped_export.is_some() {
+            self.confirm_no_active_runtime().await?;
+        }
         state.closing = true;
         self.confirm_stop().await?;
         state.active = None;
+        state.stopped_export = None;
         state.candidate = None;
         state.released = true;
         Ok(())
@@ -529,6 +565,7 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
         };
         // A failed Stage may have replaced resources before any controller load.
         // Restart the accepted immutable snapshot rather than trusting partial readback.
+        state.stopped_export = None;
         self.load_snapshot(&active, true, true).await?;
         state.candidate = None;
         Ok(())
@@ -544,6 +581,7 @@ impl<T: RuntimeTransport> PreparedRuntime<T> {
         let (candidate, phase) = self.state.candidate.as_mut().ok_or_else(unknown)?;
         *phase = CandidatePhase::Uncertain;
         let candidate = candidate.clone();
+        self.state.stopped_export = None;
         let applied = self
             .owner
             .load_snapshot(&candidate, force, initial || self.recovery)

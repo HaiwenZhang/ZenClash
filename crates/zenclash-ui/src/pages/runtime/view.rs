@@ -1,7 +1,7 @@
 use super::{
     ActiveTheme, App, Button, Context, Disableable, FluentBuilder, Focusable, InteractiveElement,
-    IntoElement, Page, ParentElement, Render, RuntimeData, RuntimePage, ScrollableElement, Sizable,
-    Styled, Window, div, empty_state, h_flex, v_flex,
+    IntoElement, Page, PageSnapshotData, ParentElement, Render, RuntimePage, ScrollableElement,
+    Sizable, Styled, Window, div, empty_state, h_flex, v_flex,
 };
 use crate::{assets::AppIcon, components::workspace};
 use gpui_kit::StatefulInteractiveElement;
@@ -27,11 +27,14 @@ impl RuntimePage {
                 button.h_10()
             })
             .outline()
-            .loading(self.loading || (self.page == Page::Network && self.network_probe.loading))
+            .loading(
+                self.loading
+                    || (self.page == Page::Network && self.network_diagnostics.query.is_loading()),
+            )
             .disabled(self.core_busy())
             .on_click(cx.listener(|this, _, _, cx| {
                 if this.page == Page::Network {
-                    this.refresh_network_probe(cx);
+                    this.refresh_network_diagnostics(cx);
                 } else {
                     this.refresh(cx);
                 }
@@ -51,11 +54,13 @@ impl RuntimePage {
                 .child(self.render_profile_commands(cx))
                 .into_any_element(),
             Page::Logs => self.render_log_actions(cx).into_any_element(),
-            Page::Connections => h_flex()
-                .gap_2()
-                .child(self.render_connection_pause(cx))
-                .child(self.render_connection_close_all(cx))
-                .into_any_element(),
+            Page::Connections => self.connections.update(cx, |view, cx| {
+                h_flex()
+                    .gap_2()
+                    .child(view.render_connection_pause(cx))
+                    .child(view.render_connection_close_all(cx))
+                    .into_any_element()
+            }),
             Page::Network => h_flex()
                 .gap_2()
                 .flex_wrap()
@@ -77,7 +82,7 @@ impl RuntimePage {
                         .small()
                         .h_10()
                         .outline()
-                        .disabled(self.network_probe.report.is_none())
+                        .disabled(self.network_diagnostics.query.report().is_none())
                         .on_click(cx.listener(|this, _, _, cx| this.export_network_report(cx))),
                 )
                 .into_any_element(),
@@ -110,7 +115,7 @@ impl RuntimePage {
                                 cx,
                             ))
                             .when(self.page == Page::Logs, |view| {
-                                view.child(self.log_stream_status(theme))
+                                view.child(self.log_stream_status(theme, cx))
                             }),
                     )
                     .child(commands),
@@ -129,12 +134,12 @@ impl RuntimePage {
         // Installation remains reachable when the current controller cannot provide
         // runtime forms. The card reads only the application owner's prepared state.
         if self.page == Page::Tun
-            && self.profile_service.service_state().is_some()
+            && self.application_commands.service_state().is_some()
             && (self.persistent_loading
                 || !self
                     .config_inputs
                     .is_for_profile(self.profile_path.as_deref())
-                || matches!(self.data, RuntimeData::Empty))
+                || matches!(self.page_observation.data(), PageSnapshotData::Empty))
         {
             return v_flex()
                 .gap_4()
@@ -158,11 +163,13 @@ impl RuntimePage {
                 .is_for_profile(self.profile_path.as_deref()))
         {
             return empty_state(
-                zenclash_i18n::text(if self.persistent_loading || self.config_inputs_loading {
-                    "runtime.empty.loading"
-                } else {
-                    "runtime.empty.unavailable"
-                }),
+                zenclash_i18n::text(
+                    if self.persistent_loading || self.config_inputs.is_loading() {
+                        "runtime.empty.loading"
+                    } else {
+                        "runtime.empty.unavailable"
+                    },
+                ),
                 theme,
             )
             .into_any_element();
@@ -170,7 +177,7 @@ impl RuntimePage {
         if self.page == Page::Home {
             return self.render_home(theme, compact, cx);
         }
-        if matches!(self.data, RuntimeData::Empty)
+        if matches!(self.page_observation.data(), PageSnapshotData::Empty)
             && !matches!(
                 self.page,
                 Page::Logs
@@ -195,10 +202,10 @@ impl RuntimePage {
             Page::Home => unreachable!("home is rendered before the empty-data fallback"),
             Page::Mihomo => self.render_core(compact, theme, cx),
             Page::Profiles => self.render_profile(compact, theme, cx),
-            Page::Connections => self.render_connections(compact, theme, cx),
-            Page::Rules => self.render_rules(compact, theme, cx),
+            Page::Connections => self.connections.clone().into_any_element(),
+            Page::Rules => self.rules.clone().into_any_element(),
             Page::Resources => self.render_resources(theme, cx),
-            Page::Logs => self.render_logs(theme, cx),
+            Page::Logs => self.render_logs(),
             Page::Tun => self.render_tun(compact, theme, cx),
             Page::Sniffer => self.render_sniffer(compact, theme, cx),
             Page::Traffic => self.render_traffic(theme, cx),
@@ -228,12 +235,16 @@ impl Render for RuntimePage {
                     && this.page == Page::Profiles
                     && !this.core_busy()
                 {
-                    if this.profiles.forms.editing_profile_id.is_some() {
-                        this.cancel_edit_remote_profile(cx);
-                        cx.stop_propagation();
-                    } else if this.profiles.forms.adding_subscription {
-                        this.close_subscription_form(cx);
-                        cx.stop_propagation();
+                    match this.profiles.forms.dismissible_form() {
+                        Some(super::profiles::ProfileFormDismissal::RemoteEditor) => {
+                            this.cancel_edit_remote_profile(cx);
+                            cx.stop_propagation();
+                        }
+                        Some(super::profiles::ProfileFormDismissal::Subscription) => {
+                            this.close_subscription_form(cx);
+                            cx.stop_propagation();
+                        }
+                        None => {}
                     }
                 }
             }))
@@ -255,7 +266,7 @@ impl Render for RuntimePage {
                         .min_w_0()
                         .min_h_0()
                         .overflow_y_scroll()
-                        .track_scroll(&self.settings_navigation.scroll)
+                        .track_scroll(&self.body_scroll)
                         .child(
                             v_flex()
                                 .min_w_0()
@@ -278,7 +289,7 @@ impl Render for RuntimePage {
                                     cx,
                                 )),
                         )
-                        .vertical_scrollbar(&self.settings_navigation.scroll),
+                        .vertical_scrollbar(&self.body_scroll),
                 ),
             )
     }

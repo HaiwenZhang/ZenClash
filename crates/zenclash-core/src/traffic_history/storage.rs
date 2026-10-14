@@ -7,16 +7,16 @@ use std::{
 use rusqlite::{Connection, Transaction, params};
 
 use super::{
-    TrafficAggregate, TrafficDimension, TrafficHistoryEntry, TrafficHistoryError,
-    TrafficHistoryQuery, TrafficHistoryResult, TrafficOverview, TrafficTotals, TrafficTrendPoint,
+    TrafficAggregate, TrafficHistoryEntry, TrafficHistoryError, TrafficHistoryQuery,
+    TrafficHistoryResult, TrafficHistorySelection, TrafficHistorySnapshot, TrafficOverview,
 };
 use crate::AppPreferencesStore;
 use crate::data_coordinator::{DataWriteAccess, DataWriteLease};
 
+mod query;
+
 const MAX_INSERT_BATCH: usize = 10_000;
 const MAX_HISTORY_ENTRIES: i64 = 1_000_000;
-const MAX_RANKINGS: u32 = 200;
-
 /// Cloneable handle to `ZenClash`'s native `SQLite` traffic database.
 #[derive(Clone, Debug)]
 pub struct TrafficHistoryStore {
@@ -116,30 +116,37 @@ impl TrafficHistoryStore {
         Ok(())
     }
 
-    /// Loads totals, dimension rankings, and a gap-filled trend for one time range.
+    /// Reads an overview and selected drill-down results from one database snapshot.
+    ///
+    /// Recording, cleanup and clear operations cannot change the database view
+    /// between the totals, rankings, trend, details and proxy-statistics reads.
+    /// Each rankings list remains bounded to 200 entries.
     ///
     /// # Errors
+    /// Returns an error for an invalid query, filesystem access, or `SQLite` failure.
+    pub fn query(
+        &self,
+        query: &TrafficHistoryQuery,
+        selection: &TrafficHistorySelection,
+    ) -> TrafficHistoryResult<TrafficHistorySnapshot> {
+        query.validate()?;
+        let mut connection = self.open()?;
+        query::snapshot(&mut connection, query, selection)
+    }
+
+    /// Loads totals, rankings and trend from one database snapshot.
     ///
+    /// # Errors
     /// Returns an error when the query is invalid or `SQLite` cannot read the database.
     pub fn overview(&self, query: &TrafficHistoryQuery) -> TrafficHistoryResult<TrafficOverview> {
-        query.validate()?;
-        let connection = self.open()?;
-        let start = to_sql_integer(query.start_ms, "查询开始时间")?;
-        let end = to_sql_integer(query.end_ms, "查询结束时间")?;
-        let bucket = to_sql_integer(query.bucket_ms, "趋势分桶")?;
-        let totals = read_totals(&connection, start, end)?;
-        let rankings = read_rankings(&connection, query.dimension, start, end)?;
-        let trend = read_trend(&connection, query, start, end, bucket)?;
-        Ok(TrafficOverview {
-            rankings,
-            trend,
-            totals,
-        })
+        self.query(query, &TrafficHistorySelection::Overview)
+            .map(|snapshot| snapshot.overview)
     }
 
     /// Loads the next drill-down level for a ranking label.
     ///
     /// Host rankings drill down to source devices. All other dimensions drill down to hosts.
+    /// Use [`Self::query`] when combining this result with an overview or proxy statistics.
     ///
     /// # Errors
     ///
@@ -151,18 +158,11 @@ impl TrafficHistoryStore {
     ) -> TrafficHistoryResult<Vec<TrafficAggregate>> {
         query.validate()?;
         let connection = self.open()?;
-        let start = to_sql_integer(query.start_ms, "查询开始时间")?;
-        let end = to_sql_integer(query.end_ms, "查询结束时间")?;
-        let (filter, group) = match query.dimension {
-            TrafficDimension::Host => ("host", "source_ip"),
-            TrafficDimension::SourceIp => ("source_ip", "host"),
-            TrafficDimension::Outbound => ("outbound", "host"),
-            TrafficDimension::Process => ("process", "host"),
-        };
-        read_filtered_rankings(&connection, filter, group, parent, start, end)
+        query::details(&connection, query, parent)
     }
 
     /// Loads outbound proxy usage for a selected ranking and drill-down label.
+    /// Use [`Self::query`] when combining this result with other historical facts.
     ///
     /// # Errors
     ///
@@ -175,16 +175,7 @@ impl TrafficHistoryStore {
     ) -> TrafficHistoryResult<Vec<TrafficAggregate>> {
         query.validate()?;
         let connection = self.open()?;
-        let start = to_sql_integer(query.start_ms, "查询开始时间")?;
-        let end = to_sql_integer(query.end_ms, "查询结束时间")?;
-        read_proxy_stats(
-            &connection,
-            query.dimension.column(),
-            parent,
-            detail,
-            start,
-            end,
-        )
+        query::proxy_stats(&connection, query, parent, detail)
     }
 
     /// Deletes all persisted traffic records without deleting the database schema.
@@ -274,185 +265,8 @@ fn insert_entries(
     Ok(())
 }
 
-fn read_totals(
-    connection: &Connection,
-    start: i64,
-    end: i64,
-) -> TrafficHistoryResult<TrafficTotals> {
-    let (upload, download, samples) = connection.query_row(
-        "SELECT COALESCE(SUM(upload), 0), COALESCE(SUM(download), 0), COUNT(*)
-         FROM traffic_history WHERE timestamp_ms BETWEEN ?1 AND ?2",
-        params![start, end],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        },
-    )?;
-    aggregate_totals(upload, download, samples)
-}
-
-fn read_rankings(
-    connection: &Connection,
-    dimension: TrafficDimension,
-    start: i64,
-    end: i64,
-) -> TrafficHistoryResult<Vec<TrafficAggregate>> {
-    let sql = format!(
-        "SELECT {column}, SUM(upload), SUM(download), COUNT(*)
-         FROM traffic_history WHERE timestamp_ms BETWEEN ?1 AND ?2
-         GROUP BY {column} ORDER BY SUM(upload) + SUM(download) DESC, {column} ASC LIMIT ?3",
-        column = dimension.column()
-    );
-    read_aggregates(connection, &sql, params![start, end, MAX_RANKINGS])
-}
-
-fn read_filtered_rankings(
-    connection: &Connection,
-    filter: &str,
-    group: &str,
-    parent: &str,
-    start: i64,
-    end: i64,
-) -> TrafficHistoryResult<Vec<TrafficAggregate>> {
-    let sql = format!(
-        "SELECT {group}, SUM(upload), SUM(download), COUNT(*)
-         FROM traffic_history
-         WHERE {filter} = ?1 AND timestamp_ms BETWEEN ?2 AND ?3
-         GROUP BY {group} ORDER BY SUM(upload) + SUM(download) DESC, {group} ASC LIMIT ?4"
-    );
-    read_aggregates(connection, &sql, params![parent, start, end, MAX_RANKINGS])
-}
-
-fn read_proxy_stats(
-    connection: &Connection,
-    dimension: &str,
-    parent: &str,
-    detail: &str,
-    start: i64,
-    end: i64,
-) -> TrafficHistoryResult<Vec<TrafficAggregate>> {
-    let secondary = if dimension == "host" {
-        "source_ip"
-    } else {
-        "host"
-    };
-    let sql = format!(
-        "SELECT outbound, SUM(upload), SUM(download), COUNT(*)
-         FROM traffic_history
-         WHERE {dimension} = ?1 AND {secondary} = ?2 AND timestamp_ms BETWEEN ?3 AND ?4
-         GROUP BY outbound
-         ORDER BY SUM(upload) + SUM(download) DESC, outbound ASC LIMIT ?5"
-    );
-    read_aggregates(
-        connection,
-        &sql,
-        params![parent, detail, start, end, MAX_RANKINGS],
-    )
-}
-
-fn read_aggregates<P>(
-    connection: &Connection,
-    sql: &str,
-    parameters: P,
-) -> TrafficHistoryResult<Vec<TrafficAggregate>>
-where
-    P: rusqlite::Params,
-{
-    let mut statement = connection.prepare(sql)?;
-    let rows = statement.query_map(parameters, |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, i64>(3)?,
-        ))
-    })?;
-    rows.map(|row| {
-        let (label, upload, download, samples) = row?;
-        let totals = aggregate_totals(upload, download, samples)?;
-        Ok(TrafficAggregate {
-            label,
-            upload: totals.upload,
-            download: totals.download,
-            total: totals.total,
-            samples: totals.samples,
-        })
-    })
-    .collect()
-}
-
-fn read_trend(
-    connection: &Connection,
-    query: &TrafficHistoryQuery,
-    start: i64,
-    end: i64,
-    bucket: i64,
-) -> TrafficHistoryResult<Vec<TrafficTrendPoint>> {
-    let mut statement = connection.prepare(
-        "SELECT (timestamp_ms - ?1) / ?3 AS bucket_index, SUM(upload), SUM(download)
-         FROM traffic_history WHERE timestamp_ms BETWEEN ?1 AND ?2
-         GROUP BY bucket_index ORDER BY bucket_index ASC",
-    )?;
-    let rows = statement.query_map(params![start, end, bucket], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, i64>(2)?,
-        ))
-    })?;
-    let bucket_count = query.end_ms.saturating_sub(query.start_ms) / query.bucket_ms + 1;
-    let mut trend = Vec::with_capacity(
-        usize::try_from(bucket_count)
-            .map_err(|_| TrafficHistoryError::InvalidQuery("趋势分桶数量超出平台范围".into()))?,
-    );
-    for index in 0..bucket_count {
-        trend.push(TrafficTrendPoint {
-            timestamp_ms: query
-                .start_ms
-                .saturating_add(index.saturating_mul(query.bucket_ms)),
-            ..TrafficTrendPoint::default()
-        });
-    }
-    for row in rows {
-        let (index, upload, download) = row?;
-        let index = usize::try_from(index)
-            .map_err(|_| TrafficHistoryError::ValueOutOfRange("趋势分桶索引".into()))?;
-        let point = trend.get_mut(index).ok_or_else(|| {
-            TrafficHistoryError::InvalidQuery("SQLite 返回了范围外的趋势分桶".into())
-        })?;
-        point.upload = from_sql_integer(upload, "趋势上传字节")?;
-        point.download = from_sql_integer(download, "趋势下载字节")?;
-    }
-    Ok(trend)
-}
-
-fn aggregate_totals(
-    upload: i64,
-    download: i64,
-    samples: i64,
-) -> TrafficHistoryResult<TrafficTotals> {
-    let upload = from_sql_integer(upload, "上传字节")?;
-    let download = from_sql_integer(download, "下载字节")?;
-    let total = upload
-        .checked_add(download)
-        .ok_or_else(|| TrafficHistoryError::ValueOutOfRange("流量总字节溢出 u64".into()))?;
-    Ok(TrafficTotals {
-        upload,
-        download,
-        total,
-        samples: from_sql_integer(samples, "样本数量")?,
-    })
-}
-
 fn to_sql_integer(value: u64, label: &str) -> TrafficHistoryResult<i64> {
     i64::try_from(value).map_err(|_| TrafficHistoryError::ValueOutOfRange(label.to_owned()))
-}
-
-fn from_sql_integer(value: i64, label: &str) -> TrafficHistoryResult<u64> {
-    u64::try_from(value).map_err(|_| TrafficHistoryError::ValueOutOfRange(label.to_owned()))
 }
 
 fn unix_millis() -> u64 {

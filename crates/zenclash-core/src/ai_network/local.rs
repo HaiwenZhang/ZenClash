@@ -7,9 +7,7 @@ pub(super) fn proxy(tun: Option<bool>) -> CheckResult {
     let system = SystemProxyManager::detect()
         .and_then(|manager| manager.status())
         .ok();
-    let enabled = system
-        .as_ref()
-        .map(|status| status.enabled || status.secure_enabled || status.auto_enabled);
+    let enabled = system.as_ref().map(|status| status.active());
     let variables: Vec<_> = [
         "HTTP_PROXY",
         "HTTPS_PROXY",

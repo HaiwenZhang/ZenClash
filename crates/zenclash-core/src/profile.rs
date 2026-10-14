@@ -20,6 +20,25 @@ impl From<PathBuf> for ProfileRuntimeSource {
     }
 }
 
+/// One parsed source document from which related effective payloads are composed.
+pub(crate) struct ProfileSourceDocument {
+    yaml: Value,
+}
+
+impl ProfileSourceDocument {
+    pub(crate) fn read(path: &Path) -> MihomoResult<Self> {
+        Ok(Self {
+            yaml: read_yaml(path, "基础配置")?,
+        })
+    }
+
+    pub(crate) fn patched_payload(&self, patch: Value) -> MihomoResult<String> {
+        let mut document = self.yaml.clone();
+        merge_yaml(&mut document, patch);
+        serialize_profile(&document)
+    }
+}
+
 pub(crate) fn merge_payload_patch(payload: &str, patch: Value) -> MihomoResult<String> {
     let mut document = parse_payload(payload)?;
     merge_yaml(&mut document, patch);
@@ -47,9 +66,7 @@ pub fn merge_profile_overrides(
 }
 
 pub fn merge_profile_patch(profile: &Path, patch: Value) -> MihomoResult<String> {
-    let mut document = read_yaml(profile, "基础配置")?;
-    merge_yaml(&mut document, patch);
-    serialize_profile(&document)
+    ProfileSourceDocument::read(profile)?.patched_payload(patch)
 }
 
 pub fn merge_payload_overrides(payload: &str, overrides: &[PathBuf]) -> MihomoResult<String> {

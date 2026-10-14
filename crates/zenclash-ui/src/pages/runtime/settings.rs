@@ -1,44 +1,13 @@
 use super::{
     AutostartStatus, Button, Context, Disableable, FluentBuilder, HideTrafficIcon, IconName,
-    IntoElement, Page, ParentElement, RuntimeConfig, RuntimeData, RuntimePage, Selectable,
-    SetDarkTheme, SetLightTheme, SetSystemTheme, ShowTrafficIcon, Sizable, Styled, div, h_flex, px,
+    IntoElement, Page, PageSnapshotData, ParentElement, RuntimeConfig, RuntimePage, Selectable,
+    SetDarkTheme, SetLightTheme, SetSystemTheme, ShowTrafficIcon, Sizable, Styled, div, h_flex,
     setting_card, v_flex,
 };
-use crate::components::sidebar::dispatch_navigate;
+use crate::app::navigation::dispatch_navigate;
 use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_kit::{InteractiveElement, ScrollHandle, TestSupportExt};
-
-pub(super) struct SettingsNavigationState {
-    pub(super) scroll: ScrollHandle,
-    pub(super) resource_search: gpui_kit::Entity<gpui_kit::component::input::InputState>,
-}
-
-impl SettingsNavigationState {
-    pub(super) fn new(
-        window: &mut gpui_kit::Window,
-        cx: &mut Context<RuntimePage>,
-    ) -> (Self, gpui_kit::Subscription) {
-        use gpui_kit::AppContext;
-        use gpui_kit::component::input::{InputEvent, InputState};
-        let search = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(zenclash_i18n::text("settings_redesign.search_resources"))
-        });
-        let subscription = cx.subscribe(&search, |_, _, event, cx| {
-            if matches!(event, InputEvent::Change) {
-                cx.notify();
-            }
-        });
-        (
-            Self {
-                scroll: ScrollHandle::default(),
-                resource_search: search,
-            },
-            subscription,
-        )
-    }
-}
+use gpui_kit::{InteractiveElement, TestSupportExt};
 
 mod app_update;
 pub(super) mod backup;
@@ -46,6 +15,7 @@ mod choice;
 mod core_management;
 pub(super) mod forms;
 mod legal;
+pub(in crate::pages::runtime) mod runtime_read;
 pub(in crate::pages::runtime) use core_management::CoreManagementUiState;
 
 impl RuntimePage {
@@ -55,8 +25,8 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let (config, autostart) = match &self.data {
-            RuntimeData::Settings { config, autostart } => {
+        let (config, autostart) = match self.page_observation.data() {
+            PageSnapshotData::Settings { config, autostart } => {
                 (config.as_ref(), autostart.as_ref().ok())
             }
             _ => (None, None),
@@ -332,7 +302,7 @@ impl RuntimePage {
                 )
             })??;
             let config = client.runtime_config().await.ok();
-            Ok::<_, String>(RuntimeData::Settings {
+            Ok::<_, String>(PageSnapshotData::Settings {
                 config,
                 autostart: Ok(status),
             })
@@ -390,7 +360,7 @@ impl RuntimePage {
             ))
             .child(
                 h_flex()
-                    .min_h(px(58.))
+                    .min_h(gpui_kit::rems(3.625))
                     .px_4()
                     .gap_3()
                     .justify_between()
@@ -596,7 +566,7 @@ fn theme_setting(
 
 fn tray_setting(theme: &gpui_kit::component::Theme, visible: bool) -> gpui_kit::Div {
     h_flex()
-        .min_h(px(58.))
+        .min_h(gpui_kit::rems(3.625))
         .px_4()
         .py_3()
         .gap_3()
@@ -629,3 +599,6 @@ fn tray_setting(theme: &gpui_kit::component::Theme, visible: bool) -> gpui_kit::
                 }),
         )
 }
+
+#[cfg(test)]
+mod ui_tests;

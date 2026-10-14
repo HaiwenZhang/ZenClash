@@ -1,145 +1,49 @@
 #[cfg(any(target_os = "windows", test))]
 use super::SystemProxyStatus;
 #[cfg(target_os = "windows")]
-use super::command::run_checked;
-#[cfg(any(target_os = "windows", test))]
-use crate::{MihomoError, MihomoResult};
+use crate::MihomoResult;
 
+#[cfg(any(target_os = "windows", test))]
+mod connection_options;
+#[cfg(any(target_os = "windows", test))]
+mod snapshot;
 #[cfg(target_os = "windows")]
-const INTERNET_SETTINGS: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+pub(super) use snapshot::{WinInetProxySnapshot as ProxySnapshot, apply, capture, restore};
 
 #[cfg(target_os = "windows")]
 pub(super) fn detect() -> MihomoResult<String> {
-    query_value("ProxyEnable")?;
+    status("WinINET")?;
     Ok("WinINET".into())
 }
-
 #[cfg(target_os = "windows")]
 pub(super) fn status(service: &str) -> MihomoResult<SystemProxyStatus> {
-    let enabled = query_value("ProxyEnable")?
-        .split_whitespace()
-        .last()
-        .is_some_and(|value| value == "0x1" || value == "1");
-    let server_output = match query_value("ProxyServer") {
-        Ok(output) => output,
-        Err(_) if !enabled => String::new(),
-        Err(error) => return Err(error),
-    };
-    let value = server_output
-        .lines()
-        .find_map(|line| line.split_once("REG_SZ").map(|(_, value)| value.trim()))
-        .unwrap_or_default();
-    let (server, port, secure_server, secure_port) =
-        parse_proxy_server(value).map_err(MihomoError::Process)?;
-    let bypass = query_value("ProxyOverride")
-        .ok()
-        .and_then(|output| registry_string_value(&output))
-        .map_or_else(Vec::new, |value| parse_bypass(&value));
-    let auto_url = query_value("AutoConfigURL")
-        .ok()
-        .and_then(|output| registry_string_value(&output))
-        .unwrap_or_default();
-    Ok(SystemProxyStatus {
-        service: service.to_owned(),
-        enabled: enabled && !server.is_empty() && port > 0,
-        server,
-        port,
-        secure_enabled: enabled && !secure_server.is_empty() && secure_port > 0,
-        secure_server,
-        secure_port,
-        bypass,
-        auto_enabled: !auto_url.is_empty(),
-        auto_url,
-    })
+    connection_options::default_connection_status(service, connection_options::query_default)
 }
-
 #[cfg(target_os = "windows")]
 pub(super) fn set_enabled(
-    _service: &str,
+    service: &str,
     enabled: bool,
-    server: &str,
+    host: &str,
     port: u16,
     bypass: &[String],
 ) -> MihomoResult<()> {
-    let update = update_registry(enabled, server, port, bypass);
-    let notification = notify_wininet();
-    combine_update_and_notification(update, notification)
+    let before = capture(super::native::NativeProxyTarget::Service(service))?;
+    let change = if enabled {
+        super::native::NativeProxyChange::Manual { host, port, bypass }
+    } else {
+        super::native::NativeProxyChange::Disable
+    };
+    apply(&before, &change).result.map(drop)
 }
-
 #[cfg(target_os = "windows")]
-fn update_registry(enabled: bool, server: &str, port: u16, bypass: &[String]) -> MihomoResult<()> {
-    if !enabled {
-        set_proxy_enabled(false)?;
-        return add_value("AutoConfigURL", "REG_SZ", "");
-    }
-
-    // ProxyEnable is cleared before updating an existing WinINET proxy. It is
-    // restored only after both the endpoint and bypass list are complete.
-    set_proxy_enabled(false)?;
-    add_value("AutoConfigURL", "REG_SZ", "")?;
-    let proxy = format!("http={server}:{port};https={server}:{port}");
-    add_value("ProxyServer", "REG_SZ", &proxy)?;
-    add_value("ProxyOverride", "REG_SZ", &bypass.join(";"))?;
-    set_proxy_enabled(true)
-}
-
-#[cfg(target_os = "windows")]
-pub(super) fn set_pac_enabled(_service: &str, enabled: bool, url: &str) -> MihomoResult<()> {
-    let update = update_pac_registry(enabled, url);
-    let notification = notify_wininet();
-    combine_update_and_notification(update, notification)
-}
-
-#[cfg(target_os = "windows")]
-fn update_pac_registry(enabled: bool, url: &str) -> MihomoResult<()> {
-    set_proxy_enabled(false)?;
-    add_value("AutoConfigURL", "REG_SZ", if enabled { url } else { "" })
-}
-
-#[cfg(target_os = "windows")]
-pub(super) fn restore_snapshot(previous: &SystemProxyStatus) -> MihomoResult<()> {
-    let proxy = snapshot_proxy_server(previous)?;
-    let update = (|| {
-        set_proxy_enabled(false)?;
-        add_value("AutoConfigURL", "REG_SZ", "")?;
-        add_value("ProxyServer", "REG_SZ", &proxy)?;
-        add_value("ProxyOverride", "REG_SZ", &previous.bypass.join(";"))?;
-        add_value("AutoConfigURL", "REG_SZ", &previous.auto_url)?;
-        set_proxy_enabled(previous.enabled || previous.secure_enabled)
-    })();
-    combine_update_and_notification(update, notify_wininet())
-}
-
-fn snapshot_proxy_server(previous: &SystemProxyStatus) -> MihomoResult<String> {
-    let active = previous.enabled || previous.secure_enabled;
-    let mut entries = Vec::new();
-    for (scheme, enabled, host, port) in [
-        ("http", previous.enabled, &previous.server, previous.port),
-        (
-            "https",
-            previous.secure_enabled,
-            &previous.secure_server,
-            previous.secure_port,
-        ),
-    ] {
-        if host.is_empty() && port == 0 && !enabled {
-            continue;
-        }
-        // WinINET has one manual enable bit; an enabled snapshot cannot also
-        // contain a configured but individually disabled protocol endpoint.
-        if host.is_empty() || port == 0 || (active && !enabled) {
-            return Err(MihomoError::Process(zenclash_i18n::text(
-                "system_proxy.errors.verification",
-            )));
-        }
-        entries.push(format!("{scheme}={host}:{port}"));
-    }
-    if previous.auto_enabled == previous.auto_url.is_empty() {
-        return Err(MihomoError::Process(zenclash_i18n::text(
-            "system_proxy.errors.verification",
-        )));
-    }
-    Ok(entries.join(";"))
+pub(super) fn set_pac_enabled(service: &str, enabled: bool, url: &str) -> MihomoResult<()> {
+    let before = capture(super::native::NativeProxyTarget::Service(service))?;
+    let change = if enabled {
+        super::native::NativeProxyChange::Pac { url }
+    } else {
+        super::native::NativeProxyChange::Disable
+    };
+    apply(&before, &change).result.map(drop)
 }
 
 #[cfg(target_os = "windows")]
@@ -147,64 +51,27 @@ fn notify_wininet() -> MihomoResult<()> {
     use std::ptr;
 
     use windows_sys::Win32::Networking::WinInet::{
-        INTERNET_OPTION_REFRESH, INTERNET_OPTION_SETTINGS_CHANGED, InternetSetOptionW,
+        INTERNET_OPTION_PROXY_SETTINGS_CHANGED, INTERNET_OPTION_REFRESH,
+        INTERNET_OPTION_SETTINGS_CHANGED, InternetSetOptionW,
     };
 
-    for option in [INTERNET_OPTION_SETTINGS_CHANGED, INTERNET_OPTION_REFRESH] {
-        // SAFETY: A null internet handle applies the option globally. Both
-        // options take no buffer, as required by the WinINet API contract.
+    for option in [
+        INTERNET_OPTION_SETTINGS_CHANGED,
+        INTERNET_OPTION_PROXY_SETTINGS_CHANGED,
+        INTERNET_OPTION_REFRESH,
+    ] {
+        // SAFETY: Both options are bufferless; no borrowed data enters WinINET.
+        // Notification rejection is an operation failure, retaining GetLastError.
         let succeeded = unsafe { InternetSetOptionW(ptr::null(), option, ptr::null(), 0) };
         if succeeded == 0 {
-            return Err(MihomoError::Process(format!(
-                "通知 WinINET 刷新代理设置失败：{}",
-                std::io::Error::last_os_error()
-            )));
+            return Err(crate::SystemProxyError::PlatformIo {
+                backend: crate::SystemProxyBackendKind::WinInet,
+                operation: "InternetSetOptionW",
+                source: std::io::Error::last_os_error(),
+            }
+            .into());
         }
     }
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn combine_update_and_notification(
-    update: MihomoResult<()>,
-    notification: MihomoResult<()>,
-) -> MihomoResult<()> {
-    match (update, notification) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-        (Err(update), Err(notification)) => Err(MihomoError::Process(format!(
-            "更新系统代理失败：{update}；刷新 WinINET 设置也失败：{notification}"
-        ))),
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn set_proxy_enabled(enabled: bool) -> MihomoResult<()> {
-    add_value("ProxyEnable", "REG_DWORD", if enabled { "1" } else { "0" })
-}
-
-#[cfg(target_os = "windows")]
-fn query_value(name: &str) -> MihomoResult<String> {
-    let output = run_checked("reg.exe", &["query", INTERNET_SETTINGS, "/v", name])?;
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-#[cfg(target_os = "windows")]
-fn add_value(name: &str, value_type: &str, value: &str) -> MihomoResult<()> {
-    run_checked(
-        "reg.exe",
-        &[
-            "add",
-            INTERNET_SETTINGS,
-            "/v",
-            name,
-            "/t",
-            value_type,
-            "/d",
-            value,
-            "/f",
-        ],
-    )?;
     Ok(())
 }
 
@@ -222,6 +89,10 @@ fn parse_proxy_server(value: &str) -> Result<(String, u16, String, u16), String>
         if port == 0 {
             return Err("WinINET 代理端口不能为 0".to_owned());
         }
+        let server = server
+            .strip_prefix('[')
+            .and_then(|server| server.strip_suffix(']'))
+            .unwrap_or(server);
         Ok((server.to_owned(), port))
     };
     if value.trim().is_empty() {
@@ -246,13 +117,6 @@ fn parse_proxy_server(value: &str) -> Result<(String, u16, String, u16), String>
     Ok((http.0, http.1, https.0, https.1))
 }
 
-fn registry_string_value(output: &str) -> Option<String> {
-    output.lines().find_map(|line| {
-        line.split_once("REG_SZ")
-            .map(|(_, value)| value.trim().to_owned())
-    })
-}
-
 fn parse_bypass(value: &str) -> Vec<String> {
     value
         .split(';')
@@ -264,71 +128,7 @@ fn parse_bypass(value: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        SystemProxyStatus, parse_bypass, parse_proxy_server, registry_string_value,
-        snapshot_proxy_server,
-    };
-
-    #[test]
-    fn restore_mapping_preserves_distinct_endpoints_with_manual_and_pac_enabled() {
-        let previous = SystemProxyStatus {
-            enabled: true,
-            server: "http.original.test".into(),
-            port: 8080,
-            secure_enabled: true,
-            secure_server: "https.original.test".into(),
-            secure_port: 8443,
-            auto_enabled: true,
-            auto_url: "http://pac.original.test/pac".into(),
-            ..Default::default()
-        };
-        let stored = snapshot_proxy_server(&previous).unwrap();
-        assert_eq!(
-            parse_proxy_server(&stored).unwrap(),
-            (previous.server, 8080, previous.secure_server, 8443)
-        );
-    }
-
-    #[test]
-    fn restore_mapping_keeps_disabled_cached_endpoints_and_accepts_absent_ones() {
-        let mut previous = SystemProxyStatus::default();
-        assert_eq!(snapshot_proxy_server(&previous).unwrap(), "");
-        previous.server = "http.cached.test".into();
-        previous.port = 8080;
-        previous.secure_server = "https.cached.test".into();
-        previous.secure_port = 8443;
-        let stored = snapshot_proxy_server(&previous).unwrap();
-        assert_eq!(
-            parse_proxy_server(&stored).unwrap(),
-            (previous.server, 8080, previous.secure_server, 8443)
-        );
-    }
-
-    #[test]
-    fn restore_mapping_retains_single_enabled_protocol_without_enabling_another() {
-        for secure in [false, true] {
-            let mut previous = SystemProxyStatus::default();
-            if secure {
-                previous.secure_enabled = true;
-                previous.secure_server = "secure.test".into();
-                previous.secure_port = 8443;
-            } else {
-                previous.enabled = true;
-                previous.server = "http.test".into();
-                previous.port = 8080;
-            }
-            let stored = snapshot_proxy_server(&previous).unwrap();
-            assert_eq!(
-                parse_proxy_server(&stored).unwrap(),
-                (
-                    previous.server,
-                    previous.port,
-                    previous.secure_server,
-                    previous.secure_port
-                )
-            );
-        }
-    }
+    use super::{parse_bypass, parse_proxy_server};
 
     #[test]
     fn parses_protocol_specific_proxy_server() {
@@ -373,17 +173,6 @@ mod tests {
         assert_eq!(
             parse_bypass("localhost;127.*;*.example.com;<local>"),
             ["localhost", "127.*", "*.example.com", "<local>"]
-        );
-    }
-
-    #[test]
-    fn extracts_registry_string_value_without_command_columns() {
-        assert_eq!(
-            registry_string_value(
-                "    ProxyOverride    REG_SZ    localhost;127.*;*.example.com\r\n"
-            )
-            .as_deref(),
-            Some("localhost;127.*;*.example.com")
         );
     }
 }

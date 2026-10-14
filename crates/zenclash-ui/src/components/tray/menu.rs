@@ -135,7 +135,7 @@ pub(super) fn build_menu(
             let delay_test = builder.item(
                 zenclash_i18n::text("tray.test_group"),
                 TrayCommand::TestGroup {
-                    group: group.name.clone(),
+                    group: group.controller_name().to_owned(),
                     automatic: group.automatic,
                     test_url: group.test_url.clone(),
                 },
@@ -158,7 +158,7 @@ pub(super) fn build_menu(
                     format!("{}{delay}", proxy.name),
                     proxy.name == group.now,
                     TrayCommand::SelectProxy {
-                        group: group.name.clone(),
+                        group: group.controller_name().to_owned(),
                         proxy: proxy.name.clone(),
                     },
                 );

@@ -5,11 +5,11 @@ use std::{
     sync::Arc,
 };
 
-use crate::{MihomoProcess, service_runtime_session::ServiceRuntimeSession};
+use crate::{ManagedCoreProcess, service_runtime_session::ServiceRuntimeSession};
 
 #[derive(Clone)]
 pub(crate) enum OwnedCore {
-    Local(Arc<MihomoProcess>),
+    Local(Arc<ManagedCoreProcess>),
     Service(Arc<ServiceRuntimeSession>),
 }
 

@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc};
 
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme, ThemeMode, TitleBar, WindowExt, h_flex, v_flex};
@@ -7,8 +7,6 @@ use gpui_kit::{
     InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, SharedString, Styled,
     Subscription, Window, WindowBounds, WindowOptions, div, px,
 };
-#[cfg(target_os = "macos")]
-use gpui_kit::{Pixels, Size};
 use zenclash_core::{
     AppPreferences, AppPreferencesStore, AppearancePreference, ControlledConfigStore, CoreKind,
     CoreSession, LogMonitor, MihomoClient, MihomoLogLevel, OperationalStatus, ServiceManager,
@@ -19,18 +17,25 @@ use zenclash_core::{
 mod actions;
 mod automatic;
 mod bootstrap;
+mod menu_preferences;
+pub(crate) mod navigation;
+mod outbound_mode;
 pub(crate) mod platform;
+mod preferences;
 mod profile_updates;
 mod system_proxy;
+#[cfg(test)]
+mod test_support;
 mod traffic_history;
 mod tray;
 mod view;
+mod window;
 
 pub use bootstrap::{
     BootstrappedApplication, create_main_window, create_main_window_with_pending_startup,
     create_main_window_with_service_startup, init, reopen_main_window,
 };
-use platform::{open_directory, tray_directories};
+use platform::open_directory;
 pub use traffic_history::TrafficHistorySession;
 
 /// Process arguments prepared only after capture and kernel shutdown succeeds.
@@ -40,12 +45,12 @@ pub struct RestartRequest {
     /// Explicit local-kernel choice for the new session.
     pub continue_local: bool,
 }
+use crate::outbound_mode::{OutboundMode, OutboundModeCoordinator};
 use tray::LatestCommandQueue;
 
 use crate::{
     components::{
-        mode::OutboundModeCoordinator,
-        sidebar::{OutboundMode, Sidebar},
+        sidebar::Sidebar,
         tray::{
             EnvironmentShell, NetworkTrayIcon, TrayClick, TrayCommand, TrayEvent, TrayMenuState,
             TrayProfile, TrayProxyGroup, TrayProxyNode,
@@ -116,7 +121,7 @@ pub struct ZenClashApp {
     outbound_mode: OutboundModeCoordinator,
     core_kind: CoreKind,
     core_session: CoreSession,
-    profile_service: crate::ProfileService,
+    application_commands: crate::ApplicationCommands,
     client: MihomoClient,
     traffic_monitor: Arc<TrafficMonitor>,
     runtime: tokio::runtime::Handle,
@@ -129,10 +134,11 @@ pub struct ZenClashApp {
     main_window: AnyWindowHandle,
     main_window_visible: bool,
     #[cfg(target_os = "macos")]
-    main_window_memory: MainWindowMemoryState,
+    main_window_restore_size: window::MainWindowRestoreSize,
     status_panel: Option<AnyWindowHandle>,
     status_panel_traffic: tray::panel::TrafficHistory,
     tray_state: TrayMenuState,
+    tray_observation: Option<zenclash_core::CoreObservationIdentity>,
     tray_current_node: Option<(OutboundMode, String)>,
     tray_error: Option<String>,
     tray_command_error: Option<String>,
@@ -146,37 +152,18 @@ pub struct ZenClashApp {
     traffic_capture: TrafficCaptureSession,
     quit_state: system_proxy::QuitState,
     tun_commands: LatestCommandQueue<bool>,
-    proxy_selection_commands: LatestCommandQueue<(String, String)>,
+    proxy_selection_commands: LatestCommandQueue<tray::proxy_commands::TrayProxySelectionRequest>,
     profile_selection_commands: LatestCommandQueue<String>,
     network_tray: Option<NetworkTrayIcon>,
     preferences_store: Option<AppPreferencesStore>,
     preferences: AppPreferences,
     preferences_save_task: Option<tokio::task::JoinHandle<()>>,
+    menu_preference_saves: menu_preferences::MenuPreferenceSaves,
+    preferences_reconciliation_read: Option<preferences::PreferenceReconciliationRead>,
     restart_after_exit: Arc<parking_lot::Mutex<Option<RestartRequest>>>,
     log_monitor: Arc<LogMonitor>,
     traffic_history_session: Option<Arc<TrafficHistorySession>>,
     _subscriptions: Vec<Subscription>,
-}
-
-#[cfg(target_os = "macos")]
-#[derive(Default)]
-struct MainWindowMemoryState {
-    restore_size: Option<Size<Pixels>>,
-}
-
-#[cfg(target_os = "macos")]
-impl MainWindowMemoryState {
-    fn park(&mut self, current_size: Size<Pixels>) -> Size<Pixels> {
-        let parked_size = gpui_kit::size(px(1.), px(1.));
-        if current_size != parked_size && self.restore_size.is_none() {
-            self.restore_size = Some(current_size);
-        }
-        parked_size
-    }
-
-    fn restore(&mut self) -> Option<Size<Pixels>> {
-        self.restore_size.take()
-    }
 }
 
 /// Runtime services supplied to the application window.
@@ -255,7 +242,8 @@ impl ZenClashApp {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         let main_window = window.window_handle();
-        let proxies_page = cx.new(|cx| ProxiesPage::new(client.clone(), runtime.clone(), cx));
+        let proxies_page =
+            cx.new(|cx| ProxiesPage::new_with_session(core_session.clone(), runtime.clone(), cx));
         let app_profile_path = profile_path.clone();
         let app_controlled_config_store = controlled_config_store.clone();
         let system_proxy_controller = SystemProxyController::default();
@@ -285,11 +273,11 @@ impl ZenClashApp {
                 let _ = service_health.refresh_health().await;
             });
         }
-        let profile_service =
-            crate::ProfileService::new(core_session.clone(), override_store.clone())
+        let application_commands =
+            crate::ApplicationCommands::new(core_session.clone(), override_store.clone())
                 .with_service_manager(service_manager);
         if let Some(initialization) = initialization.as_ref() {
-            profile_service.record_service_initialization(initialization);
+            application_commands.record_service_initialization(initialization);
         }
         let runtime_page = cx.new(|cx| {
             RuntimePage::new(
@@ -299,7 +287,7 @@ impl ZenClashApp {
                     override_store,
                     core_kind,
                     core_session: core_session.clone(),
-                    profile_service: profile_service.clone(),
+                    profile_service: application_commands.clone(),
                     client: client.clone(),
                     runtime: runtime.clone(),
                     traffic_monitor: traffic_monitor.clone(),
@@ -358,7 +346,7 @@ impl ZenClashApp {
             outbound_mode: OutboundModeCoordinator::new_unsynchronized(OutboundMode::default()),
             core_kind,
             core_session,
-            profile_service,
+            application_commands,
             client,
             traffic_monitor,
             runtime,
@@ -371,10 +359,11 @@ impl ZenClashApp {
             main_window,
             main_window_visible: true,
             #[cfg(target_os = "macos")]
-            main_window_memory: MainWindowMemoryState::default(),
+            main_window_restore_size: window::MainWindowRestoreSize::default(),
             status_panel: None,
             status_panel_traffic: tray::panel::TrafficHistory::default(),
             tray_state: TrayMenuState::default(),
+            tray_observation: None,
             tray_current_node: None,
             tray_error: None,
             tray_command_error: None,
@@ -394,6 +383,8 @@ impl ZenClashApp {
             preferences_store,
             preferences,
             preferences_save_task: None,
+            menu_preference_saves: Default::default(),
+            preferences_reconciliation_read: None,
             restart_after_exit,
             log_monitor,
             traffic_history_session,
@@ -481,7 +472,7 @@ impl ZenClashApp {
         let sidebar_collapsed = self.sidebar_collapsed;
         let window_visible = self.main_window_visible;
         #[cfg(target_os = "macos")]
-        let window_memory = std::mem::take(&mut self.main_window_memory);
+        let restore_size = std::mem::take(&mut self.main_window_restore_size);
         // The status panel must follow the newly published runtime as well.
         if let Some(handle) = self.status_panel.take() {
             let _ = cx.update_window(handle, |_, window, _| window.remove_window());
@@ -498,7 +489,7 @@ impl ZenClashApp {
         self.sidebar_collapsed = sidebar_collapsed;
         #[cfg(target_os = "macos")]
         {
-            self.main_window_memory = window_memory;
+            self.main_window_restore_size = restore_size;
         }
         self.navigate(page, cx);
         if !window_visible {
@@ -512,7 +503,7 @@ impl ZenClashApp {
         cx: &mut Context<Self>,
     ) -> Subscription {
         cx.subscribe(runtime_page, |this, _, event: &ProfileActivated, cx| {
-            let snapshot = this.profile_service.committed_profile();
+            let snapshot = this.application_commands.committed_profile();
             let path = if snapshot.generation == event.runtime_version {
                 event.path.clone()
             } else if let Some(path) = snapshot.profile_path {
@@ -558,70 +549,10 @@ impl ZenClashApp {
         runtime_page: &Entity<RuntimePage>,
         cx: &mut Context<Self>,
     ) -> Subscription {
-        let runtime_page_for_localization = runtime_page.clone();
         cx.subscribe(
             runtime_page,
             move |this, _, event: &PreferencesRestored, cx| {
-                let previous_language = this.preferences.language;
-                event.scope.apply(&mut this.preferences, &event.preferences);
-                if previous_language != this.preferences.language {
-                    zenclash_i18n::set_locale(this.preferences.language.locale());
-                    bootstrap::refresh_native_app_menu(cx);
-                    this.proxies_page.update(cx, |_, cx| cx.notify());
-                    let runtime_page = runtime_page_for_localization.clone();
-                    let proxies_page = this.proxies_page.clone();
-                    let main_window = this.main_window;
-                    cx.defer(move |cx| {
-                        let _ = cx.update_window(main_window, |_, window, cx| {
-                            proxies_page.update(cx, |page, cx| {
-                                page.refresh_localized_placeholders(window, cx);
-                            });
-                            runtime_page.update(cx, |page, cx| {
-                                page.refresh_localized_placeholders(window, cx);
-                            });
-                        });
-                    });
-                }
-                use crate::pages::runtime::PreferenceScope;
-                if matches!(
-                    event.scope,
-                    PreferenceScope::Restore | PreferenceScope::TrafficHistory
-                ) && let Some(history) = &this.traffic_history_session
-                {
-                    history.update_preferences(&this.preferences);
-                }
-                if event.scope == PreferenceScope::Restore {
-                    if let Err(error) = bootstrap::configure_log_monitor(
-                        &this.log_monitor,
-                        this.preferences_store.as_ref(),
-                        &this.preferences,
-                    ) {
-                        tracing::warn!(%error, "failed to apply restored log persistence settings");
-                    }
-                    let traffic = this.traffic_monitor.snapshot();
-                    if let Some(tray) = this.network_tray.as_mut() {
-                        if let Err(error) =
-                            tray.set_display(this.preferences.tray_display, &traffic)
-                        {
-                            tracing::warn!(%error, "failed to apply restored tray display");
-                        }
-                        if let Err(error) = tray.set_visible(this.preferences.traffic_tray_visible)
-                        {
-                            tracing::warn!(%error, "failed to apply restored tray visibility");
-                        }
-                    }
-                    let appearance = this.preferences.appearance;
-                    let _ = cx.update_window(this.main_window, move |_, window, cx| {
-                        let mode = match appearance {
-                            AppearancePreference::System => ThemeMode::from(window.appearance()),
-                            AppearancePreference::Light => ThemeMode::Light,
-                            AppearancePreference::Dark => ThemeMode::Dark,
-                        };
-                        apply_zen_theme(mode, Some(window), cx);
-                    });
-                }
-                this.refresh_tray_menu(cx);
-                cx.notify();
+                this.accept_preferences_event(event, cx);
             },
         )
     }
@@ -716,10 +647,10 @@ impl ZenClashApp {
                         }
                         if mode_changed {
                             let displayed = mode.displayed();
-                            this.proxies_page.update(cx, |page, cx| {
-                                page.set_outbound_mode(displayed.api_value(), cx);
-                            });
                             let pending = mode.is_pending();
+                            this.proxies_page.update(cx, |page, cx| {
+                                page.synchronize_outbound_mode(displayed.api_value(), pending, cx);
+                            });
                             let error = mode.error();
                             if error != this.mode_error {
                                 this.mode_error = error.clone();
@@ -768,64 +699,5 @@ impl ZenClashApp {
             }
         })
         .detach();
-    }
-
-    fn start_mode_sync(&mut self, cx: &mut Context<Self>) {
-        let client = self.client.clone();
-        let runtime = self.runtime.clone();
-        let mode = self.outbound_mode.clone();
-        let logs = self.log_monitor.clone();
-        cx.spawn(async move |this, _cx| {
-            loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                let generation = mode.generation();
-                let client = client.clone();
-                let task = runtime.spawn(async move { client.runtime_config().await });
-                match task.await {
-                    Ok(Ok(config)) => {
-                        mode.synchronize(OutboundMode::from_api(&config.mode), generation);
-                        if let Some(level) = MihomoLogLevel::from_api(&config.log_level) {
-                            logs.set_level(level);
-                        }
-                    }
-                    Ok(Err(error)) => {
-                        tracing::debug!(%error, "failed to synchronize Mihomo outbound mode");
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "outbound mode synchronization task failed")
-                    }
-                }
-                if this.upgrade().is_none() {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod memory_tests {
-    use super::*;
-
-    #[test]
-    fn parked_main_window_restores_its_previous_size() {
-        let mut state = MainWindowMemoryState::default();
-        let visible_size = gpui_kit::size(px(1280.), px(820.));
-
-        assert_eq!(state.park(visible_size), gpui_kit::size(px(1.), px(1.)));
-        assert_eq!(state.restore(), Some(visible_size));
-        assert_eq!(state.restore(), None);
-    }
-
-    #[test]
-    fn repeated_parking_does_not_forget_the_visible_size() {
-        let mut state = MainWindowMemoryState::default();
-        let visible_size = gpui_kit::size(px(960.), px(640.));
-
-        state.park(visible_size);
-        state.park(gpui_kit::size(px(1.), px(1.)));
-
-        assert_eq!(state.restore(), Some(visible_size));
     }
 }

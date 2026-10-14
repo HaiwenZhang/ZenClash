@@ -96,7 +96,7 @@ fn aggregate(
 pub(super) struct HomeFlowState {
     epoch: Arc<AtomicU64>,
     gate: Arc<tokio::sync::Mutex<()>>,
-    task: super::super::loader::PageReadTask,
+    task: super::super::page_observation::PageReadTask,
     in_flight: bool,
     generation: u64,
     requested_at: Option<Instant>,
@@ -242,14 +242,14 @@ mod tests {
     }
 
     fn home_http_fixture(cx: &mut gpui_kit::TestAppContext, change_generation: bool) {
-        use crate::pages::runtime::logs::tests::{
-            log_test_services, settings_test_directory, settle_log_preferences,
+        use crate::pages::runtime::test_support::runtime_page_fixture::{
+            runtime_page_services, runtime_page_test_directory, wait_for_page_state,
         };
         use zenclash_core::{
             AppPreferences, AppPreferencesStore, CoreKind, CoreSession, MihomoClient,
             MihomoEndpoint,
         };
-        let directory = settings_test_directory("home-http");
+        let directory = runtime_page_test_directory("home-http");
         let store = AppPreferencesStore::new(directory.join("preferences.json"));
         let preferences = AppPreferences::default();
         store.update(|saved| *saved = preferences.clone()).unwrap();
@@ -267,7 +267,7 @@ mod tests {
         let endpoint =
             MihomoEndpoint::new(format!("http://{}", listener.local_addr().unwrap()), "");
         let server = runtime.spawn(serve_connection_fixture(listener));
-        let mut services = log_test_services(&runtime, &directory, &store, preferences);
+        let mut services = runtime_page_services(&runtime, &directory, &store, preferences);
         services.client = MihomoClient::new(endpoint).unwrap();
         services.core_session = CoreSession::open_with_config(
             CoreKind::Mihomo,
@@ -276,7 +276,8 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        services.profile_service = crate::ProfileService::new(services.core_session.clone(), None);
+        services.profile_service =
+            crate::ApplicationCommands::new(services.core_session.clone(), None);
         let status = services.operational_status.clone();
         cx.executor().allow_parking();
         cx.update(gpui_kit::init);
@@ -291,15 +292,14 @@ mod tests {
         );
         let page = owner.unwrap();
         cx.foreground_executor().clone().block_test(async {
-            settle_log_preferences(cx, &runtime, &page, |page| !page.persistent_loading).await;
+            wait_for_page_state(cx, &runtime, &page, |page| !page.persistent_loading).await;
             cx.update(|cx| {
                 page.update(cx, |page, cx| {
                     assert!(!page.traffic_monitor.snapshot().connected);
                     page.update_home_traffic_presentation(cx);
                 })
             });
-            settle_log_preferences(cx, &runtime, &page, |page| page.home.flow.summary.is_some())
-                .await;
+            wait_for_page_state(cx, &runtime, &page, |page| page.home.flow.summary.is_some()).await;
         });
         cx.update(|cx| {
             let page = page.read(cx);
@@ -340,7 +340,10 @@ mod tests {
                             .sparkline(2, page.home.generation)
                             .is_empty()
                     );
-                    assert_ne!(page.data_runtime_version, page.home.generation);
+                    assert_ne!(
+                        page.page_observation.configuration_generation(),
+                        page.home.generation
+                    );
                     page.prepare_home_projection();
                     assert!(page.home.projection.is_none());
                     assert!(page.home_flow_summary().is_none());
@@ -356,12 +359,15 @@ mod tests {
     }
 
     async fn serve_connection_fixture(listener: tokio::net::TcpListener) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         while let Ok((mut socket, _)) = listener.accept().await {
-            let mut request = [0; 2_048];
-            let Ok(length) = socket.read(&mut request).await else {
+            let Ok(request) =
+                zenclash_core::test_support::read_controller_request(&mut socket).await
+            else {
                 continue;
             };
+            let request = request.into_bytes();
+            let length = request.len();
             let body = if String::from_utf8_lossy(&request[..length])
                 .starts_with("GET /connections ")
             {

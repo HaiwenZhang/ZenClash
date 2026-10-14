@@ -213,7 +213,7 @@ impl RuntimePage {
                         let owner = cx.entity().downgrade();
                         let profile = this.profile_path.clone();
                         let page = this.page;
-                        let generation = this.config_inputs_generation;
+                        let generation = this.config_inputs.read_generation();
                         let navigation = this.navigation_generation;
                         let title = title.clone();
                         window.open_dialog(cx, move |dialog, window, cx| {
@@ -268,7 +268,8 @@ impl RuntimePage {
                                         .update(cx, |this, cx| {
                                             if this.page != page
                                                 || this.profile_path != profile
-                                                || this.config_inputs_generation != generation
+                                                || this.config_inputs.read_generation()
+                                                    != generation
                                                 || this.navigation_generation != navigation
                                                 || this.core_busy()
                                             {
@@ -348,7 +349,7 @@ impl RuntimePage {
                         let field = field.clone();
                         let profile = this.profile_path.clone();
                         let page = this.page;
-                        let generation = this.config_inputs_generation;
+                        let generation = this.config_inputs.read_generation();
                         let navigation = this.navigation_generation;
                         let title = title.clone();
                         let focus = draft.read(cx).focus_handle(cx);
@@ -392,7 +393,8 @@ impl RuntimePage {
                                         .update(cx, |this, cx| {
                                             if this.page != page
                                                 || this.profile_path != profile
-                                                || this.config_inputs_generation != generation
+                                                || this.config_inputs.read_generation()
+                                                    != generation
                                                 || this.navigation_generation != navigation
                                                 || this.core_busy()
                                             {

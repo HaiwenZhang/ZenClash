@@ -5,7 +5,7 @@ mod forms;
 use gpui_kit::{InteractiveElement, TestSupportExt};
 
 use super::super::{
-    Button, Disableable, FluentBuilder, IconName, IntoElement, ParentElement, RuntimeData,
+    Button, Disableable, FluentBuilder, IconName, IntoElement, PageSnapshotData, ParentElement,
     RuntimePage, Sizable, Styled, h_flex, v_flex,
 };
 
@@ -26,7 +26,7 @@ impl RuntimePage {
                     .label(zenclash_i18n::text("unified.profiles.update_all"))
                     .disabled(
                         self.core_busy()
-                            || self.profiles.store.is_none()
+                            || self.profiles.store().is_none()
                             || self.profiles.forms.catalog_view.remote_count == 0,
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.update_all_managed_profiles(cx))),
@@ -63,8 +63,8 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut gpui_kit::Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let config = match &self.data {
-            RuntimeData::Profile { config, .. } => config.as_ref(),
+        let config = match self.page_observation.data() {
+            PageSnapshotData::Profile { config, .. } => config.as_ref(),
             _ => None,
         };
         v_flex()
@@ -74,7 +74,8 @@ impl RuntimePage {
                     .prefix(gpui_kit::component::Icon::new(IconName::Search)),
             )
             .when(
-                self.profiles.recovery.is_some() || self.profiles.pending_finalization.is_some(),
+                self.profiles.recovery().is_some()
+                    || self.profiles.pending_finalization().is_some(),
                 |view| view.child(self.render_profile_recovery(theme, cx)),
             )
             .child(

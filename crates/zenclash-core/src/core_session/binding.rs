@@ -1,7 +1,7 @@
 use super::*;
 
 enum RuntimeSwitch {
-    Local(Arc<MihomoProcess>),
+    Local(Arc<ManagedCoreProcess>),
     Service(Arc<crate::service::ServiceSession>, PathBuf),
     Direct(crate::MihomoEndpoint),
 }
@@ -14,7 +14,7 @@ impl CoreSession {
     /// The original config path is identity, not a recovery payload: materialize
     /// the accepted resource bundle and verify the ordinary binary before startup.
     #[must_use]
-    pub fn local_recovery_launch(&self) -> Option<crate::MihomoLaunchConfig> {
+    pub fn local_recovery_launch(&self) -> Option<crate::CoreLaunchConfig> {
         self.client.local_recovery_launch()
     }
 
@@ -57,7 +57,7 @@ impl CoreSession {
     /// Rejects shutdown, a different core kind, stale admission, or failed retirement.
     pub async fn switch_to_process(
         &self,
-        process: Arc<MihomoProcess>,
+        process: Arc<ManagedCoreProcess>,
     ) -> Result<u64, CoreSessionError> {
         self.switch_runtime(RuntimeSwitch::Local(process)).await
     }
@@ -103,7 +103,7 @@ impl CoreSession {
             let _transition = session.transition.clone().lock_owned().await;
             client.ensure_binding_current()?;
             session.ensure_not_shutting_down()?;
-            let _run_attempt = session.begin_core_run_attempt();
+            let _availability_pause = session.pause_pac_availability();
             let before = session.runtime_descriptor().binding_generation();
             let result = match target {
                 RuntimeSwitch::Local(process) => client.switch_to_process(process).await,

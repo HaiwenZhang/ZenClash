@@ -28,10 +28,10 @@ struct HistorySummary {
 fn read_history(
     store: &TrafficHistoryStore,
     end_ms: u64,
-    epoch: &AtomicU64,
-    expected: u64,
+    invalidation_sequence: &AtomicU64,
+    expected_invalidation_sequence: u64,
 ) -> Result<Option<HistorySummary>, String> {
-    if epoch.load(Ordering::Acquire) != expected {
+    if invalidation_sequence.load(Ordering::Acquire) != expected_invalidation_sequence {
         return Ok(None);
     }
     let overview = store
@@ -42,7 +42,7 @@ fn read_history(
             bucket_ms: 60 * 60 * 1_000,
         })
         .map_err(|error| error.to_string())?;
-    if epoch.load(Ordering::Acquire) != expected {
+    if invalidation_sequence.load(Ordering::Acquire) != expected_invalidation_sequence {
         return Ok(None);
     }
     let mut ranks = overview
@@ -68,9 +68,9 @@ fn read_history(
 }
 #[derive(Default)]
 pub(super) struct HomeHistoryState {
-    epoch: Arc<AtomicU64>,
+    invalidation_sequence: Arc<AtomicU64>,
     gate: Arc<tokio::sync::Mutex<()>>,
-    task: super::super::loader::PageReadTask,
+    task: super::super::page_observation::PageReadTask,
     in_flight: bool,
     requested_at: Option<Instant>,
     source: Option<std::path::PathBuf>,
@@ -95,7 +95,7 @@ impl HomeHistoryState {
     }
 
     pub(super) fn release(&mut self) {
-        self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.invalidation_sequence.fetch_add(1, Ordering::AcqRel);
         self.task.cancel();
         self.in_flight = false;
         self.requested_at = None;
@@ -103,8 +103,12 @@ impl HomeHistoryState {
         self.summary = None;
         self.status = HistoryStatus::Loading;
     }
-    fn finish(&mut self, expected: u64, result: Result<Option<HistorySummary>, String>) -> bool {
-        if self.epoch.load(Ordering::Acquire) != expected {
+    fn finish(
+        &mut self,
+        expected_invalidation_sequence: u64,
+        result: Result<Option<HistorySummary>, String>,
+    ) -> bool {
+        if self.invalidation_sequence.load(Ordering::Acquire) != expected_invalidation_sequence {
             return false;
         }
         self.in_flight = false;
@@ -136,7 +140,7 @@ impl RuntimePage {
             self.home.history.release();
             return;
         }
-        let Some(store) = self.traffic_history_store.clone() else {
+        let Some(store) = self.traffic_history.store().cloned() else {
             if self.home.history.status != HistoryStatus::StoreUnavailable {
                 self.home.history.release();
                 self.home.history.status = HistoryStatus::StoreUnavailable;
@@ -159,8 +163,8 @@ impl RuntimePage {
         }
         state.in_flight = true;
         state.requested_at = Some(Instant::now());
-        let expected = state.epoch.load(Ordering::Acquire);
-        let epoch = state.epoch.clone();
+        let expected_invalidation_sequence = state.invalidation_sequence.load(Ordering::Acquire);
+        let invalidation_sequence = state.invalidation_sequence.clone();
         let gate = state.gate.clone();
         let generation = self.home.generation;
         let end_ms = SystemTime::now()
@@ -172,7 +176,12 @@ impl RuntimePage {
             let permit = gate.lock_owned().await;
             tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                read_history(&store, end_ms, &epoch, expected)
+                read_history(
+                    &store,
+                    end_ms,
+                    &invalidation_sequence,
+                    expected_invalidation_sequence,
+                )
             })
             .await
             .map_err(|error| error.to_string())?
@@ -188,13 +197,17 @@ impl RuntimePage {
                     || this.home.generation != generation
                     || this.core_session.generation() != generation
                     || this
-                        .traffic_history_store
-                        .as_ref()
+                        .traffic_history
+                        .store()
                         .is_none_or(|store| store.path() != source)
                 {
                     return;
                 }
-                if this.home.history.finish(expected, result) {
+                if this
+                    .home
+                    .history
+                    .finish(expected_invalidation_sequence, result)
+                {
                     cx.notify();
                 }
             });
@@ -222,7 +235,10 @@ mod tests {
 
     #[test]
     fn real_sqlite_history_keeps_exact_day_boundary_top_five_and_other_totals() {
-        let directory = crate::pages::runtime::logs::tests::settings_test_directory("home-history");
+        let directory =
+            crate::pages::runtime::test_support::runtime_page_fixture::runtime_page_test_directory(
+                "home-history",
+            );
         let store = TrafficHistoryStore::new(directory.join("history.sqlite3"));
         let end = 100_000_000;
         let start = end - DAY_MS + 1;
@@ -272,7 +288,9 @@ mod tests {
     #[test]
     fn cancelled_history_query_does_not_open_store_and_real_query_failure_is_reported() {
         let directory =
-            crate::pages::runtime::logs::tests::settings_test_directory("home-history-cancel");
+            crate::pages::runtime::test_support::runtime_page_fixture::runtime_page_test_directory(
+                "home-history-cancel",
+            );
         let missing = directory.join("not-created.sqlite3");
         let store = TrafficHistoryStore::new(&missing);
         assert!(

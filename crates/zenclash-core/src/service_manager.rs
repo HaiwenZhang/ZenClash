@@ -2,6 +2,7 @@
 // GPL-3.0-only; see the repository and service-integration NOTICE.md.
 //! Application service intents; native maintenance never owns runtime publication.
 
+use crate::core_session::RuntimeConfigurationRevision;
 use std::{future::Future, path::PathBuf, sync::Arc};
 
 use crate::service::{health::ServiceHealth, maintenance::MaintenanceError};
@@ -146,7 +147,7 @@ pub enum ServiceManagerError {
     /// The actual core or its accepted configuration changed while authorization waited.
     #[error("the current core changed")]
     Stale,
-    /// An external controller or experimental runtime cannot enter service ownership.
+    /// An external controller cannot enter service ownership.
     #[error("the actual runtime does not support service TUN")]
     Unsupported,
     /// The explicit request did not consent to a necessary native authorization flow.
@@ -193,12 +194,6 @@ impl ServiceManagerError {
     }
 }
 
-#[derive(Clone, Copy)]
-struct ServiceIntent {
-    binding: u64,
-    generation: u64,
-}
-
 /// Accepted configuration outcome, including service capture and finalization facts.
 pub enum ServiceConfigOutcome {
     /// Ordinary Local application of the immutable checked configuration.
@@ -213,7 +208,7 @@ pub enum ServiceConfigOutcome {
 /// may authorize a native prompt without replacing the original binding token.
 #[derive(Clone)]
 pub struct ServiceTunRequest {
-    intent: ServiceIntent,
+    runtime_revision: RuntimeConfigurationRevision,
     backend: CoreRuntimeBackend,
     source_home: Option<PathBuf>,
     core_source: Option<PathBuf>,
@@ -301,7 +296,7 @@ impl ServiceManager {
     /// Reading this request does not inspect files, perform IPC or grant privileges.
     ///
     /// # Errors
-    /// Rejects shutdown, external controllers, and experimental runtimes.
+    /// Rejects shutdown and external controllers.
     pub fn request_enable_tun(&self) -> Result<ServiceTunRequest, ServiceManagerError> {
         if !self.capture.shares_core_session(&self.session) {
             return Err(ServiceManagerError::Unsupported);
@@ -319,9 +314,9 @@ impl ServiceManager {
             return Err(ServiceManagerError::Unsupported);
         }
         let request = ServiceTunRequest {
-            intent: ServiceIntent {
-                binding: descriptor.binding_generation(),
-                generation: self.session.generation(),
+            runtime_revision: RuntimeConfigurationRevision {
+                binding_generation: descriptor.binding_generation(),
+                configuration_generation: self.session.generation(),
             },
             backend: descriptor.backend(),
             source_home: descriptor.home_dir().map(std::path::Path::to_owned),
@@ -336,7 +331,7 @@ impl ServiceManager {
         {
             return Err(ServiceManagerError::Unsupported);
         }
-        self.check_intent(request.intent)?;
+        self.check_runtime_revision(request.runtime_revision)?;
         Ok(request)
     }
 
@@ -356,7 +351,7 @@ impl ServiceManager {
             .held_bundle_for(&self.session)
             .map_err(|_| ServiceManagerError::Stale)?;
         request.recovery_bundle = Some(bundle);
-        self.check_intent(request.intent)?;
+        self.check_runtime_revision(request.runtime_revision)?;
         Ok(request)
     }
 
@@ -376,22 +371,18 @@ impl ServiceManager {
         .await
     }
 
-    fn intent(&self) -> ServiceIntent {
-        ServiceIntent {
-            binding: self.session.runtime_descriptor().binding_generation(),
-            generation: self.session.generation(),
-        }
-    }
-
-    fn check_intent(&self, intent: ServiceIntent) -> Result<(), ServiceManagerError> {
+    fn check_runtime_revision(
+        &self,
+        runtime_revision: RuntimeConfigurationRevision,
+    ) -> Result<(), ServiceManagerError> {
         if !self.capture.shares_core_session(&self.session) {
             return Err(ServiceManagerError::Unsupported);
         }
         if self.session.is_shutting_down() {
             return Err(ServiceManagerError::Closed);
         }
-        let current = self.intent();
-        if current.binding != intent.binding || current.generation != intent.generation {
+        let current = self.session.runtime_revision();
+        if current != runtime_revision {
             return Err(ServiceManagerError::Stale);
         }
         Ok(())
@@ -399,17 +390,17 @@ impl ServiceManager {
 
     async fn authorize_action<A>(
         &self,
-        intent: ServiceIntent,
+        runtime_revision: RuntimeConfigurationRevision,
         action: crate::service::health::PendingAction,
         authorization: A,
     ) -> Result<(), ServiceManagerError>
     where
         A: Future<Output = Result<(), MaintenanceError>> + Send,
     {
-        self.check_intent(intent)?;
+        self.check_runtime_revision(runtime_revision)?;
         let sidecar_was_allowed = self.session.run_state.store.request_action(action);
         let result = self
-            .authorize_then(intent, authorization, || async { Ok(()) })
+            .authorize_then(runtime_revision, authorization, || async { Ok(()) })
             .await;
         // A cancelled or failed installer may already have changed registration.
         // Keep typed authorization errors, and retain pending state if completion is unknown.
@@ -423,7 +414,10 @@ impl ServiceManager {
                 .send_modify(|state| state.health = Some(Arc::new(health)));
             // Match upstream's failed-action rollback, retaining ZenClash's
             // binding receipt and unknown-outcome admission protections.
-            if result.is_err() && sidecar_was_allowed && self.check_intent(intent).is_ok() {
+            if result.is_err()
+                && sidecar_was_allowed
+                && self.check_runtime_revision(runtime_revision).is_ok()
+            {
                 self.session.run_state.store.restore_sidecar_allowance();
             }
         }
@@ -432,7 +426,7 @@ impl ServiceManager {
 
     async fn authorize_then<T, A, C, F>(
         &self,
-        intent: ServiceIntent,
+        runtime_revision: RuntimeConfigurationRevision,
         authorization: A,
         completion: C,
     ) -> Result<T, ServiceManagerError>
@@ -441,11 +435,11 @@ impl ServiceManager {
         C: FnOnce() -> F + Send,
         F: Future<Output = Result<T, ServiceManagerError>> + Send,
     {
-        self.check_intent(intent)?;
+        self.check_runtime_revision(runtime_revision)?;
         self.state
             .send_modify(|state| state.phase = ServicePhase::Authorizing);
         authorization.await?;
-        self.check_intent(intent)?;
+        self.check_runtime_revision(runtime_revision)?;
         completion().await
     }
 
@@ -606,7 +600,7 @@ mod tests {
         let authorizations = AtomicUsize::new(0);
         let result = mismatched
             .authorize_then(
-                mismatched.intent(),
+                mismatched.session.runtime_revision(),
                 async {
                     authorizations.fetch_add(1, Ordering::SeqCst);
                     Ok(())
@@ -622,29 +616,10 @@ mod tests {
         assert_eq!(authorizations.load(Ordering::SeqCst), 0);
     }
 
-    #[test]
-    fn requesting_service_tun_does_not_replace_an_experimental_runtime() {
-        let session = CoreSession::open(
-            CoreKind::Meow,
-            MihomoClient::new(MihomoEndpoint::default())
-                .unwrap()
-                .with_core_kind(CoreKind::Meow)
-                .unwrap(),
-        )
-        .unwrap();
-        let manager = manager_for_session(session);
-        assert!(matches!(
-            manager.request_enable_tun(),
-            Err(ServiceManagerError::Unsupported)
-        ));
-        assert_eq!(manager.session.kind(), CoreKind::Meow);
-        assert_eq!(manager.snapshot().phase(), ServicePhase::Idle);
-    }
-
     #[tokio::test]
     async fn authorization_of_an_old_intent_cannot_enable_the_replacement_binding() {
         let manager = manager();
-        let intent = manager.intent();
+        let runtime_revision = manager.session.runtime_revision();
         let effects = AtomicUsize::new(0);
         manager
             .session
@@ -656,7 +631,7 @@ mod tests {
             .unwrap();
         let generation = manager.session.generation();
         let result = manager
-            .authorize_then(intent, async { Ok(()) }, || async {
+            .authorize_then(runtime_revision, async { Ok(()) }, || async {
                 effects.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             })
@@ -669,11 +644,11 @@ mod tests {
     #[tokio::test]
     async fn cancelling_authorization_never_enters_runtime_completion() {
         let manager = manager();
-        let intent = manager.intent();
+        let runtime_revision = manager.session.runtime_revision();
         let effects = AtomicUsize::new(0);
         let result = manager
             .authorize_then(
-                intent,
+                runtime_revision,
                 async { Err(MaintenanceError::AuthorizationCancelled) },
                 || async {
                     effects.fetch_add(1, Ordering::SeqCst);
@@ -688,17 +663,20 @@ mod tests {
             ))
         ));
         assert_eq!(effects.load(Ordering::SeqCst), 0);
-        assert_eq!(manager.session.generation(), intent.generation);
+        assert_eq!(
+            manager.session.generation(),
+            runtime_revision.configuration_generation
+        );
     }
 
     #[tokio::test]
     async fn shutdown_while_authorization_waits_expires_tun_intent() {
         let manager = manager();
-        let intent = manager.intent();
+        let runtime_revision = manager.session.runtime_revision();
         let effects = AtomicUsize::new(0);
         let result = manager
             .authorize_then(
-                intent,
+                runtime_revision,
                 async {
                     manager.session.request_shutdown();
                     Ok(())
@@ -862,9 +840,9 @@ mod tests {
     async fn cancelled_native_authorization_retires_pending_action_without_losing_its_error() {
         use crate::service::health::PendingAction;
         let manager = manager();
-        let intent = manager.intent();
+        let runtime_revision = manager.session.runtime_revision();
         let result = manager
-            .authorize_action(intent, PendingAction::Install, async {
+            .authorize_action(runtime_revision, PendingAction::Install, async {
                 assert_eq!(
                     manager.session.run_state().pending,
                     Some(PendingAction::Install)
@@ -887,16 +865,18 @@ mod tests {
     async fn an_unknown_native_authorization_keeps_the_requested_action_pending() {
         use crate::service::health::PendingAction;
         let manager = manager();
-        let intent = manager.intent();
+        let runtime_revision = manager.session.runtime_revision();
         let error = tokio::spawn(async { panic!("unknown native outcome") })
             .await
             .unwrap_err();
         let result = manager
             .complete::<(), _, _>(ServiceOperation::Repair, move |manager| async move {
                 manager
-                    .authorize_action(intent, PendingAction::ForceReinstall, async move {
-                        Err(MaintenanceError::OutcomeUnconfirmed(error))
-                    })
+                    .authorize_action(
+                        runtime_revision,
+                        PendingAction::ForceReinstall,
+                        async move { Err(MaintenanceError::OutcomeUnconfirmed(error)) },
+                    )
                     .await
             })
             .await;
@@ -916,10 +896,14 @@ mod tests {
         let result = manager
             .complete(ServiceOperation::Repair, |manager| async move {
                 manager
-                    .authorize_action(manager.intent(), PendingAction::ForceReinstall, async {
-                        assert!(!manager.session.run_state().sidecar_allowed);
-                        Err(MaintenanceError::AuthorizationCancelled)
-                    })
+                    .authorize_action(
+                        manager.session.runtime_revision(),
+                        PendingAction::ForceReinstall,
+                        async {
+                            assert!(!manager.session.run_state().sidecar_allowed);
+                            Err(MaintenanceError::AuthorizationCancelled)
+                        },
+                    )
                     .await
             })
             .await;
@@ -937,13 +921,17 @@ mod tests {
         let result = manager
             .complete(ServiceOperation::Repair, |manager| async move {
                 manager
-                    .authorize_action(manager.intent(), PendingAction::ForceReinstall, async {
-                        let error =
-                            tokio::spawn(async { panic!("native fixture lost completion") })
-                                .await
-                                .unwrap_err();
-                        Err(MaintenanceError::OutcomeUnconfirmed(error))
-                    })
+                    .authorize_action(
+                        manager.session.runtime_revision(),
+                        PendingAction::ForceReinstall,
+                        async {
+                            let error =
+                                tokio::spawn(async { panic!("native fixture lost completion") })
+                                    .await
+                                    .unwrap_err();
+                            Err(MaintenanceError::OutcomeUnconfirmed(error))
+                        },
+                    )
                     .await
             })
             .await;

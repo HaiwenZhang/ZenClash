@@ -99,16 +99,40 @@ impl MihomoClient {
     /// Rejects an empty group name and propagates transport, API-status or
     /// response-decoding errors.
     pub async fn proxy_group_selection(&self, group: &str) -> MihomoResult<String> {
+        Ok(self
+            .proxy_group_observation(group)
+            .await?
+            .member()
+            .to_owned())
+    }
+
+    /// Reads actual member and optional behavior for one controller group key.
+    ///
+    /// # Errors
+    /// Rejects an empty key and returns transport, API-status or decoding errors.
+    pub async fn proxy_group_observation(
+        &self,
+        group: &str,
+    ) -> MihomoResult<crate::ProxyGroupSelectionObservation> {
         #[derive(serde::Deserialize)]
         struct GroupSelection {
             #[serde(default)]
             now: String,
+            #[serde(default, rename = "type")]
+            kind: String,
+            #[serde(default, deserialize_with = "crate::proxy::deserialize_fixed")]
+            fixed: bool,
         }
 
         require_non_empty(group, "代理组名称")?;
         let path = format!("/proxies/{}", encode_path_segment(group));
         let selection: GroupSelection = self.get_json(&path).await?;
-        Ok(selection.now)
+        let behavior = (!selection.kind.is_empty())
+            .then(|| crate::ProxyGroupBehavior::from_mihomo(&selection.kind, selection.fixed));
+        Ok(crate::ProxyGroupSelectionObservation::new(
+            selection.now,
+            behavior,
+        ))
     }
 
     pub(crate) async fn restore_proxy_group(&self, group: &str) -> MihomoResult<()> {
@@ -898,7 +922,7 @@ mod verification_tests {
     };
 
     use parking_lot::Mutex;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
 
     use super::json_contains;
     use crate::{MihomoClient, MihomoEndpoint, MihomoError, MihomoResult};
@@ -981,22 +1005,11 @@ mod verification_tests {
         let (release, release_waiter) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut headers = Vec::new();
-            while !headers.ends_with(b"\r\n\r\n") {
-                headers.push(stream.read_u8().await.unwrap());
-            }
-            assert!(headers.starts_with(b"PATCH /configs "));
-            let headers = String::from_utf8(headers).unwrap();
-            let length: usize = headers
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse().unwrap())
-                })
-                .unwrap();
-            let mut body = vec![0; length];
-            stream.read_exact(&mut body).await.unwrap();
+            let (headers, body) = crate::test_support::read_controller_request(&mut stream)
+                .await
+                .unwrap()
+                .into_parts();
+            assert!(headers.as_bytes().starts_with(b"PATCH /configs "));
             assert_eq!(
                 serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
                 serde_json::json!({"mode":"global"})

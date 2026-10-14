@@ -28,10 +28,10 @@ impl CoreSession {
         let session = self.clone();
         let capture = capture.clone();
         tokio::spawn(async move {
-            let _run_attempt = session.begin_core_run_attempt();
+            let _availability_pause = session.pause_pac_availability();
             let client = session.client.pin_binding()?;
             {
-                let _lease = session.acquire_process_write_lease(&client).await?;
+                let _lease = session.acquire_runtime_write_lease(&client).await?;
                 let _transition = session.transition.lock().await;
                 client.ensure_binding_current()?;
                 session.ensure_not_shutting_down()?;
@@ -50,7 +50,7 @@ impl CoreSession {
             }
             // Capture may itself acquire Transition. Recheck the same pin afterward.
             let released = CoreRecoveryCapture::release_owned(&capture).await;
-            let lease = session.acquire_process_write_lease(&client).await?;
+            let lease = session.acquire_runtime_write_lease(&client).await?;
             let _transition = session.transition.clone().lock_owned().await;
             client.ensure_binding_current()?;
             session.ensure_not_shutting_down()?;
@@ -71,7 +71,7 @@ impl CoreSession {
                 return Err(error);
             }
             session.next_generation();
-            released.map_err(|error| CoreSessionError::Process(MihomoError::Process(error)))?;
+            released.map_err(CoreSessionError::from)?;
             Ok(true)
         })
         .await
@@ -100,10 +100,10 @@ impl CoreSession {
         let session = self.clone();
         let capture = capture.clone();
         tokio::spawn(async move {
-            let _run_attempt = session.begin_core_run_attempt();
+            let _availability_pause = session.pause_pac_availability();
             let client = session.client.pin_binding()?;
             {
-                let lease = session.acquire_process_write_lease(&client).await?;
+                let lease = session.acquire_runtime_write_lease(&client).await?;
                 let _transition = session.transition.clone().lock_owned().await;
                 client.ensure_binding_current()?;
                 session.ensure_not_shutting_down()?;
@@ -130,7 +130,7 @@ impl CoreSession {
             }
             CoreRecoveryCapture::reconcile(&capture)
                 .await
-                .map_err(|error| CoreSessionError::Process(MihomoError::Process(error)))?;
+                .map_err(CoreSessionError::from)?;
             let _transition = session.transition.lock().await;
             client.ensure_binding_current()?;
             session.ensure_not_shutting_down()?;
@@ -191,7 +191,7 @@ impl CoreSession {
         }
         client.ensure_binding_current()?;
         self.ensure_not_shutting_down()?;
-        let _run_attempt = self.begin_core_run_attempt();
+        let _availability_pause = self.pause_pac_availability();
         match client.owned_core() {
             Some(crate::owned_core::OwnedCore::Local(process)) => {
                 let _mutation = client.lock_runtime_binding().await?;

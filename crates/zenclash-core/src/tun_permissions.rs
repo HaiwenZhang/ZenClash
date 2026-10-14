@@ -125,8 +125,6 @@ fn is_supported_core_name(binary: &Path) -> bool {
             | "mihomo-alpha.exe"
             | "mihomo-smart"
             | "mihomo-smart.exe"
-            | "meow"
-            | "meow.exe"
     )
 }
 
@@ -162,8 +160,6 @@ mod tests {
         assert!(is_supported_core_name(Path::new("/tmp/mihomo")));
         assert!(is_supported_core_name(Path::new("C:/core/MIHOMO.EXE")));
         assert!(is_supported_core_name(Path::new("/tmp/mihomo-smart")));
-        assert!(is_supported_core_name(Path::new("/tmp/meow")));
-        assert!(is_supported_core_name(Path::new("C:/core/MEOW.EXE")));
         assert!(!is_supported_core_name(Path::new("/tmp/sh")));
         assert!(!is_supported_core_name(Path::new("/tmp/mihomo.backup")));
     }

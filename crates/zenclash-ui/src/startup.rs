@@ -314,8 +314,9 @@ mod tests {
     }
 
     #[test]
-    fn startup_explicit_external_and_experimental_core_do_not_acquire_mihomo_service() {
-        for (kind, external) in [(CoreKind::Mihomo, true), (CoreKind::Meow, false)] {
+    fn startup_explicit_external_does_not_acquire_mihomo_service() {
+        {
+            let (kind, external) = (CoreKind::Mihomo, true);
             let result = route_startup_with_policy(
                 kind,
                 external,

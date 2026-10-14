@@ -404,26 +404,11 @@ mod tests {
             .unwrap()
     }
 
-    async fn receive_request<T: AsyncRead + Unpin>(stream: &mut T) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        loop {
-            let mut byte = [0];
-            stream.read_exact(&mut byte).await.unwrap();
-            bytes.push(byte[0]);
-            if bytes.ends_with(b"\r\n\r\n") {
-                let length = std::str::from_utf8(&bytes)
-                    .unwrap()
-                    .lines()
-                    .filter_map(|line| line.split_once(':'))
-                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                    .map(|(_, length)| length.trim().parse::<usize>().unwrap())
-                    .unwrap_or(0);
-                let mut body = vec![0; length];
-                stream.read_exact(&mut body).await.unwrap();
-                bytes.extend_from_slice(&body);
-                return bytes;
-            }
-        }
+    async fn receive_request<T: AsyncRead + Unpin + Send>(stream: &mut T) -> Vec<u8> {
+        crate::test_support::read_controller_request(stream)
+            .await
+            .unwrap()
+            .into_bytes()
     }
 
     #[tokio::test]

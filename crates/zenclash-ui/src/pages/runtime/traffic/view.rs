@@ -1,14 +1,14 @@
 use chrono::{DateTime, Local, Utc};
-use gpui_kit::SharedString;
 use gpui_kit::component::chart::AreaChart;
-use zenclash_core::{TrafficDimension, TrafficTrendPoint};
+use gpui_kit::{SharedString, TestSupportExt};
+use zenclash_core::{TrafficDimension, TrafficOverview, TrafficTrendPoint};
 
 use super::{TrafficHistoryFreshness, TrafficRange, dimension_label};
 use crate::pages::runtime::{
     Button, ButtonVariants, Context, Disableable, FluentBuilder, IconName, InteractiveElement,
-    IntoElement, ParentElement, RuntimeData, RuntimePage, Selectable, Sizable,
+    IntoElement, PageSnapshotData, ParentElement, RuntimePage, Selectable, Sizable,
     StatefulInteractiveElement, Styled, div, empty_dash, empty_state, format_bytes,
-    format_profile_age, format_speed, h_flex, metric, px, v_flex,
+    format_profile_age, format_speed, h_flex, metric, v_flex,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -25,11 +25,10 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let realtime = self.traffic_monitor.snapshot();
-        let connection_count = match &self.data {
-            RuntimeData::Connections(data) => Some(data.connections.len()),
+        let connection_count = match self.page_observation.data() {
+            PageSnapshotData::Connections(data) => Some(data.connections.len()),
             _ => None,
         };
-        let history = &self.traffic_history;
         v_flex()
             .gap_4()
             .child(
@@ -56,9 +55,9 @@ impl RuntimePage {
                     ))
                     .child(metric(
                         zenclash_i18n::text("traffic.metrics.range_usage"),
-                        history.last_success_at_ms.map_or_else(
+                        self.traffic_history.presentation().map_or_else(
                             || empty_dash(""),
-                            |_| format_bytes(history.overview.totals.total),
+                            |presentation| format_bytes(presentation.overview().totals.total),
                         ),
                         theme,
                     ))
@@ -82,10 +81,22 @@ impl RuntimePage {
     }
 
     fn render_traffic_signal(&self, theme: &gpui_kit::component::Theme) -> gpui_kit::AnyElement {
-        let history = &self.traffic_history;
-        let points = historical_traffic_points(&history.overview.trend, history.range);
+        let history = &self.traffic_history.state;
+        let presentation = self.traffic_history.presentation();
+        let empty = TrafficOverview::default();
+        let overview = presentation.map_or(&empty, |presentation| presentation.overview());
+        let range = presentation.map_or(history.range, |presentation| presentation.range());
+        let points = historical_traffic_points(&overview.trend, range);
         let has_points = !points.is_empty();
-        let (freshness, freshness_color) = match history.freshness() {
+        let summary = zenclash_i18n::text_with(
+            "traffic.chart.summary",
+            &[
+                ("range", range.label()),
+                ("upload", format_bytes(overview.totals.upload)),
+                ("download", format_bytes(overview.totals.download)),
+            ],
+        );
+        let (freshness, freshness_color) = match history.freshness(self.traffic_history.source()) {
             TrafficHistoryFreshness::Loading => (
                 zenclash_i18n::text("traffic.chart.loading"),
                 theme.muted_foreground,
@@ -139,19 +150,16 @@ impl RuntimePage {
                                     .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                     .child(zenclash_i18n::text("traffic.chart.title")),
                             )
-                            .child(div().text_xs().text_color(theme.muted_foreground).child(
-                                zenclash_i18n::text_with(
-                                    "traffic.chart.summary",
-                                    &[
-                                        ("range", history.range.label()),
-                                        ("upload", format_bytes(history.overview.totals.upload)),
-                                        (
-                                            "download",
-                                            format_bytes(history.overview.totals.download),
-                                        ),
-                                    ],
-                                ),
-                            )),
+                            .child(
+                                div()
+                                    .id("traffic-history-summary")
+                                    .role(gpui_kit::Role::Status)
+                                    .aria_label(summary.clone())
+                                    .test_support()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(summary),
+                            ),
                     )
                     .child(
                         v_flex()
@@ -186,7 +194,7 @@ impl RuntimePage {
             )
             .child(
                 div()
-                    .h(px(210.))
+                    .h(gpui_kit::rems(13.125))
                     .mx_4()
                     .mb_4()
                     .mt_3()
@@ -211,7 +219,7 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let history = &self.traffic_history;
+        let history = &self.traffic_history.state;
         h_flex()
             .gap_3()
             .flex_wrap()
@@ -272,7 +280,7 @@ impl RuntimePage {
         h_flex()
             .gap_2()
             .flex_wrap()
-            .when(self.traffic_history.clear_confirmation, |this| {
+            .when(self.traffic_history.is_clear_confirmation_open(), |this| {
                 this.child(
                     Button::new("cancel-clear-traffic")
                         .label(zenclash_i18n::text("traffic.actions.cancel"))
@@ -299,7 +307,7 @@ impl RuntimePage {
                         })),
                 )
             })
-            .when(!self.traffic_history.clear_confirmation, |this| {
+            .when(!self.traffic_history.is_clear_confirmation_open(), |this| {
                 this.child(
                     Button::new("request-clear-traffic")
                         .icon(IconName::Globe)
@@ -322,9 +330,19 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let history = &self.traffic_history;
+        let history = &self.traffic_history.state;
+        let presentation = self.traffic_history.presentation();
+        let empty = TrafficOverview::default();
+        let overview = presentation.map_or(&empty, |presentation| presentation.overview());
+        let dimension =
+            presentation.map_or(history.dimension, |presentation| presentation.dimension());
+        let can_inspect = history.can_inspect(self.traffic_history.source());
+        let ranking_title = zenclash_i18n::text_with(
+            "traffic.rankings.title",
+            &[("dimension", dimension_label(dimension))],
+        );
         v_flex()
-            .min_w(px(360.))
+            .min_w(gpui_kit::rems(22.5))
             .flex_1()
             .rounded(theme.radius)
             .border_1()
@@ -339,21 +357,22 @@ impl RuntimePage {
                     .border_color(theme.border)
                     .child(
                         div()
+                            .id("traffic-ranking-title")
+                            .role(gpui_kit::Role::Status)
+                            .aria_label(ranking_title.clone())
+                            .test_support()
                             .text_sm()
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(zenclash_i18n::text_with(
-                                "traffic.rankings.title",
-                                &[("dimension", dimension_label(history.dimension))],
-                            )),
+                            .child(ranking_title),
                     )
                     .child(div().text_xs().text_color(theme.muted_foreground).child(
                         zenclash_i18n::text_with(
                             "traffic.rankings.samples",
-                            &[("count", history.overview.totals.samples.to_string())],
+                            &[("count", overview.totals.samples.to_string())],
                         ),
                     )),
             )
-            .when(history.overview.rankings.is_empty(), |this| {
+            .when(overview.rankings.is_empty(), |this| {
                 this.child(empty_state(
                     if self.preferences.traffic_history_enabled {
                         zenclash_i18n::text("traffic.rankings.empty_enabled")
@@ -364,30 +383,33 @@ impl RuntimePage {
                 ))
             })
             .children(
-                history
-                    .overview
+                overview
                     .rankings
                     .iter()
                     .take(20)
                     .enumerate()
                     .map(|(index, item)| {
                         let label = item.label.clone();
-                        let selected = history.selected_parent.as_deref() == Some(&item.label);
+                        let selected = presentation
+                            .and_then(|presentation| presentation.selected_parent())
+                            == Some(item.label.as_str());
                         h_flex()
                             .id(("traffic-ranking", index))
-                            .min_h(px(44.))
+                            .min_h(gpui_kit::rems(2.75))
                             .px_4()
                             .gap_3()
                             .border_b_1()
                             .border_color(theme.border)
                             .when(selected, |this| this.bg(theme.primary.opacity(0.1)))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.select_traffic_parent(label.clone(), cx);
-                            }))
+                            .when(can_inspect, |row| {
+                                row.cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.select_traffic_parent(label.clone(), cx);
+                                    }))
+                            })
                             .child(
                                 div()
-                                    .w(px(24.))
+                                    .w_6()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
                                     .child(format!("{:02}", index + 1)),
@@ -409,9 +431,15 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let history = &self.traffic_history;
+        let presentation = self.traffic_history.presentation();
+        let parent = presentation
+            .and_then(|presentation| presentation.selected_parent())
+            .map(str::to_owned);
+        let detail = presentation
+            .and_then(|presentation| presentation.selected_detail())
+            .map(str::to_owned);
         v_flex()
-            .min_w(px(320.))
+            .min_w(gpui_kit::rems(20.))
             .flex_1()
             .rounded(theme.radius)
             .border_1()
@@ -437,13 +465,13 @@ impl RuntimePage {
                             .child(zenclash_i18n::text("traffic.inspector.description")),
                     ),
             )
-            .when(history.selected_parent.is_none(), |this| {
+            .when(parent.is_none(), |this| {
                 this.child(empty_state(
                     zenclash_i18n::text("traffic.inspector.empty"),
                     theme,
                 ))
             })
-            .when_some(history.selected_parent.clone(), |this, parent| {
+            .when_some(parent, |this, parent| {
                 this.child(
                     div()
                         .px_4()
@@ -453,7 +481,7 @@ impl RuntimePage {
                         .child(parent),
                 )
                 .children(self.render_traffic_details(theme, cx))
-                .when_some(history.selected_detail.clone(), |this, detail| {
+                .when_some(detail, |this, detail| {
                     this.child(
                         v_flex()
                             .mt_2()
@@ -468,17 +496,22 @@ impl RuntimePage {
                                     &[("detail", detail)],
                                 ),
                             ))
-                            .children(history.proxy_stats.iter().map(|item| {
-                                h_flex()
-                                    .justify_between()
-                                    .child(div().text_sm().child(item.label.clone()))
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                            .child(format_bytes(item.total)),
-                                    )
-                            })),
+                            .children(
+                                presentation
+                                    .map_or(&[][..], |presentation| presentation.proxy_stats())
+                                    .iter()
+                                    .map(|item| {
+                                        h_flex()
+                                            .justify_between()
+                                            .child(div().text_sm().child(item.label.clone()))
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                                    .child(format_bytes(item.total)),
+                                            )
+                                    }),
+                            ),
                     )
                 })
             })
@@ -489,26 +522,34 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> Vec<gpui_kit::AnyElement> {
-        self.traffic_history
-            .details
+        let presentation = self.traffic_history.presentation();
+        let can_inspect = self
+            .traffic_history
+            .state
+            .can_select_detail(self.traffic_history.source());
+        presentation
+            .map_or(&[][..], |presentation| presentation.details())
             .iter()
             .take(12)
             .enumerate()
             .map(|(index, item)| {
                 let label = item.label.clone();
-                let selected = self.traffic_history.selected_detail.as_deref() == Some(&item.label);
+                let selected = presentation.and_then(|presentation| presentation.selected_detail())
+                    == Some(item.label.as_str());
                 h_flex()
                     .id(("traffic-detail", index))
-                    .min_h(px(40.))
+                    .min_h(gpui_kit::rems(2.5))
                     .px_4()
                     .gap_3()
                     .border_t_1()
                     .border_color(theme.border)
                     .when(selected, |this| this.bg(theme.primary.opacity(0.1)))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.select_traffic_detail(label.clone(), cx);
-                    }))
+                    .when(can_inspect, |row| {
+                        row.cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.select_traffic_detail(label.clone(), cx);
+                            }))
+                    })
                     .child(div().flex_1().min_w_0().text_sm().child(item.label.clone()))
                     .child(
                         div()
@@ -550,32 +591,9 @@ fn format_trend_timestamp(timestamp_ms: u64, range: TrafficRange) -> String {
 }
 
 fn chart_value(bytes: u64) -> f64 {
-    f64::from(u32::try_from(bytes).unwrap_or(u32::MAX))
+    // The chart accepts f64; rounding above 2^53 affects display precision, not stored bytes.
+    bytes as f64
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn history_chart_keeps_upload_and_download_as_distinct_series() {
-        let points = historical_traffic_points(
-            &[TrafficTrendPoint {
-                timestamp_ms: 1_700_000_000_000,
-                upload: 1_024,
-                download: 8_192,
-            }],
-            TrafficRange::Hour,
-        );
-
-        assert_eq!(points.len(), 1);
-        assert_eq!(points[0].upload, 1_024.0);
-        assert_eq!(points[0].download, 8_192.0);
-        assert!(!points[0].label.is_empty());
-    }
-
-    #[test]
-    fn history_chart_caps_values_that_exceed_chart_numeric_support() {
-        assert_eq!(chart_value(u64::MAX), f64::from(u32::MAX));
-    }
-}
+mod tests;

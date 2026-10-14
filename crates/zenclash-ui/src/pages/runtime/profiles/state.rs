@@ -3,8 +3,16 @@ use gpui_kit::{AppContext, Context, Entity, Window};
 use std::collections::HashMap;
 use zenclash_core::{ProfileCatalog, RemoteProfileRoute};
 
+use super::yaml_editor::ProfileYamlEditorState;
+
+pub(in crate::pages::runtime) enum ProfileFormDismissal {
+    RemoteEditor,
+    Subscription,
+}
+
 /// Input and editor state owned by the profiles page.
 pub(crate) struct ProfileFormState {
+    pub(in crate::pages::runtime) yaml_editor: ProfileYamlEditorState,
     pub(in crate::pages::runtime) search: Entity<InputState>,
     _search_subscription: gpui_kit::Subscription,
     pub(in crate::pages::runtime) details_open: bool,
@@ -28,6 +36,22 @@ pub(crate) struct ProfileFormState {
 }
 
 impl ProfileFormState {
+    pub(in crate::pages::runtime) fn dismissible_form(&self) -> Option<ProfileFormDismissal> {
+        if self.editing_profile_id.is_some() {
+            Some(ProfileFormDismissal::RemoteEditor)
+        } else if self.adding_subscription {
+            Some(ProfileFormDismissal::Subscription)
+        } else {
+            None
+        }
+    }
+
+    pub(in crate::pages::runtime) fn close_subscription(&mut self) -> bool {
+        let was_open = self.adding_subscription;
+        self.adding_subscription = false;
+        was_open
+    }
+
     pub(crate) fn new(
         window: &mut Window,
         cx: &mut Context<'_, super::super::RuntimePage>,
@@ -40,15 +64,13 @@ impl ProfileFormState {
             |this, _, event: &gpui_kit::component::input::InputEvent, cx| {
                 if matches!(event, gpui_kit::component::input::InputEvent::Change) {
                     let query = this.profiles.forms.search.read(cx).value().to_lowercase();
-                    this.profiles
-                        .forms
-                        .catalog_view
-                        .set_query(query, &this.profiles.catalog);
+                    this.profiles.set_catalog_query(query);
                     cx.notify();
                 }
             },
         );
         Self {
+            yaml_editor: ProfileYamlEditorState::new(window, cx),
             search,
             _search_subscription: search_subscription,
             details_open: false,

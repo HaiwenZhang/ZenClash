@@ -43,7 +43,10 @@ impl FrozenRuntime {
         validate: bool,
     ) -> MihomoResult<Self> {
         tokio::task::spawn_blocking(move || {
-            let core = core.map_or_else(|| crate::process::service_core_source(&home), Ok)?;
+            let core = core.map_or_else(
+                || crate::managed_core_process::service_core_source(&home),
+                Ok,
+            )?;
             let prepared = materialize(&bundle, &home, &core)?;
             if validate {
                 crate::verify_ordinary_local_executable(&core)?;
@@ -164,7 +167,7 @@ fn io_error(error: std::io::Error) -> MihomoError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service_runtime::tests::TestHome;
+    use crate::service_runtime::test_support::TestHome;
 
     fn bundle() -> ServiceRuntimeBundle {
         ServiceRuntimeBundle {

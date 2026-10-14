@@ -1,8 +1,11 @@
+use super::runtime_observation::TrayRuntimeObservation;
 use super::{
     Context, OutboundMode, TrayMenuState, TrayProfile, TrayProxyGroup, TrayProxyNode, ZenClashApp,
-    tray_directories,
 };
-use zenclash_core::{Observation, ProxyGroupBehavior, ProxyOperations, ProxyVisibility};
+use crate::runtime_read_source::RuntimeReadSource;
+use zenclash_core::{CoreObservationIdentity, Observation, ProxyGroupBehavior};
+
+use super::directories::load_profile_catalog_and_directories;
 
 struct TrayMenuSnapshot {
     config: zenclash_core::RuntimeConfig,
@@ -10,8 +13,8 @@ struct TrayMenuSnapshot {
     current_node: Option<String>,
     system_proxy: Result<bool, String>,
     profiles: Result<zenclash_core::ProfileCatalog, String>,
-    mode_generation: u64,
-    core_generation: u64,
+    mode_intent_generation: u64,
+    observation: CoreObservationIdentity,
     directories: Vec<(String, std::path::PathBuf)>,
     profile_path: Option<std::path::PathBuf>,
 }
@@ -27,37 +30,25 @@ impl ZenClashApp {
         }
         self.tray_refreshing = true;
         self.tray_refresh_pending = false;
-        let mode_generation = self.outbound_mode.generation();
-        let client = self.client.clone();
-        let core_generation = self.core_session.generation();
-        let core_kind = self.core_kind;
-        let profile_path = self.profile_path.clone();
-        let directories_profile = profile_path.clone();
+        let mode_intent_generation = self.outbound_mode.intent_generation();
+        let session = self.core_session.clone();
         let operational_status = self.operational_status.clone();
+        let read_source = std::sync::Arc::new(RuntimeReadSource::default());
+        let submitted_source = read_source.clone();
         let task = self.runtime.spawn(async move {
-            let proxy_operations = ProxyOperations::new(client.clone());
-            let profile_catalog_task = tokio::task::spawn_blocking(move || {
-                let store = zenclash_core::ProfileStore::discover();
-                let data_root = store
-                    .as_ref()
-                    .ok()
-                    .map(|store| store.root().parent().unwrap_or(store.root()));
-                let directories =
-                    tray_directories(directories_profile.as_deref(), core_kind, data_root);
-                let catalog = store
-                    .and_then(|store| store.load())
-                    .map_err(|error| error.to_string());
-                (catalog, directories)
-            });
-            let (config, catalog, profiles) = tokio::join!(
-                client.runtime_config(),
-                proxy_operations.catalog(ProxyVisibility::IncludeHidden),
-                profile_catalog_task
+            let runtime =
+                TrayRuntimeObservation::load_with_source(&session, &submitted_source).await?;
+            let directories_profile = runtime.profile_path.clone();
+            let descriptor = runtime.descriptor;
+            let profiles = tokio::task::spawn_blocking(move || {
+                load_profile_catalog_and_directories(directories_profile.as_deref(), &descriptor)
+            })
+            .await;
+            let current_node = current_proxy_node(
+                &runtime.catalog,
+                OutboundMode::from_api(&runtime.config.mode),
             );
-            let config = config.map_err(|error| error.to_string())?;
-            let catalog = catalog.map_err(|error| error.to_string())?;
-            let current_node = current_proxy_node(&catalog, OutboundMode::from_api(&config.mode));
-            let groups = tray_proxy_groups(catalog, &config.mode);
+            let groups = tray_proxy_groups(runtime.catalog, &runtime.config.mode);
             let system_proxy = match operational_status.snapshot().capture.system_proxy {
                 Observation::Fresh { value, .. } | Observation::Stale { value, .. } => {
                     Ok(value.actual.active())
@@ -74,15 +65,17 @@ impl ZenClashApp {
                     Vec::new(),
                 )
             });
-            Ok::<_, String>((
-                config,
+            Ok::<_, String>(TrayMenuSnapshot {
+                config: runtime.config,
                 groups,
                 current_node,
                 system_proxy,
                 profiles,
                 directories,
-                mode_generation,
-            ))
+                mode_intent_generation,
+                observation: runtime.identity,
+                profile_path: runtime.profile_path,
+            })
         });
 
         cx.spawn(async move |this, cx| {
@@ -90,32 +83,13 @@ impl ZenClashApp {
             let _ = this.update(cx, |this, cx| {
                 this.tray_refreshing = false;
                 match result {
-                    Ok(Ok((
-                        config,
-                        groups,
-                        current_node,
-                        system_proxy,
-                        profiles,
-                        directories,
-                        mode_generation,
-                    ))) => {
-                        this.apply_tray_menu_state(
-                            TrayMenuSnapshot {
-                                config,
-                                groups,
-                                current_node,
-                                system_proxy,
-                                profiles,
-                                mode_generation,
-                                core_generation,
-                                directories,
-                                profile_path,
-                            },
-                            cx,
-                        );
+                    Ok(Ok(snapshot)) => this.apply_tray_menu_state(snapshot, cx),
+                    Ok(Err(error)) => {
+                        this.publish_tray_refresh_error(&read_source, error);
                     }
-                    Ok(Err(error)) => this.tray_error = Some(error),
-                    Err(error) => this.tray_error = Some(error.to_string()),
+                    Err(error) => {
+                        this.publish_tray_refresh_error(&read_source, error.to_string());
+                    }
                 }
                 cx.notify();
 
@@ -134,6 +108,29 @@ impl ZenClashApp {
         .detach();
     }
 
+    fn publish_tray_refresh_error(&mut self, source: &RuntimeReadSource, error: String) -> bool {
+        if self.tray_refresh_pending {
+            return false;
+        }
+        match source.identity() {
+            Some(identity) => {
+                let published = identity.belongs_to(&self.core_session)
+                    && identity
+                        .publish_if_current(|| self.tray_error = Some(error))
+                        .is_some();
+                if !published {
+                    self.tray_refresh_pending = true;
+                }
+                published
+            }
+            None => {
+                // Only preflight/capture can fail here; no controller request has begun.
+                self.tray_error = Some(error);
+                true
+            }
+        }
+    }
+
     fn apply_tray_menu_state(&mut self, snapshot: TrayMenuSnapshot, cx: &mut Context<Self>) {
         let TrayMenuSnapshot {
             config,
@@ -141,24 +138,21 @@ impl ZenClashApp {
             current_node,
             system_proxy,
             profiles: profile_catalog,
-            mode_generation,
-            core_generation,
+            mode_intent_generation,
+            observation,
             directories,
             profile_path,
         } = snapshot;
-        if self.core_session.generation() != core_generation {
+        if !observation.belongs_to(&self.core_session) {
             self.tray_refresh_pending = true;
             return;
         }
-        self.outbound_mode
-            .synchronize(OutboundMode::from_api(&config.mode), mode_generation);
         let mixed_port = config.system_proxy_port().unwrap_or_default();
         let active_profile = profile_catalog
             .as_ref()
             .ok()
-            .and_then(|catalog| catalog.active_profile());
-        self.proxies_page
-            .update(cx, |page, cx| page.set_active_profile(active_profile, cx));
+            .and_then(|catalog| catalog.active_profile())
+            .cloned();
         let (profile_name, profiles) = profile_catalog.map_or_else(
             |error| {
                 tracing::warn!(%error, "failed to read managed profiles for tray menu");
@@ -195,8 +189,8 @@ impl ZenClashApp {
             tracing::warn!(%error, "failed to read system proxy state for tray menu");
             false
         });
-        let state = TrayMenuState {
-            mode: self.outbound_mode.displayed().api_value().into(),
+        let mut state = TrayMenuState {
+            mode: config.mode.clone(),
             display: self.preferences.tray_display,
             system_proxy,
             tun: config.tun.enable,
@@ -206,15 +200,33 @@ impl ZenClashApp {
             groups,
             directories,
         };
+        let published = observation.publish_if_current(|| {
+            self.outbound_mode
+                .synchronize(OutboundMode::from_api(&config.mode), mode_intent_generation);
+            state.mode = self.outbound_mode.displayed().api_value().into();
+            self.proxies_page.update(cx, |page, cx| {
+                page.set_active_profile(active_profile.as_ref(), cx)
+            });
+            self.tray_current_node =
+                current_node.map(|node| (OutboundMode::from_api(&config.mode), node));
+            self.tray_state = state;
+            self.tray_observation = Some(observation.clone());
+            self.tray_error = None;
+        });
+        if published.is_none() {
+            self.tray_refresh_pending = true;
+            return;
+        }
+        // Native menu work stays outside the ordinary-read publication guard.
         if let Some(tray) = self.network_tray.as_mut()
-            && let Err(error) = tray.update_menu(&state)
+            && let Err(error) =
+                tray.update_menu_with_observation(&self.tray_state, Some(observation.clone()))
         {
             tracing::warn!(%error, "failed to update tray menu");
         }
-        self.tray_current_node =
-            current_node.map(|node| (OutboundMode::from_api(&config.mode), node));
-        self.tray_state = state;
-        self.tray_error = None;
+        if !observation.is_current() {
+            self.tray_refresh_pending = true;
+        }
     }
 }
 
@@ -259,6 +271,7 @@ fn tray_proxy_groups(
                 selectable,
                 automatic,
                 has_more,
+                controller_name: group.controller_name().to_owned(),
                 name: group.name.clone(),
                 now: group.now.clone(),
                 test_url: group.test_url.clone(),
@@ -304,6 +317,9 @@ fn bounded_tray_proxy_nodes(
 }
 
 #[cfg(test)]
+mod observation_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -322,12 +338,9 @@ mod tests {
             .into_iter()
             .map(|(name, now, behavior)| {
                 (
-                    ProxyGroup {
-                        name: name.into(),
-                        now: now.into(),
-                        behavior,
-                        ..Default::default()
-                    },
+                    ProxyGroup::new(name)
+                        .with_current_member(now)
+                        .with_behavior(behavior),
                     vec![ProxyNode {
                         name: now.into(),
                         ..Default::default()
@@ -363,12 +376,9 @@ mod tests {
         assert_eq!(current_proxy_node(&catalog, OutboundMode::Rule), None);
         let balanced = zenclash_core::ProxyCatalog::from_group_nodes(
             vec![(
-                zenclash_core::ProxyGroup {
-                    name: "PROXY".into(),
-                    now: "node".into(),
-                    behavior: ProxyGroupBehavior::LoadBalance,
-                    ..Default::default()
-                },
+                zenclash_core::ProxyGroup::new("PROXY")
+                    .with_current_member("node")
+                    .with_behavior(ProxyGroupBehavior::LoadBalance),
                 vec![zenclash_core::ProxyNode {
                     name: "node".into(),
                     ..Default::default()

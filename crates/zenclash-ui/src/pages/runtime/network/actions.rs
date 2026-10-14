@@ -1,133 +1,80 @@
 use zenclash_core::{
-    DiagnosticData, DiagnosticPlan, DiagnosticReport, DiagnosticStepKind, NetworkDiagnostics,
-    NetworkLatencyTarget, NetworkProbeRoute, NetworkProbeRoutePreference, NetworkProbeSnapshot,
-    SupportSafe,
+    DiagnosticPlan, NetworkLatencyTarget, NetworkProbeRoutePreference, SupportSafe,
 };
 
 use super::{DnsCacheAction, NetworkPreferenceChange, model};
-use crate::pages::runtime::{Context, Page, RuntimeData, RuntimePage};
+use crate::pages::runtime::{Context, Page, RuntimePage};
 
 impl RuntimePage {
-    pub(in crate::pages::runtime) fn cancel_network_probe(&mut self) {
-        self.network_probe.task.cancel();
-        self.network_probe.loading = false;
-        self.network_probe.revision = self.network_probe.revision.wrapping_add(1);
+    pub(in crate::pages::runtime) fn cancel_network_diagnostics(&mut self) {
+        self.network_diagnostics.query.cancel();
     }
 
-    pub(in crate::pages::runtime) fn refresh_network_probe(&mut self, cx: &mut Context<Self>) {
-        if self.page != Page::Network || self.network_probe.loading {
+    pub(in crate::pages::runtime) fn refresh_network_diagnostics(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        if self.page != Page::Network || self.network_diagnostics.query.is_loading() {
             return;
         }
-        let Some(config) = (match &self.data {
-            RuntimeData::Network { config, .. } => Some(config.clone()),
-            _ => None,
-        }) else {
-            return;
-        };
-        let generation = self.core_session.generation();
-        let mihomo_route = model::network_probe_route(&config, true);
-        let dns_name = self.network_probe.dns_name.read(cx).value().to_string();
-        let provider = self.preferences.network_ip_provider;
+        let dns_name = self
+            .network_diagnostics
+            .dns_name
+            .read(cx)
+            .value()
+            .to_string();
         let targets = model::network_latency_targets(&self.preferences.network_latency_targets);
-        let mut plan = match DiagnosticPlan::new(dns_name, provider, targets) {
-            Ok(plan) => plan,
-            Err(error) => {
-                self.network_probe.snapshot = Some(NetworkProbeSnapshot {
-                    public_ip_error: Some(error.to_string()),
-                    ..Default::default()
-                });
-                cx.notify();
-                return;
-            }
-        };
-        if let Ok(route) = mihomo_route.clone() {
-            plan = plan
-                .with_mihomo_route(route)
-                .expect("validated Mihomo route should extend a diagnostic plan");
-        }
-        let selected_kind =
-            if self.preferences.network_probe_route == NetworkProbeRoutePreference::Mihomo {
-                DiagnosticStepKind::NetworkMihomo
-            } else {
-                DiagnosticStepKind::NetworkDirect
+        let plan =
+            match DiagnosticPlan::new(dns_name, self.preferences.network_ip_provider, targets) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    self.network_diagnostics
+                        .query
+                        .reject_plan(error.to_string());
+                    cx.notify();
+                    return;
+                }
             };
-        self.network_probe.loading = true;
-        self.network_probe.revision = self.network_probe.revision.wrapping_add(1);
-        let revision = self.network_probe.revision;
-        let operational_status = self.operational_status.clone();
-        let diagnostics = NetworkDiagnostics::new(self.client.clone(), operational_status);
-        let task = self
-            .runtime
-            .spawn(async move { diagnostics.run(plan).await });
-        self.network_probe.task.replace(&task);
+        let (request, task) = self.network_diagnostics.query.start(
+            &self.runtime,
+            self.core_session.clone(),
+            self.operational_status.clone(),
+            plan,
+            self.preferences.network_probe_route,
+        );
         cx.spawn(async move |this, cx| {
-            let result = task.await.map_err(|error| {
-                zenclash_i18n::text_with(
-                    "network.errors.probe_task",
-                    &[("error", error.to_string())],
-                )
-            });
+            let result = task
+                .await
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "network.errors.probe_task",
+                        &[("error", error.to_string())],
+                    )
+                })
+                .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.complete_network_probe(
-                    revision,
-                    generation,
-                    mihomo_route,
-                    selected_kind,
-                    result,
-                    cx,
-                );
+                this.complete_network_diagnostics(request, result, cx);
             });
         })
         .detach();
         cx.notify();
     }
 
-    pub(in crate::pages::runtime) fn complete_network_probe(
+    pub(in crate::pages::runtime) fn complete_network_diagnostics(
         &mut self,
-        revision: u64,
-        generation: u64,
-        mihomo_route: Result<NetworkProbeRoute, String>,
-        selected_kind: DiagnosticStepKind,
-        result: Result<DiagnosticReport, String>,
+        request: super::diagnostic_query::NetworkDiagnosticRequestId,
+        result: Result<super::diagnostic_query::ObservedNetworkDiagnostic, String>,
         cx: &mut Context<Self>,
     ) {
-        if self.page != Page::Network
-            || self.network_probe.revision != revision
-            || !self.network_probe.loading
-        {
-            return;
-        }
-        self.network_probe.loading = false;
-        if self.core_session.generation() != generation {
+        if self.page == Page::Network {
+            self.network_diagnostics.query.complete(
+                request,
+                &self.core_session,
+                &self.operational_status,
+                result,
+            );
             cx.notify();
-            return;
         }
-        let path = result.as_ref().map_err(Clone::clone).and_then(|report| {
-            let route = mihomo_route.as_ref().map_err(Clone::clone)?;
-            let snapshot = diagnostic_network_snapshot(report, DiagnosticStepKind::NetworkMihomo)?;
-            model::path_observation(route, generation, snapshot)
-        });
-        self.operational_status.record_path(generation, path);
-        match result {
-            Ok(report) => {
-                self.network_probe.snapshot = Some(
-                    diagnostic_network_snapshot(&report, selected_kind)
-                        .cloned()
-                        .unwrap_or_else(|error| NetworkProbeSnapshot {
-                            public_ip_error: Some(error),
-                            ..Default::default()
-                        }),
-                );
-                self.network_probe.report = Some(report);
-            }
-            Err(error) => {
-                self.network_probe.snapshot = Some(NetworkProbeSnapshot {
-                    public_ip_error: Some(error),
-                    ..Default::default()
-                })
-            }
-        }
-        cx.notify();
     }
 
     pub(super) fn request_network_cache_flush(
@@ -135,12 +82,12 @@ impl RuntimePage {
         action: DnsCacheAction,
         cx: &mut Context<Self>,
     ) {
-        self.network_probe.cache_confirmation = Some(action);
+        self.network_diagnostics.cache_confirmation = Some(action);
         cx.notify();
     }
 
     pub(super) fn cancel_network_cache_flush(&mut self, cx: &mut Context<Self>) {
-        self.network_probe.cache_confirmation = None;
+        self.network_diagnostics.cache_confirmation = None;
         cx.notify();
     }
 
@@ -148,7 +95,7 @@ impl RuntimePage {
         let Some(token) = self.begin_mutation(Page::Network) else {
             return;
         };
-        self.network_probe.cache_confirmation = None;
+        self.network_diagnostics.cache_confirmation = None;
         let client = self.client.clone();
         let task = self.runtime.spawn(async move {
             match action {
@@ -191,12 +138,10 @@ impl RuntimePage {
     }
 
     pub(in crate::pages::runtime) fn export_network_report(&mut self, cx: &mut Context<Self>) {
-        let Some(report) = self.network_probe.report.as_ref() else {
+        let Some(report) = self.network_diagnostics.query.report() else {
             return;
         };
-        let diagnostics =
-            NetworkDiagnostics::new(self.client.clone(), self.operational_status.clone());
-        let payload = diagnostics.export(report, SupportSafe).markdown;
+        let payload = report.export_support_bundle(SupportSafe).markdown;
         let token = self.page_task_token_for(Page::Network);
         let receiver =
             cx.prompt_for_new_path(&std::env::temp_dir(), Some("zenclash-network-report.md"));
@@ -238,8 +183,18 @@ impl RuntimePage {
     }
 
     pub(super) fn add_network_latency_target(&mut self, cx: &mut Context<Self>) {
-        let name = self.network_probe.latency_name.read(cx).value().to_string();
-        let url = self.network_probe.latency_url.read(cx).value().to_string();
+        let name = self
+            .network_diagnostics
+            .latency_name
+            .read(cx)
+            .value()
+            .to_string();
+        let url = self
+            .network_diagnostics
+            .latency_url
+            .read(cx)
+            .value()
+            .to_string();
         match NetworkLatencyTarget::new(name, url) {
             Ok(target) => self.persist_network_preference(
                 NetworkPreferenceChange::AddTarget(target),
@@ -324,18 +279,18 @@ impl RuntimePage {
                         );
                         if adding
                             && this.is_page_task_current(token)
-                            && this.network_probe.adding_target
+                            && this.network_diagnostics.adding_target
                         {
-                            this.network_probe.adding_target = false;
+                            this.network_diagnostics.adding_target = false;
                             use gpui_kit::AppContext;
                             use gpui_kit::component::WindowExt;
                             let _ = cx.update_window(this.window_handle, |_, window, cx| {
                                 window.close_dialog(cx)
                             });
                         }
-                        this.cancel_network_probe();
+                        this.cancel_network_diagnostics();
                         if this.is_page_task_current(token) {
-                            this.refresh_network_probe(cx);
+                            this.refresh_network_diagnostics(cx);
                         }
                     }
                     Err(error) => this.set_page_error(token, error),
@@ -345,21 +300,5 @@ impl RuntimePage {
         })
         .detach();
         cx.notify();
-    }
-}
-
-fn diagnostic_network_snapshot(
-    report: &DiagnosticReport,
-    kind: DiagnosticStepKind,
-) -> Result<&NetworkProbeSnapshot, String> {
-    let step = report
-        .step(kind)
-        .ok_or_else(|| zenclash_i18n::text("network.errors.missing_diagnostic_step"))?;
-    match &step.outcome {
-        Ok(DiagnosticData::Network(snapshot)) => Ok(snapshot),
-        Ok(_) => Err(zenclash_i18n::text(
-            "network.errors.invalid_diagnostic_step",
-        )),
-        Err(error) => Err(error.message.clone()),
     }
 }

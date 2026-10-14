@@ -49,12 +49,14 @@ zenclash-service = { path = "../zenclash-service", features = ["client"] }
 windows-service = "0.8.1"
 deelevate = "0.2.0"
 runas = "=1.2.0"
-windows-sys = { workspace = true, features = ["Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }
+windows-sys = { workspace = true, features = ["Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Registry", "Win32_System_Pipes", "Win32_System_Memory"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 [dev-dependencies]
+# Exercise Windows table classification with actual SDK structs on every test host.
+windows-sys.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 

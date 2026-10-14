@@ -295,11 +295,7 @@ fn truncate_chars(value: &str, limit: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        io::{Read, Write},
-        net::TcpListener,
-        thread,
-    };
+    use std::{io::Write, net::TcpListener, thread};
 
     use super::*;
 
@@ -352,8 +348,10 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 2_048];
-            let bytes = stream.read(&mut request).unwrap();
+            let request = crate::test_support::read_controller_request_blocking(&mut stream)
+                .unwrap()
+                .into_bytes();
+            let bytes = request.len();
             assert!(String::from_utf8_lossy(&request[..bytes]).starts_with("GET /latest "));
             let body = serde_json::json!({
                 "tag_name": "v0.2.0",

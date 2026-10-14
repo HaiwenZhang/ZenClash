@@ -11,7 +11,7 @@ impl ZenClashApp {
     pub(super) fn start_profile_updates(&mut self, cx: &mut Context<Self>) {
         let runtime = self.runtime.clone();
         let controlled = self.controlled_config_store.clone();
-        let profile_service = self.profile_service.clone();
+        let application_commands = self.application_commands.clone();
         cx.spawn(async move |this, cx| {
             loop {
                 let scan = runtime.spawn_blocking(|| {
@@ -26,11 +26,11 @@ impl ZenClashApp {
                 match scan.await {
                     Ok(Ok((store, profile_ids))) => {
                         for id in profile_ids {
-                            let service = profile_service.clone();
+                            let commands = application_commands.clone();
                             let update_store = store.clone();
                             let controlled = controlled.clone();
                             let task = runtime.spawn(async move {
-                                service
+                                commands
                                     .update_remote(update_store, controlled, id)
                                     .await
                                     .map_err(|error| error.to_string())

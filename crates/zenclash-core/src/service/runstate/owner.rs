@@ -1,6 +1,6 @@
 // Forked from Clash Verge Rev; adapted for ZenClash on 2026-10-04.
 // GPL-3.0-only; see NOTICE.md and UPSTREAM.json.
-//! Classifies service ownership samples; `CoreManager` performs any recovery it requests.
+//! Classifies ownership samples for `CoreSession` supervision; it does not perform recovery.
 
 use zenclash_service::ServiceLifecycleState;
 

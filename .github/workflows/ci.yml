@@ -2,81 +2,39 @@ name: Continuous integration
 
 on:
   push:
+    branches-ignore:
+      - "v*"
+      - "v*/**"
+      - "V*"
+      - "V*/**"
+    tags-ignore:
+      - "v*"
+      - "V*"
   pull_request:
+    branches-ignore:
+      - "v*"
+      - "v*/**"
+      - "V*"
+      - "V*/**"
   workflow_dispatch:
+    inputs:
+      mihomo_version:
+        description: Mihomo tag override; leave blank for the shared default
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
 
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: "1"
-
 jobs:
-  formatting:
-    name: rustfmt
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Install the stable Rust toolchain
-        run: |
-          rustup update stable
-          rustup default stable
-          rustup component add rustfmt clippy
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
   verify:
-    name: ${{ matrix.name }} tests and Clippy
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Ubuntu 24.04
-            os: ubuntu-24.04
-          - name: macOS 15
-            os: macos-15
-          - name: Windows 2022
-            os: windows-2022
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Install the stable Rust toolchain
-        run: |
-          rustup update stable
-          rustup default stable
-          rustup component add rustfmt clippy
-
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
-        run: sudo scripts/install_linux_build_deps.sh
-
-      - name: Test authorization result classification
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: scripts/tests/service_authorization_test.ps1
-
-      - name: Run Clippy
-        run: >-
-          cargo clippy --workspace --all-targets --all-features --locked --
-          -D warnings
-          -D clippy::future_not_send
-          -D clippy::await_holding_lock
-          -D clippy::large_futures
-          -D clippy::perf
-          -D clippy::redundant_clone
-          -D clippy::needless_collect
-          -D clippy::large_enum_variant
-          -D clippy::manual_ok_or
-          -D clippy::missing_errors_doc
-          -D clippy::missing_panics_doc
-
-      - name: Run workspace tests
-        run: cargo test --workspace --all-features --locked
+    # PR filters inspect the base; case-insensitive startsWith also covers V.
+    if: >-
+      ${{ !startsWith(github.ref_name, 'v') &&
+      !startsWith(github.head_ref, 'v') }}
+    uses: ./.github/workflows/validate-release.yml
+    with:
+      mihomo_version: ${{ inputs.mihomo_version }}
+    secrets:
+      test_profile_url: ${{ secrets.ZENCLASH_TEST_PROFILE_URL }}

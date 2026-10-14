@@ -3,7 +3,9 @@ use std::{path::PathBuf, process::Command, sync::Arc, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::{MihomoClient, MihomoError};
-use crate::{CoreKind, MihomoEndpoint, MihomoLaunchConfig, MihomoProcess, owned_core::OwnedCore};
+use crate::{
+    CoreKind, CoreLaunchConfig, ManagedCoreProcess, MihomoEndpoint, owned_core::OwnedCore,
+};
 
 #[test]
 fn an_external_controller_has_no_managed_process_owner() {
@@ -52,21 +54,6 @@ async fn a_switch_publishes_process_owner_and_endpoint_to_existing_clones_togeth
         panic!("existing clone did not receive managed ownership");
     };
     assert!(Arc::ptr_eq(&clone_owner, &owner));
-}
-
-#[tokio::test]
-async fn a_process_of_another_kind_cannot_replace_a_client_binding() {
-    let fixture = ProcessFixture::new(CoreKind::Meow, "unsupported-owner");
-    let client = MihomoClient::new(MihomoEndpoint::default()).unwrap();
-    let generation = client.binding.generation();
-    let endpoint = client.endpoint().unwrap();
-
-    let result = client.switch_to_process(fixture.process().clone()).await;
-
-    assert!(matches!(result, Err(MihomoError::InvalidInput(_))));
-    assert_eq!(client.binding.generation(), generation);
-    assert_eq!(client.endpoint().unwrap().controller, endpoint.controller);
-    assert!(client.owned_core().is_none());
 }
 
 #[tokio::test]
@@ -276,12 +263,12 @@ async fn a_previous_controller_response_is_rejected_after_managed_ownership_chan
 // This executable is a real owned child, solely for lifecycle/binding behavior.
 // It does not implement Mihomo or prove native core integration.
 struct ProcessFixture {
-    process: Option<Arc<MihomoProcess>>,
+    process: Option<Arc<ManagedCoreProcess>>,
     directory: PathBuf,
 }
 
 impl ProcessFixture {
-    fn process(&self) -> &Arc<MihomoProcess> {
+    fn process(&self) -> &Arc<ManagedCoreProcess> {
         self.process.as_ref().unwrap()
     }
 
@@ -329,7 +316,7 @@ impl ProcessFixture {
         );
         let configuration = directory.join("profile.yaml");
         std::fs::write(&configuration, "rules:\n  - MATCH,DIRECT\n").unwrap();
-        let process = MihomoProcess::spawn(MihomoLaunchConfig {
+        let process = ManagedCoreProcess::spawn(CoreLaunchConfig {
             kind,
             binary,
             config_file: configuration,

@@ -1,11 +1,11 @@
 //! Real ordinary Local backup restoration; no privileged service or TUN is started.
 
 use super::*;
-use crate::{MihomoLaunchConfig, owned_core::OwnedCore};
+use crate::{CoreLaunchConfig, owned_core::OwnedCore};
 
 struct Fixture {
     root: PathBuf,
-    process: Option<Arc<MihomoProcess>>,
+    process: Option<Arc<ManagedCoreProcess>>,
     client: Option<MihomoClient>,
 }
 
@@ -75,9 +75,9 @@ async fn ordinary_local_backup_recovers_held_provider_after_original_sources_are
     );
     let store = ControlledConfigStore::new(root.join("controlled"));
     let runtime = store.materialize(&source).unwrap();
-    let launch = MihomoLaunchConfig::new(local_binary, runtime, home.clone()).unwrap();
+    let launch = CoreLaunchConfig::new(local_binary, runtime, home.clone()).unwrap();
     drop(reservation);
-    let process = MihomoProcess::spawn(launch).unwrap();
+    let process = ManagedCoreProcess::spawn(launch).unwrap();
     fixture.process = Some(process.clone());
     process
         .wait_until_ready(Duration::from_secs(10))

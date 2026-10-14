@@ -66,7 +66,7 @@ impl CoreSession {
     pub async fn recover_service_to_local(
         &self,
         store: &ControlledConfigStore,
-        fallback: Option<crate::MihomoLaunchConfig>,
+        fallback: Option<crate::CoreLaunchConfig>,
     ) -> Result<CoreLocalRecoveryOutcome, CoreSessionError> {
         self.ensure_not_shutting_down()?;
         let capture = self.capture_publication_gate().lock_owned().await;
@@ -77,7 +77,7 @@ impl CoreSession {
     pub(crate) async fn recover_service_to_local_admitted(
         &self,
         store: &ControlledConfigStore,
-        fallback: Option<crate::MihomoLaunchConfig>,
+        fallback: Option<crate::CoreLaunchConfig>,
         capture: tokio::sync::OwnedMutexGuard<()>,
         expected_generation: u64,
     ) -> Result<CoreLocalRecoveryOutcome, CoreSessionError> {
@@ -98,7 +98,7 @@ impl CoreSession {
         }
         let scopes_launch = launch.clone();
         let scopes = tokio::task::spawn_blocking(move || {
-            MihomoProcess::prepare_stopped(scopes_launch).write_scopes()
+            ManagedCoreProcess::prepare_stopped(scopes_launch).write_scopes()
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))?;
@@ -120,7 +120,7 @@ impl CoreSession {
         self.lifecycle.write().stop_requested = true;
         let session = self.clone();
         tokio::spawn(async move {
-            let _run_attempt = session.begin_core_run_attempt();
+            let _availability_pause = session.pause_pac_availability();
             let _capture = capture;
             let _lease = lease;
             let _transition = transition;
@@ -235,7 +235,7 @@ mod tests {
         });
         tokio::task::yield_now().await;
         assert!(!waiting.is_finished());
-        session.mark_runtime_unknown();
+        session.invalidate_runtime_observations();
         drop(held);
         assert!(matches!(
             waiting.await.unwrap(),
@@ -246,7 +246,7 @@ mod tests {
     async fn prepared_receipt() -> (CoreSession, CoreLocalRecoveryOutcome) {
         let home =
             std::env::temp_dir().join(format!("zenclash-recovery-receipt-{}", std::process::id()));
-        let process = MihomoProcess::prepare_stopped(crate::MihomoLaunchConfig {
+        let process = ManagedCoreProcess::prepare_stopped(crate::CoreLaunchConfig {
             kind: CoreKind::Mihomo,
             binary: home.join("ordinary-mihomo"),
             config_file: home.join("held-runtime.yaml"),
@@ -317,7 +317,7 @@ mod tests {
 
     #[tokio::test]
     async fn suspended_session_successful_local_recovery_reopens_runtime_operations() {
-        let process = MihomoProcess::prepare_stopped(crate::MihomoLaunchConfig {
+        let process = ManagedCoreProcess::prepare_stopped(crate::CoreLaunchConfig {
             kind: CoreKind::Mihomo,
             binary: PathBuf::from("ordinary-mihomo"),
             config_file: PathBuf::from("held-runtime.yaml"),

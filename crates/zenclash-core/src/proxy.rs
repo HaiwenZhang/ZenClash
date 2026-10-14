@@ -110,7 +110,7 @@ impl Default for ProxyGroupBehavior {
 }
 
 impl ProxyGroupBehavior {
-    fn from_mihomo(kind: &str, fixed: bool) -> Self {
+    pub(crate) fn from_mihomo(kind: &str, fixed: bool) -> Self {
         if kind.eq_ignore_ascii_case("selector") {
             Self::Selector
         } else if kind.eq_ignore_ascii_case("urltest") || kind.eq_ignore_ascii_case("fallback") {
@@ -120,6 +120,31 @@ impl ProxyGroupBehavior {
         } else {
             Self::Unknown(kind.to_owned())
         }
+    }
+}
+
+/// Controller evidence for one group's actual member and selection behavior.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProxyGroupSelectionObservation {
+    member: String,
+    behavior: Option<ProxyGroupBehavior>,
+}
+
+impl ProxyGroupSelectionObservation {
+    pub(crate) fn new(member: String, behavior: Option<ProxyGroupBehavior>) -> Self {
+        Self { member, behavior }
+    }
+
+    /// Returns the member reported by the controller, empty when none was reported.
+    #[must_use]
+    pub fn member(&self) -> &str {
+        &self.member
+    }
+
+    /// Returns behavior only when the response included the group's implementation type.
+    #[must_use]
+    pub fn behavior(&self) -> Option<&ProxyGroupBehavior> {
+        self.behavior.as_ref()
     }
 }
 
@@ -161,8 +186,10 @@ impl ProxyNodeId {
 
 /// Selectable Mihomo proxy group with references into its owning catalog.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ProxyGroup {
-    /// Group name.
+    controller_name: String,
+    /// User-facing label; controller commands use [`Self::controller_name`].
     pub name: String,
     /// Mihomo group implementation type.
     pub kind: String,
@@ -176,6 +203,70 @@ pub struct ProxyGroup {
     pub test_url: Option<String>,
     /// Whether Mihomo marks this group as hidden.
     pub hidden: bool,
+}
+
+impl ProxyGroup {
+    /// Creates a group whose display label initially matches its controller map key.
+    #[must_use]
+    pub fn new(controller_name: impl Into<String>) -> Self {
+        let controller_name = controller_name.into();
+        Self {
+            name: controller_name.clone(),
+            controller_name,
+            ..Self::default()
+        }
+    }
+    /// Returns the stable key accepted by controller group endpoints.
+    #[must_use]
+    pub fn controller_name(&self) -> &str {
+        if self.controller_name.is_empty() {
+            &self.name
+        } else {
+            &self.controller_name
+        }
+    }
+    /// Sets the display label without changing controller identity.
+    #[must_use]
+    pub fn with_display_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+    /// Sets the raw controller implementation type.
+    #[must_use]
+    pub fn with_kind(mut self, kind: impl Into<String>) -> Self {
+        self.kind = kind.into();
+        self
+    }
+    /// Sets the observed selection behavior.
+    #[must_use]
+    pub fn with_behavior(mut self, behavior: ProxyGroupBehavior) -> Self {
+        self.behavior = behavior;
+        self
+    }
+    /// Sets a member observed in the initial snapshot.
+    #[must_use]
+    pub fn with_current_member(mut self, member: impl Into<String>) -> Self {
+        self.now = member.into();
+        self
+    }
+    /// Sets canonical member references for catalog construction.
+    #[must_use]
+    pub fn with_members(mut self, members: Arc<[ProxyNodeId]>) -> Self {
+        self.all = members;
+        self
+    }
+    /// Sets the group health-check URL.
+    #[must_use]
+    pub fn with_test_url(mut self, test_url: Option<String>) -> Self {
+        self.test_url = test_url;
+        self
+    }
+    /// Sets whether normal catalog consumers hide this group.
+    #[must_use]
+    pub fn with_hidden(mut self, hidden: bool) -> Self {
+        self.hidden = hidden;
+        self
+    }
 }
 
 /// Resolved proxy groups and aggregate proxy count.
@@ -239,12 +330,37 @@ impl ProxyCatalog {
     /// Updates confirmed or optimistic selection without changing membership identity.
     /// Returns whether the group exists in this snapshot.
     pub fn set_group_selection(&mut self, group: &str, member: String) -> bool {
-        let Some(group) = self.groups.iter_mut().find(|item| item.name == group) else {
+        let Some(group) = self
+            .groups
+            .iter_mut()
+            .find(|item| item.controller_name() == group)
+        else {
             return false;
         };
         group.now = member;
         if matches!(group.behavior, ProxyGroupBehavior::Automatic { .. }) {
             group.behavior = ProxyGroupBehavior::Automatic { fixed: true };
+        }
+        true
+    }
+
+    /// Applies only actual member and behavior present in a controller observation.
+    /// Returns whether the group exists, preserving membership identity.
+    pub fn apply_group_observation(
+        &mut self,
+        group: &str,
+        observation: &ProxyGroupSelectionObservation,
+    ) -> bool {
+        let Some(group) = self
+            .groups
+            .iter_mut()
+            .find(|item| item.controller_name() == group)
+        else {
+            return false;
+        };
+        group.now = observation.member().to_owned();
+        if let Some(behavior) = observation.behavior() {
+            group.behavior = behavior.clone();
         }
         true
     }
@@ -283,14 +399,14 @@ impl ProxyCatalog {
     ) -> impl Iterator<Item = &'a ProxyGroup> + 'a {
         self.groups
             .iter()
-            .filter(move |group| group_visible_in_mode(&group.name, mode))
+            .filter(move |group| group_visible_in_mode(group.controller_name(), mode))
     }
 
     /// Consumes the catalog and yields the strategy groups for one mode.
     pub fn into_groups_for_mode(self, mode: &str) -> impl Iterator<Item = ProxyGroup> + '_ {
         self.groups
             .into_iter()
-            .filter(move |group| group_visible_in_mode(&group.name, mode))
+            .filter(move |group| group_visible_in_mode(group.controller_name(), mode))
     }
 }
 
@@ -358,7 +474,7 @@ struct RawProxy {
     fixed: bool,
 }
 
-fn deserialize_fixed<'de, D>(deserializer: D) -> Result<bool, D::Error>
+pub(crate) fn deserialize_fixed<'de, D>(deserializer: D) -> Result<bool, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -419,6 +535,7 @@ impl From<RawProxyCatalog> for ProxyCatalog {
             if !proxy.all.is_empty() {
                 let members = std::mem::take(&mut proxy.all);
                 let group = ProxyGroup {
+                    controller_name: key.clone(),
                     name: if proxy.name.is_empty() {
                         key.clone()
                     } else {
@@ -487,6 +604,46 @@ mod tests {
         let proxy = &raw.proxies["empty"];
         assert!(proxy.all.is_empty());
         assert!(proxy.history.is_empty());
+    }
+
+    #[test]
+    fn catalog_keeps_group_controller_keys_independent_of_display_labels() {
+        let raw: RawProxyCatalog = serde_json::from_str(r#"{"proxies":{
+            "GLOBAL":{"name":"Global display label","type":"Selector","all":["first-key","second-key"]},
+            "first-key":{"name":"Same label","type":"Selector","now":"DIRECT","all":["DIRECT"]},
+            "second-key":{"name":"Same label","type":"Selector","now":"DIRECT","all":["DIRECT"]},
+            "DIRECT":{"type":"Direct"}
+        }}"#).unwrap();
+        let mut catalog = ProxyCatalog::from(raw);
+        let global: Vec<_> = catalog
+            .groups_for_mode("global")
+            .map(ProxyGroup::controller_name)
+            .collect();
+        assert_eq!(global, ["GLOBAL"]);
+        let rule_keys: Vec<_> = catalog
+            .groups_for_mode("rule")
+            .map(ProxyGroup::controller_name)
+            .collect();
+        assert_eq!(rule_keys, ["first-key", "second-key"]);
+        assert!(catalog.set_group_selection("second-key", "REJECT".into()));
+        assert_eq!(
+            catalog
+                .groups()
+                .iter()
+                .find(|group| group.controller_name() == "first-key")
+                .unwrap()
+                .now,
+            "DIRECT"
+        );
+        assert_eq!(
+            catalog
+                .groups()
+                .iter()
+                .find(|group| group.controller_name() == "second-key")
+                .unwrap()
+                .name,
+            "Same label"
+        );
     }
 
     #[test]

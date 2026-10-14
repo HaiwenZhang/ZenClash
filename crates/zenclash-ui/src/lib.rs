@@ -17,8 +17,17 @@ pub mod design;
 /// Navigable application pages and their live Mihomo views.
 pub mod pages;
 
-mod profile_service;
-pub use profile_service::ProfileService;
+/// Shared outbound routing modes and intent coordination.
+pub mod outbound_mode;
+
+mod application_commands;
+mod preference_previews;
+mod proxy_selection;
+mod runtime_read_source;
+pub use application_commands::ApplicationCommands;
+
+/// Compatibility name for the shared application commands and recovery context.
+pub type ProfileService = ApplicationCommands;
 
 #[cfg(test)]
 #[path = "../build_version.rs"]

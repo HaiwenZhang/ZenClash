@@ -6,18 +6,18 @@ use gpui_kit::component::{ActiveTheme, WindowExt};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::{InteractiveElement, TestSupportExt};
 
-impl RuntimePage {
+impl LogsView {
     pub(in crate::pages::runtime) fn render_log_actions(
         &self,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
-        let presentation = &self.logs.presentation;
+        let presentation = &self.presentation;
         h_flex()
             .gap_2()
             .flex_wrap()
             .child(
                 Button::new("pause-logs-display")
-                    .label(zenclash_i18n::text(if self.logs.paused {
+                    .label(zenclash_i18n::text(if self.paused {
                         "common.actions.resume_display"
                     } else {
                         "common.actions.pause_display"
@@ -26,11 +26,11 @@ impl RuntimePage {
                     .small()
                     .h_10()
                     .outline()
-                    .disabled(self.logs.presentation.revision.is_none())
+                    .disabled(self.presentation.revision.is_none())
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.logs.paused = !this.logs.paused;
-                        this.logs.cancel_refresh();
-                        this.logs.last_refresh = None;
+                        this.paused = !this.paused;
+                        this.cancel_refresh();
+                        this.last_refresh = None;
                         this.update_log_presentation(cx);
                         cx.notify();
                     })),
@@ -42,9 +42,9 @@ impl RuntimePage {
                     .small()
                     .h_10()
                     .outline()
-                    .loading(self.logs.exporting)
-                    .disabled(presentation.entries.is_empty() || self.logs.exporting)
-                    .on_click(cx.listener(|this, _, _, cx| this.choose_log_export(cx))),
+                    .loading(self.exporting)
+                    .disabled(presentation.entries.is_empty() || self.exporting)
+                    .on_click(cx.listener(|this, _, _, cx| this.request_export(cx))),
             )
             .child(
                 Button::new("log-settings")
@@ -61,7 +61,7 @@ impl RuntimePage {
         &self,
         theme: &gpui_kit::component::Theme,
     ) -> gpui_kit::Div {
-        let color = if self.logs.connected {
+        let color = if self.connected {
             theme.success
         } else {
             theme.muted_foreground
@@ -71,9 +71,9 @@ impl RuntimePage {
             .text_sm()
             .text_color(color)
             .child(div().size_2().rounded_full().bg(color))
-            .child(zenclash_i18n::text(if self.logs.paused {
+            .child(zenclash_i18n::text(if self.paused {
                 "redesign.display_paused"
-            } else if self.logs.connected {
+            } else if self.connected {
                 "redesign.receiving"
             } else {
                 "logs.stream.reconnecting"
@@ -85,7 +85,7 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let presentation = &self.logs.presentation;
+        let presentation = &self.presentation;
         let ready = presentation.revision.is_some();
         let mut table = panel(theme)
             .id("logs-table")
@@ -105,7 +105,7 @@ impl RuntimePage {
                     .flex_wrap()
                     .child(
                         div().flex_1().min_w(gpui_kit::rems(12.)).child(
-                            Input::new(&self.logs.filter)
+                            Input::new(&self.filter)
                                 .prefix(gpui_kit::component::Icon::new(IconName::Search))
                                 .small()
                                 .h_10(),
@@ -146,10 +146,10 @@ impl RuntimePage {
                                         .on_ok(move |_, _, cx| {
                                             let _ = owner.update(cx, |this, cx| {
                                                 this.log_monitor.clear();
-                                                this.logs.paused = false;
-                                                this.logs.selected = None;
-                                                this.logs.page = 0;
-                                                this.logs.cancel_refresh();
+                                                this.paused = false;
+                                                this.selected = None;
+
+                                                this.cancel_refresh();
                                                 this.update_log_presentation(cx);
                                                 cx.notify();
                                             });
@@ -185,28 +185,24 @@ impl RuntimePage {
                             presentation.matches.len(),
                             move |range, _, cx| {
                                 owner
-                                    .update(cx, |page, cx| {
+                                    .update(cx, |view, cx| {
                                         let theme = cx.theme().clone();
                                         range
                                             .filter_map(|position| {
-                                                page.logs
-                                                    .presentation
-                                                    .matches
-                                                    .get(position)
-                                                    .copied()
+                                                view.presentation.matches.get(position).copied()
                                             })
-                                            .map(|index| page.render_log_row(index, &theme, cx))
+                                            .map(|index| view.render_log_row(index, &theme, cx))
                                             .collect::<Vec<_>>()
                                     })
                                     .unwrap_or_default()
                             },
                         )
-                        .track_scroll(&self.logs.scroll)
+                        .track_scroll(&self.scroll)
                         .h_full()
                         .w_full(),
                     )
                 })
-                .vertical_scrollbar(&self.logs.scroll),
+                .vertical_scrollbar(&self.scroll),
         );
         table = table.child(
             h_flex()
@@ -232,11 +228,11 @@ impl RuntimePage {
                         .child(
                             crate::components::mint_switch::MintSwitch::new("log-auto-scroll")
                                 .accessibility_label(zenclash_i18n::text("redesign.auto_scroll"))
-                                .checked(self.logs.auto_scroll)
-                                .on_click(cx.listener(|page, checked, _, cx| {
-                                    page.logs.auto_scroll = *checked;
+                                .checked(self.auto_scroll)
+                                .on_click(cx.listener(|view, checked, _, cx| {
+                                    view.auto_scroll = *checked;
                                     if *checked {
-                                        page.jump_to_latest_log(cx);
+                                        view.jump_to_latest_log(cx);
                                     }
                                     cx.notify();
                                 })),
@@ -247,12 +243,13 @@ impl RuntimePage {
                                 .small()
                                 .label(zenclash_i18n::text("redesign.jump_latest"))
                                 .on_click(
-                                    cx.listener(|page, _, _, cx| page.jump_to_latest_log(cx)),
+                                    cx.listener(|view, _, _, cx| view.jump_to_latest_log(cx)),
                                 ),
                         ),
                 ),
         );
         v_flex()
+            .track_focus(&self.focus_handle)
             .h_full()
             .min_h_0()
             .gap_3()
@@ -298,11 +295,10 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let presentation = &self.logs.presentation;
+        let presentation = &self.presentation;
         let row = &presentation.rows[index];
         let entry = presentation.entries[index].clone();
         let selected = self
-            .logs
             .selected
             .as_ref()
             .is_some_and(|selected| Arc::ptr_eq(&selected.0, &entry));
@@ -359,7 +355,7 @@ impl RuntimePage {
                         })
                         .custom(ButtonCustomVariant::new(cx).foreground(theme.foreground))
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.logs.selected = Some((entry.clone(), selected_row.clone()));
+                            this.selected = Some((entry.clone(), selected_row.clone()));
                             this.open_log_details(window, cx);
                         })),
                 ),
@@ -371,7 +367,7 @@ impl RuntimePage {
                     .w_20()
                     .label(zenclash_i18n::text("redesign.details"))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.logs.selected = Some((detail_entry.clone(), detail_row.clone()));
+                        this.selected = Some((detail_entry.clone(), detail_row.clone()));
                         this.open_log_details(window, cx);
                     })),
             )
@@ -408,11 +404,11 @@ impl RuntimePage {
                 .small()
                 .h_10()
                 .outline()
-                .selected(self.logs.level_filter.as_deref() == level)
+                .selected(self.level_filter.as_deref() == level)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.logs.level_filter = level.map(str::to_owned);
-                    this.logs.page = 0;
-                    this.logs.cancel_refresh();
+                    this.level_filter = level.map(str::to_owned);
+
+                    this.cancel_refresh();
                     this.update_log_presentation(cx);
                     cx.notify();
                 }))
@@ -421,7 +417,7 @@ impl RuntimePage {
     }
 
     fn render_log_order(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let oldest_first = self.logs.oldest_first;
+        let oldest_first = self.oldest_first;
         let owner = cx.entity().downgrade();
         Button::new("log-display-order")
             .small()
@@ -440,11 +436,11 @@ impl RuntimePage {
                         PopupMenuItem::new(zenclash_i18n::text(label))
                             .checked(oldest_first == value)
                             .on_click(move |_, _, cx| {
-                                let _ = owner.update(cx, |page, cx| {
-                                    page.logs.oldest_first = value;
-                                    page.logs.page = 0;
-                                    page.logs.cancel_refresh();
-                                    page.update_log_presentation(cx);
+                                let _ = owner.update(cx, |view, cx| {
+                                    view.oldest_first = value;
+
+                                    view.cancel_refresh();
+                                    view.update_log_presentation(cx);
                                     cx.notify();
                                 });
                             }),

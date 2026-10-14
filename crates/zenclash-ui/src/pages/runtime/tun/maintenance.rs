@@ -13,7 +13,7 @@ impl RuntimePage {
     ) {
         if self.core_busy()
             || self
-                .profile_service
+                .application_commands
                 .service_state()
                 .is_some_and(|state| state.is_busy())
             || window.has_active_dialog(cx)
@@ -27,7 +27,7 @@ impl RuntimePage {
             return;
         }
         let request = match self
-            .profile_service
+            .application_commands
             .request_service_maintenance(operation, None)
         {
             Ok(request) => request,
@@ -66,9 +66,9 @@ impl RuntimePage {
             .core_binaries
             .path(CoreKind::Mihomo)
             .map(std::path::Path::to_path_buf);
-        let profiles = self.profile_service.clone();
+        let commands = self.application_commands.clone();
         let task = self.runtime.spawn(async move {
-            profiles
+            commands
                 .discover_service_maintenance(operation, root, preferred)
                 .await
         });
@@ -160,15 +160,15 @@ impl RuntimePage {
         };
         let restart_after_repair = request.operation() == ServiceOperation::Repair
             && self.core_session.is_offline_recovery();
-        let profiles = self.profile_service.clone();
+        let commands = self.application_commands.clone();
         let store = self.controlled_config_store.clone();
         let preferences_store = self.preferences_store.clone();
         let task = self.runtime.spawn(async move {
             let maintenance = async {
-                let preparation = profiles
+                let preparation = commands
                     .prepare_service_maintenance(request, &store)
                     .await?;
-                profiles.maintain_prepared_service(preparation, true).await
+                commands.maintain_prepared_service(preparation, true).await
             }
             .await;
             let preferences = if let Some(store) = preferences_store {

@@ -1,9 +1,9 @@
 use super::SystemProxyEditorState;
 use crate::pages::runtime::settings::forms::settings_status;
 use crate::pages::runtime::{
-    Button, ButtonVariants, Context, Disableable, FluentBuilder, Input, IntoElement, ParentElement,
-    RuntimeConfig, RuntimeData, RuntimePage, Selectable, Sizable, Styled, SystemProxyMode,
-    SystemProxyStatus, div, format_proxy, h_flex, info_row, setting_card, v_flex,
+    Button, ButtonVariants, Context, Disableable, FluentBuilder, Input, IntoElement,
+    PageSnapshotData, ParentElement, RuntimeConfig, RuntimePage, Selectable, Sizable, Styled,
+    SystemProxyMode, SystemProxySummary, div, format_proxy, h_flex, info_row, setting_card, v_flex,
 };
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::input::Textarea;
@@ -15,14 +15,20 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let (config, status) = match &self.data {
-            RuntimeData::SystemProxy { config, status } => (config.clone(), status.clone()),
-            _ => (RuntimeConfig::default(), SystemProxyStatus::default()),
+        let default_config = RuntimeConfig::default();
+        let default_status = SystemProxySummary::default();
+        let (config, status) = match self.page_observation.data() {
+            PageSnapshotData::SystemProxy { config, status } => (config, status),
+            _ => (&default_config, &default_status),
         };
         let active = status.active();
         let port = config.system_proxy_port().unwrap_or_default();
         let mode = self.preferences.system_proxy_mode;
-        let endpoint = format_proxy(&status.server, status.port, status.enabled);
+        let endpoint = format_proxy(
+            status.http().host(),
+            status.http().port(),
+            status.http().is_enabled(),
+        );
         let bypass = self.preferences.system_proxy_bypass.clone();
         v_flex()
             .gap_4()
@@ -96,10 +102,10 @@ impl RuntimePage {
                                     ))
                                     .child(info_row(
                                         zenclash_i18n::text("system_proxy.fields.pac"),
-                                        if status.auto_enabled {
-                                            status.auto_url
+                                        if status.pac().is_enabled() {
+                                            status.pac().url()
                                         } else {
-                                            "—".into()
+                                            "—"
                                         },
                                         theme,
                                     ))

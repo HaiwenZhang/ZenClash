@@ -18,7 +18,7 @@ impl RuntimePage {
         let authorization = self.core_session.runtime_descriptor().backend()
             == CoreRuntimeBackend::Local
             && !run_state.tun_capable();
-        let pending = self.profile_service.pending_finalization();
+        let pending = self.application_commands.pending_finalization();
         h_flex()
             .justify_end()
             .flex_wrap()
@@ -129,7 +129,7 @@ impl RuntimePage {
     pub(crate) fn request_service_tun(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.core_busy()
             || self
-                .profile_service
+                .application_commands
                 .service_state()
                 .is_some_and(|state| state.is_busy())
         {
@@ -144,7 +144,7 @@ impl RuntimePage {
         if self.page == Page::Home {
             self.home.action_error = None;
         }
-        match self.profile_service.request_service_tun() {
+        match self.application_commands.request_service_tun() {
             Ok(request) => self.present_service_tun_request(request, window, cx),
             Err(error) => {
                 self.set_service_tun_error(self.page_task_token_for(self.page), error);
@@ -161,7 +161,7 @@ impl RuntimePage {
     ) {
         if self.core_busy()
             || self
-                .profile_service
+                .application_commands
                 .service_state()
                 .is_some_and(|state| state.is_busy())
         {
@@ -173,7 +173,7 @@ impl RuntimePage {
             return;
         }
         let health = self
-            .profile_service
+            .application_commands
             .service_state()
             .and_then(|state| state.health().cloned());
         if !request.needs_authorization_consent() || health == Some(ServiceHealthKind::Ready) {
@@ -226,10 +226,10 @@ impl RuntimePage {
         let Some(token) = self.begin_mutation(self.page) else {
             return;
         };
-        let profiles = self.profile_service.clone();
+        let commands = self.application_commands.clone();
         let task = self
             .runtime
-            .spawn(async move { profiles.enable_service_tun(request).await });
+            .spawn(async move { commands.enable_service_tun(request).await });
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
@@ -240,10 +240,9 @@ impl RuntimePage {
                 this.reload_controlled_config(cx);
                 match result {
                     Ok(outcome) => {
-                        if outcome
-                            .core()
-                            .is_some_and(|core| !this.profile_service.is_current(core.generation))
-                        {
+                        if outcome.core().is_some_and(|core| {
+                            !this.application_commands.is_current(core.generation)
+                        }) {
                             this.refresh(cx);
                             return;
                         }
@@ -264,7 +263,7 @@ impl RuntimePage {
                     }
                     Err(error) => {
                         let visible_status = this
-                            .profile_service
+                            .application_commands
                             .service_state()
                             .map(|state| state.phase());
                         if !matches!(
@@ -297,10 +296,10 @@ impl RuntimePage {
         let Some(token) = self.begin_mutation(self.page) else {
             return;
         };
-        let profiles = self.profile_service.clone();
+        let commands = self.application_commands.clone();
         let task = self
             .runtime
-            .spawn(async move { profiles.confirm_service_runtime(version).await });
+            .spawn(async move { commands.confirm_service_runtime(version).await });
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
@@ -311,7 +310,7 @@ impl RuntimePage {
                 this.reload_controlled_config(cx);
                 this.refresh(cx);
                 if let Err(error) = result
-                    && this.profile_service.pending_finalization() == Some(version)
+                    && this.application_commands.pending_finalization() == Some(version)
                 {
                     this.set_page_error(token, error);
                 }

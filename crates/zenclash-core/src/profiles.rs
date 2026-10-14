@@ -21,7 +21,7 @@ mod tests;
 
 pub use application::{
     PreparedProfileChange, ProfileApplication, ProfileApplicationError, ProfileApplyOutcome,
-    ProfileChange, ProfilePreparationError, ProfileRecovery, ProfileVersion,
+    ProfileChange, ProfilePreparationError, ProfileRecovery, ProfileSourceMetadata, ProfileVersion,
 };
 use download::download_profile;
 pub use model::{
@@ -30,7 +30,6 @@ pub use model::{
     SubscriptionUsage,
 };
 pub use storage::atomic_write;
-use storage::home_dir;
 pub use storage::read_profile_bytes;
 pub(crate) use storage::{encode_catalog, read_index_bytes};
 pub use validation::validate_clash_yaml;

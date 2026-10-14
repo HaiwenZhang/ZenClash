@@ -1,14 +1,18 @@
 use super::{
-    AppContext, ClipboardItem, Context, EnvironmentShell, NetworkTrayIcon, OutboundMode, Page,
-    TrayClick, TrayCommand, TrayEvent, TrayMenuState, TrayProfile, TrayProxyGroup, TrayProxyNode,
-    ZenClashApp, open_directory, tray_directories,
+    ClipboardItem, Context, EnvironmentShell, NetworkTrayIcon, OutboundMode, Page, TrayClick,
+    TrayCommand, TrayEvent, TrayMenuState, TrayProfile, TrayProxyGroup, TrayProxyNode, ZenClashApp,
+    open_directory,
 };
 
 mod commands;
+mod directories;
 pub(in crate::app) mod panel;
+pub(in crate::app) mod proxy_commands;
 mod queue;
 mod refresh;
-mod window;
+mod runtime_observation;
+#[cfg(test)]
+mod test_support;
 
 pub(in crate::app) use queue::LatestCommandQueue;
 
@@ -34,8 +38,8 @@ impl ZenClashApp {
                             .as_ref()
                             .and_then(|tray| tray.resolve_event(event));
                         match event {
-                            Some(TrayEvent::Command(command)) => {
-                                this.handle_tray_command(command, cx);
+                            Some(TrayEvent::Command(command, observation)) => {
+                                this.handle_observed_tray_command(command, observation, cx);
                             }
                             Some(TrayEvent::Click(click)) => match click {
                                 TrayClick::ShowPanel => this.toggle_status_panel(cx),

@@ -20,7 +20,7 @@ impl RuntimePage {
             .as_deref()
             .and_then(|id| {
                 self.profiles
-                    .catalog
+                    .catalog()
                     .profiles
                     .iter()
                     .find(|profile| profile.id == id)

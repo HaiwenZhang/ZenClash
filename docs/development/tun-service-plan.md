@@ -45,7 +45,7 @@
 | ZenClash 异常结束 | 服务识别会话所有者消失，在有界时间内停止其内核并释放 TUN |
 | 系统重启 | 服务可由系统启动待命；只有有效应用会话才能启动内核，服务不自行恢复代理 |
 
-本次正式支持 Mihomo。meow-rs 继续保持实验后端的真实能力边界；连接外部控制器时，不接管或提权外部内核。Linux 首期要求 systemd；缺少 systemd 或 Polkit 授权代理时应给出明确说明和文档入口。
+本次正式支持 Mihomo。连接外部控制器时，不接管或提权外部内核。Linux 首期要求 systemd；缺少 systemd 或 Polkit 授权代理时应给出明确说明和文档入口。
 
 ## 2. 规划基线与接入点
 
@@ -56,8 +56,8 @@
 | [Windows TUN 权限](../../crates/zenclash-core/src/tun_permissions/windows.rs) | 只检测当前进程是否为管理员，尚无可请求的受限 helper |
 | [Linux TUN 权限](../../crates/zenclash-core/src/tun_permissions/linux.rs) | 通过 `pkexec` 把内核改为 root 所有并设置 setuid |
 | [macOS TUN 权限](../../crates/zenclash-core/src/tun_permissions/macos.rs) | 通过管理员授权脚本把内核改为 root 所有并设置 setuid |
-| [内核会话](../../crates/zenclash-core/src/core_session.rs) | `CoreSession` 串行管理配置、重启、恢复和退出，持有本地 `MihomoProcess` |
-| [进程管理](../../crates/zenclash-core/src/process.rs) | 本地子进程启动、停止、就绪等待、日志缓冲与退出状态 |
+| [内核会话](../../crates/zenclash-core/src/core_session.rs) | `CoreSession` 串行管理配置、重启、恢复和退出，持有本地 `ManagedCoreProcess` |
+| [进程管理](../../crates/zenclash-core/src/managed_core_process.rs) | 本地子进程启动、停止、就绪等待、日志缓冲与退出状态 |
 | [捕获模式事务](../../crates/zenclash-core/src/traffic_capture.rs) | `TrafficCaptureCoordinator` 协调系统代理、TUN、权限与失败回滚 |
 | [配置事务](../../crates/zenclash-core/src/controlled_config.rs) | 运行时配置生成、校验、应用和回滚；必须保持订阅源文件不变 |
 | [运行状态](../../crates/zenclash-core/src/operational_status.rs)、[TUN 回读](../../crates/zenclash-core/src/tun_runtime.rs) | 区分请求、配置、权限、实际设备和路由，不能只依据 `tun.enable` 报告成功 |
@@ -164,7 +164,7 @@ flowchart LR
 
 macOS 在当前最低系统版本和签名条件下验证管理员授权加 LaunchDaemon 的路径；不把提高最低系统版本或取得 Developer ID 作为隐含前提。helper 纳入现有签名与校验流程，不修改签名身份或关闭平台安全机制。参考 [Apple LaunchDaemon 文档](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)。
 
-Linux 在 Ubuntu、Fedora、Rocky Linux 的当前发布目标上验证服务管理器版本和权限差异。对缺少 Polkit 代理的桌面环境提供明确的手工安装文档，不能在 GUI 后台挂起一个等待终端密码的 `sudo`。容器内打包成功只证明产物构建，不证明 systemd 或 TUN 实机行为。
+Linux 在 Ubuntu 当前发布目标上验证服务管理器版本和权限差异。对缺少 Polkit 代理的桌面环境提供明确的手工安装文档，不能在 GUI 后台挂起一个等待终端密码的 `sudo`。容器内打包成功只证明产物构建，不证明 systemd 或 TUN 实机行为。
 
 ## 6. 状态与事务
 
@@ -320,7 +320,7 @@ macOS 另需证明已加载 job 的实际程序和参数。当前查询分类只
 ### P0：接口梳理与基线
 
 - [ ] 核对本地上游版本、可确认的提交及许可，建立源码到目标模块的移植清单，标明直接复用、必要适配和保留现实现的原因。
-- [ ] 列出 `MihomoProcess` 在启动、配置事务、内核更新、页面快照与退出中的所有调用点。
+- [ ] 列出 `ManagedCoreProcess` 在启动、配置事务、内核更新、页面快照与退出中的所有调用点。
 - [ ] 复核现有本地模式、外部控制器、系统代理/TUN 切换和退出测试，记录可重复基线。
 - [ ] 确定服务库 feature、平台固定目录、协议消息预算、超时与支持的 Mihomo API 清单。
 - [ ] 记录三平台验证环境；缺少的实机环境标记待验收，不用交叉编译冒充。
@@ -405,7 +405,7 @@ macOS 另需证明已加载 job 的实际程序和参数。当前查询分类只
 | 迁移 | 原 setuid 内核、已更新内核、服务版本更新/回滚、未知安装元数据版本、卸载取消 |
 | 网络 | 真实网卡与路由、DNS、配置覆盖的 IPv4/IPv6、切回系统代理、退出后网络恢复 |
 
-优先扩展最近的行为测试：[进程测试](../../crates/zenclash-core/src/process/tests.rs)、[配置事务测试](../../crates/zenclash-core/src/controlled_config/tests.rs)、`core_session.rs` 和 `traffic_capture.rs` 内的测试，以及 [GPUI 行为测试](../../crates/zenclash-ui/src/pages/runtime/ui_tests.rs)。避免只检测字符串、文件存在或内部结构的测试。
+优先扩展最近的行为测试：[进程测试](../../crates/zenclash-core/src/managed_core_process/tests.rs)、[配置事务测试](../../crates/zenclash-core/src/controlled_config/tests.rs)、`core_session.rs` 和 `traffic_capture.rs` 内的测试，以及 [GPUI 行为测试](../../crates/zenclash-ui/src/pages/runtime/ui_tests.rs)。避免只检测字符串、文件存在或内部结构的测试。
 
 共享状态机测试可以使用受控测试替身；安装、授权、进程身份、真实内核、网卡和路由验收必须使用原生实现。新增真实服务集成测试默认忽略，在隔离测试机上显式执行，使用 `ZENCLASH_MIHOMO_BINARY` 指向真实内核。失败路径同样清理测试专用服务，禁止操作已有用户服务。
 
@@ -455,7 +455,7 @@ cargo test -p zenclash-core --test real_mihomo --locked -- --ignored --nocapture
 
 - 当前打包的 Mihomo 在三个平台上的控制器 IPC 能力、热加载行为、TUN 驱动/资源部署及退出清理行为；不能凭其他版本的经验假定可用。
 - 当前 macOS 最低系统版本、ad-hoc 签名与管理员安装流程能否完整承载 helper，升级后是否仍能验证正确身份。
-- Rocky Linux 等既有目标的 systemd/Polkit 版本、SELinux 约束和图形授权代理行为；不通过关闭 SELinux、Gatekeeper 或防火墙绕过问题。
+- Linux 目标的 systemd/Polkit 版本、SELinux 约束和图形授权代理行为；不通过关闭 SELinux、Gatekeeper 或防火墙绕过问题。
 - 配置中本地 provider、GeoData、缓存等资源迁入服务运行目录后的读写和更新边界，以及现有备份/恢复与数据写入协调的衔接。
 - 真正退出应用与关闭窗口到托盘的区别：仅应用会话结束才触发退出清理，窗口隐藏不终止正常代理。
 

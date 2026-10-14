@@ -5,7 +5,8 @@ use super::{
     Render, Sidebar, Styled, TitleBar, Window, ZenClashApp, div, h_flex, v_flex,
 };
 use gpui_kit::component::{
-    IconName,
+    Disableable, IconName, Sizable,
+    alert::Alert,
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -369,6 +370,49 @@ impl Render for ZenClashApp {
                             .flex_1()
                             .h_full()
                             .min_w_0()
+                            .when_some(
+                                self.menu_preference_saves.failure_message(),
+                                |view, message| {
+                                    view.child(
+                                        h_flex()
+                                            .id("menu-preference-save-failure")
+                                            .test_support()
+                                            .flex_shrink_0()
+                                            .items_center()
+                                            .gap_3()
+                                            .px_4()
+                                            .py_2()
+                                            .child(
+                                                Alert::warning(
+                                                    "menu-preference-save-alert",
+                                                    message,
+                                                )
+                                                .small()
+                                                .flex_1()
+                                                .min_w_0(),
+                                            )
+                                            .child(
+                                                Button::new("retry-menu-preferences")
+                                                    .label(zenclash_i18n::text(
+                                                        "common.actions.retry",
+                                                    ))
+                                                    .small()
+                                                    .outline()
+                                                    .disabled(
+                                                        self.menu_preference_saves
+                                                            .has_pending_retry(),
+                                                    )
+                                                    .loading(
+                                                        self.menu_preference_saves
+                                                            .has_pending_retry(),
+                                                    )
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.retry_menu_preferences(cx)
+                                                    })),
+                                            ),
+                                    )
+                                },
+                            )
                             .child(div().flex_1().min_h_0().child(content))
                             .when(self.current_page == Page::Settings, |this| {
                                 this.child(

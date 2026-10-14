@@ -1,7 +1,7 @@
 // Forked from Clash Verge Rev; adapted for ZenClash on 2026-10-04.
 // GPL-3.0-only; original authors and changes are recorded in NOTICE.md.
 //! Run State separates observed Service health from session intent.
-//! Core lifecycle remains in `CoreManager`.
+//! `CoreSession` owns core lifecycle; health observations do not grant runtime ownership.
 
 use crate::service::RunningMode;
 

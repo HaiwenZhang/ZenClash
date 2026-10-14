@@ -42,14 +42,16 @@ struct SessionEffects {
 struct PacEffects {
     server: Option<PacServer>,
     available: bool,
-    attempts: usize,
+    availability_pauses: usize,
     external_allowed: bool,
 }
 
 impl PacEffects {
     fn apply(&self) {
         if let Some(server) = &self.server {
-            server.set_available(self.attempts == 0 && (self.available || self.external_allowed));
+            server.set_available(
+                self.availability_pauses == 0 && (self.available || self.external_allowed),
+            );
         }
     }
 }
@@ -217,14 +219,15 @@ impl CoreSession {
         }
     }
 
-    pub(crate) fn begin_core_run_attempt(&self) -> CoreRunAttempt {
+    /// Keeps PAC unavailable through the original session operation; it does not stop the core.
+    pub(crate) fn pause_pac_availability(&self) -> PacAvailabilityPauseGuard {
         {
             let mut effects = self.run_state.effects.pac.lock();
-            effects.attempts += 1;
+            effects.availability_pauses += 1;
             effects.apply();
         }
         self.run_state.store.core_starting();
-        CoreRunAttempt {
+        PacAvailabilityPauseGuard {
             session: self.clone(),
         }
     }
@@ -239,16 +242,16 @@ impl CoreSession {
     }
 }
 
-pub(crate) struct CoreRunAttempt {
+pub(crate) struct PacAvailabilityPauseGuard {
     session: CoreSession,
 }
 
-impl Drop for CoreRunAttempt {
+impl Drop for PacAvailabilityPauseGuard {
     fn drop(&mut self) {
         self.session.reconcile_run_state();
         self.session.run_state.store.core_start_settled();
         let mut effects = self.session.run_state.effects.pac.lock();
-        effects.attempts -= 1;
+        effects.availability_pauses -= 1;
         effects.apply();
     }
 }
@@ -309,7 +312,10 @@ impl RunStateEnv for SessionEnv {
     async fn probe_service_version(&self) -> anyhow::Result<ServiceVersionReply> {
         let (home, binary, binding) = self.source()?;
         let requirement = tokio::task::spawn_blocking(move || {
-            let core = binary.map_or_else(|| crate::process::service_core_source(&home), Ok)?;
+            let core = binary.map_or_else(
+                || crate::managed_core_process::service_core_source(&home),
+                Ok,
+            )?;
             let name = core
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -443,12 +449,12 @@ mod tests {
     }
 
     #[test]
-    fn nested_attempts_cannot_reopen_pac_when_only_one_has_settled() {
+    fn nested_availability_pauses_cannot_reopen_pac_when_only_one_has_settled() {
         let session = external();
         let server = PacServer::default();
         session.attach_pac_server(server.clone());
-        let first = session.begin_core_run_attempt();
-        let second = session.begin_core_run_attempt();
+        let first = session.pause_pac_availability();
+        let second = session.pause_pac_availability();
         drop(second);
         assert!(!server.is_available());
         drop(first);
@@ -460,7 +466,7 @@ mod tests {
         let session = external();
         let server = PacServer::default();
         session.attach_pac_server(server.clone());
-        let attempt = session.begin_core_run_attempt();
+        let attempt = session.pause_pac_availability();
         session.request_shutdown();
         drop(attempt);
         assert!(!server.is_available());
@@ -482,7 +488,7 @@ mod tests {
     #[tokio::test]
     async fn live_child_observation_and_real_stop_control_the_attached_http_endpoint() {
         let fixture =
-            super::super::ownership_tests::ChildFixture::new("persistent-run-state-pac").await;
+            super::super::test_support::OwnedCoreFixture::new("persistent-run-state-pac").await;
         let session = CoreSession::open(
             CoreKind::Mihomo,
             MihomoClient::from_process(fixture.process.clone()).unwrap(),
@@ -508,7 +514,7 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_local_choice_publishes_health_and_retires_attention() {
         let fixture =
-            super::super::ownership_tests::ChildFixture::new("startup-sidecar-state").await;
+            super::super::test_support::OwnedCoreFixture::new("startup-sidecar-state").await;
         let session = CoreSession::open(
             CoreKind::Mihomo,
             MihomoClient::from_process(fixture.process.clone()).unwrap(),

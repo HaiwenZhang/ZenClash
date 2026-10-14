@@ -1,0 +1,28 @@
+name: Set up project Rust
+description: Install the same pinned toolchain for verification and release builds
+inputs:
+  version:
+    description: Rust toolchain version
+    required: false
+    default: "1.99.0"
+  target:
+    description: Optional additional compilation target
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Install pinned Rust and components
+      shell: bash
+      env:
+        PROJECT_RUST_VERSION: ${{ inputs.version }}
+        PROJECT_RUST_TARGET: ${{ inputs.target }}
+      run: |
+        set -euo pipefail
+        rustup toolchain install "${PROJECT_RUST_VERSION}" --profile minimal --component rustfmt --component clippy
+        rustup override set "${PROJECT_RUST_VERSION}"
+        if [[ -n "${PROJECT_RUST_TARGET}" ]]; then
+          rustup target add --toolchain "${PROJECT_RUST_VERSION}" "${PROJECT_RUST_TARGET}"
+        fi
+        rustc --version
+        cargo --version

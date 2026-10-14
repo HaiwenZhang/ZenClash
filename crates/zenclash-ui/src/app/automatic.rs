@@ -1,7 +1,7 @@
 use std::{path::PathBuf, time::Duration};
 
 use gpui_kit::Context;
-use zenclash_core::{NetworkReachability, YamlOverrideStore};
+use zenclash_core::NetworkReachability;
 
 use super::{ZenClashApp, system_proxy::QuitState};
 
@@ -18,61 +18,8 @@ impl<T: PartialEq> StableObservation<T> {
     }
 }
 
-type SourceChange = Option<(PathBuf, Vec<PathBuf>, [u8; 32])>;
-type SourceStamp = (PathBuf, Option<(u64, std::time::SystemTime)>);
-
-#[derive(Default)]
-struct SourceScanner {
-    stamps: Vec<SourceStamp>,
-    cached: Option<Result<SourceChange, String>>,
-}
-
-impl SourceScanner {
-    fn scan(
-        &mut self,
-        store: &zenclash_core::ControlledConfigStore,
-        kind: zenclash_core::CoreKind,
-        profile: Option<PathBuf>,
-    ) -> Result<SourceChange, String> {
-        let Some(profile) = profile else {
-            self.cached = None;
-            return Ok(None);
-        };
-        let overrides = YamlOverrideStore::discover()
-            .and_then(|store| store.load_enabled_paths())
-            .map_err(|error| error.to_string())?;
-        let paths = [
-            profile.clone(),
-            store.runtime_path(),
-            store.root().join("override.yaml"),
-        ]
-        .into_iter()
-        .chain(overrides.iter().cloned());
-        let stamps = paths
-            .map(|path| {
-                let metadata = std::fs::metadata(&path).ok().and_then(|metadata| {
-                    metadata
-                        .modified()
-                        .ok()
-                        .map(|modified| (metadata.len(), modified))
-                });
-                (path, metadata)
-            })
-            .collect::<Vec<_>>();
-        if self.stamps == stamps
-            && let Some(result) = &self.cached
-        {
-            return result.clone();
-        }
-        let result = store
-            .pending_source_revision(kind, &profile, &overrides)
-            .map(|revision| revision.map(|revision| (profile, overrides, revision)))
-            .map_err(|error| error.to_string());
-        self.stamps = stamps;
-        self.cached = Some(result.clone());
-        result
-    }
-}
+mod source_scanner;
+use source_scanner::{PendingSourceRevision, SourceRevisionKey, SourceScanner};
 
 impl ZenClashApp {
     pub(super) fn start_service_handoff(&self, cx: &mut Context<Self>) {
@@ -85,7 +32,7 @@ impl ZenClashApp {
         }
         let core = self.core_session.clone();
         let capture = self.traffic_capture.clone();
-        let profiles = self.profile_service.clone();
+        let commands = self.application_commands.clone();
         let runtime = self.runtime.clone();
         let descriptor = core.runtime_descriptor();
         let Some(home) = descriptor.home_dir().map(PathBuf::from) else {
@@ -114,13 +61,13 @@ impl ZenClashApp {
                     .ok()
                     == Some(zenclash_core::ServiceHealthKind::Ready)
                 {
-                    let Ok(request) = profiles.request_service_tun() else {
+                    let Ok(request) = commands.request_service_tun() else {
                         return;
                     };
                     // No authorization consent: a ready service can be used, but a
                     // concurrent stop cannot turn an automatic handoff into a prompt.
                     let result = runtime
-                        .spawn(async move { profiles.enable_service_tun(request).await })
+                        .spawn(async move { commands.enable_service_tun(request).await })
                         .await;
                     let _ = this.update(cx, |this, cx| {
                         if let Err(error) = result
@@ -156,7 +103,7 @@ impl ZenClashApp {
         let scanner = std::sync::Arc::new(parking_lot::Mutex::new(SourceScanner::default()));
         cx.spawn(async move |this, cx| {
             let mut network = StableObservation { candidate: None };
-            let mut source = StableObservation::<Option<(PathBuf, [u8; 32])>>::default();
+            let mut source = StableObservation::<Option<SourceRevisionKey>>::default();
             let mut rejected_source = None;
             let mut last_error = None;
             loop {
@@ -199,14 +146,14 @@ impl ZenClashApp {
                             }
                         }
                         match configuration {
-                            Ok(Some((profile, overrides, revision))) => {
-                                let identity = (profile.clone(), revision);
+                            Ok(Some(PendingSourceRevision { source_profile, override_paths, digest })) => {
+                                let identity = SourceRevisionKey { source_profile: source_profile.clone(), digest };
                                 if source.observe(Some(identity.clone())) && rejected_source.as_ref() != Some(&identity) && reachability != NetworkReachability::Offline {
                                     let task_core = core.clone();
                                     let task_capture = capture.clone();
                                     let task_store = controlled.clone();
                                     let applied = runtime.spawn(async move {
-                                        let result = task_core.restart_changed_source(&task_store, profile, overrides, generation, revision).await.map_err(|error| error.to_string());
+                                        let result = task_core.restart_changed_source(&task_store, source_profile, override_paths, generation, digest).await.map_err(|error| error.to_string());
                                         if result.as_ref().is_ok_and(|changed| *changed) || result.is_err() {
                                             let capture = task_capture.reconcile().await.map_err(|error| error.to_string())?;
                                             if let zenclash_core::CaptureOutcome::ReconcileNeeded { failure, .. } = capture { return Err(failure); }
@@ -268,11 +215,25 @@ mod tests {
 
     #[test]
     fn repeated_saves_debounce_until_the_latest_revision_is_stable() {
-        let mut state = StableObservation::<Option<u8>>::default();
-        assert!(!state.observe(Some(1)));
-        assert!(!state.observe(Some(2)));
-        assert!(state.observe(Some(2)));
+        let first = SourceRevisionKey {
+            source_profile: "first.yaml".into(),
+            digest: [1; 32],
+        };
+        let second = SourceRevisionKey {
+            source_profile: "first.yaml".into(),
+            digest: [2; 32],
+        };
+        let other = SourceRevisionKey {
+            source_profile: "other.yaml".into(),
+            digest: [2; 32],
+        };
+        let mut state = StableObservation::<Option<SourceRevisionKey>>::default();
+        assert!(!state.observe(Some(first)));
+        assert!(!state.observe(Some(second.clone())));
+        assert!(state.observe(Some(second.clone())));
+        assert!(!state.observe(Some(other.clone())));
+        assert!(state.observe(Some(other)));
         assert!(!state.observe(None));
-        assert!(!state.observe(Some(2)));
+        assert!(!state.observe(Some(second)));
     }
 }

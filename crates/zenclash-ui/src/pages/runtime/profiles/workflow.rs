@@ -1,4 +1,4 @@
-//! Page presentation adapters over the application-owned profile service.
+//! Page presentation adapters over the shared application commands.
 
 use std::path::PathBuf;
 
@@ -6,31 +6,31 @@ use zenclash_core::{
     ControlledConfigStore, CoreApplyOutcome, ProfileStore, ProfileStoreResult, RemoteProfileOptions,
 };
 
-use super::super::{Page, RuntimeData, load_page};
-pub(crate) use crate::ProfileService as CoreProfileRuntime;
-use crate::profile_service::ProfileReceipt;
+use super::super::{Page, PageSnapshotData, load_page};
+use crate::ApplicationCommands;
+use crate::application_commands::ProfileReceipt;
 
 pub(crate) struct ActivationOutcome {
-    pub(in crate::pages::runtime) refresh: Result<RuntimeData, String>,
+    pub(in crate::pages::runtime) refresh: Result<PageSnapshotData, String>,
     pub(crate) name: String,
     pub(in crate::pages::runtime) receipt: ProfileReceipt,
 }
 
 pub(super) struct UpdateOutcome {
-    pub(super) refresh: Result<RuntimeData, String>,
+    pub(super) refresh: Result<PageSnapshotData, String>,
     pub(super) receipt: ProfileReceipt,
     pub(super) refresh_version: u64,
 }
 
 async fn activation_presentation(
-    runtime: &CoreProfileRuntime,
+    application_commands: &ApplicationCommands,
     receipt: ProfileReceipt,
     page: Page,
 ) -> Result<ActivationOutcome, String> {
     receipt
         .runtime_version()
         .ok_or_else(|| zenclash_i18n::text("profiles.errors.not_applied"))?;
-    let refresh = load_page(runtime.client().clone(), page).await;
+    let refresh = load_page(application_commands.client().clone(), page).await;
     Ok(ActivationOutcome {
         refresh,
         name: receipt.name().to_owned(),
@@ -41,59 +41,59 @@ async fn activation_presentation(
 pub(super) async fn import_local(
     store: ProfileStore,
     controlled: ControlledConfigStore,
-    runtime: CoreProfileRuntime,
+    application_commands: ApplicationCommands,
     source: PathBuf,
     refresh_page: Page,
 ) -> Result<ActivationOutcome, String> {
-    let receipt = runtime
+    let receipt = application_commands
         .import_local(store, controlled, source)
         .await
         .map_err(|error| error.to_string())?;
-    activation_presentation(&runtime, receipt, refresh_page).await
+    activation_presentation(&application_commands, receipt, refresh_page).await
 }
 
 pub(in super::super) async fn add_remote(
     store: ProfileStore,
     controlled: ControlledConfigStore,
-    runtime: CoreProfileRuntime,
+    application_commands: ApplicationCommands,
     name: String,
     url: String,
     user_agent: String,
     options: RemoteProfileOptions,
 ) -> Result<ActivationOutcome, String> {
-    let receipt = runtime
+    let receipt = application_commands
         .add_remote(store, controlled, name, url, user_agent, options)
         .await
         .map_err(|error| error.to_string())?;
-    activation_presentation(&runtime, receipt, Page::Profiles).await
+    activation_presentation(&application_commands, receipt, Page::Profiles).await
 }
 
 pub(in crate::pages::runtime) async fn activate_existing_for_page(
     store: ProfileStore,
     controlled: ControlledConfigStore,
-    runtime: CoreProfileRuntime,
+    application_commands: ApplicationCommands,
     id: String,
     refresh_page: Page,
 ) -> Result<ActivationOutcome, String> {
-    let receipt = runtime
+    let receipt = application_commands
         .activate(store, controlled, id)
         .await
         .map_err(|error| error.to_string())?;
-    activation_presentation(&runtime, receipt, refresh_page).await
+    activation_presentation(&application_commands, receipt, refresh_page).await
 }
 
 pub(super) async fn update_remote(
     store: ProfileStore,
     controlled: ControlledConfigStore,
-    runtime: CoreProfileRuntime,
+    application_commands: ApplicationCommands,
     id: String,
 ) -> Result<UpdateOutcome, String> {
-    let receipt = runtime
+    let receipt = application_commands
         .update_remote(store, controlled, id)
         .await
         .map_err(|error| error.to_string())?;
-    let refresh_version = runtime.session().generation();
-    let refresh = load_page(runtime.client().clone(), Page::Profiles).await;
+    let refresh_version = application_commands.session().generation();
+    let refresh = load_page(application_commands.client().clone(), Page::Profiles).await;
     Ok(UpdateOutcome {
         refresh,
         receipt,
@@ -107,10 +107,10 @@ pub(super) async fn delete(store: ProfileStore, id: String) -> Result<(), String
 
 pub(in super::super) async fn reload_effective(
     controlled: ControlledConfigStore,
-    runtime: &CoreProfileRuntime,
+    application_commands: &ApplicationCommands,
 ) -> Result<CoreApplyOutcome, String> {
-    let overrides = runtime.enabled_overrides().await?;
-    runtime
+    let overrides = application_commands.enabled_overrides().await?;
+    application_commands
         .reapply_with_overrides(controlled, overrides)
         .await
         .and_then(|outcome| {
@@ -161,10 +161,10 @@ mod tests {
                 .unwrap();
         let session = CoreSession::open(CoreKind::Mihomo, client).unwrap();
         let controlled = ControlledConfigStore::new(root.join("controlled"));
-        let runtime = CoreProfileRuntime::new(session.clone(), Some(overrides.clone()));
+        let commands = ApplicationCommands::new(session.clone(), Some(overrides.clone()));
 
         assert_eq!(
-            runtime
+            commands
                 .reapply_with_overrides(controlled.clone(), paths.clone())
                 .await
                 .unwrap(),

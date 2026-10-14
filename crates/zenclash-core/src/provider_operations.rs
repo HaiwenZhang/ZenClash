@@ -7,6 +7,10 @@ use thiserror::Error;
 
 use crate::{MihomoClient, Provider, ProviderCatalog};
 
+mod action_receipt;
+mod actions;
+pub use action_receipt::ProviderActionReceipt;
+
 /// Kind of Mihomo provider being observed.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ProviderKind {
@@ -70,6 +74,43 @@ impl ProviderOperationalStatus {
     }
 }
 
+/// One controller-key target in a provider update batch.
+#[derive(Clone, Debug)]
+pub struct ProviderUpdateTarget {
+    kind: ProviderKind,
+    controller_key: String,
+}
+
+impl ProviderUpdateTarget {
+    /// Creates a target using the provider collection kind and controller map key.
+    #[must_use]
+    pub fn new(kind: ProviderKind, controller_key: impl Into<String>) -> Self {
+        Self {
+            kind,
+            controller_key: controller_key.into(),
+        }
+    }
+}
+
+/// Batch diagnostics and the original runtime client for subsequent readback.
+pub struct ProviderUpdateBatchReceipt {
+    client: MihomoClient,
+    failures: Vec<String>,
+}
+
+impl ProviderUpdateBatchReceipt {
+    /// Returns the batch's pinned runtime client for its presentation readback.
+    #[must_use]
+    pub fn client(&self) -> &MihomoClient {
+        &self.client
+    }
+    /// Returns per-target update/readback failures without losing successful history.
+    #[must_use]
+    pub fn failures(&self) -> &[String] {
+        &self.failures
+    }
+}
+
 /// Errors from a provider operation or its required readback.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -89,25 +130,83 @@ pub type ProviderOperationResult<T> = Result<T, ProviderOperationError>;
 #[derive(Clone)]
 pub struct ProviderOperations {
     client: MihomoClient,
-    states: Arc<RwLock<BTreeMap<(ProviderKind, String), ProviderOperationalStatus>>>,
+    observations: Arc<RwLock<ProviderObservationLedger>>,
+}
+
+#[derive(Default)]
+struct ProviderObservationLedger {
+    binding_generation: Option<u64>,
+    states: BTreeMap<(ProviderKind, String), ProviderOperationalStatus>,
+}
+
+impl ProviderObservationLedger {
+    fn for_binding(
+        &mut self,
+        generation: u64,
+    ) -> &mut BTreeMap<(ProviderKind, String), ProviderOperationalStatus> {
+        if self.binding_generation != Some(generation) {
+            self.states.clear();
+            self.binding_generation = Some(generation);
+        }
+        &mut self.states
+    }
 }
 
 impl ProviderOperations {
+    pub(crate) fn with_admitted_client(
+        &self,
+        client: MihomoClient,
+    ) -> ProviderOperationResult<Self> {
+        self.client
+            .ensure_binding_current()
+            .map_err(|error| ProviderOperationError::Operation(error.to_string()))?;
+        if !Arc::ptr_eq(&self.client.binding, &client.binding) {
+            return Err(ProviderOperationError::Operation(
+                crate::MihomoError::StaleBinding.to_string(),
+            ));
+        }
+        Ok(Self {
+            client,
+            observations: self.observations.clone(),
+        })
+    }
     /// Creates an operation owner for one Mihomo controller client.
     #[must_use]
     pub fn new(client: MihomoClient) -> Self {
         Self {
             client,
-            states: Arc::new(RwLock::new(BTreeMap::new())),
+            observations: Arc::default(),
         }
     }
 
     /// Records a successful catalog without discarding earlier action history.
     pub fn observe_catalog(&self, kind: ProviderKind, catalog: &ProviderCatalog) {
+        let _ = self
+            .client
+            .with_current_binding(|generation| self.record_catalog(generation, kind, catalog));
+    }
+
+    /// Records page-read provider facts only for the runtime identity that produced them.
+    /// Returns false after a configuration/owner change or during an admitted transition.
+    pub fn observe_catalog_for_runtime(
+        &self,
+        kind: ProviderKind,
+        catalog: &ProviderCatalog,
+        identity: &crate::CoreObservationIdentity,
+    ) -> bool {
+        identity
+            .publish_for_client(&self.client, |generation| {
+                self.record_catalog(generation, kind, catalog)
+            })
+            .is_some()
+    }
+
+    fn record_catalog(&self, generation: u64, kind: ProviderKind, catalog: &ProviderCatalog) {
         let observed_at_ms = now_ms();
-        let mut states = self.states.write();
+        let mut observations = self.observations.write();
+        let states = observations.for_binding(generation);
         for (key, provider) in &catalog.providers {
-            let name = provider_name(key, provider);
+            let name = key.clone();
             let state = states
                 .entry((kind, name.clone()))
                 .or_insert_with(|| ProviderOperationalStatus::empty(kind, name));
@@ -118,71 +217,30 @@ impl ProviderOperations {
     /// Returns the retained state for one provider.
     #[must_use]
     pub fn status(&self, kind: ProviderKind, name: &str) -> Option<ProviderOperationalStatus> {
-        self.states.read().get(&(kind, name.to_owned())).cloned()
+        self.client
+            .with_current_binding(|generation| {
+                let observations = self.observations.read();
+                (observations.binding_generation == Some(generation))
+                    .then(|| observations.states.get(&(kind, name.to_owned())).cloned())
+                    .flatten()
+            })
+            .ok()
+            .flatten()
     }
 
-    /// Downloads a fresh provider document and verifies it through catalog readback.
-    ///
-    /// A failed update records its own failure while preserving the previous
-    /// provider value and count.
-    ///
-    /// # Errors
-    ///
-    /// Returns controller or readback errors.
-    pub async fn update(
-        &self,
+    async fn catalog_on(
+        client: &MihomoClient,
         kind: ProviderKind,
-        name: &str,
-    ) -> ProviderOperationResult<ProviderCatalog> {
-        let result = async {
-            match kind {
-                ProviderKind::Proxy => self.client.update_proxy_provider(name).await,
-                ProviderKind::Rule => self.client.update_rule_provider(name).await,
-            }
-            .map_err(|error| ProviderOperationError::Operation(error.to_string()))?;
-            self.catalog(kind)
-                .await
-                .map_err(|error| ProviderOperationError::Operation(error.to_string()))
-        }
-        .await;
-        self.finish_action(kind, name, ProviderAction::Update, result)
-    }
-
-    /// Runs a proxy-provider health check without downloading a new document.
-    ///
-    /// Update and health-check histories remain independent.
-    ///
-    /// # Errors
-    ///
-    /// Returns controller or readback errors.
-    pub async fn healthcheck_proxy(&self, name: &str) -> ProviderOperationResult<ProviderCatalog> {
-        let result = async {
-            self.client
-                .healthcheck_proxy_provider(name)
-                .await
-                .map_err(|error| ProviderOperationError::Operation(error.to_string()))?;
-            self.catalog(ProviderKind::Proxy)
-                .await
-                .map_err(|error| ProviderOperationError::Operation(error.to_string()))
-        }
-        .await;
-        self.finish_action(
-            ProviderKind::Proxy,
-            name,
-            ProviderAction::Healthcheck,
-            result,
-        )
-    }
-
-    async fn catalog(&self, kind: ProviderKind) -> crate::MihomoResult<ProviderCatalog> {
+    ) -> crate::MihomoResult<ProviderCatalog> {
         match kind {
-            ProviderKind::Proxy => self.client.proxy_provider_catalog().await,
-            ProviderKind::Rule => self.client.rule_provider_catalog().await,
+            ProviderKind::Proxy => client.proxy_provider_catalog().await,
+            ProviderKind::Rule => client.rule_provider_catalog().await,
         }
     }
 
     fn finish_action(
         &self,
+        generation: u64,
         kind: ProviderKind,
         name: &str,
         action: ProviderAction,
@@ -196,7 +254,8 @@ impl ProviderOperations {
                 match provider {
                     Ok(provider) => {
                         let observed_at_ms = now_ms();
-                        let mut states = self.states.write();
+                        let mut observations = self.observations.write();
+                        let states = observations.for_binding(generation);
                         let state = states.entry((kind, name.to_owned())).or_insert_with(|| {
                             ProviderOperationalStatus::empty(kind, name.to_owned())
                         });
@@ -205,13 +264,13 @@ impl ProviderOperations {
                         Ok(catalog)
                     }
                     Err(error) => {
-                        self.record_failure(kind, name, action, &error);
+                        self.record_failure(generation, kind, name, action, &error);
                         Err(error)
                     }
                 }
             }
             Err(error) => {
-                self.record_failure(kind, name, action, &error);
+                self.record_failure(generation, kind, name, action, &error);
                 Err(error)
             }
         }
@@ -219,6 +278,7 @@ impl ProviderOperations {
 
     fn record_failure(
         &self,
+        generation: u64,
         kind: ProviderKind,
         name: &str,
         action: ProviderAction,
@@ -228,7 +288,8 @@ impl ProviderOperations {
             message: error.to_string(),
             occurred_at_ms: now_ms(),
         };
-        let mut states = self.states.write();
+        let mut observations = self.observations.write();
+        let states = observations.for_binding(generation);
         let state = states
             .entry((kind, name.to_owned()))
             .or_insert_with(|| ProviderOperationalStatus::empty(kind, name.to_owned()));
@@ -252,21 +313,8 @@ impl ProviderAction {
     }
 }
 
-fn find_provider<'a>(catalog: &'a ProviderCatalog, name: &str) -> Option<&'a Provider> {
-    catalog.providers.get(name).or_else(|| {
-        catalog
-            .providers
-            .values()
-            .find(|provider| provider.name == name)
-    })
-}
-
-fn provider_name(key: &str, provider: &Provider) -> String {
-    if provider.name.trim().is_empty() {
-        key.to_owned()
-    } else {
-        provider.name.clone()
-    }
+fn find_provider<'a>(catalog: &'a ProviderCatalog, controller_key: &str) -> Option<&'a Provider> {
+    catalog.providers.get(controller_key)
 }
 
 fn accept_provider(state: &mut ProviderOperationalStatus, provider: Provider, observed_at_ms: u64) {
@@ -311,6 +359,171 @@ mod tests {
                 },
             )]),
         }
+    }
+
+    #[test]
+    fn duplicate_provider_labels_keep_independent_controller_keys() {
+        let client = MihomoClient::new(MihomoEndpoint::default()).unwrap();
+        let operations = ProviderOperations::new(client);
+        let provider = Provider {
+            name: "Visible label".into(),
+            ..Provider::default()
+        };
+        let catalog = ProviderCatalog {
+            providers: BTreeMap::from([
+                ("first-key".into(), provider.clone()),
+                ("second-key".into(), provider),
+            ]),
+        };
+        operations.observe_catalog(ProviderKind::Proxy, &catalog);
+        assert_eq!(
+            operations
+                .status(ProviderKind::Proxy, "first-key")
+                .unwrap()
+                .name,
+            "first-key"
+        );
+        assert_eq!(
+            operations
+                .status(ProviderKind::Proxy, "second-key")
+                .unwrap()
+                .name,
+            "second-key"
+        );
+        assert!(
+            operations
+                .status(ProviderKind::Proxy, "Visible label")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_update_readback_and_history_remain_bound_to_the_original_runtime() {
+        use tokio::io::AsyncWriteExt;
+        let original = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = MihomoClient::new(MihomoEndpoint::new(
+            format!("http://{}", original.local_addr().unwrap()),
+            "",
+        ))
+        .unwrap();
+        let replacement = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let replacement_url = format!("http://{}", replacement.local_addr().unwrap());
+        let operations = ProviderOperations::new(client.clone());
+        operations.observe_catalog(ProviderKind::Proxy, &proxy_catalog(3));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = original.accept().await.unwrap();
+            let request = crate::test_support::read_controller_request(&mut stream)
+                .await
+                .unwrap()
+                .into_bytes();
+            assert!(
+                String::from_utf8_lossy(&request).starts_with("PUT /providers/proxies/airport ")
+            );
+            entered_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let updating_operations = operations.clone();
+        let updating = tokio::spawn(async move {
+            updating_operations
+                .update(ProviderKind::Proxy, "airport")
+                .await
+        });
+        entered_rx.await.unwrap();
+        let (switching_tx, switching_rx) = tokio::sync::oneshot::channel();
+        let switching = tokio::spawn(async move {
+            switching_tx.send(()).unwrap();
+            client
+                .switch_to_direct(MihomoEndpoint::new(replacement_url, ""))
+                .await
+        });
+        switching_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        release_tx.send(()).unwrap();
+        server.await.unwrap();
+        switching.await.unwrap().unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), updating)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert!(operations.status(ProviderKind::Proxy, "airport").is_none());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), replacement.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_stops_remaining_targets_and_readback_on_runtime_replacement() {
+        use tokio::io::AsyncWriteExt;
+        let original = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = MihomoClient::new(MihomoEndpoint::new(
+            format!("http://{}", original.local_addr().unwrap()),
+            "",
+        ))
+        .unwrap();
+        let replacement = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let replacement_url = format!("http://{}", replacement.local_addr().unwrap());
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = original.accept().await.unwrap();
+            let headers = crate::test_support::read_controller_request(&mut stream)
+                .await
+                .unwrap()
+                .into_bytes();
+            assert!(String::from_utf8_lossy(&headers).starts_with("PUT /providers/proxies/first "));
+            entered_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let operations = ProviderOperations::new(client.clone());
+        let updating = tokio::spawn(async move {
+            operations
+                .update_many(vec![
+                    ProviderUpdateTarget::new(ProviderKind::Proxy, "first"),
+                    ProviderUpdateTarget::new(ProviderKind::Proxy, "second"),
+                ])
+                .await
+        });
+        entered_rx.await.unwrap();
+        let (switching_tx, switching_rx) = tokio::sync::oneshot::channel();
+        let switching = tokio::spawn(async move {
+            switching_tx.send(()).unwrap();
+            client
+                .switch_to_direct(MihomoEndpoint::new(replacement_url, ""))
+                .await
+        });
+        switching_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        release_tx.send(()).unwrap();
+        server.await.unwrap();
+        switching.await.unwrap().unwrap();
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(2), updating)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!receipt.failures().is_empty());
+        assert!(receipt.client().verify_current_runtime().is_err());
+        assert!(receipt.client().runtime_config().await.is_err());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), replacement.accept())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -358,9 +571,9 @@ mod tests {
                 Some(r#"{"providers":{"airport":{"name":"airport","proxies":[{},{}]}}}"#),
             ] {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0_u8; 2_048];
-                let bytes = stream.read(&mut request).unwrap();
-                let request = String::from_utf8_lossy(&request[..bytes]);
+                let request =
+                    crate::test_support::read_controller_request_blocking(&mut stream).unwrap();
+                let request = request.headers();
                 first_lines.push(request.lines().next().unwrap_or_default().to_owned());
                 if let Some(body) = body {
                     write!(

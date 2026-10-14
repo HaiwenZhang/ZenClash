@@ -207,11 +207,7 @@ fn display_url(url: &reqwest::Url) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        io::{Read, Write},
-        net::TcpListener,
-        thread,
-    };
+    use std::{io::Write, net::TcpListener, thread};
 
     use super::*;
 
@@ -292,9 +288,9 @@ mod tests {
         let server = thread::spawn(move || {
             for _ in 0..2 {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0_u8; 2_048];
-                let length = stream.read(&mut request).unwrap();
-                let request = String::from_utf8_lossy(&request[..length]);
+                let request =
+                    crate::test_support::read_controller_request_blocking(&mut stream).unwrap();
+                let request = request.headers();
                 let (status, payload) = if request.starts_with("GET /api/subs ") {
                     (
                         "200 OK",

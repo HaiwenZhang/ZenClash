@@ -1,8 +1,14 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use serde_yaml::{Mapping, Value};
 
-use super::{ControlledConfigError, ControlledConfigResult, ControlledConfigStore};
+use super::{
+    ControlledConfigError, ControlledConfigResult, ControlledConfigStore, ControlledConfigUpdate,
+};
 use crate::profiles::{atomic_write, read_profile_bytes};
 
 pub(super) struct RuntimeCacheTransaction {
@@ -49,14 +55,7 @@ impl ControlledConfigStore {
         let write_lease = self.write_access.acquire();
         let _transaction = self.transaction.lock();
         let path = self.runtime_path();
-        let previous = if path.exists() {
-            Some(read_profile_bytes(&path).map_err(|error| match error {
-                crate::ProfileStoreError::Io(error) => ControlledConfigError::Io(error),
-                _ => ControlledConfigError::TooLarge,
-            })?)
-        } else {
-            None
-        };
+        let previous = read_optional_payload(&path)?;
         atomic_write(&path, payload.as_bytes())?;
         Ok(RuntimeCacheTransaction {
             path,
@@ -76,19 +75,26 @@ impl ControlledConfigStore {
     }
 
     pub(super) fn current_patch_bytes_unlocked(&self) -> ControlledConfigResult<Option<Vec<u8>>> {
-        let path = self.patch_path();
-        if !path.exists() {
-            return Ok(None);
-        }
-        let bytes = read_profile_bytes(&path).map_err(|error| match error {
-            crate::ProfileStoreError::Io(error) => ControlledConfigError::Io(error),
-            _ => ControlledConfigError::TooLarge,
-        })?;
-        Ok(Some(bytes))
+        read_optional_payload(&self.patch_path())
     }
 
     pub(super) fn patch_path(&self) -> PathBuf {
         self.root.join("override.yaml")
+    }
+}
+
+pub(super) fn read_optional_payload(
+    path: &std::path::Path,
+) -> ControlledConfigResult<Option<Vec<u8>>> {
+    match read_profile_bytes(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(crate::ProfileStoreError::Io(error))
+            if error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(None)
+        }
+        Err(crate::ProfileStoreError::Io(error)) => Err(ControlledConfigError::Io(error)),
+        Err(_) => Err(ControlledConfigError::TooLarge),
     }
 }
 
@@ -98,8 +104,12 @@ fn restore_runtime_cache(
 ) -> ControlledConfigResult<()> {
     if let Some(previous) = previous {
         atomic_write(path, previous)?;
-    } else if path.exists() {
-        fs::remove_file(path)?;
+    } else {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(ControlledConfigError::Io(error)),
+        }
     }
     Ok(())
 }
@@ -109,31 +119,6 @@ pub(super) fn require_mapping(value: &Value) -> ControlledConfigResult<()> {
         Ok(())
     } else {
         Err(ControlledConfigError::NotMapping)
-    }
-}
-
-pub(super) fn default_data_dir() -> ControlledConfigResult<PathBuf> {
-    let home = || {
-        std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(PathBuf::from)
-            .ok_or(ControlledConfigError::MissingDataDirectory)
-    };
-    if cfg!(target_os = "macos") {
-        Ok(home()?
-            .join("Library")
-            .join("Application Support")
-            .join("ZenClash"))
-    } else if cfg!(target_os = "windows") {
-        Ok(std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or(home()?.join("AppData").join("Local"))
-            .join("ZenClash"))
-    } else {
-        Ok(std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or(home()?.join(".local").join("share"))
-            .join("zenclash"))
     }
 }
 
@@ -168,6 +153,107 @@ impl CommitGate {
             let _ = entered.send(());
             self.release.lock().recv().unwrap();
         }
+    }
+}
+
+impl ControlledConfigStore {
+    /// Loads the current YAML override mapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unreadable, oversized, malformed, or non-mapping
+    /// content.
+    pub fn load(&self) -> ControlledConfigResult<Value> {
+        let _transaction = self.transaction.lock();
+        self.load_unlocked().map(|(_, value)| value)
+    }
+
+    /// Loads the current override as JSON for native UI state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the YAML layer is invalid or cannot be represented
+    /// as a JSON object.
+    pub fn load_json(&self) -> ControlledConfigResult<serde_json::Value> {
+        Ok(serde_json::to_value(self.load()?)?)
+    }
+
+    /// Persists a prepared update if the controlled layer has not changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for concurrent modification or an atomic write failure.
+    pub fn commit(&self, update: &ControlledConfigUpdate) -> ControlledConfigResult<()> {
+        #[cfg(test)]
+        if let Some(gate) = &self.commit_gate {
+            gate.wait();
+        }
+        let _write_lease = self.write_access.acquire();
+        let _transaction = self.transaction.lock();
+        if self.current_patch_bytes_unlocked()? != update.expected_patch {
+            return Err(ControlledConfigError::ConcurrentModification);
+        }
+        atomic_write(&self.patch_path(), &update.next_patch)?;
+        Ok(())
+    }
+
+    /// Returns the generated runtime-cache path.
+    #[must_use]
+    pub fn runtime_path(&self) -> PathBuf {
+        self.root.join("effective.yaml")
+    }
+
+    /// Returns the controlled-config storage root.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Quarantines a malformed persisted override and restores an empty layer.
+    ///
+    /// Only parse, shape, and defensive-size failures are recoverable. Native
+    /// I/O errors are returned unchanged so permission and disk failures are
+    /// never mistaken for successful repair.
+    ///
+    /// # Errors
+    ///
+    /// Returns the original non-recoverable error or a filesystem error while
+    /// moving the malformed document to its timestamped backup path.
+    pub fn quarantine_invalid_patch(&self) -> ControlledConfigResult<Option<PathBuf>> {
+        let _write_lease = self.write_access.acquire();
+        let _transaction = self.transaction.lock();
+        let error = match self.load_unlocked() {
+            Ok(_) => return Ok(None),
+            Err(error) => error,
+        };
+        if !matches!(
+            error,
+            ControlledConfigError::Yaml(_)
+                | ControlledConfigError::NotMapping
+                | ControlledConfigError::TooLarge
+        ) {
+            return Err(error);
+        }
+        let source = self.patch_path();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let quarantine = self.root.join(format!(
+            "override.invalid-{}-{timestamp}.yaml",
+            std::process::id()
+        ));
+        fs::rename(&source, &quarantine)?;
+        Ok(Some(quarantine))
+    }
+
+    pub(crate) fn cached_runtime_payload(&self) -> ControlledConfigResult<Option<String>> {
+        let Some(bytes) = read_optional_payload(&self.runtime_path())? else {
+            return Ok(None);
+        };
+        String::from_utf8(bytes).map(Some).map_err(|error| {
+            ControlledConfigError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        })
     }
 }
 

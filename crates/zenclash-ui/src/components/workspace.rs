@@ -1,3 +1,5 @@
+use gpui_kit::InteractiveElement;
+use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::{ActiveTheme, v_flex};
 use gpui_kit::{App, IntoElement, ParentElement, Styled, div, prelude::FluentBuilder};
 
@@ -10,10 +12,12 @@ pub(crate) fn title(page: Page, cx: &mut App) -> impl IntoElement {
         .gap_1()
         .child(
             div()
+                .id("workspace-page-title")
+                .test_support()
                 .text_2xl()
                 .when(page != Page::Settings, |title| {
                     title
-                        .text_size(gpui_kit::px(28.))
+                        .text_size(gpui_kit::rems(1.75))
                         .line_height(gpui_kit::relative(1.25))
                 })
                 .font_weight(gpui_kit::FontWeight::BOLD)

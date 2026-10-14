@@ -12,12 +12,7 @@ use gpui_kit::{
 };
 
 use crate::{
-    app::{
-        NavigateConnections, NavigateDns, NavigateHome, NavigateLogs, NavigateMihomo,
-        NavigateNetwork, NavigateOverride, NavigateProfiles, NavigateProxies, NavigateResources,
-        NavigateRules, NavigateSettings, NavigateSniffer, NavigateSystemProxy, NavigateTraffic,
-        NavigateTun, SetDarkTheme, SetLightTheme, ToggleSidebar,
-    },
+    app::{SetDarkTheme, SetLightTheme, ToggleSidebar},
     assets::{AppIcon, GROUP_ICON_PATH, RADIO_ICON_PATH, RSS_ICON_PATH, RULER_ICON_PATH},
     pages::Page,
 };
@@ -42,59 +37,9 @@ pub(crate) fn runtime_uptime(process: Option<&zenclash_core::ProcessStatus>) -> 
     ))
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-/// Mihomo's mutually exclusive outbound routing modes.
-pub enum OutboundMode {
-    /// Route connections through Mihomo rules.
-    #[default]
-    Rule,
-    /// Route connections through the selected global proxy.
-    Global,
-    /// Bypass proxies for every connection.
-    Direct,
-}
-
-impl OutboundMode {
-    /// Returns the localized user-facing label.
-    #[must_use]
-    pub fn label(self) -> String {
-        zenclash_i18n::text(match self {
-            Self::Rule => "outbound_mode.rule",
-            Self::Global => "outbound_mode.global",
-            Self::Direct => "outbound_mode.direct",
-        })
-    }
-
-    /// Returns the compact uppercase UI code.
-    #[must_use]
-    pub const fn code(self) -> &'static str {
-        match self {
-            Self::Rule => "RULE",
-            Self::Global => "GLOBAL",
-            Self::Direct => "DIRECT",
-        }
-    }
-
-    /// Returns the lowercase value accepted by Mihomo's `/configs` API.
-    #[must_use]
-    pub const fn api_value(self) -> &'static str {
-        match self {
-            Self::Rule => "rule",
-            Self::Global => "global",
-            Self::Direct => "direct",
-        }
-    }
-
-    /// Parses a Mihomo API value, defaulting unknown values to rule mode.
-    #[must_use]
-    pub fn from_api(mode: &str) -> Self {
-        match mode.to_ascii_lowercase().as_str() {
-            "global" => Self::Global,
-            "direct" => Self::Direct,
-            _ => Self::Rule,
-        }
-    }
-}
+use crate::app::navigation::dispatch_navigate;
+/// Compatibility path for application outbound routing modes.
+pub use crate::outbound_mode::OutboundMode;
 
 #[derive(IntoElement)]
 /// Primary page navigation rendered beside the active content view.
@@ -400,27 +345,6 @@ const fn sidebar_icon_path(page: Page) -> Option<&'static str> {
     }
 }
 
-pub(crate) fn dispatch_navigate(page: Page, window: &mut Window, cx: &mut App) {
-    match page {
-        Page::Home => window.dispatch_action(Box::new(NavigateHome), cx),
-        Page::SystemProxy => window.dispatch_action(Box::new(NavigateSystemProxy), cx),
-        Page::Tun => window.dispatch_action(Box::new(NavigateTun), cx),
-        Page::Profiles => window.dispatch_action(Box::new(NavigateProfiles), cx),
-        Page::Proxies => window.dispatch_action(Box::new(NavigateProxies), cx),
-        Page::Mihomo => window.dispatch_action(Box::new(NavigateMihomo), cx),
-        Page::Connections => window.dispatch_action(Box::new(NavigateConnections), cx),
-        Page::Dns => window.dispatch_action(Box::new(NavigateDns), cx),
-        Page::Sniffer => window.dispatch_action(Box::new(NavigateSniffer), cx),
-        Page::Logs => window.dispatch_action(Box::new(NavigateLogs), cx),
-        Page::Rules => window.dispatch_action(Box::new(NavigateRules), cx),
-        Page::Resources => window.dispatch_action(Box::new(NavigateResources), cx),
-        Page::Override => window.dispatch_action(Box::new(NavigateOverride), cx),
-        Page::Network => window.dispatch_action(Box::new(NavigateNetwork), cx),
-        Page::Traffic => window.dispatch_action(Box::new(NavigateTraffic), cx),
-        Page::Settings => window.dispatch_action(Box::new(NavigateSettings), cx),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -428,7 +352,7 @@ mod tests {
         pages::Page,
     };
 
-    use super::{OutboundMode, Sidebar, sidebar_icon_path};
+    use super::{Sidebar, sidebar_icon_path};
 
     #[gpui_kit::test]
     fn collapsed_navigation_keeps_accessible_names_and_keyboard_navigation(
@@ -559,15 +483,5 @@ mod tests {
         assert_eq!(sidebar_icon_path(Page::Connections), Some(RADIO_ICON_PATH));
         assert_eq!(sidebar_icon_path(Page::Rules), Some(RULER_ICON_PATH));
         assert_eq!(sidebar_icon_path(Page::Home), None);
-    }
-
-    #[test]
-    fn outbound_mode_parses_mihomo_values_case_insensitively() {
-        assert_eq!(OutboundMode::from_api("GLOBAL"), OutboundMode::Global);
-    }
-
-    #[test]
-    fn outbound_mode_defaults_unknown_values_to_rule() {
-        assert_eq!(OutboundMode::from_api("unexpected"), OutboundMode::Rule);
     }
 }

@@ -14,8 +14,10 @@ pub(super) fn latency_presentation(delay: Option<u32>) -> (String, f32) {
 
 impl RuntimePage {
     pub(super) fn home_proxy_projection(&self) -> Option<&HomeProxyProjection> {
-        (matches!(self.data, RuntimeData::Dashboard { .. })
-            && self.data_runtime_version == self.home.generation)
+        (matches!(
+            self.page_observation.data(),
+            PageSnapshotData::Dashboard { .. }
+        ) && self.page_observation.configuration_generation() == self.home.generation)
             .then_some(self.home.projection.as_ref())
             .flatten()
     }
@@ -40,11 +42,11 @@ impl RuntimePage {
 
     pub(in crate::pages::runtime) fn prepare_home_projection(&mut self) {
         self.reconcile_home_generation();
-        if self.data_runtime_version != self.home.generation {
+        if self.page_observation.configuration_generation() != self.home.generation {
             self.home.projection = None;
             return;
         }
-        if let RuntimeData::Dashboard { config, proxies } = &self.data
+        if let PageSnapshotData::Dashboard { config, proxies } = self.page_observation.data()
             && let (Some(config), Some(proxies)) = (config.value(), proxies.value())
         {
             self.home.prepare(config, proxies);

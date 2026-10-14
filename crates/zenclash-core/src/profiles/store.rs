@@ -6,8 +6,8 @@ use std::{
 
 use super::{
     ProfileCatalog, ProfileRecord, ProfileSource, ProfileStore, ProfileStoreError,
-    ProfileStoreResult, SubscriptionMetadata, atomic_write, home_dir, read_index_bytes,
-    read_profile_bytes, unique_id, unix_timestamp, validate_catalog_records, validate_clash_yaml,
+    ProfileStoreResult, SubscriptionMetadata, atomic_write, read_index_bytes, read_profile_bytes,
+    unique_id, unix_timestamp, validate_catalog_records, validate_clash_yaml,
 };
 
 impl ProfileStore {
@@ -18,31 +18,9 @@ impl ProfileStore {
     /// Returns an error when the user's data directory cannot be determined or
     /// the profile directory cannot be created.
     pub fn discover() -> ProfileStoreResult<Self> {
-        let root = if cfg!(target_os = "macos") {
-            home_dir()?
-                .join("Library")
-                .join("Application Support")
-                .join("ZenClash")
-                .join("profiles")
-        } else if cfg!(target_os = "windows") {
-            if let Some(data_home) = std::env::var_os("LOCALAPPDATA") {
-                PathBuf::from(data_home).join("ZenClash").join("profiles")
-            } else {
-                home_dir()?
-                    .join("AppData")
-                    .join("Local")
-                    .join("ZenClash")
-                    .join("profiles")
-            }
-        } else if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
-            PathBuf::from(data_home).join("zenclash").join("profiles")
-        } else {
-            home_dir()?
-                .join(".local")
-                .join("share")
-                .join("zenclash")
-                .join("profiles")
-        };
+        let root = crate::AppDataPaths::discover()
+            .ok_or_else(|| ProfileStoreError::InvalidYaml("无法确定用户主目录".into()))?
+            .profiles();
         Self::new(root)
     }
 
@@ -220,31 +198,25 @@ impl ProfileStore {
         catalog: &super::ProfileCatalog,
         name: String,
         source: ProfileSource,
-        payload_len: usize,
+        payload_size_bytes: usize,
         subscription: SubscriptionMetadata,
     ) -> ProfileRecord {
         let id = unique_id(catalog, &name);
         let file_name = format!("{id}.yaml");
-        let accepts_suggested_interval = matches!(
-            &source,
-            ProfileSource::Remote { options, .. } if !options.fixed_update_interval
-        );
-        let update_interval_minutes = accepts_suggested_interval
-            .then_some(subscription.suggested_update_interval_minutes)
-            .flatten()
-            .unwrap_or(super::DEFAULT_PROFILE_UPDATE_INTERVAL_MINUTES);
-        ProfileRecord {
+        let mut record = ProfileRecord {
             id,
             name,
             file_name,
             source,
-            updated_at: unix_timestamp(),
-            size_bytes: payload_len as u64,
+            updated_at: 0,
+            size_bytes: 0,
             auto_update: false,
-            update_interval_minutes,
+            update_interval_minutes: super::DEFAULT_PROFILE_UPDATE_INTERVAL_MINUTES,
             update_cron: None,
-            subscription,
-        }
+            subscription: SubscriptionMetadata::default(),
+        };
+        record.apply_payload_metadata(unix_timestamp(), payload_size_bytes as u64, subscription);
+        record
     }
 
     pub(super) fn load_unlocked(&self) -> ProfileStoreResult<ProfileCatalog> {

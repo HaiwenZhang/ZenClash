@@ -1,5 +1,5 @@
 use gpui_kit::AppContext;
-use zenclash_core::{CaptureOutcome, CapturePlan, ConnectionPolicy, ProxyOperations};
+use zenclash_core::{CaptureOutcome, CapturePlan, CoreObservationIdentity};
 
 use super::{
     ClipboardItem, Context, EnvironmentShell, OutboundMode, Page, TrayCommand, ZenClashApp,
@@ -12,19 +12,37 @@ impl ZenClashApp {
         command: TrayCommand,
         cx: &mut Context<Self>,
     ) {
+        self.handle_observed_tray_command(command, self.tray_observation.clone(), cx);
+    }
+
+    pub(in crate::app) fn handle_observed_tray_command(
+        &mut self,
+        command: TrayCommand,
+        observation: Option<CoreObservationIdentity>,
+        cx: &mut Context<Self>,
+    ) {
         if self.quit_state != crate::app::system_proxy::QuitState::Idle
             && !matches!(command, TrayCommand::Quit | TrayCommand::ShowWindow)
         {
             return;
         }
-        self.tray_command_error = None;
+        if matches!(
+            command,
+            TrayCommand::SelectProxy { .. } | TrayCommand::TestGroup { .. }
+        ) {
+            if let Some(source) = observation.as_ref() {
+                self.publish_tray_proxy_feedback(source, |this| this.tray_command_error = None);
+            }
+        } else {
+            self.tray_command_error = None;
+        }
         match command {
             TrayCommand::SetDisplay(display) => self.set_tray_display(display, cx),
             TrayCommand::ShowPanel => self.toggle_status_panel(cx),
             TrayCommand::ShowWindow => self.show_main_window(cx),
-            TrayCommand::SetRuleMode => self.set_mode(OutboundMode::Rule, cx),
-            TrayCommand::SetGlobalMode => self.set_mode(OutboundMode::Global, cx),
-            TrayCommand::SetDirectMode => self.set_mode(OutboundMode::Direct, cx),
+            TrayCommand::SetRuleMode => self.request_outbound_mode(OutboundMode::Rule, cx),
+            TrayCommand::SetGlobalMode => self.request_outbound_mode(OutboundMode::Global, cx),
+            TrayCommand::SetDirectMode => self.request_outbound_mode(OutboundMode::Direct, cx),
             TrayCommand::SetSystemProxy { enabled, port } => {
                 self.set_system_proxy_from_tray(enabled, port, cx);
             }
@@ -33,9 +51,9 @@ impl ZenClashApp {
                 group,
                 automatic,
                 test_url,
-            } => self.test_group_from_tray(group, automatic, test_url, cx),
+            } => self.test_group_from_tray(group, automatic, test_url, observation, cx),
             TrayCommand::SelectProxy { group, proxy } => {
-                self.select_proxy_from_tray(group, proxy, cx);
+                self.select_proxy_from_tray(group, proxy, observation, cx);
             }
             TrayCommand::SelectProfile { id } => self.select_profile_from_tray(id, cx),
             TrayCommand::OpenProfiles => {
@@ -99,7 +117,7 @@ impl ZenClashApp {
                 .map_err(|error| error.to_string())?;
             let preferences = match store {
                 Some(store) => Some(
-                    tokio::task::spawn_blocking(move || store.load())
+                    tokio::task::spawn_blocking(move || store.observe())
                         .await
                         .map_err(|error| format!("preference task failed: {error}"))?
                         .map_err(|error| error.to_string())?,
@@ -117,10 +135,13 @@ impl ZenClashApp {
                 match result {
                     Ok(Ok((outcome, preferences))) => {
                         if let Some(preferences) = preferences {
-                            this.preferences = preferences.clone();
-                            this.runtime_page.update(cx, |page, cx| {
-                                page.preferences_restored_from_app(preferences, cx);
-                            });
+                            this.accept_preferences_event(
+                                &crate::pages::runtime::PreferencesRestored::observed(
+                                    preferences,
+                                    crate::pages::runtime::PreferenceScope::SystemProxy,
+                                ),
+                                cx,
+                            );
                         }
                         if matches!(
                             outcome,
@@ -150,8 +171,8 @@ impl ZenClashApp {
     }
 
     fn start_tun_command(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        let service_request = if enabled && self.profile_service.service_state().is_some() {
-            match self.profile_service.request_service_tun() {
+        let service_request = if enabled && self.application_commands.service_state().is_some() {
+            match self.application_commands.request_service_tun() {
                 Ok(request) => Some(request),
                 Err(error) => {
                     self.report_tray_error(error, cx);
@@ -165,11 +186,14 @@ impl ZenClashApp {
         };
         if let Some(request) = &service_request
             && request.needs_authorization_consent()
-            && self.profile_service.service_state().is_some_and(|state| {
-                state
-                    .health()
-                    .is_none_or(|health| *health != zenclash_core::ServiceHealthKind::Ready)
-            })
+            && self
+                .application_commands
+                .service_state()
+                .is_some_and(|state| {
+                    state
+                        .health()
+                        .is_none_or(|health| *health != zenclash_core::ServiceHealthKind::Ready)
+                })
         {
             // System authorization is an explicit window decision. Retain the
             // tray click's original core intent through that decision.
@@ -189,10 +213,10 @@ impl ZenClashApp {
             return;
         }
         let capture = self.traffic_capture.clone();
-        let profiles = self.profile_service.clone();
+        let commands = self.application_commands.clone();
         let task = self.runtime.spawn(async move {
             if let Some(request) = service_request {
-                return profiles.enable_service_tun(request).await.map(|outcome| {
+                return commands.enable_service_tun(request).await.map(|outcome| {
                     (
                         outcome.capture().clone(),
                         outcome.core().map(|core| core.generation),
@@ -217,9 +241,9 @@ impl ZenClashApp {
                 }
                 match result {
                     Ok(Ok((outcome, generation))) => {
-                        if generation
-                            .is_none_or(|generation| this.profile_service.is_current(generation))
-                        {
+                        if generation.is_none_or(|generation| {
+                            this.application_commands.is_current(generation)
+                        }) {
                             if let CaptureOutcome::RolledBack { failure, .. }
                             | CaptureOutcome::ReconcileNeeded { failure, .. } = &outcome
                             {
@@ -243,56 +267,6 @@ impl ZenClashApp {
         .detach();
     }
 
-    fn test_group_from_tray(
-        &mut self,
-        group: String,
-        automatic: bool,
-        test_url: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        let operations = ProxyOperations::new(self.client.clone());
-        let task_group = group.clone();
-        let task = self.runtime.spawn(async move {
-            if automatic {
-                operations
-                    .measure_group_and_restore_auto(&task_group, test_url.as_deref(), 5_000)
-                    .await
-                    .map(|outcome| outcome.delays)
-            } else {
-                operations
-                    .measure_group(&task_group, test_url.as_deref(), 5_000)
-                    .await
-            }
-        });
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                if this.quit_state != crate::app::system_proxy::QuitState::Idle {
-                    return;
-                }
-                match result {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(error)) => {
-                        tracing::warn!(%group, %error, "tray proxy delay test failed");
-                    }
-                    Err(error) => {
-                        tracing::warn!(%group, %error, "tray proxy delay task failed");
-                    }
-                }
-                tracing::info!(group, "tray proxy group delay test completed");
-                this.refresh_visible_proxies(cx);
-                this.refresh_tray_menu(cx);
-            });
-        })
-        .detach();
-    }
-
-    fn select_proxy_from_tray(&mut self, group: String, proxy: String, cx: &mut Context<Self>) {
-        if let Some((group, proxy)) = self.proxy_selection_commands.submit((group, proxy)) {
-            self.start_proxy_selection(group, proxy, cx);
-        }
-    }
-
     fn select_profile_from_tray(&mut self, id: String, cx: &mut Context<Self>) {
         if let Some(id) = self.profile_selection_commands.submit(id) {
             self.start_profile_selection(id, cx);
@@ -301,13 +275,13 @@ impl ZenClashApp {
 
     fn start_profile_selection(&mut self, id: String, cx: &mut Context<Self>) {
         let controlled = self.controlled_config_store.clone();
-        let profile_service = self.profile_service.clone();
+        let application_commands = self.application_commands.clone();
         let task = self.runtime.spawn(async move {
             let store = tokio::task::spawn_blocking(zenclash_core::ProfileStore::discover)
                 .await
                 .map_err(|error| error.to_string())?
                 .map_err(|error| error.to_string())?;
-            profile_service
+            application_commands
                 .activate(store, controlled, id)
                 .await
                 .map_err(|error| error.to_string())
@@ -350,38 +324,7 @@ impl ZenClashApp {
         .detach();
     }
 
-    fn start_proxy_selection(&mut self, group: String, proxy: String, cx: &mut Context<Self>) {
-        let operations = ProxyOperations::new(self.client.clone());
-        let task = self.runtime.spawn(async move {
-            operations
-                .select(&group, &proxy, ConnectionPolicy::KeepExisting)
-                .await
-        });
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                if this.quit_state != crate::app::system_proxy::QuitState::Idle { return; }
-                match result {
-                    Ok(Ok(outcome)) => {
-                        for warning in outcome.warnings {
-                            tracing::warn!(%warning, "tray proxy selection completed with a warning");
-                        }
-                    }
-                    Ok(Err(error)) => this.report_tray_error(error.to_string(), cx),
-                    Err(error) => this.report_tray_error(error.to_string(), cx),
-                }
-                this.refresh_visible_proxies(cx);
-                if let Some((group, proxy)) = this.proxy_selection_commands.complete() {
-                    this.start_proxy_selection(group, proxy, cx);
-                } else {
-                    this.refresh_tray_menu(cx);
-                }
-            });
-        })
-        .detach();
-    }
-
-    fn report_tray_error(&mut self, error: String, cx: &mut Context<Self>) {
+    pub(super) fn report_tray_error(&mut self, error: String, cx: &mut Context<Self>) {
         self.tray_command_error = Some(error);
         cx.notify();
     }

@@ -15,7 +15,10 @@ impl RunStateHost for ObservationHost {
 
 pub(super) async fn observe(home: PathBuf, binary: Option<PathBuf>) -> ServiceHealth {
     let selected = tokio::task::spawn_blocking(move || {
-        let core = binary.map_or_else(|| crate::process::service_core_source(&home), Ok)?;
+        let core = binary.map_or_else(
+            || crate::managed_core_process::service_core_source(&home),
+            Ok,
+        )?;
         let name = core
             .file_name()
             .and_then(|name| name.to_str())

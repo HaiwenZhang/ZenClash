@@ -2,12 +2,16 @@
 
 use crate::{CapabilityState, TunConfig};
 
+#[cfg(all(test, any(unix, windows)))]
+mod test_support;
+
 /// Independent operating-system evidence for an enabled TUN configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TunRuntimeObservation {
     /// Configured device name used for native readback.
     pub device_name: Option<String>,
-    /// Whether the configured virtual interface exists and is up.
+    /// Whether the configured virtual interface exists and is administratively up.
+    /// This evidence alone does not prove packet forwarding or carrier availability.
     pub device: CapabilityState,
     /// Whether a representative public IPv4 route resolves to that interface.
     pub route: CapabilityState,
@@ -105,159 +109,18 @@ fn token_after<'a>(output: &'a str, marker: &str) -> Option<&'a str> {
     None
 }
 
+#[cfg(any(target_os = "macos", test))]
+mod macos;
 #[cfg(target_os = "macos")]
-mod platform {
-    use super::*;
-
-    pub(super) fn observe(device_name: &str) -> TunRuntimeObservation {
-        if !device_name.starts_with("utun") {
-            return observation(
-                device_name,
-                CapabilityState::Inactive,
-                CapabilityState::Unknown,
-                None,
-            );
-        }
-        let device = command_success("/sbin/ifconfig", &[device_name]);
-        let (route, interface) = route_interface("/sbin/route", &["-n", "get", "1.1.1.1"]);
-        observation(
-            device_name,
-            device,
-            route_state(interface.as_deref(), device_name, route),
-            interface.as_deref(),
-        )
-    }
-
-    fn route_interface(command: &str, args: &[&str]) -> (CapabilityState, Option<String>) {
-        match crate::platform_command::output(command, args) {
-            Ok(output) if output.status.success() => (
-                CapabilityState::Active,
-                String::from_utf8(output.stdout)
-                    .ok()
-                    .and_then(|output| parse_value_after(&output, "interface:").map(str::to_owned)),
-            ),
-            Ok(_) => (CapabilityState::Inactive, None),
-            Err(_) => (CapabilityState::Unknown, None),
-        }
-    }
-
-    fn command_success(command: &str, args: &[&str]) -> CapabilityState {
-        match crate::platform_command::output(command, args) {
-            Ok(output) if output.status.success() => CapabilityState::Active,
-            Ok(_) => CapabilityState::Inactive,
-            Err(_) => CapabilityState::Unknown,
-        }
-    }
-}
-
+use macos as platform;
+#[cfg(any(target_os = "linux", test))]
+mod linux;
 #[cfg(target_os = "linux")]
-mod platform {
-    use super::*;
-
-    pub(super) fn observe(device_name: &str) -> TunRuntimeObservation {
-        let device = command_success("ip", &["link", "show", "dev", device_name]);
-        let interface =
-            match crate::platform_command::output("ip", &["-4", "route", "get", "1.1.1.1"]) {
-                Ok(output) if output.status.success() => String::from_utf8(output.stdout)
-                    .ok()
-                    .and_then(|output| token_after(&output, "dev").map(str::to_owned)),
-                _ => None,
-            };
-        let route_readback = if interface.is_some() {
-            CapabilityState::Active
-        } else {
-            CapabilityState::Unknown
-        };
-        observation(
-            device_name,
-            device,
-            route_state(interface.as_deref(), device_name, route_readback),
-            interface.as_deref(),
-        )
-    }
-
-    fn command_success(command: &str, args: &[&str]) -> CapabilityState {
-        match crate::platform_command::output(command, args) {
-            Ok(output) if output.status.success() => CapabilityState::Active,
-            Ok(_) => CapabilityState::Inactive,
-            Err(_) => CapabilityState::Unknown,
-        }
-    }
-}
-
+use linux as platform;
 #[cfg(target_os = "windows")]
-mod platform {
-    use serde::Deserialize;
-
-    use super::*;
-
-    const SCRIPT: &str = concat!(
-        "$ErrorActionPreference='Stop'; ",
-        "$name=$args[0]; ",
-        "$adapter=Get-NetAdapter -Name $name -IncludeHidden -ErrorAction SilentlyContinue | Select-Object -First 1; ",
-        "$route=Find-NetRoute -RemoteIPAddress '1.1.1.1' | Where-Object { $_.PSObject.Properties.Name -contains 'DestinationPrefix' } | Select-Object -First 1; ",
-        "[pscustomobject]@{deviceStatus=if($null -eq $adapter){$null}else{$adapter.Status.ToString()};routeAlias=if($null -eq $route){$null}else{$route.InterfaceAlias}} | ConvertTo-Json -Compress"
-    );
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct WindowsObservation {
-        device_status: Option<String>,
-        route_alias: Option<String>,
-    }
-
-    pub(super) fn observe(device_name: &str) -> TunRuntimeObservation {
-        let result = crate::platform_command::output(
-            "powershell.exe",
-            &[
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                SCRIPT,
-                device_name,
-            ],
-        );
-        let Ok(output) = result else {
-            return observation(
-                device_name,
-                CapabilityState::Unknown,
-                CapabilityState::Unknown,
-                None,
-            );
-        };
-        if !output.status.success() {
-            return observation(
-                device_name,
-                CapabilityState::Unknown,
-                CapabilityState::Unknown,
-                None,
-            );
-        }
-        let Ok(readback) = serde_json::from_slice::<WindowsObservation>(&output.stdout) else {
-            return observation(
-                device_name,
-                CapabilityState::Unknown,
-                CapabilityState::Unknown,
-                None,
-            );
-        };
-        let device = match readback.device_status.as_deref() {
-            Some(status) if status.eq_ignore_ascii_case("up") => CapabilityState::Active,
-            Some(_) | None => CapabilityState::Inactive,
-        };
-        let route_readback = if readback.route_alias.is_some() {
-            CapabilityState::Active
-        } else {
-            CapabilityState::Unknown
-        };
-        observation(
-            device_name,
-            device,
-            route_state(readback.route_alias.as_deref(), device_name, route_readback),
-            readback.route_alias.as_deref(),
-        )
-    }
-}
+mod windows;
+#[cfg(target_os = "windows")]
+use windows as platform;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 mod platform {

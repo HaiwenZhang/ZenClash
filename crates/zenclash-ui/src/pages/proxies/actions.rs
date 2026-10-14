@@ -1,12 +1,6 @@
-use super::{
-    CatalogTaskToken, ConnectionPolicy, Context, DelayTaskToken, ProxiesPage, ProxyDelayTarget,
-    ProxyNodeId, ProxyOperations, ProxySelectionTaskToken, ProxyTestKey, ProxyVisibility,
-    append_delay, apply_optimistic_selection, insert_inflight_test, remove_inflight_test,
-    take_untested_group_proxies,
-};
-use futures_util::{StreamExt, stream};
+use super::{CatalogTaskToken, Context, ProxiesPage, ProxyNodeId, ProxyVisibility};
 
-const MAX_DELAY_TEST_CONCURRENCY: usize = 16;
+pub(super) const MAX_DELAY_TEST_CONCURRENCY: usize = 16;
 
 impl ProxiesPage {
     pub(crate) fn refresh_localized_placeholders(
@@ -55,7 +49,7 @@ impl ProxiesPage {
         if self.search_query.is_empty() {
             return;
         }
-        let Some(index) = self.search_index.clone() else {
+        let Some(index) = self.catalog_presentation.search_index() else {
             return;
         };
         let query = self.search_query.clone();
@@ -122,17 +116,12 @@ impl ProxiesPage {
             return self
                 .search_projection
                 .as_ref()
-                .and_then(|projection| projection.orders.get(&group.name))
+                .and_then(|projection| projection.orders.get(group.controller_name()))
                 .cloned()
                 .unwrap_or_default();
         }
-        self.group_orders.order(
-            catalog,
-            group,
-            self.sort_by_latency,
-            self.hide_unavailable,
-            &self.test_failures,
-        )
+        self.catalog_presentation
+            .order(catalog, group, self.sort_by_latency, self.hide_unavailable)
     }
 
     pub(super) fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -143,6 +132,7 @@ impl ProxiesPage {
         if !force && (self.loading || self.operation_pending()) {
             return;
         }
+        self.presented = true;
         let token = self.begin_catalog_operation();
         self.loading = true;
         self.loading_token = Some(token);
@@ -151,17 +141,25 @@ impl ProxiesPage {
         cx.notify();
 
         let client = self.client.clone();
+        let session = self.core_session.clone();
         let mode_revision = self.mode_revision;
         let visibility = ProxyVisibility::VisibleOnly;
         let show_hidden = false;
+        let read_source =
+            std::sync::Arc::new(super::catalog_runtime::ProxyCatalogReadSource::default());
+        let submitted_source = read_source.clone();
         let task = self.runtime.spawn(async move {
-            let operations = ProxyOperations::new(client.clone());
-            let (catalog, config) =
-                tokio::try_join!(operations.catalog(visibility), client.runtime_config())
-                    .map_err(|error| error.to_string())?;
-            let indices =
-                super::presentation::visible_group_indices(&catalog, &config.mode, show_hidden);
-            Ok::<_, String>((catalog, config.mode, indices))
+            let operations = submitted_source.capture(session, client).await?;
+            let observation = operations
+                .observe_workspace(visibility)
+                .await
+                .map_err(|error| error.to_string())?;
+            let indices = super::presentation::visible_group_indices(
+                observation.catalog(),
+                observation.outbound_mode(),
+                show_hidden,
+            );
+            Ok::<_, String>((observation, indices))
         });
         self.presentation_tasks.track(&task);
 
@@ -185,21 +183,35 @@ impl ProxiesPage {
                 this.loading = false;
                 this.loading_token = None;
                 match result {
-                    Ok((catalog, mut mode, mut indices)) => {
-                        if mode_revision != this.mode_revision {
-                            mode = this.outbound_mode.clone();
-                            indices =
-                                super::presentation::visible_group_indices(&catalog, &mode, false);
+                    Ok((observation, mut indices)) => {
+                        let operations = observation.operations();
+                        let published = observation.publish_if_current(|catalog, mut mode| {
+                            if mode_revision != this.mode_revision {
+                                mode = this.outbound_mode.clone();
+                                indices = super::presentation::visible_group_indices(
+                                    &catalog, &mode, false,
+                                );
+                            }
+                            if this.selected_group.is_none()
+                                && let Some(group) = catalog.groups_for_mode(&mode).next()
+                            {
+                                this.selected_group = Some(group.controller_name().to_owned());
+                            }
+                            this.install_catalog(catalog, mode, indices);
+                            this.catalog_operations = Some(operations);
+                            this.error = None;
+                        });
+                        if published.is_err() {
+                            this.publish_catalog_refresh_error(
+                                token,
+                                &read_source,
+                                zenclash_core::MihomoError::StaleBinding.to_string(),
+                            );
                         }
-                        if this.expanded.is_empty()
-                            && let Some(group) = catalog.groups_for_mode(&mode).next()
-                        {
-                            this.expanded.insert(group.name.clone());
-                        }
-                        this.install_catalog(catalog, mode, indices);
-                        this.error = None;
                     }
-                    Err(error) => this.error = Some(error),
+                    Err(error) => {
+                        this.publish_catalog_refresh_error(token, &read_source, error);
+                    }
                 }
                 this.prepare_search(cx);
                 cx.notify();
@@ -214,19 +226,18 @@ impl ProxiesPage {
         mode: String,
         indices: Vec<usize>,
     ) {
+        self.next_catalog_task();
+        self.delay_generation = self.delay_generation.wrapping_add(1);
+        self.testing.clear();
+        self.active_testing_groups.clear();
+        self.group_progress.clear();
+        self.catalog_operations = None;
         if !self.outbound_mode.eq_ignore_ascii_case(&mode) {
             self.mode_revision = self.mode_revision.wrapping_add(1);
         }
         self.set_group_indices(indices);
-        self.group_orders.clear();
         self.cancel_search();
-        self.test_failures.clear();
-        self.group_orders.prepare_current(&catalog);
-        self.node_summary = super::presentation::NodeSummary::new(&catalog);
-        self.search_index = Some(std::sync::Arc::new(super::presentation::SearchIndex::new(
-            &catalog,
-            &self.test_failures,
-        )));
+        self.catalog_presentation.install(&catalog);
         self.catalog = Some(std::sync::Arc::new(catalog));
         self.outbound_mode = mode;
     }
@@ -249,24 +260,23 @@ impl ProxiesPage {
 
     /// Invalidates in-flight presentation work and releases the inactive catalog.
     pub(crate) fn suspend(&mut self) {
+        self.presented = false;
         self.presentation_tasks.cancel();
         self.cancel_search();
         self.group_progress.clear();
-        self.search_index = None;
         self.catalog_generation = self.catalog_generation.wrapping_add(1);
         self.delay_generation = self.delay_generation.wrapping_add(1);
         self.switching.clear();
-        self.group_orders.clear();
+        self.catalog_presentation.release();
         self.catalog = None;
-        self.node_summary = Default::default();
-        self.group_orders.release_current();
+        self.catalog_operations = None;
         self.visible_group_indices = Vec::new();
         self.node_focus.clear();
         self.details_focus.clear();
-        self.expanded.clear();
+        self.node_grid = Default::default();
+        self.selected_group = None;
         self.testing.clear();
         self.active_testing_groups.clear();
-        self.test_failures.clear();
         self.restoring_auto = None;
         self.measuring_and_restoring_auto = None;
         self.loading = false;
@@ -288,9 +298,9 @@ impl ProxiesPage {
     }
 
     pub(super) fn toggle_group(&mut self, name: &str, cx: &mut Context<Self>) {
-        super::toggle_expanded_group(&mut self.expanded, name);
-        if !self.expanded.contains(name) {
-            self.group_orders.invalidate(name);
+        super::toggle_group_selection(&mut self.selected_group, name);
+        if self.selected_group.as_deref() != Some(name) {
+            self.catalog_presentation.invalidate_group(name);
         }
         cx.notify();
     }
@@ -303,504 +313,43 @@ impl ProxiesPage {
         }
         self.outbound_mode = mode.to_ascii_lowercase();
         self.refresh_group_indices();
-        self.group_orders.clear();
-        self.expanded.clear();
+        self.catalog_presentation.clear_order_cache();
+        self.selected_group = None;
         if let Some(catalog) = &self.catalog
             && let Some(group) = catalog.groups_for_mode(&self.outbound_mode).next()
         {
-            self.expanded.insert(group.name.clone());
+            self.selected_group = Some(group.controller_name().to_owned());
         }
         cx.notify();
     }
 
-    pub(super) fn change_proxy(&mut self, group: String, proxy: String, cx: &mut Context<Self>) {
-        if self.catalog_operation_pending() || self.switching.group_pending(&group) || self.loading
+    /// Adopts mode coordination and refreshes a visible catalog after configuration completion.
+    pub(crate) fn synchronize_outbound_mode(
+        &mut self,
+        mode: &str,
+        pending: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_outbound_mode(mode, cx);
+        if !pending
+            && self.core_session.is_some()
+            && self.presented
+            && self
+                .catalog_operations
+                .as_ref()
+                .is_none_or(|operations| operations.pin_current_runtime().is_err())
         {
-            return;
+            self.start_refresh(true, cx);
         }
-        let Some(request) = self.switching.start(group, proxy) else {
-            return;
-        };
-        self.error = None;
-        self.notice = None;
-        cx.notify();
-
-        let client = self.client.clone();
-        let task_group = request.group.clone();
-        let task_proxy = request.proxy.clone();
-        let task = self.runtime.spawn(async move {
-            ProxyOperations::new(client)
-                .apply_selection(&task_group, &task_proxy, ConnectionPolicy::KeepExisting)
-                .await
-        });
-
-        cx.spawn(async move |this, cx| {
-            let result = match task.await {
-                Ok(result) => result.map_err(|error| error.to_string()),
-                Err(error) => Err(zenclash_i18n::text_with(
-                    "proxies.errors.switch_task",
-                    &[("error", error.to_string())],
-                )),
-            };
-            let _ = this.update(cx, |this, cx| {
-                if !this.switching.complete(&request) {
-                    return;
-                }
-                match result {
-                    Ok(receipt) => {
-                        let warning = (!receipt.warnings.is_empty()).then(|| {
-                            zenclash_i18n::text_with(
-                                "proxies.notices.applied_with_warning",
-                                &[("warning", receipt.warnings.join("; "))],
-                            )
-                        });
-                        for warning in receipt.warnings {
-                            tracing::warn!(%warning, "proxy selection completed with a warning");
-                        }
-                        apply_optimistic_selection(
-                            &mut this.catalog,
-                            &request.group,
-                            &request.proxy,
-                        );
-                        if let Some(catalog) = this.catalog.as_deref() {
-                            this.group_orders.update_current(catalog, &request.group);
-                        }
-                        this.error = None;
-                        this.notice = warning;
-                        this.reconcile_proxy_selection(request.token, request.group.clone(), cx);
-                    }
-                    Err(error) => this.error = Some(error),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn reconcile_proxy_selection(
-        &mut self,
-        selection_token: ProxySelectionTaskToken,
-        group: String,
-        cx: &mut Context<Self>,
-    ) {
-        let token = self.next_catalog_task();
-        let client = self.client.clone();
-        let task_group = group.clone();
-        let task = self
-            .runtime
-            .spawn(async move { client.proxy_group_selection(&task_group).await });
-
-        cx.spawn(async move |this, cx| {
-            let result = match task.await {
-                Ok(result) => result,
-                Err(error) => {
-                    tracing::warn!(%error, "proxy catalog reconciliation task failed");
-                    return;
-                }
-            };
-            let _ = this.update(cx, |this, cx| {
-                if !token.is_current(this.catalog_generation)
-                    || !selection_token.is_latest(this.switching.generation)
-                {
-                    return;
-                }
-                match result {
-                    Ok(actual) if !actual.is_empty() => {
-                        apply_optimistic_selection(&mut this.catalog, &group, &actual);
-                        if let Some(catalog) = this.catalog.as_deref() {
-                            this.group_orders.update_current(catalog, &group);
-                        }
-                        cx.notify();
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!(%error, "proxy catalog reconciliation failed");
-                    }
-                }
-            });
-        })
-        .detach();
-    }
-
-    pub(super) fn restore_auto(&mut self, group: String, cx: &mut Context<Self>) {
-        if self.operation_pending() || self.loading {
-            return;
-        }
-        let token = self.begin_catalog_operation();
-        self.restoring_auto = Some(group.clone());
-        self.error = None;
-        self.notice = None;
-        cx.notify();
-
-        let client = self.client.clone();
-        let task = self
-            .runtime
-            .spawn(async move { ProxyOperations::new(client).restore_auto(&group).await });
-
-        cx.spawn(async move |this, cx| {
-            let result = match task.await {
-                Ok(result) => result.map_err(|error| error.to_string()),
-                Err(error) => Err(zenclash_i18n::text_with(
-                    "proxies.errors.restore_auto_task",
-                    &[("error", error.to_string())],
-                )),
-            };
-            let _ = this.update(cx, |this, cx| {
-                if !token.is_current(this.catalog_generation) {
-                    return;
-                }
-                this.restoring_auto = None;
-                match result {
-                    Ok(outcome) => {
-                        let warning = (!outcome.warnings.is_empty()).then(|| {
-                            zenclash_i18n::text_with(
-                                "proxies.notices.restored_with_warning",
-                                &[("warning", outcome.warnings.join("; "))],
-                            )
-                        });
-                        for warning in outcome.warnings {
-                            tracing::warn!(%warning, "automatic proxy group restored with a warning");
-                        }
-                        if let Some(catalog) = outcome.catalog {
-                            let indices = super::presentation::visible_group_indices(&catalog, &this.outbound_mode, false);
-                            this.install_catalog(catalog, this.outbound_mode.clone(), indices);
-                        }
-                        this.error = None;
-                        this.notice = warning.or_else(|| {
-                            Some(zenclash_i18n::text("proxies.notices.restored_auto"))
-                        });
-                    }
-                    Err(error) => this.error = Some(error),
-                }
-                this.prepare_search(cx);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    pub(super) fn measure_group_and_restore_auto(
-        &mut self,
-        group: String,
-        test_url: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.operation_pending() || self.loading || !self.testing.is_empty() {
-            return;
-        }
-        let token = self.begin_catalog_operation();
-        self.measuring_and_restoring_auto = Some(group.clone());
-        self.error = None;
-        self.notice = None;
-        cx.notify();
-
-        let client = self.client.clone();
-        let task = self.runtime.spawn(async move {
-            ProxyOperations::new(client)
-                .measure_group_and_restore_auto(&group, test_url.as_deref(), 5_000)
-                .await
-                .map(|outcome| (group, outcome))
-        });
-
-        cx.spawn(async move |this, cx| {
-            let result = match task.await {
-                Ok(result) => result.map_err(|error| error.to_string()),
-                Err(error) => Err(zenclash_i18n::text_with(
-                    "proxies.errors.measure_restore_task",
-                    &[("error", error.to_string())],
-                )),
-            };
-            let _ = this.update(cx, |this, cx| {
-                if !token.is_current(this.catalog_generation) {
-                    return;
-                }
-                this.measuring_and_restoring_auto = None;
-                match result {
-                    Ok((group, outcome)) => {
-                        let warning = (!outcome.selection.warnings.is_empty()).then(|| {
-                            zenclash_i18n::text_with(
-                                "proxies.notices.restored_with_warning",
-                                &[("warning", outcome.selection.warnings.join("; "))],
-                            )
-                        });
-                        for warning in outcome.selection.warnings {
-                            tracing::warn!(%warning, "group delay completed with a readback warning");
-                        }
-                        if let Some(catalog) = outcome.selection.catalog {
-                            let indices = super::presentation::visible_group_indices(&catalog, &this.outbound_mode, false);
-                            this.install_catalog(catalog, this.outbound_mode.clone(), indices);
-                        }
-                        let results = this.catalog.as_ref().and_then(|catalog| {
-                            let group = catalog.groups().iter().find(|item| item.name == group)?;
-                            Some(group.all.iter().filter_map(|id| {
-                                outcome.delays.get(id.controller_name()).copied().map(|delay| (id.clone(), delay))
-                            }).collect::<Vec<_>>())
-                        }).unwrap_or_default();
-                        for (id, delay) in results { this.record_node_delay(&id, delay, delay, None); }
-                        this.error = None;
-                        this.notice = warning.or_else(|| {
-                            Some(zenclash_i18n::text(
-                                "proxies.notices.measured_and_restored_auto",
-                            ))
-                        });
-                    }
-                    Err(error) => this.error = Some(error),
-                }
-                this.prepare_search(cx);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    pub(super) fn test_proxy(
-        &mut self,
-        group: String,
-        node: ProxyNodeId,
-        test_url: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.proxy_selection_blocked(&group) || self.loading {
-            return;
-        }
-        let Some(proxy) = self
-            .catalog
-            .as_ref()
-            .and_then(|catalog| catalog.node(&node))
-        else {
-            return;
-        };
-        let target = ProxyDelayTarget {
-            name: if node.provider().is_some() {
-                proxy.name.clone()
-            } else {
-                node.controller_name().to_owned()
-            },
-            provider: node.provider().map(str::to_owned),
-        };
-        let Some(test_key) = self.start_node_test(&group, node.clone()) else {
-            return;
-        };
-        let token = DelayTaskToken(self.delay_generation);
-        cx.notify();
-
-        let operations = ProxyOperations::new(self.client.clone());
-
-        let task = self.runtime.spawn(async move {
-            operations
-                .measure(&target, test_url.as_deref(), 5_000)
-                .await
-                .map_err(|error| error.to_string())
-        });
-        self.presentation_tasks.track(&task);
-
-        cx.spawn(async move |this, cx| {
-            let result = match task.await {
-                Ok(result) => result,
-                Err(error) => Err(zenclash_i18n::text_with(
-                    "proxies.errors.delay_task",
-                    &[("error", error.to_string())],
-                )),
-            };
-            let _ = this.update(cx, |this, cx| {
-                if !this.finish_proxy_test(token, &group, &test_key) {
-                    return;
-                }
-                match result {
-                    Ok(result) => {
-                        this.record_node_delay(&node, result.delay, result.mean_delay, None);
-                    }
-                    Err(error) => {
-                        this.record_node_delay(
-                            &node,
-                            0,
-                            0,
-                            Some(super::DelayTestFailure::from_error(&error)),
-                        );
-                        this.error = Some(error);
-                    }
-                }
-                this.prepare_search(cx);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    #[cfg(test)]
-    pub(super) fn start_proxy_test(&mut self, group: &str, proxy: &str) -> Option<ProxyTestKey> {
-        self.start_node_test(group, ProxyNodeId::new(proxy.to_owned(), None))
-    }
-
-    fn start_node_test(&mut self, group: &str, node: ProxyNodeId) -> Option<ProxyTestKey> {
-        let key = ProxyTestKey {
-            group: group.to_owned(),
-            node,
-        };
-        insert_inflight_test(
-            &mut self.testing,
-            &mut self.active_testing_groups,
-            group,
-            key.clone(),
-        )
-        .then_some(key)
-    }
-
-    pub(super) fn finish_proxy_test(
-        &mut self,
-        token: DelayTaskToken,
-        group: &str,
-        key: &ProxyTestKey,
-    ) -> bool {
-        if !token.is_current(self.delay_generation) {
-            return false;
-        }
-        remove_inflight_test(
-            &mut self.testing,
-            &mut self.active_testing_groups,
-            group,
-            key,
-        );
-        true
-    }
-
-    pub(super) fn test_group(&mut self, group_name: &str, cx: &mut Context<Self>) {
-        if self.proxy_selection_blocked(group_name)
-            || self.loading
-            || self.group_progress.contains_key(group_name)
-        {
-            return;
-        }
-        let Some(catalog) = self.catalog.as_deref() else {
-            return;
-        };
-        let Some(group) = catalog
-            .groups()
-            .iter()
-            .find(|group| group.name == group_name)
-        else {
-            return;
-        };
-        let group_name = group.name.clone();
-        let test_url = group.test_url.clone();
-        let proxies = take_untested_group_proxies(
-            &mut self.testing,
-            &mut self.active_testing_groups,
-            catalog,
-            group,
-        );
-        if proxies.is_empty() {
-            return;
-        }
-        self.group_progress
-            .insert(group_name.clone(), (0, proxies.len()));
-        let token = DelayTaskToken(self.delay_generation);
-        self.error = None;
-        cx.notify();
-
-        let operations = ProxyOperations::new(self.client.clone());
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(64);
-        let task = self.runtime.spawn(async move {
-            let mut measurements = stream::iter(proxies.into_iter().map(|(node, target)| {
-                let operations = operations.clone();
-                let test_url = test_url.clone();
-                async move {
-                    let result = operations
-                        .measure(&target, test_url.as_deref(), 5_000)
-                        .await
-                        .map_err(|error| error.to_string());
-                    (node, result)
-                }
-            }))
-            .buffer_unordered(MAX_DELAY_TEST_CONCURRENCY);
-            while let Some(result) = measurements.next().await {
-                if sender.send(result).await.is_err() {
-                    break;
-                }
-            }
-        });
-        self.presentation_tasks.track(&task);
-        cx.spawn(async move |this, cx| {
-            let mut failures = 0usize;
-            while let Some(batch) = receive_batch(&mut receiver, || {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(50))
-            })
-            .await
-            {
-                let applied = this.update(cx, |this, cx| {
-                    if !token.is_current(this.delay_generation) {
-                        return false;
-                    }
-                    for (node, result) in batch {
-                        let key = ProxyTestKey {
-                            group: group_name.clone(),
-                            node: node.clone(),
-                        };
-                        remove_inflight_test(
-                            &mut this.testing,
-                            &mut this.active_testing_groups,
-                            &group_name,
-                            &key,
-                        );
-                        if let Some(progress) = this.group_progress.get_mut(&group_name) {
-                            progress.0 += 1;
-                        }
-                        match result {
-                            Ok(result) => {
-                                this.record_node_delay(&node, result.delay, result.mean_delay, None)
-                            }
-                            Err(error) => {
-                                failures += 1;
-                                this.record_node_delay(
-                                    &node,
-                                    0,
-                                    0,
-                                    Some(super::DelayTestFailure::from_error(&error)),
-                                );
-                            }
-                        }
-                    }
-                    if !this.search_query.is_empty() {
-                        this.prepare_search(cx);
-                    }
-                    cx.notify();
-                    true
-                });
-                if !matches!(applied, Ok(true)) {
-                    return;
-                }
-            }
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                if !token.is_current(this.delay_generation) {
-                    return;
-                }
-                this.group_progress.remove(&group_name);
-                if !this.search_query.is_empty() {
-                    this.prepare_search(cx);
-                }
-                if let Err(error) = result {
-                    this.error = Some(zenclash_i18n::text_with(
-                        "proxies.errors.group_delay_task",
-                        &[("error", error.to_string())],
-                    ));
-                } else if failures > 0 {
-                    this.error = Some(zenclash_i18n::text_with(
-                        "proxies.errors.group_failed",
-                        &[("group", group_name), ("count", failures.to_string())],
-                    ));
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     #[cfg(test)]
     pub(super) fn record_delay(&mut self, group: &str, name: &str, delay: u32, mean_delay: u32) {
         let node = self.catalog.as_ref().and_then(|catalog| {
-            let group = catalog.groups().iter().find(|item| item.name == group)?;
+            let group = catalog
+                .groups()
+                .iter()
+                .find(|item| item.controller_name() == group)?;
             group
                 .all
                 .iter()
@@ -825,24 +374,8 @@ impl ProxiesPage {
         let Some(catalog) = self.catalog.as_mut() else {
             return;
         };
-        let catalog = std::sync::Arc::make_mut(catalog);
-        let Some(node) = catalog.node_mut(id) else {
-            return;
-        };
-        append_delay(node, delay, mean_delay);
-        self.node_summary.record(id, node.latest_delay());
-        if let Some(index) = &self.search_index {
-            index.update(id, node, failure.is_some());
-        }
-        if let Some(failure) = failure {
-            self.test_failures.insert(id.clone(), failure);
-        } else {
-            self.test_failures.remove(id);
-        }
-        for &index in catalog.referencing_groups(id) {
-            self.group_orders
-                .invalidate_delays(&catalog.groups()[index].name);
-        }
+        self.catalog_presentation
+            .record_delay(catalog, id, delay, mean_delay, failure);
     }
 
     fn next_catalog_task(&mut self) -> CatalogTaskToken {
@@ -850,7 +383,7 @@ impl ProxiesPage {
         CatalogTaskToken(self.catalog_generation)
     }
 
-    fn begin_catalog_operation(&mut self) -> CatalogTaskToken {
+    pub(super) fn begin_catalog_operation(&mut self) -> CatalogTaskToken {
         self.presentation_tasks.cancel();
         self.cancel_search();
         self.group_progress.clear();
@@ -858,8 +391,7 @@ impl ProxiesPage {
         self.delay_generation = self.delay_generation.wrapping_add(1);
         self.testing.clear();
         self.active_testing_groups.clear();
-        self.group_orders.clear();
-        self.test_failures.clear();
+        self.catalog_presentation.begin_operation();
         self.restoring_auto = None;
         self.measuring_and_restoring_auto = None;
         token
@@ -871,7 +403,7 @@ impl ProxiesPage {
             || self.measuring_and_restoring_auto.is_some()
     }
 
-    fn catalog_operation_pending(&self) -> bool {
+    pub(super) fn catalog_operation_pending(&self) -> bool {
         self.restoring_auto.is_some() || self.measuring_and_restoring_auto.is_some()
     }
 
@@ -884,7 +416,7 @@ impl ProxiesPage {
 pub(super) struct PresentationTasks(Vec<tokio::task::AbortHandle>);
 
 impl PresentationTasks {
-    fn track<T>(&mut self, task: &tokio::task::JoinHandle<T>) {
+    pub(super) fn track<T>(&mut self, task: &tokio::task::JoinHandle<T>) {
         self.0.retain(|handle| !handle.is_finished());
         self.0.push(task.abort_handle());
     }
@@ -902,7 +434,7 @@ impl Drop for PresentationTasks {
     }
 }
 
-async fn receive_batch<T, D: std::future::Future<Output = ()>>(
+pub(super) async fn receive_batch<T, D: std::future::Future<Output = ()>>(
     receiver: &mut tokio::sync::mpsc::Receiver<T>,
     delay: impl FnOnce() -> D,
 ) -> Option<Vec<T>> {

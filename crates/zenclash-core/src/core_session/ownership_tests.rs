@@ -1,22 +1,19 @@
 //! Real child ownership regressions; the HTTP responder is only a readiness fixture.
 
-use std::{path::PathBuf, process::Command, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    task::JoinHandle,
-};
+use super::test_support::OwnedCoreFixture as ChildFixture;
 
 use crate::{
-    CoreKind, CoreMaintenanceIntent, CoreSession, MihomoClient, MihomoEndpoint, MihomoLaunchConfig,
-    MihomoProcess,
+    CoreKind, CoreLaunchConfig, CoreMaintenanceIntent, CoreSession, ManagedCoreProcess,
+    MihomoClient, MihomoEndpoint,
 };
 
 #[tokio::test]
 async fn local_recovery_launch_tracks_actual_owner_and_clears_for_external_binding() {
     let directory =
         std::env::temp_dir().join(format!("zenclash-recovery-launch-{}", std::process::id()));
-    let process = MihomoProcess::prepare_stopped(MihomoLaunchConfig {
+    let process = ManagedCoreProcess::prepare_stopped(CoreLaunchConfig {
         kind: CoreKind::Mihomo,
         binary: directory.join("ordinary-mihomo"),
         config_file: directory.join("original.yaml"),
@@ -197,7 +194,7 @@ async fn cancelled_maintenance_queue_does_not_stop_the_owned_child() {
 }
 
 #[tokio::test]
-async fn explicit_stop_intent_survives_failed_switch_and_is_replaced_only_by_admitted_runtime() {
+async fn explicit_stop_intent_is_replaced_only_by_admitted_runtime() {
     let first = ChildFixture::new("stop-intent-first").await;
     let second = ChildFixture::new("stop-intent-second").await;
     let session = CoreSession::open(
@@ -211,13 +208,6 @@ async fn explicit_stop_intent_survives_failed_switch_and_is_replaced_only_by_adm
     // Missing confirmation must remain distinct from the user's stopped intention.
     session.lifecycle.write().phase = crate::CoreLifecyclePhase::Unknown;
     assert!(clone.ensure_running_operations_allowed().is_err());
-    let mut wrong_kind = second.process.launch_config().clone();
-    wrong_kind.kind = CoreKind::Meow;
-    let rejected = MihomoProcess::spawn(wrong_kind).unwrap();
-    assert!(clone.switch_to_process(rejected.clone()).await.is_err());
-    assert!(session.lifecycle_snapshot().stop_requested);
-    assert!(first.process.snapshot().pid.is_none());
-    rejected.stop_async().await.unwrap();
 
     clone
         .maintain(CoreMaintenanceIntent::Restart)
@@ -279,7 +269,7 @@ async fn permission_grant_does_not_restart_an_explicitly_stopped_runtime() {
     session.maintain(CoreMaintenanceIntent::Stop).await.unwrap();
     let version = session.generation();
     let client = session.client.pin_binding().unwrap();
-    let lease = session.acquire_process_write_lease(&client).await.unwrap();
+    let lease = session.acquire_runtime_write_lease(&client).await.unwrap();
     // The helper is entered after authorization has succeeded. No native grant is invoked.
     session
         .restart_after_tun_grant(&fixture.process, &lease, Duration::from_secs(1))
@@ -304,7 +294,7 @@ async fn permission_restart_cancelled_before_stop_preserves_the_current_read_ver
     )
     .unwrap();
     let client = session.client.pin_binding().unwrap();
-    let lease = session.acquire_process_write_lease(&client).await.unwrap();
+    let lease = session.acquire_runtime_write_lease(&client).await.unwrap();
     let previous_pid = fixture.process.snapshot().pid;
     let previous_version = session.generation();
     session
@@ -331,7 +321,7 @@ async fn granted_permission_restart_failure_invalidates_the_old_runtime_version(
     .unwrap();
     let old_version = session.generation();
     let client = session.client.pin_binding().unwrap();
-    let lease = session.acquire_process_write_lease(&client).await.unwrap();
+    let lease = session.acquire_runtime_write_lease(&client).await.unwrap();
     fixture.responder.abort();
     // Authorization is already acknowledged at this boundary; no native grant is invoked.
     let result = session
@@ -520,50 +510,6 @@ async fn supervisor_recovers_only_the_current_owned_child() {
     assert!(second.process.snapshot().pid.is_none());
 }
 
-#[test]
-fn shared_direct_builder_cannot_change_kind_or_generation() {
-    let client = MihomoClient::new(MihomoEndpoint::default()).unwrap();
-    let clone = client.clone();
-    let before = clone.runtime_descriptor();
-    assert!(client.with_core_kind(CoreKind::Meow).is_err());
-    let after = clone.runtime_descriptor();
-    assert_eq!(after.kind(), CoreKind::Mihomo);
-    assert_eq!(after.binding_generation(), before.binding_generation());
-    assert!(CoreSession::open(CoreKind::Meow, clone).is_err());
-}
-
-#[test]
-fn declared_external_meow_kind_is_fixed_before_publication() {
-    let client = MihomoClient::new(MihomoEndpoint::default())
-        .unwrap()
-        .with_core_kind(CoreKind::Meow)
-        .unwrap();
-    let clone = client.clone();
-    let session = CoreSession::open(CoreKind::Meow, client).unwrap();
-    assert_eq!(session.kind(), CoreKind::Meow);
-    assert_eq!(session.runtime_descriptor().kind(), CoreKind::Meow);
-    assert_eq!(clone.runtime_descriptor().kind(), CoreKind::Meow);
-    assert!(!session.is_managed());
-    assert_eq!(session.snapshot().running, None);
-    drop(session);
-    // Unique again is not enough: a published binding stays immutable.
-    assert!(clone.with_core_kind(CoreKind::Mihomo).is_err());
-}
-
-#[tokio::test]
-async fn mismatched_owned_kind_is_rejected_without_touching_the_child() {
-    let fixture = ChildFixture::new("wrong-kind").await;
-    let pid = fixture.process.snapshot().pid;
-    assert!(
-        CoreSession::open(
-            CoreKind::Meow,
-            MihomoClient::from_process(fixture.process.clone()).unwrap()
-        )
-        .is_err()
-    );
-    assert_eq!(fixture.process.snapshot().pid, pid);
-}
-
 #[tokio::test]
 async fn permission_observation_uses_current_binary_and_external_is_unsupported() {
     let first = ChildFixture::new("permission-first").await;
@@ -606,113 +552,4 @@ async fn permission_observation_uses_current_binary_and_external_is_unsupported(
     assert!(first.process.snapshot().pid.is_none());
     assert!(second.process.snapshot().pid.is_none());
     session.shutdown().await.unwrap();
-}
-
-pub(crate) struct ChildFixture {
-    pub(crate) process: Arc<MihomoProcess>,
-    directory: PathBuf,
-    responder: JoinHandle<()>,
-}
-
-impl ChildFixture {
-    pub(crate) fn responder_for_test_abort(&self) {
-        self.responder.abort();
-    }
-
-    pub(crate) async fn new(label: &str) -> Self {
-        Self::with_config_path(label, "profile.yaml").await
-    }
-
-    pub(crate) async fn with_config_path(label: &str, relative: &str) -> Self {
-        let directory = std::env::temp_dir().join(format!(
-            "zenclash-current-child-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
-        std::fs::create_dir_all(directory.join("home")).unwrap();
-        let directory = std::fs::canonicalize(directory).unwrap();
-        let source = directory.join("child.rs");
-        std::fs::write(
-            &source,
-            r#"fn main() {
-            if std::env::args().any(|arg| arg == "-t") { return; }
-            std::thread::sleep(std::time::Duration::from_secs(30));
-        }"#,
-        )
-        .unwrap();
-        let binary = directory.join(if cfg!(windows) {
-            "mihomo.exe"
-        } else {
-            "mihomo"
-        });
-        let compilation = Command::new("rustc")
-            .arg("--edition=2024")
-            .arg(source)
-            .arg("-o")
-            .arg(&binary)
-            .output()
-            .unwrap();
-        assert!(
-            compilation.status.success(),
-            "{}",
-            String::from_utf8_lossy(&compilation.stderr)
-        );
-        let config = directory.join(relative);
-        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-        std::fs::write(&config, "rules:\n  - MATCH,DIRECT\n").unwrap();
-        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .unwrap();
-        let address = listener.local_addr().unwrap();
-        let responder = tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
-                let mut request = Vec::new();
-                while request.len() < 4096 && !request.windows(4).any(|tail| tail == b"\r\n\r\n") {
-                    let mut bytes = [0_u8; 1024];
-                    let read = stream.read(&mut bytes).await.unwrap();
-                    if read == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&bytes[..read]);
-                }
-                let body = r#"{"meta":true,"version":"owned-child-fixture"}"#;
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                stream.write_all(response.as_bytes()).await.unwrap();
-            }
-        });
-        let process = MihomoProcess::spawn(MihomoLaunchConfig {
-            kind: CoreKind::Mihomo,
-            binary,
-            config_file: config,
-            home_dir: directory.join("home"),
-            endpoint: MihomoEndpoint::new(format!("http://{address}"), ""),
-            controller_override: None,
-        })
-        .unwrap();
-        Self {
-            process,
-            directory,
-            responder,
-        }
-    }
-}
-
-impl Drop for ChildFixture {
-    fn drop(&mut self) {
-        self.responder.abort();
-        self.process.stop().unwrap();
-        for attempt in 0..20 {
-            match std::fs::remove_dir_all(&self.directory) {
-                Ok(()) => return,
-                Err(error) if attempt == 19 => panic!("child fixture cleanup failed: {error}"),
-                Err(_) => std::thread::sleep(Duration::from_millis(10)),
-            }
-        }
-    }
 }

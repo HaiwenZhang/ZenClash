@@ -17,6 +17,91 @@ static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const PROFILE: &str = "mixed-port: 7890\nproxies: []\nproxy-groups: []\nrules: []\n";
 
 #[test]
+fn export_waits_for_an_admitted_profile_update_and_captures_a_restorable_snapshot() {
+    use std::{sync::mpsc, thread, time::Duration};
+
+    let root = test_root("export-profile-update");
+    let source = root.join("source");
+    create_snapshot(&source, AppearancePreference::Light, false, 7890);
+    let update_authority = crate::data_coordinator::DataWriteLease::shared([source.clone()]);
+    let profiles = ProfileStore::open(source.join("profiles"), Some(&update_authority)).unwrap();
+    let profile = profiles.load().unwrap().profiles.remove(0);
+    let archive = root.join("snapshot.zip");
+    let export_archive = archive.clone();
+    let export_source = source.clone();
+    let (finished_sender, finished_receiver) = mpsc::channel();
+    let exporter = thread::spawn(move || {
+        finished_sender
+            .send(BackupManager::new(export_source).export_to(export_archive))
+            .unwrap();
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let mut early_completion = None;
+    while !crate::data_coordinator::has_waiting_restore(&source) {
+        if let Ok(result) = finished_receiver.try_recv() {
+            early_completion = Some(result);
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        thread::yield_now();
+    }
+    let snapshot_waited = crate::data_coordinator::has_waiting_restore(&source);
+    let updated_payload = "mode: direct\nproxies: []\nproxy-groups: []\nrules: ['MATCH,DIRECT']\n";
+    profiles
+        .replace_payload(&profile.id, PROFILE, updated_payload)
+        .unwrap();
+    drop(update_authority);
+    early_completion
+        .unwrap_or_else(|| {
+            finished_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+        })
+        .unwrap();
+    exporter.join().unwrap();
+
+    let target = BackupManager::new(root.join("restored"));
+    target
+        .prepare_restore(&archive)
+        .unwrap()
+        .activate()
+        .unwrap()
+        .commit()
+        .unwrap();
+    let restored_profiles = ProfileStore::new(target.data_root().join("profiles")).unwrap();
+    let restored_profile = restored_profiles.load().unwrap().profiles.remove(0);
+    let restored_payload =
+        fs::read_to_string(restored_profiles.profile_path(&restored_profile)).unwrap();
+    fs::remove_dir_all(root).unwrap();
+    assert!(
+        snapshot_waited,
+        "export raced with an admitted profile writer"
+    );
+    assert_eq!(restored_payload, updated_payload);
+    assert_eq!(restored_profile.size_bytes, updated_payload.len() as u64);
+}
+
+#[test]
+fn export_rejects_an_oversized_managed_override_before_reading_its_contents() {
+    let root = test_root("export-override-budget");
+    create_snapshot(&root, AppearancePreference::Light, false, 7890);
+    let overrides = YamlOverrideStore::new(root.join("yaml-overrides")).unwrap();
+    let record = overrides.load().unwrap().items.remove(0);
+    fs::File::create(overrides.managed_path(&record))
+        .unwrap()
+        .set_len(MAX_BACKUP_BYTES + 1)
+        .unwrap();
+
+    let result = BackupManager::new(&root).export_to(root.join("oversized.zip"));
+    assert!(matches!(result, Err(BackupError::TooLarge(_))));
+    assert!(!root.join("oversized.zip").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn preference_writer_waits_until_restore_commits() {
     verify_writer_waits_for_restore(false);
 }
@@ -358,7 +443,7 @@ fn managed_file_directory_aliases_obey_the_other_roots_restore_lease() {
 async fn runtime_restore_snapshot_is_captured_after_admission_and_replays_exact_bytes() {
     use crate::{CoreKind, CoreSession, EffectiveConfigIntent, MihomoClient, MihomoEndpoint};
     use std::time::Duration;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
 
     let root = test_root("exact-runtime-snapshot");
     let source = root.join("source");
@@ -389,25 +474,11 @@ async fn runtime_restore_snapshot_is_captured_after_admission_and_replays_exact_
                 .await
                 .unwrap()
                 .unwrap();
-            let mut request = Vec::new();
-            loop {
-                request.push(stream.read_u8().await.unwrap());
-                if request.ends_with(b"\r\n\r\n") {
-                    break;
-                }
-            }
-            let headers = String::from_utf8(request).unwrap();
+            let (headers, body) = crate::test_support::read_controller_request(&mut stream)
+                .await
+                .unwrap()
+                .into_parts();
             assert!(headers.starts_with("PUT /configs?force=true "));
-            let length = headers
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().unwrap())
-                })
-                .unwrap();
-            let mut body = vec![0; length];
-            stream.read_exact(&mut body).await.unwrap();
             payloads.push(
                 serde_json::from_slice::<serde_json::Value>(&body).unwrap()["payload"]
                     .as_str()
@@ -610,13 +681,7 @@ async fn session_restore_authorizes_profile_application_in_an_external_runtime_h
         CoreConfigValidator, CoreKind, CoreSession, MihomoClient, MihomoEndpoint,
         ProfileApplication, ProfileApplyOutcome, ProfileChange,
     };
-    use std::{
-        io::{Read, Write},
-        net::TcpListener,
-        os::unix::fs::PermissionsExt,
-        thread,
-        time::Duration,
-    };
+    use std::{io::Write, net::TcpListener, os::unix::fs::PermissionsExt, thread, time::Duration};
 
     let root = test_root("external-runtime-authority");
     let source = root.join("source");
@@ -650,8 +715,10 @@ async fn session_restore_authorizes_profile_application_in_an_external_runtime_h
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        let mut request = [0_u8; 8192];
-        let count = stream.read(&mut request).unwrap();
+        let request = crate::test_support::read_controller_request_blocking(&mut stream)
+            .unwrap()
+            .into_bytes();
+        let count = request.len();
         assert!(String::from_utf8_lossy(&request[..count]).starts_with("PUT /configs?force=true "));
         stream
             .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
@@ -1211,4 +1278,103 @@ fn test_root(name: &str) -> PathBuf {
         "zenclash-backup-{name}-{}-{sequence}",
         std::process::id()
     ))
+}
+
+#[test]
+fn restore_activation_and_rollback_retire_preference_observations_without_granting_write_authority()
+{
+    let root = test_root("observed-preferences-restore");
+    let source = root.join("source");
+    let target = root.join("target");
+    create_snapshot(&source, AppearancePreference::Dark, true, 7890);
+    create_snapshot(&target, AppearancePreference::Light, false, 7891);
+    let store = AppPreferencesStore::new(target.join("preferences.json"));
+    let previous = store.observe().unwrap();
+    let archive = root.join("backup.zip");
+    BackupManager::new(&source).export_to(&archive).unwrap();
+    let transaction = BackupManager::new(&target)
+        .prepare_restore(&archive)
+        .unwrap()
+        .activate()
+        .unwrap();
+    assert!(
+        previous
+            .publish_if_current(|_| panic!("pre-restore preferences published"))
+            .is_none()
+    );
+    let trial = transaction.observe_preferences().unwrap();
+    assert_eq!(trial.preferences().appearance, AppearancePreference::Dark);
+    assert!(
+        trial
+            .publish_if_current(|_| panic!("unfinished restore preferences published"))
+            .is_none()
+    );
+    transaction.rollback().unwrap();
+    assert!(
+        trial
+            .publish_if_current(|_| panic!("rolled-back preferences published"))
+            .is_none()
+    );
+    assert_eq!(
+        store.observe().unwrap().preferences().appearance,
+        AppearancePreference::Light
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn committed_restore_preferences_can_publish_after_original_data_authority_ends() {
+    let root = test_root("observed-preferences-commit");
+    let source = root.join("source");
+    let target = root.join("target");
+    create_snapshot(&source, AppearancePreference::Dark, true, 7890);
+    create_snapshot(&target, AppearancePreference::Light, false, 7891);
+    let archive = root.join("backup.zip");
+    BackupManager::new(&source).export_to(&archive).unwrap();
+    let transaction = BackupManager::new(&target)
+        .prepare_restore(&archive)
+        .unwrap()
+        .activate()
+        .unwrap();
+    let observed = transaction.observe_preferences().unwrap();
+    transaction.commit().unwrap();
+    assert_eq!(
+        crate::preferences::test_support::publish_when_available(&observed, |preferences| {
+            preferences.appearance
+        }),
+        AppearancePreference::Dark
+    );
+    // Observation holds no restore lease: an ordinary store update can proceed immediately.
+    let store = AppPreferencesStore::new(target.join("preferences.json"));
+    store
+        .update(|preferences| preferences.appearance = AppearancePreference::Light)
+        .unwrap();
+    assert!(
+        observed
+            .publish_if_current(|_| panic!("old committed preferences published"))
+            .is_none()
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn observed_backup_snapshot_pairs_preferences_with_the_actual_source_of_its_root_read() {
+    let root = test_root("observed-backup-data");
+    create_snapshot(&root, AppearancePreference::Dark, true, 7890);
+    let manager = BackupManager::new(&root);
+    let (snapshot, observation) = manager.read_observed_snapshot().unwrap().into_parts();
+    assert_eq!(&snapshot.preferences, observation.preferences());
+    let store = AppPreferencesStore::new(root.join(PREFERENCES_PATH));
+    assert!(observation.belongs_to(&store));
+    assert_eq!(observation.path(), store.path());
+    let latest = store
+        .update(|preferences| preferences.appearance = AppearancePreference::Light)
+        .unwrap();
+    assert!(
+        observation
+            .publish_if_current(|_| panic!("old backup preferences published"))
+            .is_none()
+    );
+    assert_eq!(manager.read_snapshot().unwrap().preferences, latest);
+    fs::remove_dir_all(root).unwrap();
 }

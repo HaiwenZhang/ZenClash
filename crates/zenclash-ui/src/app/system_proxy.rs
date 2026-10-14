@@ -151,7 +151,12 @@ mod tests {
         };
         for failure in [
             Ok(partial),
-            Err(TrafficCaptureError::Backend("release task failed".into())),
+            Err(TrafficCaptureError::Controller(
+                zenclash_core::MihomoError::Api {
+                    status: 503,
+                    message: "release task failed".into(),
+                },
+            )),
         ] {
             assert!(
                 stop_core_after_capture_release(&core, failure, None)

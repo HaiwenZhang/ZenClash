@@ -9,31 +9,33 @@ use gpui_kit::component::{
     switch::Switch,
     v_flex,
 };
+#[cfg(test)]
+use gpui_kit::px;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext, ClipboardItem, Context, Entity, EventEmitter, Focusable,
     InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render,
-    StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::FluentBuilder, px,
+    StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::FluentBuilder,
 };
 use serde_json::{Value, json};
 use zenclash_core::{
-    AppPreferences, AppPreferencesStore, AutostartStatus, ConfigDiffReport, ConnectionsSnapshot,
-    ControlledConfigStore, CoreBinaryInfo, CoreKind, CoreSession, CoreTunPermissionStatus,
-    DiagnosticData, DiagnosticReport, DiagnosticRoute, DiagnosticStep, DiagnosticStepKind,
-    LogMonitor, LogTimeSource, MihomoClient, MihomoLaunchConfig, MihomoLogLevel,
-    NetworkLatencyTarget, NetworkProbeRoutePreference, NetworkProbeSnapshot, Observation,
-    OperationalStatus, ProfileCatalog, ProfileStore, ProviderCatalog, ProviderKind,
-    ProviderOperations, ProxyOperations, ProxyVisibility, PublicIpProvider, RecoveryAction,
-    RemoteProfileOptions, RemoteProfileRoute, RuleCatalog, RuntimeConfig, SystemNetworkSnapshot,
-    SystemProxyManager, SystemProxyMode, SystemProxySession, SystemProxyStatus,
+    AppPreferences, AppPreferencesStore, AutostartStatus, ControlledConfigStore, CoreKind,
+    CoreSession, DiagnosticData, DiagnosticRoute, DiagnosticStep, DiagnosticStepKind, LogMonitor,
+    LogTimeSource, MihomoClient, MihomoLogLevel, NetworkLatencyTarget, NetworkProbeRoutePreference,
+    NetworkProbeSnapshot, OperationalStatus, ProfileCatalog, ProfileStore, ProviderCatalog,
+    ProviderKind, ProviderOperations, PublicIpProvider, RemoteProfileOptions, RemoteProfileRoute,
+    RuntimeConfig, SystemNetworkSnapshot, SystemProxyMode, SystemProxySession, SystemProxySummary,
     TrafficCaptureSession, TrafficHistoryStore, TrafficMonitor, VersionInfo, YamlOverrideCatalog,
-    YamlOverrideStore, default_pac_script, default_system_proxy_bypass, diff_yaml_configs,
-    format_log_entries, format_log_entries_support_safe, format_speed, normalize_pac_script,
-    normalize_system_proxy_bypass, normalize_system_proxy_host,
+    YamlOverrideStore, default_pac_script, default_system_proxy_bypass, format_speed,
+    normalize_pac_script, normalize_system_proxy_bypass, normalize_system_proxy_host,
 };
+#[cfg(test)]
+use zenclash_core::{ConnectionsSnapshot, CoreLaunchConfig};
 
 use crate::app::{HideTrafficIcon, SetDarkTheme, SetLightTheme, SetSystemTheme, ShowTrafficIcon};
 
 use super::Page;
+#[cfg(all(test, target_os = "windows"))]
+use zenclash_core::SystemProxyStatus;
 
 mod busy;
 mod common;
@@ -43,22 +45,24 @@ mod dns;
 mod feedback;
 mod home;
 mod lifecycle;
-mod loader;
 mod logs;
 mod mihomo;
 mod network;
 mod overrides;
+mod page_observation;
+mod page_task;
 pub(crate) mod profiles;
 mod resources;
 mod rules;
 mod settings;
 mod sniffer;
-mod state;
 mod system_proxy;
 mod traffic;
 mod tun;
 mod view;
 
+#[cfg(test)]
+pub(crate) mod test_support;
 #[cfg(test)]
 pub(crate) mod ui_tests;
 
@@ -68,9 +72,9 @@ use common::{
     pagination_summary, setting_card, yes_no,
 };
 use config_inputs::{ConfigInputs, config_input_snapshot};
-use loader::{load_page, load_page_with_core};
 use mihomo::CoreReleaseState;
-use state::{ConfigInputsTaskToken, PageTaskToken, RuntimeData};
+use page_observation::{PageSnapshotData, load_page};
+use page_task::PageTaskToken;
 
 /// Stateful GPUI page host for Mihomo runtime, configuration, and diagnostics.
 pub struct RuntimePage {
@@ -78,7 +82,7 @@ pub struct RuntimePage {
     page: Page,
     core_kind: CoreKind,
     core_session: CoreSession,
-    profile_service: crate::ProfileService,
+    application_commands: crate::ApplicationCommands,
     client: MihomoClient,
     runtime: tokio::runtime::Handle,
     traffic_monitor: Arc<TrafficMonitor>,
@@ -88,36 +92,28 @@ pub struct RuntimePage {
     profile_path: Option<PathBuf>,
     controlled_config_store: ControlledConfigStore,
     controlled_config: Value,
-    effective_config: Value,
     config_inputs: ConfigInputs,
-    config_inputs_profile: Option<PathBuf>,
-    config_inputs_generation: u64,
-    config_inputs_loading: bool,
     persistent_loading: bool,
     preferences_store: Option<AppPreferencesStore>,
     preferences: AppPreferences,
+    preference_previews: crate::preference_previews::PreferencePreviews,
     core_management: settings::CoreManagementUiState,
-    settings_navigation: settings::SettingsNavigationState,
+    body_scroll: gpui_kit::ScrollHandle,
+    resources: resources::ResourcesState,
     system_proxy_session: Option<SystemProxySession>,
-    traffic_history_store: Option<TrafficHistoryStore>,
     profiles: profiles::ProfileLibrary,
     overrides: overrides::OverridesState,
-    connections: connections::ConnectionsUiState,
-    logs: logs::LogUiState,
-    rules: rules::RulesUiState,
+    connections: Entity<connections::ConnectionsView>,
+    logs: Entity<logs::LogsView>,
+    rules: Entity<rules::RulesView>,
     system_proxy_editor: Option<system_proxy::SystemProxyEditorState>,
     core_releases: CoreReleaseState,
-    data: RuntimeData,
-    data_runtime_version: u64,
-    page_snapshots: state::PageSnapshots,
+    page_observation: page_observation::PageObservationOwner,
     home: home::HomeUiState,
-    traffic_history: traffic::TrafficHistoryUiState,
-    network_probe: network::NetworkProbeUiState,
+    traffic_history: traffic::TrafficHistory,
+    network_diagnostics: network::NetworkDiagnosticsUiState,
     provider_operations: ProviderOperations,
-    ruleset: resources::RulesetUiState,
     navigation_generation: u64,
-    load_generation: u64,
-    page_read_task: loader::PageReadTask,
     controlled_config_generation: u64,
     loading: bool,
     mutations: busy::MutationState,
@@ -141,8 +137,8 @@ pub struct RuntimePageServices {
     pub core_kind: CoreKind,
     /// Serialized runtime-core transition owner.
     pub core_session: CoreSession,
-    /// Shared profile business commands and typed recovery record.
-    pub profile_service: crate::ProfileService,
+    /// Shared application commands and recovery record; field name retained for compatibility.
+    pub profile_service: crate::ApplicationCommands,
     /// Typed Mihomo controller client.
     pub client: MihomoClient,
     /// Tokio runtime used for controller and filesystem work.
@@ -210,11 +206,40 @@ impl EventEmitter<ServiceRepairRestartRequested> for RuntimePage {}
 
 /// Event emitted after persisted application preference fields become authoritative.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct PreferencesRestored {
     /// Fields made authoritative by this operation; only backup restore replaces all fields.
     pub scope: PreferenceScope,
     /// Persisted snapshot whose fields are selected by `scope`.
     pub preferences: AppPreferences,
+    observation: Option<zenclash_core::AppPreferencesObservation>,
+}
+
+impl PreferencesRestored {
+    /// Creates a scoped preference completion; restore callers use a persisted observation.
+    pub fn new(preferences: AppPreferences, scope: PreferenceScope) -> Self {
+        Self {
+            preferences,
+            scope,
+            observation: None,
+        }
+    }
+    pub(crate) fn observed(
+        observation: zenclash_core::AppPreferencesObservation,
+        scope: PreferenceScope,
+    ) -> Self {
+        Self {
+            preferences: observation.preferences().clone(),
+            scope,
+            observation: Some(observation),
+        }
+    }
+    pub(crate) fn restored(observation: zenclash_core::AppPreferencesObservation) -> Self {
+        Self::observed(observation, PreferenceScope::Restore)
+    }
+    pub(crate) fn observation(&self) -> Option<&zenclash_core::AppPreferencesObservation> {
+        self.observation.as_ref()
+    }
 }
 
 impl EventEmitter<PreferencesRestored> for RuntimePage {}

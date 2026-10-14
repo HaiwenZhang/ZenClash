@@ -3,15 +3,17 @@ use super::settings::forms::{
 };
 use super::{
     Button, ButtonVariants, Context, Disableable, FluentBuilder, IconName, Input, IntoElement,
-    Page, ParentElement, RuntimeConfig, RuntimeData, RuntimePage, Sizable, Styled, VersionInfo,
-    h_flex, info_row, json, load_page, setting_card, v_flex,
+    Page, PageSnapshotData, ParentElement, RuntimeConfig, RuntimePage, Sizable, Styled,
+    VersionInfo, h_flex, info_row, json, load_page, setting_card, v_flex,
 };
 use gpui_kit::component::{ActiveTheme, WindowExt};
 use zenclash_core::{CoreMaintenanceIntent, CoreRuntimeBackend, Observation};
 
 mod maintenance;
+pub(in crate::pages::runtime) mod runtime_read;
 
-pub(super) use maintenance::CoreReleaseState;
+mod release_list;
+pub(super) use release_list::CoreReleaseState;
 
 impl RuntimePage {
     fn confirm_core_action(
@@ -140,8 +142,8 @@ impl RuntimePage {
         window.open_dialog(cx, move |dialog, window, cx| {
             let content = owner
                 .update(cx, |page, cx| {
-                    let version = match &page.data {
-                        RuntimeData::Core { version, .. } => version.version.clone(),
+                    let version = match page.page_observation.data() {
+                        PageSnapshotData::Core { version, .. } => version.version.clone(),
                         _ => String::new(),
                     };
                     let local = page.core_session.runtime_descriptor().backend()
@@ -179,7 +181,7 @@ impl RuntimePage {
                 .await
                 .map_err(|error| (initial_version, error.to_string()))?;
             if core.generation() != version {
-                return Ok((version, RuntimeData::Empty));
+                return Ok((version, PageSnapshotData::Empty));
             }
             match capture
                 .release_owned()
@@ -189,7 +191,7 @@ impl RuntimePage {
                 zenclash_core::CaptureOutcome::ReconcileNeeded { failure, .. } => {
                     Err((version, failure))
                 }
-                _ => Ok((version, RuntimeData::Empty)),
+                _ => Ok((version, PageSnapshotData::Empty)),
             }
         });
         Self::finish_core_maintenance(
@@ -220,7 +222,7 @@ impl RuntimePage {
                 .await
                 .map_err(|error| (initial_version, error.to_string()))?;
             if core_session.generation() != version {
-                return Ok((version, RuntimeData::Empty));
+                return Ok((version, PageSnapshotData::Empty));
             }
             if let zenclash_core::CaptureOutcome::ReconcileNeeded { failure, .. } = capture
                 .reconcile()
@@ -247,7 +249,7 @@ impl RuntimePage {
     }
 
     fn finish_core_maintenance(
-        task: tokio::task::JoinHandle<Result<(u64, RuntimeData), (u64, String)>>,
+        task: tokio::task::JoinHandle<Result<(u64, PageSnapshotData), (u64, String)>>,
         token: super::PageTaskToken,
         initial_version: u64,
         success: String,
@@ -270,7 +272,7 @@ impl RuntimePage {
                 this.finish_mutation(token);
                 match result {
                     Ok((version, data)) => {
-                        if !this.profile_service.is_current(version) {
+                        if !this.application_commands.is_current(version) {
                             this.invalidate_page_load();
                             this.refresh(cx);
                             return;
@@ -280,7 +282,7 @@ impl RuntimePage {
                         }
                     }
                     Err((version, error)) => {
-                        if this.profile_service.is_current(version) {
+                        if this.application_commands.is_current(version) {
                             this.set_page_error(token, error);
                         } else {
                             this.invalidate_page_load();
@@ -305,9 +307,10 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let (version, config, has_runtime_data) = match &self.data {
-            RuntimeData::Core { version, config }
-                if self.data_runtime_version == self.core_session.generation() =>
+        let (version, config, has_runtime_data) = match self.page_observation.data() {
+            PageSnapshotData::Core { version, config }
+                if self.page_observation.configuration_generation()
+                    == self.core_session.generation() =>
             {
                 (version.clone(), config.clone(), true)
             }
@@ -680,3 +683,6 @@ mod owner_status_tests {
         assert!(!copy.contains("PID 0"));
     }
 }
+
+#[cfg(test)]
+mod ui_tests;

@@ -1,4 +1,4 @@
-use super::{InteractiveElement, IntoElement, ParentElement, Styled, div, h_flex, px, v_flex};
+use super::{InteractiveElement, IntoElement, ParentElement, Styled, div, h_flex, v_flex};
 use gpui_kit::{SharedString, StatefulInteractiveElement};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,7 +85,7 @@ pub(super) fn info_row(
     let label = SharedString::from(label.to_string());
     let value = SharedString::from(value.to_string());
     h_flex()
-        .min_h(px(50.))
+        .min_h(gpui_kit::rems(3.125))
         .px_4()
         .gap_4()
         .justify_between()
@@ -96,7 +96,7 @@ pub(super) fn info_row(
             div()
                 .min_w_0()
                 .flex_1()
-                .max_w(px(620.))
+                .max_w(gpui_kit::rems(38.75))
                 .text_ellipsis()
                 .overflow_hidden()
                 .text_right()
@@ -287,3 +287,6 @@ mod tests {
         assert!(!contains_ascii_case_insensitive("DIRECT", "proxy"));
     }
 }
+
+#[cfg(test)]
+mod zoom_tests;

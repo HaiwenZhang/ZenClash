@@ -8,7 +8,7 @@ use crate::{
 use std::{fs, time::Duration};
 
 struct Fixture {
-    child: crate::core_session::ownership_tests::ChildFixture,
+    child: crate::core_session::test_support::OwnedCoreFixture,
     manager: ServiceManager,
     store: ControlledConfigStore,
     root: PathBuf,
@@ -17,7 +17,7 @@ struct Fixture {
 
 impl Fixture {
     async fn new(label: &str, tun: bool) -> Self {
-        let child = crate::core_session::ownership_tests::ChildFixture::with_config_path(
+        let child = crate::core_session::test_support::OwnedCoreFixture::with_config_path(
             label,
             "home/target/controlled-config/local-runtime/slot0/runtime.yaml",
         )
@@ -282,20 +282,20 @@ async fn backup_local_apply_and_outer_rollback_recover_held_deleted_resources() 
         .session
         .prepare_service_backup_config(
             &store,
-            (
-                fixture
+            crate::core_session::RuntimeConfigurationRevision {
+                binding_generation: fixture
                     .manager
                     .session
                     .runtime_descriptor()
                     .binding_generation(),
-                2,
-            ),
+                configuration_generation: 2,
+            },
             &candidate,
         )
         .await
         .unwrap();
     fs::write(store.runtime_path(), &accepted).unwrap();
-    fixture.child.responder_for_test_abort();
+    fixture.child.abort_responder();
     tokio::task::yield_now().await;
     let address = fixture
         .child
@@ -310,30 +310,11 @@ async fn backup_local_apply_and_outer_rollback_recover_held_deleted_resources() 
     let server_mode = mode.clone();
     let server_requests = requests.clone();
     let reject = tokio::spawn(async move {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         while let Ok((mut stream, _)) = listener.accept().await {
-            let mut request = Vec::new();
-            loop {
-                let mut bytes = [0; 4096];
-                let read = stream.read(&mut bytes).await.unwrap();
-                assert!(read > 0);
-                request.extend_from_slice(&bytes[..read]);
-                assert!(request.len() < 64 * 1024);
-                if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
-                    let header = String::from_utf8_lossy(&request[..end]);
-                    let length = header
-                        .lines()
-                        .find_map(|line| {
-                            let (name, value) = line.split_once(':')?;
-                            name.eq_ignore_ascii_case("content-length")
-                                .then(|| value.trim().parse::<usize>().unwrap())
-                        })
-                        .unwrap_or(0);
-                    if request.len() >= end + 4 + length {
-                        break;
-                    }
-                }
-            }
+            let _request = crate::core_session::test_support::read_controller_request(&mut stream)
+                .await
+                .unwrap();
             server_requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let response: &[u8] = match server_mode.load(std::sync::atomic::Ordering::SeqCst) {
                 0 => b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",

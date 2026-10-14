@@ -24,7 +24,7 @@ pub(super) struct ProjectionWorker {
     pub(super) policy: Option<String>,
     generation: Arc<AtomicU64>,
     gate: Arc<tokio::sync::Mutex<()>>,
-    task: super::super::loader::PageReadTask,
+    task: super::super::page_observation::PageReadTask,
 }
 
 impl ProjectionWorker {

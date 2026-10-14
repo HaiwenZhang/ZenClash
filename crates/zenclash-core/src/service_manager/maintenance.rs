@@ -8,10 +8,10 @@ use super::*;
 #[derive(Clone)]
 pub struct ServiceMaintenanceRequest {
     operation: ServiceOperation,
-    intent: ServiceIntent,
+    runtime_revision: RuntimeConfigurationRevision,
     capture_gate: Arc<Mutex<()>>,
     backend: CoreRuntimeBackend,
-    ordinary_launch: Option<crate::MihomoLaunchConfig>,
+    ordinary_launch: Option<crate::CoreLaunchConfig>,
 }
 
 impl ServiceMaintenanceRequest {
@@ -161,24 +161,27 @@ impl ServiceManager {
             let warning = if tun_warning.is_some() {
                 tun_warning
             } else {
-                let generation = tun
-                    .as_ref()
-                    .and_then(|outcome| outcome.core())
-                    .map_or(preparation.request.intent.generation, |core| {
-                        core.generation
-                    });
+                let generation = tun.as_ref().and_then(|outcome| outcome.core()).map_or(
+                    preparation
+                        .request
+                        .runtime_revision
+                        .configuration_generation,
+                    |core| core.generation,
+                );
                 let binding = if tun.is_some() {
                     manager.session.runtime_descriptor().binding_generation()
                 } else {
-                    preparation.request.intent.binding
+                    preparation.request.runtime_revision.binding_generation
                 };
                 manager
                     .capture
                     .restore_maintenance_proxy(
                         &manager.session,
                         before.clone(),
-                        binding,
-                        generation,
+                        RuntimeConfigurationRevision {
+                            binding_generation: binding,
+                            configuration_generation: generation,
+                        },
                         recovery.capture_revision(),
                     )
                     .await
@@ -234,8 +237,8 @@ impl ServiceManager {
             .profile_path
             .ok_or(ServiceManagerError::Unsupported)?;
         self.complete(operation, move |manager| async move {
-            manager.check_intent(tun.intent)?;
-            let fallback = crate::MihomoLaunchConfig::discover_ordinary_recovery(
+            manager.check_runtime_revision(tun.runtime_revision)?;
+            let fallback = crate::CoreLaunchConfig::discover_ordinary_recovery(
                 project_root,
                 preferred_binary,
                 profile,
@@ -243,7 +246,7 @@ impl ServiceManager {
             )
             .await
             .map_err(|error| ServiceManagerError::Runtime(Box::new(error.into())))?;
-            manager.check_intent(tun.intent)?;
+            manager.check_runtime_revision(tun.runtime_revision)?;
             manager.request_maintenance(operation, Some(fallback))
         })
         .await
@@ -289,7 +292,7 @@ impl ServiceManager {
             let helper = super::tun::bundled_helper().await?;
             manager
                 .authorize_action(
-                    request.intent,
+                    request.runtime_revision,
                     action,
                     crate::service::maintenance::maintain_service(action, helper, core),
                 )
@@ -314,7 +317,9 @@ impl ServiceManager {
         let binary = tokio::task::spawn_blocking(move || {
             let binary = match (ordinary, offline) {
                 (Some(binary), _) | (None, Some((_, Some(binary)))) => binary,
-                (None, Some((home, None))) => crate::process::service_core_source(&home)?,
+                (None, Some((home, None))) => {
+                    crate::managed_core_process::service_core_source(&home)?
+                }
                 (None, None) => {
                     return Err(crate::MihomoError::InvalidInput(
                         "No application-owned service core source".into(),
@@ -362,11 +367,11 @@ impl ServiceManager {
     ///
     /// # Errors
     /// Rejects other operations, mismatched capture owners, shutdown, external
-    /// or experimental runtimes and missing ordinary Service recovery identity.
+    /// or missing ordinary Service recovery identity.
     pub fn request_maintenance(
         &self,
         operation: ServiceOperation,
-        fallback: Option<crate::MihomoLaunchConfig>,
+        fallback: Option<crate::CoreLaunchConfig>,
     ) -> Result<ServiceMaintenanceRequest, ServiceManagerError> {
         if !matches!(
             operation,
@@ -379,7 +384,7 @@ impl ServiceManager {
         {
             let request = ServiceMaintenanceRequest {
                 operation,
-                intent: self.intent(),
+                runtime_revision: self.session.runtime_revision(),
                 capture_gate: self.session.capture_publication_gate(),
                 backend: CoreRuntimeBackend::Direct,
                 ordinary_launch: None,
@@ -400,7 +405,7 @@ impl ServiceManager {
         }
         let request = ServiceMaintenanceRequest {
             operation,
-            intent: tun.intent,
+            runtime_revision: tun.runtime_revision,
             capture_gate: self.session.capture_publication_gate(),
             backend: tun.backend,
             ordinary_launch,
@@ -437,12 +442,11 @@ impl ServiceManager {
                 Some(Arc::new(
                     manager
                         .capture
-                        .recover_service_to_local(
+                        .recover_service_to_local_with_revision(
                             &manager.session,
                             &store,
                             request.ordinary_launch.clone(),
-                            request.intent.binding,
-                            request.intent.generation,
+                            request.runtime_revision,
                         )
                         .await
                         .map_err(|error| ServiceManagerError::Runtime(Box::new(error)))?,
@@ -452,9 +456,9 @@ impl ServiceManager {
             };
             let mut request = request;
             if let Some(recovery) = &recovery {
-                request.intent = ServiceIntent {
-                    binding: manager.session.runtime_descriptor().binding_generation(),
-                    generation: recovery.runtime().generation(),
+                request.runtime_revision = RuntimeConfigurationRevision {
+                    binding_generation: manager.session.runtime_descriptor().binding_generation(),
+                    configuration_generation: recovery.runtime().generation(),
                 };
                 request.backend = CoreRuntimeBackend::Local;
             }
@@ -478,7 +482,7 @@ impl ServiceManager {
         ) {
             return Err(ServiceManagerError::Stale);
         }
-        self.check_intent(request.intent)?;
+        self.check_runtime_revision(request.runtime_revision)?;
         if self.session.runtime_descriptor().backend() != request.backend {
             return Err(ServiceManagerError::Stale);
         }
@@ -531,7 +535,7 @@ mod tests {
 
     fn local_manager() -> ServiceManager {
         let home = std::env::temp_dir().join("maintenance-preparation-unused-home");
-        let process = crate::MihomoProcess::prepare_stopped(crate::MihomoLaunchConfig {
+        let process = crate::ManagedCoreProcess::prepare_stopped(crate::CoreLaunchConfig {
             kind: CoreKind::Mihomo,
             binary: home.join("ordinary-mihomo"),
             config_file: home.join("missing-source.yaml"),
@@ -767,12 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn offline_maintenance_rejects_experimental_core_and_mismatched_capture_owner() {
-        let experimental = offline_manager(CoreKind::Meow, None);
-        assert!(matches!(
-            experimental.request_maintenance(ServiceOperation::Repair, None),
-            Err(ServiceManagerError::Unsupported)
-        ));
+    fn offline_maintenance_rejects_mismatched_capture_owner() {
         let manager = offline_manager(CoreKind::Mihomo, None);
         let other = offline_manager(CoreKind::Mihomo, None);
         let mismatched = ServiceManager::new(manager.session, other.capture);
@@ -788,7 +787,7 @@ mod tests {
         let request = manager
             .request_maintenance(ServiceOperation::Repair, None)
             .unwrap();
-        manager.session.mark_runtime_unknown();
+        manager.session.invalidate_runtime_observations();
         assert!(matches!(
             manager.prepare_maintenance(request, &unused_store()).await,
             Err(ServiceManagerError::Stale)
@@ -960,7 +959,7 @@ mod tests {
             Err(ServiceManagerError::Stale)
         ));
         assert_eq!(other.snapshot().phase(), ServicePhase::Idle);
-        manager.session.mark_runtime_unknown();
+        manager.session.invalidate_runtime_observations();
         assert!(matches!(
             manager.maintain_prepared(&prepared).await,
             Err(ServiceManagerError::Stale)
@@ -974,7 +973,7 @@ mod tests {
         let request = manager
             .request_maintenance(ServiceOperation::Uninstall, None)
             .unwrap();
-        manager.session.mark_runtime_unknown();
+        manager.session.invalidate_runtime_observations();
         assert!(matches!(
             manager.prepare_maintenance(request, &unused_store()).await,
             Err(ServiceManagerError::Stale)

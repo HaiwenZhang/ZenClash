@@ -108,9 +108,8 @@ async fn clones_use_the_committed_transport_after_a_switch() {
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0_u8; 2048];
-        let size = stream.read(&mut request).unwrap();
-        assert!(String::from_utf8_lossy(&request[..size]).contains("Bearer replacement"));
+        let request = crate::test_support::read_controller_request_blocking(&mut stream).unwrap();
+        assert!(request.headers().contains("Bearer replacement"));
         let body = r#"{"version":"replacement"}"#;
         write!(
             stream,
@@ -190,8 +189,10 @@ async fn connection_consumers_share_a_request_and_close_invalidates_the_snapshot
             r#"{"connections":[],"downloadTotal":42}"#,
         ] {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 2048];
-            let size = stream.read(&mut request).unwrap();
+            let request = crate::test_support::read_controller_request_blocking(&mut stream)
+                .unwrap()
+                .into_bytes();
+            let size = request.len();
             requests.push(
                 String::from_utf8_lossy(&request[..size])
                     .lines()
@@ -298,8 +299,10 @@ async fn provider_proxy_delay_uses_the_provider_healthcheck_endpoint() {
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0_u8; 2_048];
-        let bytes = stream.read(&mut request).unwrap();
+        let request = crate::test_support::read_controller_request_blocking(&mut stream)
+            .unwrap()
+            .into_bytes();
+        let bytes = request.len();
         let request = String::from_utf8_lossy(&request[..bytes]).into_owned();
         let body = r#"{"delay":42}"#;
         write!(
@@ -335,8 +338,10 @@ async fn blank_provider_proxy_delay_uses_the_regular_proxy_endpoint() {
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0_u8; 2_048];
-        let bytes = stream.read(&mut request).unwrap();
+        let request = crate::test_support::read_controller_request_blocking(&mut stream)
+            .unwrap()
+            .into_bytes();
+        let bytes = request.len();
         let request = String::from_utf8_lossy(&request[..bytes]).into_owned();
         let body = r#"{"delay":21}"#;
         write!(
@@ -370,8 +375,10 @@ async fn proxy_group_selection_reads_only_the_encoded_group_endpoint() {
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0_u8; 2_048];
-        let bytes = stream.read(&mut request).unwrap();
+        let request = crate::test_support::read_controller_request_blocking(&mut stream)
+            .unwrap()
+            .into_bytes();
+        let bytes = request.len();
         let request = String::from_utf8_lossy(&request[..bytes]).into_owned();
         let body = r#"{"name":"机场/A","now":"香港 01","all":["香港 01","美国 02"]}"#;
         write!(
@@ -407,8 +414,10 @@ async fn dns_a_and_aaaa_queries_preserve_independent_answers() {
             r#"{"Status":0,"Question":[{"name":"example.com.","type":28}],"Answer":[{"name":"example.com.","type":28,"TTL":60,"data":"2001:db8::1"}]}"#,
         ] {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 2_048];
-            let bytes = stream.read(&mut request).unwrap();
+            let request = crate::test_support::read_controller_request_blocking(&mut stream)
+                .unwrap()
+                .into_bytes();
+            let bytes = request.len();
             requests.push(String::from_utf8_lossy(&request[..bytes]).into_owned());
             write!(
                 stream,
@@ -455,9 +464,9 @@ async fn dns_and_fake_ip_cache_flushes_use_separate_endpoints() {
         let mut first_lines = Vec::new();
         for _ in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 2_048];
-            let bytes = stream.read(&mut request).unwrap();
-            let request = String::from_utf8_lossy(&request[..bytes]);
+            let request =
+                crate::test_support::read_controller_request_blocking(&mut stream).unwrap();
+            let request = request.headers();
             first_lines.push(request.lines().next().unwrap_or_default().to_owned());
             write!(
                 stream,
@@ -497,8 +506,10 @@ async fn reload_payload_adds_mihomo_geodata_fallbacks_before_the_request() {
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0_u8; 8_192];
-        let length = stream.read(&mut request).unwrap();
+        let request = crate::test_support::read_controller_request_blocking(&mut stream)
+            .unwrap()
+            .into_bytes();
+        let length = request.len();
         write!(
             stream,
             "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -597,8 +608,10 @@ async fn maintenance_operations_use_real_mihomo_post_endpoints() {
         let mut requests = Vec::new();
         for _ in 0..3 {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 2_048];
-            let bytes = stream.read(&mut request).unwrap();
+            let request = crate::test_support::read_controller_request_blocking(&mut stream)
+                .unwrap()
+                .into_bytes();
+            let bytes = request.len();
             requests.push(String::from_utf8_lossy(&request[..bytes]).into_owned());
             write!(
                 stream,
@@ -644,8 +657,11 @@ async fn rule_disable_uses_indexed_patch_and_requires_matching_readback() {
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (mut patch_stream, _) = listener.accept().unwrap();
-        let mut patch_request = [0_u8; 2_048];
-        let bytes = patch_stream.read(&mut patch_request).unwrap();
+        let patch_request =
+            crate::test_support::read_controller_request_blocking(&mut patch_stream)
+                .unwrap()
+                .into_bytes();
+        let bytes = patch_request.len();
         let patch_request = String::from_utf8_lossy(&patch_request[..bytes]).into_owned();
         write!(
             patch_stream,
@@ -654,8 +670,11 @@ async fn rule_disable_uses_indexed_patch_and_requires_matching_readback() {
         .unwrap();
 
         let (mut readback_stream, _) = listener.accept().unwrap();
-        let mut readback_request = [0_u8; 2_048];
-        let bytes = readback_stream.read(&mut readback_request).unwrap();
+        let readback_request =
+            crate::test_support::read_controller_request_blocking(&mut readback_stream)
+                .unwrap()
+                .into_bytes();
+        let bytes = readback_request.len();
         let readback_request = String::from_utf8_lossy(&readback_request[..bytes]).into_owned();
         let body = r#"{"rules":[{"type":"Domain","payload":"example.com","proxy":"DIRECT","size":-1,"index":12,"extra":{"disabled":true,"hitCount":1,"hitAt":"now","missCount":0,"missAt":""}}]}"#;
         write!(
@@ -683,8 +702,11 @@ async fn acknowledged_rule_disable_returns_without_catalog_readback() {
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (mut patch_stream, _) = listener.accept().unwrap();
-        let mut patch_request = [0_u8; 2_048];
-        let bytes = patch_stream.read(&mut patch_request).unwrap();
+        let patch_request =
+            crate::test_support::read_controller_request_blocking(&mut patch_stream)
+                .unwrap()
+                .into_bytes();
+        let bytes = patch_request.len();
         let patch_request = String::from_utf8_lossy(&patch_request[..bytes]).into_owned();
         write!(
             patch_stream,
@@ -705,7 +727,7 @@ async fn acknowledged_rule_disable_returns_without_catalog_readback() {
 #[tokio::test]
 async fn local_tun_reload_is_rejected_before_controller_dispatch() {
     let fixture =
-        crate::core_session::ownership_tests::ChildFixture::new("geodata-local-tun-reload-gate")
+        crate::core_session::test_support::OwnedCoreFixture::new("geodata-local-tun-reload-gate")
             .await;
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
@@ -732,7 +754,7 @@ async fn local_tun_reload_is_rejected_before_controller_dispatch() {
         .launch_config()
         .clone()
         .with_controller_endpoint(MihomoEndpoint::new(format!("http://{address}"), ""));
-    let process = crate::MihomoProcess::prepare_stopped(launch);
+    let process = crate::ManagedCoreProcess::prepare_stopped(launch);
     let client = MihomoClient::from_process(process).unwrap();
     for payload in [
         "tun: {enable: true}\n",
@@ -751,7 +773,7 @@ async fn local_tun_reload_is_rejected_before_controller_dispatch() {
 #[tokio::test]
 async fn local_tun_patch_is_rejected_before_controller_dispatch() {
     let fixture =
-        crate::core_session::ownership_tests::ChildFixture::new("geodata-local-tun-patch-gate")
+        crate::core_session::test_support::OwnedCoreFixture::new("geodata-local-tun-patch-gate")
             .await;
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
@@ -778,7 +800,7 @@ async fn local_tun_patch_is_rejected_before_controller_dispatch() {
         .launch_config()
         .clone()
         .with_controller_endpoint(MihomoEndpoint::new(format!("http://{address}"), ""));
-    let process = crate::MihomoProcess::prepare_stopped(launch);
+    let process = crate::ManagedCoreProcess::prepare_stopped(launch);
     let client = MihomoClient::from_process(process).unwrap();
     for patch in [
         serde_json::json!({"tun":{"enable":true}}),
@@ -800,8 +822,10 @@ async fn external_tun_patch_keeps_its_controller_path() {
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0_u8; 8192];
-        let length = stream.read(&mut request).unwrap();
+        let request = crate::test_support::read_controller_request_blocking(&mut stream)
+            .unwrap()
+            .into_bytes();
+        let length = request.len();
         stream
             .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             .unwrap();
@@ -815,34 +839,4 @@ async fn external_tun_patch_keeps_its_controller_path() {
     let request = server.join().unwrap();
     assert!(request.starts_with("PATCH /configs "));
     assert!(request.contains(r#""enable":true"#));
-}
-
-#[tokio::test]
-async fn meow_owned_tun_patch_does_not_claim_mihomo_service_admission() {
-    let fixture =
-        crate::core_session::ownership_tests::ChildFixture::new("geodata-meow-tun-policy-kind")
-            .await;
-    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0_u8; 8192];
-        let length = stream.read(&mut request).unwrap();
-        stream
-            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-            .unwrap();
-        String::from_utf8_lossy(&request[..length]).into_owned()
-    });
-    let mut launch = fixture
-        .process
-        .launch_config()
-        .clone()
-        .with_controller_endpoint(MihomoEndpoint::new(format!("http://{address}"), ""));
-    launch.kind = crate::CoreKind::Meow;
-    let client = MihomoClient::from_process(crate::MihomoProcess::prepare_stopped(launch)).unwrap();
-    client
-        .patch_configs(&serde_json::json!({"tun":{"enable":true}}))
-        .await
-        .unwrap();
-    assert!(server.join().unwrap().starts_with("PATCH /configs "));
 }

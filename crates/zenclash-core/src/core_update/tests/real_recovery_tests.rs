@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::{
-    ControlledConfigStore, MihomoClient, MihomoLaunchConfig, MihomoProcess, ServiceRuntimeBundle,
+    ControlledConfigStore, CoreLaunchConfig, ManagedCoreProcess, MihomoClient, ServiceRuntimeBundle,
 };
 use std::{
     sync::{Arc, atomic::AtomicBool},
@@ -11,7 +11,7 @@ use std::{
 
 struct Fixture {
     root: PathBuf,
-    process: Option<Arc<MihomoProcess>>,
+    process: Option<Arc<ManagedCoreProcess>>,
 }
 
 impl Drop for Fixture {
@@ -67,8 +67,8 @@ async fn update_recovery_owner(reject_version: bool) {
         .materialize_local_runtime(&store, None)
         .await
         .unwrap();
-    let process = MihomoProcess::prepare_stopped(
-        MihomoLaunchConfig::new(target.clone(), config, home.clone()).unwrap(),
+    let process = ManagedCoreProcess::prepare_stopped(
+        CoreLaunchConfig::new(target.clone(), config, home.clone()).unwrap(),
     );
     fixture.process = Some(process.clone());
     drop(reservation);

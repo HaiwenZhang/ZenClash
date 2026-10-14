@@ -12,6 +12,7 @@ pub(super) struct HomeProxyProjection {
 }
 
 struct HomeGroupRow {
+    controller_name: String,
     name: String,
     behavior: ProxyGroupBehavior,
     current: bool,
@@ -29,7 +30,7 @@ impl HomeUiState {
         let group_names: HashSet<_> = catalog
             .groups()
             .iter()
-            .map(|group| group.name.as_str())
+            .map(|group| group.controller_name())
             .collect();
         let is_node = |id: &ProxyNodeId| {
             id.provider().is_some() || !group_names.contains(id.controller_name())
@@ -37,9 +38,14 @@ impl HomeUiState {
         let group = self
             .selected_group
             .as_ref()
-            .and_then(|name| catalog.groups().iter().find(|group| &group.name == name))
+            .and_then(|name| {
+                catalog
+                    .groups()
+                    .iter()
+                    .find(|group| group.controller_name() == name)
+            })
             .or_else(|| current_proxy_group(config, catalog));
-        self.selected_group = group.map(|group| group.name.clone());
+        self.selected_group = group.map(|group| group.controller_name().to_owned());
         let direct = OutboundMode::from_api(&config.mode) == OutboundMode::Direct;
         let switchable = !direct && group.is_some_and(home_group_can_switch);
         let current = if direct {
@@ -59,7 +65,9 @@ impl HomeUiState {
                 group.now == id.controller_name()
                     && !matches!(group.behavior, ProxyGroupBehavior::LoadBalance)
             }) && !direct,
-            target_group: target.filter(|_| !direct).map(|group| group.name.clone()),
+            target_group: target
+                .filter(|_| !direct)
+                .map(|group| group.controller_name().to_owned()),
         };
         let nodes = group.map_or_else(Vec::new, |group| {
             group
@@ -106,12 +114,13 @@ impl HomeUiState {
                 catalog
                     .groups()
                     .iter()
-                    .filter(|item| Some(&item.name) != self.selected_group.as_ref()),
+                    .filter(|item| Some(item.controller_name()) != self.selected_group.as_deref()),
             )
             .map(|item| HomeGroupRow {
+                controller_name: item.controller_name().to_owned(),
                 name: item.name.clone(),
                 behavior: item.behavior.clone(),
-                current: Some(&item.name) == self.selected_group.as_ref(),
+                current: Some(item.controller_name()) == self.selected_group.as_deref(),
             })
             .collect();
         self.projection = Some(HomeProxyProjection {
@@ -155,7 +164,7 @@ fn group_icon(behavior: &ProxyGroupBehavior) -> Icon {
 
 impl RuntimePage {
     fn select_home_group(&mut self, group: String, cx: &mut Context<Self>) {
-        if self.page != Page::Home || self.home.proxy_switching.is_some() {
+        if self.page != Page::Home || self.home.proxy_selection.any_pending() {
             return;
         }
         self.home.selected_group = Some(group);
@@ -190,7 +199,7 @@ impl RuntimePage {
     ) -> gpui_kit::AnyElement {
         let projection = self.home_proxy_projection();
         let busy = self.core_busy()
-            || self.home.proxy_switching.is_some()
+            || self.home.proxy_selection.any_pending()
             || self.home.profile_switching.is_some();
         let mut groups = h_flex()
             .id("home-group-row")
@@ -223,12 +232,12 @@ impl RuntimePage {
                     / (group_count + 1) as f32)
                     .max(1.);
             for group in projection.groups.iter().take(group_count) {
-                let name = group.name.clone();
+                let name = group.controller_name.clone();
                 let tooltip = group.name.clone();
                 groups = groups.child(
                     CardButton::new((
                         gpui_kit::ElementId::from("home-group-card"),
-                        group.name.clone(),
+                        group.controller_name.clone(),
                     ))
                     .accessibility_label(group.name.clone())
                     .tooltip(move |window, cx| {
@@ -358,6 +367,22 @@ impl RuntimePage {
                     .child(zenclash_i18n::text("home.proxy.title")),
             )
             .child(content)
+            .when_some(
+                self.home
+                    .selected_group
+                    .as_deref()
+                    .and_then(|group| self.home.proxy_selection.status_text(group)),
+                |panel, status| {
+                    panel.child(
+                        div()
+                            .id("home-proxy-selection-status")
+                            .test_support()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(status),
+                    )
+                },
+            )
             .when_some(self.home.proxy_error.as_ref(), |panel, error| {
                 panel.child(
                     div()
@@ -378,11 +403,11 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let id = node.id.clone();
-        let pending = self
-            .home
-            .proxy_switching
-            .as_ref()
-            .is_some_and(|(_, name)| name == id.controller_name());
+        let pending = node.target_group.as_deref().is_some_and(|group| {
+            self.home
+                .proxy_selection
+                .proxy_pending(group, id.controller_name())
+        });
         let (delay, _) = dashboard::latency_presentation(node.delay);
         let color = match node.delay {
             Some(0) => theme.danger,
@@ -497,17 +522,15 @@ impl RuntimePage {
             .w(rems(card_width))
             .flex_shrink_0()
             .h(rems(3.5))
-            .dropdown_menu(move |mut menu, window, cx| {
-                menu = menu
-                    .min_w(window.rem_size() * 15.)
-                    .max_w(window.rem_size() * 26.)
-                    .max_h(window.rem_size() * 22.)
+            .dropdown_menu(move |menu, window, cx| {
+                let mut menu = HomeMenuSize::MORE_GROUPS
+                    .apply_to(menu, window, cx)
                     .scrollable(true);
                 if let Some(page) = owner.upgrade()
                     && let Some(projection) = page.read(cx).home_proxy_projection()
                 {
                     for group in &projection.groups {
-                        let name = group.name.clone();
+                        let name = group.controller_name.clone();
                         let owner = owner.clone();
                         menu = menu.item(
                             PopupMenuItem::new(group.name.clone())
@@ -539,11 +562,9 @@ impl RuntimePage {
             .w(rems(card_width))
             .flex_shrink_0()
             .h(rems(3.5))
-            .dropdown_menu(move |mut menu, window, cx| {
-                menu = menu
-                    .min_w(window.rem_size() * 20.)
-                    .max_w(window.rem_size() * 32.)
-                    .max_h(window.rem_size() * 22.)
+            .dropdown_menu(move |menu, window, cx| {
+                let mut menu = HomeMenuSize::MORE_NODES
+                    .apply_to(menu, window, cx)
                     .scrollable(true);
                 if let Some(page) = owner.upgrade()
                     && let Some(projection) = page.read(cx).home_proxy_projection()
@@ -590,12 +611,9 @@ mod tests {
         let catalog = ProxyCatalog::from_group_nodes(
             vec![
                 (
-                    ProxyGroup {
-                        name: "primary".into(),
-                        now: "automatic".into(),
-                        behavior: ProxyGroupBehavior::Selector,
-                        ..Default::default()
-                    },
+                    ProxyGroup::new("primary")
+                        .with_current_member("automatic")
+                        .with_behavior(ProxyGroupBehavior::Selector),
                     ["automatic", "node", "DIRECT", "REJECT"]
                         .into_iter()
                         .map(|name| ProxyNode {
@@ -605,12 +623,9 @@ mod tests {
                         .collect(),
                 ),
                 (
-                    ProxyGroup {
-                        name: "automatic".into(),
-                        now: "node".into(),
-                        behavior: ProxyGroupBehavior::Automatic { fixed: false },
-                        ..Default::default()
-                    },
+                    ProxyGroup::new("automatic")
+                        .with_current_member("node")
+                        .with_behavior(ProxyGroupBehavior::Automatic { fixed: false }),
                     vec![ProxyNode {
                         name: "node".into(),
                         ..Default::default()
@@ -671,12 +686,9 @@ mod tests {
             .collect();
         let catalog = ProxyCatalog::from_group_nodes(
             vec![(
-                ProxyGroup {
-                    name: "primary".into(),
-                    now: "node-19".into(),
-                    behavior: ProxyGroupBehavior::Selector,
-                    ..ProxyGroup::default()
-                },
+                ProxyGroup::new("primary")
+                    .with_current_member("node-19")
+                    .with_behavior(ProxyGroupBehavior::Selector),
                 nodes,
             )],
             20,
@@ -707,11 +719,7 @@ mod tests {
     fn direct_and_load_balance_do_not_offer_manual_switches() {
         let catalog = ProxyCatalog::from_group_nodes(
             vec![(
-                ProxyGroup {
-                    name: "primary".into(),
-                    behavior: ProxyGroupBehavior::LoadBalance,
-                    ..ProxyGroup::default()
-                },
+                ProxyGroup::new("primary").with_behavior(ProxyGroupBehavior::LoadBalance),
                 vec![ProxyNode {
                     name: "node".into(),
                     ..ProxyNode::default()
@@ -752,12 +760,9 @@ mod tests {
                 .into_iter()
                 .map(|name| {
                     (
-                        ProxyGroup {
-                            name: name.into(),
-                            now: format!("{name}-node"),
-                            behavior: ProxyGroupBehavior::Selector,
-                            ..Default::default()
-                        },
+                        ProxyGroup::new(name)
+                            .with_current_member(format!("{name}-node"))
+                            .with_behavior(ProxyGroupBehavior::Selector),
                         vec![ProxyNode {
                             name: format!("{name}-node"),
                             ..Default::default()
@@ -805,12 +810,9 @@ mod tests {
             .to_vec();
         let catalog = ProxyCatalog::from_group_nodes(
             vec![(
-                ProxyGroup {
-                    name: "primary".into(),
-                    now: "🇭🇰 香港 · 自定义节点".into(),
-                    behavior: ProxyGroupBehavior::Selector,
-                    ..Default::default()
-                },
+                ProxyGroup::new("primary")
+                    .with_current_member("🇭🇰 香港 · 自定义节点")
+                    .with_behavior(ProxyGroupBehavior::Selector),
                 nodes,
             )],
             2,

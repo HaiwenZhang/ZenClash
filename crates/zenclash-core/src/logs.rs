@@ -20,6 +20,10 @@ use crate::{
 };
 
 mod file;
+mod private_io;
+
+mod publication;
+use publication::{accept_log_entry, push_monitor_error_for_generation, update_log_connection};
 
 pub use file::{LogPersistenceError, LogPersistenceResult, LogPersistenceStatus};
 
@@ -92,18 +96,6 @@ impl MihomoLogLevel {
             Self::Warning => "warning",
             Self::Info => "info",
             Self::Debug => "debug",
-        }
-    }
-
-    const fn realtime_stream_level(self) -> Self {
-        // meow-rs broadcasts its WebSocket protocol DEBUG events through the
-        // same `/logs` stream. Subscribing at DEBUG therefore records each
-        // outgoing frame as another outgoing frame. The native UI intentionally
-        // keeps operational logs while leaving verbose diagnostics to the core's
-        // own stdout/file sink.
-        match self {
-            Self::Debug => Self::Info,
-            level => level,
         }
     }
 }
@@ -209,8 +201,7 @@ pub struct LogMonitor {
 impl LogMonitor {
     /// Starts a log monitor at the requested Mihomo severity level.
     ///
-    /// Debug is normalized to info for the real-time WebSocket because some
-    /// compatible cores emit their own frame-writing diagnostics into `/logs`.
+    /// The requested threshold is preserved, including Debug.
     #[must_use]
     pub fn start(runtime: &Handle, endpoint: MihomoEndpoint, level: MihomoLogLevel) -> Arc<Self> {
         Self::start_binding(runtime, ControllerBinding::direct(endpoint), level)
@@ -231,7 +222,6 @@ impl LogMonitor {
         binding: Arc<ControllerBinding>,
         level: MihomoLogLevel,
     ) -> Arc<Self> {
-        let level = level.realtime_stream_level();
         let entries = Arc::new(RwLock::new(LogBuffer::default()));
         let stream = Arc::new(RwLock::new(LogStreamSnapshot::default()));
         let revision = Arc::new(AtomicU64::new(0));
@@ -310,9 +300,7 @@ impl LogMonitor {
     }
 
     /// Changes the stream threshold and reconnects only when it actually differs.
-    /// Debug requests use the safe info threshold for the real-time stream.
     pub fn set_level(&self, level: MihomoLogLevel) {
-        let level = level.realtime_stream_level();
         if *self.level.borrow() != level {
             self.level.send_replace(level);
             self.revision.fetch_add(1, Ordering::AcqRel);
@@ -367,19 +355,6 @@ impl LogMonitor {
         self.stream.read().clone()
     }
 
-    /// Changes the accepted core generation and reconnects the WebSocket.
-    ///
-    /// Frames already queued by the older socket are rejected before they can
-    /// enter the visible log buffer.
-    pub fn synchronize_generation(&self, generation: u64) {
-        if self.expected_generation.swap(generation, Ordering::AcqRel) == generation {
-            return;
-        }
-        self.stream.write().connected = false;
-        self.revision.fetch_add(1, Ordering::AcqRel);
-        self.generation.send_replace(generation);
-    }
-
     /// Returns whether the background monitor task has terminated unexpectedly.
     #[must_use]
     pub fn is_finished(&self) -> bool {
@@ -430,6 +405,28 @@ pub fn format_log_entries(entries: &[LogEntry]) -> String {
         );
     }
     output
+}
+
+/// Atomically writes a prepared log export, privately on Unix.
+/// Formatting and support-safe redaction remain the caller's explicit choice.
+///
+/// # Errors
+/// Returns I/O failures for an unavailable parent, private-file creation or replacement.
+pub fn write_log_export(path: &std::path::Path, payload: &str) -> std::io::Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        let metadata = std::fs::metadata(parent)?;
+        if !metadata.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotADirectory,
+                "log export parent is not a directory",
+            ));
+        }
+    }
+    let _write_lease = crate::data_coordinator::DataWriteAccess::new(path).acquire();
+    private_io::replace(path, payload.as_bytes())
 }
 
 /// Formats a support-safe copy with messages and arbitrary fields omitted.
@@ -625,118 +622,7 @@ async fn run_monitor(
     }
 }
 
-fn update_log_connection(
-    stream: &RwLock<LogStreamSnapshot>,
-    connected: bool,
-    error: Option<String>,
-    generation: u64,
-    expected_generation: &AtomicU64,
-) -> bool {
-    if expected_generation.load(Ordering::Acquire) != generation {
-        return false;
-    }
-    let mut stream = stream.write();
-    if stream.generation != generation {
-        *stream = LogStreamSnapshot {
-            generation,
-            ..LogStreamSnapshot::default()
-        };
-    }
-    stream.connected = connected;
-    if connected && error.is_none() {
-        stream.last_error = None;
-    }
-    if let Some(error) = error {
-        stream.last_error = Some(error);
-    }
-    true
-}
-
-fn accept_log_entry(
-    entries: &RwLock<LogBuffer>,
-    stream: &RwLock<LogStreamSnapshot>,
-    revision: &AtomicU64,
-    file_sender: &file::LogFileSender,
-    entry: LogEntry,
-    generation: u64,
-    expected_generation: &AtomicU64,
-) -> bool {
-    if expected_generation.load(Ordering::Acquire) != generation {
-        return false;
-    }
-    let Some(entry) = BufferedLogEntry::prepare(entry) else {
-        push_monitor_error_for_generation(
-            entries,
-            stream,
-            revision,
-            file_sender,
-            zenclash_i18n::text("logs.errors.entry_too_large"),
-            generation,
-            expected_generation,
-        );
-        return false;
-    };
-    {
-        let mut stream = stream.write();
-        if stream.generation != generation {
-            return false;
-        }
-        stream.connected = true;
-        stream.updated_at_ms = if entry.entry.received_at_ms == 0 {
-            entry.entry.timestamp_ms
-        } else {
-            entry.entry.received_at_ms
-        };
-        stream.last_error = None;
-        stream.format = if entry.entry.core_time.is_some() || !entry.entry.fields.is_null() {
-            LogStreamFormat::Structured
-        } else {
-            LogStreamFormat::Plain
-        };
-    }
-    let entry = push_prepared_bounded(entries, entry);
-    revision.fetch_add(1, Ordering::AcqRel);
-    file_sender.append(entry.entry, entry.bytes);
-    true
-}
-
-fn push_monitor_error_for_generation(
-    entries: &RwLock<LogBuffer>,
-    stream: &RwLock<LogStreamSnapshot>,
-    revision: &AtomicU64,
-    file_sender: &file::LogFileSender,
-    payload: String,
-    generation: u64,
-    expected_generation: &AtomicU64,
-) -> bool {
-    if expected_generation.load(Ordering::Acquire) != generation {
-        return false;
-    }
-    let timestamp_ms = now_ms();
-    {
-        let mut stream = stream.write();
-        if stream.generation != generation {
-            *stream = LogStreamSnapshot {
-                generation,
-                ..LogStreamSnapshot::default()
-            };
-        }
-        stream.last_error = Some(payload.clone());
-    }
-    let entry = LogEntry {
-        level: "error".into(),
-        payload,
-        timestamp_ms,
-        ..LogEntry::default()
-    };
-    let Some(entry) = push_bounded(entries, entry) else {
-        return false;
-    };
-    revision.fetch_add(1, Ordering::AcqRel);
-    file_sender.append(entry.entry, entry.bytes);
-    true
-}
-
+#[cfg(test)]
 fn push_bounded(entries: &RwLock<LogBuffer>, entry: LogEntry) -> Option<BufferedLogEntry> {
     BufferedLogEntry::prepare(entry).map(|entry| push_prepared_bounded(entries, entry))
 }
@@ -1236,18 +1122,6 @@ mod tests {
     }
 
     #[test]
-    fn realtime_stream_caps_debug_to_operational_logs() {
-        assert_eq!(
-            MihomoLogLevel::Debug.realtime_stream_level(),
-            MihomoLogLevel::Info
-        );
-        assert_eq!(
-            MihomoLogLevel::Warning.realtime_stream_level(),
-            MihomoLogLevel::Warning
-        );
-    }
-
-    #[test]
     fn late_log_frame_from_an_old_generation_is_rejected() {
         let entries = RwLock::new(LogBuffer::default());
         let stream = RwLock::new(LogStreamSnapshot {
@@ -1316,6 +1190,8 @@ mod tests {
         monitor.set_level(MihomoLogLevel::Warning);
 
         assert_eq!(monitor.level(), MihomoLogLevel::Warning);
+        monitor.set_level(MihomoLogLevel::Debug);
+        assert_eq!(monitor.level(), MihomoLogLevel::Debug);
     }
     #[test]
     fn native_debug_stream_obeys_the_user_severity_threshold() {

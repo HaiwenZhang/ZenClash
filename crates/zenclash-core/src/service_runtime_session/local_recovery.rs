@@ -17,13 +17,13 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
     pub(crate) async fn recover_local_runtime<C, F>(
         self: &Arc<Self>,
         store: &crate::ControlledConfigStore,
-        original: crate::MihomoLaunchConfig,
+        original: crate::CoreLaunchConfig,
         cancelled: Arc<AtomicBool>,
         timeout: Duration,
         publish: C,
     ) -> MihomoResult<LocalRecoveryResult>
     where
-        C: FnOnce(Arc<crate::MihomoProcess>) -> F + Send + 'static,
+        C: FnOnce(Arc<crate::ManagedCoreProcess>) -> F + Send + 'static,
         F: Future<Output = MihomoResult<OwnedMutexGuard<()>>> + Send + 'static,
     {
         if original.kind != crate::CoreKind::Mihomo || original.home_dir != self.source_home {
@@ -54,14 +54,14 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
     pub(crate) async fn recover_held_local_runtime<C, F>(
         self: &Arc<Self>,
         admission: (&crate::ControlledConfigStore, OwnedMutexGuard<()>),
-        original: crate::MihomoLaunchConfig,
+        original: crate::CoreLaunchConfig,
         bundle: Arc<ServiceRuntimeBundle>,
         cancelled: Arc<AtomicBool>,
         timeout: Duration,
         publish: C,
     ) -> MihomoResult<LocalRecoveryResult>
     where
-        C: FnOnce(Arc<crate::MihomoProcess>) -> F + Send + 'static,
+        C: FnOnce(Arc<crate::ManagedCoreProcess>) -> F + Send + 'static,
         F: Future<Output = MihomoResult<OwnedMutexGuard<()>>> + Send + 'static,
     {
         let (store, mutation) = admission;
@@ -92,11 +92,11 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
             .await?;
         let process = tokio::task::spawn_blocking(move || {
             let mut launch =
-                crate::MihomoLaunchConfig::new(original.binary, config, original.home_dir)?;
+                crate::CoreLaunchConfig::new(original.binary, config, original.home_dir)?;
             if original.controller_override.is_some() {
                 launch = launch.with_controller_endpoint(original.endpoint);
             }
-            Ok::<_, MihomoError>(crate::MihomoProcess::prepare_stopped(launch))
+            Ok::<_, MihomoError>(crate::ManagedCoreProcess::prepare_stopped(launch))
         })
         .await
         .map_err(|_| unknown())??;

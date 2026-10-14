@@ -132,3 +132,38 @@ pub struct TrafficOverview {
     /// Aggregate totals across the query range.
     pub totals: TrafficTotals,
 }
+
+/// The selected levels of a historical traffic drill-down.
+/// A detail selection always includes its parent; empty labels remain valid.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TrafficHistorySelection {
+    /// Only the overall rankings, totals and trend.
+    #[default]
+    Overview,
+    /// Include the next level under one ranking label.
+    Parent {
+        /// Label in the query's primary dimension.
+        parent: String,
+    },
+    /// Include the next level and its outbound proxy statistics.
+    Detail {
+        /// Label in the query's primary dimension.
+        parent: String,
+        /// Selected label in the secondary dimension.
+        detail: String,
+    },
+}
+
+/// Historical traffic facts read from a single database snapshot.
+/// This record is a query result, not authority to mutate or restore runtime state.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TrafficHistorySnapshot {
+    /// Overall totals, bounded rankings and gap-filled trend.
+    pub overview: TrafficOverview,
+    /// Bounded secondary rankings, empty when no parent was selected.
+    pub details: Vec<TrafficAggregate>,
+    /// Bounded outbound rankings, empty when no detail was selected.
+    pub proxy_stats: Vec<TrafficAggregate>,
+}

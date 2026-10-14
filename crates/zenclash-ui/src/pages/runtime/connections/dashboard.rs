@@ -7,12 +7,15 @@ use gpui_kit::component::{
 };
 use gpui_kit::{InteractiveElement, StatefulInteractiveElement, TestSupportExt};
 
-impl RuntimePage {
+impl ConnectionsView {
     pub(in crate::pages::runtime) fn render_connection_close_all(
         &self,
         cx: &mut Context<Self>,
     ) -> Button {
-        let empty = !matches!(&self.data, RuntimeData::Connections(snapshot) if !snapshot.connections.is_empty());
+        let empty = self
+            .live_snapshot
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.connections.is_empty());
 
         Button::new("close-all-connections")
             .icon(gpui_kit::assets::IconName::Square)
@@ -22,10 +25,10 @@ impl RuntimePage {
             .h_10()
             .small()
             .disabled(
-                self.connections.show_closed
+                self.show_closed
                     || empty
-                    || self.core_busy()
-                    || !self.connections.closing.is_empty(),
+                    || !self.close_allowed
+                    || !self.closing_connections.is_empty(),
             )
             .on_click(
                 cx.listener(|this, _, window, cx| this.confirm_connection_close(None, window, cx)),
@@ -38,9 +41,9 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let Some(projection) = &self.connections.projection else {
+        let Some(projection) = &self.projection else {
             return empty_state(
-                zenclash_i18n::text(if self.connections.projecting {
+                zenclash_i18n::text(if self.projecting {
                     "connections.filtering"
                 } else {
                     "connections.empty.active"
@@ -52,12 +55,11 @@ impl RuntimePage {
         let data = &projection.snapshot;
         let page = list_page(
             projection.order.len(),
-            self.connections.page,
+            self.page_index,
             CONNECTIONS_PER_PAGE,
         );
         let selected = self
-            .connections
-            .expanded
+            .inspected_connection
             .as_ref()
             .and_then(|id| projection.by_id.get(id))
             .and_then(|&index| data.connections.get(index));
@@ -211,9 +213,9 @@ impl RuntimePage {
                             .small()
                             .h_10()
                             .disabled(
-                                self.connections.show_closed
-                                    || self.core_busy()
-                                    || self.connections.closing.contains(&id),
+                                self.show_closed
+                                    || !self.close_allowed
+                                    || self.closing_connections.contains(&id),
                             )
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.confirm_connection_close(Some(id.clone()), window, cx)
@@ -232,9 +234,9 @@ impl RuntimePage {
             .children([false, true].into_iter().map(|closed| {
                 use gpui_kit::component::Selectable as _;
                 let count = if closed {
-                    self.connections.timeline.closed().connections.len()
+                    self.timeline.closed().connections.len()
                 } else {
-                    self.connections.timeline.active_count()
+                    self.timeline.active_count()
                 };
                 Button::new(if closed {
                     "connections-closed"
@@ -250,13 +252,13 @@ impl RuntimePage {
                     })
                 ))
                 .outline()
-                .selected(self.connections.show_closed == closed)
+                .selected(self.show_closed == closed)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.connections.show_closed = closed;
-                    this.connections.projection = None;
-                    this.connections.page = 0;
-                    this.connections.frozen = None;
-                    this.update_connection_presentation(cx);
+                    this.show_closed = closed;
+                    this.projection = None;
+                    this.page_index = 0;
+                    this.paused_snapshot = None;
+                    this.update_projection(cx);
                     cx.notify();
                 }))
             }));
@@ -275,7 +277,7 @@ impl RuntimePage {
                     .flex_wrap()
                     .child(
                         div().flex_1().min_w(gpui_kit::rems(12.)).child(
-                            Input::new(&self.connections.filter)
+                            Input::new(&self.filter_input)
                                 .prefix(gpui_kit::component::Icon::new(IconName::Search))
                                 .small()
                                 .h_10(),
@@ -283,7 +285,7 @@ impl RuntimePage {
                     )
                     .child({
                         let owner = cx.entity().downgrade();
-                        let selected = self.connections.worker.policy.clone();
+                        let selected = self.worker.policy.clone();
                         let policies = projection.policies.clone();
                         Button::new("connections-policy-filter")
                             .outline()
@@ -303,11 +305,11 @@ impl RuntimePage {
                                         .checked(value == selected)
                                         .on_click(
                                             move |_, _, cx| {
-                                                let _ = owner.update(cx, |page, cx| {
-                                                    page.connections.worker.policy = value.clone();
-                                                    page.connections.projection = None;
-                                                    page.connections.page = 0;
-                                                    page.update_connection_presentation(cx);
+                                                let _ = owner.update(cx, |view, cx| {
+                                                    view.worker.policy = value.clone();
+                                                    view.projection = None;
+                                                    view.page_index = 0;
+                                                    view.update_projection(cx);
                                                     cx.notify();
                                                 });
                                             },
@@ -336,23 +338,26 @@ impl RuntimePage {
             let connection = &data.connections[index];
             let id = connection.id.clone();
             let detail_id = id.clone();
+            let rule_label = if connection.rule.is_empty() {
+                "—".to_owned()
+            } else if connection.rule_payload.is_empty() {
+                connection.rule.clone()
+            } else {
+                format!("{} ({})", connection.rule, connection.rule_payload)
+            };
             let host = if connection.metadata.host.is_empty() {
                 &connection.metadata.destination_ip
             } else {
                 &connection.metadata.host
             };
-            let active = self.connections.expanded.as_deref() == Some(id.as_str());
-            let rates = if self.connections.show_closed {
+            let active = self.inspected_connection.as_deref() == Some(id.as_str());
+            let rates = if self.show_closed {
                 Some([0, 0])
             } else {
-                self.connections.timeline.rates(&id)
+                self.timeline.rates(&id)
             };
-            let duration = if self.connections.show_closed {
-                self.connections
-                    .timeline
-                    .duration(&id)
-                    .unwrap_or("—")
-                    .to_owned()
+            let duration = if self.show_closed {
+                self.timeline.duration(&id).unwrap_or("—").to_owned()
             } else {
                 projection.durations[index].clone()
             };
@@ -431,6 +436,18 @@ impl RuntimePage {
                                 .join(" → "),
                         ),
                     )
+                    .child(
+                        div()
+                            .id(connection_element_id("connection-rule", &id))
+                            .role(gpui_kit::Role::Status)
+                            .aria_label(rule_label.clone())
+                            .test_support()
+                            .w_24()
+                            .flex_shrink_0()
+                            .text_sm()
+                            .truncate()
+                            .child(rule_label),
+                    )
                     .child(div().w_20().flex_shrink_0().text_sm().text_right().child(
                         rates.map_or_else(
                             || "—".into(),
@@ -470,9 +487,9 @@ impl RuntimePage {
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
-                .track_scroll(&self.connections.scroll)
+                .track_scroll(&self.scroll)
                 .child(rows)
-                .vertical_scrollbar(&self.connections.scroll),
+                .vertical_scrollbar(&self.scroll),
         );
         table = table.child(
             h_flex()
@@ -497,10 +514,7 @@ impl RuntimePage {
                                 .label(zenclash_i18n::text("common.actions.previous_page"))
                                 .disabled(page.index == 0)
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.set_connections_page(
-                                        this.connections.page.saturating_sub(1),
-                                        cx,
-                                    )
+                                    this.set_connections_page(this.page_index.saturating_sub(1), cx)
                                 })),
                         )
                         .child(
@@ -511,7 +525,7 @@ impl RuntimePage {
                                 .label(zenclash_i18n::text("common.actions.next_page"))
                                 .disabled(page.index + 1 >= page.count)
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.set_connections_page(this.connections.page + 1, cx)
+                                    this.set_connections_page(this.page_index + 1, cx)
                                 })),
                         ),
                 ),
@@ -540,7 +554,7 @@ impl RuntimePage {
                                 IconName::Network,
                                 zenclash_i18n::text("connections.metrics.active"),
                                 data.connections.len().to_string(),
-                                self.connections.history.points(0),
+                                self.history.points(0),
                                 theme.chart_1,
                                 0,
                                 theme,
@@ -549,7 +563,7 @@ impl RuntimePage {
                                 IconName::ArrowUp,
                                 zenclash_i18n::text("connections.metrics.upload"),
                                 format_bytes(data.upload_total),
-                                self.connections.history.points(1),
+                                self.history.points(1),
                                 theme.chart_2,
                                 1,
                                 theme,
@@ -558,7 +572,7 @@ impl RuntimePage {
                                 IconName::ArrowDown,
                                 zenclash_i18n::text("connections.metrics.download"),
                                 format_bytes(data.download_total),
-                                self.connections.history.points(2),
+                                self.history.points(2),
                                 theme.chart_1,
                                 2,
                                 theme,
@@ -567,7 +581,7 @@ impl RuntimePage {
                                 IconName::Cpu,
                                 zenclash_i18n::text("connections.metrics.memory"),
                                 format_bytes(data.memory),
-                                self.connections.history.points(3),
+                                self.history.points(3),
                                 theme.chart_1,
                                 3,
                                 theme,

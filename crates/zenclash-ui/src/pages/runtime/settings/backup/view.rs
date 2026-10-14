@@ -1,6 +1,6 @@
 use super::super::super::{
     Button, Context, Disableable, FluentBuilder, IconName, IntoElement, ParentElement, RuntimePage,
-    Sizable, Styled, div, h_flex, info_row, px, setting_card, v_flex,
+    Sizable, Styled, div, h_flex, info_row, setting_card, v_flex,
 };
 
 impl RuntimePage {
@@ -19,7 +19,7 @@ impl RuntimePage {
                 theme,
             ))
             .when(
-                self.profile_service.pending_backup_restore().is_some() || recovering,
+                self.application_commands.pending_backup_restore().is_some() || recovering,
                 |this| {
                     this.child(
                         h_flex()
@@ -68,7 +68,7 @@ impl RuntimePage {
             )
             .child(
                 h_flex()
-                    .min_h(px(72.))
+                    .min_h(gpui_kit::rems(4.5))
                     .px_4()
                     .gap_3()
                     .flex_wrap()

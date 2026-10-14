@@ -22,15 +22,15 @@ impl RuntimePage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let route = match &self.data {
-            RuntimeData::Network { config, .. } => model::network_probe_route(
+        let route = match self.page_observation.data() {
+            PageSnapshotData::Network { config, .. } => model::network_probe_route(
                 config,
                 self.preferences.network_probe_route == NetworkProbeRoutePreference::Mihomo,
             ),
             _ => Err(text("config_unavailable")),
         };
-        let tun = match &self.data {
-            RuntimeData::Network { config, .. } => Some(config.tun.enable),
+        let tun = match self.page_observation.data() {
+            PageSnapshotData::Network { config, .. } => Some(config.tun.enable),
             _ => None,
         };
         let runtime = self.runtime.clone();
@@ -79,7 +79,7 @@ struct AiNetworkDialog {
     route: Result<NetworkProbeRoute, String>,
     tun: Option<bool>,
     rows: Vec<(Check, RowState)>,
-    task: super::super::loader::PageReadTask,
+    task: super::super::page_observation::PageReadTask,
     revision: u64,
     running: bool,
     stopped: bool,

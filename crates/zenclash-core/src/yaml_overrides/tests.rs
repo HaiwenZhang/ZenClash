@@ -62,6 +62,50 @@ fn invalid_directory_candidate_prevents_partial_import() {
 }
 
 #[test]
+fn directory_import_rejects_excess_files_before_parsing_any_payload() {
+    let root = test_root("candidate-count");
+    let source = root.join("source");
+    fs::create_dir_all(&source).unwrap();
+    for index in 0..=MAX_OVERRIDE_COUNT {
+        fs::write(source.join(format!("{index}.yaml")), "[invalid mapping").unwrap();
+    }
+    let store = YamlOverrideStore::new(root.join("store")).unwrap();
+    let error = store.import_paths([source]).unwrap_err();
+    assert!(error.to_string().contains("单次导入"), "{error}");
+    assert!(store.load().unwrap().items.is_empty());
+    assert_eq!(fs::read_dir(store.files_dir()).unwrap().count(), 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn stale_disabled_view_cannot_delete_a_now_enabled_record() {
+    let root = test_root("enabled-delete");
+    fs::create_dir_all(&root).unwrap();
+    let source = root.join("source.yaml");
+    fs::write(&source, "mode: direct\n").unwrap();
+    let store = YamlOverrideStore::new(root.join("store")).unwrap();
+    let record = store.import_paths([source]).unwrap().remove(0);
+    assert!(store.delete_disabled(&record.id).is_err());
+    assert_eq!(store.load().unwrap().items, vec![record]);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn import_compensation_retains_a_record_changed_by_another_writer() {
+    let root = test_root("changed-import");
+    fs::create_dir_all(&root).unwrap();
+    let source = root.join("source.yaml");
+    fs::write(&source, "mode: direct\n").unwrap();
+    let store = YamlOverrideStore::new(root.join("store")).unwrap();
+    let record = store.import_paths([source]).unwrap().remove(0);
+    store.set_enabled(&record.id, false).unwrap();
+    assert!(store.discard_imported(&record).is_err());
+    assert!(!store.load().unwrap().items[0].enabled);
+    assert!(store.managed_path(&record).is_file());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn rejects_manifest_path_traversal_before_file_operations() {
     let root = test_root("path-traversal");
     let store = YamlOverrideStore::new(root.join("store")).unwrap();

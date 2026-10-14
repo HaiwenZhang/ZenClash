@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use gpui_kit::PathPromptOptions;
 use zenclash_core::BackupManager;
 
-use super::super::super::{Context, Page, PreferencesRestored, RuntimePage};
+use super::super::super::{Context, Page, RuntimePage};
 use super::{
     RestoreOutcome, format_backup_size,
     workflow::{RetryOutcome, refresh_committed_state, restore_backup, retry_runtime},
@@ -11,7 +11,7 @@ use super::{
 
 impl RuntimePage {
     pub(super) fn retry_backup_runtime(&mut self, cx: &mut Context<Self>) {
-        if self.profile_service.pending_backup_restore().is_none() {
+        if self.application_commands.pending_backup_restore().is_none() {
             return;
         }
         let Some(token) = self.begin_scoped_mutation(
@@ -25,18 +25,18 @@ impl RuntimePage {
             .root()
             .parent()
             .map(std::path::Path::to_path_buf);
-        let runtime = self.profile_service.clone();
-        let task = self.runtime.spawn(retry_runtime(runtime, data_root));
+        let commands = self.application_commands.clone();
+        let task = self.runtime.spawn(retry_runtime(commands, data_root));
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                this.finish_mutation(token);
+                let mut preferences_pending = false;
                 match result {
                     Ok(RetryOutcome::Failed {
                         runtime_version,
                         error,
-                    }) if this.profile_service.is_current(runtime_version)
-                        && this.profile_service.pending_backup_restore().is_some() =>
+                    }) if this.application_commands.is_current(runtime_version)
+                        && this.application_commands.pending_backup_restore().is_some() =>
                     {
                         this.set_page_error(
                             token,
@@ -49,24 +49,22 @@ impl RuntimePage {
                     Ok(RetryOutcome::Restored {
                         runtime_version,
                         refresh,
-                    }) if this.profile_service.is_current(runtime_version) => {
+                    }) if this.application_commands.is_current(runtime_version) => {
                         this.synchronize_committed_profile(cx);
                         match refresh {
                             Ok(refresh) => {
                                 let snapshot = refresh.snapshot;
-                                this.profiles.forms.catalog_view.prepare(&snapshot.profiles);
-                                this.profiles.catalog = snapshot.profiles;
-                                this.profiles.generation = this.profiles.generation.wrapping_add(1);
+                                this.profiles.adopt_retry_catalog(snapshot.profiles);
                                 this.controlled_config = snapshot.controlled_config;
                                 this.controlled_config_generation =
                                     this.controlled_config_generation.wrapping_add(1);
-                                this.overrides.catalog = snapshot.overrides;
-                                this.preferences = snapshot.preferences.clone();
-                                this.system_proxy_editor = None;
-                                cx.emit(PreferencesRestored {
-                                    scope: crate::pages::runtime::PreferenceScope::Restore,
-                                    preferences: snapshot.preferences,
-                                });
+                                this.overrides.adopt_restored_catalog(snapshot.overrides);
+                                preferences_pending = true;
+                                this.publish_restored_preferences(
+                                    refresh.preferences_observation,
+                                    token,
+                                    cx,
+                                );
                                 if this.replace_page_data(token, refresh.page_data, cx) {
                                     this.notice = Some(zenclash_i18n::text(
                                         "backup.notices.runtime_recovered",
@@ -90,6 +88,9 @@ impl RuntimePage {
                             &[("error", error.to_string())],
                         ),
                     ),
+                }
+                if !preferences_pending {
+                    this.finish_mutation(token);
                 }
                 cx.notify();
             });
@@ -230,8 +231,10 @@ impl RuntimePage {
         ) else {
             return;
         };
-        let core_runtime = self.profile_service.clone();
-        let task = self.runtime.spawn(restore_backup(archive, core_runtime));
+        let application_commands = self.application_commands.clone();
+        let task = self
+            .runtime
+            .spawn(restore_backup(archive, application_commands));
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
@@ -243,10 +246,12 @@ impl RuntimePage {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.finish_mutation(token);
                 match result {
                     Ok(outcome) => this.apply_restore_outcome(outcome, token, cx),
-                    Err(error) => this.set_page_error(token, error),
+                    Err(error) => {
+                        this.finish_mutation(token);
+                        this.set_page_error(token, error);
+                    }
                 }
                 cx.notify();
             });
@@ -272,7 +277,10 @@ impl RuntimePage {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(outcome) => this.finish_restore_outcome(outcome, token, cx),
-                    Err(error) => this.set_page_error(token, error),
+                    Err(error) => {
+                        this.finish_mutation(token);
+                        this.set_page_error(token, error);
+                    }
                 }
                 cx.notify();
             });
@@ -286,39 +294,44 @@ impl RuntimePage {
         token: super::super::super::PageTaskToken,
         cx: &mut Context<Self>,
     ) {
-        self.profiles.store = Some(outcome.profile_store);
-        self.profiles.generation = self.profiles.generation.wrapping_add(1);
-        self.profiles.forms.catalog_view.prepare(&outcome.catalog);
-        self.profiles.catalog = outcome.catalog;
-        self.controlled_config_store = outcome.controlled_store;
+        let restored = outcome.restored;
+        let runtime_version = restored.runtime_generation();
+        let file_count = restored.restored_file_count();
+        let payload_bytes = restored.restored_payload_bytes();
+        let cleanup_warning = restored.cleanup_warning().map(str::to_owned);
+        self.profiles
+            .adopt_restored_store(restored.profile_store().clone());
+        self.controlled_config_store = restored.controlled_store().clone();
+        self.overrides
+            .adopt_restored_store(restored.override_store().clone());
+        let preferences_observation = restored.preferences_observation().clone();
+        let snapshot = restored.into_snapshot();
+        self.profiles.adopt_restore_catalog(snapshot.profiles);
         self.controlled_config_generation = self.controlled_config_generation.wrapping_add(1);
-        self.controlled_config = outcome.controlled_config;
-        self.overrides.store = Some(outcome.override_store);
-        self.overrides.catalog = outcome.override_catalog;
+        self.controlled_config = snapshot.controlled_config;
+        self.overrides.adopt_restored_catalog(snapshot.overrides);
         self.config_inputs.reset_on_next_refresh();
         self.invalidate_config_inputs(cx);
         self.overrides.invalidate_preview();
         self.synchronize_committed_profile(cx);
-        self.preferences = outcome.preferences.clone();
-        self.system_proxy_editor = None;
-        cx.emit(PreferencesRestored {
-            scope: crate::pages::runtime::PreferenceScope::Restore,
-            preferences: outcome.preferences,
-        });
-        if self.profile_service.is_current(outcome.runtime_version)
+        self.publish_restored_preferences(preferences_observation, token, cx);
+        if self.application_commands.is_current(runtime_version)
             && self.replace_page_data(token, outcome.page_data, cx)
         {
-            let warning = outcome.cleanup_warning.map_or_else(String::new, |warning| {
+            let warning = cleanup_warning.map_or_else(String::new, |warning| {
                 zenclash_i18n::text_with("backup.notices.cleanup_warning", &[("warning", warning)])
             });
             self.notice = Some(zenclash_i18n::text_with(
                 "backup.notices.restored",
                 &[
-                    ("count", outcome.file_count.to_string()),
-                    ("size", format_backup_size(outcome.payload_bytes)),
+                    ("count", file_count.to_string()),
+                    ("size", format_backup_size(payload_bytes)),
                     ("warning", warning),
                 ],
             ));
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

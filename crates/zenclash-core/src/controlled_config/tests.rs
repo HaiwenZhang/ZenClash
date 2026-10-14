@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{BufRead, Read, Write},
+    io::{Read, Write},
     net::TcpListener,
     path::{Path, PathBuf},
     thread,
@@ -9,6 +9,11 @@ use std::{
 
 use super::{ControlledConfigError, ControlledConfigStore, normalize_runtime_payload};
 use crate::{CoreKind, MihomoClient, MihomoEndpoint};
+
+#[cfg(unix)]
+mod restart_completion;
+#[cfg(unix)]
+mod source_snapshot;
 
 fn test_root(name: &str) -> PathBuf {
     let sequence = SystemTime::now()
@@ -122,7 +127,7 @@ async fn ordinary_runtime_updates_keep_tun_projection_and_service_preparation_re
         "mihomo"
     });
     fs::write(&binary, b"synthetic stopped owner; never executed").unwrap();
-    let process = crate::MihomoProcess::prepare_stopped(crate::MihomoLaunchConfig {
+    let process = crate::ManagedCoreProcess::prepare_stopped(crate::CoreLaunchConfig {
         kind: CoreKind::Mihomo,
         binary,
         config_file: profile.clone(),
@@ -130,8 +135,29 @@ async fn ordinary_runtime_updates_keep_tun_projection_and_service_preparation_re
         endpoint: MihomoEndpoint::default(),
         controller_override: None,
     });
+    let owner = std::sync::Arc::downgrade(&process);
     let client = MihomoClient::from_process(process).unwrap();
     let store = ControlledConfigStore::new(root.join("store")).with_runtime_tun_policy(&client);
+    for projected in [
+        store.without_startup_tun(),
+        store.without_startup_tun().with_runtime_tun_policy(&client),
+    ] {
+        assert!(
+            !crate::tun_admission::yaml_enables_tun(
+                &projected.effective_payload(&profile).unwrap()
+            )
+            .unwrap()
+        );
+        assert!(
+            crate::tun_admission::yaml_enables_tun(
+                &projected
+                    .for_service_runtime()
+                    .effective_payload(&profile)
+                    .unwrap()
+            )
+            .unwrap()
+        );
+    }
     let ordinary = store
         .prepare_service_config_update(
             profile.clone(),
@@ -156,24 +182,18 @@ async fn ordinary_runtime_updates_keep_tun_projection_and_service_preparation_re
         .await
         .unwrap();
     assert!(crate::tun_admission::yaml_enables_tun(service.next_payload()).unwrap());
-    assert!(
-        store
-            .runtime_tun_policy
-            .as_ref()
-            .unwrap()
-            .upgrade()
-            .is_some()
-    );
+    assert!(owner.upgrade().is_some());
     assert_eq!(store.load_json().unwrap(), serde_json::json!({}));
     drop(client);
     assert!(
-        store
-            .runtime_tun_policy
-            .as_ref()
-            .unwrap()
-            .upgrade()
-            .is_none(),
+        owner.upgrade().is_none(),
         "projection must not keep runtime owners alive"
+    );
+    assert!(
+        crate::tun_admission::yaml_enables_tun(
+            &store.effective_payload(root.join("base.yaml")).unwrap()
+        )
+        .unwrap()
     );
     fs::remove_dir_all(root).unwrap();
 }
@@ -311,7 +331,7 @@ async fn profile_mode_zero_send_reports_cache_failure_without_runtime_change() {
 
 async fn profile_mode_replaced_after_preflight(fail_cache_restore: bool) {
     use std::{task::Context, time::Duration};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
 
     let root = test_root("profile-mode-zero-send");
     let profile = write_profile(&root);
@@ -325,10 +345,10 @@ async fn profile_mode_replaced_after_preflight(fail_cache_restore: bool) {
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut headers = Vec::new();
-        while !headers.ends_with(b"\r\n\r\n") {
-            headers.push(stream.read_u8().await.unwrap());
-        }
+        let headers = crate::test_support::read_controller_request(&mut stream)
+            .await
+            .unwrap()
+            .into_bytes();
         assert!(headers.starts_with(b"GET /configs "));
         let body = r#"{"mode":"rule"}"#;
         stream
@@ -485,23 +505,8 @@ async fn cancelling_the_waiter_keeps_patch_cache_and_session_consistent_with_per
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        let mut reader = std::io::BufReader::new(&mut stream);
-        let mut content_length = 0;
-        loop {
-            let mut line = String::new();
-            assert_ne!(reader.read_line(&mut line).unwrap(), 0);
-            if line == "\r\n" {
-                break;
-            }
-            if let Some((name, value)) = line.split_once(':')
-                && name.eq_ignore_ascii_case("content-length")
-            {
-                content_length = value.trim().parse::<usize>().unwrap();
-            }
-        }
-        let mut body = vec![0; content_length];
-        reader.read_exact(&mut body).unwrap();
-        drop(reader);
+        let request = crate::test_support::read_controller_request_blocking(&mut stream).unwrap();
+        let _body = request.body();
         stream
             .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
             .unwrap();
@@ -735,35 +740,6 @@ fn prepares_commits_and_materializes_without_changing_source_profile() {
 }
 
 #[test]
-fn meow_materialization_adds_dns_upstreams_only_for_an_empty_enabled_resolver() {
-    let root = test_root("meow-dns-defaults");
-    fs::create_dir_all(&root).unwrap();
-    let profile = root.join("base.yaml");
-    fs::write(
-        &profile,
-        "mixed-port: 7890\ndns:\n  enable: true\nrules: [MATCH,DIRECT]\n",
-    )
-    .unwrap();
-    let store = ControlledConfigStore::new(root.join("store"));
-
-    let effective = store
-        .materialize_with_overrides_for_core(&profile, &[], CoreKind::Meow)
-        .unwrap();
-    let yaml: serde_yaml::Value =
-        serde_yaml::from_str(&fs::read_to_string(effective).unwrap()).unwrap();
-
-    assert_eq!(yaml["dns"]["nameserver"].as_sequence().unwrap().len(), 2);
-    assert_eq!(
-        yaml["dns"]["default-nameserver"]
-            .as_sequence()
-            .unwrap()
-            .len(),
-        2
-    );
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
 fn mihomo_materialization_adds_geodata_fallbacks_without_rewriting_the_source() {
     let root = test_root("mihomo-geodata-defaults");
     let profile = write_profile(&root);
@@ -803,44 +779,18 @@ fn mihomo_materialization_preserves_explicit_geodata_urls() {
 
 #[test]
 fn core_materialization_preserves_explicit_dns_upstreams() {
-    let root = test_root("meow-custom-dns");
+    let root = test_root("explicit-dns");
     let profile = write_profile(&root);
     let store = ControlledConfigStore::new(root.join("store"));
 
     let effective = store
-        .materialize_with_overrides_for_core(&profile, &[], CoreKind::Meow)
+        .materialize_with_overrides_for_core(&profile, &[], CoreKind::Mihomo)
         .unwrap();
     let yaml: serde_yaml::Value =
         serde_yaml::from_str(&fs::read_to_string(effective).unwrap()).unwrap();
 
     assert_eq!(yaml["dns"]["nameserver"][0].as_str(), Some("1.1.1.1"));
     assert!(yaml["dns"]["default-nameserver"].is_null());
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn meow_materialization_keeps_custom_bootstrap_and_adds_missing_main_dns() {
-    let root = test_root("meow-bootstrap-only");
-    fs::create_dir_all(&root).unwrap();
-    let profile = root.join("base.yaml");
-    fs::write(
-        &profile,
-        "dns:\n  enable: true\n  default-nameserver: [9.9.9.9]\nrules: [MATCH,DIRECT]\n",
-    )
-    .unwrap();
-    let store = ControlledConfigStore::new(root.join("store"));
-
-    let effective = store
-        .materialize_with_overrides_for_core(&profile, &[], CoreKind::Meow)
-        .unwrap();
-    let yaml: serde_yaml::Value =
-        serde_yaml::from_str(&fs::read_to_string(effective).unwrap()).unwrap();
-
-    assert_eq!(yaml["dns"]["nameserver"].as_sequence().unwrap().len(), 2);
-    assert_eq!(
-        yaml["dns"]["default-nameserver"][0].as_str(),
-        Some("9.9.9.9")
-    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -931,8 +881,10 @@ async fn reload_profile_updates_managed_startup_cache_after_mihomo_accepts_paylo
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0_u8; 8_192];
-        let length = stream.read(&mut request).unwrap();
+        let request = crate::test_support::read_controller_request_blocking(&mut stream)
+            .unwrap()
+            .into_bytes();
+        let length = request.len();
         write!(
             stream,
             "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -1119,27 +1071,15 @@ fn reload_fixture(count: usize) -> (MihomoClient, thread::JoinHandle<Vec<serde_j
             .map(|_| {
                 let (stream, _) = listener.accept().unwrap();
                 let mut stream = std::io::BufReader::new(stream);
-                let mut content_length = 0;
-                loop {
-                    let mut line = String::new();
-                    assert!(std::io::BufRead::read_line(&mut stream, &mut line).unwrap() > 0);
-                    if line == "\r\n" {
-                        break;
-                    }
-                    if let Some((name, value)) = line.split_once(':')
-                        && name.eq_ignore_ascii_case("content-length")
-                    {
-                        content_length = value.trim().parse().unwrap();
-                    }
-                }
-                let mut body = vec![0; content_length];
-                stream.read_exact(&mut body).unwrap();
+                let request =
+                    crate::test_support::read_controller_request_blocking(&mut stream).unwrap();
+                let body = request.body();
                 write!(
                     stream.get_mut(),
                     "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                 )
                 .unwrap();
-                serde_json::from_slice(&body).unwrap()
+                serde_json::from_slice(body).unwrap()
             })
             .collect()
     });
@@ -1158,8 +1098,10 @@ async fn settings_update_preserves_ordered_overrides_in_runtime_and_cache() {
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0_u8; 8_192];
-        let length = stream.read(&mut request).unwrap();
+        let request = crate::test_support::read_controller_request_blocking(&mut stream)
+            .unwrap()
+            .into_bytes();
+        let length = request.len();
         write!(
             stream,
             "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -1222,8 +1164,10 @@ async fn conflicting_yaml_mode_is_rejected_before_runtime_or_storage_changes() {
                     stream
                         .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                         .unwrap();
-                    let mut bytes = [0_u8; 8192];
-                    let read = stream.read(&mut bytes).unwrap();
+                    let bytes = crate::test_support::read_controller_request_blocking(&mut stream)
+                        .unwrap()
+                        .into_bytes();
+                    let read = bytes.len();
                     let request = String::from_utf8_lossy(&bytes[..read]).into_owned();
                     let body = if request.starts_with("GET ") {
                         if requests.is_empty() {
@@ -1282,8 +1226,10 @@ async fn mode_update_uses_partial_runtime_patch_and_persists_the_selection() {
         let mut requests = Vec::new();
         for (index, mode) in ["rule", "", "global"].into_iter().enumerate() {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 8_192];
-            let length = stream.read(&mut request).unwrap();
+            let request = crate::test_support::read_controller_request_blocking(&mut stream)
+                .unwrap()
+                .into_bytes();
+            let length = request.len();
             requests.push(String::from_utf8_lossy(&request[..length]).into_owned());
             if index == 1 {
                 write!(
@@ -1362,25 +1308,10 @@ fn mode_fixture() -> (MihomoClient, thread::JoinHandle<Vec<String>>) {
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(3)))
                 .unwrap();
-            let mut reader = std::io::BufReader::new(&mut stream);
-            let mut first = String::new();
-            reader.read_line(&mut first).unwrap();
-            let mut length = 0;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if line == "\r\n" {
-                    break;
-                }
-                if let Some((name, value)) = line.split_once(':')
-                    && name.eq_ignore_ascii_case("content-length")
-                {
-                    length = value.trim().parse::<usize>().unwrap();
-                }
-            }
-            let mut body = vec![0; length];
-            reader.read_exact(&mut body).unwrap();
-            drop(reader);
+            let request =
+                crate::test_support::read_controller_request_blocking(&mut stream).unwrap();
+            let first = request.headers().lines().next().unwrap().to_owned();
+            let body = request.body();
             if let Some(mode) = mode {
                 assert!(first.starts_with("GET /configs "));
                 let body = format!(r#"{{"mode":"{mode}"}}"#);
@@ -1393,7 +1324,7 @@ fn mode_fixture() -> (MihomoClient, thread::JoinHandle<Vec<String>>) {
             } else {
                 assert!(first.starts_with("PATCH /configs "));
                 assert_eq!(
-                    serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                    serde_json::from_slice::<serde_json::Value>(body).unwrap(),
                     serde_json::json!({"mode":"global"})
                 );
                 stream

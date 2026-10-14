@@ -172,6 +172,16 @@ app:
     scheduled_backup_directory:
       zh-CN: 定时备份目录任务异常结束：%{error}
       en: "The scheduled backup directory task ended unexpectedly: %{error}"
+  preferences:
+    appearance_unsaved:
+      zh-CN: "主题尚未保存。重试后，下次启动将保留此选择：%{error}"
+      en: "The theme hasn’t been saved. Retry to keep this choice for the next launch: %{error}"
+    tray_display_unsaved:
+      zh-CN: "托盘显示方式尚未保存。重试后，下次启动将保留此选择：%{error}"
+      en: "The tray display hasn’t been saved. Retry to keep this choice for the next launch: %{error}"
+    tray_visibility_unsaved:
+      zh-CN: "托盘可见性尚未保存。重试后，下次启动将保留此选择：%{error}"
+      en: "Tray visibility hasn’t been saved. Retry to keep this choice for the next launch: %{error}"
   system_proxy:
     errors:
       offline_release_task:
@@ -1512,6 +1522,28 @@ profiles:
       en: "The profile repository task ended unexpectedly: %{error}"
 
 proxies:
+  selection:
+    sending:
+      zh-CN: 正在请求切换节点…
+      en: Requesting a node change…
+    awaiting_confirmation:
+      zh-CN: 请求已接纳，正在确认当前节点…
+      en: Request accepted; confirming the current node…
+    unconfirmed:
+      zh-CN: '请求已接纳，当前节点尚未确认：%{error}'
+      en: 'Request accepted; the current node is unconfirmed: %{error}'
+    runtime_changed:
+      zh-CN: 内核已切换，请刷新节点状态
+      en: The runtime changed; refresh node state
+    observation_outdated:
+      zh-CN: 节点状态已变化，请重新确认
+      en: Node state changed; confirm it again
+    group_missing:
+      zh-CN: 当前配置中已找不到该代理组
+      en: This proxy group is absent from the current configuration
+    no_current_member:
+      zh-CN: 内核没有报告当前节点
+      en: The runtime did not report a current node
   columns:
     node:
       zh-CN: 节点
@@ -3780,9 +3812,6 @@ core_management:
     refresh:
       zh-CN: 重新检测
       en: Detect Again
-    environment_override:
-      zh-CN: ZENCLASH_CORE 正在覆盖界面选择；移除环境变量后，保存的下次启动内核才会生效。
-      en: ZENCLASH_CORE overrides the UI selection; remove the environment variable for the saved next-launch core to take effect.
   status:
     checking:
       zh-CN: 检测中
@@ -3805,9 +3834,6 @@ core_management:
     next:
       zh-CN: 下次启动
       en: Next Launch
-    experimental:
-      zh-CN: 实验
-      en: Experimental
     source:
       zh-CN: 来源 · %{source}
       en: Source · %{source}
@@ -3821,12 +3847,6 @@ core_management:
     automatic:
       zh-CN: 自动
       en: Automatic
-    selected:
-      zh-CN: 已选择
-      en: Selected
-    use_next:
-      zh-CN: 下次使用
-      en: Use Next Launch
   source:
     custom:
       zh-CN: 自定义文件
@@ -3834,9 +3854,6 @@ core_management:
     automatic:
       zh-CN: 自动发现
       en: Automatic discovery
-    environment:
-      zh-CN: 环境变量 %{variable}
-      en: Environment variable %{variable}
   dialog:
     choose:
       zh-CN: 选择 %{core} 可执行文件
@@ -3851,9 +3868,6 @@ core_management:
     already_current:
       zh-CN: "%{core} 已是当前与下次启动内核"
       en: "%{core} is the current and next-launch core"
-    preferred:
-      zh-CN: "%{core} 已通过复检并设为下次启动内核；重启 ZenClash 后生效"
-      en: "%{core} passed revalidation and is set for the next launch; restart ZenClash to apply"
   errors:
     detection_task:
       zh-CN: 内核检测任务异常结束：%{error}
@@ -3873,9 +3887,6 @@ core_management:
     discovery_task:
       zh-CN: 自动发现设置任务异常结束：%{error}
       en: "The automatic discovery task ended unexpectedly: %{error}"
-    not_validated:
-      zh-CN: "%{core} 尚未通过检测，不能设为启动内核"
-      en: "%{core} has not passed validation and cannot be selected as the launch core"
     switch_task:
       zh-CN: 内核切换校验任务异常结束：%{error}
       en: "The core switch validation task ended unexpectedly: %{error}"
@@ -4084,6 +4095,9 @@ overrides:
     catalog_save_task:
       zh-CN: 保存 YAML 覆写清单任务异常结束：%{error}
       en: "The YAML override catalog save task ended unexpectedly: %{error}"
+    runtime_unconfirmed:
+      en: 'The runtime may have accepted the override change. Reapply the effective configuration to confirm it: %{error}'
+      zh-CN: '内核可能已经接纳此次覆写变更；请重新应用有效配置以确认运行状态：%{error}'
     change_rejected_rolled_back:
       zh-CN: "%{core} 拒绝覆写变更，清单已恢复：%{error}"
       en: "%{core} rejected the override change and the catalog was restored: %{error}"
@@ -4670,9 +4684,6 @@ tray:
     toggle_rollback_failed:
       zh-CN: 保存系统代理开关失败：%{error}；恢复原状态也失败：%{rollback}
       en: "Could not save the system proxy toggle: %{error}; restoring the previous state also failed: %{rollback}"
-    external_tun:
-      zh-CN: 外部实验内核不能可靠应用完整 TUN 配置；请改用 ZenClash 托管内核
-      en: An external experimental core cannot reliably apply the full TUN configuration; use a ZenClash-managed core
 
 settings:
   legal:
@@ -4815,9 +4826,6 @@ settings:
       saved:
         zh-CN: IPv6 设置已保存并热重载
         en: IPv6 was saved and hot-reloaded
-  experimental_core:
-    zh-CN: meow-rs 实验模式：代理、流量、日志、连接和 Profile 可复用；完整配置通过托管进程重启应用，规则启停、Mihomo 升级、GeoData/UI 更新与 MRS 转换会被禁用。
-    en: "meow-rs experimental mode reuses proxies, traffic, logs, connections, and profiles. Full configuration changes restart the managed process; rule toggles, Mihomo upgrades, GeoData/UI updates, and MRS conversion are disabled."
   traffic_history:
     title:
       zh-CN: 记录流量历史

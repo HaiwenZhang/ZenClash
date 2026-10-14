@@ -11,6 +11,10 @@ use std::{
 mod core;
 
 pub(in crate::pages::runtime) use core::CoreInputs;
+mod read_identity;
+pub(super) use read_identity::ConfigInputsTaskToken;
+mod host;
+mod read_state;
 
 const CONFIG_INPUT_KEYS: &[&str] = &[
     "port",
@@ -30,6 +34,7 @@ const CONFIG_INPUT_KEYS: &[&str] = &[
 ];
 
 pub(super) struct ConfigInputs {
+    read: read_state::ConfigInputsReadState,
     fields: HashMap<&'static str, InputField>,
     profile: Option<PathBuf>,
     reset: bool,
@@ -102,6 +107,7 @@ impl ConfigInputs {
         let sniffer = SnifferInputs::new(config, &mut factory);
         let tun = TunInputs::new(config, &mut factory);
         Self {
+            read: read_state::ConfigInputsReadState::new(config.clone()),
             core,
             dns,
             sniffer,
@@ -114,6 +120,54 @@ impl ConfigInputs {
 
     pub(super) fn is_for_profile(&self, profile: Option<&Path>) -> bool {
         self.profile.as_deref() == profile
+    }
+
+    pub(super) fn effective(&self) -> &Value {
+        self.read.effective()
+    }
+
+    pub(super) fn read_generation(&self) -> u64 {
+        self.read.generation()
+    }
+
+    pub(super) fn is_loading(&self) -> bool {
+        self.read.is_loading()
+    }
+
+    pub(super) fn begin_read(&mut self, profile: Option<&Path>) -> Option<ConfigInputsTaskToken> {
+        self.read.begin(profile)
+    }
+
+    pub(super) fn finish_read(
+        &mut self,
+        token: &ConfigInputsTaskToken,
+        profile: Option<&Path>,
+    ) -> bool {
+        self.read.finish(token, profile)
+    }
+
+    pub(super) fn invalidate_read(&mut self) {
+        self.read.invalidate();
+    }
+
+    pub(super) fn begin_bootstrap_read(&mut self) {
+        self.read.begin_bootstrap();
+    }
+
+    pub(super) fn finish_bootstrap_read(&mut self) {
+        self.read.finish_bootstrap();
+    }
+
+    pub(super) fn accept_read(
+        &mut self,
+        config: Value,
+        token: ConfigInputsTaskToken,
+        profile: Option<&Path>,
+        window: &mut Window,
+        cx: &mut gpui_kit::App,
+    ) {
+        self.refresh(&config, profile, window, cx);
+        self.read.accept(config, token.profile);
     }
 
     pub(super) fn submitted(&self, patch: &Value, cx: &gpui_kit::App) -> SubmittedInputs {
@@ -1025,3 +1079,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod host_ui_tests;

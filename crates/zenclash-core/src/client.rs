@@ -5,7 +5,9 @@ use std::{sync::Arc, time::Duration};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{CoreConfigValidator, CoreKind, MihomoEndpoint, MihomoProcess, owned_core::OwnedCore};
+use crate::{
+    CoreConfigValidator, CoreKind, ManagedCoreProcess, MihomoEndpoint, owned_core::OwnedCore,
+};
 
 mod api;
 pub(crate) use api::AppliedConfig;
@@ -101,6 +103,9 @@ pub enum MihomoError {
     /// Process, filesystem or native-platform operation failure.
     #[error("Mihomo process error: {0}")]
     Process(String),
+    /// System-proxy or PAC operation failure, preserving native and recovery facts.
+    #[error(transparent)]
+    SystemProxy(#[from] Box<crate::SystemProxyError>),
 }
 
 impl MihomoError {
@@ -205,7 +210,7 @@ impl MihomoClient {
     ///
     /// # Errors
     /// Returns an error if the underlying HTTP client cannot be constructed.
-    pub fn from_process(process: Arc<MihomoProcess>) -> MihomoResult<Self> {
+    pub fn from_process(process: Arc<ManagedCoreProcess>) -> MihomoResult<Self> {
         Self::new_binding(ControllerBinding::process_binding(process))
     }
 
@@ -275,6 +280,23 @@ impl MihomoClient {
         scopes
     }
 
+    /// Captures one controller binding for a complete multi-request operation.
+    /// Clones keep that binding and reject requests after its replacement.
+    ///
+    /// # Errors
+    /// Returns a stale-binding error when a previously pinned runtime was replaced.
+    pub fn pin_current_runtime(&self) -> MihomoResult<Self> {
+        self.pin_binding()
+    }
+
+    /// Verifies that this operation's captured runtime binding is still current.
+    ///
+    /// # Errors
+    /// Returns a stale-binding error after runtime replacement.
+    pub fn verify_current_runtime(&self) -> MihomoResult<()> {
+        self.ensure_binding_current()
+    }
+
     pub(crate) fn pin_binding(&self) -> MihomoResult<Self> {
         Ok(Self {
             pinned_binding: Some(self.operation_binding()?),
@@ -284,6 +306,15 @@ impl MihomoClient {
 
     pub(crate) fn ensure_binding_current(&self) -> MihomoResult<()> {
         self.operation_binding().map(|_| ())
+    }
+
+    pub(crate) fn with_current_binding<T>(
+        &self,
+        publish: impl FnOnce(u64) -> T,
+    ) -> MihomoResult<T> {
+        let binding = self.binding_snapshot();
+        self.binding
+            .with_current_generation(binding.generation, || publish(binding.generation))
     }
 
     pub(crate) fn mark_runtime_binding_used(&self) {
@@ -298,7 +329,7 @@ impl MihomoClient {
         self.binding.descriptor()
     }
 
-    pub(crate) fn local_recovery_launch(&self) -> Option<crate::MihomoLaunchConfig> {
+    pub(crate) fn local_recovery_launch(&self) -> Option<crate::CoreLaunchConfig> {
         self.binding.local_recovery_launch()
     }
 
@@ -492,7 +523,10 @@ impl MihomoClient {
     ///
     /// # Errors
     /// Rejects a different core kind, unresolved service mutation, or exhausted generation.
-    pub(crate) async fn switch_to_process(&self, process: Arc<MihomoProcess>) -> MihomoResult<()> {
+    pub(crate) async fn switch_to_process(
+        &self,
+        process: Arc<ManagedCoreProcess>,
+    ) -> MihomoResult<()> {
         let guard = self.mutation_gate.clone().lock_owned().await;
         self.ensure_binding_current()?;
         self.binding.ensure_open()?;
@@ -534,7 +568,7 @@ impl MihomoClient {
 
     pub(crate) async fn publish_prepared_process(
         &self,
-        process: Arc<MihomoProcess>,
+        process: Arc<ManagedCoreProcess>,
         guard: tokio::sync::OwnedMutexGuard<()>,
     ) -> MihomoResult<tokio::sync::OwnedMutexGuard<()>> {
         self.publish_owned_backend(transport::ControllerBackend::Local(process), guard)

@@ -167,25 +167,11 @@ impl ProfileStore {
         let previous_record = catalog.profiles[index].clone();
         let previous_payload = read_profile_bytes(&path)?;
         atomic_write(&path, &applied_payload)?;
-        catalog.profiles[index].updated_at = super::unix_timestamp();
-        catalog.profiles[index].size_bytes = applied_payload.len() as u64;
-        catalog.profiles[index]
-            .subscription
-            .merge_from(subscription);
-        let accepts_suggested_interval = matches!(
-            &catalog.profiles[index].source,
-            ProfileSource::Remote { options, .. } if !options.fixed_update_interval
+        catalog.profiles[index].apply_payload_metadata(
+            super::unix_timestamp(),
+            applied_payload.len() as u64,
+            subscription,
         );
-        if let Some(interval) = accepts_suggested_interval
-            .then_some(
-                catalog.profiles[index]
-                    .subscription
-                    .suggested_update_interval_minutes,
-            )
-            .flatten()
-        {
-            catalog.profiles[index].update_interval_minutes = interval;
-        }
         let record = catalog.profiles[index].clone();
         self.save_catalog_or_restore_payload_unlocked(
             &catalog,

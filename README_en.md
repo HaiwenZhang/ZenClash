@@ -77,7 +77,7 @@ There is no official release yet. Visit **[Releases to browse ZenClash test buil
 | --- | --- |
 | macOS | Apple Silicon (arm64) |
 | Windows | x86_64 |
-| Linux | x86_64; builds for Ubuntu, Fedora, and Rocky Linux |
+| Linux | x86_64; Ubuntu builds |
 
 Release packages include Mihomo. ZenClash discovers and prepares the core at startup. Check the release notes for package formats and system requirements. macOS users can follow the [installation guide](docs/installation/macos_en.md).
 

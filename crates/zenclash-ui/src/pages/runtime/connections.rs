@@ -6,30 +6,38 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 
 use super::{
     AppContext, Button, ButtonVariants, Context, Disableable, Entity, FluentBuilder, IconName,
-    Input, InputEvent, InputState, IntoElement, Page, ParentElement, RuntimeData, RuntimePage,
-    Sizable, Styled, Subscription, Window, contains_ascii_case_insensitive, div, empty_state,
-    format_bytes, h_flex, list_page, pagination_summary, v_flex,
+    Input, InputEvent, InputState, IntoElement, ParentElement, Sizable, Styled, Subscription,
+    Window, contains_ascii_case_insensitive, div, empty_state, format_bytes, h_flex, list_page,
+    pagination_summary, v_flex,
 };
 
 mod dashboard;
+mod page_integration;
 mod projection;
+pub(in crate::pages::runtime) mod snapshot_read;
 mod timeline;
 
 const CONNECTIONS_PER_PAGE: usize = 50;
 
-pub(super) struct ConnectionsUiState {
-    pub(super) filter: Entity<InputState>,
-    pub(super) closing: HashSet<String>,
-    pub(super) expanded: Option<String>,
-    pub(super) page: usize,
+pub(super) struct ConnectionsView {
+    runtime: tokio::runtime::Handle,
+    live_snapshot: Option<std::sync::Arc<zenclash_core::ConnectionsSnapshot>>,
+    runtime_context: Option<ConnectionSnapshotContext>,
+    close_allowed: bool,
+    focus_handle: gpui_kit::FocusHandle,
+    _filter_subscription: Subscription,
+    filter_input: Entity<InputState>,
+    closing_connections: HashSet<String>,
+    inspected_connection: Option<String>,
+    page_index: usize,
     scroll: gpui_kit::ScrollHandle,
     transport: ConnectionTransport,
     sort: ConnectionSort,
     query: String,
     projection: Option<projection::ConnectionProjection>,
     worker: projection::ProjectionWorker,
-    pub(super) projecting: bool,
-    frozen: Option<std::sync::Arc<zenclash_core::ConnectionsSnapshot>>,
+    projecting: bool,
+    paused_snapshot: Option<std::sync::Arc<zenclash_core::ConnectionsSnapshot>>,
     history: ConnectionMetricHistory,
     show_closed: bool,
     timeline: timeline::ConnectionTimeline,
@@ -89,16 +97,39 @@ impl ConnectionMetricHistory {
     }
 }
 
-impl ConnectionsUiState {
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct ConnectionSnapshotContext {
+    configuration_generation: u64,
+    profile_path: Option<std::path::PathBuf>,
+}
+
+#[derive(Clone)]
+pub(super) enum ConnectionEvent {
+    CloseRequested {
+        id: Option<String>,
+        runtime: ConnectionSnapshotContext,
+    },
+    PresentationFailed(String),
+}
+
+impl gpui_kit::EventEmitter<ConnectionEvent> for ConnectionsView {}
+
+impl ConnectionsView {
     pub(super) fn release_presentation(&mut self) {
         self.worker.cancel();
+        self.live_snapshot = None;
+        self.runtime_context = None;
         self.projection = None;
         self.projecting = false;
-        self.frozen = None;
+        self.paused_snapshot = None;
         self.history = ConnectionMetricHistory::default();
     }
 
-    pub(super) fn new(window: &mut Window, cx: &mut Context<RuntimePage>) -> (Self, Subscription) {
+    pub(super) fn new(
+        runtime: tokio::runtime::Handle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let filter = cx.new(|cx| {
             InputState::new(window, cx).placeholder(zenclash_i18n::text(
                 "runtime.placeholders.connection_filter",
@@ -106,106 +137,176 @@ impl ConnectionsUiState {
         });
         let subscription = cx.subscribe(&filter, |this, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
-                if !replace_connection_query(&mut this.connections.query, &input.read(cx).value()) {
+                if !replace_connection_query(&mut this.query, &input.read(cx).value()) {
                     return;
                 }
-                this.connections.page = 0;
-                this.update_connection_presentation(cx);
+                this.page_index = 0;
+                this.update_projection(cx);
                 cx.notify();
             }
         });
-        (
-            Self {
-                filter,
-                closing: HashSet::new(),
-                expanded: None,
-                page: 0,
-                scroll: gpui_kit::ScrollHandle::default(),
-                transport: ConnectionTransport::All,
-                sort: ConnectionSort::Default,
-                query: String::new(),
-                projection: None,
-                worker: projection::ProjectionWorker::default(),
-                projecting: false,
-                frozen: None,
-                history: ConnectionMetricHistory::default(),
-                show_closed: false,
-                timeline: timeline::ConnectionTimeline::default(),
-            },
-            subscription,
-        )
+        Self {
+            runtime,
+            live_snapshot: None,
+            runtime_context: None,
+            close_allowed: false,
+            focus_handle: cx.focus_handle(),
+            _filter_subscription: subscription,
+            filter_input: filter,
+            closing_connections: HashSet::new(),
+            inspected_connection: None,
+            page_index: 0,
+            scroll: gpui_kit::ScrollHandle::default(),
+            transport: ConnectionTransport::All,
+            sort: ConnectionSort::Default,
+            query: String::new(),
+            projection: None,
+            worker: projection::ProjectionWorker::default(),
+            projecting: false,
+            paused_snapshot: None,
+            history: ConnectionMetricHistory::default(),
+            show_closed: false,
+            timeline: timeline::ConnectionTimeline::default(),
+        }
     }
 }
 
-impl RuntimePage {
-    pub(super) fn update_connection_presentation(&mut self, cx: &mut Context<Self>) {
-        let mut data = match (&self.connections.frozen, &self.data) {
-            (Some(snapshot), _) | (None, RuntimeData::Connections(snapshot)) => snapshot.clone(),
+impl ConnectionsView {
+    pub(super) fn present(
+        &mut self,
+        live_snapshot: std::sync::Arc<zenclash_core::ConnectionsSnapshot>,
+        runtime: ConnectionSnapshotContext,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .runtime_context
+            .as_ref()
+            .is_some_and(|previous| previous != &runtime)
+        {
+            self.release_presentation();
+        }
+        self.live_snapshot = Some(live_snapshot);
+        self.runtime_context = Some(runtime);
+        self.update_projection(cx);
+    }
+
+    pub(super) fn is_idle(&self) -> bool {
+        self.closing_connections.is_empty() && !self.projecting
+    }
+
+    pub(super) fn refresh_localized_placeholder(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.filter_input.update(cx, |input, cx| {
+            input.set_placeholder(
+                zenclash_i18n::text("runtime.placeholders.connection_filter"),
+                window,
+                cx,
+            )
+        });
+    }
+
+    pub(super) fn set_close_allowed(&mut self, allowed: bool, cx: &mut Context<Self>) {
+        if self.close_allowed != allowed {
+            self.close_allowed = allowed;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn has_pending_closes(&self) -> bool {
+        !self.closing_connections.is_empty()
+    }
+
+    pub(super) fn begin_close(&mut self, id: String, cx: &mut Context<Self>) -> bool {
+        let admitted = self.close_allowed && self.closing_connections.insert(id);
+        if admitted {
+            cx.notify();
+        }
+        admitted
+    }
+
+    pub(super) fn finish_connection_close(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.closing_connections.remove(id);
+        cx.notify();
+    }
+
+    pub(super) fn resume_live_display(&mut self, cx: &mut Context<Self>) {
+        self.paused_snapshot = None;
+        cx.notify();
+    }
+
+    fn update_projection(&mut self, cx: &mut Context<Self>) {
+        let mut data = match self
+            .paused_snapshot
+            .as_ref()
+            .or(self.live_snapshot.as_ref())
+        {
+            Some(snapshot) => snapshot.clone(),
             _ => {
-                self.connections.release_presentation();
+                self.release_presentation();
                 return;
             }
         };
-        if self.page != Page::Connections {
+        let Some(runtime_context) = self.runtime_context.clone() else {
             return;
-        }
-        if self.connections.frozen.is_none() {
-            self.connections.timeline.observe(
-                self.core_session.generation(),
+        };
+        if self.paused_snapshot.is_none() {
+            self.timeline.observe(
+                runtime_context.configuration_generation,
                 data.clone(),
                 std::time::Instant::now(),
             );
         }
-        if self.connections.show_closed {
-            data = self.connections.timeline.closed();
+        if self.show_closed {
+            data = self.timeline.closed();
         }
 
-        if self.connections.frozen.is_some()
-            && self
-                .connections
-                .projection
-                .as_ref()
-                .is_some_and(|projection| {
-                    std::sync::Arc::ptr_eq(&projection.snapshot, &data)
-                        && projection.query == self.connections.query
-                        && projection.transport == self.connections.transport
-                        && projection.sort == self.connections.sort
-                })
+        if self.paused_snapshot.is_some()
+            && self.projection.as_ref().is_some_and(|projection| {
+                std::sync::Arc::ptr_eq(&projection.snapshot, &data)
+                    && projection.query == self.query
+                    && projection.transport == self.transport
+                    && projection.sort == self.sort
+            })
         {
             return;
         }
-        let (generation, task) = self.connections.worker.start(
+        let (generation, task) = self.worker.start(
             &self.runtime,
             data,
-            self.connections.query.clone(),
-            self.connections.transport,
-            self.connections.sort,
+            self.query.clone(),
+            self.transport,
+            self.sort,
         );
-        self.connections.projecting = true;
+        self.projecting = true;
+        cx.notify();
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
                 .map_err(|error| error.to_string())
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                if !this.connections.worker.is_current(generation) {
+                if !this.worker.is_current(generation) {
                     return;
                 }
-                this.connections.projecting = false;
+                this.projecting = false;
                 match result {
                     Ok(Some(projection)) => {
-                        this.connections
-                            .history
-                            .observe(this.core_session.generation(), &projection.snapshot);
-                        this.connections.projection = Some(projection);
+                        this.history.observe(
+                            runtime_context.configuration_generation,
+                            &projection.snapshot,
+                        );
+                        this.projection = Some(projection);
                     }
                     Ok(None) => {}
-                    Err(error) => {
-                        this.error = Some(zenclash_i18n::text_with(
+                    Err(error) => cx.emit(ConnectionEvent::PresentationFailed(
+                        zenclash_i18n::text_with(
                             "connections.errors.filter_task",
                             &[("error", error)],
-                        ))
-                    }
+                        ),
+                    )),
                 }
                 cx.notify();
             });
@@ -218,12 +319,12 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> Button {
         Button::new("pause-connections-display")
-            .icon(if self.connections.frozen.is_some() {
+            .icon(if self.paused_snapshot.is_some() {
                 gpui_kit::assets::IconName::Play
             } else {
                 gpui_kit::assets::IconName::Pause
             })
-            .label(zenclash_i18n::text(if self.connections.frozen.is_some() {
+            .label(zenclash_i18n::text(if self.paused_snapshot.is_some() {
                 "common.actions.resume_display"
             } else {
                 "common.actions.pause_display"
@@ -232,26 +333,25 @@ impl RuntimePage {
             .small()
             .h_10()
             .outline()
-            .disabled(self.connections.projection.is_none())
+            .disabled(self.projection.is_none())
             .on_click(cx.listener(|this, _, _, cx| {
-                this.connections.frozen = if this.connections.frozen.is_some() {
+                this.paused_snapshot = if this.paused_snapshot.is_some() {
                     None
                 } else {
-                    this.connections
-                        .projection
+                    this.projection
                         .as_ref()
                         .map(|projection| projection.snapshot.clone())
                 };
-                this.connections.worker.cancel();
-                this.connections.projecting = false;
-                this.update_connection_presentation(cx);
+                this.worker.cancel();
+                this.projecting = false;
+                this.update_projection(cx);
                 cx.notify();
             }))
     }
 
     fn render_connection_options(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let transport = self.connections.transport;
-        let sort = self.connections.sort;
+        let transport = self.transport;
+        let sort = self.sort;
         let sort_owner = cx.entity().downgrade();
         h_flex()
             .gap_2()
@@ -269,9 +369,9 @@ impl RuntimePage {
                             .outline()
                             .selected(value == transport)
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.connections.transport = value;
-                                this.connections.page = 0;
-                                this.update_connection_presentation(cx);
+                                this.transport = value;
+                                this.page_index = 0;
+                                this.update_projection(cx);
                                 cx.notify();
                             }))
                     })),
@@ -291,10 +391,10 @@ impl RuntimePage {
                                 PopupMenuItem::new(zenclash_i18n::text(value.label()))
                                     .checked(value == sort)
                                     .on_click(move |_, _, cx| {
-                                        let _ = owner.update(cx, |page, cx| {
-                                            page.connections.sort = value;
-                                            page.connections.page = 0;
-                                            page.update_connection_presentation(cx);
+                                        let _ = owner.update(cx, |view, cx| {
+                                            view.sort = value;
+                                            view.page_index = 0;
+                                            view.update_projection(cx);
                                             cx.notify();
                                         });
                                     }),
@@ -305,8 +405,18 @@ impl RuntimePage {
             )
     }
 
+    #[cfg(all(test, target_os = "windows"))]
+    pub(super) fn inspect_for_design_validation(
+        &mut self,
+        id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.inspected_connection = id;
+        cx.notify();
+    }
+
     fn toggle_connection_details(&mut self, id: String, cx: &mut Context<Self>) {
-        self.connections.expanded = if self.connections.expanded.as_deref() == Some(id.as_str()) {
+        self.inspected_connection = if self.inspected_connection.as_deref() == Some(id.as_str()) {
             None
         } else {
             Some(id)
@@ -315,9 +425,8 @@ impl RuntimePage {
     }
 
     fn set_connections_page(&mut self, page: usize, cx: &mut Context<Self>) {
-        self.connections.page = page;
-        self.connections
-            .scroll
+        self.page_index = page;
+        self.scroll
             .set_offset(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(0.)));
         cx.notify();
     }
@@ -332,12 +441,13 @@ impl RuntimePage {
             window.focus(&self.focus_handle, cx);
         }
         let owner = cx.entity().downgrade();
-        let generation = self.core_session.generation();
-        let profile = self.profile_path.clone();
+        let Some(runtime) = self.runtime_context.clone() else {
+            return;
+        };
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let owner = owner.clone();
             let id = id.clone();
-            let profile = profile.clone();
+            let runtime = runtime.clone();
             dialog
                 .confirm()
                 .title(zenclash_i18n::text(if id.is_some() {
@@ -349,119 +459,30 @@ impl RuntimePage {
                 .ok_text(zenclash_i18n::text("connections.ui.close_confirm"))
                 .ok_variant(ButtonVariant::Danger)
                 .on_ok(move |_, _, cx| {
-                    let _ = owner.update(cx, |page, cx| {
-                        if page.page != Page::Connections
-                            || page.core_session.generation() != generation
-                            || page.profile_path != profile
-                        {
+                    let _ = owner.update(cx, |view, cx| {
+                        if view.runtime_context.as_ref() != Some(&runtime) || !view.close_allowed {
                             return;
                         }
-                        if let Some(id) = &id {
-                            page.close_connection(id.clone(), cx);
-                        } else {
-                            page.close_all_connections(cx);
-                        }
+                        cx.emit(ConnectionEvent::CloseRequested {
+                            id: id.clone(),
+                            runtime: runtime.clone(),
+                        });
                     });
                     true
                 })
         });
     }
+}
 
-    fn close_all_connections(&mut self, cx: &mut Context<Self>) {
-        if !self.connections.closing.is_empty() {
-            return;
-        }
-        let Some(token) = self.begin_mutation(Page::Connections) else {
-            return;
-        };
-        let client = self.client.clone();
-        let task = self.runtime.spawn(async move {
-            client
-                .close_all_connections()
-                .await
-                .map_err(|error| error.to_string())?;
-            client
-                .connections_snapshot()
-                .await
-                .map(|data| RuntimeData::Connections(std::sync::Arc::new(data)))
-                .map_err(|error| error.to_string())
-        });
-        cx.spawn(async move |this, cx| {
-            let result = match task.await {
-                Ok(result) => result,
-                Err(error) => Err(zenclash_i18n::text_with(
-                    "connections.errors.close_task",
-                    &[("error", error.to_string())],
-                )),
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.finish_mutation(token);
-                match result {
-                    Ok(data) => {
-                        if this.is_page_task_current(token) {
-                            this.connections.frozen = None;
-                        }
-                        if this.replace_page_data(token, data, cx) {
-                            this.notice =
-                                Some(zenclash_i18n::text("connections.notices.closed_all"));
-                        }
-                    }
-                    Err(error) => this.set_page_error(token, error),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn close_connection(&mut self, id: String, cx: &mut Context<Self>) {
-        if self.core_busy() || !self.connections.closing.insert(id.clone()) {
-            return;
-        }
-        self.invalidate_page_load();
-        self.error = None;
-        let token = self.page_task_token_for(Page::Connections);
-        let client = self.client.clone();
-        let id_for_task = id.clone();
-        let task = self.runtime.spawn(async move {
-            client
-                .close_connection(&id_for_task)
-                .await
-                .map_err(|error| error.to_string())
-        });
-        cx.spawn(async move |this, cx| {
-            let result = match task.await {
-                Ok(result) => result,
-                Err(error) => Err(zenclash_i18n::text_with(
-                    "connections.errors.close_task",
-                    &[("error", error.to_string())],
-                )),
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.connections.closing.remove(&id);
-                match result {
-                    Ok(()) if this.is_page_task_current(token) => {
-                        this.connections.frozen = None;
-                        this.refresh(cx);
-                    }
-                    Ok(()) => {}
-                    Err(error) => this.set_page_error(token, error),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    pub(super) fn render_connections(
-        &self,
-        compact: bool,
-        theme: &gpui_kit::component::Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui_kit::AnyElement {
-        self.connection_dashboard(compact, theme, cx)
+impl gpui_kit::Render for ConnectionsView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_kit::component::ActiveTheme;
+        let theme = cx.theme().clone();
+        self.connection_dashboard(
+            window.viewport_size().width < window.rem_size() * 68.,
+            &theme,
+            cx,
+        )
     }
 }
 
@@ -841,3 +862,6 @@ mod history_tests {
         assert_eq!(history.samples.back().unwrap()[1], 120);
     }
 }
+
+#[cfg(test)]
+mod ui_tests;

@@ -1,6 +1,6 @@
 // ZenClash native session safety regression, 2026-10-04. GPL-3.0-only.
 use super::*;
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 async fn native_start(
     session: &ServiceSession,
@@ -16,8 +16,15 @@ async fn native_start(
 #[tokio::test]
 async fn unanswered_and_cancelled_start_keep_native_stop_authority_without_adopting_replacements()
 -> Result<(), Box<dyn std::error::Error>> {
-    let root = std::env::temp_dir().join(format!("zenclash-pending-start-{}", std::process::id()));
-    std::fs::create_dir_all(&root)?;
+    // Local recovery uses a Unix socket below this root; macOS TMPDIR can
+    // already consume most of sockaddr_un's path budget.
+    #[cfg(unix)]
+    let temporary_root = PathBuf::from("/tmp");
+    #[cfg(not(unix))]
+    let temporary_root = std::env::temp_dir();
+    let root = temporary_root.join(format!("zc-pending-{}", std::process::id()));
+    std::fs::create_dir(&root)?;
+    let root = std::fs::canonicalize(root)?;
     // Elevated Windows runners otherwise inherit Administrators as the owner,
     // which native authentication correctly refuses for the caller's SID.
     #[cfg(windows)]
@@ -117,6 +124,36 @@ async fn unanswered_and_cancelled_start_keep_native_stop_authority_without_adopt
         assert!(replacement.owns_status(&after));
         assert!(matches!(session.active_proof(), Err(ServiceCallError::StartUnconfirmed)));
         replacement.stop().await?;
+
+        // The production maintenance entry can prepare both operations after explicit Stop.
+        // Only isolated mock cores run; administrator maintenance is never submitted.
+        for operation in [crate::ServiceOperation::Repair, crate::ServiceOperation::Uninstall] {
+            let profile = root.join("maintenance-source.yaml");
+            std::fs::write(&profile, "mode: rule\ntun: {enable: false}\n")?;
+            let client = crate::MihomoClient::connect_service_with_core(root.clone(), Some(core.clone())).await?;
+            let native = client.service_client().unwrap();
+            let runtime_owner = client.runtime_session().unwrap();
+            runtime_owner.prepare("mode: rule\ntun: {enable: false}\n").await?.apply(true).await?.commit().await?;
+            let core_session = crate::CoreSession::open_with_config(crate::CoreKind::Mihomo, client, Some(profile.clone()), Vec::new())?;
+            let store = crate::ControlledConfigStore::new(root.join("maintenance-controlled"));
+            let capture = crate::TrafficCaptureSession::with_unowned_capture_for_test(&core_session);
+            let manager = crate::ServiceManager::new(core_session.clone(), capture);
+            core_session.maintain(crate::CoreMaintenanceIntent::Stop).await?;
+            assert!(matches!(native.active_proof(), Err(ServiceCallError::NoActiveSession)));
+            assert!(!native.status().await?.is_active);
+            std::fs::remove_file(&profile)?;
+            let fallback = crate::CoreLaunchConfig {
+                kind: crate::CoreKind::Mihomo, binary: core.clone(), config_file: profile, home_dir: root.clone(),
+                endpoint: crate::MihomoEndpoint::local_ipc(&root)?, controller_override: None,
+            };
+            let request = manager.request_maintenance(operation, Some(fallback))?;
+            let prepared = manager.prepare_maintenance(request, &store).await?;
+            assert_eq!(prepared.operation(), operation);
+            assert!(prepared.ready(), "stopped owned resources must permit maintenance preparation");
+            assert_eq!(core_session.runtime_descriptor().backend(), crate::CoreRuntimeBackend::Local);
+            assert_eq!(core_session.snapshot().running, Some(true));
+            core_session.shutdown().await?;
+        }
         Ok::<_, Box<dyn std::error::Error>>(())
     }.await;
     let _ = session.stop().await;

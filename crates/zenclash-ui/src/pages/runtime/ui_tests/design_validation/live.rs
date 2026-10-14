@@ -1,6 +1,7 @@
 //! Opt-in real subscription validation; all generated configuration stays in a temporary directory.
 
 use super::*;
+use zenclash_core::ManagedCoreProcess;
 use zenclash_core::{
     ConnectionPolicy, MihomoEndpoint, ProxyCatalog, ProxyGroupBehavior, ProxyOperations,
 };
@@ -8,11 +9,11 @@ use zenclash_core::{
 pub(super) struct LiveValidation {
     pub(super) catalog: ProxyCatalog,
     pub(super) mode: String,
-    pub(super) pages: Vec<(Page, RuntimeData)>,
+    pub(super) pages: Vec<(Page, PageSnapshotData)>,
     _connections: Vec<std::net::TcpStream>,
 }
 
-pub(super) fn prepare(source: PathBuf) -> (Fixture, LiveValidation, Arc<MihomoProcess>) {
+pub(super) fn prepare(source: PathBuf) -> (Fixture, LiveValidation, Arc<ManagedCoreProcess>) {
     let mut fixture = Fixture::new();
     let binary = PathBuf::from(
         std::env::var_os("ZENCLASH_MIHOMO_BINARY").expect("set ZENCLASH_MIHOMO_BINARY"),
@@ -95,8 +96,8 @@ pub(super) fn prepare(source: PathBuf) -> (Fixture, LiveValidation, Arc<MihomoPr
     fixture.profiles.delete(&previous).unwrap();
     drop(listener);
     drop(controller);
-    let process = MihomoProcess::spawn(
-        MihomoLaunchConfig::new(binary, &generated, home)
+    let process = ManagedCoreProcess::spawn(
+        CoreLaunchConfig::new(binary, &generated, home)
             .unwrap()
             .with_controller_endpoint(endpoint.clone()),
     )
@@ -164,7 +165,8 @@ pub(super) fn prepare(source: PathBuf) -> (Fixture, LiveValidation, Arc<MihomoPr
             "subscription has no strategy groups"
         );
         let selection = catalog.groups().iter().find_map(|group| {
-            if group.behavior != ProxyGroupBehavior::Selector || group.name == "GLOBAL" {
+            if group.behavior != ProxyGroupBehavior::Selector || group.controller_name() == "GLOBAL"
+            {
                 return None;
             }
             successful
@@ -176,7 +178,7 @@ pub(super) fn prepare(source: PathBuf) -> (Fixture, LiveValidation, Arc<MihomoPr
                             .iter()
                             .any(|id| catalog.node(id).is_some_and(|node| &node.name == name))
                 })
-                .map(|(name, _)| (group.name.clone(), name.clone()))
+                .map(|(name, _)| (group.controller_name().to_owned(), name.clone()))
         });
         let switched = if let Some((group, name)) = selection {
             let outcome = ProxyOperations::new(client.clone())
@@ -225,7 +227,7 @@ pub(super) fn prepare(source: PathBuf) -> (Fixture, LiveValidation, Arc<MihomoPr
         ] {
             pages.push((
                 page,
-                loader::load_page(client.clone(), page)
+                load_page(client.clone(), page)
                     .await
                     .unwrap_or_else(|_| panic!("live page load failed")),
             ));
@@ -273,7 +275,7 @@ fn physical_nodes(catalog: &ProxyCatalog) -> Vec<(String, Option<String>)> {
     let groups = catalog
         .groups()
         .iter()
-        .map(|group| group.name.as_str())
+        .map(|group| group.controller_name())
         .collect::<std::collections::HashSet<_>>();
     let mut seen = std::collections::HashSet::new();
     catalog
@@ -310,11 +312,7 @@ fn open_proxy_connections(port: u16) -> (Vec<std::net::TcpStream>, Option<u16>) 
             "GET http://www.gstatic.com/generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\nConnection: close\r\n\r\n".into()
         };
         socket.write_all(text.as_bytes())?;
-        let mut response = [0; 1024];
-        let count = socket.read(&mut response)?;
-        let status = std::str::from_utf8(&response[..count])
-            .ok()
-            .and_then(|response| response.split_whitespace().nth(1)?.parse().ok());
+        let status = zenclash_core::test_support::read_http_status_line_blocking(&mut socket)?;
         Ok((socket, status))
     };
     let status = request("www.gstatic.com", false)

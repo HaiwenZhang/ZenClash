@@ -2,7 +2,7 @@ use zenclash_core::RuntimeConfig;
 
 use super::super::super::{
     Button, ButtonVariants, Context, Disableable, FluentBuilder, Icon, IconName, Input,
-    ParentElement, RemoteProfileRoute, RuntimePage, Sizable, Styled, div, h_flex, px, v_flex,
+    ParentElement, RemoteProfileRoute, RuntimePage, Sizable, Styled, div, h_flex, v_flex,
 };
 
 use crate::components::mint_switch::MintSwitch as Switch;
@@ -34,7 +34,9 @@ impl RuntimePage {
                                 .cleanable(true),
                             theme,
                         )
-                        .w(px(220.)),
+                        .id("subscription-user-agent-field")
+                        .test_support()
+                        .w(gpui_kit::rems(13.75)),
                     ),
             )
             .child(subscription_input(
@@ -106,7 +108,7 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
         v_flex()
-            .w(px(220.))
+            .w(gpui_kit::rems(13.75))
             .gap_2()
             .child(
                 h_flex()
@@ -170,7 +172,7 @@ impl RuntimePage {
                             )
                             .child(
                                 div()
-                                    .text_size(px(10.))
+                                    .text_size(gpui_kit::rems(0.625))
                                     .text_color(theme.muted_foreground)
                                     .child(zenclash_i18n::text(
                                         "profiles.form.fallback_description",
@@ -238,8 +240,8 @@ impl RuntimePage {
             })
     }
     fn render_profile_statistics(&self, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
-        let (proxies, groups, rules) = match &self.data {
-            super::super::super::RuntimeData::Profile {
+        let (proxies, groups, rules) = match self.page_observation.data() {
+            super::super::super::PageSnapshotData::Profile {
                 proxy_count,
                 group_count,
                 rule_count,
@@ -344,7 +346,7 @@ pub(super) fn configuration_edit_button(
             this.tooltip(zenclash_i18n::text("profiles.actions.activate_first"))
         })
         .on_click(|_, window, cx| {
-            crate::components::sidebar::dispatch_navigate(crate::pages::Page::Override, window, cx);
+            crate::app::navigation::dispatch_navigate(crate::pages::Page::Override, window, cx);
         })
 }
 
@@ -414,7 +416,7 @@ mod tests {
     use super::*;
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt;
-    use gpui_kit::{AppContext, IntoElement, Render, TestAppContext, Window, size};
+    use gpui_kit::{AppContext, IntoElement, Render, TestAppContext, Window, px, size};
     use std::{cell::Cell, rc::Rc};
 
     struct ConfigurationEditorEntries;

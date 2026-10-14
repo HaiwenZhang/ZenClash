@@ -427,8 +427,8 @@ fn io_error(_: std::io::Error) -> MihomoError {
 mod tests {
     use super::*;
 
-    fn home() -> super::super::tests::TestHome {
-        super::super::tests::TestHome::new()
+    fn home() -> super::super::test_support::TestHome {
+        super::super::test_support::TestHome::new()
     }
 
     #[tokio::test]

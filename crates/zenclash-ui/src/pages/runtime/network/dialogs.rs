@@ -1,4 +1,5 @@
 use super::*;
+use gpui_kit::StatefulInteractiveElement;
 use gpui_kit::component::{ActiveTheme, WindowExt};
 
 impl RuntimePage {
@@ -62,8 +63,10 @@ impl RuntimePage {
                         .outline()
                         .label(zenclash_i18n::text("common.actions.retry"))
                         .tooltip(zenclash_i18n::text("redesign.recheck_all"))
-                        .disabled(self.network_probe.loading || self.core_busy())
-                        .on_click(cx.listener(|this, _, _, cx| this.refresh_network_probe(cx))),
+                        .disabled(self.network_diagnostics.query.is_loading() || self.core_busy())
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.refresh_network_diagnostics(cx)),
+                        ),
                 )
             })
             .child(
@@ -96,7 +99,7 @@ impl RuntimePage {
                 .width(window.rem_size() * 34.)
                 .margin_top(
                     ((window.viewport_size().height - window.rem_size() * 28.) / 2.)
-                        .max(gpui_kit::px(16.)),
+                        .max(window.rem_size()),
                 )
                 .when_some(content, |dialog, content| dialog.child(content))
         });
@@ -109,9 +112,9 @@ impl RuntimePage {
     ) -> gpui_kit::AnyElement {
         let theme = cx.theme().clone();
         let Some(step) = self
-            .network_probe
-            .report
-            .as_ref()
+            .network_diagnostics
+            .query
+            .report()
             .and_then(|report| report.step(kind))
         else {
             return div()
@@ -140,11 +143,19 @@ impl RuntimePage {
             .when(
                 matches!(kind, DiagnosticStepKind::DnsA | DiagnosticStepKind::DnsAaaa),
                 |view| {
-                    view.child(info_row(
-                        zenclash_i18n::text("network.diagnostics.dns_name"),
-                        self.network_probe.dns_name.read(cx).value(),
-                        &theme,
-                    ))
+                    let dns_name = self.network_diagnostics.query.dns_name().unwrap_or("—");
+                    view.child(
+                        info_row(
+                            zenclash_i18n::text("network.diagnostics.dns_name"),
+                            dns_name,
+                            &theme,
+                        )
+                        .id("diagnostic-dns-name")
+                        .role(gpui_kit::Role::Label)
+                        .aria_label(zenclash_i18n::text("network.diagnostics.dns_name"))
+                        .aria_value(dns_name.to_owned())
+                        .test_support(),
+                    )
                 },
             )
             .child(info_row(
@@ -183,10 +194,12 @@ impl RuntimePage {
                         Button::new("retry-diagnostic-result")
                             .primary()
                             .label(zenclash_i18n::text("network.latency.retest"))
-                            .disabled(self.network_probe.loading || self.core_busy())
+                            .disabled(
+                                self.network_diagnostics.query.is_loading() || self.core_busy(),
+                            )
                             .on_click(cx.listener(|this, _, window, cx| {
                                 window.close_dialog(cx);
-                                this.refresh_network_probe(cx);
+                                this.refresh_network_diagnostics(cx);
                             })),
                     ),
             )
@@ -199,9 +212,16 @@ impl RuntimePage {
             let content = owner
                 .update(cx, |page, cx| {
                     let theme = cx.theme().clone();
-                    let snapshot = page.network_probe.snapshot.clone().unwrap_or_default();
-                    let (config, system) = match &page.data {
-                        RuntimeData::Network { config, system } => (config.clone(), system.clone()),
+                    let snapshot = page
+                        .network_diagnostics
+                        .query
+                        .snapshot()
+                        .cloned()
+                        .unwrap_or_default();
+                    let (config, system) = match page.page_observation.data() {
+                        PageSnapshotData::Network { config, system } => {
+                            (config.clone(), system.clone())
+                        }
                         _ => (RuntimeConfig::default(), SystemNetworkSnapshot::default()),
                     };
                     v_flex()
@@ -211,7 +231,7 @@ impl RuntimePage {
                                 .text_sm()
                                 .child(zenclash_i18n::text("network.diagnostics.dns_name")),
                         )
-                        .child(Input::new(&page.network_probe.dns_name))
+                        .child(Input::new(&page.network_diagnostics.dns_name))
                         .child(page.render_public_ip_card(&snapshot, true, &theme, cx))
                         .child(page.render_system_network_card(&config, &system, true, &theme, cx))
                         .into_any_element()
@@ -234,9 +254,9 @@ impl RuntimePage {
     ) {
         let owner = cx.entity().downgrade();
         let route = self
-            .network_probe
-            .snapshot
-            .as_ref()
+            .network_diagnostics
+            .query
+            .snapshot()
             .map(|snapshot| snapshot.route.clone())
             .unwrap_or_default();
         window.open_dialog(cx, move |dialog, window, cx| {
@@ -255,7 +275,7 @@ impl RuntimePage {
                 .width(window.rem_size() * 32.)
                 .margin_top(
                     ((window.viewport_size().height - window.rem_size() * 24.) / 2.)
-                        .max(gpui_kit::px(16.)),
+                        .max(window.rem_size()),
                 )
                 .child(
                     v_flex()
@@ -285,7 +305,7 @@ impl RuntimePage {
                                         .on_click(move |_, window, cx| {
                                             window.close_dialog(cx);
                                             let _ = owner.update(cx, |page, cx| {
-                                                page.refresh_network_probe(cx)
+                                                page.refresh_network_diagnostics(cx)
                                             });
                                         }),
                                 ),
@@ -336,7 +356,7 @@ impl RuntimePage {
     pub(super) fn open_network_target(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.error = None;
         window.focus(&self.focus_handle, cx);
-        self.network_probe.adding_target = true;
+        self.network_diagnostics.adding_target = true;
         let owner = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, window, cx| {
             let content = owner
@@ -349,7 +369,7 @@ impl RuntimePage {
                 .width(window.rem_size() * 32.)
                 .margin_top(
                     ((window.viewport_size().height - window.rem_size() * 24.) / 2.)
-                        .max(gpui_kit::px(16.)),
+                        .max(window.rem_size()),
                 )
                 .when_some(content, |dialog, content| dialog.child(content))
                 .on_cancel(move |_, _, cx| {
@@ -360,14 +380,14 @@ impl RuntimePage {
                             {
                                 return false;
                             }
-                            page.network_probe.adding_target = false;
+                            page.network_diagnostics.adding_target = false;
                             true
                         })
                         .unwrap_or(true)
                 })
         });
         use gpui_kit::Focusable;
-        self.network_probe
+        self.network_diagnostics
             .latency_name
             .read(cx)
             .focus_handle(cx)
@@ -384,13 +404,13 @@ impl RuntimePage {
                     .text_sm()
                     .child(zenclash_i18n::text("network.latency.target_name")),
             )
-            .child(Input::new(&self.network_probe.latency_name).disabled(busy))
+            .child(Input::new(&self.network_diagnostics.latency_name).disabled(busy))
             .child(
                 div()
                     .text_sm()
                     .child(zenclash_i18n::text("network.latency.target_url")),
             )
-            .child(Input::new(&self.network_probe.latency_url).disabled(busy))
+            .child(Input::new(&self.network_diagnostics.latency_url).disabled(busy))
             .when_some(self.error.clone(), |view, error| {
                 view.child(div().text_sm().text_color(cx.theme().danger).child(error))
             })
@@ -404,7 +424,7 @@ impl RuntimePage {
                             .label(zenclash_i18n::text("common.actions.cancel"))
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.network_probe.adding_target = false;
+                                this.network_diagnostics.adding_target = false;
                                 window.close_dialog(cx);
                                 this.restore_page_focus(crate::pages::Page::Network, cx);
                             })),
@@ -427,7 +447,9 @@ impl RuntimePage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pages::runtime::ui_tests::{Fixture, open};
+    use crate::pages::runtime::test_support::{
+        RuntimePageFixture as Fixture, open_runtime_page_window as open,
+    };
     use gpui_kit::test::TestWindowExt;
 
     #[gpui_kit::test]
@@ -440,12 +462,16 @@ mod tests {
         cx.update_window(window, |_, window, cx| {
             page.update(cx, |page, cx| {
                 page.open_network_target(window, cx);
-                page.network_probe.latency_name.update(cx, |input, cx| {
-                    input.set_value("Invalid target", window, cx)
-                });
-                page.network_probe.latency_url.update(cx, |input, cx| {
-                    input.set_value("file:///invalid", window, cx)
-                });
+                page.network_diagnostics
+                    .latency_name
+                    .update(cx, |input, cx| {
+                        input.set_value("Invalid target", window, cx)
+                    });
+                page.network_diagnostics
+                    .latency_url
+                    .update(cx, |input, cx| {
+                        input.set_value("file:///invalid", window, cx)
+                    });
             });
             window.render_frame(cx);
             window.render_frame(cx);
@@ -474,12 +500,12 @@ mod tests {
             window.render_frame(cx);
             window.render_frame(cx);
             assert_eq!(
-                page.read(cx).network_probe.cache_confirmation,
+                page.read(cx).network_diagnostics.cache_confirmation,
                 Some(DnsCacheAction::FakeIp)
             );
             window.press("escape", cx);
             assert!(!window.has_active_dialog(cx));
-            assert_eq!(page.read(cx).network_probe.cache_confirmation, None);
+            assert_eq!(page.read(cx).network_diagnostics.cache_confirmation, None);
             assert!(!page.read(cx).core_busy());
             window.remove_window();
         })

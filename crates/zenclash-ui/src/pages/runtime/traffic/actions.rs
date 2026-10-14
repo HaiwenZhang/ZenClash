@@ -1,80 +1,32 @@
-use zenclash_core::{TrafficDimension, TrafficHistoryQuery, TrafficOverview};
+use zenclash_core::TrafficDimension;
 
-use super::{TrafficHistoryPayload, TrafficRange, unix_millis};
+use super::TrafficRange;
 use crate::pages::runtime::{Context, Page, RuntimePage};
 
 impl RuntimePage {
     pub(in crate::pages::runtime) fn refresh_traffic_history(&mut self, cx: &mut Context<Self>) {
         if self.page != Page::Traffic
             || !self.live_updates_enabled()
-            || self.traffic_history.loading
+            || self.traffic_history.is_loading()
         {
             return;
         }
-        let Some(store) = self.traffic_history_store.clone() else {
-            self.error = Some(zenclash_i18n::text("traffic.errors.database_open"));
-            cx.notify();
-            return;
-        };
-        let query = self.traffic_history_query();
-        let selected_parent = self.traffic_history.selected_parent.clone();
-        let selected_detail = self.traffic_history.selected_detail.clone();
         let token = self.page_task_token_for(Page::Traffic);
-        let request = self.traffic_history.begin_query();
-        let query_gate = self.traffic_history.query_gate.clone();
-        let task = self.runtime.spawn(async move {
-            let permit = query_gate.lock_owned().await;
-            tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                let overview = store.overview(&query).map_err(|error| error.to_string())?;
-                let details = selected_parent.as_deref().map_or_else(
-                    || Ok(Vec::new()),
-                    |parent| {
-                        store
-                            .details(&query, parent)
-                            .map_err(|error| error.to_string())
-                    },
-                )?;
-                let proxy_stats = selected_parent
-                    .as_deref()
-                    .zip(selected_detail.as_deref())
-                    .map_or_else(
-                        || Ok(Vec::new()),
-                        |(parent, detail)| {
-                            store
-                                .proxy_stats(&query, parent, detail)
-                                .map_err(|error| error.to_string())
-                        },
-                    )?;
-                Ok::<_, String>(TrafficHistoryPayload {
-                    overview,
-                    details,
-                    proxy_stats,
-                })
-            })
-            .await
-            .map_err(|error| {
-                zenclash_i18n::text_with(
-                    "traffic.errors.query_task",
-                    &[("error", error.to_string())],
-                )
-            })?
-        });
-        self.traffic_history.task.replace(&task);
+        let read = match self.traffic_history.start_read() {
+            Ok(read) => read,
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
         cx.spawn(async move |this, cx| {
-            let result = task
-                .await
-                .map_err(|error| {
-                    zenclash_i18n::text_with("traffic.errors.task", &[("error", error.to_string())])
-                })
-                .and_then(|result| result);
+            let completion = read.finish().await;
             let _ = this.update(cx, |this, cx| {
                 if !this.is_page_task_current(token) || !this.live_updates_enabled() {
                     return;
                 }
-                let refresh_again =
-                    this.traffic_history
-                        .complete_query(request, result, unix_millis());
+                let refresh_again = this.traffic_history.complete_read(completion);
                 if refresh_again {
                     this.refresh_traffic_history(cx);
                 }
@@ -85,23 +37,10 @@ impl RuntimePage {
         cx.notify();
     }
 
-    fn traffic_history_query(&self) -> TrafficHistoryQuery {
-        let end_ms = unix_millis();
-        let duration = self.traffic_history.range.duration_ms();
-        TrafficHistoryQuery {
-            dimension: self.traffic_history.dimension,
-            start_ms: end_ms.saturating_sub(duration.saturating_sub(1)),
-            end_ms,
-            bucket_ms: self.traffic_history.range.bucket_ms(),
-        }
-    }
-
     pub(super) fn set_traffic_range(&mut self, range: TrafficRange, cx: &mut Context<Self>) {
-        if self.traffic_history.range != range {
-            self.traffic_history.range = range;
-            self.traffic_history.revision = self.traffic_history.revision.wrapping_add(1);
-            self.reset_traffic_drill_down();
+        if self.traffic_history.change_range(range) {
             self.refresh_traffic_history(cx);
+            cx.notify();
         }
     }
 
@@ -110,44 +49,33 @@ impl RuntimePage {
         dimension: TrafficDimension,
         cx: &mut Context<Self>,
     ) {
-        if self.traffic_history.dimension != dimension {
-            self.traffic_history.dimension = dimension;
-            self.traffic_history.revision = self.traffic_history.revision.wrapping_add(1);
-            self.reset_traffic_drill_down();
+        if self.traffic_history.change_dimension(dimension) {
             self.refresh_traffic_history(cx);
+            cx.notify();
         }
     }
 
     pub(super) fn select_traffic_parent(&mut self, label: String, cx: &mut Context<Self>) {
-        self.traffic_history.selected_parent = Some(label);
-        self.traffic_history.revision = self.traffic_history.revision.wrapping_add(1);
-        self.traffic_history.selected_detail = None;
-        self.traffic_history.details.clear();
-        self.traffic_history.proxy_stats.clear();
-        self.refresh_traffic_history(cx);
+        if self.traffic_history.select_parent(label) {
+            self.refresh_traffic_history(cx);
+            cx.notify();
+        }
     }
 
     pub(super) fn select_traffic_detail(&mut self, label: String, cx: &mut Context<Self>) {
-        self.traffic_history.selected_detail = Some(label);
-        self.traffic_history.revision = self.traffic_history.revision.wrapping_add(1);
-        self.traffic_history.proxy_stats.clear();
-        self.refresh_traffic_history(cx);
-    }
-
-    fn reset_traffic_drill_down(&mut self) {
-        self.traffic_history.selected_parent = None;
-        self.traffic_history.selected_detail = None;
-        self.traffic_history.details.clear();
-        self.traffic_history.proxy_stats.clear();
+        if self.traffic_history.select_detail(label) {
+            self.refresh_traffic_history(cx);
+            cx.notify();
+        }
     }
 
     pub(super) fn request_clear_traffic_history(&mut self, cx: &mut Context<Self>) {
-        self.traffic_history.clear_confirmation = true;
+        self.traffic_history.request_clear_confirmation();
         cx.notify();
     }
 
     pub(super) fn cancel_clear_traffic_history(&mut self, cx: &mut Context<Self>) {
-        self.traffic_history.clear_confirmation = false;
+        self.traffic_history.cancel_clear_confirmation();
         cx.notify();
     }
 
@@ -155,10 +83,13 @@ impl RuntimePage {
         if !matches!(self.page, Page::Traffic | Page::Settings) {
             return;
         }
-        let Some(store) = self.traffic_history_store.clone() else {
-            self.error = Some(zenclash_i18n::text("traffic.errors.database_unavailable"));
-            cx.notify();
-            return;
+        let clear = match self.traffic_history.prepare_clear() {
+            Ok(clear) => clear,
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+                return;
+            }
         };
         let Some(token) = self.begin_scoped_mutation(
             self.page,
@@ -166,18 +97,8 @@ impl RuntimePage {
         ) else {
             return;
         };
-        self.traffic_history.cancel_query();
-        self.traffic_history.revision = self.traffic_history.revision.wrapping_add(1);
-        let task = self.runtime.spawn(async move {
-            tokio::task::spawn_blocking(move || store.clear().map_err(|error| error.to_string()))
-                .await
-                .map_err(|error| {
-                    zenclash_i18n::text_with(
-                        "traffic.errors.clear_task",
-                        &[("error", error.to_string())],
-                    )
-                })?
-        });
+        self.traffic_history.invalidate_for_clear();
+        let task = clear.start();
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
@@ -190,12 +111,9 @@ impl RuntimePage {
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.finish_mutation(token);
-                this.traffic_history.clear_confirmation = false;
+                this.traffic_history.complete_clear(&result);
                 match result {
                     Ok(()) => {
-                        this.traffic_history.cancel_query();
-                        this.traffic_history.overview = TrafficOverview::default();
-                        this.reset_traffic_drill_down();
                         if this.is_page_task_current(token) {
                             this.notice = Some(zenclash_i18n::text("traffic.notices.cleared"));
                         }

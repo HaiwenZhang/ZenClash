@@ -3,7 +3,13 @@ use std::{
     ptr::{self, NonNull},
 };
 
-use super::super::SystemProxyStatus;
+use super::super::{
+    SystemProxyStatus,
+    native::{
+        NativeProxyChange, NativeProxySnapshot, NativeProxyTarget, NativeWriteAttempt,
+        invalid_snapshot, ownership_changed, verification_failure,
+    },
+};
 use crate::{MihomoError, MihomoResult};
 
 type CfRef = *const c_void;
@@ -31,6 +37,36 @@ unsafe extern "C" {
     static kCFTypeDictionaryValueCallBacks: ValueCallbacks;
     static kCFTypeArrayCallBacks: ValueCallbacks;
     fn CFRelease(value: CfRef);
+    fn CFEqual(left: CfRef, right: CfRef) -> u8;
+    fn CFGetTypeID(value: CfRef) -> usize;
+    fn CFErrorGetDomain(error: CfRef) -> CfRef;
+    fn CFErrorGetCode(error: CfRef) -> isize;
+    fn CFDictionaryGetTypeID() -> usize;
+    fn CFStringGetTypeID() -> usize;
+    fn CFNumberGetTypeID() -> usize;
+    fn CFBooleanGetTypeID() -> usize;
+    fn CFBooleanGetValue(value: CfRef) -> u8;
+    fn CFArrayGetTypeID() -> usize;
+    fn CFStringGetLength(value: CfRef) -> isize;
+    fn CFStringGetMaximumSizeForEncoding(length: isize, encoding: u32) -> isize;
+    fn CFStringGetCString(value: CfRef, buffer: *mut i8, capacity: isize, encoding: u32) -> u8;
+    fn CFDataCreate(allocator: CfRef, bytes: *const u8, count: isize) -> CfRef;
+    fn CFDataGetLength(data: CfRef) -> isize;
+    fn CFDataGetBytePtr(data: CfRef) -> *const u8;
+    fn CFPropertyListCreateData(
+        allocator: CfRef,
+        value: CfRef,
+        format: isize,
+        options: usize,
+        error: *mut CfRef,
+    ) -> CfRef;
+    fn CFPropertyListCreateWithData(
+        allocator: CfRef,
+        data: CfRef,
+        options: usize,
+        format: *mut isize,
+        error: *mut CfRef,
+    ) -> CfRef;
     fn CFStringCreateWithBytes(
         allocator: CfRef,
         bytes: *const u8,
@@ -39,6 +75,9 @@ unsafe extern "C" {
         external: u8,
     ) -> CfRef;
     fn CFStringCompare(left: CfRef, right: CfRef, options: usize) -> isize;
+    fn CFNumberIsFloatType(value: CfRef) -> u8;
+    fn CFDictionaryGetCount(dictionary: CfRef) -> isize;
+    fn CFDictionaryGetKeysAndValues(dictionary: CfRef, keys: *mut CfRef, values: *mut CfRef);
     fn CFNumberCreate(allocator: CfRef, kind: isize, value: CfRef) -> CfRef;
     fn CFArrayCreate(
         allocator: CfRef,
@@ -60,9 +99,7 @@ unsafe extern "C" {
         dictionary: CfRef,
     ) -> *mut c_void;
     fn CFDictionarySetValue(dictionary: *mut c_void, key: CfRef, value: CfRef);
-    #[cfg(test)]
     fn CFDictionaryGetValue(dictionary: CfRef, key: CfRef) -> CfRef;
-    #[cfg(test)]
     fn CFNumberGetValue(number: CfRef, kind: isize, output: *mut c_void) -> u8;
 }
 
@@ -70,6 +107,7 @@ unsafe extern "C" {
 unsafe extern "C" {
     static kSCNetworkProtocolTypeProxies: CfRef;
     fn SCError() -> i32;
+    fn SCPreferencesCreate(allocator: CfRef, name: CfRef, identifier: CfRef) -> CfRef;
     fn SCPreferencesCreateWithAuthorization(
         allocator: CfRef,
         name: CfRef,
@@ -82,6 +120,7 @@ unsafe extern "C" {
     fn SCPreferencesApplyChanges(preferences: CfRef) -> u8;
     fn SCNetworkServiceCopyAll(preferences: CfRef) -> CfRef;
     fn SCNetworkServiceGetName(service: CfRef) -> CfRef;
+    fn SCNetworkServiceGetServiceID(service: CfRef) -> CfRef;
     fn SCNetworkServiceCopyProtocol(service: CfRef, kind: CfRef) -> CfRef;
     fn SCNetworkProtocolGetConfiguration(protocol: CfRef) -> CfRef;
     fn SCNetworkProtocolSetConfiguration(protocol: CfRef, config: CfRef) -> u8;
@@ -113,7 +152,13 @@ impl Authorization {
         }
         NonNull::new(authorization.cast_mut())
             .map(Self)
-            .ok_or_else(|| operation_error("AuthorizationCreate", -60002))
+            .ok_or_else(|| {
+                crate::SystemProxyError::NativeOperationRejected {
+                    backend: crate::SystemProxyBackendKind::MacOs,
+                    operation: "AuthorizationCreate",
+                }
+                .into()
+            })
     }
 }
 
@@ -132,10 +177,18 @@ struct OwnedCf(NonNull<c_void>);
 impl OwnedCf {
     // SAFETY: A non-null pointer must be a valid +1 Create/Copy result. This
     // function consumes that reference; borrowed Get results must not enter it.
-    unsafe fn created(pointer: CfRef, operation: &str) -> MihomoResult<Self> {
-        NonNull::new(pointer.cast_mut())
-            .map(Self)
-            .ok_or_else(|| native_error(operation))
+    unsafe fn created(pointer: CfRef, operation: &'static str) -> MihomoResult<Self> {
+        NonNull::new(pointer.cast_mut()).map(Self).ok_or_else(|| {
+            if operation.starts_with("CF") {
+                crate::SystemProxyError::NativeOperationRejected {
+                    backend: crate::SystemProxyBackendKind::MacOs,
+                    operation,
+                }
+                .into()
+            } else {
+                native_error(operation)
+            }
+        })
     }
 
     fn string(value: &str) -> MihomoResult<Self> {
@@ -194,16 +247,18 @@ impl Drop for PreferencesLock<'_> {
     }
 }
 
-fn native_error(operation: &str) -> MihomoError {
+fn native_error(operation: &'static str) -> MihomoError {
     // SAFETY: SCError has no arguments or borrowed object lifetime.
     operation_error(operation, unsafe { SCError() })
 }
 
-fn operation_error(operation: &str, code: i32) -> MihomoError {
-    MihomoError::Process(zenclash_i18n::text_with(
-        "system_proxy.errors.snapshot_native",
-        &[("operation", operation.into()), ("error", code.to_string())],
-    ))
+fn operation_error(operation: &'static str, code: i32) -> MihomoError {
+    crate::SystemProxyError::Platform {
+        backend: crate::SystemProxyBackendKind::MacOs,
+        operation,
+        code: i64::from(code),
+    }
+    .into()
 }
 
 fn unique_service_index(matches: impl Iterator<Item = bool>) -> MihomoResult<usize> {
@@ -212,73 +267,450 @@ fn unique_service_index(matches: impl Iterator<Item = bool>) -> MihomoResult<usi
         .filter_map(|(index, matched)| matched.then_some(index));
     match (indices.next(), indices.next()) {
         (Some(index), None) => Ok(index),
-        _ => Err(MihomoError::Process(zenclash_i18n::text(
-            "system_proxy.errors.snapshot_service",
-        ))),
+        _ => Err(crate::SystemProxyError::BackendUnavailable {
+            backend: crate::SystemProxyBackendKind::MacOs,
+            reason: crate::SystemProxyBackendUnavailable::AmbiguousService,
+        }
+        .into()),
     }
 }
 
-// SAFETY: Current must be null or a valid borrowed CFDictionary with retaining
-// CFType callbacks, live throughout this synchronous copying call.
-unsafe fn snapshot_dictionary(
-    current: CfRef,
-    previous: &SystemProxyStatus,
-) -> MihomoResult<OwnedCf> {
-    // SAFETY: A non-null current dictionary is borrowed from a live protocol;
-    // empty configuration uses the SDK's retaining CFType callbacks instead.
-    let pointer = unsafe {
-        if current.is_null() {
-            CFDictionaryCreateMutable(
-                ptr::null(),
-                0,
-                &raw const kCFTypeDictionaryKeyCallBacks,
-                &raw const kCFTypeDictionaryValueCallBacks,
-            )
-        } else {
-            CFDictionaryCreateMutableCopy(ptr::null(), 0, current)
+const MAX_NATIVE_CONFIGURATION_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone)]
+pub(in crate::system_proxy) struct ProxySnapshot {
+    service_id: String,
+    summary: SystemProxyStatus,
+    configuration: Option<std::sync::Arc<[u8]>>,
+}
+
+impl ProxySnapshot {
+    pub(in crate::system_proxy) fn same_target(&self, other: &Self) -> bool {
+        self.service_id == other.service_id
+    }
+    pub(in crate::system_proxy) fn legacy_release_is_safe(&self) -> bool {
+        true
+    }
+    pub(in crate::system_proxy) fn summary(&self) -> &SystemProxyStatus {
+        &self.summary
+    }
+
+    pub(in crate::system_proxy) fn same_state(&self, other: &Self) -> MihomoResult<bool> {
+        if self.service_id != other.service_id {
+            return Ok(false);
         }
+        configurations_equal(
+            self.configuration.as_deref(),
+            other.configuration.as_deref(),
+        )
+    }
+}
+
+struct PreferenceSession {
+    preferences: OwnedCf,
+    _authorization: Option<Authorization>,
+}
+
+impl PreferenceSession {
+    fn open(writing: bool) -> MihomoResult<Self> {
+        let name = OwnedCf::string("ZenClash native proxy transaction")?;
+        let authorization = writing.then(Authorization::create).transpose()?;
+        // SAFETY: The name and optional authorization remain alive; null ID/allocator
+        // select the system network preferences. Read sessions request no rights.
+        let pointer = unsafe {
+            if let Some(authorization) = &authorization {
+                SCPreferencesCreateWithAuthorization(
+                    ptr::null(),
+                    name.pointer(),
+                    ptr::null(),
+                    authorization.0.as_ptr(),
+                )
+            } else {
+                SCPreferencesCreate(ptr::null(), name.pointer(), ptr::null())
+            }
+        };
+        // SAFETY: Create returns a +1 object or null; it is owned by this session.
+        let operation = if authorization.is_some() {
+            "SCPreferencesCreateWithAuthorization"
+        } else {
+            "SCPreferencesCreate"
+        };
+        let preferences = unsafe { OwnedCf::created(pointer, operation) }?;
+        Ok(Self {
+            preferences,
+            _authorization: authorization,
+        })
+    }
+
+    fn select(&self, expected: &str, by_id: bool) -> MihomoResult<SelectedProtocol> {
+        // SAFETY: Copy returns an owned array from a live preferences session.
+        let services = unsafe {
+            OwnedCf::created(
+                SCNetworkServiceCopyAll(self.preferences.pointer()),
+                "SCNetworkServiceCopyAll",
+            )
+        }?;
+        let expected = OwnedCf::string(expected)?;
+        // SAFETY: The retained array contains network services. Get results remain
+        // borrowed until the array is released; every index is bounded by count.
+        let count = unsafe { CFArrayGetCount(services.pointer()) };
+        let index = unique_service_index((0..count).map(|index| unsafe {
+            let service = CFArrayGetValueAtIndex(services.pointer(), index);
+            let identity = if by_id {
+                SCNetworkServiceGetServiceID(service)
+            } else {
+                SCNetworkServiceGetName(service)
+            };
+            !identity.is_null() && CFStringCompare(identity, expected.pointer(), 0) == 0
+        }))?;
+        // SAFETY: The selected index was bounded and unique. Copy retains its
+        // protocol independently of the services array; Get strings are copied.
+        unsafe {
+            let service = CFArrayGetValueAtIndex(services.pointer(), index as isize);
+            Ok(SelectedProtocol {
+                id: read_cf_string(SCNetworkServiceGetServiceID(service))?,
+                name: read_cf_string(SCNetworkServiceGetName(service))?,
+                protocol: OwnedCf::created(
+                    SCNetworkServiceCopyProtocol(service, kSCNetworkProtocolTypeProxies),
+                    "SCNetworkServiceCopyProtocol",
+                )?,
+            })
+        }
+    }
+}
+
+struct SelectedProtocol {
+    id: String,
+    name: String,
+    protocol: OwnedCf,
+}
+
+impl SelectedProtocol {
+    fn capture(&self) -> MihomoResult<ProxySnapshot> {
+        // SAFETY: The configuration is borrowed from this live protocol and is
+        // serialized synchronously before that owner can be released.
+        let configuration = unsafe {
+            encode_configuration(SCNetworkProtocolGetConfiguration(self.protocol.pointer()))
+        }?;
+        let summary = summary_from_configuration(&self.name, configuration.as_deref())?;
+        Ok(ProxySnapshot {
+            service_id: self.id.clone(),
+            summary,
+            configuration,
+        })
+    }
+}
+
+pub(in crate::system_proxy) fn capture(
+    target: NativeProxyTarget<'_>,
+) -> MihomoResult<NativeProxySnapshot> {
+    let session = PreferenceSession::open(false)?;
+    let selected = match target {
+        NativeProxyTarget::Service(name) => session.select(name, false)?,
+        NativeProxyTarget::Captured(NativeProxySnapshot::Platform(snapshot)) => {
+            session.select(&snapshot.service_id, true)?
+        }
+        #[cfg(test)]
+        NativeProxyTarget::Captured(_) => return Err(ownership_changed()),
     };
-    // SAFETY: The pointer is null or the +1 mutable Create/Copy result above.
-    let dictionary = unsafe { OwnedCf::created(pointer, "CFDictionaryCreateMutableCopy") }?;
-    for (key, value) in [
-        ("HTTPEnable", i32::from(previous.enabled)),
-        ("HTTPPort", i32::from(previous.port)),
-        ("HTTPSEnable", i32::from(previous.secure_enabled)),
-        ("HTTPSPort", i32::from(previous.secure_port)),
-        ("ProxyAutoConfigEnable", i32::from(previous.auto_enabled)),
-    ] {
-        let key = OwnedCf::string(key)?;
-        let value = OwnedCf::number(value)?;
-        // SAFETY: Mutable copy and CFType callbacks retain both live objects.
-        unsafe { CFDictionarySetValue(dictionary.0.as_ptr(), key.pointer(), value.pointer()) };
+    Ok(NativeProxySnapshot::Platform(selected.capture()?))
+}
+
+pub(in crate::system_proxy) fn apply(
+    expected: &NativeProxySnapshot,
+    change: &NativeProxyChange<'_>,
+) -> NativeWriteAttempt {
+    write_configuration(expected, |before| before.with_change(change))
+}
+
+impl ProxySnapshot {
+    fn with_change(&self, change: &NativeProxyChange<'_>) -> MihomoResult<Self> {
+        let dictionary = editable_configuration(self.configuration.as_deref())?;
+        match change {
+            NativeProxyChange::Disable => set_flags(&dictionary, false, false, false)?,
+            NativeProxyChange::Pac { url } => {
+                set_flags(&dictionary, false, false, true)?;
+                set_string(&dictionary, "ProxyAutoConfigURLString", url)?;
+            }
+            NativeProxyChange::Manual { host, port, bypass } => {
+                set_flags(&dictionary, true, true, false)?;
+                set_string(&dictionary, "HTTPProxy", host)?;
+                set_string(&dictionary, "HTTPSProxy", host)?;
+                set_number(&dictionary, "HTTPPort", i32::from(*port))?;
+                set_number(&dictionary, "HTTPSPort", i32::from(*port))?;
+                set_bypass(&dictionary, bypass)?;
+            }
+        }
+        // SAFETY: This owned dictionary has retaining CFType callbacks.
+        let configuration = unsafe { encode_configuration(dictionary.pointer()) }?;
+        Ok(ProxySnapshot {
+            service_id: self.service_id.clone(),
+            summary: summary_from_configuration(&self.summary.service, configuration.as_deref())?,
+            configuration,
+        })
     }
-    for (key, value) in [
-        ("HTTPProxy", previous.server.as_str()),
-        ("HTTPSProxy", previous.secure_server.as_str()),
-        ("ProxyAutoConfigURLString", previous.auto_url.as_str()),
-    ] {
-        let key = OwnedCf::string(key)?;
-        let value = OwnedCf::string(value)?;
-        // SAFETY: The dictionary retains the live CFString key and value.
-        unsafe { CFDictionarySetValue(dictionary.0.as_ptr(), key.pointer(), value.pointer()) };
+}
+
+pub(in crate::system_proxy) fn restore(
+    expected: &NativeProxySnapshot,
+    previous: &NativeProxySnapshot,
+) -> NativeWriteAttempt {
+    write_configuration(expected, |_| Ok(previous.platform()?.clone()))
+}
+
+fn write_configuration(
+    expected: &NativeProxySnapshot,
+    prepare: impl FnOnce(&ProxySnapshot) -> MihomoResult<ProxySnapshot>,
+) -> NativeWriteAttempt {
+    NativeWriteAttempt::run(expected, |witness| {
+        let expected = expected.platform()?;
+        let session = PreferenceSession::open(true)?;
+        // SAFETY: The preferences owner is live; zero rejects a busy native lock.
+        if unsafe { SCPreferencesLock(session.preferences.pointer(), 0) } == 0 {
+            return Err(native_error("SCPreferencesLock"));
+        }
+        let mut lock = PreferencesLock {
+            preferences: &session.preferences,
+            locked: true,
+        };
+        let selected = session.select(&expected.service_id, true)?;
+        let actual = selected.capture()?;
+        if !expected.same_state(&actual)? {
+            return Err(ownership_changed());
+        }
+        let desired = prepare(&actual)?;
+        if desired.service_id != actual.service_id {
+            return Err(ownership_changed());
+        }
+        let configuration = decode_configuration(desired.configuration.as_deref())?;
+        witness.record(NativeProxySnapshot::Platform(desired.clone()));
+        // SAFETY: Only the uniquely selected locked protocol is updated. Null
+        // restores an absent configuration; otherwise the decoded dictionary lives
+        // through Set/Commit/Apply. No authentication/keychain fields are rewritten.
+        if unsafe {
+            SCNetworkProtocolSetConfiguration(
+                selected.protocol.pointer(),
+                configuration.as_ref().map_or(ptr::null(), OwnedCf::pointer),
+            )
+        } == 0
+        {
+            return Err(native_error("SCNetworkProtocolSetConfiguration"));
+        }
+        // SAFETY: Each operation acts on the same live, exclusively locked session.
+        if unsafe { SCPreferencesCommitChanges(session.preferences.pointer()) } == 0 {
+            return Err(native_error("SCPreferencesCommitChanges"));
+        }
+        if unsafe { SCPreferencesApplyChanges(session.preferences.pointer()) } == 0 {
+            return Err(native_error("SCPreferencesApplyChanges"));
+        }
+        let verified = selected.capture()?;
+        if !desired.same_state(&verified)? {
+            return Err(verification_failure());
+        }
+        // SAFETY: Exactly one successful lock is held by this session.
+        if unsafe { SCPreferencesUnlock(session.preferences.pointer()) } == 0 {
+            return Err(native_error("SCPreferencesUnlock"));
+        }
+        lock.locked = false;
+        Ok(NativeProxySnapshot::Platform(verified))
+    })
+}
+
+// SAFETY: The dictionary is null or borrowed from a live owned protocol/CF object.
+unsafe fn encode_configuration(dictionary: CfRef) -> MihomoResult<Option<std::sync::Arc<[u8]>>> {
+    if dictionary.is_null() {
+        return Ok(None);
     }
-    let bypass = previous
-        .bypass
+    // SAFETY: GetTypeID accepts this live CF value; proxy configs must be dictionaries.
+    if unsafe { CFGetTypeID(dictionary) != CFDictionaryGetTypeID() } {
+        return Err(invalid_snapshot());
+    }
+    let mut error = ptr::null();
+    // SAFETY: Binary property-list v1.0 is format 200; the output error owns +1.
+    let data = unsafe { CFPropertyListCreateData(ptr::null(), dictionary, 200, 0, &raw mut error) };
+    // SAFETY: The optional error is a +1 CFError from this call.
+    let cause = unsafe { property_list_error(error, "CFPropertyListCreateData") };
+    if data.is_null() {
+        return Err(crate::SystemProxyError::SnapshotEncodingFailed { cause }.into());
+    }
+    // SAFETY: Create returned an owned data object or null, now consumed by RAII.
+    let data = unsafe { OwnedCf::created(data, "CFPropertyListCreateData") }?;
+    // SAFETY: This is a live CFData; its byte buffer is borrowed for the copy.
+    let length = usize::try_from(unsafe { CFDataGetLength(data.pointer()) })
+        .map_err(|_| invalid_snapshot())?;
+    if length == 0 || length > MAX_NATIVE_CONFIGURATION_BYTES {
+        return Err(invalid_snapshot());
+    }
+    let bytes = unsafe { CFDataGetBytePtr(data.pointer()) };
+    if bytes.is_null() {
+        return Err(invalid_snapshot());
+    }
+    Ok(Some(
+        unsafe { std::slice::from_raw_parts(bytes, length) }.into(),
+    ))
+}
+
+fn decode_configuration(bytes: Option<&[u8]>) -> MihomoResult<Option<OwnedCf>> {
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
+    if bytes.is_empty() || bytes.len() > MAX_NATIVE_CONFIGURATION_BYTES {
+        return Err(invalid_snapshot());
+    }
+    // SAFETY: The synchronous Create copies this bounded live byte slice.
+    let data = unsafe {
+        OwnedCf::created(
+            CFDataCreate(ptr::null(), bytes.as_ptr(), bytes.len() as isize),
+            "CFDataCreate",
+        )
+    }?;
+    let mut error = ptr::null();
+    // SAFETY: Immutable decode of valid owned CFData, with optional format output.
+    let value = unsafe {
+        CFPropertyListCreateWithData(
+            ptr::null(),
+            data.pointer(),
+            0,
+            ptr::null_mut(),
+            &raw mut error,
+        )
+    };
+    // SAFETY: The optional error is a +1 CFError from this call.
+    let cause = unsafe { property_list_error(error, "CFPropertyListCreateWithData") };
+    if value.is_null() {
+        return Err(crate::SystemProxyError::InvalidNativeSnapshot { cause }.into());
+    }
+    // SAFETY: Decode's +1 result is consumed exactly once by this owner.
+    let value = unsafe { OwnedCf::created(value, "CFPropertyListCreateWithData") }?;
+    // SAFETY: Type checking precedes every dictionary operation.
+    if unsafe { CFGetTypeID(value.pointer()) != CFDictionaryGetTypeID() } {
+        return Err(invalid_snapshot());
+    }
+    Ok(Some(value))
+}
+
+// SAFETY: error is null or a +1 CFError returned by a property-list Create call.
+unsafe fn property_list_error(
+    error: CfRef,
+    operation: &'static str,
+) -> Option<crate::NativePropertyListError> {
+    let error = NonNull::new(error.cast_mut()).map(OwnedCf)?;
+    // SAFETY: The owned CFError remains live while its borrowed domain and code are copied.
+    let domain = unsafe { read_cf_string(CFErrorGetDomain(error.pointer())) }.ok();
+    let code = unsafe { CFErrorGetCode(error.pointer()) } as i64;
+    Some(crate::NativePropertyListError::new(operation, domain, code))
+}
+
+fn configurations_equal(left: Option<&[u8]>, right: Option<&[u8]>) -> MihomoResult<bool> {
+    match (decode_configuration(left)?, decode_configuration(right)?) {
+        (None, None) => Ok(true),
+        (Some(left), Some(right)) => {
+            // SAFETY: Both are live property lists decoded as dictionaries.
+            unsafe { property_types_equal(left.pointer(), right.pointer(), 0) }
+        }
+        _ => Ok(false),
+    }
+}
+
+// SAFETY: Both references are valid property-list objects, live throughout recursion.
+unsafe fn property_types_equal(left: CfRef, right: CfRef, depth: usize) -> MihomoResult<bool> {
+    if depth > 64 {
+        return Err(invalid_snapshot());
+    }
+    let kind = unsafe { CFGetTypeID(left) };
+    if kind != unsafe { CFGetTypeID(right) } || unsafe { CFEqual(left, right) } == 0 {
+        return Ok(false);
+    }
+    if kind == unsafe { CFNumberGetTypeID() } {
+        return Ok(unsafe { CFNumberIsFloatType(left) == CFNumberIsFloatType(right) });
+    }
+    if kind == unsafe { CFArrayGetTypeID() } {
+        for index in 0..unsafe { CFArrayGetCount(left) } {
+            if !unsafe {
+                property_types_equal(
+                    CFArrayGetValueAtIndex(left, index),
+                    CFArrayGetValueAtIndex(right, index),
+                    depth + 1,
+                )
+            }? {
+                return Ok(false);
+            }
+        }
+    } else if kind == unsafe { CFDictionaryGetTypeID() } {
+        let count = usize::try_from(unsafe { CFDictionaryGetCount(left) })
+            .map_err(|_| invalid_snapshot())?;
+        if count > MAX_NATIVE_CONFIGURATION_BYTES {
+            return Err(invalid_snapshot());
+        }
+        let mut keys = vec![ptr::null(); count];
+        let mut values = vec![ptr::null(); count];
+        // SAFETY: Arrays each have capacity for the full dictionary entry count.
+        unsafe { CFDictionaryGetKeysAndValues(left, keys.as_mut_ptr(), values.as_mut_ptr()) };
+        for (key, value) in keys.into_iter().zip(values) {
+            let other = unsafe { CFDictionaryGetValue(right, key) };
+            if other.is_null() || !unsafe { property_types_equal(value, other, depth + 1) }? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn editable_configuration(bytes: Option<&[u8]>) -> MihomoResult<OwnedCf> {
+    let original = decode_configuration(bytes)?;
+    // SAFETY: An owned dictionary is copied; absent config uses retaining callbacks.
+    unsafe {
+        OwnedCf::created(
+            if let Some(original) = original {
+                CFDictionaryCreateMutableCopy(ptr::null(), 0, original.pointer())
+            } else {
+                CFDictionaryCreateMutable(
+                    ptr::null(),
+                    0,
+                    &raw const kCFTypeDictionaryKeyCallBacks,
+                    &raw const kCFTypeDictionaryValueCallBacks,
+                )
+            },
+            "CFDictionaryCreateMutableCopy",
+        )
+    }
+}
+
+fn set_string(dictionary: &OwnedCf, name: &str, value: &str) -> MihomoResult<()> {
+    let key = OwnedCf::string(name)?;
+    let value = OwnedCf::string(value)?;
+    // SAFETY: Editable config is mutable and retains these live CFType objects.
+    unsafe { CFDictionarySetValue(dictionary.0.as_ptr(), key.pointer(), value.pointer()) };
+    Ok(())
+}
+fn set_number(dictionary: &OwnedCf, name: &str, value: i32) -> MihomoResult<()> {
+    let key = OwnedCf::string(name)?;
+    let value = OwnedCf::number(value)?;
+    unsafe { CFDictionarySetValue(dictionary.0.as_ptr(), key.pointer(), value.pointer()) };
+    Ok(())
+}
+fn set_flags(dictionary: &OwnedCf, http: bool, https: bool, pac: bool) -> MihomoResult<()> {
+    for (key, value) in [
+        ("HTTPEnable", http),
+        ("HTTPSEnable", https),
+        ("ProxyAutoConfigEnable", pac),
+    ] {
+        set_number(dictionary, key, i32::from(value))?;
+    }
+    Ok(())
+}
+fn set_bypass(dictionary: &OwnedCf, entries: &[String]) -> MihomoResult<()> {
+    let entries = entries
         .iter()
         .map(|entry| OwnedCf::string(entry))
         .collect::<MihomoResult<Vec<_>>>()?;
-    let pointers = bypass.iter().map(OwnedCf::pointer).collect::<Vec<_>>();
-    // SAFETY: All pointers are live CFStrings; the retaining callbacks copy
-    // their references before this temporary pointer array is dropped.
-    let bypass = unsafe {
+    let pointers = entries.iter().map(OwnedCf::pointer).collect::<Vec<_>>();
+    // SAFETY: Retaining callbacks keep every live string; an empty array is valid.
+    let array = unsafe {
         OwnedCf::created(
             CFArrayCreate(
                 ptr::null(),
-                if pointers.is_empty() {
-                    ptr::null()
-                } else {
-                    pointers.as_ptr()
-                },
+                pointers.as_ptr(),
                 pointers.len() as isize,
                 &raw const kCFTypeArrayCallBacks,
             ),
@@ -286,95 +718,131 @@ unsafe fn snapshot_dictionary(
         )
     }?;
     let key = OwnedCf::string("ExceptionsList")?;
-    // SAFETY: Dictionary retains the live array and key. Empty arrays are valid.
-    unsafe { CFDictionarySetValue(dictionary.0.as_ptr(), key.pointer(), bypass.pointer()) };
-    Ok(dictionary)
+    unsafe { CFDictionarySetValue(dictionary.0.as_ptr(), key.pointer(), array.pointer()) };
+    Ok(())
 }
 
-pub(super) fn restore(previous: &SystemProxyStatus) -> MihomoResult<()> {
-    let name = OwnedCf::string("ZenClash proxy snapshot recovery")?;
-    let authorization = Authorization::create()?;
-    // SAFETY: Null allocator/ID select documented defaults; name and the
-    // authorization reference outlive this session. SystemConfiguration handles
-    // the OS authorization policy for its writes, as for native system tools.
-    let preferences = unsafe {
-        OwnedCf::created(
-            SCPreferencesCreateWithAuthorization(
-                ptr::null(),
-                name.pointer(),
-                ptr::null(),
-                authorization.0.as_ptr(),
-            ),
-            "SCPreferencesCreateWithAuthorization",
-        )
-    }?;
-    // SAFETY: 0 means do not wait; preferences owns the live session.
-    if unsafe { SCPreferencesLock(preferences.pointer(), 0) } == 0 {
-        return Err(native_error("SCPreferencesLock"));
+// SAFETY: The value is a live CFString or null; null is never converted as a string.
+unsafe fn read_cf_string(value: CfRef) -> MihomoResult<String> {
+    if value.is_null() || unsafe { CFGetTypeID(value) != CFStringGetTypeID() } {
+        return Err(invalid_snapshot());
     }
-    let mut lock = PreferencesLock {
-        preferences: &preferences,
-        locked: true,
+    let capacity =
+        unsafe { CFStringGetMaximumSizeForEncoding(CFStringGetLength(value), 0x0800_0100) };
+    let capacity = usize::try_from(capacity)
+        .map_err(|_| invalid_snapshot())?
+        .checked_add(1)
+        .filter(|capacity| *capacity <= MAX_NATIVE_CONFIGURATION_BYTES)
+        .ok_or_else(invalid_snapshot)?;
+    let mut buffer = vec![0_u8; capacity];
+    if unsafe {
+        CFStringGetCString(
+            value,
+            buffer.as_mut_ptr().cast(),
+            capacity as isize,
+            0x0800_0100,
+        )
+    } == 0
+    {
+        return Err(invalid_snapshot());
+    }
+    std::ffi::CStr::from_bytes_until_nul(&buffer)
+        .map_err(|_| invalid_snapshot())?
+        .to_str()
+        .map(str::to_owned)
+        .map_err(|_| invalid_snapshot())
+}
+
+fn summary_from_configuration(
+    service: &str,
+    bytes: Option<&[u8]>,
+) -> MihomoResult<SystemProxyStatus> {
+    let dictionary = decode_configuration(bytes)?;
+    let Some(dictionary) = dictionary else {
+        return Ok(SystemProxyStatus {
+            service: service.into(),
+            ..Default::default()
+        });
     };
-    // SAFETY: Copy returns a retained array from the live locked session.
-    let services = unsafe {
-        OwnedCf::created(
-            SCNetworkServiceCopyAll(preferences.pointer()),
-            "SCNetworkServiceCopyAll",
-        )
-    }?;
-    let expected = OwnedCf::string(&previous.service)?;
-    // SAFETY: Owned services is a CFArray. Every index remains within its count;
-    // service/name Get results remain borrowed until that array is released.
-    let count = unsafe { CFArrayGetCount(services.pointer()) };
-    let index = unique_service_index((0..count).map(|index| unsafe {
-        let service = CFArrayGetValueAtIndex(services.pointer(), index);
-        let name = SCNetworkServiceGetName(service);
-        !name.is_null() && CFStringCompare(name, expected.pointer(), 0) == 0
-    }))?;
-    // SAFETY: This index was selected from the array's bounded range. The
-    // Proxies protocol constant is a system-owned CFString; Copy returns +1.
-    let protocol = unsafe {
-        OwnedCf::created(
-            SCNetworkServiceCopyProtocol(
-                CFArrayGetValueAtIndex(services.pointer(), index as isize),
-                kSCNetworkProtocolTypeProxies,
-            ),
-            "SCNetworkServiceCopyProtocol",
-        )
-    }?;
-    // SAFETY: Get returns a dictionary borrowed from the live protocol owner.
-    let config = unsafe {
-        snapshot_dictionary(
-            SCNetworkProtocolGetConfiguration(protocol.pointer()),
-            previous,
-        )
-    }?;
-    // SAFETY: Only this locked session's uniquely selected Proxies protocol is
-    // updated. Its retained dictionary lives through Set, Commit and Apply.
-    if unsafe { SCNetworkProtocolSetConfiguration(protocol.pointer(), config.pointer()) } == 0 {
-        return Err(native_error("SCNetworkProtocolSetConfiguration"));
-    }
-    // SAFETY: Lock and preferences remain live; permission/apply failures must
-    // propagate so the controller retains the original recoverable snapshot.
-    if unsafe { SCPreferencesCommitChanges(preferences.pointer()) } == 0 {
-        return Err(native_error("SCPreferencesCommitChanges"));
-    }
-    // SAFETY: Same live preferences session; no wait-for-lock fallback.
-    if unsafe { SCPreferencesApplyChanges(preferences.pointer()) } == 0 {
-        return Err(native_error("SCPreferencesApplyChanges"));
-    }
-    // SAFETY: Exactly one successful Lock has been acquired in this session.
-    if unsafe { SCPreferencesUnlock(preferences.pointer()) } == 0 {
-        return Err(native_error("SCPreferencesUnlock"));
-    }
-    lock.locked = false;
-    Ok(())
+    let value = |name: &str| -> MihomoResult<CfRef> {
+        let key = OwnedCf::string(name)?;
+        Ok(unsafe { CFDictionaryGetValue(dictionary.pointer(), key.pointer()) })
+    };
+    let number = |name: &str| -> MihomoResult<i64> {
+        let value = value(name)?;
+        if value.is_null() {
+            return Ok(0);
+        }
+        let kind = unsafe { CFGetTypeID(value) };
+        if kind == unsafe { CFBooleanGetTypeID() } {
+            return Ok(i64::from(unsafe { CFBooleanGetValue(value) }));
+        }
+        if kind != unsafe { CFNumberGetTypeID() } {
+            return Err(invalid_snapshot());
+        }
+        let mut number = 0_i64;
+        // SAFETY: Type checked CFNumber; kCFNumberSInt64Type (4) copies into i64.
+        if unsafe { CFNumberGetValue(value, 4, (&raw mut number).cast()) } == 0 {
+            return Err(invalid_snapshot());
+        }
+        Ok(number)
+    };
+    let string = |name: &str| -> MihomoResult<String> {
+        let value = value(name)?;
+        if value.is_null() {
+            Ok(String::new())
+        } else {
+            unsafe { read_cf_string(value) }
+        }
+    };
+    let bypass = value("ExceptionsList")?;
+    let bypass = if bypass.is_null() {
+        Vec::new()
+    } else {
+        if unsafe { CFGetTypeID(bypass) != CFArrayGetTypeID() } {
+            return Err(invalid_snapshot());
+        }
+        (0..unsafe { CFArrayGetCount(bypass) })
+            .map(|index| unsafe { read_cf_string(CFArrayGetValueAtIndex(bypass, index)) })
+            .collect::<MihomoResult<Vec<_>>>()?
+    };
+    Ok(SystemProxyStatus {
+        service: service.into(),
+        enabled: number("HTTPEnable")? != 0,
+        server: string("HTTPProxy")?,
+        port: u16::try_from(number("HTTPPort")?).map_err(|_| invalid_snapshot())?,
+        secure_enabled: number("HTTPSEnable")? != 0,
+        secure_server: string("HTTPSProxy")?,
+        secure_port: u16::try_from(number("HTTPSPort")?).map_err(|_| invalid_snapshot())?,
+        bypass,
+        auto_enabled: number("ProxyAutoConfigEnable")? != 0,
+        auto_url: string("ProxyAutoConfigURLString")?,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_plist_retains_the_native_error_code_without_input_contents() {
+        use std::error::Error;
+        let error = match decode_configuration(Some(b"not a property list: private-password")) {
+            Err(error) => error,
+            Ok(_) => panic!("malformed property list must be rejected"),
+        };
+        assert!(matches!(&error, MihomoError::SystemProxy(error)
+            if matches!(error.as_ref(), crate::SystemProxyError::InvalidNativeSnapshot { cause: Some(cause) }
+                if cause.operation() == "CFPropertyListCreateWithData"
+                    && cause.code() != 0 && cause.domain().is_some())));
+        assert!(
+            error
+                .source()
+                .unwrap()
+                .is::<crate::NativePropertyListError>()
+        );
+        assert!(!format!("{error:?} {error}").contains("private-password"));
+    }
 
     #[test]
     fn allocation_and_authorization_errors_remain_errors_without_native_writes() {
@@ -419,84 +887,80 @@ mod tests {
             !value.is_null() && CFStringCompare(value, expected.pointer(), 0) == 0
         }
     }
-
-    #[test]
-    fn cf_mapping_preserves_independent_protocol_flags_endpoints_and_pac_without_native_writes() {
-        let previous = SystemProxyStatus {
-            enabled: true,
-            server: "http.original.test".into(),
-            port: 8080,
-            secure_enabled: false,
-            secure_server: "https.cached.test".into(),
-            secure_port: 8443,
-            auto_enabled: true,
-            auto_url: "http://pac.original.test/config.pac".into(),
-            bypass: vec!["localhost".into(), "*.original.test".into()],
-            ..Default::default()
-        };
-        // SAFETY: Null creates an in-memory dictionary with CFType callbacks.
-        let dictionary = unsafe { snapshot_dictionary(ptr::null(), &previous) }.unwrap();
-        assert_eq!(number(&dictionary, "HTTPEnable"), 1);
-        assert_eq!(number(&dictionary, "HTTPSEnable"), 0);
-        assert_eq!(number(&dictionary, "HTTPPort"), 8080);
-        assert_eq!(number(&dictionary, "HTTPSPort"), 8443);
-        assert_eq!(number(&dictionary, "ProxyAutoConfigEnable"), 1);
-        assert!(string_equals(&dictionary, "HTTPProxy", &previous.server));
-        assert!(string_equals(
-            &dictionary,
-            "HTTPSProxy",
-            &previous.secure_server
-        ));
-        assert!(string_equals(
-            &dictionary,
-            "ProxyAutoConfigURLString",
-            &previous.auto_url
-        ));
-        let key = OwnedCf::string("ExceptionsList").unwrap();
-        // SAFETY: The retained array and its strings are owned by dictionary.
-        unsafe {
-            let bypass = CFDictionaryGetValue(dictionary.pointer(), key.pointer());
-            assert!(!bypass.is_null());
-            assert_eq!(CFArrayGetCount(bypass), 2);
-            for (index, expected) in previous.bypass.iter().enumerate() {
-                let expected = OwnedCf::string(expected).unwrap();
-                assert_eq!(
-                    CFStringCompare(
-                        CFArrayGetValueAtIndex(bypass, index as isize),
-                        expected.pointer(),
-                        0
-                    ),
-                    0
-                );
-            }
+    fn fixture_snapshot(dictionary: &OwnedCf) -> ProxySnapshot {
+        let configuration = unsafe { encode_configuration(dictionary.pointer()) }.unwrap();
+        ProxySnapshot {
+            service_id: "fixture-stable-id".into(),
+            summary: summary_from_configuration("old label", configuration.as_deref()).unwrap(),
+            configuration,
         }
     }
 
     #[test]
-    fn cf_mapping_restores_empty_disabled_endpoints_and_retains_unrelated_fields() {
-        // SAFETY: Null creates only an in-memory dictionary, with no OS writes.
-        let original =
-            unsafe { snapshot_dictionary(ptr::null(), &SystemProxyStatus::default()) }.unwrap();
-        let unrelated_key = OwnedCf::string("SOCKSProxy").unwrap();
-        let unrelated_value = OwnedCf::string("unchanged.test").unwrap();
-        // SAFETY: Test dictionary retains both live test strings.
-        unsafe {
-            CFDictionarySetValue(
-                original.0.as_ptr(),
-                unrelated_key.pointer(),
-                unrelated_value.pointer(),
+    fn complete_dictionary_round_trip_preserves_hidden_attributes_and_absence() {
+        let dictionary = editable_configuration(None).unwrap();
+        set_string(&dictionary, "HTTPProxyUsername", "fixture secret").unwrap();
+        set_string(&dictionary, "SOCKSProxy", "foreign.socks").unwrap();
+        set_number(&dictionary, "SOCKSEnable", 1).unwrap();
+        let before = fixture_snapshot(&dictionary);
+        let after = before
+            .with_change(&NativeProxyChange::Manual {
+                host: "new.local",
+                port: 7890,
+                bypass: &["localhost".into()],
+            })
+            .unwrap();
+        let decoded = decode_configuration(after.configuration.as_deref())
+            .unwrap()
+            .unwrap();
+        assert!(string_equals(
+            &decoded,
+            "HTTPProxyUsername",
+            "fixture secret"
+        ));
+        assert!(string_equals(&decoded, "SOCKSProxy", "foreign.socks"));
+        assert_eq!(number(&decoded, "SOCKSEnable"), 1);
+        assert_eq!(number(&decoded, "HTTPEnable"), 1);
+        assert!(!before.same_state(&after).unwrap());
+        let restored = decode_configuration(before.configuration.as_deref())
+            .unwrap()
+            .unwrap();
+        let round_trip = fixture_snapshot(&restored);
+        assert!(before.same_state(&round_trip).unwrap());
+        let key = OwnedCf::string("HTTPEnable").unwrap();
+        assert!(unsafe { CFDictionaryGetValue(restored.pointer(), key.pointer()) }.is_null());
+        assert!(!configurations_equal(None, before.configuration.as_deref()).unwrap());
+    }
+
+    #[test]
+    fn hidden_external_changes_and_integer_to_real_changes_fail_complete_equality() {
+        let original = editable_configuration(None).unwrap();
+        set_number(&original, "NativeExtra", 1).unwrap();
+        let before = fixture_snapshot(&original);
+        let changed = editable_configuration(before.configuration.as_deref()).unwrap();
+        let key = OwnedCf::string("NativeExtra").unwrap();
+        let real = 1.0_f64;
+        let value = unsafe {
+            OwnedCf::created(
+                CFNumberCreate(ptr::null(), 6, (&raw const real).cast()),
+                "fixture real",
             )
-        };
-        // SAFETY: Original is a live CFType-callback dictionary owned by test.
-        let restored =
-            unsafe { snapshot_dictionary(original.pointer(), &SystemProxyStatus::default()) }
-                .unwrap();
-        assert_eq!(number(&restored, "HTTPEnable"), 0);
-        assert_eq!(number(&restored, "HTTPPort"), 0);
-        assert_eq!(number(&restored, "HTTPSPort"), 0);
-        assert!(string_equals(&restored, "HTTPProxy", ""));
-        assert!(string_equals(&restored, "HTTPSProxy", ""));
-        assert!(string_equals(&restored, "ProxyAutoConfigURLString", ""));
-        assert!(string_equals(&restored, "SOCKSProxy", "unchanged.test"));
+        }
+        .unwrap();
+        unsafe { CFDictionarySetValue(changed.0.as_ptr(), key.pointer(), value.pointer()) };
+        assert!(!before.same_state(&fixture_snapshot(&changed)).unwrap());
+        set_number(&changed, "NativeExtra", 1).unwrap();
+        set_string(&changed, "UnknownCredential", "external").unwrap();
+        assert!(!before.same_state(&fixture_snapshot(&changed)).unwrap());
+    }
+
+    #[test]
+    fn stable_identity_survives_a_display_name_change() {
+        let dictionary = editable_configuration(None).unwrap();
+        let before = fixture_snapshot(&dictionary);
+        let mut renamed = before.clone();
+        renamed.summary.service = "new label".into();
+        assert!(before.same_target(&renamed));
+        assert!(before.same_state(&renamed).unwrap());
     }
 }

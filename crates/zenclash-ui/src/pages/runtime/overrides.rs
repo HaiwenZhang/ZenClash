@@ -1,77 +1,16 @@
 use super::{
-    Button, ButtonVariants, ClipboardItem, ConfigDiffReport, Context, Disableable, FluentBuilder,
-    IconName, IntoElement, Page, ParentElement, PathPromptOptions, RuntimePage, ScrollableElement,
-    Sizable, Styled, Switch, context_note, diff_yaml_configs, div, h_flex, info_row, load_page, px,
-    setting_card, v_flex,
+    Button, ButtonVariants, ClipboardItem, Context, Disableable, FluentBuilder, IconName,
+    IntoElement, Page, ParentElement, PathPromptOptions, RuntimePage, ScrollableElement, Sizable,
+    Styled, Switch, context_note, div, h_flex, info_row, load_page, setting_card, v_flex,
 };
 
+mod model;
+pub(super) use model::OverridesState;
 mod diff_view;
-mod editor;
 mod store_actions;
 use diff_view::render_config_diff;
-pub(crate) use editor::ProfileEditorState;
 
 const MAX_PREVIEW_BYTES: usize = 64 * 1024;
-const MAX_CONFIG_DIFF_ENTRIES: usize = 200;
-
-pub(super) struct ConfigPreview {
-    source: String,
-    effective: String,
-    diff: ConfigDiffReport,
-}
-
-impl ConfigPreview {
-    pub(super) fn is_truncated(&self) -> bool {
-        self.source.len() > MAX_PREVIEW_BYTES || self.effective.len() > MAX_PREVIEW_BYTES
-    }
-}
-
-pub(super) struct OverridesState {
-    pub(super) store: Option<zenclash_core::YamlOverrideStore>,
-    pub(super) catalog: zenclash_core::YamlOverrideCatalog,
-    pub(super) preview: Option<ConfigPreview>,
-    pub(super) editor: ProfileEditorState,
-    preview_generation: u64,
-    preview_loading: bool,
-    preview_task: super::loader::PageReadTask,
-    preview_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
-}
-
-impl OverridesState {
-    pub(super) fn new(
-        store: Option<zenclash_core::YamlOverrideStore>,
-        catalog: zenclash_core::YamlOverrideCatalog,
-        editor: ProfileEditorState,
-    ) -> Self {
-        Self {
-            store,
-            catalog,
-            editor,
-            preview: None,
-            preview_generation: 0,
-            preview_loading: false,
-            preview_task: super::loader::PageReadTask::default(),
-            preview_gate: std::sync::Arc::default(),
-        }
-    }
-
-    pub(super) fn cancel_preview(&mut self) {
-        self.preview_task.cancel();
-        self.preview_generation = self.preview_generation.wrapping_add(1);
-        self.preview_loading = false;
-    }
-
-    pub(super) fn invalidate_preview(&mut self) {
-        self.cancel_preview();
-        self.preview = None;
-    }
-
-    pub(super) fn enabled_paths(&self) -> Vec<std::path::PathBuf> {
-        self.store
-            .as_ref()
-            .map_or_else(Vec::new, |store| store.enabled_paths(&self.catalog))
-    }
-}
 
 impl RuntimePage {
     fn choose_overrides(&mut self, cx: &mut Context<Self>) {
@@ -122,66 +61,28 @@ impl RuntimePage {
             cx.notify();
             return;
         };
-        if self.overrides.preview_loading {
-            return;
-        }
-        self.overrides.invalidate_preview();
-        self.overrides.preview_loading = true;
-        let generation = self.overrides.preview_generation;
-        let gate = self.overrides.preview_gate.clone();
         let token = self.page_task_token_for(Page::Override);
-        let controlled = self.controlled_config_store.clone();
-        let overrides = self.enabled_override_paths();
-        let task = self.runtime.spawn(async move {
-            let permit = gate.lock_owned().await;
-            tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                let source = controlled
-                    .source_payload(&profile)
-                    .map_err(|error| error.to_string())?;
-                let effective = controlled
-                    .effective_with_overrides(profile, &overrides)
-                    .map_err(|error| error.to_string())?;
-                let diff = diff_yaml_configs(&source, &effective, MAX_CONFIG_DIFF_ENTRIES)
-                    .map_err(|error| error.to_string())?;
-                Ok::<_, String>(ConfigPreview {
-                    source,
-                    effective,
-                    diff,
-                })
-            })
-            .await
-            .map_err(|error| {
-                zenclash_i18n::text_with(
-                    "overrides.errors.preview_task",
-                    &[("error", error.to_string())],
-                )
-            })?
-        });
-        self.overrides.preview_task.replace(&task);
+        let Some(read) = self.overrides.start_preview(
+            &self.runtime,
+            profile,
+            self.controlled_config_store.clone(),
+        ) else {
+            return;
+        };
         cx.spawn(async move |this, cx| {
-            let result = task
-                .await
-                .map_err(|error| {
-                    zenclash_i18n::text_with(
-                        "overrides.errors.preview_worker",
-                        &[("error", error.to_string())],
-                    )
-                })
-                .and_then(|result| result);
+            let completion = read.finish().await;
             let _ = this.update(cx, |this, cx| {
-                if this.overrides.preview_generation != generation
-                    || !this.is_page_task_current(token)
-                {
+                if !this.is_page_task_current(token) {
                     return;
                 }
-                this.overrides.preview_loading = false;
+                let Some(result) = this.overrides.complete_preview(completion) else {
+                    return;
+                };
                 match result {
-                    Ok(preview) if this.is_page_task_current(token) => {
-                        this.overrides.preview = Some(preview);
+                    Ok(()) if this.is_page_task_current(token) => {
                         this.notice = Some(zenclash_i18n::text("overrides.notices.preview"));
                     }
-                    Ok(_) => {}
+                    Ok(()) => {}
                     Err(error) => this.set_page_error(token, error),
                 }
                 cx.notify();
@@ -192,7 +93,7 @@ impl RuntimePage {
     }
 
     fn copy_config_preview(&self, effective: bool, cx: &mut Context<Self>) {
-        let Some(preview) = &self.overrides.preview else {
+        let Some(preview) = self.overrides.preview() else {
             return;
         };
         let payload = if effective {
@@ -209,47 +110,56 @@ impl RuntimePage {
             cx.notify();
             return;
         }
-        let overrides = self.enabled_override_paths();
+        let Some(store) = self.overrides.store().cloned() else {
+            self.error = Some(zenclash_i18n::text("overrides.errors.store_unavailable"));
+            cx.notify();
+            return;
+        };
         let Some(token) = self.begin_mutation(Page::Override) else {
             return;
         };
-        let count = overrides.len();
+        let application = self
+            .application_commands
+            .override_application(store, self.controlled_config_store.clone());
         let client = self.client.clone();
-        let controlled = self.controlled_config_store.clone();
-        let core_runtime = self.profile_service.clone();
         let task = self.runtime.spawn(async move {
-            let outcome =
-                super::profiles::workflow::reload_effective(controlled, &core_runtime).await?;
-            load_page(client, Page::Override)
-                .await
-                .map(|data| (outcome.generation, data))
+            let receipt = application.reapply().await?;
+            let presentation = load_page(client, Page::Override).await;
+            Ok::<_, crate::application_commands::OverrideApplicationFailure>((
+                receipt,
+                presentation,
+            ))
         });
         cx.spawn(async move |this, cx| {
-            let result = match task.await {
-                Ok(result) => result,
-                Err(error) => Err(zenclash_i18n::text_with(
-                    "overrides.errors.reload_task",
-                    &[("error", error.to_string())],
-                )),
-            };
+            let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                this.finish_mutation(token);
                 match result {
-                    Ok((runtime_version, data)) => {
-                        if !this.profile_service.is_current(runtime_version) {
-                            this.invalidate_config_inputs(cx);
-                            this.refresh(cx);
-                            return;
-                        }
-                        if this.replace_page_data(token, data, cx) {
-                            this.notice = Some(zenclash_i18n::text_with(
-                                "overrides.notices.applied",
-                                &[("count", count.to_string())],
-                            ));
+                    Ok(Ok((receipt, presentation))) => {
+                        let runtime_version =
+                            receipt.runtime_outcome().map(|outcome| outcome.generation);
+                        let enabled_count = receipt.enabled_count();
+                        this.accept_override_receipt(receipt, cx);
+                        match presentation {
+                            Ok(data)
+                                if runtime_version.is_some_and(|version| {
+                                    this.application_commands.is_current(version)
+                                }) =>
+                            {
+                                if this.replace_page_data(token, data, cx) {
+                                    this.notice = Some(zenclash_i18n::text_with(
+                                        "overrides.notices.applied",
+                                        &[("count", enabled_count.to_string())],
+                                    ));
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(error) => this.set_page_error(token, error),
                         }
                     }
-                    Err(error) => this.set_page_error(token, error),
+                    Ok(Err(failure)) => this.accept_override_failure(failure, token, cx),
+                    Err(error) => this.set_page_error(token, error.to_string()),
                 }
+                this.finish_mutation(token);
                 cx.notify();
             });
         })
@@ -269,7 +179,7 @@ impl RuntimePage {
                 zenclash_i18n::text("overrides.chain.explanation"),
                 theme,
             ))
-            .children(self.overrides.preview.as_ref().map(|preview| {
+            .children(self.overrides.preview().map(|preview| {
                 v_flex()
                     .gap_4()
                     .child(render_config_diff(&preview.diff, theme))
@@ -300,10 +210,10 @@ impl RuntimePage {
             || zenclash_i18n::text("overrides.chain.unspecified"),
             |path| path.display().to_string(),
         );
-        let count = self.overrides.catalog.items.len();
+        let count = self.overrides.catalog().items.len();
         let enabled = self
             .overrides
-            .catalog
+            .catalog()
             .items
             .iter()
             .filter(|record| record.enabled)
@@ -327,7 +237,7 @@ impl RuntimePage {
             ))
             .children(
                 self.overrides
-                    .catalog
+                    .catalog()
                     .items
                     .iter()
                     .enumerate()
@@ -342,8 +252,8 @@ impl RuntimePage {
                         Button::new("preview-overrides")
                             .icon(IconName::Eye)
                             .label(zenclash_i18n::text("overrides.actions.preview"))
-                            .loading(self.overrides.preview_loading)
-                            .disabled(self.core_busy() || self.overrides.preview_loading)
+                            .loading(self.overrides.is_preview_loading())
+                            .disabled(self.core_busy() || self.overrides.is_preview_loading())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.load_config_preview(cx);
                             })),
@@ -355,11 +265,31 @@ impl RuntimePage {
                             .outline()
                             .disabled(
                                 self.core_busy()
-                                    || self.overrides.preview.is_none()
-                                    || self.profiles.catalog.active.is_none(),
+                                    || self.overrides.preview().is_none()
+                                    || self.profiles.catalog().active.is_none(),
                             )
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_profile_yaml_editor(window, cx);
+                                let Some(preview) = this.overrides.preview() else {
+                                    this.error = Some(zenclash_i18n::text(
+                                        "overrides.errors.preview_required",
+                                    ));
+                                    cx.notify();
+                                    return;
+                                };
+                                let Some(profile_id) = this.profiles.catalog().active.clone()
+                                else {
+                                    this.error = Some(zenclash_i18n::text(
+                                        "overrides.errors.unmanaged_profile",
+                                    ));
+                                    cx.notify();
+                                    return;
+                                };
+                                this.open_profile_yaml_editor(
+                                    profile_id,
+                                    preview.source.clone(),
+                                    window,
+                                    cx,
+                                );
                             })),
                     )
                     .child(
@@ -392,7 +322,7 @@ impl RuntimePage {
         let down_id = record.id.clone();
         let delete_id = record.id.clone();
         h_flex()
-            .min_h(px(44.))
+            .min_h(gpui_kit::rems(2.75))
             .px_4()
             .gap_3()
             .border_t_1()
@@ -407,7 +337,7 @@ impl RuntimePage {
             )
             .child(
                 div()
-                    .w(px(24.))
+                    .w(gpui_kit::rems(1.5))
                     .text_xs()
                     .text_color(theme.muted_foreground)
                     .child(format!("{}.", index + 1)),
@@ -434,7 +364,7 @@ impl RuntimePage {
                     .icon(IconName::ArrowDown)
                     .xsmall()
                     .ghost()
-                    .disabled(index + 1 == self.overrides.catalog.items.len() || self.core_busy())
+                    .disabled(index + 1 == self.overrides.catalog().items.len() || self.core_busy())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.move_override(&down_id, 1, cx);
                     })),
@@ -480,7 +410,7 @@ where
         )
         .child(
             div()
-                .max_h(px(360.))
+                .max_h(gpui_kit::rems(22.5))
                 .overflow_y_scrollbar()
                 .p_4()
                 .font_family(theme.mono_font_family.clone())
@@ -521,3 +451,6 @@ mod tests {
         assert!(preview.is_char_boundary(preview.len()));
     }
 }
+
+#[cfg(test)]
+mod ui_tests;

@@ -218,7 +218,7 @@ pub struct SubscriptionMetadata {
 }
 
 impl SubscriptionMetadata {
-    pub(super) fn merge_from(&mut self, newer: Self) {
+    fn merge_from(&mut self, newer: Self) {
         if newer.usage.is_some() {
             self.usage = newer.usage;
         }
@@ -282,6 +282,27 @@ pub struct ProfileRecord {
 }
 
 impl ProfileRecord {
+    /// Applies successful payload facts while retaining missing subscription fields.
+    /// Only an eligible remote source follows the merged provider interval.
+    /// Source ingestion uses this policy; YAML edits must preserve the existing cadence.
+    /// Callers supply the clock/byte facts and retain persistence/transaction ownership.
+    pub(super) fn apply_payload_metadata(
+        &mut self,
+        updated_at: u64,
+        size_bytes: u64,
+        subscription: SubscriptionMetadata,
+    ) {
+        self.updated_at = updated_at;
+        self.size_bytes = size_bytes;
+        self.subscription.merge_from(subscription);
+        if let ProfileSource::Remote { options, .. } = &self.source
+            && !options.fixed_update_interval
+            && let Some(interval) = self.subscription.suggested_update_interval_minutes
+        {
+            self.update_interval_minutes = interval;
+        }
+    }
+
     /// Returns a concise localized source label for the UI.
     #[must_use]
     pub fn source_label(&self) -> String {

@@ -41,10 +41,7 @@ impl PreparedCoreUpdate {
     /// Returns an error when the current core cannot be backed up, the staging
     /// file cannot be renamed into place, or the directory cannot be synced.
     pub fn activate(mut self) -> CoreUpdateResult<CoreUpdateTransaction> {
-        let staging = self
-            .staging
-            .take()
-            .ok_or_else(|| CoreUpdateError::Io("候选内核已经被使用".into()))?;
+        let staging = self.candidate_path()?;
         let backup = sibling_path(&self.target, "backup")?;
         std::fs::rename(&self.target, &backup).map_err(|error| {
             CoreUpdateError::Io(format!(
@@ -53,14 +50,16 @@ impl PreparedCoreUpdate {
                 backup.display()
             ))
         })?;
-        if let Err(error) = std::fs::rename(&staging, &self.target) {
+        if let Err(error) = std::fs::rename(staging, &self.target) {
             let restore = std::fs::rename(&backup, &self.target);
-            let _ = std::fs::remove_file(&staging);
             return Err(CoreUpdateError::Io(format!(
                 "无法启用候选内核：{error}；恢复旧内核结果：{}",
                 restore.map_or_else(|restore| restore.to_string(), |()| "成功".into())
             )));
         }
+        // The candidate is now at target. Until this rename succeeds, Drop owns
+        // cleanup even when choosing a backup path or moving the old core fails.
+        self.staging = None;
         let transaction = CoreUpdateTransaction {
             target: self.target.clone(),
             backup,

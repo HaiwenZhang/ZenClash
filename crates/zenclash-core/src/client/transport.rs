@@ -10,7 +10,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::{MihomoError, MihomoResult};
 use crate::{
-    MihomoEndpoint, MihomoProcess,
+    ManagedCoreProcess, MihomoEndpoint,
     owned_core::OwnedCore,
     websocket::{MihomoSocket, connect_stream},
 };
@@ -18,7 +18,7 @@ use crate::{
 #[derive(Clone)]
 pub(crate) enum ControllerBackend {
     Direct(MihomoEndpoint),
-    Local(Arc<MihomoProcess>),
+    Local(Arc<ManagedCoreProcess>),
     Service {
         runtime: Arc<crate::service_runtime_session::ServiceRuntimeSession>,
     },
@@ -109,7 +109,7 @@ impl ControllerBinding {
         }
     }
 
-    pub(crate) fn local_recovery_launch(&self) -> Option<crate::MihomoLaunchConfig> {
+    pub(crate) fn local_recovery_launch(&self) -> Option<crate::CoreLaunchConfig> {
         let binding = self.updates.borrow();
         match &binding.backend {
             ControllerBackend::Local(process) => Some(process.launch_config().clone()),
@@ -158,7 +158,7 @@ impl ControllerBinding {
         })
     }
 
-    pub(crate) fn process_binding(process: Arc<MihomoProcess>) -> Arc<Self> {
+    pub(crate) fn process_binding(process: Arc<ManagedCoreProcess>) -> Arc<Self> {
         let (updates, _) = watch::channel(BindingSnapshot {
             generation: 0,
             kind: process.kind(),
@@ -202,6 +202,19 @@ impl ControllerBinding {
     }
     pub(crate) fn is_current(&self, generation: u64) -> bool {
         self.updates.borrow().generation == generation
+    }
+
+    pub(crate) fn with_current_generation<T>(
+        &self,
+        generation: u64,
+        publish: impl FnOnce() -> T,
+    ) -> MihomoResult<T> {
+        let current = self.updates.borrow();
+        if current.generation != generation {
+            return Err(MihomoError::StaleBinding);
+        }
+        // Keep the binding read guard through publication, excluding a concurrent replacement.
+        Ok(publish())
     }
     pub(crate) fn endpoint(&self) -> Option<MihomoEndpoint> {
         let binding = self.updates.borrow();

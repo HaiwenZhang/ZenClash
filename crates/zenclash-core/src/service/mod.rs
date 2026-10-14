@@ -133,45 +133,6 @@ pub fn remote_providers_of(
     runtime_bundle::remote_providers_of(config, root)
 }
 
-/// Retains upstream service intent independently of observed health and core runtime ownership.
-#[derive(Default)]
-pub struct ServiceRunState {
-    stored: parking_lot::Mutex<health::StoredService>,
-}
-
-impl ServiceRunState {
-    /// Records the latest observed service health.
-    pub fn observe(&self, health: health::ServiceHealth) {
-        self.stored.lock().observe(health);
-    }
-    /// Retains an explicit service maintenance request.
-    pub fn request(&self, action: health::PendingAction) {
-        self.stored.lock().request(action);
-    }
-    /// Accepts local sidecar execution for this application session.
-    pub fn allow_sidecar(&self) {
-        self.stored.lock().allow_sidecar();
-    }
-
-    /// Projects stored intent together with current execution and privilege facts.
-    pub fn snapshot(
-        &self,
-        mode: RunningMode,
-        is_admin: bool,
-        op_in_flight: bool,
-    ) -> health::RunState {
-        let stored = self.stored.lock();
-        health::RunState {
-            health: stored.health.clone(),
-            pending: stored.pending,
-            sidecar_allowed: stored.sidecar_allowed,
-            mode,
-            is_admin,
-            op_in_flight,
-        }
-    }
-}
-
 pub use execution::{CoreExecutionGuard, check_sidecar_available, current_process_elevated};
 
 pub use controller::{NativeController, NativeHttpError, NativeHttpResponse, NativeSocket};

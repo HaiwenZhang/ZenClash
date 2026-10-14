@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::Path,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -158,11 +158,4 @@ fn replace_file(temporary: &Path, path: &Path) -> std::io::Result<()> {
     } else {
         Ok(())
     }
-}
-
-pub(super) fn home_dir() -> ProfileStoreResult<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .ok_or_else(|| ProfileStoreError::InvalidYaml("无法确定用户主目录".into()))
 }

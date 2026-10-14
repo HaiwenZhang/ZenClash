@@ -11,12 +11,12 @@ pub(super) struct LogSettingsDraft {
     max_mebibytes: u16,
 }
 
-impl RuntimePage {
+impl LogsView {
     pub(super) fn open_log_details(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let owner = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, window, cx| {
             let content = owner
-                .update(cx, |page, cx| page.log_details_content(cx))
+                .update(cx, |view, cx| view.log_details_content(cx))
                 .ok();
             dialog
                 .bg(cx.theme().group_box)
@@ -24,7 +24,7 @@ impl RuntimePage {
                 .width(window.rem_size() * 38.)
                 .margin_top(
                     ((window.viewport_size().height - window.rem_size() * 25.) / 2.)
-                        .max(gpui_kit::px(16.)),
+                        .max(window.rem_size()),
                 )
                 .when_some(content, |dialog, content| dialog.child(content))
         });
@@ -32,7 +32,7 @@ impl RuntimePage {
     }
 
     fn log_details_content(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let Some((entry, row)) = &self.logs.selected else {
+        let Some((entry, row)) = &self.selected else {
             return div().into_any_element();
         };
         let time = i64::try_from(entry.timestamp_ms)
@@ -101,15 +101,19 @@ impl RuntimePage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.logs.settings = Some(LogSettingsDraft {
-            level: self.logs.level,
-            enabled: self.preferences.log_file_enabled,
-            max_mebibytes: self.preferences.log_file_max_mebibytes,
+        self.settings = Some(LogSettingsDraft {
+            level: self.level,
+            enabled: self
+                .context
+                .is_some_and(|context| context.preferences.enabled),
+            max_mebibytes: self
+                .context
+                .map_or(0, |context| context.preferences.max_mebibytes),
         });
         let owner = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, window, cx| {
             let content = owner
-                .update(cx, |page, cx| page.log_settings_content(cx))
+                .update(cx, |view, cx| view.log_settings_content(cx))
                 .ok();
             let owner = owner.clone();
             dialog
@@ -118,11 +122,11 @@ impl RuntimePage {
                 .width(window.rem_size() * 30.)
                 .margin_top(
                     ((window.viewport_size().height - window.rem_size() * 24.) / 2.)
-                        .max(gpui_kit::px(16.)),
+                        .max(window.rem_size()),
                 )
                 .when_some(content, |dialog, content| dialog.child(content))
                 .on_cancel(move |_, _, cx| {
-                    let _ = owner.update(cx, |page, _| page.logs.settings = None);
+                    let _ = owner.update(cx, |view, _| view.settings = None);
                     true
                 })
         });
@@ -130,7 +134,7 @@ impl RuntimePage {
     }
 
     fn log_settings_content(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let Some(draft) = self.logs.settings else {
+        let Some(draft) = self.settings else {
             return div().into_any_element();
         };
         let owner = cx.entity().downgrade();
@@ -155,11 +159,9 @@ impl RuntimePage {
                     .map_or_else(|| "—".into(), log_level_description),
             )
             .disabled(
-                self.core_busy()
-                    || self.config_inputs_loading
-                    || !self
-                        .config_inputs
-                        .is_for_profile(self.profile_path.as_deref()),
+                !self
+                    .context
+                    .is_some_and(|context| context.commands.can_change_level),
             )
             .dropdown_menu(move |mut menu, _, _| {
                 for level in [
@@ -174,8 +176,8 @@ impl RuntimePage {
                         PopupMenuItem::new(level.api_value().to_uppercase())
                             .checked(draft.level == Some(level))
                             .on_click(move |_, _, cx| {
-                                let _ = owner.update(cx, |page, cx| {
-                                    if let Some(draft) = &mut page.logs.settings {
+                                let _ = owner.update(cx, |view, cx| {
+                                    if let Some(draft) = &mut view.settings {
                                         draft.level = Some(level);
                                     }
                                     cx.notify();
@@ -197,8 +199,8 @@ impl RuntimePage {
                         PopupMenuItem::new(format!("{limit} MiB"))
                             .checked(draft.max_mebibytes == limit)
                             .on_click(move |_, _, cx| {
-                                let _ = owner.update(cx, |page, cx| {
-                                    if let Some(draft) = &mut page.logs.settings {
+                                let _ = owner.update(cx, |view, cx| {
+                                    if let Some(draft) = &mut view.settings {
                                         draft.max_mebibytes = limit;
                                     }
                                     cx.notify();
@@ -223,8 +225,8 @@ impl RuntimePage {
                     .child(
                         MintSwitch::new("log-draft-file-enabled")
                             .checked(draft.enabled)
-                            .on_click(cx.listener(|page, checked, _, cx| {
-                                if let Some(draft) = &mut page.logs.settings {
+                            .on_click(cx.listener(|view, checked, _, cx| {
+                                if let Some(draft) = &mut view.settings {
                                     draft.enabled = *checked;
                                 }
                                 cx.notify();
@@ -247,9 +249,9 @@ impl RuntimePage {
                 Button::new("copy-support-safe-logs")
                     .ghost()
                     .label(zenclash_i18n::text("logs.actions.copy_safe"))
-                    .loading(self.logs.copying)
-                    .disabled(self.logs.copying || self.logs.presentation.entries.is_empty())
-                    .on_click(cx.listener(|page, _, _, cx| page.copy_support_safe_logs(cx))),
+                    .loading(self.copying)
+                    .disabled(self.copying || self.presentation.entries.is_empty())
+                    .on_click(cx.listener(|view, _, _, cx| view.request_support_copy(cx))),
             )
             .child(
                 h_flex()
@@ -259,8 +261,8 @@ impl RuntimePage {
                         Button::new("cancel-log-settings")
                             .outline()
                             .label(zenclash_i18n::text("common.actions.cancel"))
-                            .on_click(cx.listener(|page, _, window, cx| {
-                                page.logs.settings = None;
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.settings = None;
                                 window.close_dialog(cx);
                             })),
                     )
@@ -268,22 +270,23 @@ impl RuntimePage {
                         Button::new("save-log-settings")
                             .primary()
                             .label(zenclash_i18n::text("common.actions.save"))
-                            .disabled(self.preferences_store.is_none() || self.core_busy())
-                            .on_click(cx.listener(|page, _, window, cx| {
-                                if let Some(draft) = page.logs.settings.take() {
-                                    if draft.level != page.logs.level
-                                        && let Some(level) = draft.level
-                                    {
-                                        page.apply_controlled_config(
-                                            serde_json::json!({"log-level": level.api_value()}),
-                                            zenclash_i18n::text("logs.collection_level_updated"),
-                                            cx,
-                                        );
-                                    }
-                                    page.persist_log_preferences(
-                                        Some(draft.enabled),
-                                        Some(draft.max_mebibytes),
-                                        zenclash_i18n::text("logs.notices.limit_saved"),
+                            .disabled(
+                                !self
+                                    .context
+                                    .is_some_and(|context| context.commands.can_save_settings),
+                            )
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                if let Some(draft) = view.settings.take() {
+                                    let level =
+                                        draft.level.filter(|level| Some(*level) != view.level);
+                                    view.request_command(
+                                        LogCommand::SaveSettings {
+                                            level,
+                                            preferences: LogPersistencePreferences {
+                                                enabled: draft.enabled,
+                                                max_mebibytes: draft.max_mebibytes,
+                                            },
+                                        },
                                         cx,
                                     );
                                     window.close_dialog(cx);
@@ -298,7 +301,10 @@ impl RuntimePage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pages::runtime::ui_tests::{Fixture, open};
+    use crate::pages::Page;
+    use crate::pages::runtime::test_support::{
+        RuntimePageFixture as Fixture, open_runtime_page_window as open,
+    };
     use gpui_kit::test::TestWindowExt;
 
     #[gpui_kit::test]
@@ -316,10 +322,13 @@ mod tests {
             window.render_frame(cx);
             window.render_frame(cx);
             window.click("log-draft-file-enabled", cx);
-            assert_eq!(page.read(cx).logs.settings.unwrap().enabled, !enabled);
+            assert_eq!(
+                page.read(cx).logs.read(cx).settings.unwrap().enabled,
+                !enabled
+            );
             window.press("escape", cx);
             assert!(!window.has_active_dialog(cx));
-            assert!(page.read(cx).logs.settings.is_none());
+            assert!(page.read(cx).logs.read(cx).settings.is_none());
             assert_eq!(page.read(cx).preferences.log_file_enabled, enabled);
             assert_eq!(page.read(cx).log_monitor.level(), level);
             window.remove_window();

@@ -17,6 +17,12 @@ use crate::{
     CoreKind, NetworkLatencyTarget, PublicIpProvider, SystemProxyMode, SystemProxyOwnership,
 };
 
+mod migration;
+mod observation;
+#[cfg(test)]
+pub(crate) mod test_support;
+pub use observation::AppPreferencesObservation;
+
 const MAX_PREFERENCES_BYTES: usize = 1024 * 1024;
 
 /// Native application appearance selected by the user.
@@ -116,7 +122,7 @@ pub struct AppPreferences {
     pub system_proxy_bypass: Vec<String>,
     /// Whether ZenClash should own and restore the native system proxy.
     pub system_proxy_enabled: bool,
-    /// Exact native state written by the most recent successful enable.
+    /// Managed HTTP/HTTPS endpoints or PAC URL from the most recent verified enable.
     pub system_proxy_ownership: Option<SystemProxyOwnership>,
     /// Whether native system proxying uses explicit endpoints or PAC.
     pub system_proxy_mode: SystemProxyMode,
@@ -132,8 +138,6 @@ pub struct AppPreferences {
 pub struct CoreBinaryPreferences {
     /// Custom Mihomo executable, or automatic discovery when absent.
     pub mihomo: Option<PathBuf>,
-    /// Custom meow-rs executable, or automatic discovery when absent.
-    pub meow: Option<PathBuf>,
 }
 
 impl CoreBinaryPreferences {
@@ -142,7 +146,6 @@ impl CoreBinaryPreferences {
     pub fn path(&self, kind: CoreKind) -> Option<&Path> {
         match kind {
             CoreKind::Mihomo => self.mihomo.as_deref(),
-            CoreKind::Meow => self.meow.as_deref(),
         }
     }
 
@@ -150,7 +153,6 @@ impl CoreBinaryPreferences {
     pub fn set(&mut self, kind: CoreKind, path: Option<PathBuf>) {
         match kind {
             CoreKind::Mihomo => self.mihomo = path,
-            CoreKind::Meow => self.meow = path,
         }
     }
 }
@@ -216,6 +218,7 @@ pub type AppPreferencesResult<T> = Result<T, AppPreferencesError>;
 pub struct AppPreferencesStore {
     path: PathBuf,
     transaction: Arc<Mutex<()>>,
+    revision: Arc<std::sync::atomic::AtomicU64>,
     write_access: crate::data_coordinator::DataWriteAccess,
 }
 
@@ -227,17 +230,29 @@ impl AppPreferencesStore {
     /// Returns an error when the user's application-data directory cannot be
     /// determined.
     pub fn discover() -> AppPreferencesResult<Self> {
-        Ok(Self::new(default_data_dir()?.join("preferences.json")))
+        let path = crate::AppDataPaths::discover()
+            .ok_or(AppPreferencesError::MissingDataDirectory)?
+            .preferences();
+        Ok(Self::new(path))
     }
 
     /// Creates a store backed by an explicit path.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
+        let transaction = crate::data_coordinator::shared_transaction(&path);
         Self {
-            transaction: crate::data_coordinator::shared_transaction(&path),
+            revision: observation::shared_revision(&transaction),
+            transaction,
             write_access: crate::data_coordinator::DataWriteAccess::new(&path),
             path,
+        }
+    }
+
+    pub(crate) fn with_write_lease(&self, lease: &crate::data_coordinator::DataWriteLease) -> Self {
+        Self {
+            write_access: self.write_access.authorized(lease),
+            ..self.clone()
         }
     }
 
@@ -263,7 +278,7 @@ impl AppPreferencesStore {
         if bytes.len() > MAX_PREFERENCES_BYTES {
             return Err(AppPreferencesError::TooLarge);
         }
-        let preferences: AppPreferences = serde_json::from_slice(&bytes)?;
+        let preferences = migration::decode_preferences(&bytes)?;
         validate_preferences(&preferences)?;
         Ok(preferences)
     }
@@ -326,6 +341,8 @@ impl AppPreferencesStore {
         validate_preferences(preferences)?;
         let bytes = serde_json::to_vec_pretty(preferences)?;
         atomic_write(&self.path, &bytes)?;
+        self.revision
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
         Ok(())
     }
 
@@ -378,6 +395,8 @@ impl AppPreferencesStore {
             std::process::id()
         ));
         fs::rename(&self.path, &quarantine)?;
+        self.revision
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
         Ok(Some(quarantine))
     }
 }
@@ -437,46 +456,100 @@ fn validate_preferences(preferences: &AppPreferences) -> AppPreferencesResult<()
     Ok(())
 }
 
-fn default_data_dir() -> AppPreferencesResult<PathBuf> {
-    let home = || {
-        std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(PathBuf::from)
-            .ok_or(AppPreferencesError::MissingDataDirectory)
-    };
-    if cfg!(target_os = "macos") {
-        Ok(home()?
-            .join("Library")
-            .join("Application Support")
-            .join("ZenClash"))
-    } else if cfg!(target_os = "windows") {
-        Ok(std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or(home()?.join("AppData").join("Local"))
-            .join("ZenClash"))
-    } else {
-        Ok(std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or(home()?.join(".local").join("share"))
-            .join("zenclash"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
+    use super::test_support::test_path;
     use super::*;
 
-    fn test_path(name: &str) -> PathBuf {
-        let sequence = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "zenclash-preferences-{name}-{}-{sequence}.json",
-            std::process::id()
-        ))
+    #[test]
+    fn removed_runtime_preferences_migrate_without_losing_other_settings() {
+        let path = test_path("removed-runtime-migration");
+        let store = AppPreferencesStore::new(&path);
+        let mut old = serde_json::to_value(AppPreferences {
+            appearance: AppearancePreference::Dark,
+            language: LanguagePreference::En,
+            traffic_retention_days: 30,
+            ..Default::default()
+        })
+        .unwrap();
+        old["core_kind"] = "meow".into();
+        old["core_binaries"] =
+            serde_json::json!({"mihomo": "/kept/mihomo", "meow": "/retired/engine"});
+        old["last_known_good_core"] = "meow".into();
+        old["last_known_good_binary"] = "/retired/engine".into();
+        let bytes = serde_json::to_vec(&old).unwrap();
+        fs::write(&path, &bytes).unwrap();
+
+        let preferences = store.load().unwrap();
+
+        assert_eq!(preferences.core_kind, CoreKind::Mihomo);
+        assert_eq!(
+            preferences.core_binaries.mihomo.as_deref(),
+            Some(Path::new("/kept/mihomo"))
+        );
+        assert!(preferences.last_known_good_core.is_none());
+        assert!(preferences.last_known_good_binary.is_none());
+        assert_eq!(preferences.appearance, AppearancePreference::Dark);
+        assert_eq!(preferences.language, LanguagePreference::En);
+        assert_eq!(preferences.traffic_retention_days, 30);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        store.save(&preferences).unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(saved["core_binaries"].get("meow").is_none());
+        assert_eq!(store.load().unwrap(), preferences);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn retired_binary_field_keeps_the_valid_mihomo_recovery_identity() {
+        let path = test_path("retired-binary-field");
+        let store = AppPreferencesStore::new(&path);
+        let expected = AppPreferences {
+            core_binaries: CoreBinaryPreferences {
+                mihomo: Some("/current/mihomo".into()),
+            },
+            last_known_good_core: Some(CoreKind::Mihomo),
+            last_known_good_binary: Some("/known/mihomo".into()),
+            ..Default::default()
+        };
+        let mut old = serde_json::to_value(&expected).unwrap();
+        old["core_binaries"]["meow"] = serde_json::Value::Null;
+        fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+
+        assert_eq!(store.load().unwrap(), expected);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn removed_runtime_migration_does_not_accept_other_invalid_preferences() {
+        let path = test_path("invalid-retired-preferences");
+        let store = AppPreferencesStore::new(&path);
+        for invalid in [
+            serde_json::json!({"core_kind": "unsupported", "core_binaries": {"meow": null}}),
+            serde_json::json!({"core_kind": "meow", "unknown_preference": true}),
+        ] {
+            let bytes = serde_json::to_vec(&invalid).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            assert!(store.load().is_err());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn retired_settings_migration_still_rejects_duplicate_json_fields() {
+        let path = test_path("duplicate-retired-preferences");
+        let store = AppPreferencesStore::new(&path);
+        for bytes in [
+            r#"{"appearance":"dark","appearance":"light","core_binaries":{"meow":null}}"#,
+            r#"{"core_kind":"meow","core_binaries":{"mihomo":"/first","mihomo":"/second"}}"#,
+            r#"{"core_kind":"meow","core_kind":"mihomo","core_binaries":{"meow":null}}"#,
+        ] {
+            fs::write(&path, bytes).unwrap();
+            assert!(store.load().is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), bytes);
+        }
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -484,10 +557,9 @@ mod tests {
         let path = test_path("roundtrip");
         let store = AppPreferencesStore::new(&path);
         let preferences = AppPreferences {
-            core_kind: CoreKind::Meow,
+            core_kind: CoreKind::Mihomo,
             core_binaries: CoreBinaryPreferences {
-                mihomo: None,
-                meow: Some(PathBuf::from("/opt/zenclash/meow")),
+                mihomo: Some(PathBuf::from("/opt/zenclash/mihomo")),
             },
             last_known_good_core: Some(CoreKind::Mihomo),
             last_known_good_binary: Some(PathBuf::from("/opt/zenclash/mihomo")),

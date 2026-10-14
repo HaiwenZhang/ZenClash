@@ -50,7 +50,7 @@ fn detect() -> NetworkReachability {
                         // SAFETY: AF_INET addresses have sockaddr_in layout.
                         let address = unsafe { &*interface.ifa_addr.cast::<libc::sockaddr_in>() };
                         let ip = Ipv4Addr::from(address.sin_addr.s_addr.to_ne_bytes());
-                        !ip.is_unspecified() && !ip.is_loopback() && !ip.is_link_local()
+                        is_usable_ipv4(ip)
                     }
                     libc::AF_INET6 => {
                         // SAFETY: AF_INET6 addresses have sockaddr_in6 layout.
@@ -72,6 +72,11 @@ fn detect() -> NetworkReachability {
     } else {
         NetworkReachability::Offline
     }
+}
+
+#[cfg(any(unix, windows, test))]
+fn is_usable_ipv4(ip: std::net::Ipv4Addr) -> bool {
+    !ip.is_unspecified() && !ip.is_loopback() && !ip.is_link_local()
 }
 
 #[cfg(any(unix, test))]
@@ -98,7 +103,7 @@ fn detect() -> NetworkReachability {
     windows::detect()
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 mod windows;
 
 #[cfg(not(any(unix, windows)))]

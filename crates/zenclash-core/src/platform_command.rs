@@ -1,11 +1,15 @@
 use std::{
     ffi::OsStr,
-    io::{self, Read},
     path::Path,
-    process::{Child, Command, ExitStatus, Output, Stdio},
+    process::{Child, Command, Output, Stdio},
     thread,
     time::{Duration, Instant},
 };
+
+mod error;
+mod output_pipe;
+pub use error::{PlatformCommandError, PlatformCommandStage, PlatformCommandStream};
+use output_pipe::CommandOutputPipe;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
@@ -23,7 +27,7 @@ const fn background_creation_flags() -> u32 {
 /// The child is terminated after ten seconds so an unavailable desktop
 /// service cannot block a background worker indefinitely.
 pub fn output(command: &str, args: &[&str]) -> Result<Output, String> {
-    output_with_timeout(command, args, COMMAND_TIMEOUT)
+    output_typed(command, args).map_err(|error| error.to_string())
 }
 
 pub(crate) fn output_with_timeout(
@@ -46,11 +50,29 @@ pub(crate) fn output_path_with_timeout(
     output_from_command(process, &command.display().to_string(), timeout)
 }
 
+/// Executes a native command while retaining typed failure causes.
+///
+/// # Errors
+/// Returns process, pipe, reader or timeout failures.
+pub(crate) fn output_typed(command: &str, args: &[&str]) -> Result<Output, PlatformCommandError> {
+    let mut process = Command::new(command);
+    process.args(args);
+    output_from_command_typed(process, command, COMMAND_TIMEOUT)
+}
+
 pub(crate) fn output_from_command(
-    mut command: Command,
+    command: Command,
     display_name: &str,
     timeout: Duration,
 ) -> Result<Output, String> {
+    output_from_command_typed(command, display_name, timeout).map_err(|error| error.to_string())
+}
+
+fn output_from_command_typed(
+    mut command: Command,
+    display_name: &str,
+    timeout: Duration,
+) -> Result<Output, PlatformCommandError> {
     configure_background_command(&mut command);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let started = Instant::now();
@@ -60,7 +82,9 @@ pub(crate) fn output_from_command(
             Err(error) => {
                 // A concurrent fork can retain a closed writer until exec.
                 // See https://github.com/rust-lang/rust/issues/114554.
-                if cfg!(target_os = "linux") && error.kind() == io::ErrorKind::ExecutableFileBusy {
+                if cfg!(target_os = "linux")
+                    && error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                {
                     let remaining = timeout.saturating_sub(started.elapsed());
                     if !remaining.is_zero() {
                         thread::sleep(POLL_INTERVAL.min(remaining));
@@ -69,44 +93,89 @@ pub(crate) fn output_from_command(
                         }
                     }
                 }
-                return Err(format!("执行 {display_name} 失败：{error}"));
+                return Err(PlatformCommandError::io(
+                    display_name,
+                    PlatformCommandStage::Spawn,
+                    error,
+                ));
             }
         }
     };
+    let result = collect_child_output(&mut child, display_name, started, timeout);
+    if result.is_err() {
+        // try_wait caches an observed status. Never signal a PID after it was reaped.
+        if !matches!(child.try_wait(), Ok(Some(_))) {
+            abort_child(&mut child);
+        }
+    }
+    result
+}
+
+fn collect_child_output(
+    child: &mut Child,
+    command: &str,
+    started: Instant,
+    timeout: Duration,
+) -> Result<Output, PlatformCommandError> {
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| abort_for_setup_error(&mut child, display_name, "无法捕获标准输出"))?;
-    let stdout_reader = match spawn_reader(stdout, "stdout") {
-        Ok(reader) => reader,
-        Err(error) => {
-            abort_child(&mut child);
-            return Err(format!("执行 {display_name} 失败：{error}"));
+        .ok_or_else(|| PlatformCommandError::MissingPipe {
+            command: command.into(),
+            stream: PlatformCommandStream::Stdout,
+        })?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| PlatformCommandError::MissingPipe {
+            command: command.into(),
+            stream: PlatformCommandStream::Stderr,
+        })?;
+    let mut stdout = CommandOutputPipe::new(stdout).map_err(|source| {
+        PlatformCommandError::io(command, PlatformCommandStage::ConfigureStdoutPipe, source)
+    })?;
+    let mut stderr = CommandOutputPipe::new(stderr).map_err(|source| {
+        PlatformCommandError::io(command, PlatformCommandStage::ConfigureStderrPipe, source)
+    })?;
+    let mut status = None;
+    loop {
+        if started.elapsed() >= timeout {
+            return Err(PlatformCommandError::TimedOut {
+                command: command.into(),
+                timeout,
+            });
         }
-    };
-    let Some(stderr) = child.stderr.take() else {
-        abort_child(&mut child);
-        let _ = join_reader(stdout_reader, "stdout");
-        return Err(format!("执行 {display_name} 失败：无法捕获标准错误"));
-    };
-    let stderr_reader = match spawn_reader(stderr, "stderr") {
-        Ok(reader) => reader,
-        Err(error) => {
-            abort_child(&mut child);
-            let _ = join_reader(stdout_reader, "stdout");
-            return Err(format!("执行 {display_name} 失败：{error}"));
+        if status.is_none() {
+            status = child.try_wait().map_err(|source| {
+                PlatformCommandError::io(command, PlatformCommandStage::Wait, source)
+            })?;
         }
-    };
-
-    let status = wait_for_exit(&mut child, display_name, started, timeout);
-    let stdout = join_reader(stdout_reader, "stdout");
-    let stderr = join_reader(stderr_reader, "stderr");
-
-    Ok(Output {
-        status: status?,
-        stdout: stdout.map_err(|error| format!("读取 {display_name} 标准输出失败：{error}"))?,
-        stderr: stderr.map_err(|error| format!("读取 {display_name} 标准错误失败：{error}"))?,
-    })
+        let stdout_progress = stdout.poll().map_err(|source| {
+            PlatformCommandError::io(command, PlatformCommandStage::ReadStdout, source)
+        })?;
+        let stderr_progress = stderr.poll().map_err(|source| {
+            PlatformCommandError::io(command, PlatformCommandStage::ReadStderr, source)
+        })?;
+        if started.elapsed() >= timeout {
+            return Err(PlatformCommandError::TimedOut {
+                command: command.into(),
+                timeout,
+            });
+        }
+        if let Some(status) = status
+            && stdout.is_complete()
+            && stderr.is_complete()
+        {
+            return Ok(Output {
+                status,
+                stdout: stdout.into_bytes(),
+                stderr: stderr.into_bytes(),
+            });
+        }
+        if !stdout_progress && !stderr_progress {
+            thread::sleep(POLL_INTERVAL.min(timeout.saturating_sub(started.elapsed())));
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -119,66 +188,6 @@ fn configure_background_command(command: &mut Command) {
 #[cfg(not(target_os = "windows"))]
 fn configure_background_command(_command: &mut Command) {}
 
-fn spawn_reader(
-    pipe: impl Read + Send + 'static,
-    stream: &'static str,
-) -> io::Result<thread::JoinHandle<io::Result<Vec<u8>>>> {
-    thread::Builder::new()
-        .name(format!("zenclash-{stream}-reader"))
-        .spawn(move || {
-            let mut bytes = Vec::new();
-            pipe.take(MAX_COMMAND_OUTPUT_BYTES as u64 + 1)
-                .read_to_end(&mut bytes)?;
-            if bytes.len() > MAX_COMMAND_OUTPUT_BYTES {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("{stream} 超过 1 MiB 上限"),
-                ));
-            }
-            Ok(bytes)
-        })
-}
-
-fn join_reader(
-    reader: thread::JoinHandle<io::Result<Vec<u8>>>,
-    stream: &str,
-) -> Result<Vec<u8>, String> {
-    reader
-        .join()
-        .map_err(|_| format!("{stream} 读取线程异常结束"))?
-        .map_err(|error| error.to_string())
-}
-
-fn wait_for_exit(
-    child: &mut Child,
-    command: &str,
-    started: Instant,
-    timeout: Duration,
-) -> Result<ExitStatus, String> {
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Ok(status),
-            Ok(None) if started.elapsed() >= timeout => {
-                abort_child(child);
-                return Err(format!(
-                    "执行 {command} 超时（{} 秒），已终止",
-                    timeout.as_secs_f64()
-                ));
-            }
-            Ok(None) => thread::sleep(POLL_INTERVAL.min(timeout)),
-            Err(error) => {
-                abort_child(child);
-                return Err(format!("等待 {command} 结束失败：{error}"));
-            }
-        }
-    }
-}
-
-fn abort_for_setup_error(child: &mut Child, command: &str, reason: &str) -> String {
-    abort_child(child);
-    format!("执行 {command} 失败：{reason}")
-}
-
 fn abort_child(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
@@ -187,6 +196,7 @@ fn abort_child(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io;
 
     #[cfg(target_os = "windows")]
     #[test]
@@ -213,6 +223,54 @@ mod tests {
 
         assert!(error.contains("超时"));
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_collection_deadline_survives_a_descendant_holding_the_pipes() {
+        let started = Instant::now();
+        let result = output_with_timeout(
+            "/bin/sh",
+            &["-c", "sleep 1 & exit 0"],
+            Duration::from_millis(40),
+        );
+        assert!(
+            result.is_err(),
+            "pipe collection must not outlive the command budget"
+        );
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn either_inherited_stream_and_a_live_parent_share_the_same_deadline() {
+        for script in [
+            "sleep 1 >/dev/null & exit 0",
+            "sleep 1 2>/dev/null & exit 0",
+            "sleep 1 & wait",
+        ] {
+            let started = Instant::now();
+            let result = output_with_timeout("/bin/sh", &["-c", script], Duration::from_millis(40));
+            assert!(matches!(result, Err(message) if message.contains("超时")));
+            assert!(started.elapsed() < Duration::from_millis(500));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_large_output_streams_are_drained_without_starvation() {
+        let result = output_with_timeout(
+            "/bin/sh",
+            &[
+                "-c",
+                "head -c 131072 /dev/zero & head -c 131072 /dev/zero >&2; wait",
+            ],
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!(result.status.success());
+        assert_eq!(result.stdout.len(), 131072);
+        assert_eq!(result.stderr.len(), 131072);
     }
 
     #[cfg(target_os = "linux")]
@@ -333,15 +391,26 @@ mod tests {
         assert_eq!(output.stderr, b"stderr");
     }
 
+    #[cfg(unix)]
     #[test]
-    fn reader_rejects_output_over_the_size_limit() {
-        let payload = std::io::Cursor::new(vec![b'x'; MAX_COMMAND_OUTPUT_BYTES + 1]);
-        let error = join_reader(
-            spawn_reader(payload, "stdout").expect("reader thread should start"),
-            "stdout",
-        )
-        .expect_err("oversized output should be rejected");
+    fn output_rejects_an_oversized_stream_without_waiting_for_process_exit() {
+        let started = Instant::now();
+        let result = output_with_timeout(
+            "/bin/sh",
+            &["-c", "head -c 1048577 /dev/zero; sleep 1"],
+            Duration::from_secs(2),
+        );
+        assert!(matches!(result, Err(message) if message.contains("1 MiB")));
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
 
-        assert!(error.contains("超过 1 MiB"));
+    #[test]
+    fn typed_execution_retains_spawn_failure_and_omits_arguments() {
+        let command = format!("zenclash-missing-command-{}", std::process::id());
+        let error = output_typed(&command, &["private-command-argument"]).unwrap_err();
+        assert!(matches!(&error, PlatformCommandError::Io {
+            stage: PlatformCommandStage::Spawn, source, ..
+        } if source.kind() == io::ErrorKind::NotFound));
+        assert!(!format!("{error:?}").contains("private-command-argument"));
     }
 }

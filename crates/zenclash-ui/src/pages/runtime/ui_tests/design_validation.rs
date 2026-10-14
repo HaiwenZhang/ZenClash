@@ -2,8 +2,8 @@
 
 use super::*;
 use gpui_kit::base::TestSupportExt;
-use gpui_kit::component::{ActiveTheme, ThemeMode};
-use gpui_kit::{AnyView, Bounds, Render, WindowBounds, WindowOptions, point};
+use gpui_kit::component::{ActiveTheme, Root, ThemeMode};
+use gpui_kit::{AnyView, Bounds, Render, WindowBounds, WindowOptions, point, size};
 use std::{cell::RefCell, rc::Rc};
 
 mod live;
@@ -129,8 +129,8 @@ fn native_pages_render_for_design_validation() {
                         if live.is_some() {
                             return;
                         }
-                        let template = page.profiles.catalog.profiles[0].clone();
-                        page.profiles.catalog.profiles = [
+                        let template = page.profiles.catalog().profiles[0].clone();
+                        page.profiles.fixture_catalog_mut().profiles = [
                             "Daily Network",
                             "Streaming Network",
                             "Gaming Profile",
@@ -161,14 +161,11 @@ fn native_pages_render_for_design_validation() {
                             record
                         })
                         .collect();
-                        page.profiles
-                            .forms
-                            .catalog_view
-                            .prepare(&page.profiles.catalog);
+                        page.profiles.prepare_fixture_catalog_view();
                     })
                 });
                 cx.update(|cx| {
-                    let profile = page.read(cx).profiles.catalog.active_profile().cloned();
+                    let profile = page.read(cx).profiles.catalog().active_profile().cloned();
                     proxies.update(cx, |proxies, cx| proxies.set_active_profile(profile.as_ref(), cx));
                 });
                 for (width, height, viewport) in [(1536., 1024., ""), (1280., 820., "-compact"), (900., 700., "-medium"), (720., 560., "-narrow")] {
@@ -209,8 +206,7 @@ fn native_pages_render_for_design_validation() {
                                         page.error = None;
                                         page.ui_visibility = lifecycle::UiVisibility::new(true);
                                         page.live_updates_enabled.send_replace(false);
-                                        page.settings_navigation
-                                            .scroll
+                                        page.body_scroll
                                             .set_offset(point(px(0.), px(0.)));
                                         let data = live
                                             .as_ref()
@@ -228,11 +224,9 @@ fn native_pages_render_for_design_validation() {
                                             page.controlled_config = config.clone();
                                             page.config_inputs.refresh(&config, page.profile_path.as_deref(), window, cx);
                                         }
-                                        if let RuntimeData::Connections(snapshot) = &data {
-                                            page.connections.expanded = snapshot
-                                                .connections
-                                                .first()
-                                                .map(|connection| connection.id.clone());
+                                        if let PageSnapshotData::Connections(snapshot) = &data {
+                                            let selected = snapshot.connections.first().map(|connection| connection.id.clone());
+                                            page.connections.update(cx, |view, cx| view.inspect_for_design_validation(selected, cx));
                                         }
                                         page.replace_page_data(
                                             page.page_task_token_for(destination),
@@ -243,7 +237,7 @@ fn native_pages_render_for_design_validation() {
                                             page.update_home_traffic_presentation(cx);
                                         }
                                         if live.is_none() && destination == Page::Home {
-                                            let RuntimeData::Connections(connections) = fixture_data(Page::Connections) else {
+                                            let PageSnapshotData::Connections(connections) = fixture_data(Page::Connections) else {
                                                 unreachable!();
                                             };
                                             page.prepare_home_design_validation((*connections).clone());
@@ -252,14 +246,14 @@ fn native_pages_render_for_design_validation() {
                                             if live.is_some() {
                                                 page.update_log_presentation(cx);
                                             } else {
-                                                page.logs.prepare_design_validation();
+                                                page.logs.update(cx, |view, _| view.prepare_design_validation());
                                             }
                                         }
                                         if live.is_none() && destination == Page::Connections {
-                                            page.connections.expanded = Some("fixture-0".into());
+                                            page.connections.update(cx, |view, cx| view.inspect_for_design_validation(Some("fixture-0".into()), cx));
                                         }
                                         if live.is_none() && destination == Page::Network {
-                                            page.network_probe.snapshot = Some(zenclash_core::NetworkProbeSnapshot {
+                                            let diagnostic_snapshot = zenclash_core::NetworkProbeSnapshot {
                                                 route: "Mihomo".into(),
                                                 public_ip: Some(zenclash_core::PublicIpInfo { ip: "203.0.113.24".into(), ..Default::default() }),
                                                 latencies: [("example.com", "https://example.com/generate_204", Some(42)),
@@ -271,12 +265,10 @@ fn native_pages_render_for_design_validation() {
                                                         error: latency_ms.is_none().then(|| "Connection timed out after 8000 ms".into()),
                                                     }).collect(),
                                                 ..Default::default()
-                                            });
-                                        }
-                                        if live.is_none() && destination == Page::Network {
+                                            };
                                             use zenclash_core::{DiagnosticStepKind as Kind, DiagnosticRoute as Route, DiagnosticData as Data};
-                                            let snapshot = page.network_probe.snapshot.clone().unwrap();
-                                            page.network_probe.report = Some(zenclash_core::DiagnosticReport {
+                                            let snapshot = diagnostic_snapshot;
+                                            let report = zenclash_core::DiagnosticReport {
                                                 started_at_ms: 1_700_000_000_000,
                                                 steps: [
                                                     (Kind::Controller, Route::Controller, Ok(Data::Controller(zenclash_core::VersionInfo { meta: true, version: "v1.19.30".into() }))),
@@ -291,7 +283,8 @@ fn native_pages_render_for_design_validation() {
                                                     kind, route, outcome, duration_ms: 18 + index as u64,
                                                     completed_at_ms: 1_700_000_000_020 + index as u64,
                                                 }).collect(),
-                                            });
+                                            };
+                                            page.network_diagnostics.query.set_design_validation("example.com".into(), report);
                                         }
                                         cx.notify();
                                     });
@@ -346,7 +339,7 @@ fn native_pages_render_for_design_validation() {
                                             window.render_frame(cx);
                                         }
                                         if destination == Page::Rules {
-                                            let RuntimeData::Rules { catalog, .. } = &page.read(cx).data else {
+                                            let PageSnapshotData::Rules { catalog, .. } = page.read(cx).page_observation.data() else {
                                                 return Err("rule catalog is unavailable".to_owned());
                                             };
                                             let identity = catalog.rules.first().ok_or("rule catalog has no selectable row")?.index.unwrap_or(0);
@@ -375,7 +368,7 @@ fn native_pages_render_for_design_validation() {
                                             window.press("escape", cx);
                                             window.render_frame(cx);
                                             let previous = page.update(cx, |page, cx| {
-                                                let step = page.network_probe.report.as_mut().unwrap().steps.iter_mut().find(|step| step.kind == DiagnosticStepKind::DnsAaaa).unwrap();
+                                                let step = page.network_diagnostics.query.report_for_design_validation().unwrap().steps.iter_mut().find(|step| step.kind == DiagnosticStepKind::DnsAaaa).unwrap();
                                                 let previous = step.outcome.clone();
                                                 step.outcome = Err(zenclash_core::DiagnosticFailure { message: "DNS query timed out while resolving a-long-diagnostic-target.example.com after 8000 ms".into() });
                                                 cx.notify();
@@ -389,7 +382,7 @@ fn native_pages_render_for_design_validation() {
                                             window.render_frame(cx);
                                             window.render_to_image().map_err(|error| error.to_string())?.save(output.join(format!("network-{suffix}-partial-failure{viewport}.png"))).map_err(|error| error.to_string())?;
                                             page.update(cx, |page, cx| {
-                                                page.network_probe.report.as_mut().unwrap().steps.iter_mut().find(|step| step.kind == DiagnosticStepKind::DnsAaaa).unwrap().outcome = previous;
+                                                page.network_diagnostics.query.report_for_design_validation().unwrap().steps.iter_mut().find(|step| step.kind == DiagnosticStepKind::DnsAaaa).unwrap().outcome = previous;
                                                 cx.notify();
                                             });
                                             window.render_frame(cx);
@@ -399,16 +392,16 @@ fn native_pages_render_for_design_validation() {
                                                 return Err("removed profile controls remain visible".into());
                                             }
                                             let original = page.update(cx, |page, cx| {
-                                                let original = page.profiles.catalog.clone();
-                                                page.profiles.catalog.profiles.truncate(1);
-                                                page.profiles.forms.catalog_view.prepare(&page.profiles.catalog);
+                                                let original = page.profiles.catalog().clone();
+                                                page.profiles.fixture_catalog_mut().profiles.truncate(1);
+                                                page.profiles.prepare_fixture_catalog_view();
                                                 cx.notify();
                                                 original
                                             });
                                             window.render_frame(cx);
                                             window.render_to_image().map_err(|error| error.to_string())?
                                                 .save(output.join(format!("profiles-current-{suffix}{viewport}.png"))).map_err(|error| error.to_string())?;
-                                            let id = page.read(cx).profiles.catalog.profiles[0].id.clone();
+                                            let id = page.read(cx).profiles.catalog().profiles[0].id.clone();
                                             page.update(cx, |page, cx| page.begin_edit_remote_profile(id, window, cx));
                                             window.render_frame(cx);
                                             window.render_frame(cx);
@@ -420,14 +413,14 @@ fn native_pages_render_for_design_validation() {
                                                 .save(output.join(format!("profiles-request-settings-{suffix}{viewport}.png"))).map_err(|error| error.to_string())?;
                                             window.press("escape", cx);
                                             page.update(cx, |page, cx| {
-                                                page.profiles.catalog = original;
-                                                page.profiles.forms.catalog_view.prepare(&page.profiles.catalog);
+                                                *page.profiles.fixture_catalog_mut() = original;
+                                                page.profiles.prepare_fixture_catalog_view();
                                                 cx.notify();
                                             });
                                             window.render_frame(cx);
                                         }
                                         if destination == Page::Logs {
-                                            let first_log = page.read(cx).logs.design_validation_log_id();
+                                            let first_log = page.read(cx).logs.read(cx).design_validation_log_id();
                                             if let Some(id) = first_log {
                                                 let button = window.try_find(("inspect-log", id)).ok_or_else(|| "log detail action is missing".to_owned())?;
                                                 let table = window.try_find("logs-table").ok_or_else(|| "log table is missing".to_owned())?;
@@ -587,9 +580,9 @@ fn native_pages_render_for_design_validation() {
     drop(fixture);
 }
 
-fn fixture_data(page: Page) -> RuntimeData {
+fn fixture_data(page: Page) -> PageSnapshotData {
     match page {
-        Page::Home => RuntimeData::Dashboard {
+        Page::Home => PageSnapshotData::Dashboard {
             config: Observation::Fresh {
                 value: RuntimeConfig {
                     mode: "rule".into(),
@@ -613,16 +606,11 @@ fn fixture_data(page: Page) -> RuntimeData {
                     .enumerate()
                     .map(|(index, name)| {
                         (
-                            zenclash_core::ProxyGroup {
-                                name: name.into(),
-                                now: "🇭🇰 香港 · HK 01".into(),
-                                behavior: if index == 1 {
+                            zenclash_core::ProxyGroup::new(name).with_current_member("🇭🇰 香港 · HK 01").with_behavior(if index == 1 {
                                     zenclash_core::ProxyGroupBehavior::Automatic { fixed: false }
                                 } else {
                                     zenclash_core::ProxyGroupBehavior::Selector
-                                },
-                                ..Default::default()
-                            },
+                                }),
                             [
                                 ("🇭🇰 香港 · HK 01", Some(28)),
                                 ("🇭🇰 香港 · HK 02", Some(35)),
@@ -654,13 +642,13 @@ fn fixture_data(page: Page) -> RuntimeData {
                 observed_at_ms: 0,
             },
         },
-        Page::Profiles => RuntimeData::Profile {
+        Page::Profiles => PageSnapshotData::Profile {
             config: Some(RuntimeConfig::default()),
             proxy_count: Some(9),
             group_count: Some(2),
             rule_count: Some(30),
         },
-        Page::Connections => RuntimeData::Connections(Arc::new(ConnectionsSnapshot {
+        Page::Connections => PageSnapshotData::Connections(Arc::new(ConnectionsSnapshot {
             connections: (0..128)
                 .map(|index| zenclash_core::Connection {
                     id: format!("fixture-{index}"),
@@ -679,7 +667,7 @@ fn fixture_data(page: Page) -> RuntimeData {
                 .collect(),
             ..Default::default()
         })),
-        Page::Rules => RuntimeData::Rules {
+        Page::Rules => PageSnapshotData::Rules {
             proxies: None,
             config: Some(RuntimeConfig {
                 mode: "rule".into(),
@@ -710,18 +698,18 @@ fn fixture_data(page: Page) -> RuntimeData {
                     .collect(),
             }),
         },
-        Page::Settings => RuntimeData::Settings {
+        Page::Settings => PageSnapshotData::Settings {
             config: Some(RuntimeConfig::default()),
             autostart: Ok(AutostartStatus::default()),
         },
-        Page::Dns | Page::Sniffer => RuntimeData::Config(serde_json::from_value(settings_fixture_config()).unwrap()),
-        Page::Tun => RuntimeData::Tun { config: serde_json::from_value(settings_fixture_config()).unwrap(), permissions: Observation::Loading },
-        Page::SystemProxy => RuntimeData::SystemProxy { config: serde_json::from_value(settings_fixture_config()).unwrap(), status: SystemProxyStatus::default() },
-        Page::Resources => RuntimeData::Resources { config: serde_json::from_value(settings_fixture_config()).unwrap(),
+        Page::Dns | Page::Sniffer => PageSnapshotData::Config(serde_json::from_value(settings_fixture_config()).unwrap()),
+        Page::Tun => PageSnapshotData::Tun { config: serde_json::from_value(settings_fixture_config()).unwrap(), permissions: Observation::Loading },
+        Page::SystemProxy => PageSnapshotData::SystemProxy { config: serde_json::from_value(settings_fixture_config()).unwrap(), status: SystemProxyStatus::default() },
+        Page::Resources => PageSnapshotData::Resources { config: serde_json::from_value(settings_fixture_config()).unwrap(),
             proxy: serde_json::from_value(json!({"providers":{"Daily Network":{"name":"Daily Network","proxies":[{}, {}, {}],"updatedAt":"2026-10-07 10:30","vehicleType":"HTTP"}}})).unwrap(),
             rules: serde_json::from_value(json!({"providers":{"applications":{"name":"applications","ruleCount":1432,"updatedAt":"2026-10-07 09:30","vehicleType":"HTTP","behavior":"classical","format":"mrs"},"private":{"name":"private","ruleCount":28,"vehicleType":"File","behavior":"ipcidr","format":"yaml"}}})).unwrap() },
-        Page::Mihomo => RuntimeData::Core { config: serde_json::from_value(settings_fixture_config()).unwrap(), version: Default::default() },
-        Page::Network => RuntimeData::Network {
+        Page::Mihomo => PageSnapshotData::Core { config: serde_json::from_value(settings_fixture_config()).unwrap(), version: Default::default() },
+        Page::Network => PageSnapshotData::Network {
             config: RuntimeConfig {
                 ipv6: true,
                 unified_delay: true,
@@ -729,7 +717,7 @@ fn fixture_data(page: Page) -> RuntimeData {
             },
             system: zenclash_core::SystemNetworkSnapshot::default(),
         },
-        _ => RuntimeData::Empty,
+        _ => PageSnapshotData::Empty,
     }
 }
 

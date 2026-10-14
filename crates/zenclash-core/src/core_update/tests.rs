@@ -1,9 +1,5 @@
 #[cfg(unix)]
-use std::{
-    io::{Read, Write},
-    net::TcpListener,
-    thread,
-};
+use std::{io::Write, net::TcpListener, thread};
 use std::{
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
@@ -208,11 +204,38 @@ fn abandoned_staging_and_failed_activation_leave_the_old_core_intact() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
+#[test]
+fn activation_failure_before_candidate_rename_cleans_the_owned_staging_file() {
+    for missing_target_name in [true, false] {
+        let directory = unique_directory("early-activation-failure");
+        std::fs::create_dir_all(&directory).unwrap();
+        let staging = directory.join("validated-candidate");
+        std::fs::write(&staging, b"new candidate").unwrap();
+        let target = if missing_target_name {
+            PathBuf::new()
+        } else {
+            directory.join("missing-active-core")
+        };
+        let prepared = PreparedCoreUpdate {
+            staging: Some(staging.clone()),
+            target,
+            tag: "v-test".into(),
+        };
+        assert!(prepared.activate().is_err());
+        assert!(
+            !staging.exists(),
+            "early failure must retain candidate cleanup ownership"
+        );
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn application_shutdown_during_release_download_never_restarts_the_owned_core() {
     use crate::{
-        CoreKind, CoreSession, MihomoClient, MihomoEndpoint, MihomoLaunchConfig, MihomoProcess,
+        CoreKind, CoreLaunchConfig, CoreSession, ManagedCoreProcess, MihomoClient, MihomoEndpoint,
     };
     use std::os::unix::fs::PermissionsExt;
 
@@ -260,8 +283,10 @@ async fn application_shutdown_during_release_download_never_restarts_the_owned_c
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                 .unwrap();
-            let mut request = [0_u8; 8192];
-            let read = stream.read(&mut request).unwrap();
+            let request = crate::test_support::read_controller_request_blocking(&mut stream)
+                .unwrap()
+                .into_bytes();
+            let read = request.len();
             let request = String::from_utf8_lossy(&request[..read]);
             let body = if request.starts_with("GET /asset.gz ") {
                 requested.take().unwrap().send(()).unwrap();
@@ -283,7 +308,7 @@ async fn application_shutdown_during_release_download_never_restarts_the_owned_c
         }
     });
     let endpoint = MihomoEndpoint::new(format!("http://{address}"), "");
-    let process = MihomoProcess::spawn(MihomoLaunchConfig {
+    let process = ManagedCoreProcess::spawn(CoreLaunchConfig {
         kind: CoreKind::Mihomo,
         binary: target.clone(),
         config_file: profile,
@@ -355,8 +380,10 @@ async fn release_download_activation_and_rollback_are_transactional() {
     let server = thread::spawn(move || {
         for _ in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 4_096];
-            let length = stream.read(&mut request).unwrap();
+            let request = crate::test_support::read_controller_request_blocking(&mut stream)
+                .unwrap()
+                .into_bytes();
+            let length = request.len();
             let request = String::from_utf8_lossy(&request[..length]);
             let (content_type, body) = if request.starts_with("GET /releases?") {
                 ("application/json", metadata.as_bytes())
@@ -488,9 +515,9 @@ async fn release_rollback_reuses_prechecked_payload_after_source_turns_tun_on() 
 }
 
 #[cfg(unix)]
-async fn wait_for_old_startup(home: &std::path::Path, pid: u32) {
+async fn wait_for_startup_payload(home: &std::path::Path, core: &str, pid: u32) {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while std::fs::read_to_string(home.join("old-startup.pid"))
+        while std::fs::read_to_string(home.join(format!("{core}-startup.pid")))
             .ok()
             .and_then(|published| published.trim().parse::<u32>().ok())
             != Some(pid)
@@ -499,15 +526,17 @@ async fn wait_for_old_startup(home: &std::path::Path, pid: u32) {
         }
     })
     .await
-    .expect("old core did not publish its complete startup payload for the current PID");
+    .unwrap_or_else(|_| {
+        panic!("{core} core did not publish its complete startup payload for PID {pid}")
+    });
 }
 
 #[cfg(unix)]
 async fn exercise_managed_install(case: ManagedInstallCase) {
     let _ports = crate::core_session::fixed_listener_ports_guard().await;
     use crate::{
-        ControlledConfigStore, CoreKind, CoreSession, CoreSessionError, EffectiveConfigIntent,
-        MihomoClient, MihomoEndpoint, MihomoLaunchConfig, MihomoProcess,
+        ControlledConfigStore, CoreKind, CoreLaunchConfig, CoreSession, CoreSessionError,
+        EffectiveConfigIntent, ManagedCoreProcess, MihomoClient, MihomoEndpoint,
     };
     use std::{os::unix::fs::PermissionsExt, time::Duration};
 
@@ -571,7 +600,7 @@ async fn exercise_managed_install(case: ManagedInstallCase) {
     } else {
         "exec sleep 60"
     };
-    let candidate = format!("#!/bin/sh\nif [ \"$1\" = '-v' ]; then printf 'Mihomo Meta v9.9.9 test\\n'; exit 0; fi\nif [ \"$1\" = '-t' ]; then {validation}; exit $?; fi\ncat \"$4\" > \"$2/candidate-startup.yaml\"\nprintf 'candidate\\n' >> \"$2/runs\"\n{launch}\n").into_bytes();
+    let candidate = format!("#!/bin/sh\nset -e\nif [ \"$1\" = '-v' ]; then printf 'Mihomo Meta v9.9.9 test\\n'; exit 0; fi\nif [ \"$1\" = '-t' ]; then {validation}; exit $?; fi\ncat \"$4\" > \"$2/candidate-startup.$$.tmp\"\nmv \"$2/candidate-startup.$$.tmp\" \"$2/candidate-startup.yaml\"\nprintf '%s\\n' \"$$\" > \"$2/candidate-startup-pid.$$.tmp\"\nmv \"$2/candidate-startup-pid.$$.tmp\" \"$2/candidate-startup.pid\"\nprintf 'candidate\\n' >> \"$2/runs\"\n{launch}\n").into_bytes();
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(&candidate).unwrap();
     let archive = encoder.finish().unwrap();
@@ -586,6 +615,7 @@ async fn exercise_managed_install(case: ManagedInstallCase) {
     let (release_ready, ready_released) = std::sync::mpsc::channel();
     let (stop, stopped) = std::sync::mpsc::channel();
     let server_target = target.clone();
+    let server_home = directory.join("data");
     let server = thread::spawn(move || {
         let mut asset_seen = Some(asset_seen);
         let mut asset_released = Some(asset_released);
@@ -604,8 +634,10 @@ async fn exercise_managed_install(case: ManagedInstallCase) {
             stream
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .unwrap();
-            let mut bytes = [0; 8192];
-            let length = stream.read(&mut bytes).unwrap();
+            let bytes = crate::test_support::read_controller_request_blocking(&mut stream)
+                .unwrap()
+                .into_bytes();
+            let length = bytes.len();
             let request = String::from_utf8_lossy(&bytes[..length]);
             if request.starts_with("GET /asset.gz ") {
                 asset_seen.take().unwrap().send(()).unwrap();
@@ -631,17 +663,26 @@ async fn exercise_managed_install(case: ManagedInstallCase) {
             }
             assert!(request.starts_with("GET /version "), "{request}");
             let candidate_active = std::fs::read(&server_target).unwrap() != old;
+            // Readiness must mean the candidate consumed its frozen configuration.
+            // Returning success from binary metadata alone can release that input
+            // before the shell opens it, unlike the real core's controller.
+            let candidate_initialized =
+                std::fs::read_to_string(server_home.join("candidate-startup.pid"))
+                    .ok()
+                    .and_then(|published| published.trim().parse::<u32>().ok())
+                    .is_some();
             if candidate_active && case == ManagedInstallCase::ShutdownReady {
                 ready_seen.take().unwrap().send(()).unwrap();
                 ready_released.recv_timeout(Duration::from_secs(8)).unwrap();
             }
             let (status, body) = if candidate_active
-                && matches!(
-                    case,
-                    ManagedInstallCase::ReadyFailure
-                        | ManagedInstallCase::ReadyFailureStopped
-                        | ManagedInstallCase::ChangedPrecheckRollback
-                ) {
+                && (!candidate_initialized
+                    || matches!(
+                        case,
+                        ManagedInstallCase::ReadyFailure
+                            | ManagedInstallCase::ReadyFailureStopped
+                            | ManagedInstallCase::ChangedPrecheckRollback
+                    )) {
                 ("503 Service Unavailable", "unready")
             } else if candidate_active && case == ManagedInstallCase::VersionMismatch {
                 ("200 OK", r#"{"meta":true,"version":"0.0.0"}"#)
@@ -661,7 +702,7 @@ async fn exercise_managed_install(case: ManagedInstallCase) {
         }
     });
     let endpoint = MihomoEndpoint::new(format!("http://{address}"), "");
-    let process = MihomoProcess::spawn(MihomoLaunchConfig {
+    let process = ManagedCoreProcess::spawn(CoreLaunchConfig {
         kind: CoreKind::Mihomo,
         binary: target.clone(),
         config_file: store.runtime_path(),
@@ -677,7 +718,12 @@ async fn exercise_managed_install(case: ManagedInstallCase) {
         vec![],
     )
     .unwrap();
-    wait_for_old_startup(&directory.join("data"), process.snapshot().pid.unwrap()).await;
+    wait_for_startup_payload(
+        &directory.join("data"),
+        "old",
+        process.snapshot().pid.unwrap(),
+    )
+    .await;
     if case == ManagedInstallCase::ReadyFailureStopped {
         session
             .maintain(crate::CoreMaintenanceIntent::Stop)
@@ -744,8 +790,15 @@ async fn exercise_managed_install(case: ManagedInstallCase) {
     };
     let snapshot = process.snapshot();
     let executable = std::fs::read(&target).unwrap();
-    if snapshot.running && executable == old {
-        wait_for_old_startup(&directory.join("data"), snapshot.pid.unwrap()).await;
+    if snapshot.running {
+        // The fake controller can report the installed binary before its shell
+        // publishes startup bytes. Wait for the actual current process, not a delay.
+        let core = if executable == old {
+            "old"
+        } else {
+            "candidate"
+        };
+        wait_for_startup_payload(&directory.join("data"), core, snapshot.pid.unwrap()).await;
     }
     let payload = std::fs::read(store.runtime_path()).unwrap();
     let old_startup = std::fs::read(directory.join("data/old-startup.yaml")).unwrap();
@@ -848,7 +901,7 @@ async fn exercise_managed_install(case: ManagedInstallCase) {
 }
 
 #[tokio::test]
-async fn external_and_experimental_sessions_reject_release_installation_before_download() {
+async fn external_sessions_reject_release_installation_before_download() {
     use crate::{CoreKind, CoreSession, CoreSessionError, MihomoClient, MihomoEndpoint};
     let service = MihomoReleaseService::with_base("http://127.0.0.1:1/", true).unwrap();
     let release = super::MihomoRelease {
@@ -862,7 +915,8 @@ async fn external_and_experimental_sessions_reject_release_installation_before_d
             sha256: "00".repeat(32),
         },
     };
-    for kind in [CoreKind::Mihomo, CoreKind::Meow] {
+    {
+        let kind = CoreKind::Mihomo;
         let session = CoreSession::open(
             kind,
             MihomoClient::new(MihomoEndpoint::new("http://127.0.0.1:1", ""))

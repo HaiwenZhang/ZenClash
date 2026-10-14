@@ -1,5 +1,7 @@
 use super::*;
-use crate::pages::runtime::ui_tests::{Fixture, open};
+use crate::pages::runtime::test_support::{
+    RuntimePageFixture as Fixture, open_runtime_page_window as open,
+};
 
 struct PreviewBackground;
 
@@ -162,15 +164,17 @@ fn ai_network_native_preview() {
                         {
                             crate::design::apply_zen_theme(mode, Some(window), cx);
                             page.update(cx, |page, cx| {
-                                page.page_read_task.cancel();
+                                page.page_observation.cancel();
                                 page.loading = false;
-                                page.data = RuntimeData::Network {
-                                    config: RuntimeConfig {
-                                        mixed_port: 7890,
-                                        ..Default::default()
+                                page.page_observation.replace_fixture_data(
+                                    PageSnapshotData::Network {
+                                        config: RuntimeConfig {
+                                            mixed_port: 7890,
+                                            ..Default::default()
+                                        },
+                                        system: SystemNetworkSnapshot::default(),
                                     },
-                                    system: SystemNetworkSnapshot::default(),
-                                };
+                                );
                                 cx.notify();
                             });
                             window.render_frame(cx);

@@ -1,7 +1,6 @@
 pub(crate) mod feedback;
 pub(crate) mod mint_switch;
-pub(crate) mod mode;
-/// Primary navigation sidebar and outbound-mode values.
+/// Primary navigation sidebar with a compatibility export for outbound modes.
 pub mod sidebar;
 /// Native status icon, menu model, and command routing.
 pub mod tray;

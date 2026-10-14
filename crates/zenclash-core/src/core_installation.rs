@@ -46,16 +46,6 @@ pub enum CoreBinaryError {
         /// Concrete command failure.
         message: String,
     },
-    /// The executable belongs to the other supported core implementation.
-    #[error("内核类型不匹配：期望 {expected}，但 {path} 报告为 {actual}")]
-    WrongKind {
-        /// Core selected in the UI.
-        expected: CoreKind,
-        /// Core detected from version output.
-        actual: CoreKind,
-        /// Executable being checked.
-        path: PathBuf,
-    },
 }
 
 /// Validates that a path is executable, responsive, and belongs to `kind`.
@@ -116,15 +106,9 @@ pub fn validate_core_binary(
         path: canonical.clone(),
         message: format!("无法从版本输出识别内核：{version}"),
     })?;
-    if detected != kind {
-        return Err(CoreBinaryError::WrongKind {
-            expected: kind,
-            actual: detected,
-            path: canonical,
-        });
-    }
+
     Ok(CoreBinaryInfo {
-        kind,
+        kind: detected,
         path: canonical,
         version,
         architecture: std::env::consts::ARCH,
@@ -145,8 +129,6 @@ fn detect_core_kind(output: &str) -> Option<CoreKind> {
     let normalized = output.to_ascii_lowercase();
     if normalized.contains("mihomo") || normalized.contains("clash meta") {
         Some(CoreKind::Mihomo)
-    } else if normalized.contains("meow") {
-        Some(CoreKind::Meow)
     } else {
         None
     }
@@ -179,7 +161,7 @@ mod tests {
             detect_core_kind("Mihomo Meta v1.19"),
             Some(CoreKind::Mihomo)
         );
-        assert_eq!(detect_core_kind("Meow Meta 0.21"), Some(CoreKind::Meow));
+        assert_eq!(detect_core_kind("Other Proxy 0.21"), None);
     }
 
     #[test]
@@ -190,30 +172,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn validates_an_executable_with_the_expected_identity() {
-        let path = version_script("valid-meow", "Meow Meta 0.21.1");
+        let path = version_script("valid-mihomo", "Mihomo Meta v1.19.30");
 
-        let info = validate_core_binary(CoreKind::Meow, &path).unwrap();
+        let info = validate_core_binary(CoreKind::Mihomo, &path).unwrap();
 
-        assert_eq!(info.kind, CoreKind::Meow);
-        assert_eq!(info.version, "Meow Meta 0.21.1");
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rejects_an_executable_with_the_other_core_identity() {
-        let path = version_script("wrong-kind", "Mihomo Meta v1.19.0");
-
-        let error = validate_core_binary(CoreKind::Meow, &path).unwrap_err();
-
-        assert!(matches!(
-            error,
-            CoreBinaryError::WrongKind {
-                expected: CoreKind::Meow,
-                actual: CoreKind::Mihomo,
-                ..
-            }
-        ));
+        assert_eq!(info.kind, CoreKind::Mihomo);
+        assert_eq!(info.version, "Mihomo Meta v1.19.30");
         std::fs::remove_file(path).unwrap();
     }
 
