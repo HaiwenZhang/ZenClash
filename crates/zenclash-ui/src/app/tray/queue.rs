@@ -14,6 +14,7 @@ impl<T> Default for LatestCommandQueue<T> {
 }
 
 impl<T> LatestCommandQueue<T> {
+    #[cfg(test)]
     pub(super) fn is_running(&self) -> bool {
         self.running
     }

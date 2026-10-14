@@ -37,8 +37,6 @@ impl ZenClashApp {
             self.tray_command_error = None;
         }
         match command {
-            TrayCommand::SetDisplay(display) => self.set_tray_display(display, cx),
-            TrayCommand::ShowPanel => self.toggle_status_panel(cx),
             TrayCommand::ShowWindow => self.show_main_window(cx),
             TrayCommand::SetRuleMode => self.request_outbound_mode(OutboundMode::Rule, cx),
             TrayCommand::SetGlobalMode => self.request_outbound_mode(OutboundMode::Global, cx),
@@ -76,7 +74,6 @@ impl ZenClashApp {
                     tracing::warn!("cannot copy proxy environment without a live HTTP/Mixed port");
                 }
             }
-            TrayCommand::LightMode => self.hide_main_window(cx),
             TrayCommand::Restart => {
                 let executable = match std::env::current_exe() {
                     Ok(executable) => executable,

@@ -176,9 +176,6 @@ app:
     appearance_unsaved:
       zh-CN: "主题尚未保存。重试后，下次启动将保留此选择：%{error}"
       en: "The theme hasn’t been saved. Retry to keep this choice for the next launch: %{error}"
-    tray_display_unsaved:
-      zh-CN: "托盘显示方式尚未保存。重试后，下次启动将保留此选择：%{error}"
-      en: "The tray display hasn’t been saved. Retry to keep this choice for the next launch: %{error}"
     tray_visibility_unsaved:
       zh-CN: "托盘可见性尚未保存。重试后，下次启动将保留此选择：%{error}"
       en: "Tray visibility hasn’t been saved. Retry to keep this choice for the next launch: %{error}"
@@ -4602,24 +4599,6 @@ outbound_mode:
     en: Direct Mode
 
 tray:
-  display:
-    zh-CN: 显示方式
-    en: Display mode
-  display_icon:
-    zh-CN: 应用图标
-    en: Application icon
-  display_traffic:
-    zh-CN: 实时流量
-    en: Live traffic
-  show_panel:
-    zh-CN: 打开状态面板
-    en: Open status panel
-  tooltip:
-    zh-CN: ZenClash · %{core} 网络流量
-    en: ZenClash · %{core} Network Traffic
-  core_offline:
-    zh-CN: 内核离线
-    en: Core Offline
   show_window:
     zh-CN: 显示主窗口
     en: Show Main Window
@@ -4650,9 +4629,6 @@ tray:
   delay_timeout:
     zh-CN: "  （超时）"
     en: "  (timeout)"
-  light_mode:
-    zh-CN: 轻量模式（隐藏窗口）
-    en: Lightweight Mode (Hide Window)
   restart:
     zh-CN: 重新启动 ZenClash
     en: Restart ZenClash
@@ -4929,8 +4905,8 @@ settings:
       zh-CN: 状态栏图标
       en: Status bar icon
     description:
-      zh-CN: 显示 ZenClash 图标；可在图标菜单中选择应用图标或实时流量
-      en: Show the ZenClash indicator; choose its display mode from the icon menu
+      zh-CN: 显示 ZenClash 应用图标
+      en: Show the ZenClash application icon
   language:
     save_error:
       zh-CN: 语言设置保存失败：%{error}

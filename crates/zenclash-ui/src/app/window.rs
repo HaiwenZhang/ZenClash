@@ -13,24 +13,6 @@ impl ZenClashApp {
         window.resize(parked_size);
     }
 
-    pub(super) fn hide_main_window(&mut self, cx: &mut Context<Self>) {
-        self.release_hidden_page_data(cx);
-        #[cfg(target_os = "macos")]
-        {
-            let main_window = self.main_window;
-            let _ = cx.update_window(main_window, |_, window, _| self.park_main_window(window));
-        }
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
-        {
-            let main_window = self.main_window;
-            let _ = cx.update_window(main_window, |_, window, _| {
-                self.hide_retained_window(window)
-            });
-        }
-        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-        cx.hide();
-    }
-
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(in crate::app) fn hide_main_window_in(
         &mut self,

@@ -38,17 +38,6 @@ pub enum AppearancePreference {
     Light,
 }
 
-/// Content shown by the native tray or menu-bar indicator.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum TrayDisplayPreference {
-    /// Display the live upload/download indicator, preserving existing preferences.
-    #[default]
-    Traffic,
-    /// Display only the ZenClash application mark.
-    Icon,
-}
-
 /// Language used by ZenClash's window, application menu, and native status menu.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -100,10 +89,8 @@ pub struct AppPreferences {
     pub appearance: AppearancePreference,
     /// Preferred language for all user-facing application surfaces.
     pub language: LanguagePreference,
-    /// Whether the live native traffic indicator is visible.
+    /// Whether the native application tray icon is visible.
     pub traffic_tray_visible: bool,
-    /// Appearance of the visible tray indicator, independent from visibility.
-    pub tray_display: TrayDisplayPreference,
     /// Whether real Mihomo connection deltas are persisted for historical reports.
     pub traffic_history_enabled: bool,
     /// Number of days retained by the local traffic-history database.
@@ -168,7 +155,6 @@ impl Default for AppPreferences {
             appearance: AppearancePreference::System,
             language: LanguagePreference::ZhCn,
             traffic_tray_visible: true,
-            tray_display: TrayDisplayPreference::default(),
             traffic_history_enabled: true,
             traffic_retention_days: crate::DEFAULT_TRAFFIC_RETENTION_DAYS,
             log_file_enabled: true,
@@ -462,6 +448,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn removed_tray_display_preferences_preserve_other_settings_and_are_not_saved_again() {
+        for display in ["traffic", "icon"] {
+            let path = test_path(&format!("removed-tray-display-{display}"));
+            let store = AppPreferencesStore::new(&path);
+            let mut old = serde_json::to_value(AppPreferences {
+                appearance: AppearancePreference::Dark,
+                language: LanguagePreference::En,
+                traffic_tray_visible: false,
+                ..Default::default()
+            })
+            .unwrap();
+            old["tray_display"] = display.into();
+            let bytes = serde_json::to_vec(&old).unwrap();
+            fs::write(&path, &bytes).unwrap();
+
+            let preferences = store.load().unwrap();
+            assert_eq!(preferences.appearance, AppearancePreference::Dark);
+            assert_eq!(preferences.language, LanguagePreference::En);
+            assert!(!preferences.traffic_tray_visible);
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            store.save(&preferences).unwrap();
+            let saved: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert!(saved.get("tray_display").is_none());
+            assert_eq!(store.load().unwrap(), preferences);
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn removed_tray_display_migration_still_rejects_invalid_or_duplicate_settings() {
+        let path = test_path("invalid-removed-tray-display");
+        let store = AppPreferencesStore::new(&path);
+        for bytes in [
+            r#"{"tray_display":"unsupported"}"#,
+            r#"{"tray_display":"traffic","tray_display":"icon"}"#,
+            r#"{"tray_display":"traffic","language":"unsupported"}"#,
+        ] {
+            fs::write(&path, bytes).unwrap();
+            assert!(store.load().is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), bytes);
+        }
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn removed_runtime_preferences_migrate_without_losing_other_settings() {
         let path = test_path("removed-runtime-migration");
         let store = AppPreferencesStore::new(&path);
@@ -566,7 +598,6 @@ mod tests {
             appearance: AppearancePreference::Light,
             language: LanguagePreference::En,
             traffic_tray_visible: false,
-            tray_display: TrayDisplayPreference::Icon,
             ..AppPreferences::default()
         };
 
@@ -697,7 +728,6 @@ mod tests {
 
         let preferences = store.load().unwrap();
 
-        assert_eq!(preferences.tray_display, TrayDisplayPreference::Traffic);
         assert!(preferences.traffic_history_enabled);
         assert_eq!(preferences.language, LanguagePreference::ZhCn);
         assert_eq!(preferences.core_kind, CoreKind::Mihomo);

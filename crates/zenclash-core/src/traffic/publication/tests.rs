@@ -51,11 +51,13 @@ fn a_paused_old_traffic_frame_cannot_replace_new_generation_rates_or_samples() {
     ));
     let snapshot = monitor.snapshot();
     let samples = monitor.samples();
+    let timed_samples = monitor.timed_samples();
     let revision = monitor.revision();
     controller.resume();
     assert!(!writer.join().unwrap());
     assert_eq!(monitor.snapshot(), snapshot);
     assert_eq!(monitor.samples(), samples);
+    assert_eq!(monitor.timed_samples(), timed_samples);
     assert_eq!(monitor.revision(), revision);
 }
 
@@ -132,4 +134,48 @@ fn traffic_keeps_the_generation_gate_until_its_sample_is_published() {
             download: 8
         })
     );
+    assert_eq!(monitor.timed_samples().len(), 1);
+    assert_eq!(
+        monitor.timed_samples()[0].timestamp_ms(),
+        monitor.snapshot().updated_at_ms
+    );
+}
+
+#[test]
+fn generation_reconnects_retain_real_history_without_appending_old_rates_as_new_frames() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let monitor = monitor_without_socket(runtime.handle());
+    assert!(update_frame_for_generation(
+        &monitor.snapshot,
+        &monitor.samples,
+        TrafficFrame { up: 10, down: 20 },
+        1,
+        &monitor.expected_generation,
+        &monitor.revision
+    ));
+    let history = monitor.timed_samples();
+    monitor.synchronize_generation(2);
+    assert!(update_connection_for_generation(
+        &monitor.snapshot,
+        true,
+        None,
+        2,
+        &monitor.expected_generation,
+        &monitor.revision
+    ));
+    assert_eq!(monitor.timed_samples(), history);
+    assert!(update_frame_for_generation(
+        &monitor.snapshot,
+        &monitor.samples,
+        TrafficFrame { up: 30, down: 40 },
+        2,
+        &monitor.expected_generation,
+        &monitor.revision
+    ));
+    let history = monitor.timed_samples();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].rates().upload, 10);
+    assert_eq!(history[1].rates().upload, 30);
 }

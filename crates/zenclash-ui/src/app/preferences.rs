@@ -206,14 +206,10 @@ impl ZenClashApp {
             ) {
                 tracing::warn!(%error, "failed to apply restored log persistence settings");
             }
-            let traffic = self.traffic_monitor.snapshot();
-            if let Some(tray) = self.network_tray.as_mut() {
-                if let Err(error) = tray.set_display(self.preferences.tray_display, &traffic) {
-                    tracing::warn!(%error, "failed to apply restored tray display");
-                }
-                if let Err(error) = tray.set_visible(self.preferences.traffic_tray_visible) {
-                    tracing::warn!(%error, "failed to apply restored tray visibility");
-                }
+            if let Some(tray) = self.network_tray.as_mut()
+                && let Err(error) = tray.set_visible(self.preferences.traffic_tray_visible)
+            {
+                tracing::warn!(%error, "failed to apply restored tray visibility");
             }
             let appearance = self.preferences.appearance;
             let _ = cx.update_window(self.main_window, move |_, window, cx| {

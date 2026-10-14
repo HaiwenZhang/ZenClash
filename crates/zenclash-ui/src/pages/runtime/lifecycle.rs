@@ -871,6 +871,10 @@ impl RuntimePage {
     }
 
     fn refresh_visible_page(&mut self, cx: &mut Context<Self>) {
+        if self.page == Page::Home {
+            // Restore the real stream backlog before waiting for controller refreshes.
+            self.update_home_traffic_presentation(cx);
+        }
         self.refresh_config_inputs(cx);
         if self.page == Page::Profiles {
             self.reload_profile_catalog(cx);

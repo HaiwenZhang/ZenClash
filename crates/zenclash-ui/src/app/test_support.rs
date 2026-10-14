@@ -1,4 +1,4 @@
-//! Shared isolated application services for window and status-panel interaction tests.
+//! Shared isolated application services for window interaction tests.
 
 pub(super) fn app_test_services(
     fixture: &crate::pages::runtime::test_support::RuntimePageFixture,

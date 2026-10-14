@@ -6,7 +6,6 @@ use super::{
 
 mod commands;
 mod directories;
-pub(in crate::app) mod panel;
 pub(in crate::app) mod proxy_commands;
 mod queue;
 mod refresh;
@@ -25,10 +24,6 @@ impl ZenClashApp {
         else {
             return;
         };
-        #[cfg(target_os = "linux")]
-        if let Some(tray) = self.network_tray.as_mut() {
-            tray.start_native_event_loop(cx);
-        }
         cx.spawn(async move |this, cx| {
             while let Some(event) = events.recv().await {
                 if this
@@ -41,13 +36,7 @@ impl ZenClashApp {
                             Some(TrayEvent::Command(command, observation)) => {
                                 this.handle_observed_tray_command(command, observation, cx);
                             }
-                            Some(TrayEvent::Click(click)) => match click {
-                                TrayClick::ShowPanel => this.toggle_status_panel(cx),
-                                TrayClick::ShowMenu => {
-                                    this.tray_menu_requested = true;
-                                    this.refresh_tray_menu(cx);
-                                }
-                            },
+                            Some(TrayEvent::Click(click)) => this.handle_tray_click(click, cx),
                             None => {}
                         }
                     })
@@ -58,5 +47,15 @@ impl ZenClashApp {
             }
         })
         .detach();
+    }
+
+    pub(in crate::app) fn handle_tray_click(&mut self, click: TrayClick, cx: &mut Context<Self>) {
+        match click {
+            TrayClick::ShowWindow => self.handle_tray_command(TrayCommand::ShowWindow, cx),
+            TrayClick::ShowMenu => {
+                self.tray_menu_requested = true;
+                self.refresh_tray_menu(cx);
+            }
+        }
     }
 }

@@ -19,7 +19,7 @@ cron = "0.17.0"
 futures-util = "0.3.34"
 getrandom = "0.4.3"
 flate2 = "1.1.10"
-gpui-kit = { version = "0.7.1", features = ["tree-sitter-yaml"] }
+gpui-kit = { version = "0.7.3", features = ["tree-sitter-yaml"] }
 http = "1.5.0"
 http-body-util = "0.1.5"
 hyper = { version = "1.12.0", features = ["client", "http1"] }
@@ -45,7 +45,7 @@ tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "sync", "
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-tray-icon = "0.26.0"
+tray-icon = { version = "0.26.0", default-features = false }
 url = "2.5.8"
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",

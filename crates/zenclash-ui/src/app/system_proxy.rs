@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use super::{AppContext, Context, ZenClashApp};
+use super::{Context, ZenClashApp};
 use zenclash_core::{CaptureOutcome, CoreSession, TrafficCaptureError};
 
 async fn stop_core_after_capture_release(
@@ -80,9 +80,6 @@ impl ZenClashApp {
             return;
         }
         self.quit_state = QuitState::InProgress;
-        if let Some(panel) = self.status_panel.take() {
-            let _ = cx.update_window(panel, |_, window, _| window.remove_window());
-        }
         self.core_session.request_shutdown();
         let capture = self.traffic_capture.clone();
         let core_session = self.core_session.clone();

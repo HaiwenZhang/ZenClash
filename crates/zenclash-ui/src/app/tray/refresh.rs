@@ -10,7 +10,6 @@ use super::directories::load_profile_catalog_and_directories;
 struct TrayMenuSnapshot {
     config: zenclash_core::RuntimeConfig,
     groups: Vec<TrayProxyGroup>,
-    current_node: Option<String>,
     system_proxy: Result<bool, String>,
     profiles: Result<zenclash_core::ProfileCatalog, String>,
     mode_intent_generation: u64,
@@ -44,10 +43,6 @@ impl ZenClashApp {
                 load_profile_catalog_and_directories(directories_profile.as_deref(), &descriptor)
             })
             .await;
-            let current_node = current_proxy_node(
-                &runtime.catalog,
-                OutboundMode::from_api(&runtime.config.mode),
-            );
             let groups = tray_proxy_groups(runtime.catalog, &runtime.config.mode);
             let system_proxy = match operational_status.snapshot().capture.system_proxy {
                 Observation::Fresh { value, .. } | Observation::Stale { value, .. } => {
@@ -68,7 +63,6 @@ impl ZenClashApp {
             Ok::<_, String>(TrayMenuSnapshot {
                 config: runtime.config,
                 groups,
-                current_node,
                 system_proxy,
                 profiles,
                 directories,
@@ -135,7 +129,6 @@ impl ZenClashApp {
         let TrayMenuSnapshot {
             config,
             groups,
-            current_node,
             system_proxy,
             profiles: profile_catalog,
             mode_intent_generation,
@@ -191,7 +184,6 @@ impl ZenClashApp {
         });
         let mut state = TrayMenuState {
             mode: config.mode.clone(),
-            display: self.preferences.tray_display,
             system_proxy,
             tun: config.tun.enable,
             mixed_port,
@@ -207,8 +199,6 @@ impl ZenClashApp {
             self.proxies_page.update(cx, |page, cx| {
                 page.set_active_profile(active_profile.as_ref(), cx)
             });
-            self.tray_current_node =
-                current_node.map(|node| (OutboundMode::from_api(&config.mode), node));
             self.tray_state = state;
             self.tray_observation = Some(observation.clone());
             self.tray_error = None;
@@ -228,29 +218,6 @@ impl ZenClashApp {
             self.tray_refresh_pending = true;
         }
     }
-}
-
-fn current_proxy_node(catalog: &zenclash_core::ProxyCatalog, mode: OutboundMode) -> Option<String> {
-    if mode == OutboundMode::Direct {
-        return Some("DIRECT".into());
-    }
-    let mut group = catalog
-        .groups_for_mode(mode.api_value())
-        .find(|group| !group.hidden)?;
-    // Follow nested selectors to the actual node, with a bound for malformed cycles.
-    for _ in 0..=catalog.groups().len() {
-        if matches!(group.behavior, ProxyGroupBehavior::LoadBalance) {
-            return Some(zenclash_i18n::text("home.proxy.load_balance"));
-        }
-        if group.now.is_empty() {
-            return None;
-        }
-        match catalog.groups().iter().find(|next| next.name == group.now) {
-            Some(next) => group = next,
-            None => return Some(group.now.clone()),
-        }
-    }
-    None
 }
 
 fn tray_proxy_groups(
@@ -322,75 +289,6 @@ mod observation_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn node_catalog() -> zenclash_core::ProxyCatalog {
-        use zenclash_core::{ProxyGroup, ProxyNode};
-        zenclash_core::ProxyCatalog::from_group_nodes(
-            [
-                ("GLOBAL", "PROXY", ProxyGroupBehavior::Selector),
-                ("PROXY", "Automatic", ProxyGroupBehavior::Selector),
-                (
-                    "Automatic",
-                    "🇭🇰 香港 · HK 01",
-                    ProxyGroupBehavior::Automatic { fixed: false },
-                ),
-            ]
-            .into_iter()
-            .map(|(name, now, behavior)| {
-                (
-                    ProxyGroup::new(name)
-                        .with_current_member(now)
-                        .with_behavior(behavior),
-                    vec![ProxyNode {
-                        name: now.into(),
-                        ..Default::default()
-                    }],
-                )
-            })
-            .collect(),
-            4,
-        )
-    }
-
-    #[test]
-    fn current_node_resolves_nested_selections_and_preserves_flags() {
-        let catalog = node_catalog();
-        assert_eq!(
-            current_proxy_node(&catalog, OutboundMode::Rule).as_deref(),
-            Some("🇭🇰 香港 · HK 01")
-        );
-        assert_eq!(
-            current_proxy_node(&catalog, OutboundMode::Global).as_deref(),
-            Some("🇭🇰 香港 · HK 01")
-        );
-        assert_eq!(
-            current_proxy_node(&catalog, OutboundMode::Direct).as_deref(),
-            Some("DIRECT")
-        );
-    }
-
-    #[test]
-    fn current_node_does_not_guess_through_cycles_or_load_balancing() {
-        let mut catalog = node_catalog();
-        catalog.set_group_selection("Automatic", "PROXY".into());
-        assert_eq!(current_proxy_node(&catalog, OutboundMode::Rule), None);
-        let balanced = zenclash_core::ProxyCatalog::from_group_nodes(
-            vec![(
-                zenclash_core::ProxyGroup::new("PROXY")
-                    .with_current_member("node")
-                    .with_behavior(ProxyGroupBehavior::LoadBalance),
-                vec![zenclash_core::ProxyNode {
-                    name: "node".into(),
-                    ..Default::default()
-                }],
-            )],
-            2,
-        );
-        assert_eq!(
-            current_proxy_node(&balanced, OutboundMode::Rule),
-            Some(zenclash_i18n::text("home.proxy.load_balance"))
-        );
-    }
 
     #[test]
     fn bounded_tray_nodes_keep_the_current_member_without_retaining_the_full_group() {

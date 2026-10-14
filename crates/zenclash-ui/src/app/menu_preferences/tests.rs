@@ -5,7 +5,6 @@ use gpui_kit::test::TestWindowExt;
 use gpui_kit::{AppContext, Entity, TestAppContext, WindowHandle, px, size};
 use zenclash_core::{
     AppPreferences, AppPreferencesStore, AppearancePreference, LanguagePreference,
-    TrayDisplayPreference,
 };
 
 fn open_app(
@@ -110,19 +109,16 @@ fn failed_menu_save_is_visible_and_retry_commits_only_the_selected_field(cx: &mu
 }
 
 #[gpui_kit::test]
-fn missing_preference_store_reports_unsaved_tray_selection(cx: &mut TestAppContext) {
+fn missing_preference_store_reports_unsaved_tray_visibility(cx: &mut TestAppContext) {
     let fixture = crate::pages::runtime::test_support::RuntimePageFixture::new();
     let (owner, window) = open_app(&fixture, None, cx);
     cx.update_window(window.into(), |_, window, cx| {
         owner.update(cx, |app, cx| {
-            app.set_tray_display(TrayDisplayPreference::Icon, cx)
+            app.update_menu_preference(MenuPreferenceChange::TrayVisibility(false), cx)
         });
         window.render_frame(cx);
         assert!(window.find("menu-preference-save-failure").visible());
-        assert_eq!(
-            owner.read(cx).preferences.tray_display,
-            TrayDisplayPreference::Icon
-        );
+        assert!(!owner.read(cx).preferences.traffic_tray_visible);
         assert!(
             owner
                 .read(cx)
@@ -193,7 +189,7 @@ fn queued_menu_choices_keep_latest_preview_and_save_order(cx: &mut TestAppContex
             }));
             app.on_set_dark_theme(&SetDarkTheme, window, cx);
             app.on_set_light_theme(&SetLightTheme, window, cx);
-            app.set_tray_display(TrayDisplayPreference::Icon, cx);
+            app.update_menu_preference(MenuPreferenceChange::TrayVisibility(false), cx);
         });
         assert_eq!(
             owner.read(cx).preferences.appearance,
@@ -209,7 +205,7 @@ fn queued_menu_choices_keep_latest_preview_and_save_order(cx: &mut TestAppContex
     finish_writes(&owner, cx);
     let saved = store.load().unwrap();
     assert_eq!(saved.appearance, AppearancePreference::Light);
-    assert_eq!(saved.tray_display, TrayDisplayPreference::Icon);
+    assert!(!saved.traffic_tray_visible);
     cx.update_window(window.into(), |_, window, cx| {
         assert_eq!(
             owner.read(cx).preferences.appearance,
@@ -255,23 +251,21 @@ fn older_success_and_failure_cannot_change_newer_intents_save_status() {
 #[test]
 fn another_field_success_cannot_hide_a_failure_and_retry_retains_latest_value() {
     let mut saves = MenuPreferenceSaves::default();
-    let failed = saves.begin(MenuPreferenceChange::TrayDisplay(
-        TrayDisplayPreference::Icon,
-    ));
+    let failed = saves.begin(MenuPreferenceChange::Appearance(AppearancePreference::Dark));
     saves.complete(failed, Err("disk full".into()));
     let unrelated = saves.begin(MenuPreferenceChange::TrayVisibility(false));
     saves.complete(unrelated, Ok(()));
     assert!(saves.failure_message().unwrap().contains("disk full"));
-    let replacement = saves.begin(MenuPreferenceChange::TrayDisplay(
-        TrayDisplayPreference::Traffic,
+    let replacement = saves.begin(MenuPreferenceChange::Appearance(
+        AppearancePreference::Light,
     ));
     assert!(saves.has_pending_retry());
     assert!(saves.retry_changes().is_empty());
     saves.complete(replacement, Err("still full".into()));
     assert!(matches!(
         saves.retry_changes().as_slice(),
-        [MenuPreferenceChange::TrayDisplay(
-            TrayDisplayPreference::Traffic
+        [MenuPreferenceChange::Appearance(
+            AppearancePreference::Light
         )]
     ));
 }
@@ -361,9 +355,7 @@ fn restore_adoption_preserves_pending_and_failed_menu_previews(cx: &mut TestAppC
                 .begin(MenuPreferenceChange::Appearance(AppearancePreference::Dark));
             let _pending = app
                 .menu_preference_saves
-                .begin(MenuPreferenceChange::TrayDisplay(
-                    TrayDisplayPreference::Icon,
-                ));
+                .begin(MenuPreferenceChange::TrayVisibility(false));
             assert!(
                 app.menu_preference_saves
                     .complete(appearance, Err("fixture unsaved appearance".into()))
@@ -391,7 +383,7 @@ fn restore_adoption_preserves_pending_and_failed_menu_previews(cx: &mut TestAppC
     cx.update_window(window.into(), |_, window, cx| {
         owner.update(cx, |app, cx| {
             assert_eq!(app.preferences.appearance, AppearancePreference::Dark);
-            assert_eq!(app.preferences.tray_display, TrayDisplayPreference::Icon);
+            assert!(!app.preferences.traffic_tray_visible);
             assert!(
                 app.menu_preference_saves
                     .failure_message()
@@ -400,7 +392,7 @@ fn restore_adoption_preserves_pending_and_failed_menu_previews(cx: &mut TestAppC
             );
             assert!(
                 app.menu_preference_saves
-                    .tray_display
+                    .tray_visibility
                     .as_ref()
                     .unwrap()
                     .pending
@@ -409,22 +401,18 @@ fn restore_adoption_preserves_pending_and_failed_menu_previews(cx: &mut TestAppC
                 app.runtime_page.read(cx).presented_preferences().appearance,
                 AppearancePreference::Dark
             );
-            assert_eq!(
-                app.runtime_page
+            assert!(
+                !app.runtime_page
                     .read(cx)
                     .presented_preferences()
-                    .tray_display,
-                TrayDisplayPreference::Icon
+                    .traffic_tray_visible
             );
         });
         assert_eq!(
             store.load().unwrap().appearance,
             AppearancePreference::System
         );
-        assert_eq!(
-            store.load().unwrap().tray_display,
-            TrayDisplayPreference::Traffic
-        );
+        assert!(store.load().unwrap().traffic_tray_visible);
         window.remove_window();
     })
     .unwrap();

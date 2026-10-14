@@ -1,11 +1,10 @@
 //! Read-only presentation of unresolved menu preference intents, independent of persisted facts.
 
-use zenclash_core::{AppPreferences, AppearancePreference, TrayDisplayPreference};
+use zenclash_core::{AppPreferences, AppearancePreference};
 
 #[derive(Clone, Copy)]
 pub(crate) enum MenuPreferenceChange {
     Appearance(AppearancePreference),
-    TrayDisplay(TrayDisplayPreference),
     TrayVisibility(bool),
 }
 
@@ -13,7 +12,6 @@ impl MenuPreferenceChange {
     pub(crate) fn apply(self, preferences: &mut AppPreferences) {
         match self {
             Self::Appearance(value) => preferences.appearance = value,
-            Self::TrayDisplay(value) => preferences.tray_display = value,
             Self::TrayVisibility(value) => preferences.traffic_tray_visible = value,
         }
     }

@@ -4,10 +4,6 @@ use gpui_kit::{AppContext, TestAppContext};
 
 fn snapshot(runtime: TrayRuntimeObservation) -> TrayMenuSnapshot {
     TrayMenuSnapshot {
-        current_node: current_proxy_node(
-            &runtime.catalog,
-            OutboundMode::from_api(&runtime.config.mode),
-        ),
         groups: tray_proxy_groups(runtime.catalog, &runtime.config.mode),
         config: runtime.config,
         observation: runtime.identity,
@@ -37,11 +33,9 @@ fn a_late_tray_snapshot_cannot_replace_new_configuration_menu_facts(cx: &mut Tes
     cx.update(|cx| {
         app.update(cx, |app, cx| {
             app.tray_state.mode = "current menu".into();
-            app.tray_current_node = Some((OutboundMode::Global, "current node".into()));
             app.tray_error = Some("current error".into());
             app.apply_tray_menu_state(snapshot(old), cx);
             assert_eq!(app.tray_state.mode, "current menu");
-            assert_eq!(app.tray_current_node.as_ref().unwrap().1, "current node");
             assert_eq!(app.tray_error.as_deref(), Some("current error"));
             assert!(app.tray_refresh_pending);
         })
@@ -104,7 +98,6 @@ fn current_tray_facts_and_source_are_published_together_before_native_menu_work(
                     .unwrap()
                     .is_same_observation(&identity)
             );
-            assert_eq!(app.tray_current_node.as_ref().unwrap().1, "node");
             assert!(app.tray_error.is_none());
         })
     });

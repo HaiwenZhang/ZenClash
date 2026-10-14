@@ -11,7 +11,6 @@ impl MenuPreferenceChange {
     fn failure_key(self) -> &'static str {
         match self {
             Self::Appearance(_) => "app.preferences.appearance_unsaved",
-            Self::TrayDisplay(_) => "app.preferences.tray_display_unsaved",
             Self::TrayVisibility(_) => "app.preferences.tray_visibility_unsaved",
         }
     }
@@ -33,7 +32,6 @@ struct MenuPreferenceSave {
 #[derive(Default)]
 pub(super) struct MenuPreferenceSaves {
     appearance: Option<MenuPreferenceSave>,
-    tray_display: Option<MenuPreferenceSave>,
     tray_visibility: Option<MenuPreferenceSave>,
 }
 
@@ -41,7 +39,6 @@ impl MenuPreferenceSaves {
     fn field_mut(&mut self, change: MenuPreferenceChange) -> &mut Option<MenuPreferenceSave> {
         match change {
             MenuPreferenceChange::Appearance(_) => &mut self.appearance,
-            MenuPreferenceChange::TrayDisplay(_) => &mut self.tray_display,
             MenuPreferenceChange::TrayVisibility(_) => &mut self.tray_visibility,
         }
     }
@@ -72,7 +69,7 @@ impl MenuPreferenceSaves {
     }
 
     fn fields(&self) -> impl Iterator<Item = &MenuPreferenceSave> {
-        [&self.appearance, &self.tray_display, &self.tray_visibility]
+        [&self.appearance, &self.tray_visibility]
             .into_iter()
             .filter_map(Option::as_ref)
     }

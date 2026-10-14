@@ -1,7 +1,9 @@
 use super::*;
+use zenclash_core::TimedTrafficSample;
+#[cfg(test)]
 use zenclash_core::TrafficSnapshot;
 
-const HOME_CHART_SAMPLE_LIMIT: usize = 300;
+const HOME_CHART_SAMPLE_LIMIT: usize = zenclash_core::LIVE_TRAFFIC_HISTORY_LIMIT;
 const HOME_CHART_WINDOW_SECONDS: u64 = 120;
 
 pub(super) fn observed_span_fraction(seconds: u64) -> f32 {
@@ -26,6 +28,7 @@ struct ConnectionSample {
 pub(super) struct HomeChartState {
     connection_samples: VecDeque<ConnectionSample>,
     generation: u64,
+    traffic_revision: Option<u64>,
     samples: VecDeque<TimedSample>,
 }
 
@@ -49,32 +52,66 @@ impl HomeChartState {
         snapshot
     }
 
-    fn observe(&mut self, snapshot: &TrafficSnapshot, generation: u64) -> bool {
+    fn synchronize_generation(&mut self, generation: u64) -> bool {
         let generation_changed = self.generation != generation;
-        if self.generation != generation {
+        if generation_changed {
             self.generation = generation;
-            self.samples.clear();
+            // Rates are historical observations, not current configuration facts.
             self.connection_samples.clear();
         }
+        generation_changed
+    }
+
+    #[cfg(test)]
+    fn observe(&mut self, snapshot: &TrafficSnapshot, generation: u64) -> bool {
+        let generation_changed = self.synchronize_generation(generation);
         if snapshot.generation != generation || snapshot.updated_at_ms == 0 {
             return generation_changed;
         }
+        self.append_sample(TimedTrafficSample::new(
+            snapshot.updated_at_ms,
+            TrafficSample {
+                upload: snapshot.upload,
+                download: snapshot.download,
+            },
+        )) || generation_changed
+    }
+
+    fn observe_samples(&mut self, samples: &VecDeque<TimedTrafficSample>, generation: u64) -> bool {
+        let mut changed = self.synchronize_generation(generation);
+        for sample in samples {
+            changed |= self.append_sample(*sample);
+        }
+        changed
+    }
+
+    fn observe_monitor(
+        &mut self,
+        monitor: &zenclash_core::TrafficMonitor,
+        generation: u64,
+    ) -> bool {
+        let revision = monitor.revision();
+        if self.traffic_revision == Some(revision) {
+            return self.synchronize_generation(generation);
+        }
+        self.traffic_revision = Some(revision);
+        self.observe_samples(&monitor.timed_samples(), generation)
+    }
+
+    fn append_sample(&mut self, sample: TimedTrafficSample) -> bool {
         if self
             .samples
             .back()
-            .is_some_and(|sample| sample.at_ms >= snapshot.updated_at_ms)
+            .is_some_and(|previous| previous.at_ms >= sample.timestamp_ms())
         {
-            return generation_changed;
+            return false;
         }
         if self.samples.len() == HOME_CHART_SAMPLE_LIMIT {
             self.samples.pop_front();
         }
         self.samples.push_back(TimedSample {
-            at_ms: snapshot.updated_at_ms,
-            value: TrafficSample {
-                upload: snapshot.upload,
-                download: snapshot.download,
-            },
+            at_ms: sample.timestamp_ms(),
+            value: sample.rates(),
         });
         true
     }
@@ -198,7 +235,7 @@ impl RuntimePage {
         let traffic_changed = self
             .home
             .chart
-            .observe(&self.traffic_monitor.snapshot(), self.home.generation);
+            .observe_monitor(&self.traffic_monitor, self.home.generation);
         let connections_changed = self.home.chart.observe_connections(
             self.operational_status
                 .snapshot()
@@ -267,7 +304,7 @@ mod tests {
         assert_eq!(state.points(1).1, 120);
     }
     #[test]
-    fn generation_change_clears_old_samples() {
+    fn configuration_change_preserves_history_but_rejects_stale_new_frames() {
         let mut state = HomeChartState::default();
         state.observe(&frame(1_000), 1);
         state.observe(&frame(2_000), 1);
@@ -275,7 +312,86 @@ mod tests {
         assert_eq!(state.samples.len(), 2);
         assert_eq!(state.points(1).0.len(), 2);
         state.observe(&frame(3_000), 2);
-        assert!(state.samples.is_empty());
+        assert_eq!(state.samples.len(), 2);
         assert!(state.points(1).0.is_empty());
+        state.observe(
+            &TrafficSnapshot {
+                generation: 2,
+                ..frame(4_000)
+            },
+            2,
+        );
+        assert_eq!(state.points(2).0.len(), 3);
+        assert_eq!(state.points(2).0[0].upload, 1_000.);
+    }
+
+    #[test]
+    fn restoring_background_frames_preserves_timestamps_and_does_not_duplicate_history() {
+        let sample = |time| {
+            TimedTrafficSample::new(
+                time,
+                TrafficSample {
+                    upload: time,
+                    download: time * 2,
+                },
+            )
+        };
+        let mut state = HomeChartState::default();
+        state.observe_samples(&VecDeque::from([sample(1_000)]), 1);
+        let background = VecDeque::from([sample(1_000), sample(2_000), sample(5_000)]);
+        assert!(state.observe_samples(&background, 1));
+        assert!(!state.observe_samples(&background, 1));
+        assert_eq!(state.points(1).1, 4);
+        assert_eq!(
+            state
+                .sparkline(1, 1)
+                .iter()
+                .map(|(_, value)| *value)
+                .collect::<Vec<_>>(),
+            vec![1_000., 2_000., 5_000.]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn traffic_history_survives_page_switches_and_hidden_window_restoration(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use crate::pages::runtime::test_support::{
+            RuntimePageFixture as Fixture, open_runtime_page_window as open,
+        };
+        use gpui_kit::AppContext;
+        use gpui_kit::test::TestWindowExt;
+        let fixture = Fixture::new();
+        let (window, page) = open(cx, &fixture, Page::Home);
+        fixture.wait_for_initial_reads(cx, &page);
+        cx.update_window(window, |_, window, cx| {
+            page.update(cx, |page, cx| {
+                let generation = page.core_session.generation();
+                page.reconcile_home_generation();
+                for time in [1_000, 2_000, 3_000] {
+                    page.home.chart.observe(
+                        &TrafficSnapshot {
+                            generation,
+                            ..frame(time)
+                        },
+                        generation,
+                    );
+                }
+                page.switch_to(Page::Settings, cx);
+                page.switch_to(Page::Home, cx);
+                assert_eq!(page.home.chart.points(generation).0.len(), 3);
+                page.set_window_visible(false, cx);
+                page.set_window_visible(true, cx);
+                assert_eq!(page.home.chart.points(generation).0.len(), 3);
+                page.set_presented(false, cx);
+                page.set_presented(true, cx);
+                assert_eq!(page.home.chart.points(generation).0.len(), 3);
+                assert_eq!(page.home.chart.points(generation).0[0].upload, 1_000.);
+            });
+            window.render_frame(cx);
+            assert!(window.find("home-traffic-row").visible());
+            window.remove_window();
+        })
+        .unwrap();
     }
 }

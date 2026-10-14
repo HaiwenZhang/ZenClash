@@ -8,7 +8,6 @@ use tokio::sync::mpsc;
 use tray_icon::{
     MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent, menu::MenuEvent,
 };
-use zenclash_core::{TrafficMonitor, TrafficSnapshot, TrayDisplayPreference, format_speed};
 
 mod command_bindings;
 mod icon;
@@ -19,7 +18,7 @@ mod menu;
 
 pub(crate) const MAX_TRAY_PROXY_NODES: usize = 24;
 
-use icon::{app_icon, traffic_icon};
+use icon::app_icon;
 use menu::build_menu;
 
 #[derive(Clone, Debug, Default)]
@@ -27,8 +26,6 @@ use menu::build_menu;
 pub struct TrayMenuState {
     /// Active Mihomo routing mode.
     pub mode: String,
-    /// User-selected content of the native indicator.
-    pub display: TrayDisplayPreference,
     /// Whether an operating-system proxy is enabled.
     pub system_proxy: bool,
     /// Whether Mihomo TUN is enabled.
@@ -137,10 +134,6 @@ impl EnvironmentShell {
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Application command encoded into a native menu item identifier.
 pub enum TrayCommand {
-    /// Select application branding or live traffic for the native indicator.
-    SetDisplay(TrayDisplayPreference),
-    /// Open or close the local status panel, including on platforms without click events.
-    ShowPanel,
     /// Activate the main `ZenClash` window.
     ShowWindow,
     /// Select rule routing mode.
@@ -192,8 +185,6 @@ pub enum TrayCommand {
         /// Target shell syntax.
         shell: EnvironmentShell,
     },
-    /// Hide the main app while retaining the status item.
-    LightMode,
     /// Relaunch the current executable.
     Restart,
     /// Terminate `ZenClash`.
@@ -203,8 +194,8 @@ pub enum TrayCommand {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Mouse gestures emitted by the native tray icon.
 pub enum TrayClick {
-    /// Primary click toggles the compact status panel.
-    ShowPanel,
+    /// Primary click activates the main window.
+    ShowWindow,
     /// Secondary click requests the native menu.
     ShowMenu,
 }
@@ -249,59 +240,27 @@ fn install_native_event_handlers(sender: mpsc::UnboundedSender<NativeTrayEvent>)
     });
 }
 
-/// Native status-bar indicator. The arrows are rendered as a macOS template
-/// image and the live upload/download rates are shown beside it.
+/// Native application tray icon and its command menu.
 pub struct NetworkTrayIcon {
-    #[cfg(target_os = "linux")]
-    native_event_loop: Option<gpui_kit::Task<()>>,
-    #[cfg(target_os = "macos")]
-    _native_traffic_updater: macos::NativeTrafficUpdater,
     icon: TrayIcon,
-    last_title: String,
-    display: TrayDisplayPreference,
     commands: TrayCommandBindings,
     events: Option<mpsc::UnboundedReceiver<NativeTrayEvent>>,
 }
 
 impl NetworkTrayIcon {
-    /// Creates the native traffic icon and its initial menu.
+    /// Creates the native application icon and its initial menu.
     ///
     /// # Errors
     ///
     /// Returns a platform error when the icon, menu, or native tray cannot be created.
-    pub fn new(
-        core_kind: zenclash_core::CoreKind,
-        traffic_monitor: Arc<TrafficMonitor>,
-        display: TrayDisplayPreference,
-    ) -> Result<Self, String> {
-        // GPUI uses its own Linux event loop; it does not initialize GTK for the tray.
-        #[cfg(target_os = "linux")]
-        {
-            if gtk::is_initialized() && !gtk::is_initialized_main_thread() {
-                return Err("The native tray must be created on the GTK main thread".into());
-            }
-            gtk::init()
-                .map_err(|error| format!("Failed to initialize the native tray: {error}"))?;
-        }
+    pub fn new() -> Result<Self, String> {
         let (event_sender, events) = mpsc::unbounded_channel();
         install_native_event_handlers(event_sender);
-        let icon = match display {
-            TrayDisplayPreference::Traffic => traffic_icon(0, 0)?,
-            TrayDisplayPreference::Icon => app_icon()?,
-        };
-        let (menu, commands) = build_menu(&TrayMenuState {
-            display,
-            ..Default::default()
-        })?;
+        let icon = app_icon()?;
+        let (menu, commands) = build_menu(&TrayMenuState::default())?;
         let builder = TrayIconBuilder::new()
-            .with_tooltip(match display {
-                TrayDisplayPreference::Icon => "ZenClash".to_owned(),
-                TrayDisplayPreference::Traffic => zenclash_i18n::text_with(
-                    "tray.tooltip",
-                    &[("core", core_kind.display_name().to_owned())],
-                ),
-            })
-            .with_title(indicator_title(display, &traffic_monitor.snapshot()));
+            .with_tooltip("ZenClash")
+            .with_title("");
         #[cfg(target_os = "macos")]
         let builder = builder.with_icon_templated(icon);
         #[cfg(not(target_os = "macos"))]
@@ -313,125 +272,12 @@ impl NetworkTrayIcon {
             .build()
             .map_err(|error| error.to_string())?;
         #[cfg(target_os = "macos")]
-        let native_traffic_updater = macos::NativeTrafficUpdater::new(
-            tray.ns_status_item()
-                .ok_or_else(|| "macOS status item is unavailable".to_owned())?,
-            traffic_monitor,
-            display,
-        )?;
-        #[cfg(target_os = "macos")]
-        if display == TrayDisplayPreference::Icon {
-            tray.set_title(Some(""));
-        }
-        #[cfg(not(target_os = "macos"))]
-        drop(traffic_monitor);
+        macos::prepare_app_icon(&tray);
         Ok(Self {
-            #[cfg(target_os = "linux")]
-            native_event_loop: None,
-            #[cfg(target_os = "macos")]
-            _native_traffic_updater: native_traffic_updater,
             icon: tray,
-            last_title: String::new(),
-            display,
             commands: TrayCommandBindings::new(commands, None),
             events: Some(events),
         })
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(crate) fn start_native_event_loop(&mut self, cx: &gpui_kit::App) {
-        if self.native_event_loop.is_some() {
-            return;
-        }
-        // AppIndicator's D-Bus registration and menu callbacks need GTK dispatch
-        // on the same thread as construction. Dropping the tray cancels this task.
-        self.native_event_loop = Some(cx.spawn(async move |cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(16))
-                    .await;
-                cx.update(|_| {
-                    // Bound each turn so GTK activity cannot starve GPUI's event loop.
-                    for _ in 0..32 {
-                        if !gtk::events_pending() {
-                            break;
-                        }
-                        gtk::main_iteration_do(false);
-                    }
-                });
-            }
-        }));
-    }
-
-    /// Updates the title, tooltip, and activity bars when throughput changes.
-    ///
-    /// # Errors
-    ///
-    /// Returns a platform error when a native property cannot be updated.
-    pub fn update(&mut self, traffic: &TrafficSnapshot) -> Result<(), String> {
-        if self.display == TrayDisplayPreference::Icon {
-            return Ok(());
-        }
-        let title = traffic_title(traffic);
-        if title == self.last_title {
-            return Ok(());
-        }
-        self.icon.set_title(Some(&title));
-        self.icon
-            .set_tooltip(Some(format!("ZenClash · {title}")))
-            .map_err(|error| error.to_string())?;
-        let icon = traffic_icon(traffic.upload, traffic.download)?;
-        #[cfg(target_os = "macos")]
-        let result = self.icon.set_icon_templated(Some(icon));
-        #[cfg(not(target_os = "macos"))]
-        let result = self.icon.set_icon(Some(icon));
-        result.map_err(|error| error.to_string())?;
-        self.last_title = title;
-        Ok(())
-    }
-
-    /// Changes indicator content immediately without changing visibility.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the platform icon or tooltip cannot be replaced.
-    pub fn set_display(
-        &mut self,
-        display: TrayDisplayPreference,
-        traffic: &TrafficSnapshot,
-    ) -> Result<(), String> {
-        if self.display == display {
-            return Ok(());
-        }
-        let icon = match display {
-            TrayDisplayPreference::Icon => app_icon()?,
-            TrayDisplayPreference::Traffic => traffic_icon(traffic.upload, traffic.download)?,
-        };
-        #[cfg(target_os = "macos")]
-        self.icon
-            .set_icon_templated(Some(icon))
-            .map_err(|error| error.to_string())?;
-        #[cfg(not(target_os = "macos"))]
-        self.icon
-            .set_icon(Some(icon))
-            .map_err(|error| error.to_string())?;
-        self.icon
-            .set_tooltip(Some(match display {
-                TrayDisplayPreference::Icon => "ZenClash".to_owned(),
-                TrayDisplayPreference::Traffic => format!("ZenClash · {}", traffic_title(traffic)),
-            }))
-            .map_err(|error| error.to_string())?;
-        self.display = display;
-        self.last_title.clear();
-        #[cfg(target_os = "macos")]
-        self._native_traffic_updater.set_display(display);
-        // Recompute native menu-bar width after the template's logical size is set.
-        self.icon
-            .set_title(Some(indicator_title(display, traffic).as_str()));
-        if display == TrayDisplayPreference::Traffic {
-            self.update(traffic)?;
-        }
-        Ok(())
     }
 
     /// Shows or hides the native tray indicator.
@@ -445,14 +291,7 @@ impl NetworkTrayIcon {
             .map_err(|error| error.to_string())?;
         #[cfg(target_os = "macos")]
         if visible {
-            self._native_traffic_updater.set_status_item(
-                self.icon
-                    .ns_status_item()
-                    .ok_or_else(|| "macOS status item is unavailable".to_owned())?,
-            );
-            if self.display == TrayDisplayPreference::Icon {
-                self.icon.set_title(Some(""));
-            }
+            macos::prepare_app_icon(&self.icon);
         }
         Ok(())
     }
@@ -499,36 +338,6 @@ impl NetworkTrayIcon {
     pub fn show_menu(&self) {
         self.icon.show_menu();
     }
-
-    pub(crate) fn panel_anchor(
-        &self,
-        fallback_scale: f32,
-    ) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
-        let rect = self.icon.rect()?;
-        #[cfg(target_os = "macos")]
-        let scale = self
-            .icon
-            .ns_status_item()
-            .and_then(|item| {
-                let mtm = objc2_foundation::MainThreadMarker::new()?;
-                let button = item.button(mtm)?;
-                // SAFETY: AppKit's window and backingScaleFactor selectors run on the main thread.
-                unsafe {
-                    let window: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> =
-                        objc2::msg_send![&button, window];
-                    window.map(|window| objc2::msg_send![&window, backingScaleFactor])
-                }
-            })
-            .unwrap_or(f64::from(fallback_scale));
-        #[cfg(not(target_os = "macos"))]
-        let scale = f64::from(fallback_scale);
-        let position = rect.position.to_logical::<f32>(scale);
-        let size = rect.size.to_logical::<f32>(scale);
-        Some(gpui_kit::Bounds::new(
-            gpui_kit::point(gpui_kit::px(position.x), gpui_kit::px(position.y)),
-            gpui_kit::size(gpui_kit::px(size.width), gpui_kit::px(size.height)),
-        ))
-    }
 }
 
 impl Drop for NetworkTrayIcon {
@@ -544,100 +353,55 @@ pub(crate) enum TrayEvent {
     Click(TrayClick),
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const fn native_menu_on_right_click() -> bool {
     true
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 const fn native_menu_on_right_click() -> bool {
     false
 }
 
 const fn click_action(button: MouseButton) -> Option<TrayClick> {
     match button {
-        MouseButton::Left => Some(TrayClick::ShowPanel),
+        MouseButton::Left => Some(TrayClick::ShowWindow),
         MouseButton::Right => right_click_action(),
         MouseButton::Middle => None,
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const fn right_click_action() -> Option<TrayClick> {
     None
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 const fn right_click_action() -> Option<TrayClick> {
     Some(TrayClick::ShowMenu)
-}
-
-fn indicator_title(display: TrayDisplayPreference, traffic: &TrafficSnapshot) -> String {
-    match display {
-        TrayDisplayPreference::Icon => String::new(),
-        TrayDisplayPreference::Traffic => traffic_title(traffic),
-    }
-}
-
-fn traffic_title(traffic: &TrafficSnapshot) -> String {
-    if traffic.connected {
-        format!(
-            "↑ {}  ↓ {}",
-            format_speed(traffic.upload),
-            format_speed(traffic.download)
-        )
-    } else {
-        zenclash_i18n::text("tray.core_offline")
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
-    fn windows_uses_native_right_click_menu_without_manual_reentry() {
+    fn native_right_click_menu_does_not_require_manual_reentry() {
         assert!(native_menu_on_right_click());
         assert_eq!(click_action(MouseButton::Right), None);
     }
 
     #[test]
-    fn icon_display_never_exposes_live_rates_or_offline_text() {
-        let traffic = TrafficSnapshot {
-            connected: true,
-            upload: 1_024,
-            download: 2_048,
-            ..Default::default()
-        };
-        assert_eq!(indicator_title(TrayDisplayPreference::Icon, &traffic), "");
-        assert_eq!(
-            indicator_title(TrayDisplayPreference::Icon, &TrafficSnapshot::default()),
-            ""
-        );
-        assert_eq!(
-            indicator_title(TrayDisplayPreference::Traffic, &traffic),
-            "↑ 1.0 KiB/s  ↓ 2.0 KiB/s"
-        );
+    fn primary_tray_click_shows_the_main_window() {
+        assert_eq!(click_action(MouseButton::Left), Some(TrayClick::ShowWindow));
+        assert_eq!(click_action(MouseButton::Middle), None);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
-    fn connected_traffic_title_formats_both_directions() {
-        let title = traffic_title(&TrafficSnapshot {
-            upload: 1024,
-            download: 2 * 1024 * 1024,
-            connected: true,
-            ..TrafficSnapshot::default()
-        });
-
-        assert_eq!(title, "↑ 1.0 KiB/s  ↓ 2.0 MiB/s");
-    }
-
-    #[test]
-    fn disconnected_traffic_title_uses_offline_copy() {
-        assert_eq!(
-            traffic_title(&TrafficSnapshot::default()),
-            zenclash_i18n::text("tray.core_offline")
-        );
+    fn secondary_tray_click_requests_the_native_menu() {
+        assert!(!native_menu_on_right_click());
+        assert_eq!(click_action(MouseButton::Right), Some(TrayClick::ShowMenu));
     }
 }

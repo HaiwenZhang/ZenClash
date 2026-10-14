@@ -1,163 +1,18 @@
-use std::{
-    cell::{Cell, RefCell},
-    sync::Arc,
-};
+use objc2_foundation::{MainThreadMarker, NSSize};
 
-use objc2::rc::Retained;
-use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSEventTrackingRunLoopMode, NSStatusItem};
-use objc2_foundation::{
-    MainThreadMarker, NSDefaultRunLoopMode, NSObject, NSObjectProtocol, NSRunLoop, NSString,
-    NSTimer,
-};
-use zenclash_core::{TrafficMonitor, TrayDisplayPreference};
-
-use super::traffic_title;
-
-struct TrafficTimerIvars {
-    status_item: RefCell<Retained<NSStatusItem>>,
-    monitor: Arc<TrafficMonitor>,
-    last_revision: Cell<u64>,
-    last_title: RefCell<String>,
-    display: Cell<TrayDisplayPreference>,
-}
-
-define_class!(
-    // SAFETY: `NSObject` has no subclassing requirements and this class is
-    // confined to AppKit's main thread.
-    #[unsafe(super = NSObject)]
-    #[thread_kind = MainThreadOnly]
-    #[name = "ZenClashTrafficTimerTarget"]
-    #[ivars = TrafficTimerIvars]
-    struct TrafficTimerTarget;
-
-    // SAFETY: `NSObjectProtocol` has no additional safety requirements.
-    unsafe impl NSObjectProtocol for TrafficTimerTarget {}
-
-    impl TrafficTimerTarget {
-        // SAFETY: The selector has the single `NSTimer` argument supplied by
-        // `NSTimer` target-selector callbacks.
-        #[unsafe(method(refreshTraffic:))]
-        fn refresh_traffic(&self, _timer: &NSTimer) {
-            if self.ivars().display.get() == TrayDisplayPreference::Icon { return; }
-            let revision = self.ivars().monitor.revision();
-            if revision == self.ivars().last_revision.get() {
-                return;
-            }
-            self.ivars().last_revision.set(revision);
-            let title = traffic_title(&self.ivars().monitor.snapshot());
-            if title == *self.ivars().last_title.borrow() {
-                return;
-            }
-
-            let tooltip = format!("ZenClash · {title}");
-            let native_title = NSString::from_str(&title);
-            let tooltip = NSString::from_str(&tooltip);
-            let mtm = self.mtm();
-            if let Some(button) = self.ivars().status_item.borrow().button(mtm) {
-                button.setTitle(&native_title);
-                button.setToolTip(Some(&tooltip));
-            }
-            *self.ivars().last_title.borrow_mut() = title;
-        }
+pub(super) fn prepare_app_icon(tray: &tray_icon::TrayIcon) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let Some(status_item) = tray.ns_status_item() else {
+        return;
+    };
+    if let Some(button) = status_item.button(mtm)
+        && let Some(image) = button.image()
+    {
+        // Keep the 36px raster at 18pt so Retina retains its extra detail.
+        image.setSize(NSSize::new(18., 18.));
+        button.setImage(Some(&image));
     }
-);
-
-impl TrafficTimerTarget {
-    fn new(
-        mtm: MainThreadMarker,
-        status_item: Retained<NSStatusItem>,
-        monitor: Arc<TrafficMonitor>,
-        display: TrayDisplayPreference,
-    ) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(TrafficTimerIvars {
-            status_item: RefCell::new(status_item),
-            monitor,
-            last_revision: Cell::new(u64::MAX),
-            last_title: RefCell::new(String::new()),
-            display: Cell::new(display),
-        });
-        // SAFETY: The signature of `NSObject`'s `init` method is correct.
-        unsafe { msg_send![super(this), init] }
-    }
-}
-
-/// Keeps the native traffic title moving while an `NSMenu` tracks input.
-pub(super) struct NativeTrafficUpdater {
-    timer: Retained<NSTimer>,
-    _target: Retained<TrafficTimerTarget>,
-}
-
-impl NativeTrafficUpdater {
-    pub(super) fn new(
-        status_item: Retained<NSStatusItem>,
-        monitor: Arc<TrafficMonitor>,
-        display: TrayDisplayPreference,
-    ) -> Result<Self, String> {
-        let mtm = MainThreadMarker::new().ok_or_else(|| {
-            "native traffic updater must be created on the main thread".to_owned()
-        })?;
-        let target = TrafficTimerTarget::new(mtm, status_item, monitor, display);
-        // SAFETY: `refreshTraffic:` exists on `TrafficTimerTarget`, accepts the
-        // timer argument, and both the target and timer are retained below.
-        let timer = unsafe {
-            NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
-                0.5,
-                &target,
-                sel!(refreshTraffic:),
-                None,
-                true,
-            )
-        };
-        let run_loop = NSRunLoop::mainRunLoop();
-        // SAFETY: The timer is registered on the main run loop. The explicit
-        // event-tracking mode is what keeps it firing while a menu is open.
-        unsafe {
-            run_loop.addTimer_forMode(&timer, NSDefaultRunLoopMode);
-            run_loop.addTimer_forMode(&timer, NSEventTrackingRunLoopMode);
-        }
-        let updater = Self {
-            timer,
-            _target: target,
-        };
-        updater.prepare_app_icon();
-        updater.timer.fire();
-        Ok(updater)
-    }
-
-    fn prepare_app_icon(&self) {
-        if self._target.ivars().display.get() != TrayDisplayPreference::Icon {
-            return;
-        }
-        let mtm = self._target.mtm();
-        if let Some(button) = self._target.ivars().status_item.borrow().button(mtm)
-            && let Some(image) = button.image()
-        {
-            // Keep the 36px raster at 18pt so Retina retains its extra detail.
-            image.setSize(objc2_foundation::NSSize::new(18., 18.));
-            button.setImage(Some(&image));
-        }
-    }
-
-    pub(super) fn set_display(&self, display: TrayDisplayPreference) {
-        self._target.ivars().display.set(display);
-        self.prepare_app_icon();
-        self._target.ivars().last_revision.set(u64::MAX);
-        self._target.ivars().last_title.borrow_mut().clear();
-        self.timer.fire();
-    }
-
-    pub(super) fn set_status_item(&self, status_item: Retained<NSStatusItem>) {
-        *self._target.ivars().status_item.borrow_mut() = status_item;
-        self.prepare_app_icon();
-        self._target.ivars().last_revision.set(u64::MAX);
-        self._target.ivars().last_title.borrow_mut().clear();
-        self.timer.fire();
-    }
-}
-
-impl Drop for NativeTrafficUpdater {
-    fn drop(&mut self) {
-        self.timer.invalidate();
-    }
+    tray.set_title(Some(""));
 }

@@ -663,6 +663,66 @@ async fn reapplying_the_current_profile_clears_shared_runtime_uncertainty() {
     Box::pin(assert_delayed_runtime_publication(true, true)).await;
 }
 
+async fn read_profile_reload(
+    listener: &tokio::net::TcpListener,
+    deadline: std::time::Duration,
+) -> std::io::Result<tokio::net::TcpStream> {
+    let (mut stream, _) = tokio::time::timeout(deadline, listener.accept())
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "timed out waiting for the profile reload connection",
+            )
+        })??;
+    let request = tokio::time::timeout(
+        deadline,
+        zenclash_core::test_support::read_controller_request(&mut stream),
+    )
+    .await
+    .map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "timed out reading the profile reload request",
+        )
+    })??;
+    if !request.headers().starts_with("PUT /configs") {
+        return Err(std::io::Error::other(format!(
+            "unexpected profile reload request: {}",
+            request.headers()
+        )));
+    }
+    Ok(stream)
+}
+
+#[tokio::test]
+async fn profile_reload_fixture_times_out_when_no_request_arrives() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let error = read_profile_reload(&listener, std::time::Duration::from_millis(25))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(error.to_string().contains("waiting for"));
+}
+
+#[tokio::test]
+async fn profile_reload_fixture_times_out_when_the_http_body_is_incomplete() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    client
+        .write_all(b"PUT /configs HTTP/1.1\r\nContent-Length: 10\r\n\r\n{")
+        .await
+        .unwrap();
+    let error = read_profile_reload(&listener, std::time::Duration::from_millis(25))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(error.to_string().contains("reading"));
+    drop(client);
+}
+
 async fn assert_delayed_runtime_publication(unknown_first: bool, reapply_current: bool) {
     let root = std::env::temp_dir().join(format!(
         "zenclash-profile-result-order-{}-{}",
@@ -674,44 +734,33 @@ async fn assert_delayed_runtime_publication(unknown_first: bool, reapply_current
     ));
     let store = ProfileStore::new(root.join("profiles")).unwrap();
     let source = root.join("source.yaml");
-    let first_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let second_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let ports = [
-        first_port.local_addr().unwrap().port(),
-        second_port.local_addr().unwrap().port(),
-    ];
-    drop((first_port, second_port));
-    std::fs::write(
-        &source,
-        format!("mixed-port: {}\nrules: [MATCH,DIRECT]\n", ports[0]),
-    )
-    .unwrap();
+    // This fixture tests completion ordering, so proxy-listener availability
+    // must not reject a transition before its mocked controller request.
+    std::fs::write(&source, "mixed-port: 0\nrules: [MATCH,DIRECT]\n").unwrap();
     let first = store.import_local(&source).unwrap();
     let path = store.activate(&first.id).unwrap();
-    std::fs::write(
-        &source,
-        format!("mixed-port: {}\nrules: [MATCH,REJECT]\n", ports[1]),
-    )
-    .unwrap();
+    std::fs::write(&source, "mixed-port: 0\nrules: [MATCH,REJECT]\n").unwrap();
     let second = store.import_local(&source).unwrap();
     let overrides = YamlOverrideStore::new(root.join("overrides")).unwrap();
     let controlled = ControlledConfigStore::new(root.join("controlled"));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
+    // JoinSet owns cancellation too: a failed outcome assertion must not leave
+    // a detached mock server waiting for a request that will never be sent.
+    let mut server = tokio::task::JoinSet::new();
+    server.spawn(async move {
         for lose_response in [unknown_first, !unknown_first] {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let request = zenclash_core::test_support::read_controller_request(&mut stream)
+            let mut stream = read_profile_reload(&listener, std::time::Duration::from_secs(10))
                 .await
-                .unwrap()
-                .into_bytes();
-            let count = request.len();
-            assert!(request[..count].starts_with(b"PUT /configs"));
+                .expect("profile reload fixture failed");
             if !lose_response {
-                stream
-                    .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
-                    .await
-                    .unwrap();
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    stream.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"),
+                )
+                .await
+                .expect("timed out writing the profile reload response")
+                .unwrap();
             }
             // Losing the response intentionally leaves runtime acceptance uncertain.
         }
@@ -734,9 +783,13 @@ async fn assert_delayed_runtime_publication(unknown_first: bool, reapply_current
             })
             .await,
     );
-    assert_eq!(
-        matches!(delayed.as_ref(), ProfileApplyOutcome::RuntimeUnknown { .. }),
-        unknown_first
+    assert!(
+        matches!(
+            (unknown_first, delayed.as_ref()),
+            (true, ProfileApplyOutcome::RuntimeUnknown { .. })
+                | (false, ProfileApplyOutcome::Applied { .. })
+        ),
+        "unexpected first profile application outcome: {delayed:?}"
     );
     let latest_failed = if reapply_current {
         assert!(
@@ -753,12 +806,29 @@ async fn assert_delayed_runtime_publication(unknown_first: bool, reapply_current
         assert!(commands.latest_recovery().is_none());
         false
     } else {
-        commands
+        let latest = commands
             .activate(store, controlled, second.id.clone())
-            .await
-            .is_err()
+            .await;
+        if unknown_first {
+            latest.expect("the newer profile must be accepted");
+            false
+        } else {
+            let failure = latest.err().expect("the newer runtime must be unknown");
+            assert!(
+                matches!(
+                    failure.retained_outcome.as_deref(),
+                    Some(ProfileApplyOutcome::RuntimeUnknown { .. })
+                ),
+                "unexpected newer profile failure: {failure:?}"
+            );
+            true
+        }
     };
-    server.await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), server.join_next())
+        .await
+        .expect("timed out waiting for the profile reload fixture to finish")
+        .expect("profile reload fixture was not running")
+        .unwrap();
     assert_eq!(latest_failed, !unknown_first);
     let _ = commands.finish_apply(delayed, ChangeContext::Selection, None);
     if unknown_first {

@@ -59,4 +59,5 @@ gpui-kit = { workspace = true, features = ["test-support"] }
 zenclash-core = { path = "../zenclash-core", features = ["test-support"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-gtk = "0.18.2"
+# StatusNotifier activation emits primary clicks so they can restore the main window.
+tray-icon = { workspace = true, features = ["ksni"] }

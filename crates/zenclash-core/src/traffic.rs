@@ -44,6 +44,59 @@ pub struct TrafficSample {
 /// Number of logical traffic frames retained for charts.
 pub const LIVE_TRAFFIC_SAMPLE_COUNT: usize = 24;
 
+/// Maximum number of real, timestamped frames retained for window restoration.
+pub const LIVE_TRAFFIC_HISTORY_LIMIT: usize = 300;
+
+/// One real traffic observation retained independently of window visibility.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TimedTrafficSample {
+    timestamp_ms: u64,
+    rates: TrafficSample,
+}
+
+impl TimedTrafficSample {
+    /// Creates a historical observation from its timestamp and observed rates.
+    #[must_use]
+    pub const fn new(timestamp_ms: u64, rates: TrafficSample) -> Self {
+        Self {
+            timestamp_ms,
+            rates,
+        }
+    }
+
+    /// Returns the Unix-millisecond time of the real stream frame.
+    #[must_use]
+    pub const fn timestamp_ms(&self) -> u64 {
+        self.timestamp_ms
+    }
+
+    /// Returns upload and download rates in bytes per second.
+    #[must_use]
+    pub const fn rates(&self) -> TrafficSample {
+        self.rates
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrafficSamples {
+    recent: VecDeque<TrafficSample>,
+    timed: VecDeque<TimedTrafficSample>,
+}
+
+impl TrafficSamples {
+    fn record(&mut self, timestamp_ms: u64, rates: TrafficSample) {
+        if self.recent.len() >= LIVE_TRAFFIC_SAMPLE_COUNT {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(rates);
+        if self.timed.len() >= LIVE_TRAFFIC_HISTORY_LIMIT {
+            self.timed.pop_front();
+        }
+        self.timed
+            .push_back(TimedTrafficSample::new(timestamp_ms, rates));
+    }
+}
+
 #[derive(Debug)]
 struct TrafficRevision {
     updates: watch::Sender<u64>,
@@ -85,7 +138,7 @@ struct TrafficFrame {
 /// suitable for polling from GPUI's foreground executor.
 pub struct TrafficMonitor {
     snapshot: Arc<RwLock<TrafficSnapshot>>,
-    samples: Arc<RwLock<VecDeque<TrafficSample>>>,
+    samples: Arc<RwLock<TrafficSamples>>,
     revision: Arc<TrafficRevision>,
     expected_generation: Arc<AtomicU64>,
     generation: watch::Sender<u64>,
@@ -135,13 +188,22 @@ impl TrafficMonitor {
         self.snapshot.read().clone()
     }
 
-    /// Returns the shared ordered frame history used by every traffic display.
+    /// Returns the short ordered frame history used by compact traffic displays.
     ///
     /// Frames are appended by the WebSocket reader, not by UI polling timers,
     /// so repeated renders cannot create duplicate or contradictory samples.
     #[must_use]
     pub fn samples(&self) -> VecDeque<TrafficSample> {
-        self.samples.read().clone()
+        self.samples.read().recent.clone()
+    }
+
+    /// Returns bounded real stream history, including frames collected while hidden.
+    ///
+    /// Historical rates survive configuration changes and reconnects. Queued frames
+    /// from superseded generations are rejected before entering this history.
+    #[must_use]
+    pub fn timed_samples(&self) -> VecDeque<TimedTrafficSample> {
+        self.samples.read().timed.clone()
     }
 
     /// Returns a monotonic revision for traffic frames and connection-state changes.
@@ -172,7 +234,7 @@ impl Drop for TrafficMonitor {
 async fn run_monitor(
     binding: Arc<ControllerBinding>,
     snapshot: Arc<RwLock<TrafficSnapshot>>,
-    samples: Arc<RwLock<VecDeque<TrafficSample>>>,
+    samples: Arc<RwLock<TrafficSamples>>,
     revision: Arc<TrafficRevision>,
     expected_generation: Arc<AtomicU64>,
     mut generation_updates: watch::Receiver<u64>,
@@ -303,8 +365,11 @@ async fn run_monitor(
     }
 }
 
-fn initial_samples() -> VecDeque<TrafficSample> {
-    VecDeque::from(vec![TrafficSample::default(); LIVE_TRAFFIC_SAMPLE_COUNT])
+fn initial_samples() -> TrafficSamples {
+    TrafficSamples {
+        recent: VecDeque::from(vec![TrafficSample::default(); LIVE_TRAFFIC_SAMPLE_COUNT]),
+        timed: VecDeque::new(),
+    }
 }
 
 fn now_ms() -> u64 {
@@ -362,9 +427,9 @@ mod tests {
         );
 
         let samples = samples.read();
-        assert_eq!(samples.len(), LIVE_TRAFFIC_SAMPLE_COUNT);
+        assert_eq!(samples.recent.len(), LIVE_TRAFFIC_SAMPLE_COUNT);
         assert_eq!(
-            samples.back(),
+            samples.recent.back(),
             Some(&TrafficSample {
                 upload: 1_024,
                 download: 2_048,
@@ -387,6 +452,25 @@ mod tests {
         update_connection(&mut snapshot.write(), false, Some("offline".into()), 0);
 
         assert_eq!(*samples.read(), before_disconnect);
+    }
+
+    #[test]
+    fn timed_history_retains_only_real_frames_with_a_fixed_capacity() {
+        let mut samples = initial_samples();
+        assert!(samples.timed.is_empty());
+        for timestamp_ms in 1..=1_000 {
+            samples.record(
+                timestamp_ms,
+                TrafficSample {
+                    upload: timestamp_ms,
+                    download: timestamp_ms * 2,
+                },
+            );
+        }
+        assert_eq!(samples.timed.len(), LIVE_TRAFFIC_HISTORY_LIMIT);
+        assert_eq!(samples.timed.front().unwrap().timestamp_ms(), 701);
+        assert_eq!(samples.timed.back().unwrap().timestamp_ms(), 1_000);
+        assert_eq!(samples.timed.back().unwrap().rates().download, 2_000);
     }
 
     #[test]

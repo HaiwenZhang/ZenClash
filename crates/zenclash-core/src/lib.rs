@@ -146,7 +146,7 @@ pub use platform_command::{PlatformCommandError, PlatformCommandStage, PlatformC
 pub use preferences::{
     AppPreferences, AppPreferencesError, AppPreferencesObservation, AppPreferencesResult,
     AppPreferencesStore, AppearancePreference, CoreBinaryPreferences, LanguagePreference,
-    NetworkProbeRoutePreference, TrayDisplayPreference,
+    NetworkProbeRoutePreference,
 };
 
 pub use profile::merge_profile_overrides;
@@ -192,7 +192,8 @@ pub use system_proxy::{
     normalize_system_proxy_host,
 };
 pub use traffic::{
-    LIVE_TRAFFIC_SAMPLE_COUNT, TrafficMonitor, TrafficSample, TrafficSnapshot, format_speed,
+    LIVE_TRAFFIC_HISTORY_LIMIT, LIVE_TRAFFIC_SAMPLE_COUNT, TimedTrafficSample, TrafficMonitor,
+    TrafficSample, TrafficSnapshot, format_speed,
 };
 pub use traffic_capture::{
     CaptureOutcome, CapturePlan, ObservedCapturePlan, ServiceLocalRecoveryOutcome,

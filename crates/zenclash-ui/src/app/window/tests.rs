@@ -5,6 +5,52 @@ use crate::components::tray::TrayCommand;
 use gpui_kit::{px, size};
 
 #[gpui_kit::test]
+fn primary_tray_click_restores_the_same_main_window_and_keeps_it_visible(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    use crate::components::tray::TrayClick;
+    use gpui_kit::component::Root;
+    let fixture = crate::pages::runtime::test_support::RuntimePageFixture::new();
+    let services = app_test_services(&fixture);
+    cx.executor().allow_parking();
+    cx.update(crate::app::init);
+    let mut owner = None;
+    let main = cx.open_window(size(px(1280.), px(820.)), |window, cx| {
+        let preferences = services.preferences.clone();
+        let app =
+            cx.new(|cx| ZenClashApp::new(services, None, None, None, preferences, window, cx));
+        owner = Some(app.clone());
+        Root::new(app, window, cx)
+    });
+    let owner = owner.unwrap();
+    cx.update_window(main.into(), |_, _window, cx| {
+        owner.update(cx, |app, cx| {
+            #[cfg(target_os = "macos")]
+            app.park_main_window(_window);
+            app.release_hidden_page_data(cx);
+        });
+    })
+    .unwrap();
+    assert!(!cx.update(|cx| owner.read(cx).main_window_visible));
+
+    for _ in 0..2 {
+        cx.update(|cx| {
+            owner.update(cx, |app, cx| {
+                app.handle_tray_click(TrayClick::ShowWindow, cx)
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(owner.read(cx).main_window_visible);
+            assert_eq!(owner.read(cx).main_window, main.into());
+            assert_eq!(cx.windows().len(), 1);
+        });
+    }
+    cx.update_window(main.into(), |_, window, _| window.remove_window())
+        .unwrap();
+}
+
+#[gpui_kit::test]
 fn application_reopen_restores_hidden_main_window(cx: &mut gpui_kit::TestAppContext) {
     use gpui_kit::component::Root;
     let fixture = crate::pages::runtime::test_support::RuntimePageFixture::new();

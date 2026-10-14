@@ -890,7 +890,7 @@ impl TrafficCaptureSession {
             .unwrap_or_else(|error| failed_snapshot(error.to_string()))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "service-ipc-tests"))]
     pub(crate) fn with_unowned_capture_for_test(core: &CoreSession) -> Self {
         let mut capture = Self::with_backend(Arc::new(tests::FakeBackend::unowned_for_test()));
         capture.operation = core.capture_publication_gate();
@@ -1657,6 +1657,7 @@ mod tests {
     }
 
     impl FakeBackend {
+        #[cfg(all(test, feature = "service-ipc-tests"))]
         pub(super) fn unowned_for_test() -> Self {
             Self::new(false, SystemProxyOwnershipState::Unowned, false)
         }

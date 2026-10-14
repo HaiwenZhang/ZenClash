@@ -1,6 +1,6 @@
 use super::AppPreferences;
 
-/// Discards settings for the removed runtime only when the current schema rejects the file.
+/// Discards removed settings only when the current schema rejects the file.
 pub(super) fn decode_preferences(bytes: &[u8]) -> serde_json::Result<AppPreferences> {
     let error = match serde_json::from_slice(bytes) {
         Ok(preferences) => return Ok(preferences),
@@ -12,6 +12,13 @@ pub(super) fn decode_preferences(bytes: &[u8]) -> serde_json::Result<AppPreferen
         return Err(error);
     };
     let mut migrated = false;
+    if matches!(
+        root.get("tray_display").and_then(serde_json::Value::as_str),
+        Some("traffic" | "icon")
+    ) {
+        root.remove("tray_display");
+        migrated = true;
+    }
     if root.get("core_kind").and_then(serde_json::Value::as_str) == Some("meow") {
         root.insert("core_kind".into(), "mihomo".into());
         migrated = true;

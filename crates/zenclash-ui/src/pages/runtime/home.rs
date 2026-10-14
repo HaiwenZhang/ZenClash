@@ -133,7 +133,7 @@ impl RuntimePage {
             self.home.flow.release();
             self.home.history.release();
         }
-        self.home.chart = traffic::HomeChartState::default();
+        // Stream history is bounded and survives page/window presentation changes.
         self.home.projection = None;
         self.home.selected_group = None;
     }

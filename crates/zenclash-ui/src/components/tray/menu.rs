@@ -5,8 +5,6 @@ use std::{
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
-use zenclash_core::TrayDisplayPreference;
-
 use super::{EnvironmentShell, MAX_TRAY_PROXY_NODES, TrayCommand, TrayMenuState};
 
 static NEXT_MENU_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -67,22 +65,6 @@ pub(super) fn build_menu(
         zenclash_i18n::text("tray.show_window"),
         TrayCommand::ShowWindow,
     );
-    let show_panel = builder.item(
-        zenclash_i18n::text("tray.show_panel"),
-        TrayCommand::ShowPanel,
-    );
-    let display = Submenu::new(zenclash_i18n::text("tray.display"), true);
-    for (label, value) in [
-        ("tray.display_icon", TrayDisplayPreference::Icon),
-        ("tray.display_traffic", TrayDisplayPreference::Traffic),
-    ] {
-        let item = builder.check(
-            zenclash_i18n::text(label),
-            state.display == value,
-            TrayCommand::SetDisplay(value),
-        );
-        display.append(&item).map_err(|error| error.to_string())?;
-    }
     let rule = builder.check(
         zenclash_i18n::text("outbound_mode.rule_mode"),
         state.mode.eq_ignore_ascii_case("rule"),
@@ -110,9 +92,7 @@ pub(super) fn build_menu(
     let tun = builder.check("TUN", state.tun, TrayCommand::SetTun(!state.tun));
 
     menu.append_items(&[
-        &show_panel,
         &show_window,
-        &display,
         &rule,
         &global,
         &direct,
@@ -245,13 +225,9 @@ pub(super) fn build_menu(
     }
 
     let separator_3 = PredefinedMenuItem::separator();
-    let light_mode = builder.item(
-        zenclash_i18n::text("tray.light_mode"),
-        TrayCommand::LightMode,
-    );
     let restart = builder.item(zenclash_i18n::text("tray.restart"), TrayCommand::Restart);
     let quit = builder.item(zenclash_i18n::text("tray.quit"), TrayCommand::Quit);
-    menu.append_items(&[&separator_3, &light_mode, &restart, &quit])
+    menu.append_items(&[&separator_3, &restart, &quit])
         .map_err(|error| error.to_string())?;
 
     Ok((menu, builder.commands))

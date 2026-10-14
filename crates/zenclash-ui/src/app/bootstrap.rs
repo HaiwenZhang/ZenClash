@@ -31,11 +31,6 @@ pub fn reopen_main_window(cx: &mut App) {
 /// Registers `ZenClash` actions, native menus, and platform-appropriate key bindings.
 pub fn init(cx: &mut App) {
     gpui_kit::init(cx);
-    cx.bind_keys([KeyBinding::new(
-        "escape",
-        super::CloseStatusPanel,
-        Some("ZenClashStatusPanel"),
-    )]);
     if cfg!(target_os = "macos") {
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),
@@ -196,11 +191,7 @@ fn open_main_window(
                 let network_tray = if services.initializing {
                     None
                 } else {
-                    match NetworkTrayIcon::new(
-                        services.core_kind,
-                        services.traffic_monitor.clone(),
-                        preferences.tray_display,
-                    ) {
+                    match NetworkTrayIcon::new() {
                         Ok(tray) => {
                             if let Err(error) = tray.set_visible(preferences.traffic_tray_visible) {
                                 tracing::warn!(%error, "failed to restore traffic tray visibility");

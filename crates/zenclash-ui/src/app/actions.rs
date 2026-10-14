@@ -226,29 +226,6 @@ impl ZenClashApp {
         cx.notify();
     }
 
-    pub(in crate::app) fn set_tray_display(
-        &mut self,
-        display: zenclash_core::TrayDisplayPreference,
-        cx: &mut Context<Self>,
-    ) {
-        let traffic = self.traffic_monitor.snapshot();
-        if let Some(tray) = self.network_tray.as_mut()
-            && let Err(error) = tray.set_display(display, &traffic)
-        {
-            self.tray_command_error = Some(error);
-            return;
-        }
-        self.update_menu_preference(MenuPreferenceChange::TrayDisplay(display), cx);
-        self.tray_state.display = display;
-        if let Some(tray) = self.network_tray.as_mut()
-            && let Err(error) =
-                tray.update_menu_with_observation(&self.tray_state, self.tray_observation.clone())
-        {
-            tracing::warn!(%error, "failed to refresh tray display choices");
-        }
-        cx.notify();
-    }
-
     pub(super) fn on_show_traffic_icon(
         &mut self,
         _: &ShowTrafficIcon,

@@ -1,15 +1,12 @@
 //! Generation transitions and coherent traffic snapshot/sample publication.
 
-use std::{
-    collections::VecDeque,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 
 use super::{
-    LIVE_TRAFFIC_SAMPLE_COUNT, TrafficFrame, TrafficMonitor, TrafficRevision, TrafficSample,
-    TrafficSnapshot, now_ms,
+    TrafficFrame, TrafficMonitor, TrafficRevision, TrafficSample, TrafficSamples, TrafficSnapshot,
+    now_ms,
 };
 
 impl TrafficMonitor {
@@ -31,7 +28,7 @@ impl TrafficMonitor {
 
 pub(super) fn update_frame_for_generation(
     snapshot: &RwLock<TrafficSnapshot>,
-    samples: &RwLock<VecDeque<TrafficSample>>,
+    samples: &RwLock<TrafficSamples>,
     frame: TrafficFrame,
     generation: u64,
     expected_generation: &AtomicU64,
@@ -59,7 +56,7 @@ pub(super) fn update_frame_for_generation(
 
 pub(super) fn update_frame(
     snapshot: &mut TrafficSnapshot,
-    samples: &mut VecDeque<TrafficSample>,
+    samples: &mut TrafficSamples,
     frame: TrafficFrame,
     generation: u64,
 ) {
@@ -74,13 +71,13 @@ pub(super) fn update_frame(
     crate::stream_publication_test_support::pause_at(
         crate::stream_publication_test_support::PublicationPhase::BeforeBufferAppend,
     );
-    if samples.len() >= LIVE_TRAFFIC_SAMPLE_COUNT {
-        samples.pop_front();
-    }
-    samples.push_back(TrafficSample {
-        upload: frame.up,
-        download: frame.down,
-    });
+    samples.record(
+        snapshot.updated_at_ms,
+        TrafficSample {
+            upload: frame.up,
+            download: frame.down,
+        },
+    );
 }
 
 pub(super) fn update_connection_for_generation(

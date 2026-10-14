@@ -107,7 +107,6 @@ mod action_types {
             HideTrafficIcon,
             ShowStatusMenu,
             ToggleSidebar,
-            CloseStatusPanel,
         ]
     );
 }
@@ -123,7 +122,6 @@ pub struct ZenClashApp {
     core_session: CoreSession,
     application_commands: crate::ApplicationCommands,
     client: MihomoClient,
-    traffic_monitor: Arc<TrafficMonitor>,
     runtime: tokio::runtime::Handle,
     focus_handle: gpui_kit::FocusHandle,
     proxies_page: Entity<ProxiesPage>,
@@ -135,11 +133,8 @@ pub struct ZenClashApp {
     main_window_visible: bool,
     #[cfg(target_os = "macos")]
     main_window_restore_size: window::MainWindowRestoreSize,
-    status_panel: Option<AnyWindowHandle>,
-    status_panel_traffic: tray::panel::TrafficHistory,
     tray_state: TrayMenuState,
     tray_observation: Option<zenclash_core::CoreObservationIdentity>,
-    tray_current_node: Option<(OutboundMode, String)>,
     tray_error: Option<String>,
     tray_command_error: Option<String>,
     mode_error: Option<String>,
@@ -348,7 +343,6 @@ impl ZenClashApp {
             core_session,
             application_commands,
             client,
-            traffic_monitor,
             runtime,
             focus_handle,
             proxies_page,
@@ -360,11 +354,8 @@ impl ZenClashApp {
             main_window_visible: true,
             #[cfg(target_os = "macos")]
             main_window_restore_size: window::MainWindowRestoreSize::default(),
-            status_panel: None,
-            status_panel_traffic: tray::panel::TrafficHistory::default(),
             tray_state: TrayMenuState::default(),
             tray_observation: None,
-            tray_current_node: None,
             tray_error: None,
             tray_command_error: None,
             mode_error: None,
@@ -406,7 +397,7 @@ impl ZenClashApp {
                 }
             }));
         if !initializing {
-            app.start_traffic_updates(cx);
+            app.start_runtime_updates(cx);
             app.restore_system_proxy(cx);
             app.start_mode_sync(cx);
             app.start_profile_updates(cx);
@@ -449,13 +440,11 @@ impl ZenClashApp {
         }
         let preferences = services.preferences.clone();
         let preferences_store = services.preferences_store.clone();
-        let network_tray = NetworkTrayIcon::new(
-            services.core_kind,
-            services.traffic_monitor.clone(),
-            preferences.tray_display,
-        )
-        .inspect_err(|error| tracing::warn!(%error, "failed to create native traffic tray icon"))
-        .ok();
+        let network_tray = NetworkTrayIcon::new()
+            .inspect_err(
+                |error| tracing::warn!(%error, "failed to create native traffic tray icon"),
+            )
+            .ok();
         if let Some(tray) = network_tray.as_ref()
             && let Err(error) = tray.set_visible(preferences.traffic_tray_visible)
         {
@@ -473,10 +462,6 @@ impl ZenClashApp {
         let window_visible = self.main_window_visible;
         #[cfg(target_os = "macos")]
         let restore_size = std::mem::take(&mut self.main_window_restore_size);
-        // The status panel must follow the newly published runtime as well.
-        if let Some(handle) = self.status_panel.take() {
-            let _ = cx.update_window(handle, |_, window, _| window.remove_window());
-        }
         *self = Self::new(
             services,
             initialization,
@@ -557,10 +542,8 @@ impl ZenClashApp {
         )
     }
 
-    fn start_traffic_updates(&mut self, cx: &mut Context<Self>) {
-        let monitor = self.traffic_monitor.clone();
+    fn start_runtime_updates(&mut self, cx: &mut Context<Self>) {
         let mode = self.outbound_mode.clone();
-        let mut traffic_updates = monitor.subscribe();
         let mut mode_updates = mode.subscribe();
         let core = self.core_session.clone();
         let mut operational_updates = self.operational_status.subscribe();
@@ -569,19 +552,12 @@ impl ZenClashApp {
         let mut initialize = true;
         cx.spawn(async move |this, cx| {
             loop {
-                let (mut traffic_changed, mut mode_changed, mut process_changed) =
-                    (initialize, initialize, initialize);
+                let (mut mode_changed, mut process_changed) = (initialize, initialize);
                 let mut run_state_changed = initialize;
                 if initialize {
                     initialize = false;
                 } else {
                     tokio::select! {
-                        result = traffic_updates.changed() => {
-                            if result.is_err() {
-                                break;
-                            }
-                            traffic_changed = true;
-                        }
                         result = mode_updates.changed() => {
                             if result.is_err() {
                                 break;
@@ -605,16 +581,11 @@ impl ZenClashApp {
                 if run_state_changed {
                     run_state_updates.borrow_and_update();
                 }
-                traffic_changed |= traffic_updates.has_changed().unwrap_or(false);
                 mode_changed |= mode_updates.has_changed().unwrap_or(false);
                 process_changed |= operational_updates.has_changed().unwrap_or(false);
-                if traffic_changed {
-                    traffic_updates.borrow_and_update();
-                }
                 if mode_changed {
                     mode_updates.borrow_and_update();
                 }
-                let traffic = traffic_changed.then(|| monitor.snapshot());
                 let controller_indicator = process_changed.then(|| {
                     let snapshot = operational_updates.borrow();
                     view::ControllerIndicator::from_observation(
@@ -675,21 +646,6 @@ impl ZenClashApp {
                         }
                         if refresh_tray {
                             this.refresh_tray_menu(cx);
-                        }
-                        if let Some(traffic) = traffic {
-                            this.status_panel_traffic.observe(&traffic);
-                            if let Some(handle) = this.status_panel {
-                                if cx.update_window(handle, |_, _, _| ()).is_ok() {
-                                    cx.notify();
-                                } else {
-                                    this.status_panel = None;
-                                }
-                            }
-                            if let Some(tray) = this.network_tray.as_mut()
-                                && let Err(error) = tray.update(&traffic)
-                            {
-                                tracing::warn!(%error, "failed to update native traffic tray");
-                            }
                         }
                     })
                     .is_err()
