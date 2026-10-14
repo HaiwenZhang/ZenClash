@@ -11,16 +11,14 @@ const LIVE_UPDATE_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct UiVisibility {
-    window_active: bool,
     window_visible: bool,
     page_presented: bool,
 }
 
 impl UiVisibility {
-    pub(super) const fn new(window_active: bool) -> Self {
+    pub(super) const fn new(window_visible: bool) -> Self {
         Self {
-            window_active,
-            window_visible: true,
+            window_visible,
             page_presented: true,
         }
     }
@@ -30,7 +28,8 @@ impl UiVisibility {
     }
 
     const fn updates_enabled(self) -> bool {
-        self.window_active && self.window_visible && self.page_presented
+        // A visible page remains live even when another window has keyboard focus.
+        self.page_visible()
     }
 }
 
@@ -495,7 +494,7 @@ impl RuntimePage {
         let rule_presentation = cx.observe(&rules, |_, _, cx| cx.notify());
         let rule_context = cx.observe_self(|this, cx| this.synchronize_rule_context(cx));
         let resources = super::resources::ResourcesState::new(window, cx);
-        let ui_visibility = UiVisibility::new(window.is_window_active());
+        let ui_visibility = UiVisibility::new(window.is_visible());
         let (live_updates_enabled, live_update_activity) =
             tokio::sync::watch::channel(ui_visibility.updates_enabled());
         let traffic_history =
@@ -565,11 +564,11 @@ impl RuntimePage {
                 rule_context,
             ],
         };
-        let window_activation_subscription =
-            cx.observe_window_activation(window, |this, window, cx| {
-                this.set_window_active(window.is_window_active(), cx);
+        let window_visibility_subscription =
+            cx.observe_window_visibility(window, |this, visibility, _, cx| {
+                this.set_window_visible(visibility.is_visible(), cx);
             });
-        this._subscriptions.push(window_activation_subscription);
+        this._subscriptions.push(window_visibility_subscription);
         let feedback_subscription = cx.observe_in(&cx.entity(), window, |this, _, window, cx| {
             this.publish_feedback(window, cx);
         });
@@ -816,38 +815,21 @@ impl RuntimePage {
             .update(cx, |view, cx| view.release_presentation(cx));
     }
 
-    fn set_window_active(&mut self, active: bool, cx: &mut Context<Self>) {
-        if self.ui_visibility.window_active == active {
-            return;
-        }
-        let was_enabled = self.ui_visibility.updates_enabled();
-        self.ui_visibility.window_active = active;
-        self.update_live_update_activity(was_enabled, cx);
-    }
-
     fn update_live_update_activity(&mut self, was_enabled: bool, cx: &mut Context<Self>) {
         let enabled = self.ui_visibility.updates_enabled();
         if !enabled {
-            if !self.ui_visibility.window_visible || !self.ui_visibility.page_presented {
-                self.release_home_presentation();
-                self.connections
-                    .update(cx, |view, _| view.release_presentation());
-            }
+            self.release_home_presentation();
+            self.connections
+                .update(cx, |view, _| view.release_presentation());
             if self.network_diagnostics.query.is_loading() {
                 self.cancel_network_diagnostics();
             }
             self.logs
                 .update(cx, |view, cx| view.suspend_presentation(cx));
             self.traffic_history.cancel_query();
-            if self.ui_visibility.window_visible && self.ui_visibility.page_presented {
-                self.overrides.cancel_preview();
-                self.rules
-                    .update(cx, |view, cx| view.suspend_presentation(cx));
-            } else {
-                self.overrides.invalidate_preview();
-                self.rules
-                    .update(cx, |view, cx| view.release_presentation(cx));
-            }
+            self.overrides.invalidate_preview();
+            self.rules
+                .update(cx, |view, cx| view.release_presentation(cx));
         }
         if was_enabled == enabled {
             if self.ui_visibility.window_visible && self.ui_visibility.page_presented {
@@ -1425,7 +1407,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_updates_require_both_an_active_window_and_presented_page() {
+    fn unpresented_page_disables_ui_updates() {
         let mut visibility = UiVisibility::new(true);
         visibility.page_presented = false;
 
@@ -1433,7 +1415,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_window_disables_ui_updates_even_if_it_was_active() {
+    fn hidden_window_disables_ui_updates() {
         let mut visibility = UiVisibility::new(true);
         visibility.window_visible = false;
 

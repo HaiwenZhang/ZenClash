@@ -160,7 +160,7 @@ fn blurring_preserves_loaded_rules_until_the_window_is_hidden(cx: &mut TestAppCo
     .unwrap();
 
     VisualTestContext::from_window(window, cx).deactivate_window();
-    assert!(!cx.update(|cx| page.read(cx).live_updates_enabled()));
+    assert!(cx.update(|cx| page.read(cx).live_updates_enabled()));
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
         window.find(("rule-row", 0usize));
@@ -184,14 +184,12 @@ fn blurring_preserves_loaded_rules_until_the_window_is_hidden(cx: &mut TestAppCo
     .unwrap();
     assert!(cx.update(|cx| page.read(cx).rules.read(cx).is_projecting()));
     VisualTestContext::from_window(window, cx).deactivate_window();
-    assert!(!cx.update(|cx| page.read(cx).rules.read(cx).is_projecting()));
-    cx.update_window(window, |_, window, _| window.activate_window())
-        .unwrap();
     fixture.settle_with_context(cx, &page, |page, cx| {
         page.live_updates_enabled() && !page.rules.read(cx).is_projecting()
     });
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
+        assert!(!window.is_window_active());
         window.find(("rule-row", 0usize));
     })
     .unwrap();

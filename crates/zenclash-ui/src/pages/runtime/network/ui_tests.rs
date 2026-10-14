@@ -129,7 +129,9 @@ fn cancelling_a_network_probe_aborts_the_owned_task_and_rejects_old_publication(
 }
 
 #[gpui_kit::test]
-fn network_probe_stops_when_blurred_or_hidden_during_a_mutation(cx: &mut TestAppContext) {
+fn network_probe_continues_when_blurred_and_stops_when_hidden_during_a_mutation(
+    cx: &mut TestAppContext,
+) {
     cx.foreground_executor().clone().block_test(async {
         let fixture = Fixture::new();
         let _runtime_context = fixture.runtime.as_ref().unwrap().enter();
@@ -139,7 +141,7 @@ fn network_probe_stops_when_blurred_or_hidden_during_a_mutation(cx: &mut TestApp
         fixture.settle(cx, &page, |page| {
             !page.persistent_loading && page.live_updates_enabled()
         });
-        let blurred = fixture
+        let probe = fixture
             .runtime
             .as_ref()
             .unwrap()
@@ -148,27 +150,16 @@ fn network_probe_stops_when_blurred_or_hidden_during_a_mutation(cx: &mut TestApp
             page.update(cx, |page, _| {
                 page.network_diagnostics
                     .query
-                    .begin_pending_for_test(&blurred);
+                    .begin_pending_for_test(&probe);
             });
         })
         .unwrap();
         VisualTestContext::from_window(window, cx).deactivate_window();
-        assert!(!cx.update(|cx| page.read(cx).network_diagnostics.query.is_loading()));
-        assert!(blurred.await.unwrap_err().is_cancelled());
-        cx.update_window(window, |_, window, _| window.activate_window())
-            .unwrap();
-        fixture.settle(cx, &page, |page| page.live_updates_enabled());
-        let hidden = fixture
-            .runtime
-            .as_ref()
-            .unwrap()
-            .spawn(std::future::pending::<()>());
+        assert!(cx.update(|cx| page.read(cx).network_diagnostics.query.is_loading()));
+        assert!(!probe.is_finished());
         cx.update_window(window, |_, _, cx| {
             page.update(cx, |page, cx| {
                 let mutation = page.begin_mutation(Page::Network).unwrap();
-                page.network_diagnostics
-                    .query
-                    .begin_pending_for_test(&hidden);
                 page.set_window_visible(false, cx);
                 assert!(!page.network_diagnostics.query.is_loading());
                 assert!(page.core_busy());
@@ -176,7 +167,7 @@ fn network_probe_stops_when_blurred_or_hidden_during_a_mutation(cx: &mut TestApp
             });
         })
         .unwrap();
-        assert!(hidden.await.unwrap_err().is_cancelled());
+        assert!(probe.await.unwrap_err().is_cancelled());
         cx.update_window(window, |_, window, _| window.remove_window())
             .unwrap();
         drop(page);

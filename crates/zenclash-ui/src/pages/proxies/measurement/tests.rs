@@ -16,6 +16,8 @@ fn automatic_restore_button_adopts_original_observed_controller_facts(cx: &mut T
         let fixture = ProxyConfigurationFixture::automatic_group();
         let (window, page) = open_ready_session_page_window(cx, &fixture).await;
         cx.update_window(window, |_, window, cx| {
+            // Keep dialog geometry fixed throughout the simulated pointer events.
+            cx.set_reduce_motion(true);
             window.render_frame(cx);
             window.click(
                 crate::pages::proxies::view::proxy_element_id(
@@ -71,6 +73,8 @@ fn automatic_group_measurement_button_adopts_delays_and_actual_automatic_selecti
         let fixture = ProxyConfigurationFixture::automatic_group();
         let (window, page) = open_ready_session_page_window(cx, &fixture).await;
         cx.update_window(window, |_, window, cx| {
+            // Keep dialog geometry fixed throughout the simulated pointer events.
+            cx.set_reduce_motion(true);
             window.render_frame(cx);
             window.click(
                 crate::pages::proxies::view::proxy_element_id(

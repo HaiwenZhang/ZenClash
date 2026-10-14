@@ -147,14 +147,6 @@ impl RulesView {
         cx.notify();
     }
 
-    pub(super) fn suspend_presentation(&mut self, cx: &mut Context<Self>) {
-        self.cancel_projection();
-        if let Some(context) = &mut self.context {
-            context.active = false;
-        }
-        cx.notify();
-    }
-
     fn cancel_projection(&mut self) {
         self.worker.cancel();
         self.projecting = false;

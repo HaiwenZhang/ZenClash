@@ -97,3 +97,29 @@ fn switching_pages_restores_focus_after_a_subscription_input_disappears(cx: &mut
     cx.update_window(window, |_, window, _| window.remove_window())
         .unwrap();
 }
+
+#[gpui_kit::test]
+fn platform_visibility_pauses_and_resumes_updates_without_window_activation(
+    cx: &mut TestAppContext,
+) {
+    let fixture = Fixture::new();
+    let (window, page) = open(cx, &fixture, Page::Home);
+    fixture.wait_for_initial_reads(cx, &page);
+    cx.update_window(window, |_, window, _| window.activate_window())
+        .unwrap();
+    cx.run_until_parked();
+    gpui_kit::VisualTestContext::from_window(window, cx).deactivate_window();
+
+    cx.simulate_window_visibility_change(window, gpui_kit::WindowVisibility::Hidden);
+    cx.run_until_parked();
+    cx.update(|cx| assert!(!page.read(cx).live_updates_enabled()));
+
+    cx.simulate_window_visibility_change(window, gpui_kit::WindowVisibility::Visible);
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        assert!(!window.is_window_active());
+        assert!(page.read(cx).live_updates_enabled());
+        window.remove_window();
+    })
+    .unwrap();
+}

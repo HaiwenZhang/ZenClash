@@ -353,6 +353,45 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn unfocused_visible_window_keeps_processing_live_traffic_revisions(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use crate::pages::runtime::test_support::{
+            RuntimePageFixture as Fixture, open_runtime_page_window as open,
+        };
+        use gpui_kit::{AppContext, VisualTestContext};
+
+        let fixture = Fixture::new();
+        let (window, page) = open(cx, &fixture, Page::Home);
+        fixture.wait_for_initial_reads(cx, &page);
+        cx.update_window(window, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        VisualTestContext::from_window(window, cx).deactivate_window();
+        cx.update_window(window, |_, window, cx| {
+            assert!(!window.is_window_active());
+            assert!(page.read(cx).live_updates_enabled());
+        })
+        .unwrap();
+
+        // A stream revision must reach the chart through its timer, without pointer input.
+        let previous_revision = fixture.traffic.revision();
+        fixture
+            .traffic
+            .synchronize_generation(fixture.core.generation().wrapping_add(1));
+        cx.run_until_parked();
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(500));
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            assert!(!window.is_window_active());
+            assert!(page.read(cx).home.chart.traffic_revision.unwrap() > previous_revision);
+            window.remove_window();
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
     fn traffic_history_survives_page_switches_and_hidden_window_restoration(
         cx: &mut gpui_kit::TestAppContext,
     ) {

@@ -576,7 +576,7 @@ fn blurring_preserves_loaded_yaml_preview_until_the_window_is_hidden(cx: &mut Te
     fixture.settle(cx, &page, |page| page.overrides.preview().is_some());
 
     VisualTestContext::from_window(window, cx).deactivate_window();
-    assert!(!cx.update(|cx| page.read(cx).live_updates_enabled()));
+    assert!(cx.update(|cx| page.read(cx).live_updates_enabled()));
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
         window.find("copy-source-config");
