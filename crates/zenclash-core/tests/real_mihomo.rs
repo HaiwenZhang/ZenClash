@@ -380,13 +380,45 @@ async fn verify_real_listener_conflict_fallback(inputs: &IntegrationInputs) {
         .wait_until_ready(Duration::from_secs(20))
         .await
         .expect("real Mihomo becomes ready on fallback port");
-    let actual = MihomoClient::new(process.endpoint().clone())
-        .expect("listener fallback client")
-        .runtime_config()
-        .await
-        .expect("read listener fallback runtime config");
+    let client = MihomoClient::new(process.endpoint().clone()).expect("listener fallback client");
+    let actual = wait_for_real_mixed_listener(&process, &client, fallbacks[0].current).await;
     assert_eq!(actual.mixed_port, fallbacks[0].current);
+    TcpStream::connect_timeout(
+        &std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, actual.mixed_port)),
+        Duration::from_secs(5),
+    )
+    .expect("real fallback proxy listener accepts connections");
     process.stop().expect("stop listener fallback Mihomo");
+}
+
+async fn wait_for_real_mixed_listener(
+    process: &MihomoProcess,
+    client: &MihomoClient,
+    expected_port: u16,
+) -> zenclash_core::RuntimeConfig {
+    // Mihomo starts its controller before applying the initial configuration.
+    // /version readiness can therefore precede the proxy listener appearing in /configs.
+    let mut observed_port = None;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let config = client
+                .runtime_config()
+                .await
+                .expect("read real Mihomo listener runtime config");
+            observed_port = Some(config.mixed_port);
+            if config.mixed_port == expected_port {
+                return config;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "real Mihomo mixed listener did not become ready: expected {expected_port}, last observed {observed_port:?}\n{}",
+            process.snapshot().logs.join("\n")
+        )
+    })
 }
 
 async fn verify_controlled_mode_switch(client: &MihomoClient, profile: &Path, home: &Path) {
@@ -1379,10 +1411,7 @@ async fn verify_managed_restart(
         .expect("restarted real Mihomo becomes ready");
     let second_pid = process.snapshot().pid.expect("restarted Mihomo PID");
     assert_ne!(first_pid, second_pid, "restart must replace the child PID");
-    let restarted = client
-        .runtime_config()
-        .await
-        .expect("GET /configs after restart");
+    let restarted = wait_for_real_mixed_listener(process, client, 17_891).await;
     assert_eq!(restarted.mode.to_ascii_lowercase(), "global");
     assert_eq!(restarted.mixed_port, 17_891);
 }
