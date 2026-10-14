@@ -2,7 +2,7 @@
 
 use std::{
     io::{Read, Write},
-    net::{TcpListener, TcpStream},
+    net::{Shutdown, TcpListener, TcpStream},
     sync::atomic::{AtomicBool, Ordering},
     thread,
     time::{Duration, Instant},
@@ -10,8 +10,8 @@ use std::{
 
 use parking_lot::Mutex;
 
-const MAX_REQUEST_LINE_BYTES: usize = 8 * 1024;
-const REQUEST_LINE_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_REQUEST_HEADER_BYTES: usize = 8 * 1024;
+const REQUEST_HEADER_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_READ_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 pub(super) fn run_server(
@@ -68,10 +68,12 @@ fn serve_connection(
 ) -> std::io::Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
-    let deadline = Instant::now() + REQUEST_LINE_TIMEOUT;
-    let mut request = [0_u8; MAX_REQUEST_LINE_BYTES];
+    let deadline = Instant::now() + REQUEST_HEADER_TIMEOUT;
+    let mut request = [0_u8; MAX_REQUEST_HEADER_BYTES];
     let mut request_length = 0;
-    while request_length < request.len() && !request[..request_length].contains(&b'\n') {
+    let mut headers_complete = false;
+    // Closing with unread request headers can reset the connection on Windows.
+    while request_length < request.len() && !headers_complete {
         if shutdown.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -79,15 +81,21 @@ fn serve_connection(
         if remaining.is_zero() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                "PAC request line deadline expired",
+                "PAC request header deadline expired",
             ));
         }
         // A read timeout alone is renewed by each byte. Bound the complete
-        // request line, while still accepting normally fragmented requests.
+        // request headers, while still accepting normally fragmented requests.
         stream.set_read_timeout(Some(remaining.min(REQUEST_READ_POLL_INTERVAL)))?;
         match stream.read(&mut request[request_length..]) {
             Ok(0) => break,
-            Ok(read) => request_length += read,
+            Ok(read) => {
+                let previous_length = request_length;
+                request_length += read;
+                headers_complete = request[previous_length.saturating_sub(3)..request_length]
+                    .windows(4)
+                    .any(|bytes| bytes == b"\r\n\r\n");
+            }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error)
                 if matches!(
@@ -103,10 +111,10 @@ fn serve_connection(
     if shutdown.load(Ordering::Acquire) {
         return Ok(());
     }
-    if !request[..request_length].contains(&b'\n') {
+    if !headers_complete {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "PAC request line is incomplete or oversized",
+            "PAC request headers are incomplete or oversized",
         ));
     }
     let request_line = std::str::from_utf8(&request[..request_length])
@@ -141,5 +149,8 @@ fn serve_connection(
     if !request_line.starts_with("HEAD ") {
         stream.write_all(body)?;
     }
-    stream.flush()
+    stream.flush()?;
+    // Send FIN explicitly before either socket handle is dropped, so Windows
+    // clients can read the complete response through a graceful EOF.
+    stream.shutdown(Shutdown::Write)
 }

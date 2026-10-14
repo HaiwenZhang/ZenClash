@@ -39,6 +39,48 @@ fn pac_server_accepts_a_fragmented_http_request_line() {
 }
 
 #[test]
+fn pac_server_consumes_fragmented_headers_before_responding() {
+    let server = PacServer::default();
+    let status = server
+        .start("127.0.0.1", default_pac_script(), 17_890)
+        .unwrap();
+    for available in [true, false] {
+        server.set_available(available);
+        let mut stream = TcpStream::connect(status.address).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(150)))
+            .unwrap();
+        stream.write_all(b"GET /pac HTTP/1.1\r\n").unwrap();
+        let mut byte = [0];
+        let pending = stream.read(&mut byte).unwrap_err();
+        assert!(matches!(
+            pending.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        stream.write_all(b"Host: localhost\r\n\r").unwrap();
+        let pending = stream.read(&mut byte).unwrap_err();
+        assert!(matches!(
+            pending.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        stream.write_all(b"\n").unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let expected = if available {
+            "HTTP/1.1 200 OK\r\n"
+        } else {
+            "HTTP/1.1 503 Service Unavailable\r\n"
+        };
+        assert!(response.starts_with(expected), "{response}");
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(headers.contains(&format!("Content-Length: {}\r\n", body.len())));
+    }
+}
+
+#[test]
 fn stopping_pac_interrupts_an_incomplete_request() {
     let server = PacServer::default();
     let status = server
@@ -56,6 +98,44 @@ fn stopping_pac_interrupts_an_incomplete_request() {
         "stop waited for the incomplete request: {:?}",
         started.elapsed()
     );
+}
+
+#[test]
+fn stopping_pac_interrupts_incomplete_headers() {
+    let server = PacServer::default();
+    let status = server
+        .start("127.0.0.1", default_pac_script(), 17_890)
+        .unwrap();
+    let mut stalled = TcpStream::connect(status.address).unwrap();
+    stalled
+        .write_all(b"GET /pac HTTP/1.1\r\nHost: localhost\r\n")
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let started = std::time::Instant::now();
+    server.stop();
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(700),
+        "stop waited for incomplete headers: {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn incomplete_headers_cannot_block_the_next_request_indefinitely() {
+    let server = PacServer::default();
+    let status = server
+        .start("127.0.0.1", default_pac_script(), 17_890)
+        .unwrap();
+    let mut stalled = TcpStream::connect(status.address).unwrap();
+    stalled
+        .write_all(b"GET /pac HTTP/1.1\r\nHost: localhost\r\n")
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let response = request(status.address, b"GET /pac HTTP/1.1\r\n\r\n");
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
 }
 
 #[test]
