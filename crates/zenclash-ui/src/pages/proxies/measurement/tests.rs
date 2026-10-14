@@ -1,6 +1,8 @@
 use crate::pages::proxies::{
     ProxyGroupBehavior, ProxyNodeId,
-    test_support::{ProxyConfigurationFixture, open_ready_session_page_window},
+    test_support::{
+        ProxyConfigurationFixture, open_ready_session_page_window, wait_for_page_state,
+    },
 };
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{AppContext, TestAppContext};
@@ -31,22 +33,10 @@ fn automatic_restore_button_adopts_original_observed_controller_facts(cx: &mut T
                 ),
                 cx,
             );
+            assert_eq!(page.read(cx).restoring_auto.as_deref(), Some("group"));
         })
         .unwrap();
-        for _ in 0..200 {
-            if cx.update(|cx| {
-                page.read(cx).restoring_auto.is_none() && page.read(cx).notice.is_some()
-            }) {
-                break;
-            }
-            fixture
-                .runtime
-                .spawn(async {
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                })
-                .await
-                .unwrap();
-        }
+        wait_for_page_state(cx, &fixture, &page, |page| page.restoring_auto.is_none()).await;
         cx.update_window(window, |_, window, cx| {
             let state = page.read(cx);
             assert_eq!(
@@ -98,23 +88,16 @@ fn automatic_group_measurement_button_adopts_delays_and_actual_automatic_selecti
                 ),
                 cx,
             );
+            assert_eq!(
+                page.read(cx).measuring_and_restoring_auto.as_deref(),
+                Some("group")
+            );
         })
         .unwrap();
-        for _ in 0..200 {
-            if cx.update(|cx| {
-                page.read(cx).measuring_and_restoring_auto.is_none()
-                    && page.read(cx).notice.is_some()
-            }) {
-                break;
-            }
-            fixture
-                .runtime
-                .spawn(async {
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                })
-                .await
-                .unwrap();
-        }
+        wait_for_page_state(cx, &fixture, &page, |page| {
+            page.measuring_and_restoring_auto.is_none()
+        })
+        .await;
         cx.update_window(window, |_, window, cx| {
             let state = page.read(cx);
             assert_eq!(
@@ -234,18 +217,10 @@ fn a_completed_group_measurement_does_not_publish_after_a_same_runtime_config_ch
             .runtime
             .block_on(fixture.session.set_mode(&fixture.store, "rule"))
             .unwrap();
-        for _ in 0..200 {
-            if cx.update(|cx| page.read(cx).measuring_and_restoring_auto.is_none()) {
-                break;
-            }
-            fixture
-                .runtime
-                .spawn(async {
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                })
-                .await
-                .unwrap();
-        }
+        wait_for_page_state(cx, &fixture, &page, |page| {
+            page.measuring_and_restoring_auto.is_none()
+        })
+        .await;
         cx.update_window(window, |_, window, cx| {
             let state = page.read(cx);
             assert_eq!(

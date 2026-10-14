@@ -226,6 +226,35 @@ pub(super) fn open_session_page_window(
 
 #[expect(
     clippy::future_not_send,
+    reason = "GPUI state waiting retains its foreground-thread context"
+)]
+pub(super) async fn wait_for_page_state(
+    cx: &mut gpui_kit::TestAppContext,
+    fixture: &ProxyConfigurationFixture,
+    page: &gpui_kit::Entity<super::ProxiesPage>,
+    predicate: impl Fn(&super::ProxiesPage) -> bool,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if cx.update(|cx| predicate(page.read(cx))) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "proxy page state did not settle within 10 seconds"
+        );
+        fixture
+            .runtime
+            .spawn(async {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            })
+            .await
+            .unwrap();
+    }
+}
+
+#[expect(
+    clippy::future_not_send,
     reason = "GPUI test window setup retains its foreground-thread context"
 )]
 pub(super) async fn open_ready_session_page_window(
@@ -237,18 +266,7 @@ pub(super) async fn open_ready_session_page_window(
 ) {
     let (window, page) = open_session_page_window(cx, fixture);
     page.update(cx, |page, cx| page.refresh(cx));
-    for _ in 0..200 {
-        if cx.update(|cx| !page.read(cx).loading) {
-            break;
-        }
-        fixture
-            .runtime
-            .spawn(async {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            })
-            .await
-            .unwrap();
-    }
+    wait_for_page_state(cx, fixture, &page, |page| !page.loading).await;
     cx.update(|cx| {
         assert!(page.read(cx).catalog.is_some());
         assert!(page.read(cx).error.is_none());
