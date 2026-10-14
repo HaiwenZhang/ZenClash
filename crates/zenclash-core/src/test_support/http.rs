@@ -103,7 +103,19 @@ pub fn read_http_status_line_blocking(stream: &mut impl Read) -> io::Result<Opti
 pub async fn read_controller_request(
     stream: &mut (impl AsyncRead + Unpin + Send),
 ) -> io::Result<ControllerRequest> {
-    let mut collector = RequestCollector::default();
+    read_controller_request_with_limit(stream, MAX_REQUEST_BYTES).await
+}
+
+/// Reads one isolated request with an explicit total byte budget and 8 KiB header budget.
+/// Large-payload fixtures can opt in without relaxing the ordinary 64 KiB limit.
+///
+/// # Errors
+/// Returns the same I/O, EOF and format errors as [`read_controller_request`].
+pub async fn read_controller_request_with_limit(
+    stream: &mut (impl AsyncRead + Unpin + Send),
+    max_request_bytes: usize,
+) -> io::Result<ControllerRequest> {
+    let mut collector = RequestCollector::new(max_request_bytes);
     loop {
         let mut bytes = [0; 4096];
         let length = stream.read(&mut bytes).await?;
@@ -121,7 +133,7 @@ pub async fn read_controller_request(
 /// # Errors
 /// Returns the same I/O, EOF and format errors as [`read_controller_request`].
 pub fn read_controller_request_blocking(stream: &mut impl Read) -> io::Result<ControllerRequest> {
-    let mut collector = RequestCollector::default();
+    let mut collector = RequestCollector::new(MAX_REQUEST_BYTES);
     loop {
         let mut bytes = [0; 4096];
         let length = stream.read(&mut bytes)?;
@@ -134,16 +146,25 @@ pub fn read_controller_request_blocking(stream: &mut impl Read) -> io::Result<Co
     }
 }
 
-#[derive(Default)]
 struct RequestCollector {
     bytes: Vec<u8>,
     header_end: Option<usize>,
     total: Option<usize>,
+    max_request_bytes: usize,
 }
 
 impl RequestCollector {
+    fn new(max_request_bytes: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            header_end: None,
+            total: None,
+            max_request_bytes,
+        }
+    }
+
     fn push(&mut self, chunk: &[u8]) -> io::Result<bool> {
-        if self.bytes.len() + chunk.len() > MAX_REQUEST_BYTES {
+        if self.bytes.len().saturating_add(chunk.len()) > self.max_request_bytes {
             return Err(invalid_request());
         }
         self.bytes.extend_from_slice(chunk);
@@ -176,7 +197,7 @@ impl RequestCollector {
             let total = end
                 .checked_add(4)
                 .and_then(|headers| headers.checked_add(body_length.unwrap_or(0)))
-                .filter(|total| *total <= MAX_REQUEST_BYTES)
+                .filter(|total| *total <= self.max_request_bytes)
                 .ok_or_else(invalid_request)?;
             self.header_end = Some(end);
             self.total = Some(total);
@@ -300,6 +321,32 @@ mod tests {
         let mut input = Fragments(b"POST /x HTTP/1.1\r\ncontent-length: 3\r\n\r\nabc");
         let request = read_controller_request_blocking(&mut input).unwrap();
         assert_eq!(request.body(), b"abc");
+    }
+
+    #[tokio::test]
+    async fn explicit_request_budget_accepts_a_large_body_without_relaxing_the_default() {
+        let body = vec![b'x'; MAX_REQUEST_BYTES];
+        let mut bytes = format!(
+            "PUT /configs HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        bytes.extend_from_slice(&body);
+        let request = read_controller_request_with_limit(&mut bytes.as_slice(), bytes.len())
+            .await
+            .unwrap();
+        assert_eq!(request.body(), body);
+        assert!(matches!(
+            read_controller_request(&mut bytes.as_slice()).await,
+            Err(error) if error.kind() == io::ErrorKind::InvalidData
+        ));
+    }
+
+    #[tokio::test]
+    async fn explicit_request_budget_rejects_oversized_declared_bodies() {
+        let mut input = b"PUT /configs HTTP/1.1\r\nContent-Length: 65536\r\n\r\n".as_slice();
+        let result = read_controller_request_with_limit(&mut input, 1024).await;
+        assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::InvalidData));
     }
 
     #[test]

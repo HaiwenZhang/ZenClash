@@ -128,10 +128,11 @@ fn replace_file(temporary: &Path, path: &Path) -> std::io::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn replace_file(temporary: &Path, path: &Path) -> std::io::Result<()> {
-    use std::{iter, os::windows::ffi::OsStrExt};
+    use std::{iter, os::windows::ffi::OsStrExt, ptr};
 
+    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
     use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, ReplaceFileW,
     };
 
     let temporary = temporary
@@ -153,9 +154,28 @@ fn replace_file(temporary: &Path, path: &Path) -> std::io::Result<()> {
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
         )
     };
-    if succeeded == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
+    if succeeded != 0 {
+        return Ok(());
     }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() != Some(ERROR_ACCESS_DENIED as i32) {
+        return Err(error);
+    }
+    // MoveFileExW can reject an open destination even with delete sharing.
+    // ReplaceFileW preserves existing readers while publishing the new file.
+    // SAFETY: The UTF-16 paths remain valid; optional backup and reserved pointers are null.
+    if unsafe {
+        ReplaceFileW(
+            path.as_ptr(),
+            temporary.as_ptr(),
+            ptr::null(),
+            0,
+            ptr::null(),
+            ptr::null(),
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }

@@ -340,13 +340,64 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use std::{
+        future::Future,
         io::{Read, Write},
         net::TcpListener,
+        pin::Pin,
+        task::{Context, Poll, Wake, Waker},
         thread,
+        time::Duration,
     };
 
     use super::*;
     use crate::MihomoEndpoint;
+
+    type SwitchFuture = Pin<Box<dyn Future<Output = crate::MihomoResult<()>> + Send>>;
+
+    struct SwitchOnUnlock(parking_lot::Mutex<Option<SwitchFuture>>);
+
+    impl Wake for SwitchOnUnlock {
+        fn wake(self: Arc<Self>) {
+            let mut future = self.0.lock();
+            if let Some(switch) = future.as_mut()
+                && let Poll::Ready(result) = switch
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+            {
+                result.unwrap();
+                *future = None;
+            }
+        }
+    }
+
+    fn queue_runtime_switch(client: MihomoClient, endpoint: MihomoEndpoint) -> Arc<SwitchOnUnlock> {
+        let switch = Arc::new(SwitchOnUnlock(parking_lot::Mutex::new(Some(Box::pin(
+            async move { client.switch_to_direct(endpoint).await },
+        )))));
+        let waker = Waker::from(switch.clone());
+        // Publish synchronously when the PUT releases admission, before its catalog readback.
+        assert!(
+            switch
+                .0
+                .lock()
+                .as_mut()
+                .unwrap()
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        switch
+    }
+
+    async fn finish_runtime_switch(switch: Arc<SwitchOnUnlock>) {
+        let retirement = switch.0.lock().take();
+        if let Some(retirement) = retirement {
+            tokio::time::timeout(Duration::from_secs(2), retirement)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
 
     fn proxy_catalog(count: usize) -> ProviderCatalog {
         ProviderCatalog {
@@ -427,6 +478,13 @@ mod tests {
                 .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
                 .await
                 .unwrap();
+            drop(stream);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), original.accept())
+                    .await
+                    .is_err(),
+                "provider readback or remaining targets reached the retired controller"
+            );
         });
         let updating_operations = operations.clone();
         let updating = tokio::spawn(async move {
@@ -435,18 +493,10 @@ mod tests {
                 .await
         });
         entered_rx.await.unwrap();
-        let (switching_tx, switching_rx) = tokio::sync::oneshot::channel();
-        let switching = tokio::spawn(async move {
-            switching_tx.send(()).unwrap();
-            client
-                .switch_to_direct(MihomoEndpoint::new(replacement_url, ""))
-                .await
-        });
-        switching_rx.await.unwrap();
-        tokio::task::yield_now().await;
+        let switching = queue_runtime_switch(client, MihomoEndpoint::new(replacement_url, ""));
         release_tx.send(()).unwrap();
         server.await.unwrap();
-        switching.await.unwrap().unwrap();
+        finish_runtime_switch(switching).await;
         assert!(
             tokio::time::timeout(std::time::Duration::from_secs(2), updating)
                 .await
@@ -488,6 +538,13 @@ mod tests {
                 .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
                 .await
                 .unwrap();
+            drop(stream);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), original.accept())
+                    .await
+                    .is_err(),
+                "provider readback or remaining targets reached the retired controller"
+            );
         });
         let operations = ProviderOperations::new(client.clone());
         let updating = tokio::spawn(async move {
@@ -499,18 +556,10 @@ mod tests {
                 .await
         });
         entered_rx.await.unwrap();
-        let (switching_tx, switching_rx) = tokio::sync::oneshot::channel();
-        let switching = tokio::spawn(async move {
-            switching_tx.send(()).unwrap();
-            client
-                .switch_to_direct(MihomoEndpoint::new(replacement_url, ""))
-                .await
-        });
-        switching_rx.await.unwrap();
-        tokio::task::yield_now().await;
+        let switching = queue_runtime_switch(client, MihomoEndpoint::new(replacement_url, ""));
         release_tx.send(()).unwrap();
         server.await.unwrap();
-        switching.await.unwrap().unwrap();
+        finish_runtime_switch(switching).await;
         let receipt = tokio::time::timeout(std::time::Duration::from_secs(2), updating)
             .await
             .unwrap()

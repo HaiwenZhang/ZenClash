@@ -606,8 +606,19 @@ mod tests {
             .unwrap();
         let fixture = tokio::spawn(async move {
             server.connect().await.unwrap();
-            let bytes = receive_request(&mut server).await;
-            assert!(bytes.len() > 4 * 1024 * 1024);
+            let request = crate::test_support::read_controller_request_with_limit(
+                &mut server,
+                MAX_REQUEST_BYTES + MAX_HEADER_BYTES,
+            )
+            .await
+            .unwrap();
+            assert!(request.headers().contains("Bearer private-secret"));
+            assert!(request.body().len() > 4 * 1024 * 1024);
+            let body: Value = serde_json::from_slice(request.body()).unwrap();
+            assert_eq!(
+                body["payload"].as_str().unwrap(),
+                "\"".repeat(3 * 1024 * 1024)
+            );
             let mut tail = Vec::new();
             let result = server.read_to_end(&mut tail).await;
             if let Err(error) = result {
