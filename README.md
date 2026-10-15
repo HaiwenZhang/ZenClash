@@ -73,11 +73,11 @@
 
 目前尚无正式 Release。欢迎前往 **[Releases 查看 ZenClash 测试版本](https://github.com/HaiwenZhang/ZenClash/releases)**，如有可用构建，请选择与你的系统和架构匹配的文件；也可以参考[开发文档](docs/development)自行构建并参与测试。
 
-| 平台 | 架构 |
-| --- | --- |
-| macOS | Apple Silicon（arm64） |
-| Windows | x86_64 |
-| Linux | x86_64；提供 Ubuntu 构建 |
+| 平台 | 架构 | 安装包 |
+| --- | --- | --- |
+| macOS | Apple Silicon（arm64） | `.dmg` |
+| Windows | x86_64、arm64 | 安装向导 `.exe` |
+| Ubuntu 24.04+ | x86_64、arm64 | `.deb` |
 
 发布包内置 Mihomo，应用启动时会自动发现并准备内核。安装文件的格式与系统要求以对应 Release 说明为准；macOS 用户可查看[安装指南](docs/installation/macos.md)。
 

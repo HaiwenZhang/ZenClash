@@ -1,6 +1,9 @@
 #ifndef AppVersion
   #define AppVersion "0.2.0"
 #endif
+#ifndef AppArchitecture
+  #define AppArchitecture "x64"
+#endif
 #ifndef SourceDir
   #error SourceDir must point to the staged ZenClash application
 #endif
@@ -21,8 +24,15 @@ DefaultDirName={localappdata}\Programs\ZenClash
 DefaultGroupName=ZenClash
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
+#if AppArchitecture == "arm64"
+ArchitecturesAllowed=arm64
+ArchitecturesInstallIn64BitMode=arm64
+#elif AppArchitecture == "x64"
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+#else
+  #error AppArchitecture must be x64 or arm64
+#endif
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -30,7 +40,7 @@ SetupIconFile={#ProjectRoot}\platforms\windows\ZenClash.ico
 UninstallDisplayIcon={app}\zenclash.exe,0
 LicenseFile={#ProjectRoot}\LICENSE
 OutputDir={#OutputDir}
-OutputBaseFilename=ZenClash-{#AppVersion}-windows-x64-setup
+OutputBaseFilename=ZenClash-{#AppVersion}-windows-{#AppArchitecture}-setup
 
 [Files]
 Source: "{#SourceDir}\zenclash.exe"; DestDir: "{app}"; Flags: ignoreversion

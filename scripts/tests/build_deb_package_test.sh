@@ -3,6 +3,12 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_root="$(cd "${script_dir}/../.." && pwd)"
+test_architecture="${1:-amd64}"
+case "${test_architecture}" in
+  amd64|arm64) ;;
+  *) echo "Unsupported test architecture: ${test_architecture}" >&2; exit 2 ;;
+esac
+export MOCK_ARCHITECTURE="${test_architecture}"
 test_root="$(mktemp -d)"
 mock_bin="${test_root}/bin"
 export MIHOMO_VERSION=v1.19.30
@@ -55,7 +61,7 @@ cat >"${mock_bin}/dpkg" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "${1:-}" == "--print-architecture" ]]
-printf 'amd64\n'
+printf '%s\n' "${MOCK_ARCHITECTURE}"
 EOF
 
 cat >"${mock_bin}/dpkg-deb" <<'EOF'
@@ -132,7 +138,38 @@ chmod +x \
   "${test_root}/mihomo"
 printf 'fixture\n' >"${test_root}/geoip.metadb"
 
+# Serve local release metadata and a real gzip fixture to exercise architecture
+# selection and SHA-256 verification in the production downloader.
+gzip -c "${test_root}/mihomo" >"${test_root}/mihomo.gz"
+if command -v sha256sum >/dev/null 2>&1; then
+  fixture_hash="$(sha256sum "${test_root}/mihomo.gz" | awk '{print $1}')"
+else
+  fixture_hash="$(shasum -a 256 "${test_root}/mihomo.gz" | awk '{print $1}')"
+fi
+cat >"${test_root}/release.json" <<EOF
+{"assets":[{"name":"mihomo-linux-${test_architecture}-v1.19.30.gz","browser_download_url":"https://fixture.invalid/mihomo.gz","digest":"sha256:${fixture_hash}"}]}
+EOF
+cat >"${mock_bin}/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+previous=""
+url=""
+output=""
+for argument in "$@"; do
+  if [[ "${previous}" == --output ]]; then output="${argument}"; fi
+  case "${argument}" in https://*) url="${argument}" ;; esac
+  previous="${argument}"
+done
+case "${url}" in
+  https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/v1.19.30) cp "${MOCK_DOWNLOAD_ROOT}/release.json" "${output}" ;;
+  https://fixture.invalid/mihomo.gz) cp "${MOCK_DOWNLOAD_ROOT}/mihomo.gz" "${output}" ;;
+  *) echo "Unexpected network request: ${url}" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "${mock_bin}/curl"
+
 PATH="${mock_bin}:${PATH}" \
+  MOCK_DOWNLOAD_ROOT="${test_root}" \
   MOCK_CONTROL_COPY="${control_copy}" \
   MOCK_DPKG_LOG="${dpkg_log}" \
   MOCK_SERVICE_COPY="${service_copy}" \
@@ -142,13 +179,14 @@ PATH="${mock_bin}:${PATH}" \
   MOCK_PRERM_COPY="${prerm_copy}" \
   MOCK_TARGET_DIR="${mock_target}" \
   CARGO_TARGET_DIR="${mock_target}" \
-  ZENCLASH_MIHOMO_BINARY="${test_root}/mihomo" \
+  ZENCLASH_MIHOMO_BINARY="" \
   ZENCLASH_GEODATA_FILE="${test_root}/geoip.metadb" \
   ZENCLASH_CONFIG="${project_root}/platforms/common/default.yaml" \
   bash "${project_root}/scripts/build_deb_package.sh" 9.8.7 "${output_dir}"
 
-package_path="${output_dir}/ZenClash-9.8.7-Ubuntu-24.04+-amd64.deb"
+package_path="${output_dir}/ZenClash-9.8.7-Ubuntu-24.04+-${test_architecture}.deb"
 [[ -f "${package_path}" ]]
+grep -Fxq "Architecture: ${test_architecture}" "${control_copy}"
 [[ "$(grep -c '^--contents$' "${dpkg_log}")" -eq 1 ]]
 grep -Fxq \
   'Depends: libasound2t64, libfontconfig1, libgtk-3-0t64, libayatana-appindicator3-1, libvulkan1, libwayland-client0, libxdo3, libxkbcommon-x11-0' \
@@ -213,4 +251,4 @@ for version_failure in empty failed; do
   [[ ! -f "${package_path}" && ! -s "${dpkg_log}" ]]
 done
 
-printf 'DEB packaging regression test passed\n'
+printf 'DEB %s packaging regression test passed\n' "${test_architecture}"

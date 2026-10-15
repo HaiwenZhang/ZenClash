@@ -44,7 +44,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - name: Download Cargo binary archives
+      - name: Download platform installers
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist
@@ -56,7 +56,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          sha256sum ./*.zip ./*.tar.gz >SHA256SUMS
+          sha256sum ./*.dmg ./*-setup.exe ./*.deb >SHA256SUMS
 
       - name: Attest release artifacts
         if: github.event.repository.visibility == 'public'

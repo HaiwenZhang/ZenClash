@@ -120,9 +120,9 @@ jobs:
           --exact --ignored --nocapture
 
   macos:
-    name: macOS Apple Silicon binaries
+    name: macOS Apple Silicon installer
     needs: [prepare, verify]
-    runs-on: macos-15
+    runs-on: macos-latest
     timeout-minutes: 90
     steps:
       - name: Check out source
@@ -136,44 +136,36 @@ jobs:
       - name: Run shared Rust checks
         uses: ./.github/actions/verify-rust
 
-      - name: Build binaries with Cargo
-        run: |
-          cargo build --release --locked -p zenclash-ui --bin zenclash --target aarch64-apple-darwin
-          cargo build --release --locked -p zenclash-service --features standalone,client --bin zenclash-service --bin zenclash-service-install --bin zenclash-service-uninstall --target aarch64-apple-darwin
+      - name: Test macOS application packaging
+        run: bash scripts/tests/build_macos_app_test.sh
 
-      - name: Download verified bundled Mihomo
+      - name: Build macOS DMG
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/download_mihomo.sh darwin arm64 "${{ runner.temp }}/mihomo"
+        run: scripts/build_macos_package.sh '${{ needs.prepare.outputs.version }}' dist
 
-      - name: Archive macOS binaries
-        shell: bash
-        run: |
-          set -euo pipefail
-          name="ZenClash-${{ needs.prepare.outputs.version }}-macOS-arm64"
-          mkdir -p "dist/${name}/bin" "dist/${name}/Resources"
-          for binary in zenclash zenclash-service zenclash-service-install zenclash-service-uninstall; do
-            test -s "target/aarch64-apple-darwin/release/${binary}"
-            cp "target/aarch64-apple-darwin/release/${binary}" "dist/${name}/bin/"
-          done
-          cp "${{ runner.temp }}/mihomo" "dist/${name}/Resources/mihomo"
-          "dist/${name}/Resources/mihomo" -v
-          cp platforms/common/default.yaml "dist/${name}/Resources/profile.yaml"
-          cp platforms/common/recovery.yaml platforms/macos/ZenClash.png "dist/${name}/Resources/"
-          tar -czf "dist/${name}.tar.gz" -C dist "${name}"
-
-      - name: Upload macOS binaries
+      - name: Upload macOS DMG
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: zenclash-macos-arm64
-          path: dist/ZenClash-${{ needs.prepare.outputs.version }}-macOS-arm64.tar.gz
+          path: dist/ZenClash-${{ needs.prepare.outputs.version }}-macOS-arm64.dmg
           if-no-files-found: error
           compression-level: 0
 
   windows:
-    name: Windows x64 binaries
+    name: Windows ${{ matrix.arch }} installer
     needs: [prepare, verify]
-    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
       - name: Check out source
@@ -182,59 +174,47 @@ jobs:
       - name: Set up project Rust
         uses: ./.github/actions/setup-rust
         with:
-          target: x86_64-pc-windows-msvc
+          target: ${{ matrix.target }}
 
       - name: Run shared Rust checks
         uses: ./.github/actions/verify-rust
 
-      - name: Build binaries with Cargo
+      - name: Test Windows installer packaging
         shell: pwsh
-        run: |
-          cargo build --release --locked -p zenclash-ui --bin zenclash --target x86_64-pc-windows-msvc
-          if ($LASTEXITCODE -ne 0) { throw "GUI Cargo build failed" }
-          cargo build --release --locked -p zenclash-service --features standalone,client --bin zenclash-service --bin zenclash-service-install --bin zenclash-service-uninstall --target x86_64-pc-windows-msvc
-          if ($LASTEXITCODE -ne 0) { throw "Service Cargo build failed" }
+        run: scripts/tests/build_windows_installer_test.ps1 -Architecture '${{ matrix.arch }}'
 
-      - name: Download verified bundled Mihomo
+      - name: Build Windows setup installer
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/download_mihomo.ps1 -OutputPath "$env:RUNNER_TEMP/mihomo.exe"
+        run: >-
+          scripts/build_windows_installer.ps1
+          -Version '${{ needs.prepare.outputs.version }}'
+          -Architecture '${{ matrix.arch }}'
+          -OutputDir dist
 
-      - name: Archive Windows binaries
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $Name = "ZenClash-${{ needs.prepare.outputs.version }}-windows-x64"
-          $Stage = Join-Path 'dist' $Name
-          $Resources = Join-Path $Stage 'resources'
-          New-Item -ItemType Directory -Force -Path $Resources | Out-Null
-          foreach ($Binary in @('zenclash', 'zenclash-service', 'zenclash-service-install', 'zenclash-service-uninstall')) {
-            $Source = "target/x86_64-pc-windows-msvc/release/$Binary.exe"
-            if (-not (Test-Path -LiteralPath $Source -PathType Leaf) -or (Get-Item -LiteralPath $Source).Length -eq 0) {
-              throw "Cargo binary is missing or empty: $Source"
-            }
-            Copy-Item -LiteralPath $Source -Destination $Stage
-          }
-          Copy-Item -LiteralPath "$env:RUNNER_TEMP/mihomo.exe" -Destination (Join-Path $Resources 'mihomo.exe')
-          & (Join-Path $Resources 'mihomo.exe') -v
-          if ($LASTEXITCODE -ne 0) { throw "Bundled Mihomo cannot run" }
-          Copy-Item -LiteralPath 'platforms/common/default.yaml' -Destination (Join-Path $Resources 'profile.yaml')
-          Copy-Item -LiteralPath 'platforms/common/recovery.yaml', 'platforms/macos/ZenClash.png' -Destination $Resources
-          Compress-Archive -LiteralPath $Stage -DestinationPath "dist/$Name.zip" -Force
-
-      - name: Upload Windows binaries
+      - name: Upload Windows setup installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: zenclash-windows-x64
-          path: dist/ZenClash-${{ needs.prepare.outputs.version }}-windows-x64.zip
+          name: zenclash-windows-${{ matrix.arch }}
+          path: dist/ZenClash-${{ needs.prepare.outputs.version }}-windows-${{ matrix.arch }}-setup.exe
           if-no-files-found: error
           compression-level: 0
 
   ubuntu:
-    name: Ubuntu 24.04+ binaries
+    name: Ubuntu 24.04+ ${{ matrix.arch }} package
     needs: [prepare, verify]
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
       - name: Check out source
@@ -242,43 +222,29 @@ jobs:
 
       - name: Set up project Rust
         uses: ./.github/actions/setup-rust
+        with:
+          target: ${{ matrix.target }}
 
       - name: Install Linux dependencies
         run: sudo scripts/install_linux_build_deps.sh
 
       - name: Run shared Rust checks
+        # The prerequisite verify job already checks the amd64 runner.
+        if: matrix.arch == 'arm64'
         uses: ./.github/actions/verify-rust
 
-      - name: Build binaries with Cargo
-        run: |
-          cargo build --release --locked -p zenclash-ui --bin zenclash
-          cargo build --release --locked -p zenclash-service --features standalone,client --bin zenclash-service --bin zenclash-service-install --bin zenclash-service-uninstall
+      - name: Test Debian packaging
+        run: scripts/tests/build_deb_package_test.sh '${{ matrix.arch }}'
 
-      - name: Download verified bundled Mihomo
+      - name: Build Ubuntu Debian package
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/download_mihomo.sh linux amd64 "${{ runner.temp }}/mihomo"
+        run: scripts/build_deb_package.sh '${{ needs.prepare.outputs.version }}' dist
 
-      - name: Archive Ubuntu binaries
-        shell: bash
-        run: |
-          set -euo pipefail
-          name="ZenClash-${{ needs.prepare.outputs.version }}-Ubuntu-24.04+-amd64"
-          mkdir -p "dist/${name}/resources"
-          for binary in zenclash zenclash-service zenclash-service-install zenclash-service-uninstall; do
-            test -s "target/release/${binary}"
-            cp "target/release/${binary}" "dist/${name}/"
-          done
-          cp "${{ runner.temp }}/mihomo" "dist/${name}/resources/mihomo"
-          "dist/${name}/resources/mihomo" -v
-          cp platforms/common/default.yaml "dist/${name}/resources/profile.yaml"
-          cp platforms/common/recovery.yaml platforms/macos/ZenClash.png "dist/${name}/resources/"
-          tar -czf "dist/${name}.tar.gz" -C dist "${name}"
-
-      - name: Upload Ubuntu binaries
+      - name: Upload Ubuntu Debian package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: zenclash-ubuntu-24.04-amd64
-          path: dist/ZenClash-${{ needs.prepare.outputs.version }}-Ubuntu-24.04+-amd64.tar.gz
+          name: zenclash-ubuntu-24.04-${{ matrix.arch }}
+          path: dist/ZenClash-${{ needs.prepare.outputs.version }}-Ubuntu-24.04+-${{ matrix.arch }}.deb
           if-no-files-found: error
           compression-level: 0

@@ -1,9 +1,13 @@
 [CmdletBinding()]
-param()
+param(
+    [ValidateSet('x64', 'arm64')]
+    [string]$Architecture = 'x64'
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
+$ExpectedTargetTriple = if ($Architecture -eq 'arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
 $TemporaryRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
 $TestRoot = Join-Path $TemporaryRoot ('zenclash-windows-package-test-' + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $TestRoot | Out-Null
@@ -41,17 +45,20 @@ public static class ZenClashIconResource {
 }
 '@
     function Add-Type { param([string]$TypeDefinition) }
-    function rustup { $global:LASTEXITCODE = 0 }
+    function rustup {
+        if (($args -join ' ') -ne "target add $ExpectedTargetTriple") { throw 'Incorrect Rust target' }
+        $global:LASTEXITCODE = 0
+    }
     function cargo {
         $Arguments = $args
-        $Release = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release'
+        $Release = Join-Path $env:CARGO_TARGET_DIR "$ExpectedTargetTriple/release"
         New-Item -ItemType Directory -Force -Path $Release | Out-Null
         $Text = ' ' + ($Arguments -join ' ') + ' '
+        if (-not $Text.Contains(" --target $ExpectedTargetTriple ")) { throw 'Incorrect build target' }
         $Text | Add-Content -LiteralPath (Join-Path $env:ZENCLASH_PACKAGE_TEST_ROOT 'cargo.log')
         if ($Text.Contains(' -p zenclash-service ')) {
             if (-not $Text.Contains(' --features standalone,client ') -or
-                -not $Text.Contains(' --bin zenclash-service ') -or
-                -not $Text.Contains(' --target x86_64-pc-windows-msvc ')) { throw 'Incorrect service build command' }
+                -not $Text.Contains(' --bin zenclash-service ')) { throw 'Incorrect service build command' }
             foreach ($Tool in @('zenclash-service-install', 'zenclash-service-uninstall')) {
                 if (-not $Text.Contains(" --bin $Tool ")) { throw "Build omitted $Tool" }
                 Copy-Item -LiteralPath (Join-Path $env:ZENCLASH_PACKAGE_TEST_ROOT 'fixture.exe') -Destination (Join-Path $Release "$Tool.exe")
@@ -78,6 +85,8 @@ public static class ZenClashIconResource {
 $ErrorActionPreference = 'Stop'
 $Stage = ($args | Where-Object { $_ -like '/DSourceDir=*' }).Substring(12)
 $Output = ($args | Where-Object { $_ -like '/DOutputDir=*' }).Substring(12)
+$AppArchitecture = ($args | Where-Object { $_ -like '/DAppArchitecture=*' }).Split('=', 2)[1]
+if ($AppArchitecture -notin @('x64', 'arm64')) { throw 'Installer architecture was not passed to ISCC' }
 $Helper = Join-Path $Stage 'zenclash-service.exe'
 if (-not (Test-Path -LiteralPath $Helper -PathType Leaf) -or (Get-Item -LiteralPath $Helper).Length -eq 0) {
     throw 'ISCC received no nonempty service payload'
@@ -107,7 +116,7 @@ if ($Definition -notmatch '(?m)^PrivilegesRequired=lowest\r?$' -or
     throw 'Installer must distribute the explicit helper as ordinary-user payload without running it'
 }
 'called' | Add-Content -LiteralPath (Join-Path $env:ZENCLASH_PACKAGE_TEST_ROOT 'iscc.log')
-[System.IO.File]::WriteAllBytes((Join-Path $Output 'ZenClash-9.8.7-windows-x64-setup.exe'), [byte[]]@(1))
+[System.IO.File]::WriteAllBytes((Join-Path $Output "ZenClash-9.8.7-windows-$AppArchitecture-setup.exe"), [byte[]]@(1))
 $global:LASTEXITCODE = 0
 '@ | Set-Content -LiteralPath (Join-Path $TestRoot 'iscc.ps1')
 
@@ -115,7 +124,7 @@ $global:LASTEXITCODE = 0
     $env:CARGO_TARGET_DIR = Join-Path $TestRoot 'target'
     foreach ($Mode in @('success', 'missing', 'empty', 'build-failed', 'version-failed', 'version-empty', 'gui-missing', 'gui-empty', 'gui-build-failed')) {
         $env:ZENCLASH_PACKAGE_TEST_MODE = $Mode
-        $Release = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release'
+        $Release = Join-Path $env:CARGO_TARGET_DIR "$ExpectedTargetTriple/release"
         if (Test-Path -LiteralPath (Join-Path $Release 'zenclash-service.exe')) {
             Remove-Item -LiteralPath (Join-Path $Release 'zenclash-service.exe')
         }
@@ -126,13 +135,16 @@ $global:LASTEXITCODE = 0
         if (Test-Path -LiteralPath $Log) { Remove-Item -LiteralPath $Log }
         $Failure = $null
         try {
-            & (Join-Path $ProjectRoot 'scripts/build_windows_installer.ps1') -Version 9.8.7 `
+            & (Join-Path $ProjectRoot 'scripts/build_windows_installer.ps1') -Version 9.8.7 -Architecture $Architecture `
                 -OutputDir (Join-Path $TestRoot $Mode) -MihomoBinary (Join-Path $TestRoot 'mihomo.exe') `
                 -GeoDataFile (Join-Path $TestRoot 'geoip.metadb') -InnoCompiler (Join-Path $TestRoot 'iscc.ps1')
         } catch { $Failure = $_ }
         if ($Mode -eq 'success') {
             if ($null -ne $Failure) { throw $Failure }
             if (-not (Test-Path -LiteralPath $Log)) { throw 'ISCC was not called for a valid payload' }
+            if (-not (Test-Path -LiteralPath (Join-Path $TestRoot "$Mode/ZenClash-9.8.7-windows-$Architecture-setup.exe"))) {
+                throw 'Installer output architecture does not match the requested build'
+            }
             $OriginalHash = (Get-FileHash -LiteralPath (Join-Path $TestRoot 'fixture.exe')).Hash
             if ((Get-FileHash -LiteralPath (Join-Path $TestRoot 'packaged-gui.exe')).Hash -ne $OriginalHash) {
                 throw 'Staging changed GUI payload bytes'
@@ -157,7 +169,7 @@ $global:LASTEXITCODE = 0
         }
     }
     $global:LASTEXITCODE = 0
-    Write-Host 'Windows GUI/service payload packaging: 9 cases passed'
+    Write-Host "Windows $Architecture GUI/service payload packaging: 9 cases passed"
 } finally {
     $env:CARGO_TARGET_DIR = $PreviousTarget
     $env:ZENCLASH_PACKAGE_TEST_ROOT = $PreviousFixtureRoot

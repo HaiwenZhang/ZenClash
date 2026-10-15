@@ -2,7 +2,9 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$OutputPath,
-    [string]$Version = $(if ($env:MIHOMO_VERSION) { $env:MIHOMO_VERSION } else { 'v1.19.30' })
+    [string]$Version = $(if ($env:MIHOMO_VERSION) { $env:MIHOMO_VERSION } else { 'v1.19.30' }),
+    [ValidateSet('amd64', 'arm64')]
+    [string]$Architecture = 'amd64'
 )
 
 Set-StrictMode -Version Latest
@@ -14,7 +16,7 @@ $Headers = @{
 if ($env:GH_TOKEN) {
     $Headers.Authorization = "Bearer $($env:GH_TOKEN)"
 }
-$AssetName = "mihomo-windows-amd64-$Version.zip"
+$AssetName = "mihomo-windows-$Architecture-$Version.zip"
 $Release = Invoke-RestMethod -Headers $Headers -Uri "https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/$Version"
 $Asset = $Release.assets | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1
 if ($null -eq $Asset) { throw "Mihomo release asset not found: $AssetName" }

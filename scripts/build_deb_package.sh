@@ -8,6 +8,10 @@ output_dir="${2:-${ZENCLASH_PACKAGE_DIR:-${project_root}/dist}}"
 profile_path="${ZENCLASH_CONFIG:-${project_root}/platforms/common/default.yaml}"
 cargo_output_root="${CARGO_TARGET_DIR:-${project_root}/target}"
 architecture="$(dpkg --print-architecture)"
+case "${architecture}" in
+  amd64|arm64) ;;
+  *) echo "Unsupported Debian package architecture: ${architecture}" >&2; exit 2 ;;
+esac
 work_dir="$(mktemp -d)"
 package_root="${work_dir}/root"
 mihomo_path="${ZENCLASH_MIHOMO_BINARY:-}"
@@ -33,7 +37,7 @@ if [[ -n "${mihomo_path}" ]]; then
   fi
 else
   mihomo_path="${work_dir}/mihomo"
-  "${script_dir}/download_mihomo.sh" linux amd64 "${mihomo_path}"
+  "${script_dir}/download_mihomo.sh" linux "${architecture}" "${mihomo_path}"
 fi
 if [[ -n "${geodata_path}" ]]; then
   if [[ ! -f "${geodata_path}" ]]; then

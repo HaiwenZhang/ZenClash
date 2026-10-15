@@ -73,11 +73,11 @@ The system proxy works with browsers and applications that follow system proxy s
 
 There is no official release yet. Visit **[Releases to browse ZenClash test builds](https://github.com/HaiwenZhang/ZenClash/releases)** and, if a build is available, choose one for your system and architecture. You can also build from source using the [development notes](docs/development) and help with testing.
 
-| Platform | Architecture |
-| --- | --- |
-| macOS | Apple Silicon (arm64) |
-| Windows | x86_64 |
-| Linux | x86_64; Ubuntu builds |
+| Platform | Architecture | Installer |
+| --- | --- | --- |
+| macOS | Apple Silicon (arm64) | `.dmg` |
+| Windows | x86_64, arm64 | Setup wizard `.exe` |
+| Ubuntu 24.04+ | x86_64, arm64 | `.deb` |
 
 Release packages include Mihomo. ZenClash discovers and prepares the core at startup. Check the release notes for package formats and system requirements. macOS users can follow the [installation guide](docs/installation/macos_en.md).
 

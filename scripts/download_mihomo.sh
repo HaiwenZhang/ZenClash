@@ -12,7 +12,7 @@ output_path="$3"
 version="${4:-${MIHOMO_VERSION:-v1.19.30}}"
 
 case "${platform}:${arch}" in
-  darwin:arm64|linux:amd64) ;;
+  darwin:arm64|linux:amd64|linux:arm64) ;;
   *)
     echo "Unsupported Mihomo release target: ${platform}:${arch}" >&2
     exit 2
