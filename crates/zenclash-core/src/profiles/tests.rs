@@ -7,6 +7,8 @@ use std::{
     time::Duration,
 };
 
+use chrono::TimeZone as _;
+
 use super::*;
 
 mod payload_metadata;
@@ -291,9 +293,18 @@ fn update_policy_is_persisted_only_for_remote_profiles() {
 
 #[test]
 fn five_field_cron_drives_due_checks_and_request_settings_persist_atomically() {
-    assert!(!schedule::cron_update_due("* * * * *", 120, 179).unwrap());
-    assert!(schedule::cron_update_due("* * * * *", 120, 180).unwrap());
-    assert!(schedule::cron_update_due("0 * * * * *", 120, 180).is_err());
+    // Epoch-adjacent timestamps can be in 1969 west of UTC, before cron's supported years.
+    let updated_at = u64::try_from(
+        chrono::Local
+            .with_ymd_and_hms(2025, 1, 15, 12, 2, 0)
+            .single()
+            .unwrap()
+            .timestamp(),
+    )
+    .unwrap();
+    assert!(!schedule::cron_update_due("* * * * *", updated_at, updated_at + 59).unwrap());
+    assert!(schedule::cron_update_due("* * * * *", updated_at, updated_at + 60).unwrap());
+    assert!(schedule::cron_update_due("0 * * * * *", updated_at, updated_at + 60).is_err());
 
     let root = test_root("profile-cron-settings");
     let store = ProfileStore::new(root.join("store")).unwrap();
@@ -340,13 +351,16 @@ fn five_field_cron_drives_due_checks_and_request_settings_persist_atomically() {
     assert_eq!(saved.name, "Cron renamed");
     assert_eq!(saved.update_cron.as_deref(), Some("*/5 * * * *"));
     let mut scheduled = saved.clone();
-    scheduled.updated_at = 120;
+    scheduled.updated_at = updated_at;
     let catalog = ProfileCatalog {
         active: None,
         profiles: vec![scheduled],
     };
-    assert!(catalog.due_profile_ids(299).is_empty());
-    assert_eq!(catalog.due_profile_ids(300), vec![remote.id.clone()]);
+    assert!(catalog.due_profile_ids(updated_at + 179).is_empty());
+    assert_eq!(
+        catalog.due_profile_ids(updated_at + 180),
+        vec![remote.id.clone()]
+    );
     let ProfileSource::Remote {
         url,
         user_agent,
