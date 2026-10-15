@@ -639,6 +639,8 @@ async fn staged_profile_tampering_rolls_back_the_held_candidate_without_committi
                 }
                 Err(error) => panic!("{error}"),
             };
+            // Accepted sockets inherit the listener's nonblocking mode on Windows.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(3)))
                 .unwrap();
