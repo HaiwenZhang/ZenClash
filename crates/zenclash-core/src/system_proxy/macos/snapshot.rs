@@ -12,6 +12,9 @@ use super::super::{
 };
 use crate::{MihomoError, MihomoResult};
 
+mod networksetup;
+pub(in crate::system_proxy) use networksetup::{apply, restore};
+
 type CfRef = *const c_void;
 
 // ABI definitions follow the shipped CoreFoundation and SystemConfiguration
@@ -108,68 +111,11 @@ unsafe extern "C" {
     static kSCNetworkProtocolTypeProxies: CfRef;
     fn SCError() -> i32;
     fn SCPreferencesCreate(allocator: CfRef, name: CfRef, identifier: CfRef) -> CfRef;
-    fn SCPreferencesCreateWithAuthorization(
-        allocator: CfRef,
-        name: CfRef,
-        identifier: CfRef,
-        authorization: CfRef,
-    ) -> CfRef;
-    fn SCPreferencesLock(preferences: CfRef, wait: u8) -> u8;
-    fn SCPreferencesUnlock(preferences: CfRef) -> u8;
-    fn SCPreferencesCommitChanges(preferences: CfRef) -> u8;
-    fn SCPreferencesApplyChanges(preferences: CfRef) -> u8;
     fn SCNetworkServiceCopyAll(preferences: CfRef) -> CfRef;
     fn SCNetworkServiceGetName(service: CfRef) -> CfRef;
     fn SCNetworkServiceGetServiceID(service: CfRef) -> CfRef;
     fn SCNetworkServiceCopyProtocol(service: CfRef, kind: CfRef) -> CfRef;
     fn SCNetworkProtocolGetConfiguration(protocol: CfRef) -> CfRef;
-    fn SCNetworkProtocolSetConfiguration(protocol: CfRef, config: CfRef) -> u8;
-}
-
-#[link(name = "Security", kind = "framework")]
-unsafe extern "C" {
-    fn AuthorizationCreate(
-        rights: CfRef,
-        environment: CfRef,
-        flags: u32,
-        authorization: *mut CfRef,
-    ) -> i32;
-    fn AuthorizationFree(authorization: CfRef, flags: u32) -> i32;
-}
-
-struct Authorization(NonNull<c_void>);
-
-impl Authorization {
-    fn create() -> MihomoResult<Self> {
-        let mut authorization = ptr::null();
-        // SAFETY: Null rights/environment and kAuthorizationFlagDefaults (0)
-        // create a reference without requesting rights or displaying UI. The
-        // live output buffer receives one reference owned until AuthorizationFree.
-        let status =
-            unsafe { AuthorizationCreate(ptr::null(), ptr::null(), 0, &raw mut authorization) };
-        if status != 0 {
-            return Err(operation_error("AuthorizationCreate", status));
-        }
-        NonNull::new(authorization.cast_mut())
-            .map(Self)
-            .ok_or_else(|| {
-                crate::SystemProxyError::NativeOperationRejected {
-                    backend: crate::SystemProxyBackendKind::MacOs,
-                    operation: "AuthorizationCreate",
-                }
-                .into()
-            })
-    }
-}
-
-impl Drop for Authorization {
-    fn drop(&mut self) {
-        // SAFETY: This non-null reference came from one successful Create;
-        // default flags release local resources without destroying shared rights.
-        if unsafe { AuthorizationFree(self.0.as_ptr(), 0) } != 0 {
-            tracing::warn!("failed to release native proxy recovery authorization");
-        }
-    }
 }
 
 struct OwnedCf(NonNull<c_void>);
@@ -230,23 +176,6 @@ impl Drop for OwnedCf {
     }
 }
 
-struct PreferencesLock<'a> {
-    preferences: &'a OwnedCf,
-    locked: bool,
-}
-
-impl Drop for PreferencesLock<'_> {
-    fn drop(&mut self) {
-        if self.locked {
-            // SAFETY: The borrowed owner outlives this acquired lock. Even an
-            // unsuccessful restore releases exclusive native preference access.
-            if unsafe { SCPreferencesUnlock(self.preferences.pointer()) } == 0 {
-                tracing::warn!("failed to unlock native proxy recovery preferences");
-            }
-        }
-    }
-}
-
 fn native_error(operation: &'static str) -> MihomoError {
     // SAFETY: SCError has no arguments or borrowed object lifetime.
     operation_error(operation, unsafe { SCError() })
@@ -299,47 +228,25 @@ impl ProxySnapshot {
         if self.service_id != other.service_id {
             return Ok(false);
         }
-        configurations_equal(
-            self.configuration.as_deref(),
-            other.configuration.as_deref(),
-        )
+        let left = networksetup::comparable_configuration(self)?;
+        let right = networksetup::comparable_configuration(other)?;
+        // SAFETY: Both owners contain live property-list dictionaries.
+        unsafe { property_types_equal(left.pointer(), right.pointer(), 0) }
     }
 }
 
 struct PreferenceSession {
     preferences: OwnedCf,
-    _authorization: Option<Authorization>,
 }
 
 impl PreferenceSession {
-    fn open(writing: bool) -> MihomoResult<Self> {
-        let name = OwnedCf::string("ZenClash native proxy transaction")?;
-        let authorization = writing.then(Authorization::create).transpose()?;
-        // SAFETY: The name and optional authorization remain alive; null ID/allocator
-        // select the system network preferences. Read sessions request no rights.
-        let pointer = unsafe {
-            if let Some(authorization) = &authorization {
-                SCPreferencesCreateWithAuthorization(
-                    ptr::null(),
-                    name.pointer(),
-                    ptr::null(),
-                    authorization.0.as_ptr(),
-                )
-            } else {
-                SCPreferencesCreate(ptr::null(), name.pointer(), ptr::null())
-            }
-        };
-        // SAFETY: Create returns a +1 object or null; it is owned by this session.
-        let operation = if authorization.is_some() {
-            "SCPreferencesCreateWithAuthorization"
-        } else {
-            "SCPreferencesCreate"
-        };
-        let preferences = unsafe { OwnedCf::created(pointer, operation) }?;
-        Ok(Self {
-            preferences,
-            _authorization: authorization,
-        })
+    fn open() -> MihomoResult<Self> {
+        let name = OwnedCf::string("ZenClash proxy observation")?;
+        // SAFETY: Null ID/allocator select system network preferences. This
+        // session only reads; writes use networksetup without an app auth session.
+        let pointer = unsafe { SCPreferencesCreate(ptr::null(), name.pointer(), ptr::null()) };
+        let preferences = unsafe { OwnedCf::created(pointer, "SCPreferencesCreate") }?;
+        Ok(Self { preferences })
     }
 
     fn select(&self, expected: &str, by_id: bool) -> MihomoResult<SelectedProtocol> {
@@ -404,7 +311,7 @@ impl SelectedProtocol {
 pub(in crate::system_proxy) fn capture(
     target: NativeProxyTarget<'_>,
 ) -> MihomoResult<NativeProxySnapshot> {
-    let session = PreferenceSession::open(false)?;
+    let session = PreferenceSession::open()?;
     let selected = match target {
         NativeProxyTarget::Service(name) => session.select(name, false)?,
         NativeProxyTarget::Captured(NativeProxySnapshot::Platform(snapshot)) => {
@@ -414,13 +321,6 @@ pub(in crate::system_proxy) fn capture(
         NativeProxyTarget::Captured(_) => return Err(ownership_changed()),
     };
     Ok(NativeProxySnapshot::Platform(selected.capture()?))
-}
-
-pub(in crate::system_proxy) fn apply(
-    expected: &NativeProxySnapshot,
-    change: &NativeProxyChange<'_>,
-) -> NativeWriteAttempt {
-    write_configuration(expected, |before| before.with_change(change))
 }
 
 impl ProxySnapshot {
@@ -449,71 +349,6 @@ impl ProxySnapshot {
             configuration,
         })
     }
-}
-
-pub(in crate::system_proxy) fn restore(
-    expected: &NativeProxySnapshot,
-    previous: &NativeProxySnapshot,
-) -> NativeWriteAttempt {
-    write_configuration(expected, |_| Ok(previous.platform()?.clone()))
-}
-
-fn write_configuration(
-    expected: &NativeProxySnapshot,
-    prepare: impl FnOnce(&ProxySnapshot) -> MihomoResult<ProxySnapshot>,
-) -> NativeWriteAttempt {
-    NativeWriteAttempt::run(expected, |witness| {
-        let expected = expected.platform()?;
-        let session = PreferenceSession::open(true)?;
-        // SAFETY: The preferences owner is live; zero rejects a busy native lock.
-        if unsafe { SCPreferencesLock(session.preferences.pointer(), 0) } == 0 {
-            return Err(native_error("SCPreferencesLock"));
-        }
-        let mut lock = PreferencesLock {
-            preferences: &session.preferences,
-            locked: true,
-        };
-        let selected = session.select(&expected.service_id, true)?;
-        let actual = selected.capture()?;
-        if !expected.same_state(&actual)? {
-            return Err(ownership_changed());
-        }
-        let desired = prepare(&actual)?;
-        if desired.service_id != actual.service_id {
-            return Err(ownership_changed());
-        }
-        let configuration = decode_configuration(desired.configuration.as_deref())?;
-        witness.record(NativeProxySnapshot::Platform(desired.clone()));
-        // SAFETY: Only the uniquely selected locked protocol is updated. Null
-        // restores an absent configuration; otherwise the decoded dictionary lives
-        // through Set/Commit/Apply. No authentication/keychain fields are rewritten.
-        if unsafe {
-            SCNetworkProtocolSetConfiguration(
-                selected.protocol.pointer(),
-                configuration.as_ref().map_or(ptr::null(), OwnedCf::pointer),
-            )
-        } == 0
-        {
-            return Err(native_error("SCNetworkProtocolSetConfiguration"));
-        }
-        // SAFETY: Each operation acts on the same live, exclusively locked session.
-        if unsafe { SCPreferencesCommitChanges(session.preferences.pointer()) } == 0 {
-            return Err(native_error("SCPreferencesCommitChanges"));
-        }
-        if unsafe { SCPreferencesApplyChanges(session.preferences.pointer()) } == 0 {
-            return Err(native_error("SCPreferencesApplyChanges"));
-        }
-        let verified = selected.capture()?;
-        if !desired.same_state(&verified)? {
-            return Err(verification_failure());
-        }
-        // SAFETY: Exactly one successful lock is held by this session.
-        if unsafe { SCPreferencesUnlock(session.preferences.pointer()) } == 0 {
-            return Err(native_error("SCPreferencesUnlock"));
-        }
-        lock.locked = false;
-        Ok(NativeProxySnapshot::Platform(verified))
-    })
 }
 
 // SAFETY: The dictionary is null or borrowed from a live owned protocol/CF object.
@@ -601,6 +436,7 @@ unsafe fn property_list_error(
     Some(crate::NativePropertyListError::new(operation, domain, code))
 }
 
+#[cfg(test)]
 fn configurations_equal(left: Option<&[u8]>, right: Option<&[u8]>) -> MihomoResult<bool> {
     match (decode_configuration(left)?, decode_configuration(right)?) {
         (None, None) => Ok(true),
@@ -845,13 +681,13 @@ mod tests {
     }
 
     #[test]
-    fn allocation_and_authorization_errors_remain_errors_without_native_writes() {
+    fn allocation_and_native_errors_remain_errors_without_native_writes() {
         // SAFETY: Null is an allowed failed Create result and owns no object.
         assert!(unsafe { OwnedCf::created(ptr::null(), "fixture allocation") }.is_err());
         assert!(
-            operation_error("AuthorizationCreate", -60005)
+            operation_error("SCPreferencesCreate", 1001)
                 .to_string()
-                .contains("-60005")
+                .contains("1001")
         );
     }
 

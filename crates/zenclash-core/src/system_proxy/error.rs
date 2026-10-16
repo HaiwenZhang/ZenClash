@@ -101,6 +101,8 @@ pub enum SystemProxyBackendUnavailable {
     LockedSetting,
     /// Native option and raw storage facts cannot support exact restoration.
     UnverifiedStorageContract,
+    /// Command writes cannot safely replace and recover an authenticated proxy.
+    AuthenticatedProxy,
 }
 
 /// The original failure that caused a native transaction to roll back.
@@ -215,6 +217,23 @@ pub enum SystemProxyError {
         /// Original exit status, without potentially sensitive captured output.
         status: ExitStatus,
     },
+    /// A networksetup write could not be executed. Arguments are omitted.
+    #[error("networksetup {operation} 执行失败：{source}")]
+    NetworkSetupCommand {
+        /// Fixed command option, without user-supplied values.
+        operation: &'static str,
+        /// Typed process failure.
+        #[source]
+        source: PlatformCommandError,
+    },
+    /// networksetup rejected a write or returned diagnostic output.
+    #[error("networksetup {operation} 修改失败（{status}）")]
+    NetworkSetupRejected {
+        /// Fixed command option, without user-supplied values.
+        operation: &'static str,
+        /// Exit status; captured output can contain private values and is omitted.
+        status: ExitStatus,
+    },
     /// PAC listener creation or worker startup failed.
     #[error(transparent)]
     Pac(#[from] PacError),
@@ -313,6 +332,9 @@ impl std::fmt::Display for SystemProxyBackendUnavailable {
             Self::MissingSchema => "缺少代理 schema",
             Self::LockedSetting => "代理设置禁止写入",
             Self::UnverifiedStorageContract => "原生代理存储表示无法验证",
+            Self::AuthenticatedProxy => {
+                "当前代理包含认证信息，无法通过 networksetup 安全替换并恢复"
+            }
         })
     }
 }

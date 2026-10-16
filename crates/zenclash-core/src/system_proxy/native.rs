@@ -299,7 +299,7 @@ impl SystemProxyController {
             })
             .collect::<MihomoResult<Vec<_>>>()?;
         // Every target passed before any restore. The adapter checks again
-        // immediately before its actual writes (inside the macOS native lock).
+        // immediately before its actual writes; macOS also verifies every command.
         for (entry, actual) in entries.iter_mut().zip(current).rev() {
             if !entry.witness.has_steps() && entry.previous.same_state(&actual)? {
                 continue;
