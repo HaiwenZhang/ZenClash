@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 // Modified for the ZenClash fork on 2026-10-04; see NOTICE.md. GPL-3.0-only.
 use anyhow::{Context as _, Result, bail};
 use platform_lib::{
@@ -63,15 +65,22 @@ pub(super) fn require_no_core_process(include_service: bool) -> Result<()> {
     const CORE_NAMES: &[&str] = &["mihomo.exe", "mihomo-alpha.exe"];
     #[cfg(feature = "test")]
     const CORE_NAMES: &[&str] = &["mock_binary.exe", "crash_binary.exe"];
+    // SAFETY: The snapshot API has no memory preconditions; the returned handle
+    // is checked against INVALID_HANDLE_VALUE before adoption.
     let raw = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if raw == INVALID_HANDLE_VALUE {
         return Err(std::io::Error::last_os_error()).context("cannot inspect existing core processes");
     }
+    // SAFETY: `raw` is valid and not INVALID_HANDLE_VALUE; OwnedHandle now owns it.
     let snapshot = unsafe { OwnedHandle::from_raw_handle(raw) };
+    // SAFETY: `PROCESSENTRY32W` is a plain C struct; all-zero is a valid initial
+    // value, and `dwSize` is set explicitly here.
     let mut entry = PROCESSENTRY32W {
         dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
         ..unsafe { std::mem::zeroed() }
     };
+    // SAFETY: The snapshot handle is live and `entry` is writable storage with
+    // `dwSize` initialized as the API requires.
     let mut found = unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) };
     while found != 0 {
         let length = entry
@@ -89,6 +98,8 @@ pub(super) fn require_no_core_process(include_service: bool) -> Result<()> {
                 entry.th32ProcessID
             );
         }
+        // SAFETY: The snapshot handle remains live and `entry` is the same
+        // writable record initialized above.
         found = unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) };
     }
     let error = std::io::Error::last_os_error();

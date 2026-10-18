@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 #[cfg(unix)]
 use crate::owner_key;
 use crate::{IPC_AUTH_EXPECT, OwnerCredentials, OwnerIdentity, SESSION_TOKEN_HEX_LEN, ServiceErrorCode};
@@ -222,6 +224,7 @@ fn authenticate_synthetic_test_owner(
             )));
         }
     };
+    // SAFETY: `geteuid` has no preconditions and no memory effects.
     if !metadata.is_dir() || metadata.uid() != unsafe { platform_lib::geteuid() } {
         return Some(Err(ServiceError::unauthorized(
             "synthetic test owner root is not controlled by the test process",
@@ -313,6 +316,8 @@ mod windows_auth {
             } else {
                 FILE_ATTRIBUTE_NORMAL
             };
+        // SAFETY: `wide` is a NUL-terminated path; the returned handle is checked
+        // against INVALID_HANDLE_VALUE before adoption.
         let handle = unsafe {
             CreateFileW(
                 wide.as_ptr(),
@@ -327,17 +332,22 @@ mod windows_auth {
         if handle == INVALID_HANDLE_VALUE {
             return Err(unauthorized("owner credential path could not be opened"));
         }
+        // SAFETY: `handle` is valid and not INVALID_HANDLE_VALUE; the File now
+        // owns the handle.
         Ok(unsafe { std::fs::File::from_raw_handle(handle) })
     }
 
     fn validate_file_kind(file: &std::fs::File, directory: bool) -> Result<(), ServiceError> {
         let handle = file.as_raw_handle();
         let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: `handle` is a live file handle and `information` is writable
+        // stack storage.
         if unsafe { GetFileInformationByHandle(handle, &mut information) } == 0 {
             return Err(unauthorized("owner credential metadata is unavailable"));
         }
         if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
             || (information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0) != directory
+            // SAFETY: `handle` is the same live file handle.
             || (!directory && unsafe { GetFileType(handle) } != FILE_TYPE_DISK)
         {
             return Err(unauthorized("owner credential path has an invalid file type"));
@@ -350,6 +360,8 @@ mod windows_auth {
 
     fn validate_owner(handle: *mut c_void, declared_sid: PSID) -> Result<(), ServiceError> {
         let security = SecurityInfo::read(handle, OWNER_SECURITY_INFORMATION)?;
+        // SAFETY: The owner SID is borrowed from the live descriptor and the
+        // declared SID is valid for the caller's lifetime.
         if security.owner.is_null() || unsafe { EqualSid(security.owner, declared_sid) } == 0 {
             return Err(unauthorized("owner credential path has an unexpected owner"));
         }
@@ -358,6 +370,8 @@ mod windows_auth {
 
     fn validate_token_security(handle: *mut c_void, declared_sid: PSID) -> Result<(), ServiceError> {
         let security = SecurityInfo::read(handle, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION)?;
+        // SAFETY: The owner SID is borrowed from the live descriptor and the
+        // declared SID is valid for the caller's lifetime.
         if security.owner.is_null() || unsafe { EqualSid(security.owner, declared_sid) } == 0 {
             return Err(unauthorized("owner token file has an unexpected owner"));
         }
@@ -367,6 +381,8 @@ mod windows_auth {
 
         let mut control = 0_u16;
         let mut revision = 0_u32;
+        // SAFETY: `security.descriptor.0` is a live descriptor; both out-params
+        // are writable stack storage.
         if unsafe { GetSecurityDescriptorControl(security.descriptor.0, &mut control, &mut revision) } == 0
             || control & SE_DACL_PROTECTED == 0
         {
@@ -376,23 +392,33 @@ mod windows_auth {
         let mut owner_ace = false;
         let mut system_ace = false;
         let mut administrators_ace = false;
+        // SAFETY: `security.dacl` was checked non-null and is owned by the live
+        // SecurityInfo for the duration of this loop.
         for index in 0..unsafe { (*security.dacl).AceCount } as u32 {
             let mut ace = std::ptr::null_mut();
+            // SAFETY: The DACL is live and `ace` is a writable out-parameter;
+            // `index` is bounded by the ACE count read above.
             if unsafe { GetAce(security.dacl, index, &mut ace) } == 0 || ace.is_null() {
                 return Err(unauthorized("owner token DACL could not be inspected"));
             }
+            // SAFETY: The ACE pointer is non-null and within the live DACL; the
+            // common header/mask prefix is read before the type check below.
             let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
             if allowed.Header.AceType != ACCESS_ALLOWED_ACE_TYPE || allowed.Mask & FILE_ALL_ACCESS != FILE_ALL_ACCESS {
                 return Err(unauthorized("owner token DACL contains an unexpected ACE"));
             }
             let ace_sid = std::ptr::addr_of!(allowed.SidStart).cast_mut().cast::<c_void>();
+            // SAFETY: `ace_sid` points at the SID embedded in the live ACE.
             if unsafe { IsValidSid(ace_sid) } == 0 {
                 return Err(unauthorized("owner token DACL contains an invalid SID"));
             }
+            // SAFETY: Both SIDs are valid and live for this comparison.
             if unsafe { EqualSid(ace_sid, declared_sid) } != 0 {
                 owner_ace = true;
+            // SAFETY: `ace_sid` was validated as a live SID above.
             } else if unsafe { IsWellKnownSid(ace_sid, WinLocalSystemSid) } != 0 {
                 system_ace = true;
+            // SAFETY: `ace_sid` was validated as a live SID above.
             } else if unsafe { IsWellKnownSid(ace_sid, WinBuiltinAdministratorsSid) } != 0 {
                 administrators_ace = true;
             } else {
@@ -455,7 +481,12 @@ mod windows_auth {
             let mut wide: Vec<u16> = value.encode_utf16().collect();
             wide.push(0);
             let mut sid = std::ptr::null_mut();
-            if unsafe { ConvertStringSidToSidW(wide.as_ptr(), &mut sid) } == 0 || unsafe { IsValidSid(sid) } == 0 {
+            // SAFETY: `wide` is a NUL-terminated SID string and `sid` is a
+            // writable out-parameter.
+            let converted = unsafe { ConvertStringSidToSidW(wide.as_ptr(), &mut sid) } != 0;
+            // SAFETY: On success `sid` is a valid allocation owned by LocalSid;
+            // the short-circuit avoids inspecting null.
+            if !converted || unsafe { IsValidSid(sid) } == 0 {
                 return Err(unauthorized("declared Windows SID is invalid"));
             }
             Ok(Self(sid))
@@ -469,6 +500,8 @@ mod windows_auth {
     impl Drop for LocalSid {
         fn drop(&mut self) {
             if !self.0.is_null() {
+                // SAFETY: `self.0` is a non-null allocation from
+                // ConvertStringSidToSidW and is freed exactly once here.
                 unsafe { LocalFree(self.0) };
             }
         }
@@ -485,6 +518,8 @@ mod windows_auth {
             let mut owner = std::ptr::null_mut();
             let mut dacl = std::ptr::null_mut();
             let mut descriptor = std::ptr::null_mut();
+            // SAFETY: The handle is live; all out-parameters are writable and
+            // the descriptor is checked before being wrapped.
             let status = unsafe {
                 GetSecurityInfo(
                     handle,
@@ -513,6 +548,8 @@ mod windows_auth {
     impl Drop for LocalSecurityDescriptor {
         fn drop(&mut self) {
             if !self.0.is_null() {
+                // SAFETY: `self.0` is a descriptor allocated by GetSecurityInfo
+                // and is freed exactly once here.
                 unsafe { LocalFree(self.0) };
             }
         }
@@ -539,7 +576,9 @@ mod tests {
 
     #[test]
     fn authenticated_unix_owner_uses_canonical_owned_app_root() -> Result<(), Box<dyn std::error::Error>> {
+        // SAFETY: `geteuid` has no preconditions or memory effects.
         let uid = unsafe { platform_lib::geteuid() };
+        // SAFETY: `getegid` has no preconditions or memory effects.
         let gid = unsafe { platform_lib::getegid() };
         let app_root = std::env::temp_dir().join(format!("service-owner-auth-{}", std::process::id()));
         std::fs::create_dir_all(&app_root)?;
@@ -597,6 +636,8 @@ mod windows_tests {
             .chain(std::iter::once(0))
             .collect::<Vec<_>>();
         let mut descriptor = std::ptr::null_mut();
+        // SAFETY: `sddl` is NUL-terminated and `descriptor` is a writable
+        // out-parameter checked for null below.
         if unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 sddl.as_mut_ptr(),
@@ -612,6 +653,8 @@ mod windows_tests {
         struct Descriptor(*mut std::ffi::c_void);
         impl Drop for Descriptor {
             fn drop(&mut self) {
+                // SAFETY: `self.0` is a non-null descriptor allocated by
+                // ConvertStringSecurityDescriptorToSecurityDescriptorW.
                 unsafe { LocalFree(self.0) };
             }
         }
@@ -621,6 +664,8 @@ mod windows_tests {
             .encode_wide()
             .chain(std::iter::once(0))
             .collect::<Vec<_>>();
+        // SAFETY: `wide` is NUL-terminated and `descriptor.0` is a live
+        // descriptor for the duration of the call.
         if unsafe {
             SetFileSecurityW(
                 wide.as_ptr(),

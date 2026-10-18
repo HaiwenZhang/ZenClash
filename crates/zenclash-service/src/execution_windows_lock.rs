@@ -1,4 +1,6 @@
 // Modified for the ZenClash fork on 2026-10-04; see NOTICE.md. GPL-3.0-only.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use anyhow::{Context as _, Result, bail};
 use std::{
     os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle},
@@ -107,6 +109,8 @@ impl MutexOwner {
             .encode_utf16()
             .collect();
         let mut descriptor = std::ptr::null_mut();
+        // SAFETY: `sddl` is a NUL-terminated UTF-16 string, `descriptor` is a
+        // live out-parameter, and the returned allocation is freed below.
         if unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 sddl.as_ptr(),
@@ -124,15 +128,22 @@ impl MutexOwner {
             bInheritHandle: 0,
         };
         let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+        // SAFETY: `attributes` and `wide` are live for the call; the returned
+        // handle is checked before adoption.
         let raw = unsafe { CreateMutexExW(&attributes, wide.as_ptr(), 0, 0x00100001) };
         let error = std::io::Error::last_os_error();
+        // SAFETY: `descriptor` was allocated by the conversion above and is
+        // freed exactly once.
         unsafe {
             LocalFree(descriptor);
         }
         if raw.is_null() {
             return Err(error).with_context(|| format!("could not open core execution mutex {name:?}"));
         }
+        // SAFETY: `raw` is a non-null handle returned by CreateMutexExW, so the
+        // OwnedHandle now owns it.
         let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+        // SAFETY: `handle` owns a valid mutex handle for the duration of the call.
         match unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) } {
             // The caller checks for surviving cores while holding the reservation.
             WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(Some(Self(handle))),
@@ -147,6 +158,7 @@ impl MutexOwner {
 
 impl Drop for MutexOwner {
     fn drop(&mut self) {
+        // SAFETY: `self.0` owns the mutex handle for the guard's lifetime.
         unsafe {
             ReleaseMutex(self.0.as_raw_handle());
         }

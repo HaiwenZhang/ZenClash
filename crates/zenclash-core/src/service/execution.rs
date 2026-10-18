@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 // ZenClash application execution lifetime adaptation, 2026-10-04. GPL-3.0-only.
 // Native exclusion is provided by the upstream service; app reaping is retained from ZenClash.
 use std::io;
@@ -59,6 +61,7 @@ pub fn current_process_elevated() -> bool {
     }
     #[cfg(all(unix, not(any(test, feature = "test-support"))))]
     {
+        // SAFETY: `geteuid` has no preconditions or memory effects.
         unsafe { libc::geteuid() == 0 }
     }
 }

@@ -1,3 +1,4 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
 // Modified for the ZenClash fork on 2026-10-04; see NOTICE.md. GPL-3.0-only.
 //! Cooperative exclusion between Service supervision and local Sidecar execution.
 #[cfg(unix)]
@@ -135,6 +136,8 @@ fn test_coordination_name(path: &Path) -> String {
 
 #[cfg(unix)]
 fn process_has_exited(pid: u32) -> bool {
+    // SAFETY: `kill(pid, 0)` only probes process existence and has no memory
+    // effects; the PID is validated by the caller.
     (unsafe { platform_lib::kill(pid as i32, 0) }) == -1
         && std::io::Error::last_os_error().raw_os_error() == Some(platform_lib::ESRCH)
 }
@@ -146,11 +149,15 @@ fn process_has_exited(pid: u32) -> bool {
         Foundation::{ERROR_INVALID_PARAMETER, WAIT_OBJECT_0},
         System::Threading::{OpenProcess, SYNCHRONIZATION_SYNCHRONIZE, WaitForSingleObject},
     };
+    // SAFETY: The process API has no memory preconditions; the returned handle
+    // is checked for null before adoption.
     let raw = unsafe { OpenProcess(SYNCHRONIZATION_SYNCHRONIZE, 0, pid) };
     if raw.is_null() {
         return std::io::Error::last_os_error().raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32);
     }
+    // SAFETY: `raw` is a valid non-null handle; OwnedHandle now owns it.
     let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+    // SAFETY: The handle is live for the duration of the call.
     (unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) }) == WAIT_OBJECT_0
 }
 
@@ -161,6 +168,8 @@ fn coordination_path() -> Result<PathBuf> {
     let root = {
         use windows_sys::Win32::System::SystemInformation::GetWindowsDirectoryW;
         let mut buffer = vec![0u16; 32768];
+        // SAFETY: `buffer` is writable for its full length and the API writes
+        // at most that many UTF-16 units.
         let size = unsafe { GetWindowsDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
         anyhow::ensure!(
             size > 0 && size < buffer.len(),
@@ -220,6 +229,8 @@ fn open_coordination_file(path: &Path) -> Result<File> {
         .collect();
     let mut descriptor = std::ptr::null_mut();
     anyhow::ensure!(
+        // SAFETY: `sddl` is NUL-terminated and `descriptor` is a writable
+        // out-parameter; the allocation is freed below.
         unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 sddl.as_ptr(),
@@ -236,6 +247,8 @@ fn open_coordination_file(path: &Path) -> Result<File> {
         bInheritHandle: 0,
     };
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: `wide` is NUL-terminated and `attributes` points at the live
+    // descriptor; the returned handle is checked below.
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
@@ -248,12 +261,15 @@ fn open_coordination_file(path: &Path) -> Result<File> {
         )
     };
     let error = std::io::Error::last_os_error();
+    // SAFETY: `descriptor` is the allocation returned by the conversion above
+    // and is freed exactly once here.
     unsafe {
         LocalFree(descriptor);
     }
     if handle == INVALID_HANDLE_VALUE {
         return Err(error).with_context(|| format!("could not open or create legacy core execution lock {path:?}"));
     }
+    // SAFETY: `handle` is valid and not INVALID_HANDLE_VALUE; File now owns it.
     let file = unsafe { File::from_raw_handle(handle) };
     anyhow::ensure!(
         file.metadata()?.is_file() && !std::fs::symlink_metadata(path)?.file_type().is_symlink(),
@@ -403,6 +419,7 @@ mod windows_lock;
 #[cfg(all(windows, feature = "client", feature = "standalone", not(feature = "test")))]
 pub(crate) fn reserve_legacy_install_repair() -> Result<CoreExecutionGuard> {
     anyhow::ensure!(
+        // SAFETY: `IsUserAnAdmin` has no memory preconditions.
         unsafe { windows_sys::Win32::UI::Shell::IsUserAnAdmin() } != 0,
         "legacy service directory recovery requires an elevated installer"
     );
@@ -431,6 +448,8 @@ mod tests {
         let mut descriptor = std::ptr::null_mut();
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
         let converted = unsafe {
+            // SAFETY: `sddl` is NUL-terminated and `descriptor` is a writable
+            // out-parameter; the allocation is freed below.
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 sddl.as_ptr(),
                 SDDL_REVISION_1,
@@ -439,7 +458,11 @@ mod tests {
             )
         };
         assert_ne!(converted, 0);
+        // SAFETY: `wide` is NUL-terminated and `descriptor` is a live
+        // descriptor for the duration of the call.
         let secured = unsafe { SetFileSecurityW(wide.as_ptr(), DACL_SECURITY_INFORMATION, descriptor) };
+        // SAFETY: `descriptor` is the allocation returned above and is freed
+        // exactly once here.
         unsafe {
             LocalFree(descriptor);
         }
@@ -558,8 +581,11 @@ mod tests {
             }
             assert!(CoreExecutionGuard::acquire_at(&path).is_err());
             let wide: Vec<u16> = test_coordination_name(&path).encode_utf16().chain(Some(0)).collect();
+            // SAFETY: `wide` is NUL-terminated; the returned handle is checked
+            // for null before adoption.
             let handle = unsafe { OpenMutexW(0x00100000, 0, wide.as_ptr()) };
             anyhow::ensure!(!handle.is_null(), "could not retain mutex for abandonment test");
+            // SAFETY: `handle` is a valid non-null handle; OwnedHandle now owns it.
             keep_mutex_alive = Some(unsafe { OwnedHandle::from_raw_handle(handle) });
             Ok(())
         })();
@@ -642,6 +668,8 @@ mod tests {
         use std::os::unix::ffi::OsStrExt as _;
         let path = std::env::temp_dir().join(format!("execution-fifo-test-{}", std::process::id()));
         let name = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+        // SAFETY: `name` is a NUL-terminated path and `mkfifo` has no other
+        // memory preconditions.
         anyhow::ensure!(unsafe { platform_lib::mkfifo(name.as_ptr(), 0o600) } == 0);
         let mut child = std::process::Command::new(std::env::current_exe()?)
             .args(["--exact", "execution::tests::child_lock_probe"])

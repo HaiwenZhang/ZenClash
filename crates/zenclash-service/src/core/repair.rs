@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 // Modified for the ZenClash fork on 2026-10-05; see NOTICE.md. GPL-3.0-only.
 use anyhow::{Context as _, Result};
 use std::fs::{File, OpenOptions};
@@ -29,6 +31,7 @@ pub fn acquire_service_repair_gate() -> Result<Option<ServiceRepairGate>> {
 
         file.set_permissions(std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("failed to secure service repair gate {path:?}"))?;
+        // SAFETY: `file` is open and `flock` operates on its live descriptor.
         let status = unsafe { platform_lib::flock(file.as_raw_fd(), platform_lib::LOCK_EX | platform_lib::LOCK_NB) };
         if status == 0 {
             return Ok(Some(ServiceRepairGate { _file: file }));
@@ -46,9 +49,11 @@ pub fn acquire_service_repair_gate() -> Result<Option<ServiceRepairGate>> {
         use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, GetLastError};
         use windows_sys::Win32::Storage::FileSystem::LockFile;
 
+        // SAFETY: `file` is open and `LockFile` operates on its live handle.
         if unsafe { LockFile(file.as_raw_handle(), 0, 0, u32::MAX, u32::MAX) } != 0 {
             return Ok(Some(ServiceRepairGate { _file: file }));
         }
+        // SAFETY: `GetLastError` reads thread-local state and has no preconditions.
         if unsafe { GetLastError() } == ERROR_LOCK_VIOLATION {
             return Ok(None);
         }

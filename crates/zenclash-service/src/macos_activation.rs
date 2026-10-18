@@ -1,5 +1,7 @@
 //! launchd activation over XPC; authenticated commands still use the existing Unix socket.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 #[cfg(feature = "client")]
 use anyhow::Context as _;
 use anyhow::{Result, anyhow};
@@ -48,9 +50,10 @@ unsafe extern "C" {
 }
 
 struct Connection(NonNull<c_void>);
-// XPC connections are reference-counted and their operations are thread-safe. Callback
-// captures own only synchronized Rust state; no borrowed native event escapes a callback.
+// SAFETY: XPC connections are reference-counted and their operations are thread-safe.
+// Callback captures own only synchronized Rust state; no borrowed native event escapes.
 unsafe impl Send for Connection {}
+// SAFETY: Same invariants as the `Send` implementation above.
 unsafe impl Sync for Connection {}
 
 impl Connection {

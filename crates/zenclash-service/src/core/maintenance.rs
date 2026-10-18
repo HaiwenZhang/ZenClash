@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 // Modified for the ZenClash fork on 2026-10-05; see NOTICE.md. GPL-3.0-only.
 use crate::core::desired::ActiveOwnerState;
 use crate::core::paths::service_paths;
@@ -114,6 +116,7 @@ fn acquire_stopped_service_guard() -> Result<StoppedServiceGuard> {
             .create(true)
             .truncate(false)
             .open(paths.owner_lock_path())?;
+        // SAFETY: `file` is open and `flock` operates on its live descriptor.
         if unsafe { platform_lib::flock(file.as_raw_fd(), platform_lib::LOCK_EX | platform_lib::LOCK_NB) } != 0 {
             return Err(std::io::Error::last_os_error())
                 .context("service owner lock is held; stop the service before stale-owner maintenance");
@@ -133,6 +136,7 @@ fn acquire_stopped_service_guard() -> Result<StoppedServiceGuard> {
             .create(true)
             .truncate(false)
             .open(paths.owner_lock_path())?;
+        // SAFETY: `file` is open and `LockFile` operates on its live handle.
         if unsafe { LockFile(file.as_raw_handle(), 0, 0, u32::MAX, u32::MAX) } == 0 {
             return Err(std::io::Error::last_os_error())
                 .context("service owner lock is held; stop the service before stale-owner maintenance");
@@ -195,6 +199,8 @@ fn identity_exists(identity: &OwnerIdentity) -> Result<bool> {
     let mut wide: Vec<u16> = std::ffi::OsStr::new(sid).encode_wide().collect();
     wide.push(0);
     let mut binary_sid = std::ptr::null_mut();
+    // SAFETY: `wide` is NUL-terminated and `binary_sid` is a writable
+    // out-parameter; the allocation is owned by LocalSid below.
     if unsafe { ConvertStringSidToSidW(wide.as_ptr(), &mut binary_sid) } == 0 || binary_sid.is_null() {
         return Err(std::io::Error::last_os_error()).context("failed to parse owner SID");
     }
@@ -202,6 +208,8 @@ fn identity_exists(identity: &OwnerIdentity) -> Result<bool> {
     let mut name_length = 0;
     let mut domain_length = 0;
     let mut use_type = 0;
+    // SAFETY: `binary_sid` is a live SID owned by LocalSid; all pointer
+    // out-parameters are null and the length/use-type values are writable.
     unsafe {
         LookupAccountSidW(
             std::ptr::null(),
@@ -213,6 +221,7 @@ fn identity_exists(identity: &OwnerIdentity) -> Result<bool> {
             &mut use_type,
         )
     };
+    // SAFETY: `GetLastError` reads thread-local state and has no preconditions.
     match unsafe { GetLastError() } {
         ERROR_INSUFFICIENT_BUFFER => Ok(true),
         ERROR_NONE_MAPPED => Ok(false),
@@ -226,6 +235,8 @@ struct LocalSid(*mut std::ffi::c_void);
 #[cfg(windows)]
 impl Drop for LocalSid {
     fn drop(&mut self) {
+        // SAFETY: `self.0` is a SID allocation from ConvertStringSidToSidW and
+        // is freed exactly once here.
         unsafe { windows_sys::Win32::Foundation::LocalFree(self.0) };
     }
 }

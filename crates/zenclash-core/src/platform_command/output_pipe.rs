@@ -1,5 +1,7 @@
 //! One exclusive child-output reader with bounded, nonblocking collection.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use super::MAX_COMMAND_OUTPUT_BYTES;
 use std::io::{self, Read};
 

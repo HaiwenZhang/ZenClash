@@ -1,4 +1,6 @@
 //! A temporary macOS resolver owned by the privileged core's lifetime.
+
+#![deny(clippy::undocumented_unsafe_blocks)]
 //!
 //! # CRITICAL REGRESSION: macOS LAN DNS bypasses TUN (2026-10-10)
 //!

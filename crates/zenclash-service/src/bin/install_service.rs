@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 // Modified for the ZenClash fork on 2026-10-04; see NOTICE.md. GPL-3.0-only.
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn main() {
@@ -517,6 +519,8 @@ fn publish_staged_binary(staged: &Path, target: &Path) -> Result<(), Error> {
         let move_over = |from: &Path, to: &Path| -> std::io::Result<()> {
             let from = wide(from);
             let to = wide(to);
+            // SAFETY: Both paths are NUL-terminated UTF-16 buffers that remain
+            // alive for the synchronous call.
             if unsafe {
                 MoveFileExW(
                     from.as_ptr(),
@@ -660,14 +664,20 @@ fn env_u32(key: &str) -> Option<u32> {
 fn lookup_group_name(gid: u32, mut buffer_size: usize) -> std::io::Result<Option<String>> {
     const MAX_BUFFER_SIZE: usize = 1024 * 1024;
     loop {
+        // SAFETY: `group` is a plain C struct; all-zero is valid before
+        // `getgrgid_r` initializes it.
         let mut group = unsafe { std::mem::zeroed::<platform_lib::group>() };
         let mut buffer = vec![0 as platform_lib::c_char; buffer_size];
         let mut result = std::ptr::null_mut();
+        // SAFETY: `group` and `result` are writable storage and `buffer` is
+        // valid for `buffer.len()` bytes for the duration of the call.
         let status =
             unsafe { platform_lib::getgrgid_r(gid, &mut group, buffer.as_mut_ptr(), buffer.len(), &mut result) };
         match status {
             0 if result.is_null() => return Ok(None),
             0 => {
+                // SAFETY: On success `gr_name` points at a NUL-terminated
+                // string inside the live `buffer`.
                 let name = unsafe { std::ffi::CStr::from_ptr(group.gr_name) };
                 return Ok(Some(name.to_string_lossy().into_owned()));
             }

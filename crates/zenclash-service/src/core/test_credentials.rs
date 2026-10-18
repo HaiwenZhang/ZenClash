@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 // Modified for the ZenClash fork on 2026-10-04; see NOTICE.md. GPL-3.0-only.
 #[cfg(windows)]
 use crate::OWNER_TOKEN_FILE_NAME;
@@ -17,7 +19,9 @@ pub fn test_owner_credentials(app_data_root: &Path) -> Result<OwnerCredentials> 
     #[cfg(unix)]
     let (identity, token) = (
         OwnerIdentity::Unix {
+            // SAFETY: `geteuid` has no preconditions or memory effects.
             uid: unsafe { platform_lib::geteuid() },
+            // SAFETY: `getegid` has no preconditions or memory effects.
             gid: unsafe { platform_lib::getegid() },
         },
         None,
@@ -41,6 +45,7 @@ pub fn test_owner_credentials_for_uid(app_data_root: &Path, uid: u32) -> Result<
     std::fs::create_dir_all(app_data_root)?;
     let identity = OwnerIdentity::Unix {
         uid,
+        // SAFETY: `getegid` has no preconditions or memory effects.
         gid: unsafe { platform_lib::getegid() },
     };
     let token = format!("{SYNTHETIC_TEST_OWNER_TOKEN_PREFIX}{}", crate::owner_key(&identity));
@@ -86,33 +91,46 @@ mod windows {
 
     fn current_sid() -> Result<String> {
         let mut token = std::ptr::null_mut();
+        // SAFETY: The current process token is valid and `token` is a writable
+        // out-parameter; the handle is adopted below.
         if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
             return Err(std::io::Error::last_os_error()).context("failed to open process token");
         }
         let token = OwnedHandle(token);
 
         let mut required = 0_u32;
+        // SAFETY: This call only queries the required buffer size; the null
+        // data pointer and zero length are explicitly supported.
         unsafe { GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut required) };
         if required == 0 {
             return Err(std::io::Error::last_os_error()).context("failed to size process SID buffer");
         }
         let words = (required as usize).div_ceil(std::mem::size_of::<usize>());
         let mut buffer = vec![0_usize; words];
+        // SAFETY: `buffer` is aligned and `required` matches the size queried
+        // above; `required` is updated in place.
         if unsafe { GetTokenInformation(token.0, TokenUser, buffer.as_mut_ptr().cast(), required, &mut required) } == 0
         {
             return Err(std::io::Error::last_os_error()).context("failed to read process SID");
         }
+        // SAFETY: The successful query initialized the buffer with one aligned
+        // TOKEN_USER whose SID points into the same live buffer.
         let token_user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
         sid_to_string(token_user.User.Sid)
     }
 
     fn sid_to_string(sid: *mut c_void) -> Result<String> {
         let mut value = std::ptr::null_mut();
+        // SAFETY: `sid` is a live SID and `value` is a writable out-parameter;
+        // the allocation is owned by LocalWideString below.
         if unsafe { ConvertSidToStringSidW(sid, &mut value) } == 0 || value.is_null() {
             return Err(std::io::Error::last_os_error()).context("failed to format process SID");
         }
         let value = LocalWideString(value);
+        // SAFETY: `value` is a NUL-terminated allocation owned by LocalWideString.
         let length = (0..).take_while(|index| unsafe { *value.0.add(*index) } != 0).count();
+        // SAFETY: `value` points to the live allocation and `length` was bounded
+        // by its NUL terminator; the slice is copied immediately.
         String::from_utf16(unsafe { std::slice::from_raw_parts(value.0, length) })
             .context("process SID is not valid UTF-16")
     }
@@ -140,6 +158,8 @@ mod windows {
     impl Drop for OwnedHandle {
         fn drop(&mut self) {
             if !self.0.is_null() {
+                // SAFETY: `self.0` is a non-null handle owned by this guard and
+                // is closed exactly once here.
                 unsafe { CloseHandle(self.0) };
             }
         }
@@ -150,6 +170,8 @@ mod windows {
     impl Drop for LocalWideString {
         fn drop(&mut self) {
             if !self.0.is_null() {
+                // SAFETY: `self.0` is a non-null allocation from
+                // ConvertSidToStringSidW and is freed exactly once here.
                 unsafe { LocalFree(self.0.cast()) };
             }
         }
@@ -163,6 +185,8 @@ mod windows {
             let mut wide: Vec<u16> = sddl.encode_utf16().collect();
             wide.push(0);
             let mut descriptor = std::ptr::null_mut();
+            // SAFETY: `wide` is NUL-terminated and `descriptor` is a writable
+            // out-parameter; the allocation is freed by SecurityDescriptor.
             if unsafe {
                 ConvertStringSecurityDescriptorToSecurityDescriptorW(
                     wide.as_ptr(),
@@ -180,6 +204,8 @@ mod windows {
 
         fn apply(&self, path: &Path) -> Result<()> {
             let wide = wide_path(path)?;
+            // SAFETY: `wide` is NUL-terminated and `self.0` is a live
+            // descriptor for the duration of the call.
             if unsafe {
                 SetFileSecurityW(
                     wide.as_ptr(),
@@ -198,6 +224,8 @@ mod windows {
     impl Drop for SecurityDescriptor {
         fn drop(&mut self) {
             if !self.0.is_null() {
+                // SAFETY: `self.0` is a descriptor allocation from
+                // ConvertStringSecurityDescriptorToSecurityDescriptorW.
                 unsafe { LocalFree(self.0) };
             }
         }

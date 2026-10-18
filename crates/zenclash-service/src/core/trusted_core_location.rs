@@ -2,6 +2,8 @@
 //! Checks that privileged core execution and asset reads use protected locations.
 //! Owner authentication alone cannot establish trust: any local account may become an owner.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use crate::ServiceErrorCode;
 use crate::core::auth::ServiceError;
 use std::path::{Path, PathBuf};
@@ -238,11 +240,18 @@ mod windows_location {
         // A volume root cannot be deleted or renamed, so DELETE on it cannot move the core path.
         let inert_rights = if volume_root { DELETE } else { 0 };
 
-        for index in 0..u32::from(unsafe { (*security.dacl).AceCount }) {
+        for index in 0..u32::from(
+            // SAFETY: `security.dacl` was checked non-null and is owned by the
+            // live SecurityInfo for the duration of this review.
+            unsafe { (*security.dacl).AceCount },
+        ) {
             let mut ace = std::ptr::null_mut();
+            // SAFETY: The DACL is live and `ace` is a writable out-parameter;
+            // `index` is bounded by the ACE count read above.
             if unsafe { GetAce(security.dacl, index, &mut ace) } == 0 || ace.is_null() {
                 return Err(untrusted(format!("{label} has an unreadable DACL")));
             }
+            // SAFETY: GetAce returned a non-null ACE within the live DACL.
             let header = unsafe { *ace.cast::<ACE_HEADER>() };
             // Inherit-only entries do not apply to this object, only to children it later gains.
             if header.AceFlags & INHERIT_ONLY_ACE_FLAG != 0 {
@@ -259,6 +268,8 @@ mod windows_location {
                     )));
                 }
             }
+            // SAFETY: `AceType` was checked as an allowed ACE whose layout
+            // starts with `ACCESS_ALLOWED_ACE`; the ACE remains in the live DACL.
             let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
             let dangerous = allowed.Mask & hijack_rights & !inert_rights;
             if dangerous == 0 {
@@ -275,7 +286,10 @@ mod windows_location {
                     && header.AceType == ACCESS_ALLOWED_ACE_TYPE
                     && header.AceFlags == 0x03
                     && allowed.Mask == FILE_ALL_ACCESS
+                    // SAFETY: `sid` is the SID embedded in the live ACE.
                     && unsafe { IsValidSid(sid) } != 0
+                    // SAFETY: Both SIDs are valid; the temporary LocalSid lives
+                    // until the end of this condition.
                     && unsafe { EqualSid(sid, LocalSid::from_string(VOLUME_ROOT_MINIMAL_CAPABILITY_SID)?.as_ptr()) }
                         != 0
                 {
@@ -296,10 +310,17 @@ mod windows_location {
 
     fn sid_string(sid: PSID) -> String {
         let mut wide = std::ptr::null_mut();
-        if unsafe { IsValidSid(sid) } == 0 || unsafe { ConvertSidToStringSidW(sid, &mut wide) } == 0 {
+        // SAFETY: `sid` comes from a live ACE or descriptor; IsValidSid only
+        // inspects the SID memory.
+        let valid = unsafe { IsValidSid(sid) } != 0;
+        // SAFETY: `wide` is a writable out-parameter; on success it owns a
+        // NUL-terminated allocation that is freed below.
+        if !valid || unsafe { ConvertSidToStringSidW(sid, &mut wide) } == 0 {
             return "<invalid SID>".to_owned();
         }
         let mut len = 0;
+        // SAFETY: The conversion above returned a NUL-terminated allocation
+        // owned by this function; `len` stays within it.
         unsafe {
             while *wide.add(len) != 0 {
                 len += 1;
@@ -318,6 +339,8 @@ mod windows_location {
             } else {
                 FILE_ATTRIBUTE_NORMAL
             };
+        // SAFETY: `wide` is a NUL-terminated path; the returned handle is
+        // checked against INVALID_HANDLE_VALUE before adoption.
         let handle = unsafe {
             CreateFileW(
                 wide.as_ptr(),
@@ -332,6 +355,8 @@ mod windows_location {
         if handle == INVALID_HANDLE_VALUE {
             return Err(untrusted(format!("core path {path:?} could not be opened for review")));
         }
+        // SAFETY: `handle` is a valid handle returned by CreateFileW and is not
+        // INVALID_HANDLE_VALUE; the File now owns it.
         Ok(unsafe { std::fs::File::from_raw_handle(handle) })
     }
 
@@ -356,9 +381,16 @@ mod windows_location {
         }
 
         fn contains(&self, sid: PSID) -> bool {
-            if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
+            if sid.is_null() {
                 return false;
             }
+            // SAFETY: `sid` is checked non-null; IsValidSid only inspects the
+            // SID memory.
+            if unsafe { IsValidSid(sid) } == 0 {
+                return false;
+            }
+            // SAFETY: `sid` was validated above and `trusted_installer` is a
+            // live owned SID for the duration of this call.
             unsafe {
                 IsWellKnownSid(sid, WinLocalSystemSid) != 0
                     || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
@@ -374,7 +406,12 @@ mod windows_location {
             let mut wide: Vec<u16> = value.encode_utf16().collect();
             wide.push(0);
             let mut sid = std::ptr::null_mut();
-            if unsafe { ConvertStringSidToSidW(wide.as_ptr(), &mut sid) } == 0 || unsafe { IsValidSid(sid) } == 0 {
+            // SAFETY: `wide` is a NUL-terminated SID string and `sid` is a
+            // writable out-parameter.
+            let converted = unsafe { ConvertStringSidToSidW(wide.as_ptr(), &mut sid) } != 0;
+            // SAFETY: On success `sid` is a valid allocation owned by the
+            // returned LocalSid; the short-circuit avoids inspecting null.
+            if !converted || unsafe { IsValidSid(sid) } == 0 {
                 return Err(untrusted(format!("SID {value} could not be built")));
             }
             Ok(Self(sid))
@@ -388,6 +425,8 @@ mod windows_location {
     impl Drop for LocalSid {
         fn drop(&mut self) {
             if !self.0.is_null() {
+                // SAFETY: `self.0` is a non-null allocation returned by
+                // ConvertStringSidToSidW and is freed exactly once here.
                 unsafe { LocalFree(self.0) };
             }
         }
@@ -404,6 +443,8 @@ mod windows_location {
             let mut owner = std::ptr::null_mut();
             let mut dacl = std::ptr::null_mut();
             let mut descriptor = std::ptr::null_mut();
+            // SAFETY: The handle is live for the call; all out-parameters are
+            // initialized by the API and the descriptor is checked below.
             let status = unsafe {
                 GetSecurityInfo(
                     handle,
@@ -434,6 +475,8 @@ mod windows_location {
     impl Drop for LocalSecurityDescriptor {
         fn drop(&mut self) {
             if !self.0.is_null() {
+                // SAFETY: `self.0` is a non-null descriptor allocated by
+                // GetSecurityInfo and is freed exactly once here.
                 unsafe { LocalFree(self.0) };
             }
         }
@@ -463,6 +506,8 @@ mod windows_location {
             let wide: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
             let mut descriptor = std::ptr::null_mut();
             assert_ne!(
+                // SAFETY: `wide` is NUL-terminated and `descriptor` is a
+                // writable out-parameter owned by the wrapper below.
                 unsafe {
                     ConvertStringSecurityDescriptorToSecurityDescriptorW(
                         wide.as_ptr(),
@@ -477,12 +522,16 @@ mod windows_location {
             let mut owner = std::ptr::null_mut();
             let mut defaulted = 0;
             assert_ne!(
+                // SAFETY: `descriptor.0` is a live security descriptor and the
+                // out-parameters are writable stack storage.
                 unsafe { GetSecurityDescriptorOwner(descriptor.0, &mut owner, &mut defaulted) },
                 0
             );
             let mut dacl = std::ptr::null_mut();
             let mut present = 0;
             assert_ne!(
+                // SAFETY: `descriptor.0` is live and all out-parameters are
+                // writable stack storage.
                 unsafe { GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut dacl, &mut defaulted) },
                 0
             );

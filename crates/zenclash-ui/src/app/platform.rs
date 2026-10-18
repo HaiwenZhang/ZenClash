@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use std::{io, path::PathBuf, process::Command, thread};
 
 #[cfg(all(target_os = "macos", not(test)))]

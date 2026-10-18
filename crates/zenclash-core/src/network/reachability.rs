@@ -1,5 +1,7 @@
 //! Local uplink observations; remote service failures are not link loss.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 /// Availability of a non-tunnel network interface with a usable address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NetworkReachability {

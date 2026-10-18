@@ -1,4 +1,6 @@
 // Modified for the ZenClash fork on 2026-10-04; see NOTICE.md. GPL-3.0-only.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 #[cfg(windows)]
@@ -38,7 +40,11 @@ fn parse_linux_process_stat(stat: &str) -> Result<(char, u64)> {
 
 #[cfg(target_os = "macos")]
 fn macos_process_info(pid: i32) -> std::io::Result<platform_lib::proc_bsdinfo> {
+    // SAFETY: `proc_bsdinfo` is a plain C struct; all-zero is a valid initial
+    // value before `proc_pidinfo` fills it.
     let mut info = unsafe { std::mem::zeroed::<platform_lib::proc_bsdinfo>() };
+    // SAFETY: `info` is writable storage of the size passed below, and the pid
+    // was validated by the caller.
     let info_len = unsafe {
         platform_lib::proc_pidinfo(
             pid,
@@ -62,6 +68,8 @@ fn windows_process_identity_details_from_handle(handle: &OwnedHandle) -> Result<
 
     let mut path = vec![0u16; 32_768];
     let mut path_len = path.len() as u32;
+    // SAFETY: `handle` is a live process handle and `path` is a writable buffer
+    // large enough for the length passed.
     if unsafe { QueryFullProcessImageNameW(handle.as_raw_handle(), 0, path.as_mut_ptr(), &mut path_len) } == 0 {
         return Err(std::io::Error::last_os_error().into());
     }
@@ -74,6 +82,8 @@ fn windows_process_identity_details_from_handle(handle: &OwnedHandle) -> Result<
     let mut exit = FILETIME::default();
     let mut kernel = FILETIME::default();
     let mut user = FILETIME::default();
+    // SAFETY: `handle` is live and all four FILETIME outputs point to writable
+    // stack storage for the duration of the call.
     if unsafe { GetProcessTimes(handle.as_raw_handle(), &mut creation, &mut exit, &mut kernel, &mut user) } == 0 {
         return Err(std::io::Error::last_os_error().into());
     }
@@ -136,6 +146,8 @@ pub(super) fn process_identity(pid: u32) -> Result<Option<ProcessIdentity>> {
             return Ok(None);
         }
         let mut path = vec![0u8; platform_lib::PROC_PIDPATHINFO_MAXSIZE as usize];
+        // SAFETY: `path` is a writable buffer of the size passed and the Unix pid
+        // was range-checked by the caller.
         let path_len = unsafe { platform_lib::proc_pidpath(unix_pid, path.as_mut_ptr().cast(), path.len() as u32) };
         if path_len <= 0 {
             let error = std::io::Error::last_os_error();
@@ -200,6 +212,8 @@ pub(super) fn is_process_alive(pid: u32) -> bool {
         let Some(unix_pid) = checked_unix_pid(pid) else {
             return false;
         };
+        // SAFETY: Signal 0 only probes existence; the Unix pid was range-checked
+        // and `kill` retains no references.
         let result = unsafe { platform_lib::kill(unix_pid, 0) };
         let exists = result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(platform_lib::EPERM);
         if !exists {
@@ -232,12 +246,16 @@ pub(super) fn is_process_alive(pid: u32) -> bool {
         use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
         use windows_sys::Win32::System::Threading::OpenProcess;
 
+        // SAFETY: `OpenProcess` has no memory preconditions; the returned handle
+        // is checked for null before use.
         let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
         if handle.is_null() {
             return std::io::Error::last_os_error()
                 .raw_os_error()
                 .is_some_and(|code| code as u32 == ERROR_ACCESS_DENIED);
         }
+        // SAFETY: `handle` is non-null and was returned by `OpenProcess`; the
+        // OwnedHandle now owns it.
         let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
         windows_handle_is_signaled(&handle).map_or(true, |signaled| !signaled)
     }
@@ -248,6 +266,7 @@ fn windows_handle_is_signaled(handle: &OwnedHandle) -> Result<bool> {
     use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
+    // SAFETY: `handle` owns a valid process handle for the duration of the call.
     match unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) } {
         WAIT_OBJECT_0 => Ok(true),
         WAIT_TIMEOUT => Ok(false),
@@ -261,8 +280,12 @@ fn open_windows_process_handle(pid: u32) -> Result<Option<OwnedHandle>> {
     use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
+    // SAFETY: `OpenProcess` has no memory preconditions; the returned handle is
+    // checked for null below.
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid) };
     if !handle.is_null() {
+        // SAFETY: `handle` is non-null and was returned by `OpenProcess`; the
+        // OwnedHandle now owns it.
         return Ok(Some(unsafe { OwnedHandle::from_raw_handle(handle) }));
     }
     let error = std::io::Error::last_os_error();
@@ -289,6 +312,8 @@ async fn terminate_process_inner(pid: u32, expected_identity: Option<&ProcessIde
             process_identity(pid).ok().flatten()
         };
         warn!("Terminating process {}", pid);
+        // SAFETY: Signal delivery has no memory preconditions; the Unix pid was
+        // range-checked before this call.
         if unsafe { platform_lib::kill(unix_pid, platform_lib::SIGTERM) } != 0
             && std::io::Error::last_os_error().raw_os_error() != Some(platform_lib::ESRCH)
         {
@@ -311,6 +336,8 @@ async fn terminate_process_inner(pid: u32, expected_identity: Option<&ProcessIde
             }
         }
         warn!("Process {} did not exit, sending SIGKILL", pid);
+        // SAFETY: Signal delivery has no memory preconditions; the Unix pid was
+        // range-checked and its identity was revalidated above.
         if unsafe { platform_lib::kill(unix_pid, platform_lib::SIGKILL) } != 0
             && std::io::Error::last_os_error().raw_os_error() != Some(platform_lib::ESRCH)
         {
@@ -340,9 +367,12 @@ async fn terminate_process_inner(pid: u32, expected_identity: Option<&ProcessIde
                 bail!("process {pid} identity changed before termination");
             }
         }
-        let status = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .status()?;
+        let status = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .status()
+        })
+        .await??;
         if !status.success() && !windows_handle_is_signaled(&handle)? {
             bail!("taskkill failed for process {pid} with status {status}");
         }

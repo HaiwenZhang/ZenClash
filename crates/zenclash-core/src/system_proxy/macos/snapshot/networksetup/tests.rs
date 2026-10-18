@@ -72,6 +72,7 @@ impl NetworkSetup for Fixture {
 }
 
 fn snapshot(dictionary: &OwnedCf) -> ProxySnapshot {
+    // SAFETY: Test fixture dictionary is a live owned CFDictionary.
     let configuration = unsafe { encode_configuration(dictionary.pointer()) }.unwrap();
     ProxySnapshot {
         service_id: "fixture-id".into(),
@@ -116,6 +117,8 @@ fn manual_pac_and_disable_use_command_writes_and_keep_foreign_settings() {
             .unwrap();
         let key = OwnedCf::string("SOCKSProxy").unwrap();
         assert_eq!(
+            // SAFETY: `dictionary` is a live decoded dictionary and `key` is a
+            // live CFString retained by this scope.
             unsafe { read_cf_string(CFDictionaryGetValue(dictionary.pointer(), key.pointer())) }
                 .unwrap(),
             "foreign.socks"

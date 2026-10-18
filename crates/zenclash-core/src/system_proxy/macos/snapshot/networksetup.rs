@@ -27,15 +27,21 @@ pub(super) fn comparable_configuration(snapshot: &ProxySnapshot) -> MihomoResult
     let dictionary = editable_configuration(snapshot.configuration.as_deref())?;
     for name in NUMBER_DEFAULTS {
         let key = OwnedCf::string(name)?;
+        // SAFETY: Both the dictionary and key are live CF objects.
         let value = unsafe { CFDictionaryGetValue(dictionary.pointer(), key.pointer()) };
         if value.is_null() {
             set_number(&dictionary, name, 0)?;
-        } else if unsafe { CFGetTypeID(value) == CFBooleanGetTypeID() } {
-            set_number(
-                &dictionary,
-                name,
-                i32::from(unsafe { CFBooleanGetValue(value) } != 0),
-            )?;
+        } else {
+            // SAFETY: `value` is a borrowed live CFType; the type check guards
+            // the CFBoolean accessor used in the branch body.
+            if unsafe { CFGetTypeID(value) == CFBooleanGetTypeID() } {
+                set_number(
+                    &dictionary,
+                    name,
+                    // SAFETY: `value` is a live CFBoolean on this branch.
+                    i32::from(unsafe { CFBooleanGetValue(value) } != 0),
+                )?;
+            }
         }
     }
     for name in STRING_DEFAULTS {
@@ -122,6 +128,7 @@ impl Step<'_> {
             }
             Self::Bypass(entries) => set_bypass(&dictionary, entries)?,
         }
+        // SAFETY: `dictionary` is a live editable CFDictionary owned by this scope.
         let configuration = unsafe { encode_configuration(dictionary.pointer()) }?;
         Ok(ProxySnapshot {
             service_id: before.service_id.clone(),
@@ -140,19 +147,21 @@ fn ensure_unauthenticated(dictionary: &OwnedCf, prefix: &str) -> MihomoResult<()
         "ProxyPassword",
     ] {
         let key = OwnedCf::string(&format!("{prefix}{suffix}"))?;
+        // SAFETY: Both the dictionary and key are live CF objects.
         let value = unsafe { CFDictionaryGetValue(dictionary.pointer(), key.pointer()) };
         if value.is_null() {
             continue;
         }
         let zero = OwnedCf::number(0)?;
         let empty = OwnedCf::string("")?;
-        let kind = unsafe { CFGetTypeID(value) };
-        let harmless = (kind == unsafe { CFNumberGetTypeID() }
-            && unsafe { CFEqual(value, zero.pointer()) } != 0)
-            || (kind == unsafe { CFBooleanGetTypeID() }
-                && unsafe { CFBooleanGetValue(value) } == 0)
-            || (kind == unsafe { CFStringGetTypeID() }
-                && unsafe { CFEqual(value, empty.pointer()) } != 0);
+        // SAFETY: `value`, `zero`, and `empty` are live CF objects retained by
+        // this scope; the type checks guard each type-specific accessor.
+        let harmless = unsafe {
+            let kind = CFGetTypeID(value);
+            (kind == CFNumberGetTypeID() && CFEqual(value, zero.pointer()) != 0)
+                || (kind == CFBooleanGetTypeID() && CFBooleanGetValue(value) == 0)
+                || (kind == CFStringGetTypeID() && CFEqual(value, empty.pointer()) != 0)
+        };
         if !harmless {
             return Err(crate::SystemProxyError::BackendUnavailable {
                 backend: crate::SystemProxyBackendKind::MacOs,

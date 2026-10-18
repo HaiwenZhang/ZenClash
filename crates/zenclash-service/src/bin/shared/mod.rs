@@ -110,6 +110,8 @@ fn netsh_path() -> Result<std::path::PathBuf, Error> {
     // supports advfirewall; no filesystem-redirection override is needed.
     let mut buffer = vec![0_u16; 260];
     loop {
+        // SAFETY: `buffer` is writable for its full length and the API writes at
+        // most that many UTF-16 units.
         let length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
         if length == 0 {
             return Err(std::io::Error::last_os_error().into());

@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 // Modified for the ZenClash fork on 2026-10-04; see NOTICE.md. GPL-3.0-only.
 use crate::ServiceErrorCode;
 use crate::core::auth::ServiceError;
@@ -56,8 +58,12 @@ fn cleanup_entry(path: &Path, root_path: &str) -> Result<(), ServiceError> {
         if system_owned {
             delete_open_entry(handle.0, true)?;
         }
-    } else if system_owned && (is_reparse || unsafe { GetFileType(handle.0) } == FILE_TYPE_DISK) {
-        delete_open_entry(handle.0, false)?;
+    } else {
+        // SAFETY: `handle.0` is a live descriptor owned by this scope.
+        let disk = unsafe { GetFileType(handle.0) } == FILE_TYPE_DISK;
+        if system_owned && (is_reparse || disk) {
+            delete_open_entry(handle.0, false)?;
+        }
     }
     Ok(())
 }
@@ -71,6 +77,8 @@ fn open_entry(path: &Path) -> std::io::Result<OwnedHandle> {
         ));
     }
     wide.push(0);
+    // SAFETY: `wide` is a NUL-terminated path; the returned handle is checked
+    // against INVALID_HANDLE_VALUE before adoption.
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
@@ -90,6 +98,8 @@ fn open_entry(path: &Path) -> std::io::Result<OwnedHandle> {
 
 fn handle_information(handle: HANDLE) -> Result<BY_HANDLE_FILE_INFORMATION, ServiceError> {
     let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `handle` is a live file handle and `information` is writable
+    // stack storage.
     if unsafe { GetFileInformationByHandle(handle, &mut information) } == 0 {
         return Err(cleanup_error(format!(
             "failed to inspect legacy entry: {}",
@@ -102,6 +112,8 @@ fn handle_information(handle: HANDLE) -> Result<BY_HANDLE_FILE_INFORMATION, Serv
 fn final_path(handle: HANDLE) -> Result<String, ServiceError> {
     let mut buffer = vec![0_u16; 512];
     loop {
+        // SAFETY: `handle` is live and `buffer` is writable storage of the
+        // length passed; the call writes at most that many UTF-16 units.
         let length = unsafe { GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, 0) } as usize;
         if length == 0 {
             return Err(cleanup_error(format!(
@@ -128,6 +140,8 @@ fn path_is_below_root(root: &str, candidate: &str) -> bool {
 fn is_local_system_owned(handle: HANDLE) -> Result<bool, ServiceError> {
     let mut owner = std::ptr::null_mut();
     let mut descriptor = std::ptr::null_mut();
+    // SAFETY: The handle is live; all out-parameters are writable and the
+    // returned descriptor is checked before being wrapped.
     let status = unsafe {
         GetSecurityInfo(
             handle,
@@ -150,6 +164,8 @@ fn is_local_system_owned(handle: HANDLE) -> Result<bool, ServiceError> {
     let words = (SECURITY_MAX_SID_SIZE as usize).div_ceil(std::mem::size_of::<usize>());
     let mut sid = vec![0_usize; words];
     let mut sid_size = SECURITY_MAX_SID_SIZE;
+    // SAFETY: `sid` is aligned storage of at least `sid_size` bytes and
+    // `sid_size` is a writable in/out parameter.
     if unsafe {
         CreateWellKnownSid(
             WinLocalSystemSid,
@@ -164,6 +180,8 @@ fn is_local_system_owned(handle: HANDLE) -> Result<bool, ServiceError> {
             std::io::Error::last_os_error()
         )));
     }
+    // SAFETY: `owner` is borrowed from the live security descriptor and the
+    // LocalSystem SID is a live owned allocation.
     let is_system = unsafe { EqualSid(owner, sid.as_mut_ptr().cast()) } != 0;
     drop(descriptor);
     Ok(is_system)
@@ -171,6 +189,8 @@ fn is_local_system_owned(handle: HANDLE) -> Result<bool, ServiceError> {
 
 fn delete_open_entry(handle: HANDLE, is_directory: bool) -> Result<(), ServiceError> {
     let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // SAFETY: `handle` is live and the disposition pointer/size describe valid
+    // stack storage for the requested information class.
     if unsafe {
         SetFileInformationByHandle(
             handle,
@@ -199,6 +219,8 @@ struct OwnedHandle(HANDLE);
 
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
+        // SAFETY: `self.0` is a non-null handle owned by this guard and is
+        // closed exactly once here.
         unsafe { CloseHandle(self.0) };
     }
 }
@@ -207,6 +229,8 @@ struct LocalDescriptor(*mut std::ffi::c_void);
 
 impl Drop for LocalDescriptor {
     fn drop(&mut self) {
+        // SAFETY: `self.0` is a descriptor allocated by GetSecurityInfo and is
+        // freed exactly once here.
         unsafe { LocalFree(self.0) };
     }
 }

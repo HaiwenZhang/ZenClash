@@ -1,3 +1,4 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
 // ZenClash native-controller adaptation, 2026-10-04. GPL-3.0-only; see NOTICE.md.
 //! HTTP over one authenticated native controller connection per request.
 
@@ -162,6 +163,7 @@ impl NativeController {
             }
         };
         let mut pid = 0;
+        // SAFETY: The named-pipe handle is live and `pid` is writable storage.
         if unsafe {
             windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId(
                 stream.as_raw_handle(),
@@ -678,6 +680,7 @@ mod tests {
     #[tokio::test]
     async fn a_service_socket_rejects_an_ordinary_user_before_sending_credentials() {
         // A root test runner cannot model an ordinary-user impostor.
+        // SAFETY: `geteuid` has no preconditions or memory effects.
         if unsafe { libc::geteuid() } == 0 {
             return;
         }

@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 // Modified for the ZenClash fork on 2026-10-04; see NOTICE.md. GPL-3.0-only.
 use crate::core::auth::{AuthenticatedOwner, ServiceError};
 use crate::core::paths::ensure_owner_state_directory;
@@ -660,6 +662,8 @@ async fn prepare_owner_ipc_directory(owner: &AuthenticatedOwner) -> Result<(), S
         }
         let directory = std::ffi::CString::new(directory.as_os_str().as_bytes())
             .map_err(|_| invalid_asset("owner IPC directory contains NUL"))?;
+        // SAFETY: `directory` is a NUL-terminated path and the returned
+        // descriptor is owned by this scope.
         let fd = unsafe {
             platform_lib::open(
                 directory.as_ptr(),
@@ -673,22 +677,30 @@ async fn prepare_owner_ipc_directory(owner: &AuthenticatedOwner) -> Result<(), S
             )));
         }
         let crate::OwnerIdentity::Unix { uid, .. } = owner.identity else {
+            // SAFETY: `fd` is the live descriptor opened above.
             unsafe { platform_lib::close(fd) };
             return Err(invalid_asset("Unix IPC directory requires a Unix owner"));
         };
+        // SAFETY: `stat` is a plain C struct; all-zero is valid before `fstat`.
         let mut stat = unsafe { std::mem::zeroed::<platform_lib::stat>() };
+        // SAFETY: `fd` is live and `stat` is writable storage for one `stat`.
         let inspected = unsafe { platform_lib::fstat(fd, &mut stat) } == 0;
+        // SAFETY: `geteuid` has no preconditions or memory effects.
         let effective_uid = unsafe { platform_lib::geteuid() };
         let test_process_owned = cfg!(feature = "test") && stat.st_uid == effective_uid;
         if !owner_ipc_directory_is_usable(inspected, stat.st_mode, stat.st_uid, uid, test_process_owned) {
+            // SAFETY: `fd` is the live descriptor opened above.
             unsafe { platform_lib::close(fd) };
             return Err(invalid_asset(
                 "owner IPC directory has an unexpected owner or file type",
             ));
         }
+        // SAFETY: `geteuid` has no preconditions; `fchown` operates on the live fd.
         let chown_ok = unsafe { platform_lib::geteuid() } != 0 || unsafe { platform_lib::fchown(fd, 0, 0) } == 0;
+        // SAFETY: `fchmod` operates on the live fd and the mode is valid.
         let chmod_ok = unsafe { platform_lib::fchmod(fd, 0o700 as platform_lib::mode_t) } == 0;
         let os_error = (!chown_ok || !chmod_ok).then(std::io::Error::last_os_error);
+        // SAFETY: `fd` was not closed on the success path and is owned here.
         unsafe { platform_lib::close(fd) };
         if let Some(error) = os_error {
             return Err(invalid_asset(format!("failed to secure owner IPC directory: {error}")));
@@ -950,7 +962,9 @@ mod tests {
             std::fs::create_dir_all(root).expect("test IPC root must be creatable");
         }
 
+        // SAFETY: `geteuid` has no preconditions or memory effects.
         let uid = unsafe { platform_lib::geteuid() };
+        // SAFETY: `getegid` has no preconditions or memory effects.
         let gid = unsafe { platform_lib::getegid() };
         AuthenticatedOwner {
             key: uid.to_string(),

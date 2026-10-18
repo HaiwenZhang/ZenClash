@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 // Modified for the ZenClash fork on 2026-10-04; see NOTICE.md. GPL-3.0-only.
 use crate::core::ClashConfig;
 use crate::core::logger::{LOG_RING, set_or_update_writer, write_core_line};
@@ -150,6 +152,8 @@ async fn stop_child(child: &mut Child, grace: Duration) -> std::io::Result<()> {
     if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok())
         && !grace.is_zero()
     {
+        // SAFETY: `kill` only signals a PID owned by this child process and
+        // has no memory preconditions.
         if unsafe { platform_lib::kill(pid, platform_lib::SIGTERM) } == 0 {
             info!("Sent SIGTERM to core ({pid})");
             match tokio::time::timeout(grace, child.wait()).await {
@@ -816,6 +820,8 @@ pub async fn run_with_logging(
             .spawn()?
     };
 
+    // SAFETY: `pre_exec` runs only `umask`, which is async-signal-safe and
+    // does not touch shared Rust state before exec.
     #[cfg(unix)]
     let child = unsafe {
         let _ = owner;
@@ -873,6 +879,8 @@ fn prepare_core_ipc_socket(core_ipc_path: &str, owner: &OwnerIdentity) -> Result
         let directory = target.parent().context("core IPC path has no parent directory")?;
         let directory_c = std::ffi::CString::new(directory.as_os_str().as_bytes())
             .map_err(|_| anyhow::anyhow!("core IPC directory contains NUL"))?;
+        // SAFETY: `directory_c` is a NUL-terminated path and the returned
+        // descriptor is owned by this scope.
         let fd = unsafe {
             platform_lib::open(
                 directory_c.as_ptr(),
@@ -885,19 +893,24 @@ fn prepare_core_ipc_socket(core_ipc_path: &str, owner: &OwnerIdentity) -> Result
         }
 
         let result = (|| -> Result<()> {
+            // SAFETY: `stat` is a plain C struct; all-zero is valid before `fstat`.
             let mut stat = unsafe { std::mem::zeroed::<platform_lib::stat>() };
+            // SAFETY: `fd` is live and `stat` is writable storage for one `stat`.
             if unsafe { platform_lib::fstat(fd, &mut stat) } != 0 {
                 return Err(std::io::Error::last_os_error()).context("failed to inspect core IPC directory");
             }
+            // SAFETY: `geteuid` has no preconditions or memory effects.
             let effective_uid = unsafe { platform_lib::geteuid() };
             if stat.st_mode & platform_lib::S_IFMT != platform_lib::S_IFDIR
                 || (stat.st_uid != 0 && stat.st_uid != *uid && stat.st_uid != effective_uid)
             {
                 anyhow::bail!("core IPC directory has an unexpected owner or file type");
             }
+            // SAFETY: `fchmod` operates on the live descriptor and the mode is valid.
             if unsafe { platform_lib::fchmod(fd, 0o700 as platform_lib::mode_t) } != 0 {
                 return Err(std::io::Error::last_os_error()).context("failed to make core IPC directory private");
             }
+            // SAFETY: `fchown` operates on the live descriptor with valid ids.
             if effective_uid == 0 && unsafe { platform_lib::fchown(fd, 0, 0) } != 0 {
                 return Err(std::io::Error::last_os_error()).context("failed to take ownership of core IPC directory");
             }
@@ -905,6 +918,7 @@ fn prepare_core_ipc_socket(core_ipc_path: &str, owner: &OwnerIdentity) -> Result
             let file_name = target.file_name().context("core IPC path has no file name")?;
             let file_name_c = std::ffi::CString::new(file_name.as_bytes())
                 .map_err(|_| anyhow::anyhow!("core IPC file name contains NUL"))?;
+            // SAFETY: `fd` is live and `file_name_c` is a NUL-terminated component.
             if unsafe { platform_lib::unlinkat(fd, file_name_c.as_ptr(), 0) } != 0 {
                 let error = std::io::Error::last_os_error();
                 if error.kind() != std::io::ErrorKind::NotFound {
@@ -913,6 +927,7 @@ fn prepare_core_ipc_socket(core_ipc_path: &str, owner: &OwnerIdentity) -> Result
             }
             Ok(())
         })();
+        // SAFETY: `fd` was not closed on the success path and is owned here.
         unsafe { platform_lib::close(fd) };
         result
     }
@@ -931,6 +946,8 @@ fn grant_core_ipc_directory_to_owner(target: &std::path::Path, uid: u32, gid: u3
     let directory = target.parent().context("core IPC path has no parent directory")?;
     let directory_c = std::ffi::CString::new(directory.as_os_str().as_bytes())
         .map_err(|_| anyhow::anyhow!("core IPC directory contains NUL"))?;
+    // SAFETY: `directory_c` is a NUL-terminated path and the returned
+    // descriptor is owned by this scope.
     let fd = unsafe {
         platform_lib::open(
             directory_c.as_ptr(),
@@ -940,13 +957,16 @@ fn grant_core_ipc_directory_to_owner(target: &std::path::Path, uid: u32, gid: u3
     if fd < 0 {
         return Err(std::io::Error::last_os_error()).context("failed to reopen core IPC directory");
     }
+    // SAFETY: `geteuid` has no preconditions; `fchown` operates on the live fd.
     let result = if unsafe { platform_lib::geteuid() } == 0 && unsafe { platform_lib::fchown(fd, uid, gid) } != 0 {
         Err(std::io::Error::last_os_error()).context("failed to grant core IPC directory to owner")
+    // SAFETY: `fchmod` operates on the live descriptor and the mode is valid.
     } else if unsafe { platform_lib::fchmod(fd, 0o700 as platform_lib::mode_t) } != 0 {
         Err(std::io::Error::last_os_error()).context("failed to secure granted core IPC directory")
     } else {
         Ok(())
     };
+    // SAFETY: `fd` was not closed on the success path and is owned here.
     unsafe { platform_lib::close(fd) };
     result
 }
@@ -989,8 +1009,12 @@ async fn secure_core_ipc_socket(core_ipc_path: String, owner: OwnerIdentity, exp
         }
         let path = std::ffi::CString::new(target.as_os_str().as_bytes())
             .map_err(|_| anyhow::anyhow!("core IPC socket path contains NUL"))?;
+        // SAFETY: `geteuid` has no preconditions; `lchown` uses a
+        // NUL-terminated path and does not follow symlinks.
         let chown_ok =
             unsafe { platform_lib::geteuid() } != 0 || unsafe { platform_lib::lchown(path.as_ptr(), uid, gid) } == 0;
+        // SAFETY: `path` is NUL-terminated and `fchmodat` is told not to
+        // follow symlinks; the mode is valid.
         let chmod_ok = unsafe {
             platform_lib::fchmodat(
                 platform_lib::AT_FDCWD,
@@ -1031,6 +1055,8 @@ async fn secure_core_ipc_socket(core_ipc_path: String, owner: OwnerIdentity, exp
         pipe.push(0);
         let deadline = tokio::time::Instant::now() + CORE_IPC_READY_TIMEOUT;
         let handle_value = loop {
+            // SAFETY: `pipe` is NUL-terminated; the returned handle is checked
+            // against INVALID_HANDLE_VALUE before adoption.
             let handle_value = unsafe {
                 CreateFileW(
                     pipe.as_ptr(),
@@ -1052,8 +1078,11 @@ async fn secure_core_ipc_socket(core_ipc_path: String, owner: OwnerIdentity, exp
             tokio::time::sleep(CORE_IPC_POLL_INTERVAL).await;
         };
         let handle = handle_value as *mut std::ffi::c_void;
+        // SAFETY: `handle` is a valid non-INVALID_HANDLE_VALUE handle and the
+        // File now owns it.
         let _pipe = unsafe { std::fs::File::from_raw_handle(handle) };
         let mut server_pid = 0u32;
+        // SAFETY: The pipe handle is live and `server_pid` is writable storage.
         if unsafe { GetNamedPipeServerProcessId(handle_value as _, &mut server_pid) } == 0 {
             return Err(std::io::Error::last_os_error()).context("failed to identify core IPC pipe server");
         }
@@ -1065,6 +1094,8 @@ async fn secure_core_ipc_socket(core_ipc_path: String, owner: OwnerIdentity, exp
         let mut wide: Vec<u16> = sddl.encode_utf16().collect();
         wide.push(0);
         let mut descriptor = std::ptr::null_mut();
+        // SAFETY: `wide` is NUL-terminated and `descriptor` is a writable
+        // out-parameter; the allocation is freed by LocalDescriptor.
         if unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 wide.as_ptr(),
@@ -1080,6 +1111,8 @@ async fn secure_core_ipc_socket(core_ipc_path: String, owner: OwnerIdentity, exp
         struct LocalDescriptor(*mut std::ffi::c_void);
         impl Drop for LocalDescriptor {
             fn drop(&mut self) {
+                // SAFETY: `self.0` is a descriptor allocation from
+                // ConvertStringSecurityDescriptorToSecurityDescriptorW.
                 unsafe { LocalFree(self.0) };
             }
         }
@@ -1087,12 +1120,15 @@ async fn secure_core_ipc_socket(core_ipc_path: String, owner: OwnerIdentity, exp
         let mut present = 0;
         let mut defaulted = 0;
         let mut dacl = std::ptr::null_mut();
+        // SAFETY: The descriptor is live and all out-parameters are writable.
         if unsafe { GetSecurityDescriptorDacl(descriptor_guard.0, &mut present, &mut dacl, &mut defaulted) } == 0
             || present == 0
             || dacl.is_null()
         {
             anyhow::bail!("failed to read owner core IPC DACL");
         }
+        // SAFETY: The pipe handle is live and `dacl` is borrowed from the live
+        // descriptor for the duration of the call.
         let status = unsafe {
             SetSecurityInfo(
                 handle,
@@ -1175,10 +1211,11 @@ mod tests {
         std::fs::create_dir(&directory)?;
         let path = directory.join("mihomo.sock");
         let listener = tokio::net::UnixListener::bind(&path)?;
-        let owner = OwnerIdentity::Unix {
-            uid: unsafe { platform_lib::geteuid() },
-            gid: unsafe { platform_lib::getegid() },
-        };
+        // SAFETY: `geteuid` has no preconditions or memory effects.
+        let uid = unsafe { platform_lib::geteuid() };
+        // SAFETY: `getegid` has no preconditions or memory effects.
+        let gid = unsafe { platform_lib::getegid() };
+        let owner = OwnerIdentity::Unix { uid, gid };
 
         prepare_core_ipc_socket(&path.to_string_lossy(), &owner)?;
         drop(listener);

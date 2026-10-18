@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use std::{
     ffi::c_void,
     ptr::{self, NonNull},
@@ -245,12 +247,15 @@ impl PreferenceSession {
         // SAFETY: Null ID/allocator select system network preferences. This
         // session only reads; writes use networksetup without an app auth session.
         let pointer = unsafe { SCPreferencesCreate(ptr::null(), name.pointer(), ptr::null()) };
+        // SAFETY: Create returns a +1 object or null; `OwnedCf::created` rejects
+        // null and takes ownership of the successful result.
         let preferences = unsafe { OwnedCf::created(pointer, "SCPreferencesCreate") }?;
         Ok(Self { preferences })
     }
 
     fn select(&self, expected: &str, by_id: bool) -> MihomoResult<SelectedProtocol> {
-        // SAFETY: Copy returns an owned array from a live preferences session.
+        // SAFETY: Copy returns a +1 array or null; `OwnedCf::created` rejects
+        // null and takes ownership of the successful result.
         let services = unsafe {
             OwnedCf::created(
                 SCNetworkServiceCopyAll(self.preferences.pointer()),
@@ -261,14 +266,18 @@ impl PreferenceSession {
         // SAFETY: The retained array contains network services. Get results remain
         // borrowed until the array is released; every index is bounded by count.
         let count = unsafe { CFArrayGetCount(services.pointer()) };
-        let index = unique_service_index((0..count).map(|index| unsafe {
-            let service = CFArrayGetValueAtIndex(services.pointer(), index);
-            let identity = if by_id {
-                SCNetworkServiceGetServiceID(service)
-            } else {
-                SCNetworkServiceGetName(service)
-            };
-            !identity.is_null() && CFStringCompare(identity, expected.pointer(), 0) == 0
+        let index = unique_service_index((0..count).map(|index| {
+            // SAFETY: `index` is below the live array count; every Get result is
+            // borrowed from `services` and compared before that array is released.
+            unsafe {
+                let service = CFArrayGetValueAtIndex(services.pointer(), index);
+                let identity = if by_id {
+                    SCNetworkServiceGetServiceID(service)
+                } else {
+                    SCNetworkServiceGetName(service)
+                };
+                !identity.is_null() && CFStringCompare(identity, expected.pointer(), 0) == 0
+            }
         }))?;
         // SAFETY: The selected index was bounded and unique. Copy retains its
         // protocol independently of the services array; Get strings are copied.
@@ -376,11 +385,15 @@ unsafe fn encode_configuration(dictionary: CfRef) -> MihomoResult<Option<std::sy
     if length == 0 || length > MAX_NATIVE_CONFIGURATION_BYTES {
         return Err(invalid_snapshot());
     }
+    // SAFETY: `data` owns a live CFData; its buffer remains valid until the
+    // owner is dropped at the end of this function.
     let bytes = unsafe { CFDataGetBytePtr(data.pointer()) };
     if bytes.is_null() {
         return Err(invalid_snapshot());
     }
     Ok(Some(
+        // SAFETY: `bytes` is non-null and `length` was bounded against this live
+        // CFData's byte length; the slice is copied immediately.
         unsafe { std::slice::from_raw_parts(bytes, length) }.into(),
     ))
 }
@@ -432,6 +445,7 @@ unsafe fn property_list_error(
     let error = NonNull::new(error.cast_mut()).map(OwnedCf)?;
     // SAFETY: The owned CFError remains live while its borrowed domain and code are copied.
     let domain = unsafe { read_cf_string(CFErrorGetDomain(error.pointer())) }.ok();
+    // SAFETY: `error` is an owned live CFError for the rest of this function.
     let code = unsafe { CFErrorGetCode(error.pointer()) } as i64;
     Some(crate::NativePropertyListError::new(operation, domain, code))
 }
@@ -453,26 +467,39 @@ unsafe fn property_types_equal(left: CfRef, right: CfRef, depth: usize) -> Mihom
     if depth > 64 {
         return Err(invalid_snapshot());
     }
-    let kind = unsafe { CFGetTypeID(left) };
-    if kind != unsafe { CFGetTypeID(right) } || unsafe { CFEqual(left, right) } == 0 {
+    // SAFETY: Both references are valid property-list objects for this call.
+    let left_kind = unsafe { CFGetTypeID(left) };
+    // SAFETY: Both references are valid property-list objects for this call.
+    let right_kind = unsafe { CFGetTypeID(right) };
+    // SAFETY: Both references are valid property-list objects for this call.
+    let equal = unsafe { CFEqual(left, right) };
+    if left_kind != right_kind || equal == 0 {
         return Ok(false);
     }
-    if kind == unsafe { CFNumberGetTypeID() } {
+    // SAFETY: `left` is a live CFNumber when the type ID matches.
+    if left_kind == unsafe { CFNumberGetTypeID() } {
+        // SAFETY: Both operands are live CFNumber instances.
         return Ok(unsafe { CFNumberIsFloatType(left) == CFNumberIsFloatType(right) });
     }
-    if kind == unsafe { CFArrayGetTypeID() } {
-        for index in 0..unsafe { CFArrayGetCount(left) } {
-            if !unsafe {
-                property_types_equal(
-                    CFArrayGetValueAtIndex(left, index),
-                    CFArrayGetValueAtIndex(right, index),
-                    depth + 1,
-                )
-            }? {
+    // SAFETY: `left` is a live CFArray when the type ID matches.
+    if left_kind == unsafe { CFArrayGetTypeID() } {
+        // SAFETY: Both references are live CFArrays.
+        let count = unsafe { CFArrayGetCount(left) };
+        for index in 0..count {
+            // SAFETY: `index` is bounded by the live array count; both array
+            // objects remain live throughout this call.
+            let left_value = unsafe { CFArrayGetValueAtIndex(left, index) };
+            // SAFETY: Same index and count contract as the left array.
+            let right_value = unsafe { CFArrayGetValueAtIndex(right, index) };
+            // SAFETY: Both values are borrowed live property-list objects.
+            if !unsafe { property_types_equal(left_value, right_value, depth + 1) }? {
                 return Ok(false);
             }
         }
-    } else if kind == unsafe { CFDictionaryGetTypeID() } {
+    // SAFETY: `left` is a live CFDictionary when the type ID matches.
+    } else if left_kind == unsafe { CFDictionaryGetTypeID() } {
+        // SAFETY: `left` is a live CFDictionary; the count only bounds the
+        // arrays written below.
         let count = usize::try_from(unsafe { CFDictionaryGetCount(left) })
             .map_err(|_| invalid_snapshot())?;
         if count > MAX_NATIVE_CONFIGURATION_BYTES {
@@ -483,8 +510,15 @@ unsafe fn property_types_equal(left: CfRef, right: CfRef, depth: usize) -> Mihom
         // SAFETY: Arrays each have capacity for the full dictionary entry count.
         unsafe { CFDictionaryGetKeysAndValues(left, keys.as_mut_ptr(), values.as_mut_ptr()) };
         for (key, value) in keys.into_iter().zip(values) {
+            // SAFETY: `right` is a live dictionary and `key` comes from `left`;
+            // a missing key returns null, which is handled below.
             let other = unsafe { CFDictionaryGetValue(right, key) };
-            if other.is_null() || !unsafe { property_types_equal(value, other, depth + 1) }? {
+            if other.is_null() {
+                return Ok(false);
+            }
+            // SAFETY: Both values are borrowed live property-list objects from
+            // their respective dictionaries.
+            if !unsafe { property_types_equal(value, other, depth + 1) }? {
                 return Ok(false);
             }
         }
@@ -522,6 +556,8 @@ fn set_string(dictionary: &OwnedCf, name: &str, value: &str) -> MihomoResult<()>
 fn set_number(dictionary: &OwnedCf, name: &str, value: i32) -> MihomoResult<()> {
     let key = OwnedCf::string(name)?;
     let value = OwnedCf::number(value)?;
+    // SAFETY: Editable config is mutable and retains this live CFNumber under
+    // the live CFString key.
     unsafe { CFDictionarySetValue(dictionary.0.as_ptr(), key.pointer(), value.pointer()) };
     Ok(())
 }
@@ -554,15 +590,20 @@ fn set_bypass(dictionary: &OwnedCf, entries: &[String]) -> MihomoResult<()> {
         )
     }?;
     let key = OwnedCf::string("ExceptionsList")?;
+    // SAFETY: Editable config is mutable and retains this live CFArray under the
+    // live CFString key.
     unsafe { CFDictionarySetValue(dictionary.0.as_ptr(), key.pointer(), array.pointer()) };
     Ok(())
 }
 
 // SAFETY: The value is a live CFString or null; null is never converted as a string.
 unsafe fn read_cf_string(value: CfRef) -> MihomoResult<String> {
+    // SAFETY: `value` is checked non-null; the caller guarantees a live CF object.
     if value.is_null() || unsafe { CFGetTypeID(value) != CFStringGetTypeID() } {
         return Err(invalid_snapshot());
     }
+    // SAFETY: `value` is a live CFString; the encoding constant is the same UTF-8
+    // contract used by the copy below.
     let capacity =
         unsafe { CFStringGetMaximumSizeForEncoding(CFStringGetLength(value), 0x0800_0100) };
     let capacity = usize::try_from(capacity)
@@ -571,6 +612,8 @@ unsafe fn read_cf_string(value: CfRef) -> MihomoResult<String> {
         .filter(|capacity| *capacity <= MAX_NATIVE_CONFIGURATION_BYTES)
         .ok_or_else(invalid_snapshot)?;
     let mut buffer = vec![0_u8; capacity];
+    // SAFETY: `buffer` has exactly the capacity passed to the API and the live
+    // CFString is copied into it synchronously.
     if unsafe {
         CFStringGetCString(
             value,
@@ -602,6 +645,8 @@ fn summary_from_configuration(
     };
     let value = |name: &str| -> MihomoResult<CfRef> {
         let key = OwnedCf::string(name)?;
+        // SAFETY: `dictionary` owns a live immutable dictionary; the returned
+        // value is borrowed and only used while that dictionary is alive.
         Ok(unsafe { CFDictionaryGetValue(dictionary.pointer(), key.pointer()) })
     };
     let number = |name: &str| -> MihomoResult<i64> {
@@ -609,10 +654,14 @@ fn summary_from_configuration(
         if value.is_null() {
             return Ok(0);
         }
+        // SAFETY: `value` is a borrowed live CFType from the owned dictionary.
         let kind = unsafe { CFGetTypeID(value) };
+        // SAFETY: `kind` was read from this same live object.
         if kind == unsafe { CFBooleanGetTypeID() } {
+            // SAFETY: `value` is a live CFBoolean.
             return Ok(i64::from(unsafe { CFBooleanGetValue(value) }));
         }
+        // SAFETY: `kind` was read from this same live object.
         if kind != unsafe { CFNumberGetTypeID() } {
             return Err(invalid_snapshot());
         }
@@ -628,6 +677,7 @@ fn summary_from_configuration(
         if value.is_null() {
             Ok(String::new())
         } else {
+            // SAFETY: `value` is a borrowed live CFString from the owned dictionary.
             unsafe { read_cf_string(value) }
         }
     };
@@ -635,11 +685,18 @@ fn summary_from_configuration(
     let bypass = if bypass.is_null() {
         Vec::new()
     } else {
+        // SAFETY: `bypass` is a borrowed live CFArray from the owned dictionary.
         if unsafe { CFGetTypeID(bypass) != CFArrayGetTypeID() } {
             return Err(invalid_snapshot());
         }
-        (0..unsafe { CFArrayGetCount(bypass) })
-            .map(|index| unsafe { read_cf_string(CFArrayGetValueAtIndex(bypass, index)) })
+        // SAFETY: `bypass` is a live CFArray for the rest of this block.
+        let bypass_count = unsafe { CFArrayGetCount(bypass) };
+        (0..bypass_count)
+            .map(|index| {
+                // SAFETY: `index` is bounded by the live array count; the element
+                // is borrowed while the array remains alive.
+                unsafe { read_cf_string(CFArrayGetValueAtIndex(bypass, index)) }
+            })
             .collect::<MihomoResult<Vec<_>>>()?
     };
     Ok(SystemProxyStatus {
@@ -724,6 +781,7 @@ mod tests {
         }
     }
     fn fixture_snapshot(dictionary: &OwnedCf) -> ProxySnapshot {
+        // SAFETY: Test fixture dictionary is a live owned CFDictionary.
         let configuration = unsafe { encode_configuration(dictionary.pointer()) }.unwrap();
         ProxySnapshot {
             service_id: "fixture-stable-id".into(),
@@ -764,6 +822,7 @@ mod tests {
         let round_trip = fixture_snapshot(&restored);
         assert!(before.same_state(&round_trip).unwrap());
         let key = OwnedCf::string("HTTPEnable").unwrap();
+        // SAFETY: `restored` is a live decoded dictionary and `key` is a live CFString.
         assert!(unsafe { CFDictionaryGetValue(restored.pointer(), key.pointer()) }.is_null());
         assert!(!configurations_equal(None, before.configuration.as_deref()).unwrap());
     }
@@ -776,6 +835,7 @@ mod tests {
         let changed = editable_configuration(before.configuration.as_deref()).unwrap();
         let key = OwnedCf::string("NativeExtra").unwrap();
         let real = 1.0_f64;
+        // SAFETY: Test creates one live CFNumber with kCFNumberFloat64Type (6).
         let value = unsafe {
             OwnedCf::created(
                 CFNumberCreate(ptr::null(), 6, (&raw const real).cast()),
@@ -783,6 +843,7 @@ mod tests {
             )
         }
         .unwrap();
+        // SAFETY: `changed` is a live mutable dictionary and both objects are live.
         unsafe { CFDictionarySetValue(changed.0.as_ptr(), key.pointer(), value.pointer()) };
         assert!(!before.same_state(&fixture_snapshot(&changed)).unwrap());
         set_number(&changed, "NativeExtra", 1).unwrap();

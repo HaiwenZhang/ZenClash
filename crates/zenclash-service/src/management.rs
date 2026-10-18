@@ -1,3 +1,4 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
 // Modified for the ZenClash fork on 2026-10-04; see NOTICE.md. GPL-3.0-only.
 //! Unprivileged preparation and privileged publication share one installation contract.
 #[cfg(any(feature = "client", test))]
@@ -248,6 +249,7 @@ pub fn prepare_install_if_requested() -> Result<bool> {
     let mut ensure = false;
     let mut core_only = false;
     let mut prompt = "Install ZenClash service and approved cores".to_owned();
+    // SAFETY: `getgid` has no preconditions or memory effects.
     #[cfg(unix)]
     let mut gid = unsafe { platform_lib::getgid() };
     while let Some(argument) = arguments.next() {
@@ -372,6 +374,7 @@ fn shell_quote(value: &std::ffi::OsStr) -> String {
 
 #[cfg(all(unix, feature = "client"))]
 fn elevate(installer: &Path, arguments: &[OsString], gid: u32, prompt: &str) -> Result<()> {
+    // SAFETY: `geteuid` has no preconditions or memory effects.
     let status = if unsafe { platform_lib::geteuid() } == 0 {
         Command::new(installer)
             .args(arguments)
@@ -460,6 +463,8 @@ fn elevate(installer: &Path, arguments: &[OsString], _prompt: &str) -> Result<()
     };
     // ShellExecuteExW may delegate to a COM shell extension. A preexisting apartment
     // can reject this mode; only a successful initialization must be balanced.
+    // SAFETY: `CoInitializeEx` has no pointer preconditions; the boolean records
+    // whether the apartment must be uninitialized on drop.
     let _apartment = ComApartment(unsafe {
         CoInitializeEx(
             std::ptr::null(),

@@ -1,6 +1,10 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 // Modified for the ZenClash fork on 2026-10-05; see NOTICE.md. GPL-3.0-only.
 use crate::core::paths::{ServicePaths, service_paths};
-use crate::core::process::{is_process_alive, terminate_process};
+use crate::core::process::{
+    ProcessIdentity, is_process_alive, process_identity, terminate_process, terminate_process_if_identity,
+};
 use crate::{IPC_AUTH_EXPECT, IpcCommand};
 use anyhow::{Context, Result, anyhow};
 use kode_bridge::{ClientConfig, IpcHttpClient};
@@ -73,7 +77,13 @@ pub async fn acquire_service_owner() -> Result<Option<ServiceOwnerGuard>> {
     }
     warn!("Existing service owner is not reachable; stopping old owner before lock takeover");
     if is_process_alive(old_pid) {
-        terminate_process(old_pid).await?;
+        match read_owner_identity(&paths) {
+            Some(identity) => terminate_process_if_identity(old_pid, &identity).await?,
+            None => {
+                warn!("Service owner metadata has no process identity; falling back to PID-only termination");
+                terminate_process(old_pid).await?;
+            }
+        }
     }
     if is_process_alive(old_pid) {
         return Err(anyhow!(
@@ -109,6 +119,7 @@ fn try_acquire_owner_once(paths: &ServicePaths) -> Result<Option<ServiceOwnerGua
             .open(paths.owner_lock_path())
             .with_context(|| format!("failed to open owner lock {:?}", paths.owner_lock_path()))?;
 
+        // SAFETY: `file` is open and `flock` operates on its live descriptor.
         let result = unsafe { platform_lib::flock(file.as_raw_fd(), platform_lib::LOCK_EX | platform_lib::LOCK_NB) };
 
         if result == 0 {
@@ -139,7 +150,9 @@ fn try_acquire_owner_once(paths: &ServicePaths) -> Result<Option<ServiceOwnerGua
             .truncate(false)
             .open(paths.owner_lock_path())
             .with_context(|| format!("failed to open {:?}", paths.owner_lock_path()))?;
+        // SAFETY: `file` is open and `LockFile` operates on its live handle.
         if unsafe { LockFile(file.as_raw_handle(), 0, 0, u32::MAX, u32::MAX) } == 0 {
+            // SAFETY: `GetLastError` reads thread-local state and has no preconditions.
             if unsafe { GetLastError() } == ERROR_LOCK_VIOLATION {
                 return Ok(None);
             }
@@ -152,16 +165,48 @@ fn try_acquire_owner_once(paths: &ServicePaths) -> Result<Option<ServiceOwnerGua
 }
 
 fn write_owner_metadata(file: &mut File, paths: &ServicePaths, pid: u32) -> Result<()> {
+    // The lock owner records its own identity so a later takeover cannot kill a
+    // process that merely reused the same PID after a crash.
+    let identity = process_identity(pid)?.context("service owner process identity is unavailable")?;
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
-    writeln!(file, "pid={pid}")?;
-    writeln!(file, "version={}", crate::VERSION)?;
+    file.write_all(owner_metadata(pid, &identity).as_bytes())?;
     file.sync_data()?;
 
     std::fs::write(paths.pid_file_path(), pid.to_string())
         .with_context(|| format!("failed to write pid file {:?}", paths.pid_file_path()))?;
 
     Ok(())
+}
+
+fn owner_metadata(pid: u32, identity: &ProcessIdentity) -> String {
+    format!(
+        "pid={pid}\nexe={}\nstarted_at={}\nversion={}\n",
+        identity.executable,
+        identity.started_at,
+        crate::VERSION
+    )
+}
+
+fn read_owner_identity(paths: &ServicePaths) -> Option<ProcessIdentity> {
+    let content = std::fs::read_to_string(paths.owner_lock_path()).ok()?;
+    parse_owner_identity(&content)
+}
+
+fn parse_owner_identity(content: &str) -> Option<ProcessIdentity> {
+    let mut executable = None;
+    let mut started_at = None;
+    for line in content.lines() {
+        if let Some(value) = line.strip_prefix("exe=") {
+            executable = Some(value.to_owned());
+        } else if let Some(value) = line.strip_prefix("started_at=") {
+            started_at = value.trim().parse::<u64>().ok();
+        }
+    }
+    Some(ProcessIdentity {
+        executable: executable?,
+        started_at: started_at?,
+    })
 }
 
 fn read_owner_pid(paths: &ServicePaths) -> Option<u32> {
@@ -241,4 +286,35 @@ fn cleanup_runtime_artifacts(paths: &ServicePaths) {
 
     #[cfg(windows)]
     let _ = paths;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{owner_metadata, parse_owner_identity};
+    use crate::core::process::ProcessIdentity;
+
+    fn identity() -> ProcessIdentity {
+        ProcessIdentity {
+            executable: "/opt/zenclash/zenclash-service".to_owned(),
+            started_at: 1_700_000_000_123_456,
+        }
+    }
+
+    #[test]
+    fn owner_metadata_round_trips_the_process_identity() {
+        let parsed =
+            parse_owner_identity(&owner_metadata(42, &identity())).expect("generated owner metadata must be readable");
+        assert_eq!(parsed, identity());
+    }
+
+    #[test]
+    fn legacy_owner_metadata_without_identity_is_rejected() {
+        assert!(parse_owner_identity("pid=42\nversion=2.7.5").is_none());
+    }
+
+    #[test]
+    fn incomplete_owner_metadata_is_rejected() {
+        assert!(parse_owner_identity("pid=42\nexe=/opt/zenclash/zenclash-service\n").is_none());
+        assert!(parse_owner_identity("pid=42\nstarted_at=1700000000\n").is_none());
+    }
 }

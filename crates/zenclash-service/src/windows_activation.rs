@@ -1,6 +1,8 @@
 //! SCM trigger-start and a retained, read-only pipe connection for each GUI process.
 //! Authenticated mutations continue to use the existing control pipe.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use anyhow::{Context as _, Result, bail};
 use platform_lib::service::Service;
 #[cfg(not(feature = "test"))]
@@ -97,6 +99,8 @@ pub fn windows_service_can_activate(service: &Service) -> Result<bool> {
     }
     // Use an aligned buffer: the result contains pointers to native structs.
     let mut buffer = vec![0_usize; (required as usize).div_ceil(std::mem::size_of::<usize>())];
+    // SAFETY: `buffer` is aligned and sized to `required`; the service handle is
+    // live and the API writes at most `required` bytes.
     if unsafe {
         QueryServiceConfig2W(
             service.raw_handle(),
@@ -116,9 +120,12 @@ pub fn windows_service_can_activate(service: &Service) -> Result<bool> {
         return Ok(false);
     }
     let expected = trigger_pipe_name();
+    // SAFETY: `info` points into the live aligned SCM buffer, and its nested
+    // pointer/count pair was initialized by QueryServiceConfig2W.
     let triggers = unsafe { std::slice::from_raw_parts(info.pTriggers, info.cTriggers as usize) };
     Ok(triggers
         .iter()
+        // SAFETY: each trigger points into the live SCM buffer validated above.
         .any(|trigger| unsafe { matches_pipe_trigger(trigger, &expected) }))
 }
 
@@ -131,6 +138,8 @@ unsafe fn matches_pipe_trigger(trigger: &SERVICE_TRIGGER, expected: &[u16]) -> b
     {
         return false;
     }
+    // SAFETY: `trigger.pTriggerSubtype` was checked non-null and points into
+    // the live SCM query buffer.
     let subtype = unsafe { &*trigger.pTriggerSubtype };
     if subtype.data1 != NAMED_PIPE_EVENT_GUID.data1
         || subtype.data2 != NAMED_PIPE_EVENT_GUID.data2
@@ -139,11 +148,15 @@ unsafe fn matches_pipe_trigger(trigger: &SERVICE_TRIGGER, expected: &[u16]) -> b
     {
         return false;
     }
+    // SAFETY: `pDataItems`/`cDataItems` were initialized by the SCM query and
+    // remain live for the duration of this function.
     let items = unsafe { std::slice::from_raw_parts(trigger.pDataItems, trigger.cDataItems as usize) };
     items.iter().any(|data| {
         data.dwDataType == SERVICE_TRIGGER_DATA_TYPE_STRING
             && !data.pData.is_null()
             && data.cbData as usize == std::mem::size_of_val(expected)
+            // SAFETY: `data.pData` was checked non-null and `cbData` equals the
+            // expected byte length; the data lives in the SCM query buffer.
             && unsafe { std::slice::from_raw_parts(data.pData.cast::<u16>(), expected.len()) } == expected
     })
 }
@@ -477,12 +490,16 @@ mod trigger_tests {
         // SAFETY: every pointer names a live local value for the whole test.
         assert!(unsafe { matches_pipe_trigger(&trigger, &expected) });
         name[0] = u16::from(b'x');
+        // SAFETY: every pointer still names a live local value for this call.
         assert!(!unsafe { matches_pipe_trigger(&trigger, &expected) });
         name[0] = expected[0];
         trigger.dwAction = windows_sys::Win32::System::Services::SERVICE_TRIGGER_ACTION_SERVICE_STOP;
+        // SAFETY: every pointer still names a live local value for this call.
         assert!(!unsafe { matches_pipe_trigger(&trigger, &expected) });
         trigger.dwAction = SERVICE_TRIGGER_ACTION_SERVICE_START;
         trigger.pTriggerSubtype = std::ptr::null_mut();
+        // SAFETY: every pointer still names a live local value for this call;
+        // the function checks `pTriggerSubtype` for null before dereferencing.
         assert!(!unsafe { matches_pipe_trigger(&trigger, &expected) });
     }
 }

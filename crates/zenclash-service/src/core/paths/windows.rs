@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 // Modified for the ZenClash fork on 2026-10-04; see NOTICE.md. GPL-3.0-only.
 use std::ffi::OsString;
 use std::io;
@@ -48,6 +50,8 @@ fn resolve_state_dir(
 
 fn program_data() -> io::Result<PathBuf> {
     let mut raw = std::ptr::null_mut();
+    // SAFETY: The known-folder API has no memory preconditions; `raw` is a
+    // writable out-parameter and the returned allocation is freed below.
     let status = unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramData, 0, std::ptr::null_mut(), &mut raw) };
     let result = if status < 0 {
         Err(io::Error::other(format!(
@@ -60,11 +64,15 @@ fn program_data() -> io::Result<PathBuf> {
         ))
     } else {
         let mut length = 0;
+        // SAFETY: The API returned a NUL-terminated allocation owned here; the
+        // scan stops at the terminator.
         unsafe {
             while *raw.add(length) != 0 {
                 length += 1;
             }
         }
+        // SAFETY: `raw` points to the live allocation and `length` was bounded
+        // by its NUL terminator; the slice is copied immediately.
         let path = PathBuf::from(OsString::from_wide(unsafe { std::slice::from_raw_parts(raw, length) }));
         if path.is_absolute() {
             Ok(path)
@@ -75,6 +83,8 @@ fn program_data() -> io::Result<PathBuf> {
         }
     };
     if !raw.is_null() {
+        // SAFETY: `raw` is either null or an allocation returned by
+        // SHGetKnownFolderPath; it is freed exactly once here.
         unsafe { CoTaskMemFree(raw.cast()) };
     }
     result
@@ -148,6 +158,8 @@ fn registered_executable(command: &Path) -> io::Result<PathBuf> {
     }
     wide.push(0);
     let mut count = 0;
+    // SAFETY: `wide` is NUL-terminated; `count` is a writable out-parameter and
+    // the returned argument array is freed below.
     let arguments = unsafe { CommandLineToArgvW(wide.as_ptr(), &mut count) };
     if arguments.is_null() {
         return Err(io::Error::last_os_error());
@@ -157,17 +169,25 @@ fn registered_executable(command: &Path) -> io::Result<PathBuf> {
             "registered service command must name only the installed executable",
         ))
     } else {
+        // SAFETY: `arguments` is a live array with `count == 1`; its first
+        // entry is a valid argument string.
         let raw = unsafe { *arguments };
         let mut length = 0;
+        // SAFETY: The argument string is NUL-terminated within the live
+        // CommandLineToArgvW allocation.
         unsafe {
             while *raw.add(length) != 0 {
                 length += 1;
             }
         }
+        // SAFETY: `raw` points to the live argument string and `length` was
+        // bounded by its NUL terminator; the slice is copied immediately.
         Ok(PathBuf::from(OsString::from_wide(unsafe {
             std::slice::from_raw_parts(raw, length)
         })))
     };
+    // SAFETY: `arguments` is the live allocation returned by CommandLineToArgvW
+    // and is freed exactly once here.
     unsafe { LocalFree(arguments.cast()) };
     result
 }

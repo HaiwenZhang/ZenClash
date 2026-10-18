@@ -1,4 +1,6 @@
 // Modified for the ZenClash fork on 2026-10-04; see NOTICE.md. GPL-3.0-only.
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use anyhow::{Context as _, Result, bail};
 use std::os::windows::ffi::OsStrExt as _;
 use std::path::Path;
@@ -63,12 +65,17 @@ fn ensure_private_directory_with_recovery(
         lpSecurityDescriptor: descriptor.0,
         bInheritHandle: 0,
     };
-    if unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) } == 0 && unsafe { GetLastError() } != ERROR_ALREADY_EXISTS
-    {
+    // SAFETY: `wide` is a NUL-terminated path and `attributes` is a live
+    // SECURITY_ATTRIBUTES referencing an owned descriptor.
+    let created = unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) } != 0;
+    // SAFETY: GetLastError reads thread-local state and has no preconditions.
+    if !created && unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
         return Err(std::io::Error::last_os_error())
             .with_context(|| format!("failed to create private service directory {path:?}"));
     }
 
+    // SAFETY: `wide` is a NUL-terminated path; the returned handle is checked
+    // against INVALID_HANDLE_VALUE before adoption.
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
@@ -87,9 +94,11 @@ fn ensure_private_directory_with_recovery(
     let handle = OwnedHandle(handle);
 
     let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `handle.0` is a live directory handle opened above.
     if unsafe { GetFileInformationByHandle(handle.0, &mut information) } == 0
         || information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
         || information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        // SAFETY: `handle.0` is the same live directory handle.
         || unsafe { GetFileType(handle.0) } != FILE_TYPE_DISK
     {
         bail!("service directory {path:?} is not an ordinary directory");
@@ -122,6 +131,8 @@ pub(crate) fn secure_private_directory(path: &Path) -> Result<()> {
 pub(crate) fn secure_private_service_file_if_exists(path: &Path) -> Result<()> {
     let descriptor = LocalDescriptor::from_sddl(PRIVATE_SERVICE_FILE_SDDL)?;
     let wide = wide_path(path)?;
+    // SAFETY: `wide` is a NUL-terminated path; the returned handle is checked
+    // against INVALID_HANDLE_VALUE before adoption.
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
@@ -134,6 +145,7 @@ pub(crate) fn secure_private_service_file_if_exists(path: &Path) -> Result<()> {
         )
     };
     if handle == INVALID_HANDLE_VALUE {
+        // SAFETY: GetLastError reads thread-local state and has no preconditions.
         return match unsafe { GetLastError() } {
             ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => Ok(()),
             _ => Err(std::io::Error::last_os_error())
@@ -142,8 +154,10 @@ pub(crate) fn secure_private_service_file_if_exists(path: &Path) -> Result<()> {
     }
     let handle = OwnedHandle(handle);
     let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `handle.0` is a live file handle opened above.
     if unsafe { GetFileInformationByHandle(handle.0, &mut information) } == 0
         || information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
+        // SAFETY: `handle.0` is the same live file handle.
         || unsafe { GetFileType(handle.0) } != FILE_TYPE_DISK
     {
         bail!("service file {path:?} is not an ordinary file");
@@ -157,10 +171,13 @@ pub(crate) fn secure_private_service_file_if_exists(path: &Path) -> Result<()> {
 fn ensure_local_system_owner(handle: *mut std::ffi::c_void, path: &Path) -> Result<()> {
     let (owner, security) = read_owner(handle)?;
     let mut system_sid = well_known_sid(WinLocalSystemSid, "LocalSystem")?;
+    // SAFETY: `owner` is borrowed from the live security descriptor and the
+    // LocalSystem SID is a live owned allocation.
     if unsafe { EqualSid(owner, system_sid.as_mut_ptr().cast()) } != 0 {
         return Ok(());
     }
     let mut administrators_sid = well_known_sid(WinBuiltinAdministratorsSid, "Builtin Administrators")?;
+    // SAFETY: Both SIDs are live allocations owned by this scope.
     if unsafe { EqualSid(owner, administrators_sid.as_mut_ptr().cast()) } == 0 {
         bail!(
             "service path {path:?} has an unexpected owner; only legacy Builtin Administrators ownership can be migrated"
@@ -168,6 +185,8 @@ fn ensure_local_system_owner(handle: *mut std::ffi::c_void, path: &Path) -> Resu
     }
     drop(security);
 
+    // SAFETY: The handle is live and `system_sid` is a valid owned SID; all
+    // unused out-parameters are null or writable.
     let status = unsafe {
         SetSecurityInfo(
             handle,
@@ -190,7 +209,10 @@ fn installer_owner_is_trusted(handle: *mut std::ffi::c_void) -> Result<bool> {
     let (owner, _security) = read_owner(handle)?;
     let mut system_sid = well_known_sid(WinLocalSystemSid, "LocalSystem")?;
     let mut administrators_sid = well_known_sid(WinBuiltinAdministratorsSid, "Builtin Administrators")?;
+    // SAFETY: `owner` is borrowed from the live descriptor and both SIDs are
+    // live owned allocations.
     Ok(unsafe { EqualSid(owner, system_sid.as_mut_ptr().cast()) } != 0
+        // SAFETY: Both SIDs are live allocations owned by this scope.
         || unsafe { EqualSid(owner, administrators_sid.as_mut_ptr().cast()) } != 0)
 }
 
@@ -198,6 +220,8 @@ fn installer_owner_is_trusted(handle: *mut std::ffi::c_void) -> Result<bool> {
 fn read_owner(handle: *mut std::ffi::c_void) -> Result<(*mut std::ffi::c_void, LocalDescriptor)> {
     let mut owner = std::ptr::null_mut();
     let mut security = std::ptr::null_mut();
+    // SAFETY: The handle is live; all out-parameters are writable and the
+    // returned descriptor is checked before being wrapped.
     let status = unsafe {
         GetSecurityInfo(
             handle,
@@ -222,6 +246,8 @@ fn well_known_sid(kind: i32, label: &str) -> Result<Vec<usize>> {
     let words = (SECURITY_MAX_SID_SIZE as usize).div_ceil(std::mem::size_of::<usize>());
     let mut sid = vec![0_usize; words];
     let mut sid_size = SECURITY_MAX_SID_SIZE;
+    // SAFETY: `sid` is aligned storage of at least `sid_size` bytes and
+    // `sid_size` is a writable in/out parameter.
     if unsafe { CreateWellKnownSid(kind, std::ptr::null_mut(), sid.as_mut_ptr().cast(), &mut sid_size) } == 0 {
         return Err(std::io::Error::last_os_error()).with_context(|| format!("failed to create {label} SID"));
     }
@@ -241,6 +267,8 @@ struct OwnedHandle(*mut std::ffi::c_void);
 
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
+        // SAFETY: `self.0` is a non-null handle owned by this guard and is
+        // closed exactly once here.
         unsafe { CloseHandle(self.0) };
     }
 }
@@ -252,6 +280,8 @@ impl LocalDescriptor {
         let mut wide: Vec<u16> = sddl.encode_utf16().collect();
         wide.push(0);
         let mut descriptor = std::ptr::null_mut();
+        // SAFETY: `wide` is a NUL-terminated SDDL string and `descriptor` is a
+        // writable out-parameter checked for null before being wrapped.
         if unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 wide.as_ptr(),
@@ -272,12 +302,16 @@ impl LocalDescriptor {
         let mut present = 0;
         let mut defaulted = 0;
         let mut dacl = std::ptr::null_mut();
+        // SAFETY: `self.0` is a live descriptor owned by this wrapper; all
+        // out-parameters are writable stack storage.
         if unsafe { GetSecurityDescriptorDacl(self.0, &mut present, &mut dacl, &mut defaulted) } == 0
             || present == 0
             || dacl.is_null()
         {
             bail!("private service directory descriptor has no DACL");
         }
+        // SAFETY: `handle` is live and `dacl` is borrowed from the live
+        // descriptor for the duration of the call.
         let status = unsafe {
             SetSecurityInfo(
                 handle,
@@ -298,6 +332,8 @@ impl LocalDescriptor {
 
 impl Drop for LocalDescriptor {
     fn drop(&mut self) {
+        // SAFETY: `self.0` is a descriptor allocation returned by
+        // ConvertStringSecurityDescriptorToSecurityDescriptorW.
         unsafe { LocalFree(self.0) };
     }
 }
@@ -320,29 +356,45 @@ mod tests {
         ));
         std::fs::create_dir(&root)?;
         let mut raw = std::ptr::null_mut();
-        anyhow::ensure!(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) } != 0);
+        anyhow::ensure!(
+            // SAFETY: The current process token is valid and `raw` is a
+            // writable out-parameter; the handle is adopted below.
+            unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) } != 0
+        );
         let token = super::OwnedHandle(raw);
         let mut length = 0;
+        // SAFETY: This call only queries the required buffer size; the null
+        // data pointer and zero length are explicitly supported.
         unsafe { GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut length) };
         let mut buffer = vec![0usize; (length as usize).div_ceil(std::mem::size_of::<usize>())];
         anyhow::ensure!(
+            // SAFETY: `buffer` is aligned and `length` matches the size queried
+            // above; `length` is updated in place.
             unsafe { GetTokenInformation(token.0, TokenUser, buffer.as_mut_ptr().cast(), length, &mut length) } != 0
         );
+        // SAFETY: The successful query initialized the buffer with one aligned
+        // TOKEN_USER whose SID points into the same live buffer.
         let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
         let wide = super::wide_path(&root)?;
-        let handle = super::OwnedHandle(unsafe {
-            super::CreateFileW(
-                wide.as_ptr(),
-                super::WRITE_OWNER,
-                super::FILE_SHARE_READ | super::FILE_SHARE_WRITE | super::FILE_SHARE_DELETE,
-                std::ptr::null(),
-                super::OPEN_EXISTING,
-                super::FILE_FLAG_BACKUP_SEMANTICS,
-                std::ptr::null_mut(),
-            )
-        });
+        let handle = super::OwnedHandle(
+            // SAFETY: `wide` is a NUL-terminated path; the returned handle is
+            // checked against INVALID_HANDLE_VALUE below.
+            unsafe {
+                super::CreateFileW(
+                    wide.as_ptr(),
+                    super::WRITE_OWNER,
+                    super::FILE_SHARE_READ | super::FILE_SHARE_WRITE | super::FILE_SHARE_DELETE,
+                    std::ptr::null(),
+                    super::OPEN_EXISTING,
+                    super::FILE_FLAG_BACKUP_SEMANTICS,
+                    std::ptr::null_mut(),
+                )
+            },
+        );
         anyhow::ensure!(handle.0 != super::INVALID_HANDLE_VALUE);
         anyhow::ensure!(
+            // SAFETY: The handle is live and `user.User.Sid` points into the
+            // live token buffer.
             unsafe {
                 super::SetSecurityInfo(
                     handle.0,
