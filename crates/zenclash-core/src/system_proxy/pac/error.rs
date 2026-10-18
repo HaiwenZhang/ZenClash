@@ -22,7 +22,16 @@ pub enum PacServerOperation {
 #[non_exhaustive]
 pub enum PacError {
     /// A PAC startup operation failed, retaining the OS cause.
-    #[error("PAC 服务操作失败（{operation}）：{source}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "system_proxy.pac.errors.io",
+            &[
+                ("operation", operation.to_string()),
+                ("error", source.to_string())
+            ]
+        )
+    )]
     Io {
         /// Failed listener or worker operation.
         operation: PacServerOperation,
@@ -34,11 +43,11 @@ pub enum PacError {
 
 impl std::fmt::Display for PacServerOperation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::Bind => "绑定监听地址",
-            Self::ConfigureListener => "配置监听器",
-            Self::ReadLocalAddress => "读取监听地址",
-            Self::SpawnWorker => "启动工作线程",
-        })
+        formatter.write_str(&zenclash_i18n::text(match self {
+            Self::Bind => "system_proxy.pac.operations.bind",
+            Self::ConfigureListener => "system_proxy.pac.operations.configure_listener",
+            Self::ReadLocalAddress => "system_proxy.pac.operations.read_local_address",
+            Self::SpawnWorker => "system_proxy.pac.operations.spawn_worker",
+        }))
     }
 }

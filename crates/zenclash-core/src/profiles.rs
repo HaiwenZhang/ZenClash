@@ -60,34 +60,58 @@ const MAX_PROFILE_INDEX_BYTES: usize = 4 * 1024 * 1024;
 #[non_exhaustive]
 pub enum ProfileStoreError {
     /// Filesystem access failed.
-    #[error("配置仓库 I/O 错误：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("profiles.errors.io", &[("error", .0.to_string())])
+    )]
     Io(#[from] std::io::Error),
     /// The persistent profile index could not be decoded or encoded.
-    #[error("配置仓库索引无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("profiles.errors.index", &[("error", .0.to_string())])
+    )]
     Index(#[from] serde_json::Error),
     /// The decoded index contains unsafe paths or ambiguous record identities.
     #[error("{0}")]
     InvalidIndex(String),
     /// The profile index exceeded the defensive in-memory read limit.
-    #[error("配置仓库索引超过 {limit_mib} MiB 限制")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "profiles.errors.index_too_large",
+            &[("limit", limit_mib.to_string())]
+        )
+    )]
     IndexTooLarge {
         /// Configured index-size limit in mebibytes.
         limit_mib: usize,
     },
     /// The supplied content is not a supported Clash/Mihomo YAML profile.
-    #[error("Clash YAML 无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("profiles.errors.invalid_yaml", &[("error", .0.clone())])
+    )]
     InvalidYaml(String),
     /// A subscription request failed.
-    #[error("在线订阅请求失败：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("profiles.errors.http", &[("error", .0.to_string())])
+    )]
     Http(#[from] reqwest::Error),
     /// The requested profile does not exist or is not of the required kind.
-    #[error("找不到配置：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("profiles.errors.not_found", &[("error", .0.clone())])
+    )]
     NotFound(String),
     /// The active profile cannot be deleted.
-    #[error("活动配置不能删除，请先切换到其他配置")]
+    #[error("{}", zenclash_i18n::text("profiles.errors.active_profile"))]
     ActiveProfile,
     /// A multi-file update or its rollback could not be completed safely.
-    #[error("配置仓库事务失败：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("profiles.errors.transaction", &[("error", .0.clone())])
+    )]
     Transaction(String),
 }
 

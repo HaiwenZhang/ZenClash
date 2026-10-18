@@ -279,13 +279,16 @@ pub enum SystemProxySessionError {
     #[error(transparent)]
     Native(#[from] MihomoError),
     /// Enabling was requested without a usable proxy port.
-    #[error("启用系统代理需要可用的 HTTP 或 Mixed 端口")]
+    #[error("{}", zenclash_i18n::text("system_proxy.errors.missing_port"))]
     MissingPort,
     /// Native state was enabled but no verified ownership was returned.
-    #[error("系统代理启用后未返回可验证所有权")]
+    #[error("{}", zenclash_i18n::text("system_proxy.errors.missing_ownership"))]
     MissingOwnership,
     /// Persistence failed after a native write and recovery was attempted.
-    #[error("系统代理事务失败：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("system_proxy.errors.transaction", &[("error", .0.to_string())])
+    )]
     Transaction(#[source] Box<SystemProxyError>),
 }
 
@@ -1229,14 +1232,16 @@ mod tests {
     fn bypass_normalization_rejects_command_and_gvariant_delimiters() {
         let error = normalize_system_proxy_bypass(&["localhost';evil".into()]).unwrap_err();
 
-        assert!(error.to_string().contains("格式无效"));
+        let expected = zenclash_i18n::text("system_proxy.validation.invalid_syntax");
+        assert!(error.to_string().contains(&expected));
     }
 
     #[test]
     fn bypass_normalization_rejects_invalid_cidr_prefix() {
         let error = normalize_system_proxy_bypass(&["192.168.0.0/99".into()]).unwrap_err();
 
-        assert!(error.to_string().contains("格式无效"));
+        let expected = zenclash_i18n::text("system_proxy.validation.invalid_syntax");
+        assert!(error.to_string().contains(&expected));
     }
 
     #[test]

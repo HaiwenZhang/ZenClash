@@ -218,6 +218,7 @@ app:
         zh-CN: 退出前停止内核任务异常结束：%{error}
         en: "The pre-quit core stop task ended unexpectedly: %{error}"
 
+
 startup:
   initializing:
     zh-CN: 正在初始化内核…
@@ -288,6 +289,9 @@ startup:
   failure:
     zh-CN: ZenClash 启动失败：%{error}
     en: "ZenClash failed to start: %{error}"
+  already_running:
+    zh-CN: ZenClash 已在运行。请切换到已打开的窗口。
+    en: ZenClash is already running. Switch to the existing window.
   quarantine:
     profile_index:
       zh-CN: 损坏的配置索引已隔离到 %{path}，托管 YAML 文件仍保留
@@ -1517,6 +1521,33 @@ profiles:
     repository_task:
       zh-CN: 配置仓库后台任务异常结束：%{error}
       en: "The profile repository task ended unexpectedly: %{error}"
+    io:
+      zh-CN: 配置仓库 I/O 错误：%{error}
+      en: "Profile store I/O error: %{error}"
+    index:
+      zh-CN: 配置仓库索引无效：%{error}
+      en: "The profile store index is invalid: %{error}"
+    index_too_large:
+      zh-CN: 配置仓库索引超过 %{limit} MiB 限制
+      en: "The profile store index exceeds the %{limit} MiB limit"
+    invalid_yaml:
+      zh-CN: Clash YAML 无效：%{error}
+      en: "Clash YAML is invalid: %{error}"
+    http:
+      zh-CN: 在线订阅请求失败：%{error}
+      en: "Subscription request failed: %{error}"
+    not_found:
+      zh-CN: 找不到配置：%{error}
+      en: "Profile not found: %{error}"
+    active_profile:
+      zh-CN: 活动配置不能删除，请先切换到其他配置
+      en: The active profile cannot be deleted; switch to another profile first
+    transaction:
+      zh-CN: 配置仓库事务失败：%{error}
+      en: "Profile store transaction failed: %{error}"
+    task:
+      zh-CN: 配置事务后台任务异常结束：%{error}
+      en: "The configuration transaction task ended unexpectedly: %{error}"
 
 proxies:
   selection:
@@ -1815,6 +1846,15 @@ proxies:
       zh-CN: "「%{group}」组测速完成：%{count} 个节点失败"
       en: "Delay tests finished for %{group}: %{count} nodes failed"
 
+provider_operations:
+  errors:
+    operation:
+      zh-CN: Provider 操作失败：%{error}
+      en: "Provider operation failed: %{error}"
+    missing_readback:
+      zh-CN: Provider 回读缺少 %{name}
+      en: "Provider readback is missing %{name}"
+
 logs:
   ui:
     core:
@@ -2011,6 +2051,12 @@ logs:
     write:
       zh-CN: 写入日志失败：%{error}
       en: "Could not write the log file: %{error}"
+    invalid_limit:
+      zh-CN: 日志文件大小上限必须在 1 到 100 MiB 之间
+      en: The log file size limit must be between 1 and 100 MiB
+    io:
+      zh-CN: 日志文件 I/O 错误：%{error}
+      en: "Log file I/O error: %{error}"
   empty:
     waiting:
       zh-CN: 等待内核日志事件…
@@ -2079,6 +2125,58 @@ traffic_capture:
     completion_task:
       zh-CN: 流量接管后台任务异常结束：%{error}
       en: "Traffic capture background task failed: %{error}"
+    missing_profile:
+      zh-CN: 没有可用于流量接管的活动 Profile
+      en: No active profile is available for traffic capture
+    external_system_proxy:
+      zh-CN: 系统代理由其他应用控制；请先在系统设置中处理后再切换接管方式
+      en: The system proxy is controlled by another application; resolve it in system settings before switching capture modes
+    missing_system_proxy_port:
+      zh-CN: 没有可用的 HTTP/Mixed 端口
+      en: No usable HTTP/Mixed port is available
+    system_proxy_unavailable:
+      zh-CN: 系统代理持久化状态不可用
+      en: The persistent system proxy state is unavailable
+    reconciliation_required:
+      zh-CN: 流量接管需要协调：%{detail}
+      en: "Traffic capture needs reconciliation: %{detail}"
+    observation_unavailable:
+      zh-CN: 流量接管观察失败：%{error}
+      en: "Traffic capture observation failed: %{error}"
+    task:
+      zh-CN: 流量接管后台任务异常结束（%{task}）：%{error}
+      en: "The traffic capture background task ended unexpectedly (%{task}): %{error}"
+    rollback:
+      zh-CN: 运行操作失败：%{cause}；系统代理回滚失败：%{rollback}
+      en: "Runtime operation failed: %{cause}; system proxy rollback failed: %{rollback}"
+  tasks:
+    completion:
+      zh-CN: 完成接管事务
+      en: Completing the capture transaction
+    load_overrides:
+      zh-CN: 加载覆写链
+      en: Loading the override chain
+    read_system_proxy:
+      zh-CN: 读取系统代理
+      en: Reading the system proxy
+    apply_system_proxy:
+      zh-CN: 应用系统代理
+      en: Applying the system proxy
+    reconcile_system_proxy:
+      zh-CN: 恢复系统代理
+      en: Reconciling the system proxy
+    release_system_proxy:
+      zh-CN: 释放系统代理
+      en: Releasing the system proxy
+    service_local_recovery:
+      zh-CN: 恢复本地接管
+      en: Recovering local capture from the service
+    restore_maintenance_proxy:
+      zh-CN: 恢复维护前系统代理
+      en: Restoring the system proxy after maintenance
+    enable_service_tun:
+      zh-CN: 启用服务 TUN
+      en: Enabling service TUN
 
 system_proxy:
   title:
@@ -2136,6 +2234,9 @@ system_proxy:
       zh-CN: PAC JavaScript
       en: PAC JavaScript
   status:
+    loading:
+      zh-CN: 正在读取系统代理状态…
+      en: Loading system proxy state…
     none:
       zh-CN: 无
       en: None
@@ -2259,6 +2360,161 @@ system_proxy:
     save_rollback_failed:
       zh-CN: 保存系统代理设置失败：%{error}；恢复原状态也失败：%{rollback}
       en: "Could not save system proxy settings: %{error}; restoring the previous state also failed: %{rollback}"
+    validation:
+      zh-CN: 系统代理设置无效（%{field}）：%{reason}
+      en: "Invalid system proxy setting (%{field}): %{reason}"
+    platform:
+      zh-CN: 系统代理原生操作失败（%{backend}/%{operation}）：%{code}
+      en: "System proxy native operation failed (%{backend}/%{operation}): %{code}"
+    platform_io:
+      zh-CN: 系统代理原生操作失败（%{backend}/%{operation}）：%{error}
+      en: "System proxy native operation failed (%{backend}/%{operation}): %{error}"
+    native_operation_rejected:
+      zh-CN: 系统代理原生操作失败（%{backend}/%{operation}），原生函数未提供错误码
+      en: "System proxy native operation failed (%{backend}/%{operation}); the native function returned no error code"
+    backend_unavailable:
+      zh-CN: 系统代理后端不可用（%{backend}）：%{reason}
+      en: "System proxy backend unavailable (%{backend}): %{reason}"
+    discovery_exit:
+      zh-CN: networksetup 退出状态：%{status}
+      en: "networksetup exited with status %{status}"
+    network_setup_command:
+      zh-CN: networksetup %{operation} 执行失败：%{error}
+      en: "networksetup %{operation} failed to execute: %{error}"
+    network_setup_rejected:
+      zh-CN: networksetup %{operation} 修改失败（%{status}）
+      en: "networksetup %{operation} modification failed (%{status})"
+    ownership_changed:
+      zh-CN: 系统代理原生状态已变化，拒绝覆盖
+      en: The native system proxy state changed; refusing to overwrite it
+    observation_unstable:
+      zh-CN: 系统代理原生状态在读取时发生变化
+      en: The native system proxy state changed while being read
+    invalid_snapshot:
+      zh-CN: 系统代理原生设置格式无效或超过快照限制
+      en: The native system proxy settings are malformed or exceed the snapshot limit
+    snapshot_encoding_failed:
+      zh-CN: 无法编码系统代理原生快照
+      en: The native system proxy snapshot could not be encoded
+    unsupported_platform:
+      zh-CN: 当前平台尚未实现系统代理控制
+      en: System proxy control is not implemented on this platform
+    no_release_failure:
+      zh-CN: 未报告额外关闭错误
+      en: no additional close failure was reported
+    missing_port:
+      zh-CN: 启用系统代理需要可用的 HTTP 或 Mixed 端口
+      en: Enabling the system proxy requires a usable HTTP or Mixed port
+    missing_ownership:
+      zh-CN: 系统代理启用后未返回可验证所有权
+      en: The system proxy was enabled without verifiable ownership
+    transaction:
+      zh-CN: 系统代理事务失败：%{error}
+      en: "System proxy transaction failed: %{error}"
+    property_list:
+      zh-CN: CoreFoundation %{operation} 失败：%{code}（%{domain}）
+      en: "CoreFoundation %{operation} failed: %{code} (%{domain})"
+
+  pac:
+    errors:
+      io:
+        zh-CN: PAC 服务操作失败（%{operation}）：%{error}
+        en: "PAC server operation failed (%{operation}): %{error}"
+    operations:
+      bind:
+        zh-CN: 绑定监听地址
+        en: Binding the listener
+      configure_listener:
+        zh-CN: 配置监听器
+        en: Configuring the listener
+      read_local_address:
+        zh-CN: 读取监听地址
+        en: Reading the local address
+      spawn_worker:
+        zh-CN: 启动工作线程
+        en: Spawning the worker thread
+
+  settings:
+    port:
+      zh-CN: 端口
+      en: Port
+    host:
+      zh-CN: 主机
+      en: Host
+    bypass:
+      zh-CN: 绕过规则
+      en: Bypass rules
+    pac_script:
+      zh-CN: PAC 脚本
+      en: PAC script
+    pac_url:
+      zh-CN: PAC URL
+      en: PAC URL
+    ownership:
+      zh-CN: 所有权
+      en: Ownership
+  reasons:
+    no_usable_service:
+      zh-CN: 未找到可用网络服务
+      en: No usable network service was found
+    ambiguous_service:
+      zh-CN: 无法唯一定位网络服务
+      en: The network service cannot be identified uniquely
+    no_persistent_settings:
+      zh-CN: 持久设置后端不可用
+      en: The persistent settings backend is unavailable
+    no_schemas:
+      zh-CN: 代理 schema 来源不可用
+      en: The proxy schema source is unavailable
+    missing_schema:
+      zh-CN: 缺少代理 schema
+      en: A required proxy schema is missing
+    locked_setting:
+      zh-CN: 代理设置禁止写入
+      en: The proxy setting is locked against writes
+    unverified_storage_contract:
+      zh-CN: 原生代理存储表示无法验证
+      en: The native proxy storage representation cannot be verified
+    authenticated_proxy:
+      zh-CN: 当前代理包含认证信息，无法通过 networksetup 安全替换并恢复
+      en: The current proxy contains credentials and cannot be safely replaced and restored through networksetup
+  validation:
+    empty:
+      zh-CN: 值不能为空
+      en: The value cannot be empty
+    too_long:
+      zh-CN: 超过 %{maximum} 字节限制
+      en: "Exceeds the %{maximum}-byte limit"
+    too_many:
+      zh-CN: 最多支持 %{maximum} 条
+      en: "At most %{maximum} entries are supported"
+    invalid_syntax:
+      zh-CN: 格式无效
+      en: The format is invalid
+    unspecified_address:
+      zh-CN: 不能是未指定地址
+      en: The unspecified address is not allowed
+    zero_port:
+      zh-CN: 端口不能为 0
+      en: The port cannot be zero
+    not_canonical:
+      zh-CN: 所有权不是规范形式
+      en: The ownership value is not in canonical form
+    invalid_service:
+      zh-CN: 所有权服务名称无效
+      en: The ownership service name is invalid
+    invalid_pac_url:
+      zh-CN: PAC URL 无效：%{error}
+      en: "The PAC URL is invalid: %{error}"
+    unsafe_pac_url:
+      zh-CN: PAC URL 必须是无凭据的 HTTP 地址
+      en: The PAC URL must be a credential-free HTTP address
+    embedded_nul:
+      zh-CN: PAC 脚本不能包含 NUL 字节
+      en: The PAC script cannot contain NUL bytes
+    missing_pac_function:
+      zh-CN: PAC 脚本必须定义 FindProxyForURL
+      en: The PAC script must define FindProxyForURL
 
 config_inputs:
   placeholders:
@@ -2534,6 +2790,18 @@ tun:
     readiness:
       zh-CN: TUN 授权后内核未能重新就绪：%{error}
       en: "The core did not become ready after TUN authorization: %{error}"
+    invalid_binary:
+      zh-CN: Mihomo 内核路径不可用于 TUN 授权：%{error}
+      en: "The Mihomo core path cannot be used for TUN authorization: %{error}"
+    unsupported:
+      zh-CN: 当前平台不支持自动安装 TUN 权限：%{error}
+      en: "Automatic TUN permission installation is unsupported on this platform: %{error}"
+    platform:
+      zh-CN: TUN 权限操作失败：%{error}
+      en: "TUN permission operation failed: %{error}"
+    verification:
+      zh-CN: TUN 权限写入后校验失败：%{error}
+      en: "TUN permission verification failed after writing: %{error}"
 
 dns:
   status:
@@ -2763,7 +3031,25 @@ sniffer:
       en: Advanced sniffer settings saved and reloaded
 
 network:
+  probe:
+    errors:
+      invalid_target:
+        zh-CN: 网络探测目标无效：%{error}
+        en: "Invalid network probe target: %{error}"
+      http:
+        zh-CN: 网络探测请求失败：%{error}
+        en: "Network probe request failed: %{error}"
+      response_too_large:
+        zh-CN: 网络探测响应超过 %{limit} KiB 限制
+        en: "The network probe response exceeds the %{limit} KiB limit"
+      invalid_response:
+        zh-CN: 公网 IP 服务响应无效：%{error}
+        en: "The public IP service returned an invalid response: %{error}"
   diagnostics:
+    errors:
+      invalid_plan:
+        zh-CN: 网络诊断计划无效：%{error}
+        en: "Invalid network diagnostics plan: %{error}"
     last_checked:
       zh-CN: "最近检测 %{time}"
       en: "Last checked %{time}"
@@ -3360,6 +3646,27 @@ resources:
       write:
         zh-CN: 写入规则文件失败：%{error}
         en: "Could not write the rules file: %{error}"
+      io:
+        zh-CN: 规则集 I/O 错误：%{error}
+        en: "Ruleset I/O error: %{error}"
+      invalid_source:
+        zh-CN: MRS 源文件不存在或不是普通文件：%{error}
+        en: "The MRS source does not exist or is not a regular file: %{error}"
+      source_too_large:
+        zh-CN: MRS 源文件超过 64 MiB 上限：%{bytes} 字节
+        en: "The MRS source exceeds the 64 MiB limit: %{bytes} bytes"
+      process:
+        zh-CN: Mihomo 规则集转换失败：%{error}
+        en: "Mihomo ruleset conversion failed: %{error}"
+      output_too_large:
+        zh-CN: 转换后的规则文本超过 64 MiB 上限
+        en: The converted ruleset text exceeds the 64 MiB limit
+      invalid_utf8:
+        zh-CN: 转换后的规则文本不是有效 UTF-8：%{error}
+        en: "The converted ruleset text is not valid UTF-8: %{error}"
+      temporary_file_exhausted:
+        zh-CN: 无法创建安全的规则集转换临时文件
+        en: A safe temporary file for ruleset conversion could not be created
 
 core_page:
   service:
@@ -3786,6 +4093,36 @@ core_page:
     release_install_task:
       zh-CN: 指定版本安装任务异常结束：%{error}
       en: "The version installation task ended unexpectedly: %{error}"
+    update_http:
+      zh-CN: 内核更新网络请求失败：%{error}
+      en: "Core update network request failed: %{error}"
+    update_metadata:
+      zh-CN: 内核 Release 元数据无效：%{error}
+      en: "Core release metadata is invalid: %{error}"
+    update_too_large:
+      zh-CN: 内核更新文件超过大小限制：%{error}
+      en: "The core update file exceeds the size limit: %{error}"
+    update_checksum:
+      zh-CN: 内核更新 SHA-256 校验失败：期望 %{expected}，实际 %{actual}
+      en: "Core update SHA-256 verification failed: expected %{expected}, got %{actual}"
+    update_archive:
+      zh-CN: 内核更新压缩包无效：%{error}
+      en: "The core update archive is invalid: %{error}"
+    update_candidate:
+      zh-CN: 候选 Mihomo 内核验证失败：%{error}
+      en: "Candidate Mihomo core verification failed: %{error}"
+    update_io:
+      zh-CN: 内核更新文件事务失败：%{error}
+      en: "Core update file transaction failed: %{error}"
+    update_runtime:
+      zh-CN: 内核更新运行时切换失败：%{error}
+      en: "Core update runtime transition failed: %{error}"
+    external_restart_unsupported:
+      zh-CN: 外部 %{core} 内核不支持需要重启的运行时变更
+      en: "External %{core} cores do not support runtime changes that require a restart"
+    shutting_down:
+      zh-CN: 内核会话正在停止，拒绝开始新的运行时操作
+      en: The core session is shutting down; new runtime operations are rejected
 core_management:
   title:
     zh-CN: 运行内核
@@ -4107,6 +4444,24 @@ overrides:
     change_workflow:
       zh-CN: YAML 覆写变更工作流异常结束：%{error}
       en: "The YAML override change workflow ended unexpectedly: %{error}"
+    io:
+      zh-CN: YAML 覆写 I/O 错误：%{error}
+      en: "YAML override I/O error: %{error}"
+    manifest:
+      zh-CN: YAML 覆写清单无效：%{error}
+      en: "The YAML override manifest is invalid: %{error}"
+    invalid:
+      zh-CN: YAML 覆写无效：%{error}
+      en: "The YAML override is invalid: %{error}"
+    not_found:
+      zh-CN: 找不到 YAML 覆写：%{error}
+      en: "YAML override not found: %{error}"
+    transaction:
+      zh-CN: YAML 覆写事务失败：%{error}
+      en: "YAML override transaction failed: %{error}"
+    missing_data_directory:
+      zh-CN: 无法确定 ZenClash 数据目录
+      en: The ZenClash data directory could not be determined
 
 backup:
   local:
@@ -4203,6 +4558,39 @@ backup:
     state_task:
       zh-CN: 备份状态读取任务异常结束：%{error}
       en: "The backup state task ended unexpectedly: %{error}"
+    io:
+      zh-CN: 备份 I/O 错误：%{error}
+      en: "Backup I/O error: %{error}"
+    zip:
+      zh-CN: 备份 ZIP 无效：%{error}
+      en: "The backup ZIP is invalid: %{error}"
+    json:
+      zh-CN: 备份清单 JSON 无效：%{error}
+      en: "The backup manifest JSON is invalid: %{error}"
+    preferences:
+      zh-CN: 备份中的应用设置无效：%{error}
+      en: "Application preferences in the backup are invalid: %{error}"
+    controlled:
+      zh-CN: 备份中的受控配置无效：%{error}
+      en: "The managed configuration in the backup is invalid: %{error}"
+    profiles:
+      zh-CN: 备份中的配置仓库无效：%{error}
+      en: "The profile store in the backup is invalid: %{error}"
+    yaml_overrides:
+      zh-CN: 备份中的 YAML 覆写无效：%{error}
+      en: "The YAML overrides in the backup are invalid: %{error}"
+    invalid_archive:
+      zh-CN: 备份内容无效：%{error}
+      en: "The backup contents are invalid: %{error}"
+    too_large:
+      zh-CN: 备份超过安全大小限制：%{error}
+      en: "The backup exceeds the safety size limit: %{error}"
+    missing_data_directory:
+      zh-CN: 无法确定 ZenClash 应用数据目录
+      en: The ZenClash application data directory could not be determined
+    transaction:
+      zh-CN: 备份恢复事务失败：%{error}
+      en: "The backup restore transaction failed: %{error}"
     core_rejected:
       zh-CN: "%{core} 拒绝备份中的活动配置：%{error}"
       en: "%{core} rejected the active configuration in the backup: %{error}"
@@ -4661,6 +5049,160 @@ tray:
       zh-CN: 保存系统代理开关失败：%{error}；恢复原状态也失败：%{rollback}
       en: "Could not save the system proxy toggle: %{error}; restoring the previous state also failed: %{rollback}"
 
+core_installation:
+  errors:
+    not_executable:
+      zh-CN: 内核文件不可执行：%{path}
+      en: "The core file is not executable: %{path}"
+    canonicalize:
+      zh-CN: 无法读取内核文件 %{path}：%{error}
+      en: "Could not read the core file %{path}: %{error}"
+    probe:
+      zh-CN: 无法检测 %{kind} 内核 %{path}：%{error}
+      en: "Could not detect the %{kind} core at %{path}: %{error}"
+
+app_update:
+  errors:
+    http:
+      zh-CN: 应用更新网络请求失败：%{error}
+      en: "Application update network request failed: %{error}"
+    metadata:
+      zh-CN: 应用 Release 元数据无效：%{error}
+      en: "Application release metadata is invalid: %{error}"
+    too_large:
+      zh-CN: 应用 Release 元数据超过大小限制
+      en: The application release metadata exceeds the size limit
+
+config_diff:
+  errors:
+    source:
+      zh-CN: 原始 Profile YAML 无法解析：%{error}
+      en: "The source profile YAML could not be parsed: %{error}"
+    effective:
+      zh-CN: 最终运行 YAML 无法解析：%{error}
+      en: "The effective runtime YAML could not be parsed: %{error}"
+
+instance_lock:
+  errors:
+    already_running:
+      zh-CN: ZenClash 已在运行（实例锁：%{path}）
+      en: "ZenClash is already running (instance lock: %{path})"
+    io:
+      zh-CN: ZenClash 实例锁 I/O 错误：%{error}
+      en: "ZenClash instance lock I/O error: %{error}"
+
+core_validation:
+  errors:
+    invalid_config:
+      zh-CN: 待验证配置不是普通文件：%{path}
+      en: "The configuration to validate is not a regular file: %{path}"
+    prepare_home:
+      zh-CN: 无法准备内核验证目录 %{path}：%{error}
+      en: "Could not prepare the core validation directory %{path}: %{error}"
+    temporary_config:
+      zh-CN: 无法准备临时内核配置 %{path}：%{error}
+      en: "Could not prepare the temporary core configuration %{path}: %{error}"
+    command:
+      zh-CN: 无法使用 %{kind} 验证配置 %{path}：%{error}
+      en: "Could not validate configuration %{path} with %{kind}: %{error}"
+    rejected:
+      zh-CN: "%{kind} 拒绝配置 %{path}（退出状态 %{status}）：%{error}"
+      en: "%{kind} rejected configuration %{path} (exit status %{status}): %{error}"
+    invalid_yaml:
+      zh-CN: 配置 YAML 无效：%{error}
+      en: "Configuration YAML is invalid: %{error}"
+
+platform_command:
+  errors:
+    io:
+      zh-CN: 执行 %{command} 失败（%{stage}）：%{error}
+      en: "Failed to execute %{command} (%{stage}): %{error}"
+    timed_out:
+      zh-CN: 执行 %{command} 超时（%{timeout}），已停止收集
+      en: "Execution of %{command} timed out (%{timeout}); output collection stopped"
+    missing_pipe:
+      zh-CN: 执行 %{command} 失败：无法捕获 %{stream}
+      en: "Failed to execute %{command}: could not capture %{stream}"
+  stages:
+    spawn:
+      zh-CN: 启动进程
+      en: Starting the process
+    configure_stdout_pipe:
+      zh-CN: 配置标准输出管道
+      en: Configuring the standard output pipe
+    configure_stderr_pipe:
+      zh-CN: 配置标准错误管道
+      en: Configuring the standard error pipe
+    read_stdout:
+      zh-CN: 读取标准输出
+      en: Reading standard output
+    read_stderr:
+      zh-CN: 读取标准错误
+      en: Reading standard error
+    wait:
+      zh-CN: 等待进程结束
+      en: Waiting for the process to exit
+
+controlled_config:
+  errors:
+    io:
+      zh-CN: 受控配置 I/O 错误：%{error}
+      en: "Managed configuration I/O error: %{error}"
+    yaml:
+      zh-CN: 受控配置 YAML 无效：%{error}
+      en: "Managed configuration YAML is invalid: %{error}"
+    json:
+      zh-CN: 受控配置 JSON 无效：%{error}
+      en: "Managed configuration JSON is invalid: %{error}"
+    profile:
+      zh-CN: 无法应用受控 Mihomo 配置：%{error}
+      en: "Could not apply the managed Mihomo configuration: %{error}"
+    not_mapping:
+      zh-CN: 受控配置根节点必须是映射
+      en: The managed configuration root must be a mapping
+    concurrent_modification:
+      zh-CN: 受控配置已被其他操作修改，请刷新后重试
+      en: The managed configuration was changed by another operation; refresh and retry
+    too_large:
+      zh-CN: 受控配置超过 16 MiB 限制
+      en: The managed configuration exceeds the 16 MiB limit
+    missing_data_directory:
+      zh-CN: 无法确定受控配置目录
+      en: The managed configuration directory could not be determined
+    task:
+      zh-CN: 受控配置后台任务异常结束：%{error}
+      en: "The managed configuration task ended unexpectedly: %{error}"
+    transaction:
+      zh-CN: 受控配置事务失败：%{error}
+      en: "The managed configuration transaction failed: %{error}"
+    unsupported_core_operation:
+      zh-CN: 当前内核不支持该配置操作：%{error}
+      en: "The active core does not support this configuration operation: %{error}"
+    listener_fallback:
+      zh-CN: 代理监听端口处理失败：%{error}
+      en: "Proxy listener port handling failed: %{error}"
+
+preferences:
+  errors:
+    io:
+      zh-CN: 应用设置 I/O 错误：%{error}
+      en: "Application preferences I/O error: %{error}"
+    json:
+      zh-CN: 应用设置 JSON 无效：%{error}
+      en: "Application preferences JSON is invalid: %{error}"
+    too_large:
+      zh-CN: 应用设置超过 1 MiB 限制
+      en: Application preferences exceed the 1 MiB limit
+    missing_data_directory:
+      zh-CN: 无法确定应用数据目录
+      en: The application data directory could not be determined
+    invalid:
+      zh-CN: 应用设置无效：%{error}
+      en: "Application preferences are invalid: %{error}"
+    concurrent_modification:
+      zh-CN: 应用设置已被其他操作修改，请刷新后重试
+      en: Application preferences were changed by another operation; refresh and retry
+
 settings:
   legal:
     title:
@@ -4795,6 +5337,19 @@ settings:
       task_error:
         zh-CN: 自动启动设置任务异常结束：%{error}
         en: "The Start at Login task ended unexpectedly: %{error}"
+      errors:
+        io:
+          zh-CN: 自动启动 I/O 错误：%{error}
+          en: "Start at Login I/O error: %{error}"
+        path:
+          zh-CN: 无法确定自动启动路径：%{error}
+          en: "Could not determine the Start at Login path: %{error}"
+        command:
+          zh-CN: 自动启动系统命令失败：%{error}
+          en: "The Start at Login system command failed: %{error}"
+        verification:
+          zh-CN: 自动启动写后验证失败：%{error}
+          en: "Start at Login verification after writing failed: %{error}"
     ipv6:
       description:
         zh-CN: 同步修改 %{core} 运行时设置
@@ -4809,6 +5364,25 @@ settings:
     description:
       zh-CN: 从真实 %{core} 连接计数器计算增量，并写入本地 SQLite
       en: Calculate deltas from real %{core} connection counters and store them in local SQLite
+    errors:
+      missing_data_directory:
+        zh-CN: 无法确定流量历史数据目录
+        en: The traffic history data directory could not be determined
+      preferences:
+        zh-CN: 无法定位流量历史数据库：%{error}
+        en: "The traffic history database could not be located: %{error}"
+      io:
+        zh-CN: 流量历史 I/O 错误：%{error}
+        en: "Traffic history I/O error: %{error}"
+      sql:
+        zh-CN: 流量历史数据库错误：%{error}
+        en: "Traffic history database error: %{error}"
+      invalid_query:
+        zh-CN: 流量历史查询无效：%{error}
+        en: "Invalid traffic history query: %{error}"
+      value_out_of_range:
+        zh-CN: 流量历史数值超出 SQLite 范围：%{error}
+        en: "A traffic history value is outside the SQLite range: %{error}"
     retention:
       zh-CN: 历史保留
       en: Retention

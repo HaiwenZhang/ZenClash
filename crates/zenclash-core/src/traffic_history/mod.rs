@@ -22,22 +22,49 @@ pub use storage::TrafficHistoryStore;
 #[non_exhaustive]
 pub enum TrafficHistoryError {
     /// A platform application-data directory could not be found.
-    #[error("无法确定流量历史数据目录")]
+    #[error(
+        "{}",
+        zenclash_i18n::text("settings.traffic_history.errors.missing_data_directory")
+    )]
     MissingDataDirectory,
     /// Application-preference discovery failed before locating the database.
-    #[error("无法定位流量历史数据库：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "settings.traffic_history.errors.preferences",
+            &[("error", .0.to_string())]
+        )
+    )]
     Preferences(#[from] crate::AppPreferencesError),
     /// Filesystem access failed.
-    #[error("流量历史 I/O 错误：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("settings.traffic_history.errors.io", &[("error", .0.to_string())])
+    )]
     Io(#[from] std::io::Error),
     /// `SQLite` rejected a schema, query, or transaction operation.
-    #[error("流量历史数据库错误：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("settings.traffic_history.errors.sql", &[("error", .0.to_string())])
+    )]
     Sql(#[from] rusqlite::Error),
     /// A query range or bucket was invalid or too large.
-    #[error("流量历史查询无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "settings.traffic_history.errors.invalid_query",
+            &[("error", .0.clone())]
+        )
+    )]
     InvalidQuery(String),
     /// An unsigned application value could not be represented by `SQLite`.
-    #[error("流量历史数值超出 SQLite 范围：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "settings.traffic_history.errors.value_out_of_range",
+            &[("error", .0.clone())]
+        )
+    )]
     ValueOutOfRange(String),
 }
 

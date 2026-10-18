@@ -30,37 +30,67 @@ const MAX_BACKUP_FILES: usize = 4096;
 #[non_exhaustive]
 pub enum BackupError {
     /// Filesystem access failed.
-    #[error("备份 I/O 错误：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("backup.errors.io", &[("error", .0.to_string())])
+    )]
     Io(#[from] std::io::Error),
     /// ZIP encoding or decoding failed.
-    #[error("备份 ZIP 无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("backup.errors.zip", &[("error", .0.to_string())])
+    )]
     Zip(#[from] zip::result::ZipError),
     /// The backup manifest could not be encoded or decoded.
-    #[error("备份清单 JSON 无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("backup.errors.json", &[("error", .0.to_string())])
+    )]
     Json(#[from] serde_json::Error),
     /// Application preferences in the snapshot are invalid.
-    #[error("备份中的应用设置无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("backup.errors.preferences", &[("error", .0.to_string())])
+    )]
     Preferences(#[from] AppPreferencesError),
     /// Controlled Mihomo configuration in the snapshot is invalid.
-    #[error("备份中的受控配置无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("backup.errors.controlled", &[("error", .0.to_string())])
+    )]
     Controlled(#[from] ControlledConfigError),
     /// Profile catalog or YAML data in the snapshot is invalid.
-    #[error("备份中的配置仓库无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("backup.errors.profiles", &[("error", .0.to_string())])
+    )]
     Profiles(#[from] ProfileStoreError),
     /// Managed YAML override catalog or payload is invalid.
-    #[error("备份中的 YAML 覆写无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("backup.errors.yaml_overrides", &[("error", .0.to_string())])
+    )]
     YamlOverrides(#[from] YamlOverrideError),
     /// The archive violates the versioned format or a security constraint.
-    #[error("备份内容无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("backup.errors.invalid_archive", &[("error", .0.clone())])
+    )]
     InvalidArchive(String),
     /// The archive or its expanded payload exceeded the defensive limit.
-    #[error("备份超过安全大小限制：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("backup.errors.too_large", &[("error", .0.clone())])
+    )]
     TooLarge(String),
     /// A platform application-data directory could not be determined.
-    #[error("无法确定 ZenClash 应用数据目录")]
+    #[error("{}", zenclash_i18n::text("backup.errors.missing_data_directory"))]
     MissingDataDirectory,
     /// Activation or rollback could not be completed consistently.
-    #[error("备份恢复事务失败：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("backup.errors.transaction", &[("error", .0.clone())])
+    )]
     Transaction(String),
 }
 

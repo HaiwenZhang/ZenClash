@@ -271,7 +271,13 @@ pub enum CoreSessionError {
     #[error(transparent)]
     Capture(#[from] Box<crate::TrafficCaptureError>),
     /// An external core would require a process restart ZenClash does not own.
-    #[error("外部 {core} 内核不支持需要重启的运行时变更")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "core_page.errors.external_restart_unsupported",
+            &[("core", core.to_string())]
+        )
+    )]
     ExternalRestartUnsupported {
         /// External runtime-core implementation.
         core: CoreKind,
@@ -283,7 +289,7 @@ pub enum CoreSessionError {
         core: CoreKind,
     },
     /// An operation raced with explicit application shutdown.
-    #[error("内核会话正在停止，拒绝开始新的运行时操作")]
+    #[error("{}", zenclash_i18n::text("core_page.errors.shutting_down"))]
     ShuttingDown,
     /// A reapplication has no source configuration successfully committed to this session.
     #[error("{}", zenclash_i18n::text("overrides.notices.saved_unapplied"))]

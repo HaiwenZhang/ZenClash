@@ -198,6 +198,16 @@ mod tests {
     use super::*;
     use std::io;
 
+    fn timed_out_message(command: &str, timeout: Duration) -> String {
+        zenclash_i18n::text_with(
+            "platform_command.errors.timed_out",
+            &[
+                ("command", command.to_owned()),
+                ("timeout", format!("{timeout:?}")),
+            ],
+        )
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_background_commands_use_create_no_window() {
@@ -221,7 +231,7 @@ mod tests {
         let error = output_with_timeout("/bin/sleep", &["1"], Duration::from_millis(30))
             .expect_err("sleep should exceed the timeout");
 
-        assert!(error.contains("超时"));
+        assert!(error.contains(&timed_out_message("/bin/sleep", Duration::from_millis(30))));
         assert!(started.elapsed() < Duration::from_millis(500));
     }
 
@@ -251,7 +261,9 @@ mod tests {
         ] {
             let started = Instant::now();
             let result = output_with_timeout("/bin/sh", &["-c", script], Duration::from_millis(40));
-            assert!(matches!(result, Err(message) if message.contains("超时")));
+            assert!(
+                matches!(result, Err(message) if message.contains(&timed_out_message("/bin/sh", Duration::from_millis(40))))
+            );
             assert!(started.elapsed() < Duration::from_millis(500));
         }
     }
@@ -360,7 +372,7 @@ mod tests {
             .unwrap_err()
         });
 
-        assert!(error.contains("超时"));
+        assert!(error.contains(&timed_out_message(&path.display().to_string(), timeout)));
         assert!(started.elapsed() >= timeout);
         assert!(started.elapsed() < Duration::from_millis(850));
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
@@ -372,7 +384,7 @@ mod tests {
 
         let error = output_with_timeout("\0", &[], Duration::from_secs(2)).unwrap_err();
 
-        assert!(error.contains("失败"));
+        assert!(error.contains(&zenclash_i18n::text("platform_command.stages.spawn")));
         assert!(started.elapsed() < Duration::from_millis(500));
     }
 

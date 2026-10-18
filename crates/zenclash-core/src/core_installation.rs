@@ -26,10 +26,25 @@ pub struct CoreBinaryInfo {
 #[non_exhaustive]
 pub enum CoreBinaryError {
     /// The selected path does not resolve to a regular executable file.
-    #[error("内核文件不可执行：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "core_installation.errors.not_executable",
+            &[("path", .0.display().to_string())]
+        )
+    )]
     NotExecutable(PathBuf),
     /// The executable path could not be canonicalized.
-    #[error("无法读取内核文件 {path}：{source}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "core_installation.errors.canonicalize",
+            &[
+                ("path", path.display().to_string()),
+                ("error", source.to_string())
+            ]
+        )
+    )]
     Canonicalize {
         /// User-selected path.
         path: PathBuf,
@@ -37,7 +52,17 @@ pub enum CoreBinaryError {
         source: std::io::Error,
     },
     /// The version command failed, timed out, or returned no useful output.
-    #[error("无法检测 {kind} 内核 {path}：{message}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "core_installation.errors.probe",
+            &[
+                ("kind", kind.to_string()),
+                ("path", path.display().to_string()),
+                ("error", message.clone())
+            ]
+        )
+    )]
     Probe {
         /// Expected core implementation.
         kind: CoreKind,

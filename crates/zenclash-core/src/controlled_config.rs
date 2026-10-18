@@ -67,22 +67,37 @@ pub(crate) struct SavedRuntimeReceipt {
 #[non_exhaustive]
 pub enum ControlledConfigError {
     /// Filesystem access failed.
-    #[error("受控配置 I/O 错误：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("controlled_config.errors.io", &[("error", .0.to_string())])
+    )]
     Io(#[from] std::io::Error),
     /// YAML parsing or serialization failed.
-    #[error("受控配置 YAML 无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("controlled_config.errors.yaml", &[("error", .0.to_string())])
+    )]
     Yaml(#[from] serde_yaml::Error),
     /// JSON input could not be converted to YAML.
-    #[error("受控配置 JSON 无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("controlled_config.errors.json", &[("error", .0.to_string())])
+    )]
     Json(#[from] serde_json::Error),
     /// A profile or merged payload was rejected before persistence.
-    #[error("无法应用受控 Mihomo 配置：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("controlled_config.errors.profile", &[("error", .0.to_string())])
+    )]
     Profile(#[from] MihomoError),
     /// The override document was not a YAML mapping.
-    #[error("受控配置根节点必须是映射")]
+    #[error("{}", zenclash_i18n::text("controlled_config.errors.not_mapping"))]
     NotMapping,
     /// The override changed after an update was prepared.
-    #[error("受控配置已被其他操作修改，请刷新后重试")]
+    #[error(
+        "{}",
+        zenclash_i18n::text("controlled_config.errors.concurrent_modification")
+    )]
     ConcurrentModification,
     /// An enabled YAML override would persist a different outbound mode.
     #[error("{}", zenclash_i18n::text_with("mode.errors.override_conflict", &[("requested", requested.clone()), ("effective", effective.clone())]))]
@@ -96,22 +111,43 @@ pub enum ControlledConfigError {
     #[error("{}", zenclash_i18n::text("overrides.errors.partial_conflict"))]
     PartialOverrideConflict,
     /// The override exceeded the defensive file-size limit.
-    #[error("受控配置超过 16 MiB 限制")]
+    #[error("{}", zenclash_i18n::text("controlled_config.errors.too_large"))]
     TooLarge,
     /// A platform data directory could not be determined.
-    #[error("无法确定受控配置目录")]
+    #[error(
+        "{}",
+        zenclash_i18n::text("controlled_config.errors.missing_data_directory")
+    )]
     MissingDataDirectory,
     /// An asynchronous preparation or commit worker ended unexpectedly.
-    #[error("受控配置后台任务异常结束：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("controlled_config.errors.task", &[("error", .0.clone())])
+    )]
     Task(String),
     /// Persistence failed after Mihomo accepted the update.
-    #[error("受控配置事务失败：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("controlled_config.errors.transaction", &[("error", .0.clone())])
+    )]
     Transaction(String),
     /// The selected runtime core cannot perform an operation in its current mode.
-    #[error("当前内核不支持该配置操作：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "controlled_config.errors.unsupported_core_operation",
+            &[("error", .0.clone())]
+        )
+    )]
     UnsupportedCoreOperation(String),
     /// Listener probing or session-only fallback failed.
-    #[error("代理监听端口处理失败：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "controlled_config.errors.listener_fallback",
+            &[("error", .0.clone())]
+        )
+    )]
     ListenerFallback(String),
 }
 

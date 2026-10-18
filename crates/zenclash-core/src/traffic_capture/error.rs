@@ -32,16 +32,25 @@ pub enum TrafficCaptureTask {
 #[non_exhaustive]
 pub enum TrafficCaptureError {
     /// No active profile exists for a TUN configuration transition.
-    #[error("没有可用于流量接管的活动 Profile")]
+    #[error("{}", zenclash_i18n::text("traffic_capture.errors.missing_profile"))]
     MissingProfile,
     /// Capture would overwrite a proxy owned by another application.
-    #[error("系统代理由其他应用控制；请先在系统设置中处理后再切换接管方式")]
+    #[error(
+        "{}",
+        zenclash_i18n::text("traffic_capture.errors.external_system_proxy")
+    )]
     ExternalSystemProxy,
     /// No usable HTTP/Mixed port is available for proxy activation or restoration.
-    #[error("没有可用的 HTTP/Mixed 端口")]
+    #[error(
+        "{}",
+        zenclash_i18n::text("traffic_capture.errors.missing_system_proxy_port")
+    )]
     MissingSystemProxyPort,
     /// No persistent system-proxy session is available.
-    #[error("系统代理持久化状态不可用")]
+    #[error(
+        "{}",
+        zenclash_i18n::text("traffic_capture.errors.system_proxy_unavailable")
+    )]
     SystemProxyUnavailable,
     /// Offline recovery cannot produce live capture observations.
     #[error("{}", zenclash_i18n::text("core_page.errors.offline_capture"))]
@@ -57,13 +66,25 @@ pub enum TrafficCaptureError {
     RuntimeRecoveryUnconfirmed,
     /// The completed capture operation returned an explicit reconciliation requirement.
     /// Its detail is a display summary, not a reconstructed native error or recovery authority.
-    #[error("流量接管需要协调：{detail}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "traffic_capture.errors.reconciliation_required",
+            &[("detail", detail.clone())]
+        )
+    )]
     ReconciliationRequired {
         /// Existing capture outcome's diagnostic summary.
         detail: String,
     },
     /// A legacy read-only observer supplied a display failure rather than an operation cause.
-    #[error("流量接管观察失败：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "traffic_capture.errors.observation_unavailable",
+            &[("error", .0.clone())]
+        )
+    )]
     ObservationUnavailable(String),
     /// Native proxy validation, mutation, readback or persistence failed.
     #[error(transparent)]
@@ -78,7 +99,16 @@ pub enum TrafficCaptureError {
     #[error(transparent)]
     Overrides(#[from] YamlOverrideError),
     /// An admitted task was cancelled or panicked.
-    #[error("流量接管后台任务异常结束（{task}）：{source}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "traffic_capture.errors.task",
+            &[
+                ("task", task.to_string()),
+                ("error", source.to_string())
+            ]
+        )
+    )]
     Task {
         /// Failed background task.
         task: TrafficCaptureTask,
@@ -87,7 +117,16 @@ pub enum TrafficCaptureError {
         source: tokio::task::JoinError,
     },
     /// Runtime application and subsequent native proxy restoration both failed.
-    #[error("运行操作失败：{cause}；系统代理回滚失败：{rollback}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "traffic_capture.errors.rollback",
+            &[
+                ("cause", cause.to_string()),
+                ("rollback", rollback.to_string())
+            ]
+        )
+    )]
     Rollback {
         /// Original runtime failure.
         #[source]
@@ -132,17 +171,17 @@ impl TrafficCaptureError {
 
 impl std::fmt::Display for TrafficCaptureTask {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::Completion => "完成接管事务",
-            Self::LoadOverrides => "加载覆写链",
-            Self::ReadSystemProxy => "读取系统代理",
-            Self::ApplySystemProxy => "应用系统代理",
-            Self::ReconcileSystemProxy => "恢复系统代理",
-            Self::ReleaseSystemProxy => "释放系统代理",
-            Self::ServiceLocalRecovery => "恢复本地内核",
-            Self::RestoreMaintenanceProxy => "维护后恢复系统代理",
-            Self::EnableServiceTun => "启用服务 TUN",
-        })
+        formatter.write_str(&zenclash_i18n::text(match self {
+            Self::Completion => "traffic_capture.tasks.completion",
+            Self::LoadOverrides => "traffic_capture.tasks.load_overrides",
+            Self::ReadSystemProxy => "traffic_capture.tasks.read_system_proxy",
+            Self::ApplySystemProxy => "traffic_capture.tasks.apply_system_proxy",
+            Self::ReconcileSystemProxy => "traffic_capture.tasks.reconcile_system_proxy",
+            Self::ReleaseSystemProxy => "traffic_capture.tasks.release_system_proxy",
+            Self::ServiceLocalRecovery => "traffic_capture.tasks.service_local_recovery",
+            Self::RestoreMaintenanceProxy => "traffic_capture.tasks.restore_maintenance_proxy",
+            Self::EnableServiceTun => "traffic_capture.tasks.enable_service_tun",
+        }))
     }
 }
 

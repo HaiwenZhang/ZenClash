@@ -61,25 +61,52 @@ pub struct RulesetConversion {
 #[non_exhaustive]
 pub enum RulesetConversionError {
     /// Filesystem access failed.
-    #[error("规则集 I/O 错误：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("resources.ruleset.errors.io", &[("error", .0.to_string())])
+    )]
     Io(#[from] std::io::Error),
     /// The selected source is not a regular file.
-    #[error("MRS 源文件不存在或不是普通文件：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "resources.ruleset.errors.invalid_source",
+            &[("error", .0.display().to_string())]
+        )
+    )]
     InvalidSource(PathBuf),
     /// The source exceeds the defensive conversion limit.
-    #[error("MRS 源文件超过 64 MiB 上限：{0} 字节")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "resources.ruleset.errors.source_too_large",
+            &[("bytes", .0.to_string())]
+        )
+    )]
     SourceTooLarge(u64),
     /// Mihomo could not be executed or rejected the conversion.
-    #[error("Mihomo 规则集转换失败：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("resources.ruleset.errors.process", &[("error", .0.clone())])
+    )]
     Process(String),
     /// Converted text exceeds the defensive read limit.
-    #[error("转换后的规则文本超过 64 MiB 上限")]
+    #[error("{}", zenclash_i18n::text("resources.ruleset.errors.output_too_large"))]
     OutputTooLarge,
     /// Mihomo emitted content that was not valid UTF-8.
-    #[error("转换后的规则文本不是有效 UTF-8：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "resources.ruleset.errors.invalid_utf8",
+            &[("error", .0.to_string())]
+        )
+    )]
     InvalidUtf8(#[from] std::string::FromUtf8Error),
     /// No collision-free temporary output could be reserved.
-    #[error("无法创建安全的规则集转换临时文件")]
+    #[error(
+        "{}",
+        zenclash_i18n::text("resources.ruleset.errors.temporary_file_exhausted")
+    )]
     TemporaryFileExhausted,
 }
 

@@ -40,16 +40,40 @@ pub struct AutostartStatus {
 #[non_exhaustive]
 pub enum AutostartError {
     /// Filesystem access failed.
-    #[error("自动启动 I/O 错误：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "settings.application.autostart.errors.io",
+            &[("error", .0.to_string())]
+        )
+    )]
     Io(#[from] std::io::Error),
     /// The current executable or user configuration directory is unavailable.
-    #[error("无法确定自动启动路径：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "settings.application.autostart.errors.path",
+            &[("error", .0.clone())]
+        )
+    )]
     Path(String),
     /// A required native platform command failed.
-    #[error("自动启动系统命令失败：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "settings.application.autostart.errors.command",
+            &[("error", .0.clone())]
+        )
+    )]
     Command(String),
     /// The operating system did not report the requested state after a write.
-    #[error("自动启动写后验证失败：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "settings.application.autostart.errors.verification",
+            &[("error", .0.clone())]
+        )
+    )]
     Verification(String),
 }
 
@@ -71,8 +95,11 @@ impl AutostartManager {
     /// Returns an error when the executable or user configuration directory
     /// cannot be determined.
     pub fn discover() -> AutostartResult<Self> {
-        let executable = std::env::current_exe()
-            .map_err(|error| AutostartError::Path(format!("无法读取当前程序路径：{error}")))?;
+        let executable = std::env::current_exe().map_err(|error| {
+            AutostartError::Path(format!(
+                "failed to read the current executable path: {error}"
+            ))
+        })?;
         let entry_path = platform::default_entry_path()?;
         Ok(Self {
             executable,
@@ -103,7 +130,7 @@ impl AutostartManager {
             Ok(status)
         } else {
             Err(AutostartError::Verification(format!(
-                "请求 enabled={enabled}，系统回读 enabled={}、当前程序匹配={}",
+                "requested enabled={enabled}, OS read back enabled={}, matches current executable={}",
                 status.enabled, status.matches_current_executable
             )))
         }
@@ -123,10 +150,11 @@ fn home_dir() -> AutostartResult<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
-        .ok_or_else(|| AutostartError::Path("无法确定用户主目录".into()))
+        .ok_or_else(|| AutostartError::Path("the user home directory is unavailable".into()))
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn required_entry_path(entry_path: Option<&Path>) -> AutostartResult<&Path> {
-    entry_path.ok_or_else(|| AutostartError::Path("当前平台缺少自动启动文件路径".into()))
+    entry_path
+        .ok_or_else(|| AutostartError::Path("the platform has no login-startup entry path".into()))
 }

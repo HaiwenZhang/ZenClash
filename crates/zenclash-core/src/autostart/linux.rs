@@ -5,7 +5,7 @@ use crate::profiles::atomic_write;
 
 pub(super) fn default_entry_path() -> AutostartResult<Option<std::path::PathBuf>> {
     let config = crate::application_paths::user_configuration_directory()
-        .ok_or_else(|| AutostartError::Path("无法确定用户主目录".into()))?;
+        .ok_or_else(|| AutostartError::Path("the user home directory is unavailable".into()))?;
     Ok(Some(config.join("autostart/zenclash.desktop")))
 }
 

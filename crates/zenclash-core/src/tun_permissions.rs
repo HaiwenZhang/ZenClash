@@ -26,16 +26,28 @@ pub type TunPermissionResult<T> = Result<T, TunPermissionError>;
 #[derive(Debug, Error)]
 pub enum TunPermissionError {
     /// The configured path is absent, invalid, or is not a supported Mihomo core.
-    #[error("Mihomo 内核路径不可用于 TUN 授权：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("tun.errors.invalid_binary", &[("error", .0.clone())])
+    )]
     InvalidBinary(String),
     /// The operating system does not provide a supported privilege workflow.
-    #[error("当前平台不支持自动安装 TUN 权限：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("tun.errors.unsupported", &[("error", .0.clone())])
+    )]
     Unsupported(String),
     /// A native permission command or privilege prompt failed.
-    #[error("TUN 权限操作失败：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("tun.errors.platform", &[("error", .0.clone())])
+    )]
     Platform(String),
     /// The native operation returned successfully but the permission readback failed.
-    #[error("TUN 权限写入后校验失败：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("tun.errors.verification", &[("error", .0.clone())])
+    )]
     Verification(String),
 }
 

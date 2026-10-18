@@ -23,16 +23,31 @@ pub enum CoreUpdateError {
     #[error("{}", zenclash_i18n::text("core_page.errors.release_cancelled"))]
     Cancelled,
     /// GitHub or release-asset HTTP request failed.
-    #[error("内核更新网络请求失败：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("core_page.errors.update_http", &[("error", .0.to_string())])
+    )]
     Http(#[from] reqwest::Error),
     /// Release metadata is missing a trusted platform asset or digest.
-    #[error("内核 Release 元数据无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("core_page.errors.update_metadata", &[("error", .0.clone())])
+    )]
     Metadata(String),
     /// A compressed or decompressed payload exceeded the safety limit.
-    #[error("内核更新文件超过大小限制：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("core_page.errors.update_too_large", &[("error", .0.clone())])
+    )]
     TooLarge(String),
     /// Downloaded bytes did not match GitHub's SHA-256 digest.
-    #[error("内核更新 SHA-256 校验失败：期望 {expected}，实际 {actual}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "core_page.errors.update_checksum",
+            &[("expected", expected.clone()), ("actual", actual.clone())]
+        )
+    )]
     Checksum {
         /// Digest published in GitHub release metadata.
         expected: String,
@@ -40,16 +55,28 @@ pub enum CoreUpdateError {
         actual: String,
     },
     /// Gzip or ZIP extraction failed or did not contain the expected binary.
-    #[error("内核更新压缩包无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("core_page.errors.update_archive", &[("error", .0.clone())])
+    )]
     Archive(String),
     /// Candidate executable failed its `-v` identity/version check.
-    #[error("候选 Mihomo 内核验证失败：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("core_page.errors.update_candidate", &[("error", .0.clone())])
+    )]
     Candidate(String),
     /// Filesystem staging, atomic replacement, or rollback failed.
-    #[error("内核更新文件事务失败：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("core_page.errors.update_io", &[("error", .0.clone())])
+    )]
     Io(String),
     /// Managed process could not be stopped, started, verified, or recovered.
-    #[error("内核更新运行时切换失败：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("core_page.errors.update_runtime", &[("error", .0.clone())])
+    )]
     Runtime(String),
 }
 

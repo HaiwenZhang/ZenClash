@@ -21,10 +21,25 @@ static VALIDATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[non_exhaustive]
 pub enum CoreConfigValidationError {
     /// The configuration path is missing or is not a regular file.
-    #[error("待验证配置不是普通文件：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "core_validation.errors.invalid_config",
+            &[("path", .0.display().to_string())]
+        )
+    )]
     InvalidConfig(PathBuf),
     /// The validation data directory could not be prepared.
-    #[error("无法准备内核验证目录 {path}：{source}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "core_validation.errors.prepare_home",
+            &[
+                ("path", path.display().to_string()),
+                ("error", source.to_string())
+            ]
+        )
+    )]
     PrepareHome {
         /// Writable core home used by `-t`.
         path: PathBuf,
@@ -32,7 +47,16 @@ pub enum CoreConfigValidationError {
         source: std::io::Error,
     },
     /// A temporary payload could not be written or removed safely.
-    #[error("无法准备临时内核配置 {path}：{message}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "core_validation.errors.temporary_config",
+            &[
+                ("path", path.display().to_string()),
+                ("error", message.clone())
+            ]
+        )
+    )]
     TemporaryConfig {
         /// Temporary file involved in the failed operation.
         path: PathBuf,
@@ -41,7 +65,17 @@ pub enum CoreConfigValidationError {
     },
     /// The native validation command failed to start, timed out, or produced
     /// more output than the bounded command runner accepts.
-    #[error("无法使用 {kind} 验证配置 {path}：{message}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "core_validation.errors.command",
+            &[
+                ("kind", kind.to_string()),
+                ("path", path.display().to_string()),
+                ("error", message.clone())
+            ]
+        )
+    )]
     Command {
         /// Runtime core used for validation.
         kind: CoreKind,
@@ -51,7 +85,18 @@ pub enum CoreConfigValidationError {
         message: String,
     },
     /// The target core completed validation but rejected the configuration.
-    #[error("{kind} 拒绝配置 {path}（退出状态 {status}）：{message}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "core_validation.errors.rejected",
+            &[
+                ("kind", kind.to_string()),
+                ("path", path.display().to_string()),
+                ("status", status.clone()),
+                ("error", message.clone())
+            ]
+        )
+    )]
     Rejected {
         /// Runtime core used for validation.
         kind: CoreKind,
@@ -63,7 +108,13 @@ pub enum CoreConfigValidationError {
         message: String,
     },
     /// The payload is not even a structurally valid Clash YAML mapping.
-    #[error("配置 YAML 无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "core_validation.errors.invalid_yaml",
+            &[("error", .0.clone())]
+        )
+    )]
     InvalidYaml(String),
 }
 

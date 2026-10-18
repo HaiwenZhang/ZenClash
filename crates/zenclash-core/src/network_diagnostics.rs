@@ -192,7 +192,13 @@ impl DiagnosticPlan {
 #[non_exhaustive]
 pub enum NetworkDiagnosticsError {
     /// The caller supplied an invalid diagnostic plan.
-    #[error("网络诊断计划无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "network.diagnostics.errors.invalid_plan",
+            &[("error", .0.clone())]
+        )
+    )]
     InvalidPlan(String),
 }
 

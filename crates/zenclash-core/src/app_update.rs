@@ -14,13 +14,19 @@ const MAX_RELEASE_NOTES_CHARS: usize = 8_192;
 #[derive(Debug, Error)]
 pub enum AppUpdateError {
     /// GitHub or the configured test endpoint could not be reached.
-    #[error("应用更新网络请求失败：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("app_update.errors.http", &[("error", .0.to_string())])
+    )]
     Http(#[from] reqwest::Error),
     /// Release metadata, version, or link did not satisfy the trusted policy.
-    #[error("应用 Release 元数据无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("app_update.errors.metadata", &[("error", .0.clone())])
+    )]
     Metadata(String),
     /// The bounded release response exceeded its accepted size.
-    #[error("应用 Release 元数据超过大小限制")]
+    #[error("{}", zenclash_i18n::text("app_update.errors.too_large"))]
     TooLarge,
 }
 

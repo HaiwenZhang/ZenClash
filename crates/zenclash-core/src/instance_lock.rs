@@ -1,5 +1,7 @@
 //! Process-lifetime lock preventing concurrent ZenClash owners.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use std::{
     fs::{self, File, OpenOptions},
     path::PathBuf,
@@ -12,10 +14,19 @@ use thiserror::Error;
 #[non_exhaustive]
 pub enum AppInstanceLockError {
     /// Another process already owns the same application-data directory.
-    #[error("ZenClash 已在运行（实例锁：{}）", .0.display())]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "instance_lock.errors.already_running",
+            &[("path", .0.display().to_string())]
+        )
+    )]
     AlreadyRunning(PathBuf),
     /// The lock directory or file could not be opened or locked.
-    #[error("ZenClash 实例锁 I/O 错误：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("instance_lock.errors.io", &[("error", .0.to_string())])
+    )]
     Io(#[from] std::io::Error),
 }
 
@@ -87,6 +98,8 @@ fn try_lock(file: &File) -> std::io::Result<()> {
 fn unlock(file: &File) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
 
+    // SAFETY: `file` owns a valid descriptor and remains alive for this call;
+    // `flock` retains no Rust reference after returning.
     let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
     if result == 0 {
         Ok(())
@@ -115,6 +128,7 @@ fn try_lock(file: &File) -> std::io::Result<()> {
     // SAFETY: the handle belongs to `file`, the zeroed OVERLAPPED value denotes
     // offset zero, and the pointer is valid for the duration of LockFileEx.
     let mut overlapped: OVERLAPPED = unsafe { zeroed() };
+    // SAFETY: `file` owns a valid handle and `overlapped` is live for the call.
     let locked = unsafe {
         LockFileEx(
             file.as_raw_handle() as HANDLE,
@@ -142,6 +156,7 @@ fn unlock(file: &File) -> std::io::Result<()> {
     // SAFETY: mirrors `try_lock`; the handle and OVERLAPPED pointer remain
     // valid for the duration of the call and cover the same byte range.
     let mut overlapped: OVERLAPPED = unsafe { zeroed() };
+    // SAFETY: `file` owns a valid handle and `overlapped` is live for the call.
     let unlocked = unsafe {
         UnlockFileEx(
             file.as_raw_handle() as HANDLE,

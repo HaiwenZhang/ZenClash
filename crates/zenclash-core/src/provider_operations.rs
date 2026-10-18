@@ -116,10 +116,22 @@ impl ProviderUpdateBatchReceipt {
 #[non_exhaustive]
 pub enum ProviderOperationError {
     /// Mihomo rejected or failed the requested operation.
-    #[error("Provider 操作失败：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "provider_operations.errors.operation",
+            &[("error", .0.clone())]
+        )
+    )]
     Operation(String),
     /// A successful catalog did not contain the requested provider.
-    #[error("Provider 回读缺少 {0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "provider_operations.errors.missing_readback",
+            &[("name", .0.clone())]
+        )
+    )]
     MissingReadback(String),
 }
 

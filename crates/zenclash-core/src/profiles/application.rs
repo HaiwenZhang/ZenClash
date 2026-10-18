@@ -144,7 +144,10 @@ pub enum ProfileApplicationError {
     #[error(transparent)]
     Service(#[from] Box<crate::ServiceManagerError>),
     /// A blocking repository task ended unexpectedly.
-    #[error("配置事务后台任务异常结束：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("profiles.errors.task", &[("error", .0.clone())])
+    )]
     Task(String),
 }
 

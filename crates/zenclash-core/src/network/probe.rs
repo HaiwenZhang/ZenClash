@@ -173,19 +173,37 @@ pub struct NetworkProbeSnapshot {
 #[non_exhaustive]
 pub enum NetworkProbeError {
     /// Caller supplied an unsafe or malformed target.
-    #[error("网络探测目标无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("network.probe.errors.invalid_target", &[("error", .0.clone())])
+    )]
     InvalidTarget(String),
     /// HTTP client construction or transport failed.
-    #[error("网络探测请求失败：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("network.probe.errors.http", &[("error", .0.to_string())])
+    )]
     Http(#[from] reqwest::Error),
     /// A response exceeded the defensive body limit.
-    #[error("网络探测响应超过 {limit_kib} KiB 限制")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "network.probe.errors.response_too_large",
+            &[("limit", limit_kib.to_string())]
+        )
+    )]
     ResponseTooLarge {
         /// Maximum accepted response size in kibibytes.
         limit_kib: usize,
     },
     /// A provider returned successful HTTP with an incompatible document.
-    #[error("公网 IP 服务响应无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "network.probe.errors.invalid_response",
+            &[("error", .0.clone())]
+        )
+    )]
     InvalidResponse(String),
 }
 

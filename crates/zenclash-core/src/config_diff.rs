@@ -44,10 +44,16 @@ pub struct ConfigDiffReport {
 #[derive(Debug, Error)]
 pub enum ConfigDiffError {
     /// Source profile YAML could not be represented as JSON-like data.
-    #[error("原始 Profile YAML 无法解析：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("config_diff.errors.source", &[("error", .0.to_string())])
+    )]
     Source(serde_yaml::Error),
     /// Effective YAML could not be represented as JSON-like data.
-    #[error("最终运行 YAML 无法解析：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("config_diff.errors.effective", &[("error", .0.to_string())])
+    )]
     Effective(serde_yaml::Error),
 }
 

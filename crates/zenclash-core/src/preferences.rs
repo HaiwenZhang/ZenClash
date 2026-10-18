@@ -177,22 +177,34 @@ impl Default for AppPreferences {
 #[non_exhaustive]
 pub enum AppPreferencesError {
     /// Filesystem access failed.
-    #[error("应用设置 I/O 错误：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("preferences.errors.io", &[("error", .0.to_string())])
+    )]
     Io(#[from] std::io::Error),
     /// The preferences document is malformed or incompatible.
-    #[error("应用设置 JSON 无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("preferences.errors.json", &[("error", .0.to_string())])
+    )]
     Json(#[from] serde_json::Error),
     /// The document exceeded the defensive read limit.
-    #[error("应用设置超过 1 MiB 限制")]
+    #[error("{}", zenclash_i18n::text("preferences.errors.too_large"))]
     TooLarge,
     /// A platform data directory could not be determined.
-    #[error("无法确定应用数据目录")]
+    #[error("{}", zenclash_i18n::text("preferences.errors.missing_data_directory"))]
     MissingDataDirectory,
     /// A preference value is outside its supported range.
-    #[error("应用设置无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("preferences.errors.invalid", &[("error", .0.clone())])
+    )]
     Invalid(String),
     /// Preferences changed after a reversible update was prepared.
-    #[error("应用设置已被其他操作修改，请刷新后重试")]
+    #[error(
+        "{}",
+        zenclash_i18n::text("preferences.errors.concurrent_modification")
+    )]
     ConcurrentModification,
 }
 

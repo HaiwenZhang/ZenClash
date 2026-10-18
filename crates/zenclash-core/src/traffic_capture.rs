@@ -2345,7 +2345,9 @@ mod tests {
             .await
             .expect_err("a profile without HTTP/Mixed listeners remains unsafe");
 
-        assert!(error.to_string().contains("没有可用的 HTTP/Mixed 端口"));
+        assert!(error.to_string().contains(&zenclash_i18n::text(
+            "traffic_capture.errors.missing_system_proxy_port"
+        )));
         assert_eq!(backend.operations(), ["resync-runtime-profile"]);
     }
 

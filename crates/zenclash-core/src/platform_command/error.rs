@@ -46,7 +46,17 @@ pub enum PlatformCommandStage {
 #[non_exhaustive]
 pub enum PlatformCommandError {
     /// A process or pipe operation failed.
-    #[error("执行 {command} 失败（{stage}）：{source}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "platform_command.errors.io",
+            &[
+                ("command", command.clone()),
+                ("stage", stage.to_string()),
+                ("error", source.to_string())
+            ]
+        )
+    )]
     Io {
         /// Executable display name without arguments.
         command: String,
@@ -57,7 +67,16 @@ pub enum PlatformCommandError {
         source: io::Error,
     },
     /// The child or output collection did not complete within the shared budget.
-    #[error("执行 {command} 超时（{timeout:?}），已停止收集")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "platform_command.errors.timed_out",
+            &[
+                ("command", command.clone()),
+                ("timeout", format!("{timeout:?}"))
+            ]
+        )
+    )]
     TimedOut {
         /// Executable display name without arguments.
         command: String,
@@ -65,7 +84,16 @@ pub enum PlatformCommandError {
         timeout: Duration,
     },
     /// Child setup did not provide the requested output pipe.
-    #[error("执行 {command} 失败：无法捕获 {stream}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "platform_command.errors.missing_pipe",
+            &[
+                ("command", command.clone()),
+                ("stream", stream.to_string())
+            ]
+        )
+    )]
     MissingPipe {
         /// Executable display name without arguments.
         command: String,
@@ -86,13 +114,13 @@ impl PlatformCommandError {
 
 impl std::fmt::Display for PlatformCommandStage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::Spawn => "启动进程",
-            Self::ConfigureStdoutPipe => "配置标准输出管道",
-            Self::ConfigureStderrPipe => "配置标准错误管道",
-            Self::ReadStdout => "读取标准输出",
-            Self::ReadStderr => "读取标准错误",
-            Self::Wait => "等待进程结束",
-        })
+        formatter.write_str(&zenclash_i18n::text(match self {
+            Self::Spawn => "platform_command.stages.spawn",
+            Self::ConfigureStdoutPipe => "platform_command.stages.configure_stdout_pipe",
+            Self::ConfigureStderrPipe => "platform_command.stages.configure_stderr_pipe",
+            Self::ReadStdout => "platform_command.stages.read_stdout",
+            Self::ReadStderr => "platform_command.stages.read_stderr",
+            Self::Wait => "platform_command.stages.wait",
+        }))
     }
 }

@@ -28,46 +28,70 @@ pub enum SystemProxySetting {
 #[non_exhaustive]
 pub enum SystemProxyValidationError {
     /// A required value is empty.
-    #[error("值不能为空")]
+    #[error("{}", zenclash_i18n::text("system_proxy.validation.empty"))]
     Empty,
     /// A value exceeds its byte budget.
-    #[error("超过 {maximum} 字节限制")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "system_proxy.validation.too_long",
+            &[("maximum", maximum.to_string())]
+        )
+    )]
     TooLong {
         /// Maximum accepted bytes.
         maximum: usize,
     },
     /// Too many bypass entries were supplied.
-    #[error("最多支持 {maximum} 条")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "system_proxy.validation.too_many",
+            &[("maximum", maximum.to_string())]
+        )
+    )]
     TooMany {
         /// Maximum accepted entries.
         maximum: usize,
     },
     /// The value has invalid syntax.
-    #[error("格式无效")]
+    #[error("{}", zenclash_i18n::text("system_proxy.validation.invalid_syntax"))]
     InvalidSyntax,
     /// A wildcard listener address is not a valid proxy endpoint.
-    #[error("不能是未指定地址")]
+    #[error(
+        "{}",
+        zenclash_i18n::text("system_proxy.validation.unspecified_address")
+    )]
     UnspecifiedAddress,
     /// Port zero cannot identify a proxy endpoint.
-    #[error("端口不能为 0")]
+    #[error("{}", zenclash_i18n::text("system_proxy.validation.zero_port"))]
     ZeroPort,
     /// A persisted claim is not in canonical form.
-    #[error("所有权不是规范形式")]
+    #[error("{}", zenclash_i18n::text("system_proxy.validation.not_canonical"))]
     NotCanonical,
     /// The claimed network service is missing, oversized or not canonical.
-    #[error("所有权服务名称无效")]
+    #[error("{}", zenclash_i18n::text("system_proxy.validation.invalid_service"))]
     InvalidService,
     /// URL parsing failed.
-    #[error("PAC URL 无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "system_proxy.validation.invalid_pac_url",
+            &[("error", .0.to_string())]
+        )
+    )]
     InvalidPacUrl(#[source] url::ParseError),
     /// PAC requires an HTTP URL without credentials.
-    #[error("PAC URL 必须是无凭据的 HTTP 地址")]
+    #[error("{}", zenclash_i18n::text("system_proxy.validation.unsafe_pac_url"))]
     UnsafePacUrl,
     /// The PAC document contains a NUL byte.
-    #[error("PAC 脚本不能包含 NUL 字节")]
+    #[error("{}", zenclash_i18n::text("system_proxy.validation.embedded_nul"))]
     EmbeddedNul,
     /// The PAC entry point is missing.
-    #[error("PAC 脚本必须定义 FindProxyForURL")]
+    #[error(
+        "{}",
+        zenclash_i18n::text("system_proxy.validation.missing_pac_function")
+    )]
     MissingPacFunction,
 }
 
@@ -121,7 +145,7 @@ pub enum SystemProxyTransactionCause {
 /// Descriptions and user-info dictionaries are omitted because they can contain input data.
 #[derive(Debug, Error)]
 #[non_exhaustive]
-#[error("CoreFoundation {operation} 失败：{code}（{domain:?}）")]
+#[error("{}", self.display_message())]
 pub struct NativePropertyListError {
     operation: &'static str,
     domain: Option<String>,
@@ -129,6 +153,17 @@ pub struct NativePropertyListError {
 }
 
 impl NativePropertyListError {
+    fn display_message(&self) -> String {
+        zenclash_i18n::text_with(
+            "system_proxy.errors.property_list",
+            &[
+                ("operation", self.operation.to_owned()),
+                ("code", self.code.to_string()),
+                ("domain", format!("{:?}", self.domain)),
+            ],
+        )
+    }
+
     #[cfg(target_os = "macos")]
     pub(crate) fn new(operation: &'static str, domain: Option<String>, code: i64) -> Self {
         Self {
@@ -163,7 +198,13 @@ impl NativePropertyListError {
 #[non_exhaustive]
 pub enum SystemProxyError {
     /// Caller input was rejected before mutation.
-    #[error("系统代理设置无效（{field}）：{reason}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "system_proxy.errors.validation",
+            &[("field", field.to_string()), ("reason", reason.to_string())]
+        )
+    )]
     Validation {
         /// Rejected setting category.
         field: SystemProxySetting,
@@ -172,7 +213,17 @@ pub enum SystemProxyError {
         reason: SystemProxyValidationError,
     },
     /// A native function returned a failure code.
-    #[error("系统代理原生操作失败（{backend}/{operation}）：{code}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "system_proxy.errors.platform",
+            &[
+                ("backend", backend.to_string()),
+                ("operation", operation.to_string()),
+                ("code", code.to_string())
+            ]
+        )
+    )]
     Platform {
         /// Native preference backend.
         backend: SystemProxyBackendKind,
@@ -182,7 +233,17 @@ pub enum SystemProxyError {
         code: i64,
     },
     /// A native operation produced an I/O error.
-    #[error("系统代理原生操作失败（{backend}/{operation}）：{source}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "system_proxy.errors.platform_io",
+            &[
+                ("backend", backend.to_string()),
+                ("operation", operation.to_string()),
+                ("error", source.to_string())
+            ]
+        )
+    )]
     PlatformIo {
         /// Native preference backend.
         backend: SystemProxyBackendKind,
@@ -193,7 +254,16 @@ pub enum SystemProxyError {
         source: io::Error,
     },
     /// A native function failed without providing an OS status code.
-    #[error("系统代理原生操作失败（{backend}/{operation}），原生函数未提供错误码")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "system_proxy.errors.native_operation_rejected",
+            &[
+                ("backend", backend.to_string()),
+                ("operation", operation.to_string())
+            ]
+        )
+    )]
     NativeOperationRejected {
         /// Native preference backend.
         backend: SystemProxyBackendKind,
@@ -201,7 +271,13 @@ pub enum SystemProxyError {
         operation: &'static str,
     },
     /// A required native capability is unavailable.
-    #[error("系统代理后端不可用（{backend}）：{reason}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "system_proxy.errors.backend_unavailable",
+            &[("backend", backend.to_string()), ("reason", reason.to_string())]
+        )
+    )]
     BackendUnavailable {
         /// Native preference backend.
         backend: SystemProxyBackendKind,
@@ -212,13 +288,25 @@ pub enum SystemProxyError {
     #[error(transparent)]
     DiscoveryCommand(#[from] PlatformCommandError),
     /// Discovery ran but returned a failing exit status.
-    #[error("networksetup 退出状态：{status}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "system_proxy.errors.discovery_exit",
+            &[("status", status.to_string())]
+        )
+    )]
     DiscoveryExit {
         /// Original exit status, without potentially sensitive captured output.
         status: ExitStatus,
     },
     /// A networksetup write could not be executed. Arguments are omitted.
-    #[error("networksetup {operation} 执行失败：{source}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "system_proxy.errors.network_setup_command",
+            &[("operation", operation.to_string()), ("error", source.to_string())]
+        )
+    )]
     NetworkSetupCommand {
         /// Fixed command option, without user-supplied values.
         operation: &'static str,
@@ -227,7 +315,13 @@ pub enum SystemProxyError {
         source: PlatformCommandError,
     },
     /// networksetup rejected a write or returned diagnostic output.
-    #[error("networksetup {operation} 修改失败（{status}）")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with(
+            "system_proxy.errors.network_setup_rejected",
+            &[("operation", operation.to_string()), ("status", status.to_string())]
+        )
+    )]
     NetworkSetupRejected {
         /// Fixed command option, without user-supplied values.
         operation: &'static str,
@@ -241,20 +335,23 @@ pub enum SystemProxyError {
     #[error("{}", zenclash_i18n::text("system_proxy.errors.pending_recovery"))]
     RecoveryPending,
     /// Current native state does not grant permission for a conditional write.
-    #[error("系统代理原生状态已变化，拒绝覆盖")]
+    #[error("{}", zenclash_i18n::text("system_proxy.errors.ownership_changed"))]
     OwnershipChanged,
     /// A native capture changed while being read and cannot establish a stable snapshot.
-    #[error("系统代理原生状态在读取时发生变化")]
+    #[error("{}", zenclash_i18n::text("system_proxy.errors.observation_unstable"))]
     ObservationUnstable,
     /// Native input could not be decoded or exceeded the snapshot budget.
-    #[error("系统代理原生设置格式无效或超过快照限制")]
+    #[error("{}", zenclash_i18n::text("system_proxy.errors.invalid_snapshot"))]
     InvalidNativeSnapshot {
         /// Original property-list error, when supplied by the native decoder.
         #[source]
         cause: Option<NativePropertyListError>,
     },
     /// Native preferences could not be serialized into a retained snapshot.
-    #[error("无法编码系统代理原生快照")]
+    #[error(
+        "{}",
+        zenclash_i18n::text("system_proxy.errors.snapshot_encoding_failed")
+    )]
     SnapshotEncodingFailed {
         /// Original property-list error, when supplied by the native encoder.
         #[source]
@@ -271,7 +368,7 @@ pub enum SystemProxyError {
         cause: Box<SystemProxyTransactionCause>,
     },
     /// Recovery could not be confirmed; retained resources still require recovery.
-    #[error("{}", zenclash_i18n::text_with("system_proxy.errors.recovery_failure", &[("error", cause.to_string()), ("recovery", recovery.to_string()), ("release", release_failure.as_ref().map_or_else(|| "未报告额外关闭错误".into(), ToString::to_string))]))]
+    #[error("{}", zenclash_i18n::text_with("system_proxy.errors.recovery_failure", &[("error", cause.to_string()), ("recovery", recovery.to_string()), ("release", release_failure.as_ref().map_or_else(|| zenclash_i18n::text("system_proxy.errors.no_release_failure"), ToString::to_string))]))]
     RecoveryUnconfirmed {
         /// Original failure before recovery.
         #[source]
@@ -282,7 +379,7 @@ pub enum SystemProxyError {
         release_failure: Option<Box<MihomoError>>,
     },
     /// The platform has no native system-proxy adapter.
-    #[error("当前平台尚未实现系统代理控制")]
+    #[error("{}", zenclash_i18n::text("system_proxy.errors.unsupported_platform"))]
     UnsupportedPlatform,
 }
 
@@ -301,14 +398,14 @@ pub(super) fn invalid_setting(
 
 impl std::fmt::Display for SystemProxySetting {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::Port => "端口",
-            Self::Host => "主机",
-            Self::Bypass => "绕过规则",
-            Self::PacScript => "PAC 脚本",
-            Self::PacUrl => "PAC URL",
-            Self::Ownership => "所有权",
-        })
+        formatter.write_str(&zenclash_i18n::text(match self {
+            Self::Port => "system_proxy.settings.port",
+            Self::Host => "system_proxy.settings.host",
+            Self::Bypass => "system_proxy.settings.bypass",
+            Self::PacScript => "system_proxy.settings.pac_script",
+            Self::PacUrl => "system_proxy.settings.pac_url",
+            Self::Ownership => "system_proxy.settings.ownership",
+        }))
     }
 }
 
@@ -324,18 +421,16 @@ impl std::fmt::Display for SystemProxyBackendKind {
 
 impl std::fmt::Display for SystemProxyBackendUnavailable {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::NoUsableService => "未找到可用网络服务",
-            Self::AmbiguousService => "无法唯一定位网络服务",
-            Self::NoPersistentSettings => "持久设置后端不可用",
-            Self::NoSchemas => "代理 schema 来源不可用",
-            Self::MissingSchema => "缺少代理 schema",
-            Self::LockedSetting => "代理设置禁止写入",
-            Self::UnverifiedStorageContract => "原生代理存储表示无法验证",
-            Self::AuthenticatedProxy => {
-                "当前代理包含认证信息，无法通过 networksetup 安全替换并恢复"
-            }
-        })
+        formatter.write_str(&zenclash_i18n::text(match self {
+            Self::NoUsableService => "system_proxy.reasons.no_usable_service",
+            Self::AmbiguousService => "system_proxy.reasons.ambiguous_service",
+            Self::NoPersistentSettings => "system_proxy.reasons.no_persistent_settings",
+            Self::NoSchemas => "system_proxy.reasons.no_schemas",
+            Self::MissingSchema => "system_proxy.reasons.missing_schema",
+            Self::LockedSetting => "system_proxy.reasons.locked_setting",
+            Self::UnverifiedStorageContract => "system_proxy.reasons.unverified_storage_contract",
+            Self::AuthenticatedProxy => "system_proxy.reasons.authenticated_proxy",
+        }))
     }
 }
 

@@ -32,10 +32,13 @@ const TRUNCATE_MARKER: &[u8] =
 #[non_exhaustive]
 pub enum LogPersistenceError {
     /// The configured limit is outside the supported range.
-    #[error("日志文件大小上限必须在 1 到 100 MiB 之间")]
+    #[error("{}", zenclash_i18n::text("logs.errors.invalid_limit"))]
     InvalidLimit,
     /// Filesystem access failed.
-    #[error("日志文件 I/O 错误：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("logs.errors.io", &[("error", .0.to_string())])
+    )]
     Io(#[from] std::io::Error),
 }
 

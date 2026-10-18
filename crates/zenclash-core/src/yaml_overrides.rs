@@ -49,22 +49,37 @@ pub struct YamlOverrideCatalog {
 #[derive(Debug, Error)]
 pub enum YamlOverrideError {
     /// Filesystem operation failed.
-    #[error("YAML 覆写 I/O 错误：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("overrides.errors.io", &[("error", .0.to_string())])
+    )]
     Io(#[from] std::io::Error),
     /// Persistent manifest encoding failed.
-    #[error("YAML 覆写清单无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("overrides.errors.manifest", &[("error", .0.to_string())])
+    )]
     Manifest(#[from] serde_json::Error),
     /// An override is invalid or unsafe to import.
-    #[error("YAML 覆写无效：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("overrides.errors.invalid", &[("error", .0.clone())])
+    )]
     Invalid(String),
     /// The requested record is absent.
-    #[error("找不到 YAML 覆写：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("overrides.errors.not_found", &[("error", .0.clone())])
+    )]
     NotFound(String),
     /// A file/manifest transaction could not be safely completed.
-    #[error("YAML 覆写事务失败：{0}")]
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("overrides.errors.transaction", &[("error", .0.clone())])
+    )]
     Transaction(String),
     /// The platform data directory cannot be resolved.
-    #[error("无法确定 ZenClash 数据目录")]
+    #[error("{}", zenclash_i18n::text("overrides.errors.missing_data_directory"))]
     MissingDataDirectory,
 }
 
