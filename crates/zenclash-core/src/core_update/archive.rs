@@ -124,7 +124,7 @@ fn validate_candidate(path: &Path, tag: &str) -> CoreUpdateResult<()> {
     let version = tag.trim_start_matches('v');
     if !output.status.success()
         || !combined.to_ascii_lowercase().contains("mihomo meta")
-        || !combined.contains(version)
+        || !reports_version(&combined, version)
     {
         return Err(CoreUpdateError::Candidate(format!(
             "{} -v 未返回 Mihomo Meta {version}：{}",
@@ -133,4 +133,33 @@ fn validate_candidate(path: &Path, tag: &str) -> CoreUpdateResult<()> {
         )));
     }
     Ok(())
+}
+
+/// Accepts only a complete version token; `1.19.3` must not match `1.19.30`.
+fn reports_version(output: &str, version: &str) -> bool {
+    output.split_whitespace().any(|token| {
+        let token = token.trim_matches(|character: char| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '+' | '_'))
+        });
+        token == version
+            || token
+                .strip_prefix('v')
+                .is_some_and(|token| token == version)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reports_version;
+
+    #[test]
+    fn version_match_requires_a_complete_token() {
+        assert!(reports_version(
+            "Mihomo Meta v1.19.30 linux amd64",
+            "1.19.30"
+        ));
+        assert!(reports_version("version 1.19.30", "1.19.30"));
+        assert!(!reports_version("Mihomo Meta v1.19.300 linux", "1.19.30"));
+        assert!(!reports_version("Mihomo Meta v1.19.3 linux", "1.19.30"));
+    }
 }
