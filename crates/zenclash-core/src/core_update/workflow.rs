@@ -41,13 +41,19 @@ impl MihomoReleaseService {
                 .map_err(|error| CoreUpdateError::Runtime(error.to_string()))?
                 .into();
             validator.validate_payload(&payload).map_err(|error| {
-                CoreUpdateError::Runtime(format!("候选内核拒绝当前运行配置：{error}"))
+                CoreUpdateError::Runtime(zenclash_i18n::text_with(
+                    "core_update.details.candidate_rejected_config",
+                    &[("error", error.to_string())],
+                ))
             })?;
             Ok::<_, CoreUpdateError>(payload)
         })
         .await
         .map_err(|error| {
-            CoreUpdateError::Runtime(format!("候选内核配置预检任务异常结束：{error}"))
+            CoreUpdateError::Runtime(zenclash_i18n::text_with(
+                "core_update.details.precheck_task",
+                &[("error", error.to_string())],
+            ))
         })?;
         if cancelled.load(Ordering::Acquire) {
             tokio::task::spawn_blocking(move || drop(prepared))
@@ -88,7 +94,10 @@ impl MihomoReleaseService {
             Err(error) => {
                 return Err(restart_after_activation_failure(
                     process,
-                    format!("启用候选内核任务异常结束：{error}"),
+                    zenclash_i18n::text_with(
+                        "core_update.details.activation_task",
+                        &[("error", error.to_string())],
+                    ),
                     &cancelled,
                     lease,
                     restore_running,
@@ -105,8 +114,12 @@ impl MihomoReleaseService {
                 result = client.version() => result.map_err(|error| CoreUpdateError::Runtime(error.to_string()))?,
             };
             if !reported.meta || !versions_match(&reported.version, &expected_tag) {
-                return Err(CoreUpdateError::Runtime(format!(
-                    "新内核 /version 返回 {:?}，期望 {}", reported.version, expected_tag
+                return Err(CoreUpdateError::Runtime(zenclash_i18n::text_with(
+                    "core_update.details.runtime_version",
+                    &[
+                        ("actual", format!("{:?}", reported.version)),
+                        ("expected", expected_tag.clone()),
+                    ],
                 )));
             }
             if cancelled.load(Ordering::Acquire) {
@@ -133,7 +146,10 @@ impl MihomoReleaseService {
         let cleanup_error = tokio::task::spawn_blocking(move || transaction.commit())
             .await
             .map_err(|error| {
-                CoreUpdateError::Runtime(format!("提交内核更新任务异常结束：{error}"))
+                CoreUpdateError::Runtime(zenclash_i18n::text_with(
+                    "core_update.details.commit_task",
+                    &[("error", error.to_string())],
+                ))
             })?
             .err()
             .map(|error| error.to_string());
@@ -208,10 +224,17 @@ async fn restart_after_activation_failure(
         ));
     }
     match restart_process(process, cancelled, lease, payload).await {
-        Ok(()) => CoreUpdateError::Runtime(format!("{activation_error}；旧内核已重新启动")),
-        Err(restart) => {
-            CoreUpdateError::Runtime(format!("{activation_error}；旧内核重新启动失败：{restart}"))
-        }
+        Ok(()) => CoreUpdateError::Runtime(zenclash_i18n::text_with(
+            "core_update.details.previous_restarted",
+            &[("error", activation_error)],
+        )),
+        Err(restart) => CoreUpdateError::Runtime(zenclash_i18n::text_with(
+            "core_update.details.previous_restart_failed",
+            &[
+                ("error", activation_error),
+                ("restart", restart.to_string()),
+            ],
+        )),
     }
 }
 
@@ -226,46 +249,82 @@ async fn rollback_rejected_core(
 ) -> CoreUpdateError {
     if let Err(error) = stop_process(process.clone()).await {
         let backup = transaction.preserve_for_manual_recovery();
-        return CoreUpdateError::Runtime(format!(
-            "{rejection}；停止候选内核失败，未强制替换运行中的文件：{error}；旧内核备份保留在 {}",
-            backup.display()
+        return CoreUpdateError::Runtime(zenclash_i18n::text_with(
+            "core_update.details.candidate_stop_failed",
+            &[
+                ("error", rejection.to_string()),
+                ("stop", error.to_string()),
+                ("backup", backup.display().to_string()),
+            ],
         ));
     }
     let rollback = tokio::task::spawn_blocking(move || transaction.rollback_with_status()).await;
     let (result, restored) = match rollback {
         Ok(result) => result,
         Err(error) => {
-            return CoreUpdateError::Runtime(format!("{rejection}；回滚任务异常结束：{error}"));
+            return CoreUpdateError::Runtime(zenclash_i18n::text_with(
+                "core_update.details.rollback_task",
+                &[
+                    ("error", rejection.to_string()),
+                    ("rollback", error.to_string()),
+                ],
+            ));
         }
     };
     if !restored {
-        return CoreUpdateError::Runtime(format!(
-            "{rejection}；回滚旧内核失败：{}",
-            result.unwrap_err()
+        return CoreUpdateError::Runtime(zenclash_i18n::text_with(
+            "core_update.details.restore_failed",
+            &[
+                ("error", rejection.to_string()),
+                ("rollback", result.unwrap_err().to_string()),
+            ],
         ));
     }
     if cancelled.load(Ordering::Acquire) {
         return match result {
             Ok(()) => CoreUpdateError::Cancelled,
-            Err(error) => {
-                CoreUpdateError::Runtime(format!("{rejection}；旧内核已恢复，但清理失败：{error}"))
-            }
+            Err(error) => CoreUpdateError::Runtime(zenclash_i18n::text_with(
+                "core_update.details.restored_cleanup_failed",
+                &[
+                    ("error", rejection.to_string()),
+                    ("cleanup", error.to_string()),
+                ],
+            )),
         };
     }
-    let cleanup = result
-        .err()
-        .map_or(String::new(), |error| format!("；清理失败：{error}"));
+    let cleanup = result.err();
     if !restore_running {
-        return CoreUpdateError::Runtime(zenclash_i18n::text_with(
-            "core_page.errors.release_previous_restored_stopped",
-            &[("error", rejection.to_string()), ("cleanup", cleanup)],
+        return CoreUpdateError::Runtime(with_cleanup_failure(
+            zenclash_i18n::text_with(
+                "core_page.errors.release_previous_restored_stopped",
+                &[("error", rejection.to_string())],
+            ),
+            cleanup,
         ));
     }
-    match restart_process(process, cancelled, lease, payload).await {
-        Ok(()) => CoreUpdateError::Runtime(format!("{rejection}；已自动恢复并启动旧内核{cleanup}")),
-        Err(error) => CoreUpdateError::Runtime(format!(
-            "{rejection}；旧内核已恢复但重新启动失败：{error}{cleanup}"
-        )),
+    let message = match restart_process(process, cancelled, lease, payload).await {
+        Ok(()) => zenclash_i18n::text_with(
+            "core_update.details.restored_restarted",
+            &[("error", rejection.to_string())],
+        ),
+        Err(error) => zenclash_i18n::text_with(
+            "core_update.details.restored_restart_failed",
+            &[
+                ("error", rejection.to_string()),
+                ("restart", error.to_string()),
+            ],
+        ),
+    };
+    CoreUpdateError::Runtime(with_cleanup_failure(message, cleanup))
+}
+
+fn with_cleanup_failure(message: String, cleanup: Option<CoreUpdateError>) -> String {
+    match cleanup {
+        Some(cleanup) => zenclash_i18n::text_with(
+            "core_update.details.cleanup_failed",
+            &[("error", message), ("cleanup", cleanup.to_string())],
+        ),
+        None => message,
     }
 }
 

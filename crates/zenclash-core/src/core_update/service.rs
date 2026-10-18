@@ -33,8 +33,12 @@ impl MihomoReleaseService {
     }
 
     pub(super) fn with_base(api_base: &str, allow_insecure_assets: bool) -> CoreUpdateResult<Self> {
-        let api_base = reqwest::Url::parse(api_base)
-            .map_err(|error| CoreUpdateError::Metadata(format!("API URL 无效：{error}")))?;
+        let api_base = reqwest::Url::parse(api_base).map_err(|error| {
+            CoreUpdateError::Metadata(zenclash_i18n::text_with(
+                "core_update.details.api_url",
+                &[("error", error.to_string())],
+            ))
+        })?;
         let http = reqwest::Client::builder()
             .user_agent(concat!("ZenClash/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(10))
@@ -59,14 +63,17 @@ impl MihomoReleaseService {
     /// URL, malformed digest, unsupported platform, or oversized asset.
     pub async fn releases(&self, limit: usize) -> CoreUpdateResult<Vec<MihomoRelease>> {
         if !(1..=MAX_RELEASES).contains(&limit) {
-            return Err(CoreUpdateError::Metadata(format!(
-                "版本数量必须在 1 到 {MAX_RELEASES} 之间"
+            return Err(CoreUpdateError::Metadata(zenclash_i18n::text_with(
+                "core_update.details.release_count",
+                &[("maximum", MAX_RELEASES.to_string())],
             )));
         }
-        let url = self
-            .api_base
-            .join("releases")
-            .map_err(|error| CoreUpdateError::Metadata(format!("Release URL 无效：{error}")))?;
+        let url = self.api_base.join("releases").map_err(|error| {
+            CoreUpdateError::Metadata(zenclash_i18n::text_with(
+                "core_update.details.release_url",
+                &[("error", error.to_string())],
+            ))
+        })?;
         let response = self
             .http
             .get(url)
@@ -80,20 +87,23 @@ impl MihomoReleaseService {
             .content_length()
             .is_some_and(|length| length > MAX_METADATA_BYTES)
         {
-            return Err(CoreUpdateError::TooLarge(format!(
-                "Release 元数据超过 {} MiB",
-                MAX_METADATA_BYTES / 1024 / 1024
+            return Err(CoreUpdateError::TooLarge(zenclash_i18n::text_with(
+                "core_update.details.metadata_limit",
+                &[("limit", (MAX_METADATA_BYTES / 1024 / 1024).to_string())],
             )));
         }
         let bytes = response.bytes().await?;
         if bytes.len() as u64 > MAX_METADATA_BYTES {
-            return Err(CoreUpdateError::TooLarge(format!(
-                "Release 元数据实际响应超过 {} MiB",
-                MAX_METADATA_BYTES / 1024 / 1024
+            return Err(CoreUpdateError::TooLarge(zenclash_i18n::text_with(
+                "core_update.details.metadata_response_limit",
+                &[("limit", (MAX_METADATA_BYTES / 1024 / 1024).to_string())],
             )));
         }
         let raw = serde_json::from_slice::<Vec<RawRelease>>(&bytes).map_err(|error| {
-            CoreUpdateError::Metadata(format!("Release JSON 无法解析：{error}"))
+            CoreUpdateError::Metadata(zenclash_i18n::text_with(
+                "core_update.details.release_json",
+                &[("error", error.to_string())],
+            ))
         })?;
         let mut releases = Vec::new();
         for release in raw.into_iter().filter(|release| !release.draft) {
@@ -141,12 +151,18 @@ impl MihomoReleaseService {
                 return Err(CoreUpdateError::Cancelled);
             }
             let target = std::fs::canonicalize(&target).map_err(|error| {
-                CoreUpdateError::Io(format!("无法解析当前内核 {}：{error}", target.display()))
+                CoreUpdateError::Io(zenclash_i18n::text_with(
+                    "core_update.details.resolve_target",
+                    &[
+                        ("path", target.display().to_string()),
+                        ("error", error.to_string()),
+                    ],
+                ))
             })?;
             if !target.is_file() {
-                return Err(CoreUpdateError::Io(format!(
-                    "当前内核不是普通文件：{}",
-                    target.display()
+                return Err(CoreUpdateError::Io(zenclash_i18n::text_with(
+                    "core_update.details.invalid_target",
+                    &[("path", target.display().to_string())],
                 )));
             }
             let prepared = prepare_downloaded(&release, &target, &archive)?;
@@ -156,18 +172,29 @@ impl MihomoReleaseService {
             Ok(prepared)
         })
         .await
-        .map_err(|error| CoreUpdateError::Io(format!("候选内核任务异常结束：{error}")))?
+        .map_err(|error| {
+            CoreUpdateError::Io(zenclash_i18n::text_with(
+                "core_update.details.candidate_task",
+                &[("error", error.to_string())],
+            ))
+        })?
     }
 
     async fn download(&self, asset: &MihomoReleaseAsset) -> CoreUpdateResult<Vec<u8>> {
-        let declared = usize::try_from(asset.size)
-            .map_err(|_| CoreUpdateError::TooLarge(format!("{} 无法表示", asset.size)))?;
+        let declared = usize::try_from(asset.size).map_err(|_| {
+            CoreUpdateError::TooLarge(zenclash_i18n::text_with(
+                "core_update.details.unrepresentable_size",
+                &[("size", asset.size.to_string())],
+            ))
+        })?;
         if declared > MAX_ARCHIVE_BYTES {
-            return Err(CoreUpdateError::TooLarge(format!(
-                "{} 为 {} MiB，上限为 {} MiB",
-                asset.name,
-                declared / 1024 / 1024,
-                MAX_ARCHIVE_BYTES / 1024 / 1024
+            return Err(CoreUpdateError::TooLarge(zenclash_i18n::text_with(
+                "core_update.details.archive_limit",
+                &[
+                    ("name", asset.name.clone()),
+                    ("size", (declared / 1024 / 1024).to_string()),
+                    ("limit", (MAX_ARCHIVE_BYTES / 1024 / 1024).to_string()),
+                ],
             )));
         }
         let response = self
@@ -181,10 +208,12 @@ impl MihomoReleaseService {
             .content_length()
             .is_some_and(|length| length > MAX_ARCHIVE_BYTES as u64)
         {
-            return Err(CoreUpdateError::TooLarge(format!(
-                "{} 的 HTTP Content-Length 超过 {} MiB",
-                asset.name,
-                MAX_ARCHIVE_BYTES / 1024 / 1024
+            return Err(CoreUpdateError::TooLarge(zenclash_i18n::text_with(
+                "core_update.details.content_length_limit",
+                &[
+                    ("name", asset.name.clone()),
+                    ("limit", (MAX_ARCHIVE_BYTES / 1024 / 1024).to_string()),
+                ],
             )));
         }
         let mut bytes = Vec::with_capacity(declared.min(MAX_ARCHIVE_BYTES));
@@ -192,10 +221,12 @@ impl MihomoReleaseService {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             if bytes.len().saturating_add(chunk.len()) > MAX_ARCHIVE_BYTES {
-                return Err(CoreUpdateError::TooLarge(format!(
-                    "{} 的实际响应超过 {} MiB",
-                    asset.name,
-                    MAX_ARCHIVE_BYTES / 1024 / 1024
+                return Err(CoreUpdateError::TooLarge(zenclash_i18n::text_with(
+                    "core_update.details.download_response_limit",
+                    &[
+                        ("name", asset.name.clone()),
+                        ("limit", (MAX_ARCHIVE_BYTES / 1024 / 1024).to_string()),
+                    ],
                 )));
             }
             bytes.extend_from_slice(&chunk);
@@ -217,7 +248,10 @@ impl MihomoReleaseService {
             return Ok(None);
         };
         let download_url = reqwest::Url::parse(&asset.browser_download_url).map_err(|error| {
-            CoreUpdateError::Metadata(format!("{} 下载 URL 无效：{error}", asset.name))
+            CoreUpdateError::Metadata(zenclash_i18n::text_with(
+                "core_update.details.asset_url",
+                &[("name", asset.name.clone()), ("error", error.to_string())],
+            ))
         })?;
         validate_asset_url(&download_url, self.allow_insecure_assets)?;
         let Some(digest) = asset.digest else {
@@ -225,10 +259,12 @@ impl MihomoReleaseService {
         };
         let sha256 = parse_digest(&digest)?;
         if asset.size > MAX_ARCHIVE_BYTES as u64 {
-            return Err(CoreUpdateError::TooLarge(format!(
-                "{} 声明大小超过 {} MiB",
-                asset.name,
-                MAX_ARCHIVE_BYTES / 1024 / 1024
+            return Err(CoreUpdateError::TooLarge(zenclash_i18n::text_with(
+                "core_update.details.declared_asset_limit",
+                &[
+                    ("name", asset.name.clone()),
+                    ("limit", (MAX_ARCHIVE_BYTES / 1024 / 1024).to_string()),
+                ],
             )));
         }
         Ok(Some(MihomoRelease {
@@ -270,8 +306,9 @@ pub(super) struct RawAsset {
 
 pub(super) fn platform_asset_name(tag: &str) -> CoreUpdateResult<String> {
     if tag.trim().is_empty() || tag.contains(['/', '\\']) {
-        return Err(CoreUpdateError::Metadata(format!(
-            "版本标签不安全：{tag:?}"
+        return Err(CoreUpdateError::Metadata(zenclash_i18n::text_with(
+            "core_update.details.unsafe_tag",
+            &[("tag", format!("{tag:?}"))],
         )));
     }
     let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -283,8 +320,9 @@ pub(super) fn platform_asset_name(tag: &str) -> CoreUpdateResult<String> {
         ("windows", "x86_64") => "mihomo-windows-amd64-compatible",
         ("windows", "x86") => "mihomo-windows-386",
         (os, arch) => {
-            return Err(CoreUpdateError::Metadata(format!(
-                "不支持的平台：{os}-{arch}"
+            return Err(CoreUpdateError::Metadata(zenclash_i18n::text_with(
+                "core_update.details.unsupported_platform",
+                &[("os", os.to_owned()), ("arch", arch.to_owned())],
             )));
         }
     };
@@ -315,8 +353,9 @@ pub(super) fn validate_asset_url(url: &reqwest::Url, allow_insecure: bool) -> Co
         || url.password().is_some()
         || url.fragment().is_some()
     {
-        return Err(CoreUpdateError::Metadata(format!(
-            "拒绝不可信的 GitHub 资产 URL：{url}"
+        return Err(CoreUpdateError::Metadata(zenclash_i18n::text_with(
+            "core_update.details.untrusted_url",
+            &[("url", url.to_string())],
         )));
     }
     Ok(())
@@ -324,14 +363,15 @@ pub(super) fn validate_asset_url(url: &reqwest::Url, allow_insecure: bool) -> Co
 
 pub(super) fn parse_digest(digest: &str) -> CoreUpdateResult<String> {
     let Some(value) = digest.strip_prefix("sha256:") else {
-        return Err(CoreUpdateError::Metadata(
-            "Release 资产缺少 sha256 digest".into(),
-        ));
+        return Err(CoreUpdateError::Metadata(zenclash_i18n::text(
+            "core_update.details.missing_digest",
+        )));
     };
     let value = value.to_ascii_lowercase();
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(CoreUpdateError::Metadata(format!(
-            "SHA-256 digest 格式错误：{digest}"
+        return Err(CoreUpdateError::Metadata(zenclash_i18n::text_with(
+            "core_update.details.invalid_digest",
+            &[("digest", digest.to_owned())],
         )));
     }
     Ok(value)

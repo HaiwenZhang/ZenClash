@@ -9917,8 +9917,10 @@ dependencies = [
 name = "zenclash-i18n"
 version = "0.2.1"
 dependencies = [
+ "proc-macro2",
  "rust-i18n",
  "serde_yaml",
+ "syn 2.0.119",
 ]
 
 [[package]]

@@ -25,9 +25,11 @@ impl PreparedCoreUpdate {
     }
 
     pub(super) fn candidate_path(&self) -> CoreUpdateResult<&Path> {
-        self.staging
-            .as_deref()
-            .ok_or_else(|| CoreUpdateError::Io("候选内核已经被使用".into()))
+        self.staging.as_deref().ok_or_else(|| {
+            CoreUpdateError::Io(zenclash_i18n::text(
+                "core_update.details.candidate_consumed",
+            ))
+        })
     }
 
     /// Atomically moves the active core to a backup and installs the candidate.
@@ -44,17 +46,29 @@ impl PreparedCoreUpdate {
         let staging = self.candidate_path()?;
         let backup = sibling_path(&self.target, "backup")?;
         std::fs::rename(&self.target, &backup).map_err(|error| {
-            CoreUpdateError::Io(format!(
-                "无法备份 {} 到 {}：{error}",
-                self.target.display(),
-                backup.display()
+            CoreUpdateError::Io(zenclash_i18n::text_with(
+                "core_update.details.backup_target",
+                &[
+                    ("path", self.target.display().to_string()),
+                    ("backup", backup.display().to_string()),
+                    ("error", error.to_string()),
+                ],
             ))
         })?;
         if let Err(error) = std::fs::rename(staging, &self.target) {
             let restore = std::fs::rename(&backup, &self.target);
-            return Err(CoreUpdateError::Io(format!(
-                "无法启用候选内核：{error}；恢复旧内核结果：{}",
-                restore.map_or_else(|restore| restore.to_string(), |()| "成功".into())
+            return Err(CoreUpdateError::Io(zenclash_i18n::text_with(
+                "core_update.details.activate_restore",
+                &[
+                    ("error", error.to_string()),
+                    (
+                        "restore",
+                        restore.map_or_else(
+                            |restore| restore.to_string(),
+                            |()| zenclash_i18n::text("core_update.details.restore_succeeded"),
+                        ),
+                    ),
+                ],
             )));
         }
         // The candidate is now at target. Until this rename succeeds, Drop owns
@@ -69,8 +83,12 @@ impl PreparedCoreUpdate {
         if let Err(error) = sync_parent(&self.target) {
             return match transaction.rollback() {
                 Ok(()) => Err(error),
-                Err(rollback) => Err(CoreUpdateError::Io(format!(
-                    "{error}；并且回滚失败：{rollback}"
+                Err(rollback) => Err(CoreUpdateError::Io(zenclash_i18n::text_with(
+                    "core_update.details.rollback_also_failed",
+                    &[
+                        ("error", error.to_string()),
+                        ("rollback", rollback.to_string()),
+                    ],
                 ))),
             };
         }
@@ -110,9 +128,12 @@ impl CoreUpdateTransaction {
     pub fn commit(mut self) -> CoreUpdateResult<()> {
         self.active = false;
         std::fs::remove_file(&self.backup).map_err(|error| {
-            CoreUpdateError::Io(format!(
-                "新内核已启用，但无法删除备份 {}：{error}",
-                self.backup.display()
+            CoreUpdateError::Io(zenclash_i18n::text_with(
+                "core_update.details.remove_backup",
+                &[
+                    ("path", self.backup.display().to_string()),
+                    ("error", error.to_string()),
+                ],
             ))
         })?;
         sync_parent(&self.target)
@@ -154,13 +175,18 @@ impl Drop for CoreUpdateTransaction {
 }
 
 pub(super) fn sibling_path(target: &Path, label: &str) -> CoreUpdateResult<PathBuf> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| CoreUpdateError::Io(format!("目标没有父目录：{}", target.display())))?;
+    let parent = target.parent().ok_or_else(|| {
+        CoreUpdateError::Io(zenclash_i18n::text_with(
+            "core_update.details.target_parent",
+            &[("path", target.display().to_string())],
+        ))
+    })?;
     let stem = target
         .file_stem()
         .and_then(|value| value.to_str())
-        .ok_or_else(|| CoreUpdateError::Io("目标文件名不是有效 UTF-8".into()))?;
+        .ok_or_else(|| {
+            CoreUpdateError::Io(zenclash_i18n::text("core_update.details.target_name_utf8"))
+        })?;
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let name = target
         .extension()
@@ -179,24 +205,33 @@ pub(super) fn sibling_path(target: &Path, label: &str) -> CoreUpdateResult<PathB
 
 fn restore_backup(target: &Path, backup: &Path) -> CoreUpdateResult<()> {
     if !backup.is_file() {
-        return Err(CoreUpdateError::Io(format!(
-            "回滚备份不存在：{}",
-            backup.display()
+        return Err(CoreUpdateError::Io(zenclash_i18n::text_with(
+            "core_update.details.missing_backup",
+            &[("path", backup.display().to_string())],
         )));
     }
     let rejected = sibling_path(target, "rejected")?;
     if target.exists() {
         std::fs::rename(target, &rejected).map_err(|error| {
-            CoreUpdateError::Io(format!("无法移走候选内核 {}：{error}", target.display()))
+            CoreUpdateError::Io(zenclash_i18n::text_with(
+                "core_update.details.move_candidate",
+                &[
+                    ("path", target.display().to_string()),
+                    ("error", error.to_string()),
+                ],
+            ))
         })?;
     }
     if let Err(error) = std::fs::rename(backup, target) {
         if rejected.exists() {
             let _ = std::fs::rename(&rejected, target);
         }
-        return Err(CoreUpdateError::Io(format!(
-            "无法恢复备份 {}：{error}",
-            backup.display()
+        return Err(CoreUpdateError::Io(zenclash_i18n::text_with(
+            "core_update.details.restore_backup",
+            &[
+                ("path", backup.display().to_string()),
+                ("error", error.to_string()),
+            ],
         )));
     }
     let cleanup = if rejected.exists() {
@@ -205,18 +240,27 @@ fn restore_backup(target: &Path, backup: &Path) -> CoreUpdateResult<()> {
         Ok(())
     };
     sync_parent(target)?;
-    cleanup
-        .map_err(|error| CoreUpdateError::Io(format!("旧内核已恢复，但无法删除候选文件：{error}")))
+    cleanup.map_err(|error| {
+        CoreUpdateError::Io(zenclash_i18n::text_with(
+            "core_update.details.remove_rejected",
+            &[("error", error.to_string())],
+        ))
+    })
 }
 
 #[cfg(unix)]
 fn sync_parent(path: &Path) -> CoreUpdateResult<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| CoreUpdateError::Io("内核路径没有父目录".into()))?;
+    let parent = path.parent().ok_or_else(|| {
+        CoreUpdateError::Io(zenclash_i18n::text("core_update.details.core_parent"))
+    })?;
     File::open(parent)
         .and_then(|directory| directory.sync_all())
-        .map_err(|error| CoreUpdateError::Io(format!("同步内核目录失败：{error}")))
+        .map_err(|error| {
+            CoreUpdateError::Io(zenclash_i18n::text_with(
+                "core_update.details.sync_directory",
+                &[("error", error.to_string())],
+            ))
+        })
 }
 
 #[cfg(not(unix))]

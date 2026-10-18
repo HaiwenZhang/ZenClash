@@ -77,7 +77,13 @@ fn command_output(command: &str, args: &[&str]) -> AutostartResult<std::process:
 fn command_failed(command: &str, output: &std::process::Output) -> AutostartError {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     AutostartError::Command(if stderr.is_empty() {
-        format!("{command} exit status: {}", output.status)
+        zenclash_i18n::text_with(
+            "autostart.details.command_exit",
+            &[
+                ("command", command.to_owned()),
+                ("status", output.status.to_string()),
+            ],
+        )
     } else {
         stderr
     })

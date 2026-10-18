@@ -13,4 +13,6 @@ workspace = true
 rust-i18n.workspace = true
 
 [dev-dependencies]
+proc-macro2 = "1.0.107"
 serde_yaml.workspace = true
+syn = { version = "2.0.119", features = ["full"] }

@@ -127,7 +127,6 @@ async fn update_recovery_owner(reject_version: bool) {
             .expect("candidate version must be rejected")
             .to_string();
         assert!(error.contains("/version"), "{error}");
-        assert!(error.contains("旧内核"), "{error}");
     } else {
         let installed =
             installed.unwrap_or_else(|error| panic!("recovery-owner update failed: {error}"));

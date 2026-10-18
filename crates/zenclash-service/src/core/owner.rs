@@ -139,10 +139,6 @@ fn try_acquire_owner_once(paths: &ServicePaths) -> Result<Option<ServiceOwnerGua
 
     #[cfg(windows)]
     {
-        use std::os::windows::io::AsRawHandle as _;
-        use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, GetLastError};
-        use windows_sys::Win32::Storage::FileSystem::LockFile;
-
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -150,17 +146,32 @@ fn try_acquire_owner_once(paths: &ServicePaths) -> Result<Option<ServiceOwnerGua
             .truncate(false)
             .open(paths.owner_lock_path())
             .with_context(|| format!("failed to open {:?}", paths.owner_lock_path()))?;
-        // SAFETY: `file` is open and `LockFile` operates on its live handle.
-        if unsafe { LockFile(file.as_raw_handle(), 0, 0, u32::MAX, u32::MAX) } == 0 {
-            // SAFETY: `GetLastError` reads thread-local state and has no preconditions.
-            if unsafe { GetLastError() } == ERROR_LOCK_VIOLATION {
-                return Ok(None);
-            }
-            return Err(std::io::Error::last_os_error())
-                .with_context(|| format!("failed to lock {:?}", paths.owner_lock_path()));
+        if !try_lock_owner_file(&file).with_context(|| format!("failed to lock {:?}", paths.owner_lock_path()))? {
+            return Ok(None);
         }
 
         ServiceOwnerGuard::new(file, paths.clone()).map(Some)
+    }
+}
+
+#[cfg(windows)]
+fn try_lock_owner_file(file: &File) -> std::io::Result<bool> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
+    use windows_sys::Win32::Storage::FileSystem::LockFile;
+
+    // Lock one byte beyond the metadata without extending the file. Windows
+    // denies other handles reads of locked bytes, so the metadata must remain
+    // unlocked. This byte also overlaps the whole-file lock used by old owners.
+    // SAFETY: `file` owns a live handle; locking beyond EOF is supported.
+    if unsafe { LockFile(file.as_raw_handle(), i32::MAX as u32, 0, 1, 0) } != 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) {
+        Ok(false)
+    } else {
+        Err(error)
     }
 }
 
@@ -316,5 +327,66 @@ mod tests {
     fn incomplete_owner_metadata_is_rejected() {
         assert!(parse_owner_identity("pid=42\nexe=/opt/zenclash/zenclash-service\n").is_none());
         assert!(parse_owner_identity("pid=42\nstarted_at=1700000000\n").is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_owner_lock_reader_child() -> anyhow::Result<()> {
+        let Some(path) = std::env::var_os("ZENCLASH_OWNER_LOCK_PROBE") else {
+            return Ok(());
+        };
+        let content = std::fs::read_to_string(&path)?;
+        assert_eq!(parse_owner_identity(&content), Some(identity()));
+        let file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+        assert!(!super::try_lock_owner_file(&file)?);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_owner_metadata_remains_readable_while_lock_excludes_new_and_legacy_owners() -> anyhow::Result<()> {
+        use std::{fs::OpenOptions, io::Write as _, os::windows::io::AsRawHandle as _};
+        use windows_sys::Win32::{Foundation::ERROR_LOCK_VIOLATION, Storage::FileSystem::LockFile};
+
+        let path = std::env::temp_dir().join(format!(
+            "zenclash-owner-lock-{}-{}.lock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        let mut owner = OpenOptions::new().read(true).write(true).create_new(true).open(&path)?;
+        assert!(super::try_lock_owner_file(&owner)?);
+        owner.set_len(0)?;
+        owner.write_all(owner_metadata(42, &identity()).as_bytes())?;
+        owner.sync_data()?;
+
+        let status = std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", "core::owner::tests::windows_owner_lock_reader_child"])
+            .env("ZENCLASH_OWNER_LOCK_PROBE", &path)
+            .status()?;
+        assert!(
+            status.success(),
+            "another process must read metadata without acquiring the lock"
+        );
+
+        let legacy = OpenOptions::new().read(true).write(true).open(&path)?;
+        // SAFETY: `legacy` owns a live handle; this is the old owner's lock range.
+        assert_eq!(unsafe { LockFile(legacy.as_raw_handle(), 0, 0, u32::MAX, u32::MAX) }, 0);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(ERROR_LOCK_VIOLATION as i32)
+        );
+        drop(owner);
+
+        // SAFETY: `legacy` is live and the previous owner's handle has been closed.
+        assert_ne!(unsafe { LockFile(legacy.as_raw_handle(), 0, 0, u32::MAX, u32::MAX) }, 0);
+        let contender = OpenOptions::new().read(true).write(true).open(&path)?;
+        assert!(!super::try_lock_owner_file(&contender)?);
+        drop(legacy);
+        assert!(super::try_lock_owner_file(&contender)?);
+        drop(contender);
+        std::fs::remove_file(path)?;
+        Ok(())
     }
 }

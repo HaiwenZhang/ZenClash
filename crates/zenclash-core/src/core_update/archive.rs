@@ -43,7 +43,13 @@ fn write_candidate(asset_name: &str, archive: &[u8], staging: &Path) -> CoreUpda
         .write(true)
         .open(staging)
         .map_err(|error| {
-            CoreUpdateError::Io(format!("无法创建 staging {}：{error}", staging.display()))
+            CoreUpdateError::Io(zenclash_i18n::text_with(
+                "core_update.details.create_staging",
+                &[
+                    ("path", staging.display().to_string()),
+                    ("error", error.to_string()),
+                ],
+            ))
         })?;
     let extension = Path::new(asset_name)
         .extension()
@@ -55,7 +61,12 @@ fn write_candidate(asset_name: &str, archive: &[u8], staging: &Path) -> CoreUpda
         let stem = Path::new(asset_name)
             .file_stem()
             .and_then(|value| value.to_str())
-            .ok_or_else(|| CoreUpdateError::Archive(format!("资产名称无效：{asset_name}")))?;
+            .ok_or_else(|| {
+                CoreUpdateError::Archive(zenclash_i18n::text_with(
+                    "core_update.details.invalid_asset_name",
+                    &[("name", asset_name.to_owned())],
+                ))
+            })?;
         let expected = format!("{stem}.exe");
         let mut zip = zip::ZipArchive::new(Cursor::new(archive))
             .map_err(|error| CoreUpdateError::Archive(error.to_string()))?;
@@ -64,23 +75,35 @@ fn write_candidate(asset_name: &str, archive: &[u8], staging: &Path) -> CoreUpda
                 zip.by_index(*index)
                     .is_ok_and(|entry| entry.name() == expected)
             })
-            .ok_or_else(|| CoreUpdateError::Archive(format!("ZIP 中找不到 {expected}")))?;
+            .ok_or_else(|| {
+                CoreUpdateError::Archive(zenclash_i18n::text_with(
+                    "core_update.details.missing_archive_binary",
+                    &[("name", expected.clone())],
+                ))
+            })?;
         let mut entry = zip
             .by_index(index)
             .map_err(|error| CoreUpdateError::Archive(error.to_string()))?;
         copy_limited(&mut entry, &mut output)?;
     } else {
-        return Err(CoreUpdateError::Archive(format!(
-            "不支持的资产格式：{asset_name}"
+        return Err(CoreUpdateError::Archive(zenclash_i18n::text_with(
+            "core_update.details.unsupported_archive",
+            &[("name", asset_name.to_owned())],
         )));
     }
-    output
-        .flush()
-        .map_err(|error| CoreUpdateError::Io(format!("刷新 staging 失败：{error}")))?;
+    output.flush().map_err(|error| {
+        CoreUpdateError::Io(zenclash_i18n::text_with(
+            "core_update.details.flush_staging",
+            &[("error", error.to_string())],
+        ))
+    })?;
     set_executable(staging)?;
-    output
-        .sync_all()
-        .map_err(|error| CoreUpdateError::Io(format!("同步 staging 失败：{error}")))
+    output.sync_all().map_err(|error| {
+        CoreUpdateError::Io(zenclash_i18n::text_with(
+            "core_update.details.sync_staging",
+            &[("error", error.to_string())],
+        ))
+    })
 }
 
 fn copy_limited(reader: &mut impl Read, writer: &mut impl Write) -> CoreUpdateResult<()> {
@@ -88,9 +111,9 @@ fn copy_limited(reader: &mut impl Read, writer: &mut impl Write) -> CoreUpdateRe
     let copied = std::io::copy(&mut limited, writer)
         .map_err(|error| CoreUpdateError::Archive(error.to_string()))?;
     if copied > MAX_BINARY_BYTES {
-        return Err(CoreUpdateError::TooLarge(format!(
-            "解压后超过 {} MiB",
-            MAX_BINARY_BYTES / 1024 / 1024
+        return Err(CoreUpdateError::TooLarge(zenclash_i18n::text_with(
+            "core_update.details.expanded_limit",
+            &[("limit", (MAX_BINARY_BYTES / 1024 / 1024).to_string())],
         )));
     }
     Ok(())
@@ -101,7 +124,13 @@ fn set_executable(path: &Path) -> CoreUpdateResult<()> {
     use std::os::unix::fs::PermissionsExt;
 
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).map_err(|error| {
-        CoreUpdateError::Io(format!("无法设置 {} 执行权限：{error}", path.display()))
+        CoreUpdateError::Io(zenclash_i18n::text_with(
+            "core_update.details.executable_permission",
+            &[
+                ("path", path.display().to_string()),
+                ("error", error.to_string()),
+            ],
+        ))
     })
 }
 
@@ -111,9 +140,11 @@ fn set_executable(_path: &Path) -> CoreUpdateResult<()> {
 }
 
 fn validate_candidate(path: &Path, tag: &str) -> CoreUpdateResult<()> {
-    let executable = path
-        .to_str()
-        .ok_or_else(|| CoreUpdateError::Candidate("候选内核路径不是有效 UTF-8".into()))?;
+    let executable = path.to_str().ok_or_else(|| {
+        CoreUpdateError::Candidate(zenclash_i18n::text(
+            "core_update.details.candidate_path_utf8",
+        ))
+    })?;
     let output = platform_command::output_with_timeout(executable, &["-v"], CANDIDATE_TIMEOUT)
         .map_err(CoreUpdateError::Candidate)?;
     let combined = format!(
@@ -126,10 +157,13 @@ fn validate_candidate(path: &Path, tag: &str) -> CoreUpdateResult<()> {
         || !combined.to_ascii_lowercase().contains("mihomo meta")
         || !reports_version(&combined, version)
     {
-        return Err(CoreUpdateError::Candidate(format!(
-            "{} -v 未返回 Mihomo Meta {version}：{}",
-            path.display(),
-            combined.trim()
+        return Err(CoreUpdateError::Candidate(zenclash_i18n::text_with(
+            "core_update.details.candidate_version",
+            &[
+                ("path", path.display().to_string()),
+                ("version", version.to_owned()),
+                ("output", combined.trim().to_owned()),
+            ],
         )));
     }
     Ok(())

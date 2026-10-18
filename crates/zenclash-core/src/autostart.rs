@@ -96,8 +96,9 @@ impl AutostartManager {
     /// cannot be determined.
     pub fn discover() -> AutostartResult<Self> {
         let executable = std::env::current_exe().map_err(|error| {
-            AutostartError::Path(format!(
-                "failed to read the current executable path: {error}"
+            AutostartError::Path(zenclash_i18n::text_with(
+                "autostart.details.executable_path",
+                &[("error", error.to_string())],
             ))
         })?;
         let entry_path = platform::default_entry_path()?;
@@ -129,9 +130,13 @@ impl AutostartManager {
         if verified {
             Ok(status)
         } else {
-            Err(AutostartError::Verification(format!(
-                "requested enabled={enabled}, OS read back enabled={}, matches current executable={}",
-                status.enabled, status.matches_current_executable
+            Err(AutostartError::Verification(zenclash_i18n::text_with(
+                "autostart.details.readback",
+                &[
+                    ("requested", enabled.to_string()),
+                    ("actual", status.enabled.to_string()),
+                    ("matches", status.matches_current_executable.to_string()),
+                ],
             )))
         }
     }
@@ -150,11 +155,13 @@ fn home_dir() -> AutostartResult<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
-        .ok_or_else(|| AutostartError::Path("the user home directory is unavailable".into()))
+        .ok_or_else(|| {
+            AutostartError::Path(zenclash_i18n::text("autostart.details.home_directory"))
+        })
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn required_entry_path(entry_path: Option<&Path>) -> AutostartResult<&Path> {
     entry_path
-        .ok_or_else(|| AutostartError::Path("the platform has no login-startup entry path".into()))
+        .ok_or_else(|| AutostartError::Path(zenclash_i18n::text("autostart.details.entry_path")))
 }

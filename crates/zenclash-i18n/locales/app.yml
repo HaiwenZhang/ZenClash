@@ -4055,8 +4055,8 @@ core_page:
       zh-CN: 释放旧内核的后台任务异常结束：%{error}
       en: "The previous-core release task ended unexpectedly: %{error}"
     release_previous_restored_stopped:
-      zh-CN: "%{error}；旧内核已恢复并保持停止%{cleanup}"
-      en: "%{error}; the previous core was restored and remains stopped%{cleanup}"
+      zh-CN: "%{error}；旧内核已恢复并保持停止"
+      en: "%{error}; the previous core was restored and remains stopped"
     release_cancelled:
       zh-CN: 内核升级已因退出应用而取消。
       en: Core upgrade cancelled because the application is closing.
@@ -5898,3 +5898,201 @@ settings_redesign:
   version_updates:
     en: Version and updates
     zh-CN: 版本与更新
+
+autostart:
+  details:
+    executable_path:
+      zh-CN: "无法读取当前程序路径：%{error}"
+      en: "Could not read the current executable path: %{error}"
+    readback:
+      zh-CN: "请求 enabled=%{requested}，系统回读 enabled=%{actual}、当前程序匹配=%{matches}"
+      en: "Requested enabled=%{requested}; the OS reported enabled=%{actual}, matching the current executable=%{matches}"
+    home_directory:
+      zh-CN: "无法确定用户主目录"
+      en: "The user home directory is unavailable"
+    entry_path:
+      zh-CN: "当前平台缺少自动启动文件路径"
+      en: "The platform has no Start at Login entry path"
+    unsupported_platform:
+      zh-CN: "当前平台不支持登录自动启动"
+      en: "Start at Login is unsupported on this platform"
+    command_exit:
+      zh-CN: "%{command} 退出状态：%{status}"
+      en: "%{command} exited with status %{status}"
+
+core_update:
+  details:
+    create_staging:
+      zh-CN: "无法创建暂存文件 %{path}：%{error}"
+      en: "Could not create staging file %{path}: %{error}"
+    invalid_asset_name:
+      zh-CN: "资产名称无效：%{name}"
+      en: "Invalid asset name: %{name}"
+    missing_archive_binary:
+      zh-CN: "ZIP 中找不到 %{name}"
+      en: "The ZIP archive does not contain %{name}"
+    unsupported_archive:
+      zh-CN: "不支持的资产格式：%{name}"
+      en: "Unsupported asset format: %{name}"
+    flush_staging:
+      zh-CN: "刷新暂存文件失败：%{error}"
+      en: "Could not flush the staging file: %{error}"
+    sync_staging:
+      zh-CN: "同步暂存文件失败：%{error}"
+      en: "Could not sync the staging file: %{error}"
+    expanded_limit:
+      zh-CN: "解压后超过 %{limit} MiB"
+      en: "The extracted binary exceeds %{limit} MiB"
+    executable_permission:
+      zh-CN: "无法设置 %{path} 执行权限：%{error}"
+      en: "Could not set executable permissions on %{path}: %{error}"
+    candidate_path_utf8:
+      zh-CN: "候选内核路径不是有效 UTF-8"
+      en: "The candidate core path is not valid UTF-8"
+    candidate_version:
+      zh-CN: "%{path} -v 未返回 Mihomo Meta %{version}：%{output}"
+      en: "%{path} -v did not report Mihomo Meta %{version}: %{output}"
+    api_url:
+      zh-CN: "API URL 无效：%{error}"
+      en: "Invalid API URL: %{error}"
+    release_count:
+      zh-CN: "版本数量必须在 1 到 %{maximum} 之间"
+      en: "The release count must be between 1 and %{maximum}"
+    release_url:
+      zh-CN: "Release URL 无效：%{error}"
+      en: "Invalid release URL: %{error}"
+    metadata_limit:
+      zh-CN: "Release 元数据超过 %{limit} MiB"
+      en: "Release metadata exceeds %{limit} MiB"
+    metadata_response_limit:
+      zh-CN: "Release 元数据实际响应超过 %{limit} MiB"
+      en: "The release metadata response exceeds %{limit} MiB"
+    release_json:
+      zh-CN: "Release JSON 无法解析：%{error}"
+      en: "Could not parse release JSON: %{error}"
+    resolve_target:
+      zh-CN: "无法解析当前内核 %{path}：%{error}"
+      en: "Could not resolve the current core %{path}: %{error}"
+    invalid_target:
+      zh-CN: "当前内核不是普通文件：%{path}"
+      en: "The current core is not a regular file: %{path}"
+    candidate_task:
+      zh-CN: "候选内核任务异常结束：%{error}"
+      en: "The candidate core task ended unexpectedly: %{error}"
+    unrepresentable_size:
+      zh-CN: "无法表示资产大小 %{size}"
+      en: "The asset size %{size} cannot be represented"
+    archive_limit:
+      zh-CN: "%{name} 为 %{size} MiB，上限为 %{limit} MiB"
+      en: "%{name} is %{size} MiB; the limit is %{limit} MiB"
+    content_length_limit:
+      zh-CN: "%{name} 的 HTTP Content-Length 超过 %{limit} MiB"
+      en: "The HTTP Content-Length of %{name} exceeds %{limit} MiB"
+    download_response_limit:
+      zh-CN: "%{name} 的实际响应超过 %{limit} MiB"
+      en: "The response for %{name} exceeds %{limit} MiB"
+    declared_asset_limit:
+      zh-CN: "%{name} 声明大小超过 %{limit} MiB"
+      en: "The declared size of %{name} exceeds %{limit} MiB"
+    asset_url:
+      zh-CN: "%{name} 下载 URL 无效：%{error}"
+      en: "Invalid download URL for %{name}: %{error}"
+    unsafe_tag:
+      zh-CN: "版本标签不安全：%{tag}"
+      en: "Unsafe version tag: %{tag}"
+    unsupported_platform:
+      zh-CN: "不支持的平台：%{os}-%{arch}"
+      en: "Unsupported platform: %{os}-%{arch}"
+    untrusted_url:
+      zh-CN: "拒绝不可信的 GitHub 资产 URL：%{url}"
+      en: "Rejected an untrusted GitHub asset URL: %{url}"
+    missing_digest:
+      zh-CN: "Release 资产缺少 SHA-256 摘要"
+      en: "The release asset has no SHA-256 digest"
+    invalid_digest:
+      zh-CN: "SHA-256 摘要格式错误：%{digest}"
+      en: "Invalid SHA-256 digest format: %{digest}"
+    candidate_consumed:
+      zh-CN: "候选内核已经被使用"
+      en: "The candidate core has already been consumed"
+    backup_target:
+      zh-CN: "无法备份 %{path} 到 %{backup}：%{error}"
+      en: "Could not back up %{path} to %{backup}: %{error}"
+    activate_restore:
+      zh-CN: "无法启用候选内核：%{error}；恢复旧内核结果：%{restore}"
+      en: "Could not activate the candidate core: %{error}; restoring the previous core: %{restore}"
+    restore_succeeded:
+      zh-CN: "成功"
+      en: "succeeded"
+    rollback_also_failed:
+      zh-CN: "%{error}；并且回滚失败：%{rollback}"
+      en: "%{error}; rollback also failed: %{rollback}"
+    remove_backup:
+      zh-CN: "新内核已启用，但无法删除备份 %{path}：%{error}"
+      en: "The new core is active, but backup %{path} could not be removed: %{error}"
+    target_parent:
+      zh-CN: "目标没有父目录：%{path}"
+      en: "The target has no parent directory: %{path}"
+    target_name_utf8:
+      zh-CN: "目标文件名不是有效 UTF-8"
+      en: "The target filename is not valid UTF-8"
+    missing_backup:
+      zh-CN: "回滚备份不存在：%{path}"
+      en: "The rollback backup does not exist: %{path}"
+    move_candidate:
+      zh-CN: "无法移走候选内核 %{path}：%{error}"
+      en: "Could not move the candidate core %{path}: %{error}"
+    restore_backup:
+      zh-CN: "无法恢复备份 %{path}：%{error}"
+      en: "Could not restore backup %{path}: %{error}"
+    remove_rejected:
+      zh-CN: "旧内核已恢复，但无法删除候选文件：%{error}"
+      en: "The previous core was restored, but the rejected candidate could not be removed: %{error}"
+    core_parent:
+      zh-CN: "内核路径没有父目录"
+      en: "The core path has no parent directory"
+    sync_directory:
+      zh-CN: "同步内核目录失败：%{error}"
+      en: "Could not sync the core directory: %{error}"
+    candidate_rejected_config:
+      zh-CN: "候选内核拒绝当前运行配置：%{error}"
+      en: "The candidate core rejected the current runtime configuration: %{error}"
+    precheck_task:
+      zh-CN: "候选内核配置预检任务异常结束：%{error}"
+      en: "The candidate configuration precheck task ended unexpectedly: %{error}"
+    activation_task:
+      zh-CN: "启用候选内核任务异常结束：%{error}"
+      en: "The candidate activation task ended unexpectedly: %{error}"
+    commit_task:
+      zh-CN: "提交内核更新任务异常结束：%{error}"
+      en: "The core update commit task ended unexpectedly: %{error}"
+    runtime_version:
+      zh-CN: "新内核 /version 返回 %{actual}，期望 %{expected}"
+      en: "The new core /version reported %{actual}; expected %{expected}"
+    previous_restarted:
+      zh-CN: "%{error}；旧内核已重新启动"
+      en: "%{error}; the previous core was restarted"
+    previous_restart_failed:
+      zh-CN: "%{error}；旧内核重新启动失败：%{restart}"
+      en: "%{error}; restarting the previous core failed: %{restart}"
+    candidate_stop_failed:
+      zh-CN: "%{error}；停止候选内核失败，未强制替换运行中的文件：%{stop}；旧内核备份保留在 %{backup}"
+      en: "%{error}; the candidate could not be stopped, so its running executable was left in place: %{stop}; the previous core backup is retained at %{backup}"
+    rollback_task:
+      zh-CN: "%{error}；回滚任务异常结束：%{rollback}"
+      en: "%{error}; the rollback task ended unexpectedly: %{rollback}"
+    restore_failed:
+      zh-CN: "%{error}；回滚旧内核失败：%{rollback}"
+      en: "%{error}; restoring the previous core failed: %{rollback}"
+    restored_cleanup_failed:
+      zh-CN: "%{error}；旧内核已恢复，但清理失败：%{cleanup}"
+      en: "%{error}; the previous core was restored, but cleanup failed: %{cleanup}"
+    restored_restarted:
+      zh-CN: "%{error}；已自动恢复并启动旧内核"
+      en: "%{error}; the previous core was automatically restored and restarted"
+    restored_restart_failed:
+      zh-CN: "%{error}；旧内核已恢复但重新启动失败：%{restart}"
+      en: "%{error}; the previous core was restored, but restarting it failed: %{restart}"
+    cleanup_failed:
+      zh-CN: "%{error}；清理失败：%{cleanup}"
+      en: "%{error}; cleanup failed: %{cleanup}"
