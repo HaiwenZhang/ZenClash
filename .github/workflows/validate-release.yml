@@ -57,6 +57,26 @@ jobs:
           fi
           printf 'version=%s\n' "${manifest_version}" >>"${GITHUB_OUTPUT}"
 
+  msrv:
+    name: Minimum supported Rust version
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up minimum Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          version: "1.98.1"
+
+      - name: Install Linux dependencies
+        run: sudo scripts/install_linux_build_deps.sh
+
+      - name: Check workspace on the declared MSRV
+        run: cargo check --workspace --all-features --locked
+
   verify:
     name: Rust checks and real Mihomo integration
     needs: prepare

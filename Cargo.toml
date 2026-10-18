@@ -5,11 +5,12 @@ members = [
     "crates/zenclash-service",
     "crates/zenclash-ui",
 ]
-resolver = "2"
+resolver = "3"
 
 [workspace.package]
 version = "0.2.1"
 edition = "2024"
+rust-version = "1.98"
 authors = ["ZenClash contributors"]
 license = "GPL-3.0-only"
 
@@ -41,7 +42,7 @@ serde_yaml = "0.9.34"
 sha2 = "0.11.0"
 socket2 = "0.6.5"
 thiserror = "2.0.21"
-tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "net", "io-util"] }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
@@ -59,6 +60,24 @@ windows-sys = { version = "0.61.2", features = [
 ] }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 zenclash-i18n = { path = "crates/zenclash-i18n" }
+
+# Keep the CI lint policy enforceable from a plain `cargo clippy`.
+# `.github/actions/verify-rust/action.yml` repeats these flags so the exact
+# command remains visible in review tools and release logs.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+await_holding_lock = "deny"
+future_not_send = "deny"
+large_enum_variant = "deny"
+large_futures = "deny"
+manual_ok_or = "deny"
+missing_errors_doc = "deny"
+missing_panics_doc = "deny"
+needless_collect = "deny"
+perf = "deny"
+redundant_clone = "deny"
 
 [profile.dev]
 opt-level = 1

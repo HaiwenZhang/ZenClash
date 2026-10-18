@@ -7342,7 +7342,7 @@ dependencies = [
 [[package]]
 name = "sysproxy"
 version = "0.7.1"
-source = "git+https://github.com/clash-verge-rev/sysproxy-rs.git?branch=main#c37a60e1fc9079cc0f074200e2296afd1705208c"
+source = "git+https://github.com/clash-verge-rev/sysproxy-rs.git?rev=c37a60e1fc9079cc0f074200e2296afd1705208c#c37a60e1fc9079cc0f074200e2296afd1705208c"
 dependencies = [
  "log",
  "system-configuration 0.7.0",
@@ -7925,7 +7925,7 @@ dependencies = [
 [[package]]
 name = "tracing-estuary"
 version = "0.1.0"
-source = "git+https://github.com/Tunglies/tracing-estuary.git?branch=main#dbfce033fa4cff8f936f3e7c2282af1277546f3c"
+source = "git+https://github.com/Tunglies/tracing-estuary.git?rev=dbfce033fa4cff8f936f3e7c2282af1277546f3c#dbfce033fa4cff8f936f3e7c2282af1277546f3c"
 dependencies = [
  "anyhow",
  "compact_str",

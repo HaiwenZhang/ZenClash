@@ -2,8 +2,12 @@
 name = "zenclash-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+
+[lints]
+workspace = true
 
 [features]
 # Isolated UI children and ordinary-user privilege fixtures. Never enable for production.

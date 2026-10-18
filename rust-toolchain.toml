@@ -1,0 +1,6 @@
+[toolchain]
+# Local development toolchain. CI installs a newer pinned toolchain through
+# `.github/actions/setup-rust` to verify forward compatibility.
+channel = "1.98.1"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
