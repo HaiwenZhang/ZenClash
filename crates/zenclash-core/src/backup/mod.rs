@@ -10,6 +10,7 @@ use crate::{
 };
 
 mod archive;
+mod recovery;
 mod transaction;
 
 #[cfg(test)]
@@ -170,6 +171,25 @@ impl BackupManager {
     #[must_use]
     pub fn data_root(&self) -> &Path {
         &self.data_root
+    }
+
+    /// Recovers an interrupted restore, or cleans up a previously committed restore.
+    /// Call after taking the application instance lock and before opening data stores.
+    /// Run on a blocking worker when the application event loop is active.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid journal or failed recovery. Do not start
+    /// the core or read partially restored data after a recovery error.
+    pub fn recover_interrupted_restore(&self) -> BackupResult<bool> {
+        let mut scopes = transaction::write_scopes(&self.data_root);
+        scopes.push(self.data_root.clone());
+        let _lease = crate::data_coordinator::DataWriteLease::exclusive(scopes);
+        let Some(mut journal) = recovery::RestoreJournal::read(&self.data_root)? else {
+            return Ok(false);
+        };
+        AppPreferencesStore::new(self.data_root.join(PREFERENCES_PATH)).invalidate_observations();
+        journal.recover(&self.data_root)?;
+        Ok(true)
     }
 
     /// Reads authoritative state without observing an unfinished restore.
@@ -387,9 +407,7 @@ impl Drop for PreparedBackupRestore {
 pub struct BackupRestoreTransaction {
     data_root: PathBuf,
     rollback_root: PathBuf,
-    remove_empty_data_root: bool,
-    installed: Vec<&'static str>,
-    preserved: Vec<&'static str>,
+    journal: recovery::RestoreJournal,
     active: bool,
     previous_runtime: Option<crate::CoreRestoreSnapshot>,
     lease: crate::data_coordinator::DataWriteLease,
@@ -478,12 +496,23 @@ impl BackupRestoreTransaction {
     ///
     /// # Errors
     ///
-    /// Returns an error when the now-unneeded rollback directory cannot be
-    /// removed. The imported snapshot remains active in this case.
+    /// Returns an error when the commit cannot be recorded or cleanup fails.
+    /// A failed commit is rolled back; a cleanup failure leaves imported data active.
     pub fn commit(mut self) -> BackupResult<()> {
-        self.active = false;
-        if self.rollback_root.exists() {
-            std::fs::remove_dir_all(&self.rollback_root)?;
+        self.commit_in_place()?;
+        self.journal.cleanup(&self.data_root)
+    }
+
+    /// Durably commits disk state while retaining exclusive authority for runtime recovery.
+    /// Callers that already applied imported runtime state must roll it back if this fails.
+    /// Consume with [`Self::commit`] afterward to clean up the rollback copy.
+    ///
+    /// # Errors
+    /// Returns a journal write error without relinquishing the rollback transaction.
+    pub fn commit_in_place(&mut self) -> BackupResult<()> {
+        if self.active {
+            self.journal.commit(&self.data_root)?;
+            self.active = false;
         }
         Ok(())
     }

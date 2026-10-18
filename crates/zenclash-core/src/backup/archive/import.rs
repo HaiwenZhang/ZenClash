@@ -102,7 +102,7 @@ fn extract_and_validate(archive_path: &Path, staging_root: &Path) -> BackupResul
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&destination, &bytes)?;
+        crate::profiles::atomic_write(&destination, &bytes)?;
         observed.insert(
             normalized,
             ManifestFile {

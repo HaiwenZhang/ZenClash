@@ -193,6 +193,25 @@ impl BackupRestoration {
         };
         // Optional controller facts are domain observation, not page loading or a commit condition.
         let runtime_config = commands.client().runtime_config().await.ok();
+        let (transaction, committed) = tokio::task::spawn_blocking(move || {
+            let mut transaction = transaction;
+            let committed = transaction.commit_in_place();
+            (transaction, committed)
+        })
+        .await
+        .map_err(|error| {
+            zenclash_i18n::text_with("backup.errors.commit_task", &[("error", error.to_string())])
+        })?;
+        if let Err(error) = committed {
+            return rollback_after_runtime_accept(
+                transaction,
+                commands.clone(),
+                root,
+                error.to_string(),
+                &admission,
+            )
+            .await;
+        }
         let cleanup_warning = tokio::task::spawn_blocking(move || transaction.commit())
             .await
             .map_err(|error| {

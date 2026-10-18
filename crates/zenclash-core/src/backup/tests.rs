@@ -16,6 +16,9 @@ use crate::{
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const PROFILE: &str = "mixed-port: 7890\nproxies: []\nproxy-groups: []\nrules: []\n";
 
+#[path = "tests/recovery.rs"]
+mod recovery;
+
 #[test]
 fn export_waits_for_an_admitted_profile_update_and_captures_a_restorable_snapshot() {
     use std::{sync::mpsc, thread, time::Duration};

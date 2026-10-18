@@ -141,6 +141,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("application data directory unavailable; instance locking is disabled");
         None
     };
+    if let Some(store) = preferences_store.as_ref()
+        && let Some(root) = store.path().parent()
+    {
+        zenclash_core::BackupManager::new(root).recover_interrupted_restore()?;
+    }
     let (preferences, preferences_recovery_notice) = load_preferences(preferences_store.as_ref())?;
     zenclash_i18n::set_locale(preferences.language.locale());
     let environment_core = std::env::var("ZENCLASH_CORE")
