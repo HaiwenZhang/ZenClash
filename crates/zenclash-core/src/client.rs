@@ -108,6 +108,12 @@ pub enum MihomoError {
     SystemProxy(#[from] Box<crate::SystemProxyError>),
 }
 
+impl From<std::io::Error> for MihomoError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Process(error.to_string())
+    }
+}
+
 impl MihomoError {
     /// Returns a definitive native startup rejection, if one was observed.
     /// Transport loss and timeouts remain unknown; this reader performs no IPC.

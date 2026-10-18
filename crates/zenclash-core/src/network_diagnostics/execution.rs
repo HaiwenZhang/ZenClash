@@ -36,54 +36,33 @@ impl NetworkDiagnostics {
     pub async fn run(&self, plan: DiagnosticPlan) -> DiagnosticReport {
         let started_at_ms = unix_time_ms();
         let requests = vec![
-            (
-                DiagnosticStepKind::Controller,
-                DiagnosticRequest::Controller,
-            ),
-            (DiagnosticStepKind::Capture, DiagnosticRequest::Capture),
-            (
-                DiagnosticStepKind::DnsA,
-                DiagnosticRequest::Dns {
-                    name: plan.dns_name.clone(),
-                    record_type: DnsRecordType::A,
-                },
-            ),
-            (
-                DiagnosticStepKind::DnsAaaa,
-                DiagnosticRequest::Dns {
-                    name: plan.dns_name,
-                    record_type: DnsRecordType::Aaaa,
-                },
-            ),
-            (
-                DiagnosticStepKind::NetworkDirect,
-                DiagnosticRequest::Network {
-                    route: Some(NetworkProbeRoute::Direct),
-                    provider: plan.provider,
-                    targets: plan.latency_targets.clone(),
-                },
-            ),
-            (
-                DiagnosticStepKind::NetworkMihomo,
-                DiagnosticRequest::Network {
-                    route: plan.mihomo_route,
-                    provider: plan.provider,
-                    targets: plan.latency_targets,
-                },
-            ),
-            (
-                DiagnosticStepKind::ProxyProviders,
-                DiagnosticRequest::ProxyProviders,
-            ),
-            (
-                DiagnosticStepKind::RuleProviders,
-                DiagnosticRequest::RuleProviders,
-            ),
+            DiagnosticRequest::Controller,
+            DiagnosticRequest::Capture,
+            DiagnosticRequest::Dns {
+                name: plan.dns_name.clone(),
+                record_type: DnsRecordType::A,
+            },
+            DiagnosticRequest::Dns {
+                name: plan.dns_name,
+                record_type: DnsRecordType::Aaaa,
+            },
+            DiagnosticRequest::Network {
+                route: Some(NetworkProbeRoute::Direct),
+                provider: plan.provider,
+                targets: plan.latency_targets.clone(),
+            },
+            DiagnosticRequest::Network {
+                route: plan.mihomo_route,
+                provider: plan.provider,
+                targets: plan.latency_targets,
+            },
+            DiagnosticRequest::ProxyProviders,
+            DiagnosticRequest::RuleProviders,
         ];
         let steps = join_all(
             requests
                 .into_iter()
-                .map(|(kind, request)| execute_step(self.backend.clone(), kind, request)),
+                .map(|request| execute_step(self.backend.clone(), request)),
         )
         .await;
         DiagnosticReport {
@@ -110,9 +89,9 @@ impl NetworkDiagnostics {
 
 async fn execute_step(
     backend: Arc<dyn DiagnosticBackend>,
-    kind: DiagnosticStepKind,
     request: DiagnosticRequest,
 ) -> DiagnosticStep {
+    let kind = request.kind();
     let started = Instant::now();
     let outcome = backend
         .execute(request)
@@ -142,6 +121,30 @@ pub(super) enum DiagnosticRequest {
     },
     ProxyProviders,
     RuleProviders,
+}
+
+impl DiagnosticRequest {
+    fn kind(&self) -> DiagnosticStepKind {
+        match self {
+            Self::Controller => DiagnosticStepKind::Controller,
+            Self::Capture => DiagnosticStepKind::Capture,
+            Self::Dns {
+                record_type: DnsRecordType::A,
+                ..
+            } => DiagnosticStepKind::DnsA,
+            Self::Dns {
+                record_type: DnsRecordType::Aaaa,
+                ..
+            } => DiagnosticStepKind::DnsAaaa,
+            Self::Network {
+                route: Some(NetworkProbeRoute::Direct),
+                ..
+            } => DiagnosticStepKind::NetworkDirect,
+            Self::Network { .. } => DiagnosticStepKind::NetworkMihomo,
+            Self::ProxyProviders => DiagnosticStepKind::ProxyProviders,
+            Self::RuleProviders => DiagnosticStepKind::RuleProviders,
+        }
+    }
 }
 
 pub(super) type DiagnosticFuture<'a> =

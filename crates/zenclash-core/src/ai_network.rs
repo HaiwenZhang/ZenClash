@@ -6,7 +6,6 @@ mod local;
 mod tests;
 
 use crate::NetworkProbeRoute;
-use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::{net::IpAddr, time::Duration};
 
@@ -297,23 +296,9 @@ fn field<'a>(value: &'a Value, key: &str) -> &'a str {
 }
 
 async fn read_body(response: reqwest::Response) -> Result<Vec<u8>, ()> {
-    const LIMIT: usize = 256 * 1024;
-    if response
-        .content_length()
-        .is_some_and(|length| length > LIMIT as u64)
-    {
-        return Err(());
-    }
-    let mut stream = response.bytes_stream();
-    let mut body = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| ())?;
-        if body.len().saturating_add(chunk.len()) > LIMIT {
-            return Err(());
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
+    crate::http_body::read_limited(response, 256 * 1024)
+        .await
+        .map_err(|_| ())
 }
 
 fn risk_result(ip: &str, risk: Option<&Value>, spam: Option<&Value>) -> CheckResult {

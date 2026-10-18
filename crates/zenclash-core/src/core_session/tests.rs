@@ -32,7 +32,7 @@ async fn queued_mode_rejects_changed_binding(wait_for_transition: bool) {
         .unwrap();
     let session = CoreSession::open(CoreKind::Mihomo, client.clone()).unwrap();
     let lease = if wait_for_transition {
-        DataWriteLease::shared([root.clone()])
+        DataWriteLease::shared([root.clone()]).unwrap()
     } else {
         DataWriteLease::exclusive([root.clone()])
     };

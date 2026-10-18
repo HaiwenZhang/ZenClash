@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, USER_AGENT};
 
 use super::{
@@ -108,27 +107,15 @@ async fn download_with_client(
     let response = request.send().await?.error_for_status()?;
     let metadata = parse_subscription_metadata(response.headers());
     let suggested_name = downloaded_profile_name(response.headers(), response.url());
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_PROFILE_BYTES as u64)
-    {
-        return Err(ProfileStoreError::InvalidYaml(format!(
-            "订阅文件超过 {} MiB 限制",
-            MAX_PROFILE_BYTES / 1024 / 1024
-        )));
-    }
-    let mut stream = response.bytes_stream();
-    let mut payload = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        if payload.len().saturating_add(chunk.len()) > MAX_PROFILE_BYTES {
-            return Err(ProfileStoreError::InvalidYaml(format!(
+    let payload = crate::http_body::read_limited(response, MAX_PROFILE_BYTES)
+        .await
+        .map_err(|error| match error {
+            crate::http_body::ReadBodyError::Http(error) => ProfileStoreError::Http(error),
+            crate::http_body::ReadBodyError::TooLarge => ProfileStoreError::InvalidYaml(format!(
                 "订阅文件超过 {} MiB 限制",
-                MAX_PROFILE_BYTES / 1024 / 1024
-            )));
-        }
-        payload.extend_from_slice(&chunk);
-    }
+                MAX_PROFILE_BYTES / 1024 / 1024,
+            )),
+        })?;
     let payload = String::from_utf8(payload)
         .map_err(|error| ProfileStoreError::InvalidYaml(format!("订阅内容不是 UTF-8：{error}")))?;
     Ok(DownloadedProfile {

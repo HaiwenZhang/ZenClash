@@ -46,7 +46,7 @@ impl AdmittedManagedRestart {
         overrides: Vec<PathBuf>,
         cancelled: Option<Arc<AtomicBool>>,
     ) -> Result<(), RuntimeMutationError> {
-        let prepare_lease = self.store.write_access.acquire();
+        let prepare_lease = self.store.write_access.acquire()?;
         let prepare_store = self.store.with_write_lease(&prepare_lease);
         let (update, applied_payload) = tokio::task::spawn_blocking(move || {
             let _write_lease = prepare_lease;
@@ -87,7 +87,7 @@ impl AdmittedManagedRestart {
                 cancelled.clone(),
             )
             .await?;
-        let commit_lease = self.store.write_access.acquire();
+        let commit_lease = self.store.write_access.acquire()?;
         let commit_store = self.store.with_write_lease(&commit_lease);
         let commit_update = update.clone();
         let commit = tokio::task::spawn_blocking(move || {
@@ -121,7 +121,7 @@ impl AdmittedManagedRestart {
         overrides: Vec<PathBuf>,
         cancelled: Option<Arc<AtomicBool>>,
     ) -> Result<(), RuntimeMutationError> {
-        let worker_lease = self.store.write_access.acquire();
+        let worker_lease = self.store.write_access.acquire()?;
         let store = self.store.with_write_lease(&worker_lease);
         let payload = tokio::task::spawn_blocking(move || {
             let _write_lease = worker_lease;

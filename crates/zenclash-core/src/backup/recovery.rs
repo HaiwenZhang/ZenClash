@@ -34,6 +34,10 @@ pub(super) struct RestoreJournal {
 }
 
 impl RestoreJournal {
+    pub(super) fn is_pending(&self) -> bool {
+        !self.committed
+    }
+
     pub(super) fn create(
         root: &Path,
         rollback: &Path,

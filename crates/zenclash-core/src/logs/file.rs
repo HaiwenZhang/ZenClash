@@ -320,7 +320,7 @@ impl BoundedLogFile {
         let _write_lease = self
             .write_access
             .get_or_insert_with(|| crate::data_coordinator::DataWriteAccess::new(&config.path))
-            .acquire();
+            .acquire()?;
         self.synchronize_path(config)?;
         let data = format_log_entries(std::slice::from_ref(entry)).into_bytes();
         let max_bytes = usize::try_from(config.max_bytes)

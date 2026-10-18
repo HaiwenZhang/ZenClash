@@ -32,7 +32,7 @@ impl ProfileStore {
             )));
         }
 
-        let _write_lease = self.write_access.acquire();
+        let _write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
         let profile = remote_profile_mut(&mut catalog.profiles, id)?;
@@ -71,7 +71,7 @@ impl ProfileStore {
             parse_profile_schedule(expression)?;
         }
 
-        let _write_lease = self.write_access.acquire();
+        let _write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
         let profile = remote_profile_mut(&mut catalog.profiles, id)?;
@@ -105,7 +105,7 @@ pub(super) fn cron_update_due(
     }
     let schedule = parse_profile_schedule(expression)?;
     let updated_at = unix_to_local(updated_at)?;
-    let Some(next) = schedule.after(&updated_at).next() else {
+    let Some(next) = schedule.next_after(&updated_at) else {
         return Err(ProfileStoreError::InvalidYaml(
             "订阅 Cron 没有下一次执行时间".into(),
         ));
@@ -116,19 +116,46 @@ pub(super) fn cron_update_due(
     Ok(next <= now)
 }
 
-fn parse_profile_schedule(expression: &str) -> ProfileStoreResult<Schedule> {
+struct ProfileSchedule {
+    schedules: Vec<Schedule>,
+}
+
+impl ProfileSchedule {
+    fn next_after<T: chrono::TimeZone>(&self, after: &DateTime<T>) -> Option<DateTime<T>> {
+        self.schedules
+            .iter()
+            .filter_map(|schedule| schedule.after(after).next())
+            .min()
+    }
+}
+
+fn parse_profile_schedule(expression: &str) -> ProfileStoreResult<ProfileSchedule> {
     let mut fields = expression.split_whitespace().collect::<Vec<_>>();
     if fields.len() != 5 {
         return Err(ProfileStoreError::InvalidYaml(
             "订阅 Cron 必须恰好包含 5 个字段（分 时 日 月 周）".into(),
         ));
     }
+    let either_day = !fields[2].contains(['*', '?']) && !fields[4].contains(['*', '?']);
     let weekdays = cron_weekdays(fields[4]).ok_or_else(|| {
         ProfileStoreError::InvalidYaml(format!("订阅 Cron 星期无效：{}", fields[4]))
     })?;
     fields[4] = &weekdays;
-    Schedule::from_str(&format!("0 {}", fields.join(" ")))
-        .map_err(|error| ProfileStoreError::InvalidYaml(format!("订阅 Cron 无效：{error}")))
+    let parse = |fields: &[&str]| {
+        Schedule::from_str(&format!("0 {}", fields.join(" ")))
+            .map_err(|error| ProfileStoreError::InvalidYaml(format!("订阅 Cron 无效：{error}")))
+    };
+    let schedule = parse(&fields)?;
+    let schedules = if either_day {
+        // Five-field cron matches either restricted day field; the crate intersects them.
+        let mut calendar = fields.clone();
+        calendar[4] = "*";
+        fields[2] = "*";
+        vec![parse(&calendar)?, parse(&fields)?]
+    } else {
+        vec![schedule]
+    };
+    Ok(ProfileSchedule { schedules })
 }
 
 // Five-field cron uses 0/7 for Sunday; the cron crate uses 1 for Sunday.
@@ -220,13 +247,19 @@ mod tests {
             let numeric = parse_profile_schedule(&format!("0 0 * * {numeric}")).unwrap();
             let named = parse_profile_schedule(&format!("0 0 * * {named}")).unwrap();
             assert_eq!(
-                numeric.after(&start).take(10).collect::<Vec<_>>(),
-                named.after(&start).take(10).collect::<Vec<_>>()
+                std::iter::successors(Some(start), |at| numeric.next_after(at))
+                    .skip(1)
+                    .take(10)
+                    .collect::<Vec<_>>(),
+                std::iter::successors(Some(start), |at| named.next_after(at))
+                    .skip(1)
+                    .take(10)
+                    .collect::<Vec<_>>()
             );
         }
         let monday = parse_profile_schedule("0 0 * * 1").unwrap();
         assert_eq!(
-            monday.after(&start).next().unwrap(),
+            monday.next_after(&start).unwrap(),
             Utc.with_ymd_and_hms(2026, 10, 19, 0, 0, 0).unwrap()
         );
     }
@@ -241,5 +274,32 @@ mod tests {
                 "{weekday}"
             );
         }
+    }
+
+    #[test]
+    fn restricted_calendar_and_week_days_match_either_field() {
+        let schedule = parse_profile_schedule("0 0 1 * MON").unwrap();
+        let friday = Utc.with_ymd_and_hms(2026, 10, 2, 0, 0, 0).unwrap();
+        assert_eq!(
+            schedule.next_after(&friday),
+            Some(Utc.with_ymd_and_hms(2026, 10, 5, 0, 0, 0).unwrap())
+        );
+        let schedule = parse_profile_schedule("0 0 1 * TUE").unwrap();
+        let friday = Utc.with_ymd_and_hms(2026, 10, 30, 0, 0, 0).unwrap();
+        assert_eq!(
+            schedule.next_after(&friday),
+            Some(Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap())
+        );
+    }
+
+    #[test]
+    fn day_wildcards_keep_intersection_and_month_constraints() {
+        let schedule = parse_profile_schedule("0 0 */2 10 MON").unwrap();
+        let monday = Utc.with_ymd_and_hms(2026, 10, 5, 0, 0, 0).unwrap();
+        assert_eq!(
+            schedule.next_after(&monday),
+            Some(Utc.with_ymd_and_hms(2026, 10, 19, 0, 0, 0).unwrap())
+        );
+        assert!(parse_profile_schedule("0 0 32 * MON").is_err());
     }
 }

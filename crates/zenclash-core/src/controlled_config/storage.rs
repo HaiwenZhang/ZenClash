@@ -52,7 +52,7 @@ impl ControlledConfigStore {
         &self,
         payload: &str,
     ) -> ControlledConfigResult<RuntimeCacheTransaction> {
-        let write_lease = self.write_access.acquire();
+        let write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
         let path = self.runtime_path();
         let previous = read_optional_payload(&path)?;
@@ -188,7 +188,7 @@ impl ControlledConfigStore {
         if let Some(gate) = &self.commit_gate {
             gate.wait();
         }
-        let _write_lease = self.write_access.acquire();
+        let _write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
         if self.current_patch_bytes_unlocked()? != update.expected_patch {
             return Err(ControlledConfigError::ConcurrentModification);
@@ -220,7 +220,7 @@ impl ControlledConfigStore {
     /// Returns the original non-recoverable error or a filesystem error while
     /// moving the malformed document to its timestamped backup path.
     pub fn quarantine_invalid_patch(&self) -> ControlledConfigResult<Option<PathBuf>> {
-        let _write_lease = self.write_access.acquire();
+        let _write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
         let error = match self.load_unlocked() {
             Ok(_) => return Ok(None),

@@ -38,7 +38,7 @@ impl ControlledConfigStore {
         } else {
             None
         };
-        let worker_lease = store.write_access.acquire();
+        let worker_lease = store.write_access.acquire()?;
         let cache_store = store.with_write_lease(&worker_lease);
         let validator = process
             .as_ref()

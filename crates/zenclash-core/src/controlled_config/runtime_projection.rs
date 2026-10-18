@@ -81,7 +81,7 @@ impl ControlledConfigStore {
     pub fn resolve_startup_listener_conflicts(
         &self,
     ) -> ControlledConfigResult<Vec<ListenerPortFallback>> {
-        let _write_lease = self.write_access.acquire();
+        let _write_lease = self.write_access.acquire()?;
         let path = self.runtime_path();
         let bytes = read_profile_bytes(&path).map_err(|error| match error {
             crate::ProfileStoreError::Io(error) => ControlledConfigError::Io(error),
@@ -149,7 +149,7 @@ impl ControlledConfigStore {
     ///
     /// Returns an error when merging or the atomic cache write fails.
     pub fn materialize(&self, profile: impl AsRef<Path>) -> ControlledConfigResult<PathBuf> {
-        let _write_lease = self.write_access.acquire();
+        let _write_lease = self.write_access.acquire()?;
         let payload = self.effective_payload(profile)?;
         self.write_projected_runtime_payload(&payload)
     }
@@ -164,7 +164,7 @@ impl ControlledConfigStore {
         profile: impl AsRef<Path>,
         overrides: &[PathBuf],
     ) -> ControlledConfigResult<PathBuf> {
-        let _write_lease = self.write_access.acquire();
+        let _write_lease = self.write_access.acquire()?;
         let payload = self.effective_with_overrides(profile, overrides)?;
         self.write_projected_runtime_payload(&payload)
     }
@@ -182,7 +182,7 @@ impl ControlledConfigStore {
         overrides: &[PathBuf],
         kind: CoreKind,
     ) -> ControlledConfigResult<PathBuf> {
-        let _write_lease = self.write_access.acquire();
+        let _write_lease = self.write_access.acquire()?;
         let payload = self.effective_with_overrides(profile, overrides)?;
         let payload = normalize_runtime_payload(kind, payload)?;
         self.write_projected_runtime_payload(&payload)

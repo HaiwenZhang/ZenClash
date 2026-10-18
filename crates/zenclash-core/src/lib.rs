@@ -37,6 +37,7 @@ mod core_update;
 mod core_validation;
 mod data_coordinator;
 mod endpoint;
+mod http_body;
 mod instance_lock;
 mod listener_fallback;
 mod logs;

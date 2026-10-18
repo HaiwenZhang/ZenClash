@@ -1,6 +1,5 @@
 use std::{path::Path, time::Duration};
 
-use futures_util::StreamExt;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -92,13 +91,17 @@ impl MihomoReleaseService {
                 &[("limit", (MAX_METADATA_BYTES / 1024 / 1024).to_string())],
             )));
         }
-        let bytes = response.bytes().await?;
-        if bytes.len() as u64 > MAX_METADATA_BYTES {
-            return Err(CoreUpdateError::TooLarge(zenclash_i18n::text_with(
-                "core_update.details.metadata_response_limit",
-                &[("limit", (MAX_METADATA_BYTES / 1024 / 1024).to_string())],
-            )));
-        }
+        let bytes = crate::http_body::read_limited(response, MAX_METADATA_BYTES as usize)
+            .await
+            .map_err(|error| match error {
+                crate::http_body::ReadBodyError::Http(error) => CoreUpdateError::Http(error),
+                crate::http_body::ReadBodyError::TooLarge => {
+                    CoreUpdateError::TooLarge(zenclash_i18n::text_with(
+                        "core_update.details.metadata_response_limit",
+                        &[("limit", (MAX_METADATA_BYTES / 1024 / 1024).to_string())],
+                    ))
+                }
+            })?;
         let raw = serde_json::from_slice::<Vec<RawRelease>>(&bytes).map_err(|error| {
             CoreUpdateError::Metadata(zenclash_i18n::text_with(
                 "core_update.details.release_json",
@@ -216,21 +219,20 @@ impl MihomoReleaseService {
                 ],
             )));
         }
-        let mut bytes = Vec::with_capacity(declared.min(MAX_ARCHIVE_BYTES));
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            if bytes.len().saturating_add(chunk.len()) > MAX_ARCHIVE_BYTES {
-                return Err(CoreUpdateError::TooLarge(zenclash_i18n::text_with(
-                    "core_update.details.download_response_limit",
-                    &[
-                        ("name", asset.name.clone()),
-                        ("limit", (MAX_ARCHIVE_BYTES / 1024 / 1024).to_string()),
-                    ],
-                )));
-            }
-            bytes.extend_from_slice(&chunk);
-        }
+        let bytes = crate::http_body::read_limited(response, MAX_ARCHIVE_BYTES)
+            .await
+            .map_err(|error| match error {
+                crate::http_body::ReadBodyError::Http(error) => CoreUpdateError::Http(error),
+                crate::http_body::ReadBodyError::TooLarge => {
+                    CoreUpdateError::TooLarge(zenclash_i18n::text_with(
+                        "core_update.details.download_response_limit",
+                        &[
+                            ("name", asset.name.clone()),
+                            ("limit", (MAX_ARCHIVE_BYTES / 1024 / 1024).to_string()),
+                        ],
+                    ))
+                }
+            })?;
         verify_sha256(&bytes, &asset.sha256)?;
         Ok(bytes)
     }

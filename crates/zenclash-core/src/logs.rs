@@ -425,7 +425,7 @@ pub fn write_log_export(path: &std::path::Path, payload: &str) -> std::io::Resul
             ));
         }
     }
-    let _write_lease = crate::data_coordinator::DataWriteAccess::new(path).acquire();
+    let _write_lease = crate::data_coordinator::DataWriteAccess::new(path).acquire()?;
     private_io::replace(path, payload.as_bytes())
 }
 

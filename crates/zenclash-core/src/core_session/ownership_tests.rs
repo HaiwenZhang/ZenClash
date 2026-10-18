@@ -5,8 +5,8 @@ use std::{sync::Arc, time::Duration};
 use super::test_support::OwnedCoreFixture as ChildFixture;
 
 use crate::{
-    CoreKind, CoreLaunchConfig, CoreMaintenanceIntent, CoreSession, ManagedCoreProcess,
-    MihomoClient, MihomoEndpoint,
+    CoreKind, CoreLaunchConfig, CoreMaintenanceIntent, CoreSession, CoreSessionError,
+    ManagedCoreProcess, MihomoClient, MihomoEndpoint, MihomoError,
 };
 
 #[tokio::test]
@@ -229,114 +229,77 @@ async fn explicit_stop_intent_is_replaced_only_by_admitted_runtime() {
 }
 
 #[tokio::test]
-async fn cancelled_permission_queue_never_reaches_native_authorization() {
-    let fixture = ChildFixture::new("grant-queue-cancel").await;
+async fn cancelled_public_permission_check_preserves_the_owned_child() {
+    let fixture = ChildFixture::new("permission-queue-cancel").await;
     let session = CoreSession::open(
         CoreKind::Mihomo,
         MihomoClient::from_process(fixture.process.clone()).unwrap(),
     )
     .unwrap();
-    let effects = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let pid = fixture.process.snapshot().pid;
+    let generation = session.generation();
     let held = session.transition.clone().lock_owned().await;
     let queued_session = session.clone();
-    let effects_for_grant = effects.clone();
-    let queued = tokio::spawn(async move {
-        queued_session
-            .ensure_tun_permission_with(move |_| {
-                effects_for_grant.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(true)
-            })
-            .await
-    });
+    let queued = tokio::spawn(async move { queued_session.ensure_tun_permission().await });
     tokio::task::yield_now().await;
     assert!(!queued.is_finished());
     queued.abort();
     assert!(queued.await.unwrap_err().is_cancelled());
     drop(held);
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(effects.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(fixture.process.snapshot().pid, pid);
+    assert_eq!(session.generation(), generation);
     session.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn permission_grant_does_not_restart_an_explicitly_stopped_runtime() {
-    let fixture = ChildFixture::new("grant-stopped-intent").await;
+async fn local_permission_check_requires_existing_authority_without_changing_the_binary_or_child() {
+    let fixture = ChildFixture::new("local-permission-policy").await;
+    let session = CoreSession::open(
+        CoreKind::Mihomo,
+        MihomoClient::from_process(fixture.process.clone()).unwrap(),
+    )
+    .unwrap();
+    let pid = fixture.process.snapshot().pid;
+    let binary = &fixture.process.launch_config().binary;
+    let permissions = std::fs::metadata(binary).unwrap().permissions();
+    let generation = session.generation();
+    let result = session.ensure_tun_permission().await;
+    if crate::current_process_elevated() {
+        assert!(result.is_ok());
+    } else {
+        assert!(matches!(
+            result,
+            Err(CoreSessionError::Process(MihomoError::ServiceRequired))
+        ));
+    }
+    assert_eq!(
+        std::fs::metadata(binary).unwrap().permissions(),
+        permissions
+    );
+    assert_eq!(fixture.process.snapshot().pid, pid);
+    assert_eq!(session.generation(), generation);
+    session.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn public_permission_check_never_restarts_an_explicitly_stopped_runtime() {
+    let fixture = ChildFixture::new("permission-stopped-intent").await;
     let session = CoreSession::open(
         CoreKind::Mihomo,
         MihomoClient::from_process(fixture.process.clone()).unwrap(),
     )
     .unwrap();
     session.maintain(CoreMaintenanceIntent::Stop).await.unwrap();
-    let version = session.generation();
-    let client = session.client.pin_binding().unwrap();
-    let lease = session.acquire_runtime_write_lease(&client).await.unwrap();
-    // The helper is entered after authorization has succeeded. No native grant is invoked.
-    session
-        .restart_after_tun_grant(&fixture.process, &lease, Duration::from_secs(1))
-        .await
-        .unwrap();
+    let generation = session.generation();
+    let _ = session.ensure_tun_permission().await;
     assert!(fixture.process.snapshot().pid.is_none());
-    assert_eq!(session.generation(), version);
-    assert_eq!(
-        session.lifecycle_snapshot().phase,
-        crate::CoreLifecyclePhase::Stopped
-    );
+    assert_eq!(session.generation(), generation);
     assert!(session.lifecycle_snapshot().stop_requested);
-    session.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn permission_restart_cancelled_before_stop_preserves_the_current_read_version() {
-    let fixture = ChildFixture::new("grant-restart-cancel-before-stop").await;
-    let session = CoreSession::open(
-        CoreKind::Mihomo,
-        MihomoClient::from_process(fixture.process.clone()).unwrap(),
-    )
-    .unwrap();
-    let client = session.client.pin_binding().unwrap();
-    let lease = session.acquire_runtime_write_lease(&client).await.unwrap();
-    let previous_pid = fixture.process.snapshot().pid;
-    let previous_version = session.generation();
-    session
-        .shutdown_requested
-        .store(true, std::sync::atomic::Ordering::Release);
-    assert!(
-        session
-            .restart_after_tun_grant(&fixture.process, &lease, Duration::from_millis(100))
-            .await
-            .is_err()
-    );
-    assert_eq!(fixture.process.snapshot().pid, previous_pid);
-    assert_eq!(session.generation(), previous_version);
-    session.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn granted_permission_restart_failure_invalidates_the_old_runtime_version() {
-    let fixture = ChildFixture::new("grant-restart-failure").await;
-    let session = CoreSession::open(
-        CoreKind::Mihomo,
-        MihomoClient::from_process(fixture.process.clone()).unwrap(),
-    )
-    .unwrap();
-    let old_version = session.generation();
-    let client = session.client.pin_binding().unwrap();
-    let lease = session.acquire_runtime_write_lease(&client).await.unwrap();
-    fixture.responder.abort();
-    // Authorization is already acknowledged at this boundary; no native grant is invoked.
-    let result = session
-        .restart_after_tun_grant(&fixture.process, &lease, Duration::from_millis(100))
-        .await;
-    assert!(result.is_err());
-    assert!(fixture.process.snapshot().pid.is_none());
-    assert!(
-        session.generation() > old_version,
-        "a stopped child retained the old read version"
-    );
-    assert_eq!(
-        session.lifecycle_snapshot().phase,
-        crate::CoreLifecyclePhase::Unknown
-    );
+    session.request_shutdown();
+    assert!(matches!(
+        session.ensure_tun_permission().await,
+        Err(CoreSessionError::ShuttingDown)
+    ));
     session.shutdown().await.unwrap();
 }
 
@@ -548,6 +511,10 @@ async fn permission_observation_uses_current_binary_and_external_is_unsupported(
             recovery: crate::RecoveryAction::Unsupported,
             ..
         }
+    ));
+    assert!(matches!(
+        session.ensure_tun_permission().await,
+        Err(CoreSessionError::ExternalRestartUnsupported { .. })
     ));
     assert!(first.process.snapshot().pid.is_none());
     assert!(second.process.snapshot().pid.is_none());

@@ -45,7 +45,7 @@ impl ProfileStore {
             root,
             write_access,
         };
-        let _write_lease = store.write_access.acquire();
+        let _write_lease = store.write_access.acquire()?;
         fs::create_dir_all(store.files_dir())?;
         Ok(store)
     }
@@ -74,7 +74,7 @@ impl ProfileStore {
     /// Returns the original non-recoverable error or an I/O error while moving
     /// the invalid index to its timestamped backup.
     pub fn quarantine_invalid_index(&self) -> ProfileStoreResult<Option<PathBuf>> {
-        let _write_lease = self.write_access.acquire();
+        let _write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
         let error = match self.load_unlocked() {
             Ok(_) => return Ok(None),
@@ -176,7 +176,7 @@ impl ProfileStore {
         payload: &str,
         subscription: SubscriptionMetadata,
     ) -> ProfileStoreResult<ProfileRecord> {
-        let _write_lease = self.write_access.acquire();
+        let _write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
         let record = Self::new_profile_record(&catalog, name, source, payload.len(), subscription);

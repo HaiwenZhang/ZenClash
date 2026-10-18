@@ -195,6 +195,12 @@ impl From<MihomoError> for RuntimeMutationError {
         ControlledConfigError::Profile(cause).into()
     }
 }
+
+impl From<std::io::Error> for RuntimeMutationError {
+    fn from(cause: std::io::Error) -> Self {
+        ControlledConfigError::Io(cause).into()
+    }
+}
 pub(super) async fn rollback_runtime_cache(
     cache: RuntimeCacheTransaction,
 ) -> ControlledConfigResult<()> {

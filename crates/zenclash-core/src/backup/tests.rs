@@ -26,7 +26,8 @@ fn export_waits_for_an_admitted_profile_update_and_captures_a_restorable_snapsho
     let root = test_root("export-profile-update");
     let source = root.join("source");
     create_snapshot(&source, AppearancePreference::Light, false, 7890);
-    let update_authority = crate::data_coordinator::DataWriteLease::shared([source.clone()]);
+    let update_authority =
+        crate::data_coordinator::DataWriteLease::shared([source.clone()]).unwrap();
     let profiles = ProfileStore::open(source.join("profiles"), Some(&update_authority)).unwrap();
     let profile = profiles.load().unwrap().profiles.remove(0);
     let archive = root.join("snapshot.zip");

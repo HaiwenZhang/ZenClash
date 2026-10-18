@@ -75,16 +75,21 @@ impl DataWriteLease {
         &self.inner.paths
     }
 
-    pub(crate) fn shared(paths: impl IntoIterator<Item = PathBuf>) -> Self {
-        acquire(paths, false)
+    pub(crate) fn shared(paths: impl IntoIterator<Item = PathBuf>) -> std::io::Result<Self> {
+        let lease = acquire(paths, false);
+        // Check after admission: a restore may have failed while this writer waited.
+        crate::backup::ensure_writes_available(lease.scopes())?;
+        Ok(lease)
     }
 
     pub(crate) fn exclusive(paths: impl IntoIterator<Item = PathBuf>) -> Self {
         acquire(paths, true)
     }
 
-    pub(crate) async fn shared_async(paths: Vec<PathBuf>) -> Result<Self, tokio::task::JoinError> {
-        tokio::task::spawn_blocking(move || Self::shared(paths)).await
+    pub(crate) async fn shared_async(paths: Vec<PathBuf>) -> std::io::Result<Self> {
+        tokio::task::spawn_blocking(move || Self::shared(paths))
+            .await
+            .map_err(std::io::Error::other)?
     }
 
     fn permit(&self) -> WritePermit {
@@ -173,12 +178,13 @@ impl DataWriteAccess {
     }
 
     /// Wait only on a blocking worker, never on GPUI's foreground thread.
-    pub(crate) fn acquire(&self) -> DataWriteLease {
+    /// Unfinished restores reject ordinary writes; a live borrowed restore permit can finish.
+    pub(crate) fn acquire(&self) -> std::io::Result<DataWriteLease> {
         if let Some(lease) = self
             .borrowed_authority(&self.paths)
-            .expect("store write authority")
+            .map_err(std::io::Error::other)?
         {
-            return lease;
+            return Ok(lease);
         }
         DataWriteLease::shared(self.paths.clone())
     }
@@ -206,7 +212,7 @@ impl DataWriteAccess {
         if let Some(lease) = self.borrowed_authority(&paths)? {
             return Ok(lease);
         }
-        Ok(DataWriteLease::shared(paths))
+        DataWriteLease::shared(paths).map_err(|error| error.to_string())
     }
 
     /// Acquire all scopes together; a live borrowed permit must already cover them.
@@ -224,9 +230,11 @@ impl DataWriteAccess {
             .map_err(|error| error.to_string())
     }
 
-    pub(crate) async fn acquire_async(&self) -> Result<DataWriteLease, tokio::task::JoinError> {
+    pub(crate) async fn acquire_async(&self) -> std::io::Result<DataWriteLease> {
         let access = self.clone();
-        tokio::task::spawn_blocking(move || access.acquire()).await
+        tokio::task::spawn_blocking(move || access.acquire())
+            .await
+            .map_err(std::io::Error::other)?
     }
 }
 
@@ -490,7 +498,7 @@ mod tests {
         std::fs::remove_dir_all(destination.join("files")).unwrap();
         let (admitted_tx, admitted_rx) = mpsc::channel();
         let writer = thread::spawn(move || {
-            let _lease = access.acquire();
+            let _lease = access.acquire().unwrap();
             admitted_tx.send(()).unwrap();
         });
         let early = admitted_rx.recv_timeout(Duration::from_millis(100));
@@ -522,15 +530,15 @@ mod tests {
         let restore = DataWriteLease::exclusive([destination.clone()]);
         let (admitted_tx, admitted_rx) = mpsc::channel();
         let writer = thread::spawn(move || {
-            let _lease = access.acquire();
+            let _lease = access.acquire().unwrap();
             admitted_tx.send(()).unwrap();
         });
         let mut early = admitted_rx.recv_timeout(Duration::from_millis(100)).ok();
         for _ in 0..1000 {
             std::fs::rename(destination.join("files"), root.join("parked")).unwrap();
-            drop(DataWriteLease::shared([root.join("unrelated")]));
+            drop(DataWriteLease::shared([root.join("unrelated")]).unwrap());
             std::fs::rename(root.join("parked"), destination.join("files")).unwrap();
-            drop(DataWriteLease::shared([root.join("unrelated")]));
+            drop(DataWriteLease::shared([root.join("unrelated")]).unwrap());
             early = early.or_else(|| admitted_rx.try_recv().ok());
         }
         drop(restore);
@@ -567,7 +575,7 @@ mod tests {
         let destination = logical.join("completed");
         let writer = thread::spawn(move || {
             started_tx.send(()).unwrap();
-            let _lease = access.acquire();
+            let _lease = access.acquire().unwrap();
             std::fs::write(destination, b"committed").unwrap();
             written_tx.send(()).unwrap();
         });
@@ -602,9 +610,9 @@ mod tests {
     fn an_admitted_writer_finishes_after_parent_cancellation_with_a_restore_waiting() {
         let root = test_root("admitted-write");
         std::fs::create_dir_all(&root).unwrap();
-        let parent = DataWriteLease::shared([root.clone()]);
+        let parent = DataWriteLease::shared([root.clone()]).unwrap();
         let access = DataWriteAccess::new(&root).authorized(&parent);
-        let admitted = access.acquire();
+        let admitted = access.acquire().unwrap();
         let writer_access = access.authorized(&admitted);
         let (restore_started, started) = mpsc::channel();
         let (restored, restored_rx) = mpsc::channel();
@@ -624,7 +632,7 @@ mod tests {
         let path = root.join("completed");
         let writer = thread::spawn(move || {
             let _admitted = admitted;
-            let _nested = writer_access.acquire();
+            let _nested = writer_access.acquire().unwrap();
             std::fs::write(path, b"committed").unwrap();
             written.send(()).unwrap();
         });

@@ -181,7 +181,7 @@ impl CoreLaunchConfig {
         home_dir: PathBuf,
     ) -> MihomoResult<Self> {
         tokio::task::spawn_blocking(move || {
-            let lease = crate::data_coordinator::DataWriteLease::shared([home_dir.clone()]);
+            let lease = crate::data_coordinator::DataWriteLease::shared([home_dir.clone()])?;
             let binary = resolve_core_binary(
                 &project_root,
                 CoreKind::Mihomo,

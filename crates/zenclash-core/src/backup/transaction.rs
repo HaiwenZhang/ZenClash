@@ -33,6 +33,7 @@ pub(super) fn activate(
     // stays under the same exclusive authority.
     runtime_scopes.extend(write_scopes(&prepared.data_root));
     let lease = crate::data_coordinator::DataWriteLease::exclusive(runtime_scopes);
+    super::ensure_writes_available(lease.scopes())?;
     let mut previous_runtime = session
         .map(|session| {
             let controlled =

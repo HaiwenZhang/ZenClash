@@ -87,6 +87,23 @@ async fn every_step_retains_independent_status_time_and_route() {
     let report = diagnostics.run(test_plan()).await;
 
     assert_eq!(report.steps.len(), 8);
+    assert_eq!(
+        report
+            .steps
+            .iter()
+            .map(|step| step.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            DiagnosticStepKind::Controller,
+            DiagnosticStepKind::Capture,
+            DiagnosticStepKind::DnsA,
+            DiagnosticStepKind::DnsAaaa,
+            DiagnosticStepKind::NetworkDirect,
+            DiagnosticStepKind::NetworkMihomo,
+            DiagnosticStepKind::ProxyProviders,
+            DiagnosticStepKind::RuleProviders,
+        ]
+    );
     assert!(
         report
             .step(DiagnosticStepKind::DnsA)

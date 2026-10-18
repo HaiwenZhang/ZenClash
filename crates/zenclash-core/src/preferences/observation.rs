@@ -91,7 +91,7 @@ impl AppPreferencesStore {
     /// # Errors
     /// Returns filesystem, decoding, size or validation errors without changing the file.
     pub fn observe(&self) -> AppPreferencesResult<AppPreferencesObservation> {
-        let _read_scope = self.write_access.acquire();
+        let _read_scope = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
         Ok(AppPreferencesObservation {
             preferences: self.load_unlocked()?,

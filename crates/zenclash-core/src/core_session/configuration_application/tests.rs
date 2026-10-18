@@ -349,7 +349,7 @@ async fn admitted_mode_rejected_before_send_does_not_advance_generation() {
             .poll(&mut Context::from_waker(std::task::Waker::noop()))
             .is_pending()
     );
-    let lease = DataWriteLease::shared([root.clone()]);
+    let lease = DataWriteLease::shared([root.clone()]).unwrap();
     let store = ControlledConfigStore::new(root.join("store")).with_write_lease(&lease);
     let pinned = client
         .pin_binding()

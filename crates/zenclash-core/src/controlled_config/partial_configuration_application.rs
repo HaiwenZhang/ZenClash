@@ -88,7 +88,7 @@ impl ControlledConfigStore {
         patch: serde_json::Value,
         overrides: Vec<PathBuf>,
     ) -> Result<SavedRuntimeReceipt, RuntimeMutationError> {
-        let worker_lease = self.write_access.acquire();
+        let worker_lease = self.write_access.acquire()?;
         let worker = self.with_write_lease(&worker_lease);
         let requested = patch.clone();
         let fallback_bundle = client.service_runtime_snapshot()?;
@@ -123,7 +123,7 @@ impl ControlledConfigStore {
         .into_bytes();
         let next_runtime =
             normalize_partial_tun_payload(merge_held_delta(&previous_payload, &delta)?)?;
-        let worker_lease = self.write_access.acquire();
+        let worker_lease = self.write_access.acquire()?;
         let worker = self.with_write_lease(&worker_lease);
         let cache = tokio::task::spawn_blocking(move || {
             let _lease = worker_lease;
@@ -176,7 +176,7 @@ impl ControlledConfigStore {
             }
             (None, Some(previous_mode))
         };
-        let worker_lease = self.write_access.acquire();
+        let worker_lease = self.write_access.acquire()?;
         let worker = self.with_write_lease(&worker_lease);
         let commit = tokio::task::spawn_blocking(move || {
             let _lease = worker_lease;

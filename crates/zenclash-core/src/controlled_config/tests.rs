@@ -437,7 +437,7 @@ async fn reload_rejects_a_binding_switched_while_waiting_for_store_mutation() {
 
     let root = test_root("reload-binding-admission");
     let profile = write_profile(&root);
-    let lease = crate::data_coordinator::DataWriteLease::shared([root.clone()]);
+    let lease = crate::data_coordinator::DataWriteLease::shared([root.clone()]).unwrap();
     let store = ControlledConfigStore::new(root.join("store")).with_write_lease(&lease);
     store.materialize(&profile).unwrap();
     let previous_cache = fs::read(store.runtime_path()).unwrap();

@@ -4519,6 +4519,9 @@ backup:
       zh-CN: 备份已验证并恢复：%{count} 个文件，共 %{size}%{warning}
       en: "Backup verified and restored: %{count} files, %{size} total%{warning}"
   errors:
+    recovery_required:
+      zh-CN: 备份恢复尚未完成。重新启动应用完成恢复后，再保存修改。
+      en: A backup restore is unfinished. Restart the app to recover your data, then save your changes.
     retry_task:
       zh-CN: "恢复重试任务异常结束：%{error}"
       en: "The recovery retry task ended unexpectedly: %{error}"

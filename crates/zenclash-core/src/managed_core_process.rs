@@ -149,7 +149,7 @@ impl ManagedCoreProcess {
 
     fn spawn_inner(config: CoreLaunchConfig, isolated_test_child: bool) -> MihomoResult<Arc<Self>> {
         let _write_lease =
-            crate::data_coordinator::DataWriteLease::shared(launch_write_scopes(&config));
+            crate::data_coordinator::DataWriteLease::shared(launch_write_scopes(&config))?;
         let payload = local_launch_payload(&config)?;
         let input = payload
             .as_deref()
@@ -200,7 +200,7 @@ impl ManagedCoreProcess {
     /// and its output collectors cannot be started. After a spawn failure the
     /// process remains stopped so callers can report and retry safely.
     pub fn restart(&self) -> MihomoResult<()> {
-        let lease = crate::data_coordinator::DataWriteLease::shared(self.write_scopes());
+        let lease = crate::data_coordinator::DataWriteLease::shared(self.write_scopes())?;
         self.restart_with_write_lease(&lease, None)
     }
 
@@ -338,7 +338,7 @@ impl ManagedCoreProcess {
         let process = self.clone();
         let access =
             crate::data_coordinator::DataWriteAccess::new(&self.config.home_dir).authorized(lease);
-        let write_lease = access.acquire();
+        let write_lease = access.acquire()?;
         let worker_cancelled = cancelled.clone();
         tokio::task::spawn_blocking(move || match payload.as_deref() {
             Some(payload) => process.restart_payload_with_write_lease(

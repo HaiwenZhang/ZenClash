@@ -1036,13 +1036,13 @@ fn observe_logs(
     )
 }
 
-fn generation_observation<T>(previous: &Observation<T>, generation: u64) -> Observation<T>
-where
-    T: Clone + HasGeneration,
-{
+fn generation_observation(
+    previous: &Observation<StreamStatus>,
+    generation: u64,
+) -> Observation<StreamStatus> {
     if previous
         .value()
-        .is_some_and(|value| value.generation() == generation)
+        .is_some_and(|value| value.generation == generation)
     {
         previous.clone()
     } else {
@@ -1050,44 +1050,19 @@ where
     }
 }
 
-trait HasGeneration {
-    fn generation(&self) -> u64;
-}
-
-impl HasGeneration for StreamStatus {
-    fn generation(&self) -> u64 {
-        self.generation
-    }
-}
-
 fn reset_old_generation_streams(streams: &mut StreamStatuses, generation: u64) {
-    if streams
-        .memory
-        .value()
-        .is_some_and(|value| value.generation != generation)
-    {
-        streams.memory = Observation::Loading;
-    }
-    if streams
-        .traffic
-        .value()
-        .is_some_and(|value| value.generation != generation)
-    {
-        streams.traffic = Observation::Loading;
-    }
-    if streams
-        .logs
-        .value()
-        .is_some_and(|value| value.generation != generation)
-    {
-        streams.logs = Observation::Loading;
-    }
-    if streams
-        .connections
-        .value()
-        .is_some_and(|value| value.generation != generation)
-    {
-        streams.connections = Observation::Loading;
+    for stream in [
+        &mut streams.memory,
+        &mut streams.traffic,
+        &mut streams.logs,
+        &mut streams.connections,
+    ] {
+        if stream
+            .value()
+            .is_some_and(|value| value.generation != generation)
+        {
+            *stream = Observation::Loading;
+        }
     }
 }
 
@@ -1613,6 +1588,51 @@ mod tests {
         };
         reset_old_generation_streams(&mut streams, current.generation);
         assert_eq!(streams.memory, Observation::Loading);
+    }
+
+    #[test]
+    fn generation_reset_preserves_current_evidence_and_unversioned_failures() {
+        let current = Observation::Fresh {
+            value: StreamStatus {
+                generation: 2,
+                ..Default::default()
+            },
+            observed_at_ms: 10,
+        };
+        let failed = Observation::Failed {
+            failure: OperationalFailure {
+                message: "disconnected".into(),
+                occurred_at_ms: 11,
+            },
+            recovery: RecoveryAction::Retry,
+        };
+        let mut streams = StreamStatuses {
+            memory: Observation::Fresh {
+                value: StreamStatus {
+                    generation: 1,
+                    ..Default::default()
+                },
+                observed_at_ms: 5,
+            },
+            traffic: current.clone(),
+            logs: Observation::Stale {
+                value: StreamStatus {
+                    generation: 1,
+                    ..Default::default()
+                },
+                observed_at_ms: 5,
+                failure: OperationalFailure {
+                    message: "old stream".into(),
+                    occurred_at_ms: 6,
+                },
+            },
+            connections: failed.clone(),
+        };
+        reset_old_generation_streams(&mut streams, 2);
+        assert_eq!(streams.memory, Observation::Loading);
+        assert_eq!(streams.logs, Observation::Loading);
+        assert_eq!(streams.traffic, current);
+        assert_eq!(streams.connections, failed);
     }
 
     #[test]

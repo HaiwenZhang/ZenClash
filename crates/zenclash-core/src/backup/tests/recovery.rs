@@ -171,7 +171,127 @@ fn recovery_rejects_journal_paths_that_escape_the_transaction_directories() {
             .recover_interrupted_restore()
             .is_err()
     );
+    assert!(
+        AppPreferencesStore::new(target.join(PREFERENCES_PATH))
+            .update(|preferences| preferences.appearance = AppearancePreference::System)
+            .is_err()
+    );
     assert_eq!(read_authoritative_snapshot(&target), expected);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn failed_rollback_rejects_waiting_and_new_writers_until_recovery_finishes() {
+    use std::{sync::mpsc, thread, time::Duration};
+
+    let root = test_root("pending-rollback-writers");
+    let source = root.join("source");
+    let target = root.join("target");
+    create_snapshot(&source, AppearancePreference::Light, false, 17890);
+    create_snapshot(&target, AppearancePreference::Dark, true, 17891);
+    let original = read_authoritative_snapshot(&target);
+    let preferences = AppPreferencesStore::new(target.join(PREFERENCES_PATH));
+    let profiles = ProfileStore::new(target.join("profiles")).unwrap();
+    let overrides = YamlOverrideStore::new(target.join("yaml-overrides")).unwrap();
+    let controlled = ControlledConfigStore::new(target.join("controlled-config"));
+    BackupManager::new(&source)
+        .export_to(root.join("backup.zip"))
+        .unwrap();
+    let manager = BackupManager::new(&target);
+    let mut transaction = manager
+        .prepare_restore(root.join("backup.zip"))
+        .unwrap()
+        .activate()
+        .unwrap();
+    let unavailable = root.join("temporarily-unavailable-originals");
+    fs::rename(transaction.rollback_root.join("profiles"), &unavailable).unwrap();
+
+    let writer_store = preferences.clone();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let writer = thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        finished_tx
+            .send(
+                writer_store
+                    .update(|preferences| preferences.appearance = AppearancePreference::System),
+            )
+            .unwrap();
+    });
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(finished_rx.recv_timeout(Duration::from_millis(50)).is_err());
+    assert!(transaction.rollback_in_place().is_err());
+    let rollback_root = transaction.rollback_root.clone();
+    drop(transaction);
+    assert!(
+        finished_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .is_err()
+    );
+    writer.join().unwrap();
+    fs::rename(unavailable, rollback_root.join("profiles")).unwrap();
+
+    let input = root.join("new.yaml");
+    fs::write(&input, PROFILE).unwrap();
+    assert!(
+        preferences
+            .update(|preferences| preferences.appearance = AppearancePreference::System)
+            .is_err()
+    );
+    assert!(profiles.import_local(&input).is_err());
+    assert!(overrides.import_paths([input.clone()]).is_err());
+    assert!(controlled.materialize(&input).is_err());
+    assert!(ProfileStore::new(target.join("profiles")).is_err());
+    assert!(manager.read_snapshot().is_err());
+    assert!(manager.export_to(root.join("unfinished.zip")).is_err());
+    AppPreferencesStore::new(root.join("independent/preferences.json"))
+        .save(&AppPreferences::default())
+        .unwrap();
+
+    assert!(manager.recover_interrupted_restore().unwrap());
+    assert_eq!(read_authoritative_snapshot(&target), original);
+    preferences
+        .update(|preferences| preferences.appearance = AppearancePreference::System)
+        .unwrap();
+    profiles.import_local(&input).unwrap();
+    overrides.import_paths([input.clone()]).unwrap();
+    controlled.materialize(&input).unwrap();
+    assert_eq!(
+        preferences.load().unwrap().appearance,
+        AppearancePreference::System
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn pending_restore_blocks_writes_through_a_directory_alias_after_process_exit() {
+    use std::os::unix::fs::symlink;
+
+    let root = test_root("pending-restore-alias");
+    let source = root.join("source");
+    let target = root.join("target");
+    create_snapshot(&source, AppearancePreference::Light, false, 17890);
+    create_snapshot(&target, AppearancePreference::Dark, true, 17891);
+    let alias = root.join("alias");
+    symlink(&target, &alias).unwrap();
+    let store = AppPreferencesStore::new(alias.join(PREFERENCES_PATH));
+    BackupManager::new(source)
+        .export_to(root.join("backup.zip"))
+        .unwrap();
+    crash(&root, "active:all", false);
+    assert!(
+        store
+            .update(|preferences| preferences.appearance = AppearancePreference::System)
+            .is_err()
+    );
+    BackupManager::new(&target)
+        .recover_interrupted_restore()
+        .unwrap();
+    store
+        .update(|preferences| preferences.appearance = AppearancePreference::System)
+        .unwrap();
     fs::remove_dir_all(root).unwrap();
 }
 

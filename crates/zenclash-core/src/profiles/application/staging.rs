@@ -58,7 +58,7 @@ impl ProfileSourceCandidate {
     }
 
     pub(super) fn materialize_for_trial(&mut self, store: ProfileStore) -> ProfileStoreResult<()> {
-        self.attach_write_authority(store);
+        self.attach_write_authority(store)?;
         self.validate_source_current()?;
         self.materialize_payload()
     }
@@ -66,13 +66,14 @@ impl ProfileSourceCandidate {
     // The Service participant has already checked the source under its outer
     // lease. Commit rechecks catalog and bytes before changing persistent data.
     pub(super) fn materialize_for_commit(&mut self, store: ProfileStore) -> ProfileStoreResult<()> {
-        self.attach_write_authority(store);
+        self.attach_write_authority(store)?;
         self.materialize_payload()
     }
 
-    fn attach_write_authority(&mut self, store: ProfileStore) {
+    fn attach_write_authority(&mut self, store: ProfileStore) -> ProfileStoreResult<()> {
         self.store = store;
-        self._write_lease = Some(self.store.write_access.acquire());
+        self._write_lease = Some(self.store.write_access.acquire()?);
+        Ok(())
     }
 
     fn materialize_payload(&mut self) -> ProfileStoreResult<()> {
@@ -84,7 +85,7 @@ impl ProfileSourceCandidate {
     }
 
     pub(super) fn existing(store: ProfileStore, id: &str) -> ProfileStoreResult<Self> {
-        let _write_lease = store.write_access.acquire();
+        let _write_lease = store.write_access.acquire()?;
         let _transaction = store.transaction.lock();
         let catalog = store.load_unlocked()?;
         let record = catalog
@@ -145,7 +146,7 @@ impl ProfileSourceCandidate {
         subscription: SubscriptionMetadata,
     ) -> ProfileStoreResult<Self> {
         validate_clash_yaml(&payload)?;
-        let _write_lease = store.write_access.acquire();
+        let _write_lease = store.write_access.acquire()?;
         let _transaction = store.transaction.lock();
         let catalog = store.load_unlocked()?;
         let record =
@@ -171,7 +172,7 @@ impl ProfileSourceCandidate {
         subscription: SubscriptionMetadata,
     ) -> ProfileStoreResult<Self> {
         validate_clash_yaml(&payload)?;
-        let _write_lease = store.write_access.acquire();
+        let _write_lease = store.write_access.acquire()?;
         let _transaction = store.transaction.lock();
         let catalog = store.load_unlocked()?;
         let index = catalog
@@ -217,7 +218,7 @@ impl ProfileSourceCandidate {
         new_payload: String,
     ) -> ProfileStoreResult<Self> {
         validate_clash_yaml(&new_payload)?;
-        let _write_lease = store.write_access.acquire();
+        let _write_lease = store.write_access.acquire()?;
         let _transaction = store.transaction.lock();
         let catalog = store.load_unlocked()?;
         let record = catalog
@@ -311,7 +312,7 @@ impl ProfileSourceCandidate {
     }
 
     pub(super) fn commit(self) -> ProfileStoreResult<CommittedProfile> {
-        let _write_lease = self.store.write_access.acquire();
+        let _write_lease = self.store.write_access.acquire()?;
         let _transaction = self.store.transaction.lock();
         let mut catalog = self.store.load_unlocked()?;
         if read_profile_bytes(self.staging_path().ok_or_else(|| {

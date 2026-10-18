@@ -110,6 +110,10 @@ async fn application_start_reload_displacement_and_shutdown_use_the_actual_nativ
 
         let observer = Arc::new(ServiceSession::connect(&home).await?);
         let before = observer.status().await?;
+        session.ensure_tun_permission().await?;
+        let after_permission_check = observer.status().await?;
+        ensure!(after_permission_check.core_pid == before.core_pid);
+        ensure!(after_permission_check.active_generation == before.active_generation);
         let pid = before
             .core_pid
             .context("native Start returned no running core")?;
@@ -207,6 +211,17 @@ async fn application_start_reload_displacement_and_shutdown_use_the_actual_nativ
             client.version().await.is_err(),
             "displaced controller unexpectedly retained authority"
         );
+        ensure!(
+            session.ensure_tun_permission().await.is_err(),
+            "displaced session retained TUN authority"
+        );
+        ensure!(!matches!(
+            session.tun_permission_status().await,
+            Ok(zenclash_core::Observation::Fresh {
+                value: zenclash_core::CoreTunPermissionStatus::Service,
+                ..
+            })
+        ));
         tokio::time::timeout(Duration::from_secs(8), async {
             while session.run_state().mode != RunningMode::NotRunning {
                 tokio::time::sleep(Duration::from_millis(20)).await;

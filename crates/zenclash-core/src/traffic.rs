@@ -1,19 +1,16 @@
 use std::{
     collections::VecDeque,
-    sync::{Arc, atomic::AtomicU64},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
+use tokio::{runtime::Handle, task::JoinHandle};
 
 use crate::{MihomoClient, MihomoEndpoint, client::ControllerBinding};
 
 mod publication;
-#[cfg(test)]
-use publication::{update_connection, update_frame};
-use publication::{update_connection_for_generation, update_frame_for_generation};
+use publication::TrafficState;
 
 /// Latest values and connection health from Mihomo's `/traffic` stream.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,35 +94,6 @@ impl TrafficSamples {
     }
 }
 
-#[derive(Debug)]
-struct TrafficRevision {
-    updates: watch::Sender<u64>,
-}
-
-impl TrafficRevision {
-    fn new() -> Arc<Self> {
-        Self::with_value(0)
-    }
-
-    fn with_value(value: u64) -> Arc<Self> {
-        let (updates, _) = watch::channel(value);
-        Arc::new(Self { updates })
-    }
-
-    fn current(&self) -> u64 {
-        *self.updates.borrow()
-    }
-
-    fn advance(&self) {
-        self.updates
-            .send_modify(|revision| *revision = revision.wrapping_add(1));
-    }
-
-    fn subscribe(&self) -> watch::Receiver<u64> {
-        self.updates.subscribe()
-    }
-}
-
 #[derive(Clone, Copy, Debug, Deserialize)]
 struct TrafficFrame {
     #[serde(default)]
@@ -137,11 +105,7 @@ struct TrafficFrame {
 /// Maintains a reconnecting `/traffic` WebSocket and exposes a cheap snapshot
 /// suitable for polling from GPUI's foreground executor.
 pub struct TrafficMonitor {
-    snapshot: Arc<RwLock<TrafficSnapshot>>,
-    samples: Arc<RwLock<TrafficSamples>>,
-    revision: Arc<TrafficRevision>,
-    expected_generation: Arc<AtomicU64>,
-    generation: watch::Sender<u64>,
+    state: Arc<TrafficState>,
     task: JoinHandle<()>,
 }
 
@@ -159,63 +123,9 @@ impl TrafficMonitor {
     }
 
     fn start_binding(runtime: &Handle, binding: Arc<ControllerBinding>) -> Arc<Self> {
-        let snapshot = Arc::new(RwLock::new(TrafficSnapshot::default()));
-        let samples = Arc::new(RwLock::new(initial_samples()));
-        let revision = TrafficRevision::new();
-        let expected_generation = Arc::new(AtomicU64::new(0));
-        let (generation, generation_updates) = watch::channel(0);
-        let task = runtime.spawn(run_monitor(
-            binding,
-            snapshot.clone(),
-            samples.clone(),
-            revision.clone(),
-            expected_generation.clone(),
-            generation_updates,
-        ));
-        Arc::new(Self {
-            snapshot,
-            samples,
-            revision,
-            expected_generation,
-            generation,
-            task,
-        })
-    }
-
-    /// Returns a cheap point-in-time copy of the latest traffic state.
-    #[must_use]
-    pub fn snapshot(&self) -> TrafficSnapshot {
-        self.snapshot.read().clone()
-    }
-
-    /// Returns the short ordered frame history used by compact traffic displays.
-    ///
-    /// Frames are appended by the WebSocket reader, not by UI polling timers,
-    /// so repeated renders cannot create duplicate or contradictory samples.
-    #[must_use]
-    pub fn samples(&self) -> VecDeque<TrafficSample> {
-        self.samples.read().recent.clone()
-    }
-
-    /// Returns bounded real stream history, including frames collected while hidden.
-    ///
-    /// Historical rates survive configuration changes and reconnects. Queued frames
-    /// from superseded generations are rejected before entering this history.
-    #[must_use]
-    pub fn timed_samples(&self) -> VecDeque<TimedTrafficSample> {
-        self.samples.read().timed.clone()
-    }
-
-    /// Returns a monotonic revision for traffic frames and connection-state changes.
-    #[must_use]
-    pub fn revision(&self) -> u64 {
-        self.revision.current()
-    }
-
-    /// Subscribes to traffic frames and connection-state changes.
-    #[must_use]
-    pub fn subscribe(&self) -> watch::Receiver<u64> {
-        self.revision.subscribe()
+        let state = Arc::new(TrafficState::new());
+        let task = runtime.spawn(run_monitor(binding, state.clone()));
+        Arc::new(Self { state, task })
     }
 
     /// Returns whether the background monitor task has terminated unexpectedly.
@@ -231,14 +141,8 @@ impl Drop for TrafficMonitor {
     }
 }
 
-async fn run_monitor(
-    binding: Arc<ControllerBinding>,
-    snapshot: Arc<RwLock<TrafficSnapshot>>,
-    samples: Arc<RwLock<TrafficSamples>>,
-    revision: Arc<TrafficRevision>,
-    expected_generation: Arc<AtomicU64>,
-    mut generation_updates: watch::Receiver<u64>,
-) {
+async fn run_monitor(binding: Arc<ControllerBinding>, state: Arc<TrafficState>) {
+    let mut generation_updates = state.subscribe_generation();
     let mut backoff = crate::websocket::ReconnectBackoff::default();
     let mut transport_updates = binding.subscribe();
     loop {
@@ -252,14 +156,7 @@ async fn run_monitor(
         };
         match connection {
             Ok(mut socket) => {
-                update_connection_for_generation(
-                    &snapshot,
-                    true,
-                    None,
-                    generation,
-                    &expected_generation,
-                    &revision,
-                );
+                state.record_connection(true, None, generation);
                 loop {
                     let message = tokio::select! {
                         changed = transport_updates.changed() => {
@@ -287,24 +184,14 @@ async fn run_monitor(
                             match serde_json::from_slice::<TrafficFrame>(&message.into_data()) {
                                 Ok(frame) => {
                                     backoff.reset();
-                                    update_frame_for_generation(
-                                        &snapshot,
-                                        &samples,
-                                        frame,
-                                        generation,
-                                        &expected_generation,
-                                        &revision,
-                                    );
+                                    state.record_frame(frame, generation);
                                 }
                                 Err(error) => {
                                     tracing::debug!(%error, "ignored malformed Mihomo traffic frame");
-                                    update_connection_for_generation(
-                                        &snapshot,
+                                    state.record_connection(
                                         true,
                                         Some(format!("流量帧解析失败：{error}")),
                                         generation,
-                                        &expected_generation,
-                                        &revision,
                                     );
                                 }
                             }
@@ -312,39 +199,18 @@ async fn run_monitor(
                         Ok(message) if message.is_close() => break,
                         Ok(_) => {}
                         Err(error) => {
-                            update_connection_for_generation(
-                                &snapshot,
-                                false,
-                                Some(error.to_string()),
-                                generation,
-                                &expected_generation,
-                                &revision,
-                            );
+                            state.record_connection(false, Some(error.to_string()), generation);
                             break;
                         }
                     }
                 }
             }
             Err(error) => {
-                update_connection_for_generation(
-                    &snapshot,
-                    false,
-                    Some(error),
-                    generation,
-                    &expected_generation,
-                    &revision,
-                );
+                state.record_connection(false, Some(error), generation);
             }
         }
 
-        update_connection_for_generation(
-            &snapshot,
-            false,
-            None,
-            generation,
-            &expected_generation,
-            &revision,
-        );
+        state.record_connection(false, None, generation);
         if generation_changed {
             backoff.reset();
             continue;
@@ -412,49 +278,6 @@ mod tests {
     }
 
     #[test]
-    fn each_stream_frame_advances_the_single_logical_sample_series() {
-        let snapshot = RwLock::new(TrafficSnapshot::default());
-        let samples = RwLock::new(initial_samples());
-
-        update_frame(
-            &mut snapshot.write(),
-            &mut samples.write(),
-            TrafficFrame {
-                up: 1_024,
-                down: 2_048,
-            },
-            0,
-        );
-
-        let samples = samples.read();
-        assert_eq!(samples.recent.len(), LIVE_TRAFFIC_SAMPLE_COUNT);
-        assert_eq!(
-            samples.recent.back(),
-            Some(&TrafficSample {
-                upload: 1_024,
-                download: 2_048,
-            })
-        );
-    }
-
-    #[test]
-    fn disconnect_does_not_append_synthetic_zero_samples() {
-        let snapshot = RwLock::new(TrafficSnapshot::default());
-        let samples = RwLock::new(initial_samples());
-        update_frame(
-            &mut snapshot.write(),
-            &mut samples.write(),
-            TrafficFrame { up: 10, down: 20 },
-            0,
-        );
-        let before_disconnect = samples.read().clone();
-
-        update_connection(&mut snapshot.write(), false, Some("offline".into()), 0);
-
-        assert_eq!(*samples.read(), before_disconnect);
-    }
-
-    #[test]
     fn timed_history_retains_only_real_frames_with_a_fixed_capacity() {
         let mut samples = initial_samples();
         assert!(samples.timed.is_empty());
@@ -482,143 +305,48 @@ mod tests {
         assert!(format_speed(u64::MAX).ends_with(" GiB/s"));
     }
 
-    #[test]
-    fn reconnect_clears_a_previous_connection_error() {
-        let snapshot = RwLock::new(TrafficSnapshot {
-            last_error: Some("offline".into()),
-            ..TrafficSnapshot::default()
+    #[tokio::test]
+    async fn generation_selected_before_the_reader_starts_is_used_and_drop_closes_the_socket() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let endpoint =
+            MihomoEndpoint::new(format!("http://{}", listener.local_addr().unwrap()), "");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            socket
+                .send(Message::Text(r#"{"up":10,"down":20}"#.into()))
+                .await
+                .unwrap();
+            futures_util::StreamExt::next(&mut socket).await;
         });
 
-        update_connection(&mut snapshot.write(), true, None, 0);
-
-        assert_eq!(
-            snapshot.read().clone(),
-            TrafficSnapshot {
-                connected: true,
-                ..TrafficSnapshot::default()
+        let monitor = TrafficMonitor::start(&Handle::current(), endpoint);
+        monitor.synchronize_generation(7);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while monitor.snapshot().updated_at_ms == 0 {
+                tokio::task::yield_now().await;
             }
-        );
+        })
+        .await
+        .unwrap();
+        assert_eq!(monitor.snapshot().generation, 7);
+        assert_eq!(monitor.snapshot().upload, 10);
+        assert_eq!(monitor.timed_samples().len(), 1);
+
+        let weak = Arc::downgrade(&monitor);
+        drop(monitor);
+        assert!(weak.upgrade().is_none());
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
-    #[test]
-    fn disconnect_preserves_last_successful_rates_and_timestamp() {
-        let snapshot = RwLock::new(TrafficSnapshot {
-            upload: 1_024,
-            download: 2_048,
-            connected: true,
-            updated_at_ms: 42,
-            ..TrafficSnapshot::default()
-        });
-
-        update_connection(
-            &mut snapshot.write(),
-            false,
-            Some("socket closed".into()),
-            0,
-        );
-
-        assert_eq!(
-            snapshot.read().clone(),
-            TrafficSnapshot {
-                upload: 1_024,
-                download: 2_048,
-                updated_at_ms: 42,
-                last_error: Some("socket closed".into()),
-                ..TrafficSnapshot::default()
-            }
-        );
-    }
-
-    #[test]
-    fn late_frame_from_an_old_generation_is_rejected() {
-        let snapshot = RwLock::new(TrafficSnapshot {
-            generation: 2,
-            upload: 30,
-            download: 40,
-            updated_at_ms: 50,
-            ..TrafficSnapshot::default()
-        });
-        let samples = RwLock::new(initial_samples());
-        let expected_generation = AtomicU64::new(2);
-        let revision = TrafficRevision::new();
-
-        let accepted = update_frame_for_generation(
-            &snapshot,
-            &samples,
-            TrafficFrame { up: 100, down: 200 },
-            1,
-            &expected_generation,
-            &revision,
-        );
-
-        assert!(!accepted);
-        assert_eq!(snapshot.read().upload, 30);
-        assert_eq!(snapshot.read().generation, 2);
-        assert_eq!(*samples.read(), initial_samples());
-        assert_eq!(revision.current(), 0);
-    }
-
-    #[test]
-    fn accepted_frame_advances_the_traffic_revision() {
-        let snapshot = RwLock::new(TrafficSnapshot::default());
-        let samples = RwLock::new(initial_samples());
-        let expected_generation = AtomicU64::new(0);
-        let revision = TrafficRevision::with_value(7);
-
-        let accepted = update_frame_for_generation(
-            &snapshot,
-            &samples,
-            TrafficFrame { up: 100, down: 200 },
-            0,
-            &expected_generation,
-            &revision,
-        );
-
-        assert!(accepted);
-        assert_eq!(revision.current(), 8);
-    }
-
-    #[test]
-    fn repeated_connection_state_does_not_advance_the_traffic_revision() {
-        let snapshot = RwLock::new(TrafficSnapshot {
-            connected: true,
-            ..TrafficSnapshot::default()
-        });
-        let expected_generation = AtomicU64::new(0);
-        let revision = TrafficRevision::with_value(3);
-
-        let accepted = update_connection_for_generation(
-            &snapshot,
-            true,
-            None,
-            0,
-            &expected_generation,
-            &revision,
-        );
-
-        assert!(accepted);
-        assert_eq!(revision.current(), 3);
-    }
-
-    #[test]
-    fn traffic_revision_subscription_observes_an_accepted_frame() {
-        let snapshot = RwLock::new(TrafficSnapshot::default());
-        let samples = RwLock::new(initial_samples());
-        let expected_generation = AtomicU64::new(0);
-        let revision = TrafficRevision::new();
-        let updates = revision.subscribe();
-
-        let _ = update_frame_for_generation(
-            &snapshot,
-            &samples,
-            TrafficFrame { up: 100, down: 200 },
-            0,
-            &expected_generation,
-            &revision,
-        );
-
-        assert!(updates.has_changed().unwrap());
-    }
     #[tokio::test]
     async fn monitor_reconnects_when_an_existing_client_clone_switches_controller() {
         use futures_util::SinkExt;

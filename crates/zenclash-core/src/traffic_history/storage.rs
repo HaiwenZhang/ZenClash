@@ -198,7 +198,7 @@ impl TrafficHistoryStore {
     }
 
     fn open(&self) -> TrafficHistoryResult<HistoryConnection> {
-        let lease = self.write_access.acquire();
+        let lease = self.write_access.acquire()?;
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }

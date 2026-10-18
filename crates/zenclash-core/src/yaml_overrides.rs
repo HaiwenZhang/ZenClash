@@ -127,7 +127,7 @@ impl YamlOverrideStore {
             root,
             write_access,
         };
-        let _write_lease = store.write_access.acquire();
+        let _write_lease = store.write_access.acquire()?;
         fs::create_dir_all(store.files_dir())?;
         Ok(store)
     }
@@ -168,7 +168,7 @@ impl YamlOverrideStore {
                 "没有找到可导入的 .yaml 或 .yml 文件".into(),
             ));
         }
-        let _write_lease = self.write_access.acquire();
+        let _write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
         let mut imported = Vec::with_capacity(candidates.len());
@@ -221,7 +221,7 @@ impl YamlOverrideStore {
     ///
     /// Returns an error when the ID is absent or the manifest cannot be saved.
     pub fn set_enabled(&self, id: &str, enabled: bool) -> YamlOverrideResult<()> {
-        let _write_lease = self.write_access.acquire();
+        let _write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
         let record = catalog
@@ -239,7 +239,7 @@ impl YamlOverrideStore {
     ///
     /// Returns an error for absent IDs, out-of-range positions, or persistence failure.
     pub fn move_to(&self, id: &str, position: usize) -> YamlOverrideResult<()> {
-        let _write_lease = self.write_access.acquire();
+        let _write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
         if position >= catalog.items.len() {
@@ -272,7 +272,7 @@ impl YamlOverrideStore {
         next: &YamlOverrideCatalog,
     ) -> YamlOverrideResult<()> {
         validate_catalog_reordering(expected, next)?;
-        let _write_lease = self.write_access.acquire();
+        let _write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
         let current = self.load_unlocked()?;
         if &current != expected {
@@ -334,7 +334,7 @@ impl YamlOverrideStore {
         id: &str,
         validate: impl FnOnce(&YamlOverrideRecord) -> YamlOverrideResult<()>,
     ) -> YamlOverrideResult<YamlOverrideCatalog> {
-        let _write_lease = self.write_access.acquire();
+        let _write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
         let index = catalog
@@ -396,7 +396,7 @@ impl YamlOverrideStore {
     /// Returns the original non-recoverable error or an I/O error while moving
     /// the invalid manifest.
     pub fn quarantine_invalid_manifest(&self) -> YamlOverrideResult<Option<PathBuf>> {
-        let _write_lease = self.write_access.acquire();
+        let _write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
         let error = match self.load_unlocked() {
             Ok(_) => return Ok(None),

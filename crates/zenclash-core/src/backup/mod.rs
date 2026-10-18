@@ -26,6 +26,30 @@ pub(crate) const MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_BACKUP_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_BACKUP_FILES: usize = 4096;
 
+pub(crate) fn ensure_writes_available(paths: &[PathBuf]) -> std::io::Result<()> {
+    let mut inspected = std::collections::HashSet::new();
+    for path in paths {
+        for root in path.ancestors() {
+            if !inspected.insert(root) {
+                continue;
+            }
+            match recovery::RestoreJournal::read(root) {
+                Ok(Some(journal)) if journal.is_pending() => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        zenclash_i18n::text("backup.errors.recovery_required"),
+                    ));
+                }
+                Ok(_) => {}
+                Err(BackupError::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotADirectory => {}
+                Err(error) => return Err(std::io::Error::other(error)),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Errors produced while exporting, validating, or restoring a local backup.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -214,6 +238,7 @@ impl BackupManager {
         let mut scopes = transaction::write_scopes(&self.data_root);
         scopes.push(self.data_root.clone());
         let lease = crate::data_coordinator::DataWriteLease::exclusive(scopes);
+        ensure_writes_available(lease.scopes())?;
         let profiles = crate::ProfileStore::open(self.data_root.join("profiles"), Some(&lease))?;
         let overrides =
             crate::YamlOverrideStore::open(self.data_root.join("yaml-overrides"), Some(&lease))?;
@@ -293,7 +318,7 @@ impl PreparedBackupRestore {
         self.previous_runtime = Some((expected, snapshot));
     }
     pub(crate) fn runtime_candidate(&self) -> BackupResult<BackupRuntimeCandidate> {
-        let lease = crate::data_coordinator::DataWriteLease::shared([self.staging_root.clone()]);
+        let lease = crate::data_coordinator::DataWriteLease::shared([self.staging_root.clone()])?;
         BackupRuntimeCandidate::read(&self.staging_root, &self.data_root, &lease)
     }
 
@@ -520,6 +545,8 @@ impl BackupRestoreTransaction {
     /// Restores the complete authoritative snapshot that preceded activation.
     /// Successfully restored items are retained if a later step fails and
     /// dropping the transaction retries its remaining work.
+    /// If rollback remains unfinished, ordinary writes are refused until
+    /// [`BackupManager::recover_interrupted_restore`] succeeds.
     ///
     /// # Errors
     ///

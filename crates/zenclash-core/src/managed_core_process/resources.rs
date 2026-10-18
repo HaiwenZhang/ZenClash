@@ -69,7 +69,7 @@ pub(super) fn install_bundled_core(
     bundled: &Path,
     home_dir: &Path,
 ) -> MihomoResult<PathBuf> {
-    let lease = crate::data_coordinator::DataWriteAccess::new(home_dir).acquire();
+    let lease = crate::data_coordinator::DataWriteAccess::new(home_dir).acquire()?;
     install_bundled_core_admitted(kind, bundled, home_dir, lease)
 }
 
@@ -140,7 +140,7 @@ fn seed_bundled_mihomo_data(
 }
 
 fn install_bundled_data_file(bundled: &Path, home_dir: &Path, name: &str) -> MihomoResult<()> {
-    let _write_lease = crate::data_coordinator::DataWriteAccess::new(home_dir).acquire();
+    let _write_lease = crate::data_coordinator::DataWriteAccess::new(home_dir).acquire()?;
     let target = home_dir.join(name);
     match target.symlink_metadata() {
         Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
@@ -331,7 +331,7 @@ mod tests {
             let root = PathBuf::from(root);
             let home = root.join("home");
             let bundled = root.join("packaged");
-            let parent = crate::data_coordinator::DataWriteLease::shared([home.clone()]);
+            let parent = crate::data_coordinator::DataWriteLease::shared([home.clone()]).unwrap();
             let restore_home = home.clone();
             let restore = tokio::task::spawn_blocking(move || {
                 crate::data_coordinator::DataWriteLease::exclusive([restore_home])

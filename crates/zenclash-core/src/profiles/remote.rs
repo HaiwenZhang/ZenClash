@@ -154,7 +154,7 @@ impl ProfileStore {
         applied_payload: Vec<u8>,
         subscription: SubscriptionMetadata,
     ) -> ProfileStoreResult<ProfileUpdate> {
-        let _write_lease = self.write_access.acquire();
+        let _write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
         let index = remote_profile_index(&catalog, id)?;
@@ -194,7 +194,7 @@ impl ProfileStore {
     ///
     /// Returns an error for a stale update token or a failed rollback.
     pub fn rollback_update(&self, update: ProfileUpdate) -> ProfileStoreResult<ProfileRecord> {
-        let _write_lease = self.write_access.acquire();
+        let _write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
         let index = catalog

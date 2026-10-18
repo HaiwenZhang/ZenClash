@@ -31,6 +31,7 @@ pub(in crate::backup) fn export(
     // Catalogs and their payloads form one snapshot. Ordinary writes also hold
     // shared leases, so a shared root reservation would not freeze this read.
     let lease = crate::data_coordinator::DataWriteLease::exclusive(scopes);
+    super::super::ensure_writes_available(lease.scopes())?;
     let BackupSnapshot {
         files,
         payload_bytes,

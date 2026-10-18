@@ -131,16 +131,12 @@ impl AppUpdateService {
             });
         }
         let response = response.error_for_status()?;
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_RELEASE_METADATA_BYTES)
-        {
-            return Err(AppUpdateError::TooLarge);
-        }
-        let bytes = response.bytes().await?;
-        if bytes.len() as u64 > MAX_RELEASE_METADATA_BYTES {
-            return Err(AppUpdateError::TooLarge);
-        }
+        let bytes = crate::http_body::read_limited(response, MAX_RELEASE_METADATA_BYTES as usize)
+            .await
+            .map_err(|error| match error {
+                crate::http_body::ReadBodyError::Http(error) => AppUpdateError::Http(error),
+                crate::http_body::ReadBodyError::TooLarge => AppUpdateError::TooLarge,
+            })?;
         let release = serde_json::from_slice::<RawAppRelease>(&bytes)
             .map_err(|error| AppUpdateError::Metadata(format!("Release JSON 无法解析：{error}")))?;
         compare_release(current, release)
@@ -304,6 +300,37 @@ mod tests {
     use std::{io::Write, net::TcpListener, thread};
 
     use super::*;
+
+    #[tokio::test]
+    async fn oversized_chunked_metadata_is_rejected_before_the_server_finishes() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            crate::test_support::read_controller_request_blocking(&mut stream).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            let body = vec![b'x'; MAX_RELEASE_METADATA_BYTES as usize + 1];
+            let _ = write!(stream, "{:x}\r\n", body.len());
+            let _ = stream.write_all(&body);
+            let _ = stream.write_all(b"\r\n");
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let _ = stream.write_all(b"0\r\n\r\n");
+        });
+        let service =
+            AppUpdateService::with_latest_url(&format!("http://{address}/latest"), true).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2), service.check("0.1.0")).await;
+        release_tx.send(()).unwrap();
+        server.join().unwrap();
+        assert!(
+            matches!(result, Ok(Err(AppUpdateError::TooLarge))),
+            "{result:?}"
+        );
+    }
 
     #[test]
     fn version_comparison_prefers_stable_and_numeric_components() {

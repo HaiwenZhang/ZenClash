@@ -70,7 +70,7 @@ impl ControlledConfigStore {
         let leased_store = self.with_write_lease(&write_lease);
         let mutation_guard = leased_store.mutation_gate.clone().lock_owned().await;
         client.ensure_binding_current()?;
-        let prepare_lease = leased_store.write_access.acquire();
+        let prepare_lease = leased_store.write_access.acquire()?;
         let prepare_store = leased_store.with_write_lease(&prepare_lease);
         let profile = profile.as_ref().to_path_buf();
         let patch = patch.clone();
@@ -110,7 +110,7 @@ impl ControlledConfigStore {
             .await?;
         // One admitted task retains the write lease, store gate and runtime token to completion.
         tokio::spawn(async move {
-            let commit_lease = leased_store.write_access.acquire();
+            let commit_lease = leased_store.write_access.acquire()?;
             let commit_store = leased_store.with_write_lease(&commit_lease);
             let commit_update = update.clone();
             let commit = tokio::task::spawn_blocking(move || {
@@ -177,7 +177,7 @@ impl ControlledConfigStore {
             )
             .await?;
         if persist_patch {
-            let commit_lease = store.write_access.acquire();
+            let commit_lease = store.write_access.acquire()?;
             let commit_store = store.with_write_lease(&commit_lease);
             let commit = tokio::task::spawn_blocking(move || {
                 let _lease = commit_lease;
@@ -276,7 +276,7 @@ impl ControlledConfigStore {
         let store = self.with_write_lease(&write_lease);
         let mutation_guard = store.mutation_gate.clone().lock_owned().await;
         client.ensure_binding_current()?;
-        let worker_lease = store.write_access.acquire();
+        let worker_lease = store.write_access.acquire()?;
         let worker = store.with_write_lease(&worker_lease);
         let (payload, previous_payload) = tokio::task::spawn_blocking(move || {
             let _lease = worker_lease;
@@ -319,7 +319,7 @@ impl ControlledConfigStore {
         let leased_store = self.with_write_lease(&write_lease);
         let mutation_guard = leased_store.mutation_gate.clone().lock_owned().await;
         client.ensure_binding_current()?;
-        let worker_lease = leased_store.write_access.acquire();
+        let worker_lease = leased_store.write_access.acquire()?;
         let store = leased_store.with_write_lease(&worker_lease);
         let payload = tokio::task::spawn_blocking(move || {
             let _write_lease = worker_lease;
@@ -422,7 +422,7 @@ impl ControlledConfigStore {
         let payload = client.normalize_config_payload(payload)?;
         let payload = self.apply_session_listener_fallbacks(&payload)?;
         let prepared = client.prepare_runtime_payload(payload.clone()).await?;
-        let worker_lease = self.write_access.acquire();
+        let worker_lease = self.write_access.acquire()?;
         let store = self.with_write_lease(&worker_lease);
         let cache_payload = payload.clone();
         let cache = tokio::task::spawn_blocking(move || {
@@ -462,7 +462,7 @@ impl ControlledConfigStore {
         let leased_store = self.with_write_lease(&write_lease);
         let payload = normalize_runtime_payload(process.kind(), payload)?;
         let payload = self.apply_session_listener_fallbacks(&payload)?;
-        let worker_lease = leased_store.write_access.acquire();
+        let worker_lease = leased_store.write_access.acquire()?;
         let store = leased_store.with_write_lease(&worker_lease);
         let validator = process.config_validator().with_write_lease(&worker_lease);
         let cache = tokio::task::spawn_blocking(move || {
@@ -635,7 +635,7 @@ impl ControlledConfigStore {
         let leased_store = self.with_write_lease(&write_lease);
         let _mutation_guard = leased_store.mutation_gate.lock().await;
         client.ensure_binding_current()?;
-        let worker_lease = leased_store.write_access.acquire();
+        let worker_lease = leased_store.write_access.acquire()?;
         let store = leased_store.with_write_lease(&worker_lease);
         let profile = profile.as_ref().to_path_buf();
         let payload = tokio::task::spawn_blocking(move || {
@@ -693,7 +693,7 @@ impl ControlledConfigStore {
             .await?;
         let leased_store = self.with_write_lease(&write_lease);
         let mutation_guard = leased_store.mutation_gate.clone().lock_owned().await;
-        let worker_lease = leased_store.write_access.acquire();
+        let worker_lease = leased_store.write_access.acquire()?;
         let store = leased_store.with_write_lease(&worker_lease);
         let payload = tokio::task::spawn_blocking(move || {
             let _write_lease = worker_lease;

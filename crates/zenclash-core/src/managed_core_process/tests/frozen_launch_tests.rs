@@ -245,7 +245,7 @@ fn frozen_held_restart_does_not_require_the_original_source() {
     fixture.wait("observed-1");
     let payload = process.read_launch_payload().unwrap();
     fs::remove_file(&fixture.launch.config_file).unwrap();
-    let lease = crate::data_coordinator::DataWriteLease::shared(process.write_scopes());
+    let lease = crate::data_coordinator::DataWriteLease::shared(process.write_scopes()).unwrap();
     let result = process.restart_payload_with_write_lease(&lease, None, Some(&payload));
     let observed = if result.is_ok() {
         fs::write(fixture.launch.home_dir.join("read-2"), "").unwrap();
@@ -270,7 +270,7 @@ fn frozen_held_tun_on_is_rejected_without_stopping_the_current_child() {
     fixture.wait("observed-1");
     let pid = process.snapshot().pid;
     let inputs = fixture.private_files();
-    let lease = crate::data_coordinator::DataWriteLease::shared(process.write_scopes());
+    let lease = crate::data_coordinator::DataWriteLease::shared(process.write_scopes()).unwrap();
     let result =
         process.restart_payload_with_write_lease(&lease, None, Some("tun: {enable: true}\n"));
     let current = process.snapshot().pid;
@@ -322,7 +322,8 @@ fn frozen_cancelled_restart_keeps_pid_and_cleans_up_inputs() {
     let flag = cancelled.clone();
     let restarting = process.clone();
     let worker = std::thread::spawn(move || {
-        let lease = crate::data_coordinator::DataWriteLease::shared(restarting.write_scopes());
+        let lease =
+            crate::data_coordinator::DataWriteLease::shared(restarting.write_scopes()).unwrap();
         restarting.restart_with_write_lease(&lease, Some(&flag))
     });
     fixture.wait("checked");

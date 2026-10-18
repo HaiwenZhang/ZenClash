@@ -27,7 +27,7 @@ impl ProfileStore {
         }
         validate_clash_yaml(new_payload)?;
 
-        let _write_lease = self.write_access.acquire();
+        let _write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
         let mut catalog = self.load_unlocked()?;
         let index = catalog
