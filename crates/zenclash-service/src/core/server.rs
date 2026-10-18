@@ -673,6 +673,12 @@ fn create_ipc_server() -> Result<IpcHttpServer> {
     {
         use platform_lib::{S_IRGRP, S_IROTH, S_IRUSR, S_IWGRP, S_IWOTH, S_IWUSR, mode_t};
 
+        // Trust model: docs/development/service-security-model.md. The daemon
+        // runs as root while the GUI runs as an ordinary user, so the socket
+        // must be reachable by the desktop session. Authorization is per request
+        // (kernel peer credentials plus the caller's owned app-data root), not
+        // socket ownership. Windows restricts its control pipe to authenticated
+        // users with an explicit SDDL for the same reason.
         let mode: mode_t = platform_lib::mode_t::from(S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
         let server = server.with_listener_mode(mode);
         Ok(server)
