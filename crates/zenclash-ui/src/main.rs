@@ -15,15 +15,16 @@ use std::{
 
 use tracing_subscriber::{EnvFilter, filter::Directive};
 use zenclash_core::{
-    AppInstanceLock, AppPreferences, AppPreferencesStore, ControlledConfigStore,
-    CoreInitializationOutcome, CoreKind, CoreLaunchConfig, CoreSession, EffectiveConfigIntent,
-    LogMonitor, ManagedCoreProcess, MihomoClient, MihomoEndpoint, MihomoRuntimeResources,
-    ProfileStore, ServiceHealthKind, TrafficHistoryStore, TrafficMonitor, YamlOverrideStore,
-    bundled_recovery_profile,
+    AppInstanceLock, AppInstanceLockError, AppPreferences, AppPreferencesStore,
+    ControlledConfigStore, CoreInitializationOutcome, CoreKind, CoreLaunchConfig, CoreSession,
+    EffectiveConfigIntent, LogMonitor, ManagedCoreProcess, MihomoClient, MihomoEndpoint,
+    MihomoRuntimeResources, ProfileStore, ServiceHealthKind, TrafficHistoryStore, TrafficMonitor,
+    YamlOverrideStore, bundled_recovery_profile,
 };
 use zenclash_ui::{app, assets::Assets};
 
 mod startup;
+mod startup_failure;
 
 const DEFAULT_TRACING_FILTER: &str = "zenclash=info,zenclash_core=info,zenclash_ui=info";
 const MANAGED_CONTROLLER_ATTEMPTS: usize = 3;
@@ -35,6 +36,10 @@ const QUIET_NETWORK_TARGETS: [&str; 6] = [
     "h2=warn",
     "rustls=warn",
 ];
+
+/// Failures after the event loop starts are shutdown errors; a native dialog
+/// would outlive its window, so those keep the stderr report only.
+static GUI_STARTED: AtomicBool = AtomicBool::new(false);
 
 struct RecoveredCore {
     kind: CoreKind,
@@ -68,10 +73,23 @@ fn main() {
 
     if let Err(error) = run() {
         tracing::error!(%error, "ZenClash startup failed");
-        eprintln!(
-            "{}",
-            zenclash_i18n::text_with("startup.failure", &[("error", error.to_string())],)
-        );
+        let message = startup_failure_message(error.as_ref());
+        eprintln!("{message}");
+        if !GUI_STARTED.load(Ordering::Acquire) {
+            startup_failure::show(&message);
+        }
+    }
+}
+
+/// Selects the user-facing startup message without exposing internal lock paths.
+fn startup_failure_message(error: &(dyn std::error::Error + 'static)) -> String {
+    if matches!(
+        error.downcast_ref::<AppInstanceLockError>(),
+        Some(AppInstanceLockError::AlreadyRunning(_))
+    ) {
+        zenclash_i18n::text("startup.already_running")
+    } else {
+        zenclash_i18n::text_with("startup.failure", &[("error", error.to_string())])
     }
 }
 
@@ -170,6 +188,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let application = gpui_kit::application().with_assets(Assets);
     application.on_reopen(app::reopen_main_window);
+    GUI_STARTED.store(true, Ordering::Release);
     application.run(move |cx| {
         app::init(cx);
         app::create_main_window_with_pending_startup(pending_services, startup_task, cx);
@@ -1544,5 +1563,28 @@ mod tracing_tests {
         assert!(!is_controller_listener_conflict(
             "Start Mixed proxy error: listen tcp 127.0.0.1:7890: address already in use"
         ));
+    }
+}
+
+#[cfg(test)]
+mod startup_failure_tests {
+    use super::startup_failure_message;
+    use zenclash_core::AppInstanceLockError;
+
+    #[test]
+    fn already_running_uses_a_dedicated_message_without_the_lock_path() {
+        let error: Box<dyn std::error::Error> = Box::new(AppInstanceLockError::AlreadyRunning(
+            "/tmp/zenclash-private.lock".into(),
+        ));
+        let message = startup_failure_message(error.as_ref());
+        assert!(!message.contains("zenclash-private.lock"));
+        assert!(message.contains("ZenClash"));
+    }
+
+    #[test]
+    fn other_failures_keep_the_original_error_detail() {
+        let error: Box<dyn std::error::Error> = Box::new(std::io::Error::other("disk unavailable"));
+        let message = startup_failure_message(error.as_ref());
+        assert!(message.contains("disk unavailable"));
     }
 }
