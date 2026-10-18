@@ -198,6 +198,7 @@ mod tests {
     use super::*;
     use std::io;
 
+    #[cfg(unix)]
     fn timed_out_message(command: &str, timeout: Duration) -> String {
         zenclash_i18n::text_with(
             "platform_command.errors.timed_out",
