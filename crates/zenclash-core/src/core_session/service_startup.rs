@@ -78,7 +78,7 @@ impl CoreSession {
             .into());
         }
         let session = self.clone();
-        self.complete_service_initialization(async move {
+        self.complete_service_initialization(Box::pin(async move {
             let _availability_pause = session.pause_pac_availability();
             let _lease = lease;
             let _store_mutation = store.lock_service_tun_mutation().await;
@@ -98,7 +98,7 @@ impl CoreSession {
                     readback,
                 )
                 .await
-        })
+        }))
         .await
     }
 
