@@ -32,6 +32,8 @@ fn controller_credentials_bypass_environment_proxies() {
             for (listener, proxied) in [(&proxy, true), (&controller, false)] {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // Accepted sockets can inherit the listener's nonblocking mode.
+                        stream.set_nonblocking(false).unwrap();
                         stream
                             .set_read_timeout(Some(Duration::from_secs(2)))
                             .unwrap();
