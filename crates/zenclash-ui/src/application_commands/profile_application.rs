@@ -89,11 +89,10 @@ impl ApplicationCommands {
         controlled: ControlledConfigStore,
         source: PathBuf,
     ) -> Result<ProfileReceipt, ProfileFailure> {
-        let overrides = self.enabled_overrides().await?;
         self.apply(
             store,
             controlled,
-            ProfileChange::ImportLocal { source, overrides },
+            move |overrides| ProfileChange::ImportLocal { source, overrides },
             ChangeContext::Selection,
         )
         .await
@@ -108,11 +107,10 @@ impl ApplicationCommands {
         user_agent: String,
         options: RemoteProfileOptions,
     ) -> Result<ProfileReceipt, ProfileFailure> {
-        let overrides = self.enabled_overrides().await?;
         self.apply(
             store,
             controlled,
-            ProfileChange::AddRemote {
+            move |overrides| ProfileChange::AddRemote {
                 name,
                 url,
                 user_agent,
@@ -130,11 +128,10 @@ impl ApplicationCommands {
         controlled: ControlledConfigStore,
         id: String,
     ) -> Result<ProfileReceipt, ProfileFailure> {
-        let overrides = self.enabled_overrides().await?;
         self.apply(
             store,
             controlled,
-            ProfileChange::ActivateExisting { id, overrides },
+            move |overrides| ProfileChange::ActivateExisting { id, overrides },
             ChangeContext::Selection,
         )
         .await
@@ -146,11 +143,10 @@ impl ApplicationCommands {
         controlled: ControlledConfigStore,
         id: String,
     ) -> Result<ProfileReceipt, ProfileFailure> {
-        let overrides = self.enabled_overrides().await?;
         self.apply(
             store,
             controlled,
-            ProfileChange::UpdateRemote { id, overrides },
+            move |overrides| ProfileChange::UpdateRemote { id, overrides },
             ChangeContext::Update,
         )
         .await
@@ -164,11 +160,10 @@ impl ApplicationCommands {
         expected_payload: String,
         new_payload: String,
     ) -> Result<ProfileReceipt, ProfileFailure> {
-        let overrides = self.enabled_overrides().await?;
         self.apply(
             store,
             controlled,
-            ProfileChange::EditYaml {
+            move |overrides| ProfileChange::EditYaml {
                 id,
                 expected_payload,
                 new_payload,
@@ -183,11 +178,19 @@ impl ApplicationCommands {
         &self,
         store: ProfileStore,
         controlled: ControlledConfigStore,
-        change: ProfileChange,
+        change: impl FnOnce(Vec<PathBuf>) -> ProfileChange + Send + 'static,
         context: ChangeContext,
     ) -> Result<ProfileReceipt, ProfileFailure> {
+        let admission = self
+            .session
+            .begin_data_application()
+            .await
+            .map_err(|error| ProfileFailure::from(error.to_string()))?;
         let commands = self.clone();
         tokio::spawn(async move {
+            // Keep override discovery and application inside the same data transaction.
+            let _admission = admission;
+            let change = change(commands.enabled_overrides().await?);
             let application = ProfileApplication::new(store, controlled, commands.session.clone());
             let (outcome, service) = if let Some(manager) = &commands.service_manager {
                 application.apply_with_service(manager, change).await

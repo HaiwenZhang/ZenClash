@@ -29,6 +29,20 @@ impl Render for PreviewBackground {
 }
 use gpui_kit::test::TestWindowExt;
 
+#[test]
+fn retesting_exit_dependent_results_replaces_the_whole_exit_observation() {
+    for check in [Check::ExitIp, Check::Risk, Check::Timezone] {
+        assert_eq!(
+            checks_for_run(Some(check)),
+            [Check::ExitIp, Check::Risk, Check::Timezone]
+        );
+    }
+    for check in [Check::Proxy, Check::Ipv6, Check::Dns, Check::Claude] {
+        assert_eq!(checks_for_run(Some(check)), [check]);
+    }
+    assert_eq!(checks_for_run(None), Check::ALL);
+}
+
 #[gpui_kit::test]
 fn ai_network_entry_opens_pending_dialog_and_escape_closes_it(cx: &mut gpui_kit::TestAppContext) {
     let fixture = Fixture::new();

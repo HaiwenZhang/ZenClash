@@ -740,6 +740,51 @@ fn prepares_commits_and_materializes_without_changing_source_profile() {
 }
 
 #[test]
+fn controlled_dns_mapping_edits_replace_deleted_entries_after_commit_and_reload() {
+    let root = test_root("mapping-replacement");
+    let profile = write_profile(&root);
+    fs::write(&profile, "hosts: {old.example: 192.0.2.1, keep.example: 192.0.2.2}\ndns: {enable: true, nameserver: [1.1.1.1], nameserver-policy: {old.example: 1.1.1.1, keep.example: 8.8.8.8}}\nrules: ['MATCH,DIRECT']\n").unwrap();
+    let original = fs::read(&profile).unwrap();
+    let store = ControlledConfigStore::new(root.join("store"));
+    for patch in [
+        serde_json::json!({"hosts":{"keep.example":"192.0.2.2"},"dns":{"nameserver-policy":{"keep.example":"8.8.8.8"}}}),
+        serde_json::json!({"hosts":{},"dns":{"nameserver-policy":{}}}),
+    ] {
+        let update = store.prepare_json_update(&profile, &patch).unwrap();
+        store.commit(&update).unwrap();
+        let reloaded = ControlledConfigStore::new(store.root());
+        let effective = reloaded.effective_json(&profile).unwrap();
+        assert_eq!(effective["hosts"], patch["hosts"]);
+        assert_eq!(
+            effective["dns"]["nameserver-policy"],
+            patch["dns"]["nameserver-policy"]
+        );
+        assert_eq!(effective["dns"]["enable"], true);
+        assert_eq!(
+            effective["dns"]["nameserver"],
+            serde_json::json!(["1.1.1.1"])
+        );
+        let unrelated = reloaded
+            .prepare_json_update(&profile, &serde_json::json!({"ipv6":true}))
+            .unwrap();
+        reloaded.commit(&unrelated).unwrap();
+        assert_eq!(
+            reloaded.effective_json(&profile).unwrap()["hosts"],
+            patch["hosts"]
+        );
+    }
+    // Explicit user YAML layers retain their documented recursive merge semantics.
+    let override_path = root.join("explicit.yaml");
+    fs::write(&override_path, "hosts: {override.example: 192.0.2.3}\n").unwrap();
+    let merged = crate::merge_profile_overrides(&profile, &[override_path]).unwrap();
+    let merged: serde_yaml::Value = serde_yaml::from_str(&merged).unwrap();
+    assert!(merged["hosts"].get("old.example").is_some());
+    assert!(merged["hosts"].get("override.example").is_some());
+    assert_eq!(fs::read(&profile).unwrap(), original);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn mihomo_materialization_adds_geodata_fallbacks_without_rewriting_the_source() {
     let root = test_root("mihomo-geodata-defaults");
     let profile = write_profile(&root);

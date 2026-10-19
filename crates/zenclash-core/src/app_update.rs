@@ -217,12 +217,21 @@ fn validate_official_release_url(value: &str) -> AppUpdateResult<String> {
     let normalized = validate_external_https_url(value)?;
     let url = reqwest::Url::parse(&normalized)
         .map_err(|error| AppUpdateError::Metadata(format!("Release URL 无效：{error}")))?;
+    let official_path = url.path_segments().is_some_and(|mut segments| {
+        segments
+            .next()
+            .is_some_and(|owner| owner.eq_ignore_ascii_case("HaiwenZhang"))
+            && segments
+                .next()
+                .is_some_and(|repo| repo.eq_ignore_ascii_case("ZenClash"))
+            && segments.next() == Some("releases")
+            && segments.next() == Some("tag")
+            && segments.next().is_some_and(|tag| !tag.is_empty())
+    });
     if !url
         .host_str()
         .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
-        || !url
-            .path()
-            .starts_with("/HaiwenZhang/zenclash/releases/tag/")
+        || !official_path
         || url.query().is_some()
         || url.fragment().is_some()
     {
@@ -349,6 +358,27 @@ mod tests {
             "https://user:secret@github.com/project/releases",
         ] {
             assert!(validate_external_https_url(rejected).is_err(), "{rejected}");
+        }
+    }
+
+    #[test]
+    fn official_release_pages_accept_repository_casing_without_relaxing_the_route() {
+        for url in [
+            "https://github.com/HaiwenZhang/ZenClash/releases/tag/v0.2.1",
+            "https://github.com/haiwenzhang/zenclash/releases/tag/v0.2.1",
+            "https://github.com/HAIWENZHANG/ZENCLASH/releases/tag/release/v0.2.1",
+        ] {
+            assert!(validate_official_release_url(url).is_ok(), "{url}");
+        }
+        for url in [
+            "https://github.com/other/ZenClash/releases/tag/v0.2.1",
+            "https://github.com/HaiwenZhang/ZenClash-fork/releases/tag/v0.2.1",
+            "https://github.com/HaiwenZhang/ZenClash/RELEASES/tag/v0.2.1",
+            "https://github.com/HaiwenZhang/ZenClash/releases/tag/",
+            "https://github.example/HaiwenZhang/ZenClash/releases/tag/v0.2.1",
+            "https://github.com/HaiwenZhang/ZenClash/releases/tag/v0.2.1?redirect=other",
+        ] {
+            assert!(validate_official_release_url(url).is_err(), "{url}");
         }
     }
 

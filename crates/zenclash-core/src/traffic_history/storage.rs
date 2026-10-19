@@ -13,6 +13,9 @@ use super::{
 use crate::AppPreferencesStore;
 use crate::data_coordinator::{DataWriteAccess, DataWriteLease};
 
+#[cfg(test)]
+mod permissions_tests;
+mod private_io;
 mod query;
 
 const MAX_INSERT_BATCH: usize = 10_000;
@@ -202,12 +205,18 @@ impl TrafficHistoryStore {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
+        private_io::prepare(&self.path)?;
         let connection = Connection::open(&self.path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.execute_batch(
             "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;
-             CREATE TABLE IF NOT EXISTS traffic_history (
+             PRAGMA synchronous = NORMAL;",
+        )?;
+        // SQLite can reopen sidecars while entering WAL mode; protect them before writing data.
+        #[cfg(windows)]
+        private_io::prepare(&self.path)?;
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS traffic_history (
                  id INTEGER PRIMARY KEY,
                  timestamp_ms INTEGER NOT NULL CHECK(timestamp_ms >= 0),
                  source_ip TEXT NOT NULL,

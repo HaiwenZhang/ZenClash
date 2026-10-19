@@ -1,55 +1,5 @@
 use super::*;
 
-#[test]
-fn node_summary_counts_shared_nodes_once_and_updates_measurements() {
-    let nodes = vec![
-        super::super::ProxyNode {
-            name: "fast".into(),
-            kind: "Shadowsocks".into(),
-            history: vec![super::super::DelayHistory {
-                delay: 28,
-                ..Default::default()
-            }],
-            ..Default::default()
-        },
-        super::super::ProxyNode {
-            name: "failed".into(),
-            kind: "Shadowsocks".into(),
-            history: vec![super::super::DelayHistory::default()],
-            ..Default::default()
-        },
-        super::super::ProxyNode {
-            name: "new".into(),
-            kind: "Shadowsocks".into(),
-            ..Default::default()
-        },
-        super::super::ProxyNode {
-            name: "DIRECT".into(),
-            kind: "Direct".into(),
-            ..Default::default()
-        },
-        super::super::ProxyNode {
-            name: "group".into(),
-            kind: "Selector".into(),
-            ..Default::default()
-        },
-    ];
-    let catalog = ProxyCatalog::from_group_nodes(
-        ["group", "other"]
-            .into_iter()
-            .map(|name| (ProxyGroup::new(name), nodes.clone()))
-            .collect(),
-        7,
-    );
-    let mut summary = NodeSummary::new(&catalog);
-    assert_eq!(summary.counts(), [1, 1, 1]);
-    summary.record(&ProxyNodeId::new("new".into(), None), Some(50));
-    assert_eq!(summary.counts(), [2, 1, 0]);
-    summary.record(&ProxyNodeId::new("new".into(), None), Some(0));
-    assert_eq!(summary.counts(), [1, 2, 0]);
-    summary.record(&ProxyNodeId::new("DIRECT".into(), None), Some(1));
-    assert_eq!(summary.counts(), [1, 2, 0]);
-}
 use zenclash_core::{DelayHistory, ProxyNode};
 
 #[test]
@@ -83,28 +33,6 @@ fn master_detail_selection_tracks_group_identity_and_falls_back_on_page_changes(
     assert_eq!(selected_group_index(&catalog, &[0, 1], selected), Some(1));
     assert_eq!(selected_group_index(&catalog, &[2], selected), Some(2));
     assert_eq!(selected_group_index(&catalog, &[], selected), None);
-}
-
-#[test]
-fn current_node_cache_rejects_stale_selection_and_releases_with_page_owner() {
-    let mut catalog = catalog("group");
-    let current = catalog.groups()[0].all[1].controller_name().to_owned();
-    catalog.set_group_selection("group", current);
-    let orders = GroupOrders::default();
-    orders.prepare_current(&catalog);
-    assert_eq!(
-        orders.current_node(&catalog.groups()[0]),
-        Some(catalog.groups()[0].all[1].clone())
-    );
-    catalog.set_group_selection("group", "group-node-0".into());
-    assert_eq!(orders.current_node(&catalog.groups()[0]), None);
-    orders.update_current(&catalog, "group");
-    assert_eq!(
-        orders.current_node(&catalog.groups()[0]),
-        Some(catalog.groups()[0].all[0].clone())
-    );
-    orders.release_current();
-    assert_eq!(orders.current_node(&catalog.groups()[0]), None);
 }
 
 fn catalog(name: &str) -> ProxyCatalog {

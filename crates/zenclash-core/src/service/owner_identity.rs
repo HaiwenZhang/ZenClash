@@ -64,6 +64,11 @@ pub(crate) fn open_or_create_private_current_user_file(path: &Path) -> Result<st
     windows_owner::open_or_create_private_file(path)
 }
 
+#[cfg(windows)]
+pub(crate) fn protect_current_user_file(path: &Path, create: bool) -> Result<std::fs::File> {
+    windows_owner::protect_file(path, create)
+}
+
 /// Repairs an application data root Windows no longer reports as owned by the current user.
 ///
 /// The Service authenticates by comparing this directory's owner SID against the caller's, so a
@@ -213,6 +218,32 @@ mod windows_owner {
         let sid = current_sid()?;
         let descriptor = LocalSecurityDescriptor::from_sid(&sid)?;
         create_file(path, &descriptor)
+    }
+
+    pub(super) fn protect_file(path: &Path, create: bool) -> Result<std::fs::File> {
+        let descriptor = LocalSecurityDescriptor::from_sid(&current_sid()?)?;
+        let open = || {
+            open_no_reparse(
+                path,
+                false,
+                GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC,
+            )
+        };
+        let file = if create {
+            match create_file(path, &descriptor) {
+                Ok(file) => file,
+                Err(error) if is_os_error(&error, ERROR_FILE_EXISTS) => open()?,
+                Err(error) => return Err(error),
+            }
+        } else {
+            open()?
+        };
+        if !owner_matches(&file, descriptor.owner()?)? {
+            bail!("refusing to change another user's file permissions");
+        }
+        descriptor.apply_dacl(file.as_raw_handle())?;
+        validate_private_file(&file, descriptor.owner()?)?;
+        Ok(file)
     }
 
     pub(super) fn open_private_file(path: &Path) -> Result<std::fs::File> {

@@ -101,6 +101,9 @@ impl ZenClashApp {
     }
 
     fn start_system_proxy_command(&mut self, enabled: bool, _port: u16, cx: &mut Context<Self>) {
+        // Queued retries are admitted after the previous command publishes its result.
+        self.tray_command_error = None;
+        cx.notify();
         let capture = self.traffic_capture.clone();
         let store = self.preferences_store.clone();
         let task = self.runtime.spawn(async move {
@@ -140,12 +143,10 @@ impl ZenClashApp {
                                 cx,
                             );
                         }
-                        if matches!(
-                            outcome,
-                            CaptureOutcome::RolledBack { .. }
-                                | CaptureOutcome::ReconcileNeeded { .. }
-                        ) {
-                            tracing::warn!(?outcome, "system proxy tray command did not converge");
+                        if let CaptureOutcome::RolledBack { failure, .. }
+                        | CaptureOutcome::ReconcileNeeded { failure, .. } = outcome
+                        {
+                            this.report_tray_error(failure, cx);
                         }
                     }
                     Ok(Err(error)) => this.report_tray_error(error, cx),
@@ -168,6 +169,8 @@ impl ZenClashApp {
     }
 
     fn start_tun_command(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.tray_command_error = None;
+        cx.notify();
         let service_request = if enabled && self.application_commands.service_state().is_some() {
             match self.application_commands.request_service_tun() {
                 Ok(request) => Some(request),
@@ -271,6 +274,8 @@ impl ZenClashApp {
     }
 
     fn start_profile_selection(&mut self, id: String, cx: &mut Context<Self>) {
+        self.tray_command_error = None;
+        cx.notify();
         let controlled = self.controlled_config_store.clone();
         let application_commands = self.application_commands.clone();
         let task = self.runtime.spawn(async move {
@@ -354,6 +359,37 @@ fn proxy_environment(shell: EnvironmentShell, port: u16) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{EnvironmentShell, proxy_environment};
+
+    #[gpui_kit::test]
+    fn admitting_a_queued_retry_removes_the_previous_tray_error(cx: &mut gpui_kit::TestAppContext) {
+        use super::super::test_support::{TrayController, open_app};
+        use gpui_kit::AppContext;
+        use gpui_kit::test::TestWindowExt;
+        let fixture = crate::pages::runtime::test_support::RuntimePageFixture::new();
+        let services = fixture.services();
+        let controller = TrayController::new(&services.runtime, None);
+        let (window, app) = open_app(cx, &fixture, controller.session());
+        cx.update_window(window, |_, window, cx| {
+            app.update(cx, |app, cx| {
+                assert_eq!(
+                    app.system_proxy_commands.submit((true, 7890)),
+                    Some((true, 7890))
+                );
+                assert!(app.system_proxy_commands.submit((false, 0)).is_none());
+                app.report_tray_error("previous command failed".into(), cx);
+            });
+            window.render_frame(cx);
+            assert!(window.find("tray-feedback").visible());
+            app.update(cx, |app, cx| {
+                let (enabled, port) = app.system_proxy_commands.complete().unwrap();
+                app.start_system_proxy_command(enabled, port, cx);
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("tray-feedback").is_none());
+            window.remove_window();
+        })
+        .unwrap();
+    }
 
     #[test]
     fn formats_proxy_environment_for_each_supported_shell() {

@@ -349,7 +349,7 @@ async fn apply_selection_returns_after_ack_without_waiting_for_catalog_readback(
 }
 
 #[tokio::test]
-async fn rebuild_affected_closes_only_chains_containing_the_previous_member() {
+async fn rebuild_affected_closes_only_the_changed_groups_previous_member_connections() {
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
@@ -386,11 +386,10 @@ async fn rebuild_affected_closes_only_chains_containing_the_previous_member() {
     assert!(requests[2].starts_with("GET /connections "));
     assert!(requests[3].starts_with("DELETE /connections/affected "));
     assert!(requests[4].starts_with("GET /proxies "));
-    assert!(
-        requests
-            .iter()
-            .all(|request| !request.starts_with("DELETE /connections/unrelated "))
-    );
+    assert!(requests.iter().all(
+        |request| !request.starts_with("DELETE /connections/unrelated ")
+            && !request.starts_with("DELETE /connections/shared ")
+    ));
 }
 
 #[tokio::test]
@@ -713,7 +712,7 @@ fn proxy_catalog_with_current(current: &str) -> String {
 }
 
 fn connections_response() -> String {
-    let body = r#"{"connections":[{"id":"affected","chains":["Proxy","Old Node"]},{"id":"unrelated","chains":["Proxy","Other Node"]}]}"#;
+    let body = r#"{"connections":[{"id":"affected","chains":["Proxy","Old Node"]},{"id":"unrelated","chains":["Proxy","Other Node"]},{"id":"shared","chains":["Other Group","Old Node"]}]}"#;
     format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()

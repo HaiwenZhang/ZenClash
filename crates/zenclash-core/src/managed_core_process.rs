@@ -1,5 +1,4 @@
 use std::{
-    io::{BufRead, BufReader},
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
@@ -841,15 +840,10 @@ fn collect_output(
     std::thread::Builder::new()
         .name(format!("zenclash-core-{label}"))
         .spawn(move || {
-            for line in BufReader::new(reader).lines() {
-                let line = match line {
-                    Ok(line) => line,
-                    Err(error) => {
-                        tracing::warn!(%error, stream = label, "failed to read managed core output");
-                        break;
-                    }
-                };
-                logs.write().record(&launch, label, &line);
+            if let Err(error) = launch_logs::read_output(reader, |line| {
+                logs.write().record(&launch, label, line);
+            }) {
+                tracing::warn!(%error, stream = label, "failed to read managed core output");
             }
         })
         .map(|_| ())

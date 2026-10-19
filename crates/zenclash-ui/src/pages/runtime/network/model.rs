@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 
 use zenclash_core::{
-    DEFAULT_NETWORK_LATENCY_TARGETS, DiagnosticData, DiagnosticReport, NetworkLatencyTarget,
-    NetworkProbeRoute, NetworkProbeSnapshot, ObservedPathRoute, PathStatus, RuntimeConfig,
+    DEFAULT_NETWORK_LATENCY_TARGETS, DiagnosticData, DiagnosticReport, DiagnosticStep,
+    NetworkLatencyTarget, NetworkProbeRoute, NetworkProbeSnapshot, ObservedPathRoute, PathStatus,
+    RuntimeConfig,
 };
 
 pub(super) fn network_probe_route(
@@ -91,12 +92,7 @@ pub(super) fn path_observation(
     generation: u64,
     snapshot: &NetworkProbeSnapshot,
 ) -> Result<PathStatus, String> {
-    let succeeded = snapshot.public_ip.is_some()
-        || snapshot
-            .latencies
-            .iter()
-            .any(|result| result.latency_ms.is_some());
-    if !succeeded {
+    if !network_probe_succeeded(snapshot) {
         let error = snapshot
             .public_ip_error
             .clone()
@@ -121,6 +117,22 @@ pub(super) fn path_observation(
         },
         generation,
     })
+}
+
+fn network_probe_succeeded(snapshot: &NetworkProbeSnapshot) -> bool {
+    snapshot.public_ip.is_some()
+        || snapshot
+            .latencies
+            .iter()
+            .any(|result| result.latency_ms.is_some())
+}
+
+pub(super) fn diagnostic_step_succeeded(step: &DiagnosticStep) -> bool {
+    match &step.outcome {
+        Ok(DiagnosticData::Network(snapshot)) => network_probe_succeeded(snapshot),
+        Ok(_) => true,
+        Err(_) => false,
+    }
 }
 
 pub(super) fn latency_color(

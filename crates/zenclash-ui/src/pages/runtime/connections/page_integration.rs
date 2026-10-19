@@ -3,6 +3,9 @@
 use super::super::*;
 use super::{ConnectionEvent, ConnectionSnapshotContext};
 
+#[cfg(test)]
+mod tests;
+
 impl RuntimePage {
     pub(in crate::pages::runtime) fn handle_connection_event(
         &mut self,
@@ -18,9 +21,9 @@ impl RuntimePage {
                     return;
                 }
                 if let Some(id) = id {
-                    self.close_connection(id, cx);
+                    self.close_connections(Some(id), cx);
                 } else {
-                    self.close_all_connections(cx);
+                    self.close_connections(None, cx);
                 }
             }
             ConnectionEvent::PresentationFailed(error) => {
@@ -60,93 +63,104 @@ impl RuntimePage {
         });
     }
 
-    fn close_all_connections(&mut self, cx: &mut Context<Self>) {
-        if self.connections.read(cx).has_pending_closes() {
+    fn close_connections(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+        if self.core_busy() || (id.is_none() && self.connections.read(cx).has_pending_closes()) {
             return;
         }
-        let Some(token) = self.begin_mutation(Page::Connections) else {
+        let Some(source) = self
+            .page_observation
+            .source()
+            .clone()
+            .filter(|source| source.belongs_to(&self.core_session))
+        else {
+            self.refresh(cx);
             return;
         };
-        let client = self.client.clone();
-        let task = self.runtime.spawn(async move {
-            client
-                .close_all_connections()
-                .await
-                .map_err(|error| error.to_string())?;
-            client
-                .connections_snapshot()
-                .await
-                .map(|data| PageSnapshotData::Connections(std::sync::Arc::new(data)))
-                .map_err(|error| error.to_string())
-        });
-        cx.spawn(async move |this, cx| {
-            let result = match task.await {
-                Ok(result) => result,
-                Err(error) => Err(zenclash_i18n::text_with(
-                    "connections.errors.close_task",
-                    &[("error", error.to_string())],
-                )),
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.finish_mutation(token);
-                match result {
-                    Ok(data) => {
-                        if this.is_page_task_current(token) {
-                            this.connections
-                                .update(cx, |view, cx| view.resume_live_display(cx));
-                        }
-                        if this.replace_page_data(token, data, cx) {
-                            this.notice =
-                                Some(zenclash_i18n::text("connections.notices.closed_all"));
-                        }
-                    }
-                    Err(error) => this.set_page_error(token, error),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn close_connection(&mut self, id: String, cx: &mut Context<Self>) {
-        if self.core_busy()
-            || !self
+        let token = if let Some(id) = &id {
+            if !self
                 .connections
                 .update(cx, |view, cx| view.begin_close(id.clone(), cx))
-        {
-            return;
-        }
-        self.invalidate_page_load();
-        self.error = None;
-        let token = self.page_task_token_for(Page::Connections);
-        let client = self.client.clone();
-        let id_for_task = id.clone();
+            {
+                return;
+            }
+            self.invalidate_page_load();
+            self.error = None;
+            self.page_task_token_for(Page::Connections)
+        } else {
+            let Some(token) = self.begin_mutation(Page::Connections) else {
+                return;
+            };
+            token
+        };
+        let query_revision = self.page_observation.query_revision();
+        let session = self.core_session.clone();
+        let submitted_source = source.clone();
+        let submitted_id = id.clone();
+        let close_all = id.is_none();
         let task = self.runtime.spawn(async move {
-            client
-                .close_connection(&id_for_task)
+            let observation = session
+                .close_observed_connections(&submitted_source, submitted_id)
                 .await
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+            if close_all {
+                super::super::page_observation::ObservedPage::load_from_observation(
+                    session,
+                    observation,
+                    Page::Connections,
+                )
+                .await
+                .map(Some)
+            } else {
+                Ok(None)
+            }
         });
         cx.spawn(async move |this, cx| {
-            let result = match task.await {
-                Ok(result) => result,
-                Err(error) => Err(zenclash_i18n::text_with(
-                    "connections.errors.close_task",
-                    &[("error", error.to_string())],
-                )),
-            };
+            let result = task
+                .await
+                .map_err(|error| {
+                    zenclash_i18n::text_with(
+                        "connections.errors.close_task",
+                        &[("error", error.to_string())],
+                    )
+                })
+                .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.connections
-                    .update(cx, |view, cx| view.finish_connection_close(&id, cx));
+                this.finish_mutation(token);
+                if let Some(id) = &id {
+                    this.connections
+                        .update(cx, |view, cx| view.finish_connection_close(id, cx));
+                }
+                if !this.is_page_task_current(token)
+                    || this.page_observation.query_revision() != query_revision
+                    || !this
+                        .page_observation
+                        .source()
+                        .as_ref()
+                        .is_some_and(|current| current.is_same_observation(&source))
+                {
+                    cx.notify();
+                    return;
+                }
                 match result {
-                    Ok(()) if this.is_page_task_current(token) => {
+                    Ok(Some(observed)) => {
+                        if this.accept_page_observation(observed, cx) {
+                            this.connections
+                                .update(cx, |view, cx| view.resume_live_display(cx));
+                            source.publish_if_current(|| {
+                                this.notice =
+                                    Some(zenclash_i18n::text("connections.notices.closed_all"));
+                            });
+                        }
+                    }
+                    Ok(None) if source.is_current() => {
                         this.connections
                             .update(cx, |view, cx| view.resume_live_display(cx));
                         this.refresh(cx);
                     }
-                    Ok(()) => {}
-                    Err(error) => this.set_page_error(token, error),
+                    Ok(None) => {}
+                    Err(error) => {
+                        source.publish_if_current(|| this.set_page_error(token, error));
+                    }
                 }
                 cx.notify();
             });

@@ -16,6 +16,17 @@ fn text(key: &str) -> String {
     zenclash_i18n::text(&format!("ai_network.{key}"))
 }
 
+fn checks_for_run(only: Option<Check>) -> Vec<Check> {
+    match only {
+        // These results must share the exit observation cached by one Diagnostics run.
+        Some(Check::ExitIp | Check::Risk | Check::Timezone) => {
+            vec![Check::ExitIp, Check::Risk, Check::Timezone]
+        }
+        Some(kind) => vec![kind],
+        None => Check::ALL.to_vec(),
+    }
+}
+
 impl RuntimePage {
     pub(in crate::pages::runtime) fn open_ai_network(
         &mut self,
@@ -119,11 +130,9 @@ impl AiNetworkDialog {
         let Ok(route) = self.route.clone() else {
             return;
         };
-        let checks = only.map_or_else(|| Check::ALL.to_vec(), |kind| vec![kind]);
+        let checks = checks_for_run(only);
         for (kind, state) in &mut self.rows {
-            if checks.contains(kind)
-                || (only == Some(Check::ExitIp) && matches!(kind, Check::Risk | Check::Timezone))
-            {
+            if checks.contains(kind) {
                 *state = RowState::Pending;
             }
         }

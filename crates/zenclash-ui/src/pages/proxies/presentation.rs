@@ -8,63 +8,6 @@ use std::{
     rc::Rc,
 };
 
-#[derive(Default)]
-pub(super) struct NodeSummary {
-    states: HashMap<ProxyNodeId, usize>,
-    counts: [usize; 3],
-}
-
-impl NodeSummary {
-    pub(super) fn new(catalog: &ProxyCatalog) -> Self {
-        let groups = catalog
-            .groups()
-            .iter()
-            .map(|group| group.controller_name())
-            .collect::<HashSet<_>>();
-        let mut summary = Self::default();
-        for id in catalog.groups().iter().flat_map(|group| group.all.iter()) {
-            let Some(node) = catalog.node(id) else {
-                continue;
-            };
-            if groups.contains(id.controller_name())
-                || matches!(
-                    node.kind.as_str(),
-                    "Direct" | "Reject" | "Compatible" | "Pass"
-                )
-                || summary.states.contains_key(id)
-            {
-                continue;
-            }
-            let state = Self::state(node.latest_delay());
-            summary.states.insert(id.clone(), state);
-            summary.counts[state] += 1;
-        }
-        summary
-    }
-
-    fn state(delay: Option<u32>) -> usize {
-        match delay {
-            Some(1..) => 0,
-            Some(0) => 1,
-            None => 2,
-        }
-    }
-
-    pub(super) fn record(&mut self, id: &ProxyNodeId, delay: Option<u32>) {
-        if let Some(previous) = self.states.get_mut(id) {
-            let state = Self::state(delay);
-            self.counts[*previous] -= 1;
-            self.counts[state] += 1;
-            *previous = state;
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn counts(&self) -> [usize; 3] {
-        self.counts
-    }
-}
-
 pub(super) fn visible_group_indices(
     catalog: &ProxyCatalog,
     mode: &str,
@@ -100,7 +43,6 @@ pub(super) fn selected_group_index(
 #[derive(Default)]
 pub(super) struct GroupOrders {
     orders: RefCell<HashMap<String, CachedOrder>>,
-    current: RefCell<HashMap<String, (String, Option<ProxyNodeId>)>>,
 }
 
 struct CachedOrder {
@@ -110,52 +52,6 @@ struct CachedOrder {
 }
 
 impl GroupOrders {
-    pub(super) fn prepare_current(&self, catalog: &ProxyCatalog) {
-        let mut current = self.current.borrow_mut();
-        current.clear();
-        current.extend(catalog.groups().iter().map(|group| {
-            let node = group
-                .all
-                .iter()
-                .find(|id| id.controller_name() == group.now)
-                .cloned();
-            (
-                group.controller_name().to_owned(),
-                (group.now.clone(), node),
-            )
-        }));
-    }
-
-    pub(super) fn update_current(&self, catalog: &ProxyCatalog, name: &str) {
-        if let Some(group) = catalog
-            .groups()
-            .iter()
-            .find(|group| group.controller_name() == name)
-        {
-            let node = group
-                .all
-                .iter()
-                .find(|id| id.controller_name() == group.now)
-                .cloned();
-            self.current
-                .borrow_mut()
-                .insert(name.to_owned(), (group.now.clone(), node));
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn current_node(&self, group: &ProxyGroup) -> Option<ProxyNodeId> {
-        self.current
-            .borrow()
-            .get(group.controller_name())
-            .filter(|(name, _)| *name == group.now)
-            .and_then(|(_, node)| node.clone())
-    }
-
-    pub(super) fn release_current(&self) {
-        self.current.borrow_mut().clear();
-    }
-
     pub(super) fn clear(&self) {
         self.orders.borrow_mut().clear();
     }

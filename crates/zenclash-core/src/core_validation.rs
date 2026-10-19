@@ -362,9 +362,16 @@ fn combined_output(stdout: &[u8], stderr: &[u8]) -> String {
 
 fn contains_fatal_diagnostic(output: &str) -> bool {
     let output = output.to_ascii_lowercase();
-    output.contains("fatal")
-        || output.contains("level=fata")
-        || output.contains("parse config error")
+    output.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("fata[")
+            || line.starts_with("fatal[")
+            || line.starts_with("parse config error")
+            || line
+                .split_ascii_whitespace()
+                .take_while(|field| !field.starts_with("msg="))
+                .any(|field| matches!(field, "level=fatal" | "level=fata"))
+    })
 }
 
 fn non_empty_diagnostic(diagnostic: String) -> String {
@@ -378,6 +385,56 @@ fn non_empty_diagnostic(diagnostic: String) -> String {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fatal_detection_ignores_paths_and_messages_but_preserves_level_markers() {
+        for output in [
+            "configuration file /tmp/fatal-home/config.yaml test is successful",
+            "time=now level=info msg=\"provider fatal is ready\"",
+            "time=now level=info msg=\"provider returned level=fatal text\"",
+        ] {
+            assert!(!contains_fatal_diagnostic(output), "{output}");
+        }
+        for output in [
+            "time=now level=fatal msg=\"configuration rejected\"",
+            "level=fata msg=\"configuration rejected\"",
+            "FATA[0000] configuration rejected",
+            "Parse config error: invalid rules",
+        ] {
+            assert!(contains_fatal_diagnostic(output), "{output}");
+        }
+    }
+
+    #[test]
+    fn successful_validation_accepts_a_config_path_containing_fatal() {
+        let root = test_root("fatal-home");
+        let binary = validation_script(
+            &root,
+            "validator",
+            "printf 'configuration file %s test is successful\\n' \"$5\"",
+        );
+        let validator = CoreConfigValidator::new(CoreKind::Mihomo, binary, root.join("home"));
+        let result = validator.validate_payload("rules: [MATCH,DIRECT]\n");
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn a_zero_exit_code_cannot_hide_a_fatal_level() {
+        let root = test_root("fatal-rejection");
+        let binary = validation_script(
+            &root,
+            "validator",
+            "printf 'level=fatal msg=\"rejected\"\\n'; exit 0",
+        );
+        let validator = CoreConfigValidator::new(CoreKind::Mihomo, binary, root.join("home"));
+        let result = validator.validate_payload("rules: [MATCH,DIRECT]\n");
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(matches!(
+            result,
+            Err(CoreConfigValidationError::Rejected { .. })
+        ));
+    }
 
     #[test]
     fn invokes_the_target_core_with_test_home_and_config_arguments() {

@@ -34,14 +34,14 @@ impl ProfileSourceDocument {
 
     pub(crate) fn patched_payload(&self, patch: Value) -> MihomoResult<String> {
         let mut document = self.yaml.clone();
-        merge_yaml(&mut document, patch);
+        merge_controlled_yaml(&mut document, patch);
         serialize_profile(&document)
     }
 }
 
 pub(crate) fn merge_payload_patch(payload: &str, patch: Value) -> MihomoResult<String> {
     let mut document = parse_payload(payload)?;
-    merge_yaml(&mut document, patch);
+    merge_controlled_yaml(&mut document, patch);
     serialize_profile(&document)
 }
 
@@ -172,6 +172,27 @@ pub fn merge_yaml(target: &mut Value, patch: Value) {
             }
         }
         (target, patch) => *target = patch,
+    }
+}
+
+/// Controlled form mappings are complete values, unlike incremental YAML override layers.
+pub(crate) fn merge_controlled_yaml(target: &mut Value, patch: Value) {
+    let hosts = patch.get("hosts").cloned();
+    let policy = patch
+        .get("dns")
+        .and_then(|dns| dns.get("nameserver-policy"))
+        .cloned();
+    merge_yaml(target, patch);
+    if let (Some(value), Some(current)) = (hosts, target.get_mut("hosts")) {
+        *current = value;
+    }
+    if let (Some(value), Some(current)) = (
+        policy,
+        target
+            .get_mut("dns")
+            .and_then(|dns| dns.get_mut("nameserver-policy")),
+    ) {
+        *current = value;
     }
 }
 

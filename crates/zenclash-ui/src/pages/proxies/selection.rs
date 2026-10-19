@@ -105,16 +105,12 @@ impl ProxiesPage {
                 }
                 match result {
                     Ok((accepted, readback)) => {
-                        if this.switching.observe(
+                        this.switching.observe(
                             &request,
                             &accepted,
                             readback,
                             this.catalog.as_mut().map(Arc::make_mut),
-                        ) && let Some(catalog) = this.catalog.as_deref()
-                        {
-                            this.catalog_presentation
-                                .observe_current(catalog, &request.group_key);
-                        }
+                        );
                     }
                     Err(error) => {
                         if operations

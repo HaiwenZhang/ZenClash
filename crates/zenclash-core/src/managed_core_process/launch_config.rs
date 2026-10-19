@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use super::resources::{
-    bundled_core_binary, find_core_binary, install_bundled_core, install_bundled_core_with_lease,
-    install_bundled_mihomo_data, is_core_binary_candidate, managed_core_binary,
+    bundled_core_binary, core_path_filenames, install_bundled_core,
+    install_bundled_core_with_lease, install_bundled_mihomo_data, startup_binary,
 };
 use crate::{
     CoreCapabilities, CoreConfigValidationError, CoreConfigValidator, CoreKind, MihomoEndpoint,
@@ -236,7 +236,7 @@ fn resolve_core_binary(
 ) -> MihomoResult<PathBuf> {
     Ok({
         if let Some(binary) = preferred_binary {
-            if !is_core_binary_candidate(binary) {
+            if startup_binary([binary.to_path_buf()], lease)?.is_none() {
                 return Err(MihomoError::Process(format!(
                     "首选 {} 文件不可执行：{}",
                     kind.display_name(),
@@ -244,7 +244,15 @@ fn resolve_core_binary(
                 )));
             }
             binary.to_path_buf()
-        } else if let Some(managed) = managed_core_binary(home_dir, kind) {
+        } else if let Some(managed) = startup_binary(
+            [
+                home_dir
+                    .join("cores")
+                    .join(crate::application_paths::core_executable_filename(kind)),
+                home_dir.join(crate::application_paths::core_executable_filename(kind)),
+            ],
+            lease,
+        )? {
             managed
         } else if let Some(bundled) = bundled_core_binary(kind) {
             match lease {
@@ -252,16 +260,21 @@ fn resolve_core_binary(
                 None => install_bundled_core(kind, &bundled, home_dir)?,
             }
         } else {
-            [crate::WorkspaceResources::new(project_root).core_binary(kind)]
-                .into_iter()
-                .find(|candidate| is_core_binary_candidate(candidate))
-                .or_else(|| find_core_binary(kind))
-                .ok_or_else(|| {
-                    MihomoError::Process(format!(
-                        "找不到 {}；请在设置 → 运行内核中重新检测或选择文件",
-                        kind.display_name()
-                    ))
-                })?
+            let mut candidates =
+                vec![crate::WorkspaceResources::new(project_root).core_binary(kind)];
+            if let Some(paths) = std::env::var_os("PATH") {
+                let names = core_path_filenames(kind);
+                candidates.extend(
+                    std::env::split_paths(&paths)
+                        .flat_map(|directory| names.iter().map(move |name| directory.join(name))),
+                );
+            }
+            startup_binary(candidates, lease)?.ok_or_else(|| {
+                MihomoError::Process(format!(
+                    "找不到 {}；请在设置 → 运行内核中重新检测或选择文件",
+                    kind.display_name()
+                ))
+            })?
         }
     })
 }

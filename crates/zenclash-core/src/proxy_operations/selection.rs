@@ -11,7 +11,7 @@ pub enum ConnectionPolicy {
     /// Keep existing connections on their current chains.
     #[default]
     KeepExisting,
-    /// Close only connections whose current chain contains the previous member.
+    /// Close only connections whose current chain contains this group and its previous member.
     RebuildAffected,
     /// Close every existing connection after the selection.
     ///
@@ -312,10 +312,11 @@ impl ProxyOperations {
                     match client.connections_snapshot().await {
                         Ok(snapshot) => {
                             for connection in snapshot.connections.iter().filter(|connection| {
-                                connection
-                                    .chains
-                                    .iter()
-                                    .any(|member| member == &previous_member)
+                                connection.chains.iter().any(|member| member == group)
+                                    && connection
+                                        .chains
+                                        .iter()
+                                        .any(|member| member == &previous_member)
                             }) {
                                 if let Err(error) = client.close_connection(&connection.id).await {
                                     warnings.push(error.to_string());

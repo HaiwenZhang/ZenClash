@@ -109,6 +109,8 @@ impl ControlledConfigStore {
     }
 
     /// Prepares a recursive JSON patch without persisting it.
+    /// `hosts` and `dns.nameserver-policy` are complete form values: when supplied,
+    /// their mappings replace the saved and source mappings, including deleted keys.
     ///
     /// # Errors
     ///
@@ -235,7 +237,7 @@ impl ControlledConfigStore {
         let source = crate::profile::ProfileSourceDocument::read(profile)?;
         let previous_payload = source.patched_payload(current.clone())?;
         let mut next = current;
-        merge_yaml(&mut next, patch);
+        merge_controlled_yaml(&mut next, patch);
         require_mapping(&next)?;
         let next_patch = serde_yaml::to_string(&next)?.into_bytes();
         if next_patch.len() > MAX_PROFILE_BYTES {

@@ -142,7 +142,26 @@ impl MihomoReleaseService {
                 .await);
             }
         };
-        // commit accepts the new core before attempting backup cleanup. Keep that distinction.
+        let (transaction, acceptance) = tokio::task::spawn_blocking(move || {
+            let mut transaction = transaction;
+            let acceptance = transaction.record_commit();
+            (transaction, acceptance)
+        })
+        .await
+        .map_err(|error| CoreUpdateError::Runtime(error.to_string()))?;
+        if let Err(error) = acceptance {
+            return Err(rollback_rejected_core(
+                process,
+                transaction,
+                error,
+                &cancelled,
+                lease,
+                restore_running,
+                payload,
+            )
+            .await);
+        }
+        // Acceptance is durable before backup cleanup can fail.
         let cleanup_error = tokio::task::spawn_blocking(move || transaction.commit())
             .await
             .map_err(|error| {
@@ -248,13 +267,16 @@ async fn rollback_rejected_core(
     payload: Arc<str>,
 ) -> CoreUpdateError {
     if let Err(error) = stop_process(process.clone()).await {
-        let backup = transaction.preserve_for_manual_recovery();
+        let backup = transaction
+            .preserve_for_manual_recovery()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|error| format!("recovery record could not be preserved: {error}"));
         return CoreUpdateError::Runtime(zenclash_i18n::text_with(
             "core_update.details.candidate_stop_failed",
             &[
                 ("error", rejection.to_string()),
                 ("stop", error.to_string()),
-                ("backup", backup.display().to_string()),
+                ("backup", backup),
             ],
         ));
     }

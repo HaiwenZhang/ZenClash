@@ -8,6 +8,69 @@ use gpui_kit::{TestAppContext, VisualTestContext};
 use std::time::Duration;
 
 #[gpui_kit::test]
+fn network_health_uses_probe_results_and_offers_retry_after_total_failure(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (window, page) = open(cx, &fixture, Page::Network);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    for (ip_ok, latency_ok) in [(false, false), (true, false), (false, true), (true, true)] {
+        let step = DiagnosticStep {
+            kind: DiagnosticStepKind::NetworkMihomo,
+            route: DiagnosticRoute::Mihomo,
+            completed_at_ms: 1,
+            duration_ms: 1,
+            outcome: Ok(DiagnosticData::Network(NetworkProbeSnapshot {
+                public_ip: ip_ok.then(|| zenclash_core::PublicIpInfo {
+                    ip: "203.0.113.1".into(),
+                    ..Default::default()
+                }),
+                public_ip_error: (!ip_ok).then(|| "offline".into()),
+                latencies: vec![zenclash_core::NetworkLatencyResult {
+                    target: NetworkLatencyTarget::new("test", "https://example.com/").unwrap(),
+                    latency_ms: latency_ok.then_some(42),
+                    error: (!latency_ok).then(|| "timeout".into()),
+                }],
+                ..Default::default()
+            })),
+        };
+        let succeeded = ip_ok || latency_ok;
+        assert_eq!(network::model::diagnostic_step_succeeded(&step), succeeded);
+        cx.update_window(window, |_, window, cx| {
+            page.update(cx, |page, cx| {
+                page.invalidate_page_load();
+                page.network_diagnostics.query.set_design_validation(
+                    "example.com".into(),
+                    zenclash_core::DiagnosticReport {
+                        started_at_ms: 0,
+                        steps: vec![step],
+                    },
+                );
+                cx.notify();
+            });
+            window.clear_notifications(cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("diagnostic-status:NetworkMihomo").label(),
+                Some(
+                    zenclash_i18n::text(if succeeded {
+                        "network.latency.succeeded"
+                    } else {
+                        "network.latency.failed"
+                    })
+                    .as_str()
+                )
+            );
+            assert_eq!(
+                window.try_find("retry-diagnostic:NetworkMihomo").is_some(),
+                !succeeded
+            );
+        })
+        .unwrap();
+    }
+    cx.update_window(window, |_, window, _| window.remove_window())
+        .unwrap();
+}
+
+#[gpui_kit::test]
 fn network_target_form_cancel_preserves_input_and_restores_focus(cx: &mut TestAppContext) {
     let fixture = Fixture::new();
     let (window, page) = open(cx, &fixture, Page::Network);

@@ -1,5 +1,6 @@
 use super::super::test_support::{TrayController, open_app};
 use crate::components::tray::TrayCommand;
+use gpui_kit::test::TestWindowExt;
 use gpui_kit::{AppContext, TestAppContext};
 use std::time::Duration;
 
@@ -151,8 +152,12 @@ fn old_tray_feedback_cannot_replace_a_new_menu_query_in_the_same_configuration(
             assert_eq!(app.tray_command_error.as_deref(), Some("current query"));
         })
     });
-    cx.update_window(window, |_, window, _| window.remove_window())
-        .unwrap();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("tray-feedback").label(), Some("current query"));
+        window.remove_window();
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]
@@ -184,8 +189,16 @@ fn a_proxy_command_from_an_unobserved_native_menu_is_rejected(cx: &mut TestAppCo
             .iter()
             .any(|request| request.starts_with("PUT /proxies/"))
     );
-    cx.update_window(window, |_, window, _| window.remove_window())
-        .unwrap();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("tray-feedback").visible());
+        assert_eq!(
+            window.find("tray-feedback").label(),
+            app.read(cx).tray_command_error.as_deref()
+        );
+        window.remove_window();
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]

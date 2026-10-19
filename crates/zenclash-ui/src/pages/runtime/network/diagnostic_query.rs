@@ -93,7 +93,7 @@ impl NetworkDiagnosticQueryState {
         request
     }
 
-    #[cfg(all(test, target_os = "windows"))]
+    #[cfg(test)]
     pub(in crate::pages::runtime) fn set_design_validation(
         &mut self,
         dns_name: String,

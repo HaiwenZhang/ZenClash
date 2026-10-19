@@ -207,9 +207,7 @@ pub use traffic_history::{
     TrafficHistorySelection, TrafficHistorySnapshot, TrafficHistoryStore, TrafficOverview,
     TrafficTotals, TrafficTrendPoint,
 };
-pub use tun_permissions::{
-    TunPermissionError, TunPermissionManager, TunPermissionResult, TunPermissionStatus,
-};
+pub use tun_permissions::{TunPermissionError, TunPermissionResult, TunPermissionStatus};
 pub use tun_runtime::{TunRuntimeObservation, TunRuntimeObserver};
 pub use yaml_overrides::{
     YamlOverrideCatalog, YamlOverrideError, YamlOverrideRecord, YamlOverrideResult,

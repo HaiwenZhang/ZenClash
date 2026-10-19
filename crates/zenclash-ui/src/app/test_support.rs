@@ -13,6 +13,8 @@ pub(super) fn app_test_services(
         preferences: services.preferences.clone(),
         core_kind: services.core_kind,
         core_session: services.core_session,
+        traffic_capture: services.traffic_capture,
+        system_proxy_session: services.system_proxy_session,
         client: services.client,
         traffic_monitor: services.traffic_monitor,
         log_monitor: services.log_monitor,

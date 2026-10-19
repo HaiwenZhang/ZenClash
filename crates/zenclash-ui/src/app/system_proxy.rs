@@ -1,18 +1,84 @@
 use std::path::PathBuf;
 
 use super::{Context, ZenClashApp};
-use zenclash_core::{CaptureOutcome, CoreSession, TrafficCaptureError};
+use zenclash_core::{CaptureOutcome, CoreSession, TrafficCaptureError, TrafficCaptureSession};
+
+fn released_capture(result: Result<CaptureOutcome, TrafficCaptureError>) -> Result<(), String> {
+    match result {
+        Ok(CaptureOutcome::ReconcileNeeded { failure, .. }) => Err(failure),
+        Err(error) => Err(error.to_string()),
+        Ok(_) => Ok(()),
+    }
+}
+
+/// Releases owned capture, flushes history, then stops the core after native quit.
+/// The event loop has already committed to exiting, so every cleanup step is attempted.
+/// A missing capture is only valid before application bootstrap creates it.
+///
+/// # Errors
+/// Returns all capture, history or core cleanup failures; callers must suppress restart.
+pub async fn finish_native_shutdown(
+    core: &CoreSession,
+    capture: Option<&TrafficCaptureSession>,
+    history: Option<&super::TrafficHistorySession>,
+) -> Result<(), String> {
+    core.request_shutdown();
+    let mut failures = Vec::new();
+    if let Some(capture) = capture
+        && let Err(error) = released_capture(capture.release_owned().await)
+    {
+        failures.push(error);
+    }
+    if let Some(history) = history
+        && let Err(error) = history.shutdown().await
+    {
+        failures.push(error);
+    }
+    if let Err(error) = core.shutdown().await {
+        failures.push(error.to_string());
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
+pub(super) fn observe_native_quit(
+    core: &CoreSession,
+    capture: &TrafficCaptureSession,
+    history: Option<&std::sync::Arc<super::TrafficHistorySession>>,
+    runtime: &tokio::runtime::Handle,
+    cx: &mut gpui_kit::App,
+) {
+    let core = core.clone();
+    let capture = capture.clone();
+    let history = history.cloned();
+    let runtime = runtime.clone();
+    cx.on_app_quit(move |_| {
+        let core = core.clone();
+        let capture = capture.clone();
+        let history = history.clone();
+        let task = runtime.spawn(async move {
+            if let Err(error) =
+                finish_native_shutdown(&core, Some(&capture), history.as_deref()).await
+            {
+                tracing::warn!(%error, "native application quit cleanup failed");
+            }
+        });
+        async move {
+            let _ = task.await;
+        }
+    })
+    .detach();
+}
 
 async fn stop_core_after_capture_release(
     core_session: &CoreSession,
     release: Result<CaptureOutcome, TrafficCaptureError>,
     history: Option<&super::TrafficHistorySession>,
 ) -> Result<(), String> {
-    match release {
-        Ok(CaptureOutcome::ReconcileNeeded { failure, .. }) => return Err(failure),
-        Err(error) => return Err(error.to_string()),
-        Ok(_) => {}
-    }
+    released_capture(release)?;
     if let Some(history) = history {
         history.shutdown().await?;
     }
@@ -130,6 +196,119 @@ mod tests {
         ControlledConfigStore, CoreKind, CoreSessionError, MihomoClient, MihomoEndpoint,
         TrafficCaptureSession,
     };
+
+    #[tokio::test]
+    async fn native_shutdown_waits_for_capture_release_before_stopping_the_core() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let core = CoreSession::open(
+            CoreKind::Mihomo,
+            MihomoClient::new(MihomoEndpoint::new(
+                format!("http://{}", listener.local_addr().unwrap()),
+                "",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let capture = TrafficCaptureSession::new(
+            core.clone(),
+            ControlledConfigStore::new(std::env::temp_dir()),
+            None,
+            None,
+        );
+        let stopping = core.clone();
+        let generation = core.generation();
+        let shutdown =
+            tokio::spawn(
+                async move { finish_native_shutdown(&stopping, Some(&capture), None).await },
+            );
+        let (mut stream, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+        let request = zenclash_core::test_support::read_controller_request(&mut stream)
+            .await
+            .unwrap();
+        assert!(request.into_parts().0.starts_with("GET /configs "));
+        assert!(!shutdown.is_finished());
+        assert_eq!(
+            core.generation(),
+            generation,
+            "the core must wait for capture readback"
+        );
+        let body = r#"{"tun":{"enable":false}}"#;
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), shutdown)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(core.generation() > generation);
+    }
+
+    #[gpui_kit::test]
+    fn native_quit_observer_uses_the_capture_owner_without_a_quit_action(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use tokio::io::AsyncWriteExt;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let listener = runtime
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let core = CoreSession::open(
+            CoreKind::Mihomo,
+            MihomoClient::new(MihomoEndpoint::new(
+                format!("http://{}", listener.local_addr().unwrap()),
+                "",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let capture = TrafficCaptureSession::new(
+            core.clone(),
+            ControlledConfigStore::new(std::env::temp_dir()),
+            None,
+            None,
+        );
+        let server = runtime.spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = zenclash_core::test_support::read_controller_request(&mut stream)
+                .await
+                .unwrap();
+            assert!(request.into_parts().0.starts_with("GET /configs "));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await
+                .unwrap();
+        });
+        cx.update(|cx| {
+            observe_native_quit(&core, &capture, None, runtime.handle(), cx);
+            cx.shutdown();
+        });
+        runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(2), server)
+                .await
+                .unwrap()
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while core.generation() == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+    }
 
     #[tokio::test]
     async fn failed_capture_release_prevents_core_shutdown_and_success_allows_it() {

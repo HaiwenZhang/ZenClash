@@ -233,8 +233,9 @@ impl ConnectionsView {
     }
 
     pub(super) fn resume_live_display(&mut self, cx: &mut Context<Self>) {
-        self.paused_snapshot = None;
-        cx.notify();
+        if self.paused_snapshot.take().is_some() {
+            self.update_projection(cx);
+        }
     }
 
     fn update_projection(&mut self, cx: &mut Context<Self>) {
@@ -259,6 +260,8 @@ impl ConnectionsView {
                 std::time::Instant::now(),
             );
         }
+        self.history
+            .observe(runtime_context.configuration_generation, &data);
         if self.show_closed {
             data = self.timeline.closed();
         }
@@ -294,10 +297,6 @@ impl ConnectionsView {
                 this.projecting = false;
                 match result {
                     Ok(Some(projection)) => {
-                        this.history.observe(
-                            runtime_context.configuration_generation,
-                            &projection.snapshot,
-                        );
                         this.projection = Some(projection);
                     }
                     Ok(None) => {}
@@ -338,9 +337,13 @@ impl ConnectionsView {
                 this.paused_snapshot = if this.paused_snapshot.is_some() {
                     None
                 } else {
-                    this.projection
-                        .as_ref()
-                        .map(|projection| projection.snapshot.clone())
+                    if this.show_closed {
+                        this.live_snapshot.clone()
+                    } else {
+                        this.projection
+                            .as_ref()
+                            .map(|projection| projection.snapshot.clone())
+                    }
                 };
                 this.worker.cancel();
                 this.projecting = false;

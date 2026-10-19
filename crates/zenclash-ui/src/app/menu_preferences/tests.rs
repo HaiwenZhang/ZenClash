@@ -37,6 +37,94 @@ fn finish_writes(owner: &Entity<ZenClashApp>, cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn startup_adoption_preserves_queued_preferences_and_failed_save_retries(cx: &mut TestAppContext) {
+    for fail_save in [false, true] {
+        let fixture = crate::pages::runtime::test_support::RuntimePageFixture::new();
+        let mut services = app_test_services(&fixture);
+        let parent = services
+            .profile_path
+            .as_ref()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("startup-preferences");
+        if fail_save {
+            std::fs::write(&parent, "blocked").unwrap();
+        }
+        let store = AppPreferencesStore::new(parent.join("preferences.json"));
+        services.preferences_store = Some(store.clone());
+        let (owner, window) = open_app(&fixture, Some(store.clone()), cx);
+        let (release, gate) = tokio::sync::oneshot::channel();
+        cx.update_window(window.into(), |_, window, cx| {
+            owner.update(cx, |app, cx| {
+                app.preferences_save_task = Some(app.runtime.spawn(async move {
+                    gate.await.unwrap();
+                }));
+                app.on_set_dark_theme(&SetDarkTheme, window, cx);
+                app.update_menu_preference(MenuPreferenceChange::TrayVisibility(false), cx);
+                app.adopt_startup(
+                    crate::app::BootstrappedApplication {
+                        services,
+                        initialization: None,
+                    },
+                    None,
+                    window,
+                    cx,
+                );
+                assert!(app.preferences_save_task.is_some());
+                assert_eq!(app.preferences.appearance, AppearancePreference::Dark);
+                assert!(!app.preferences.traffic_tray_visible);
+                assert_eq!(
+                    app.runtime_page.read(cx).presented_preferences().appearance,
+                    AppearancePreference::Dark
+                );
+            });
+        })
+        .unwrap();
+        release.send(()).unwrap();
+        finish_writes(&owner, cx);
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                owner
+                    .read(cx)
+                    .menu_preference_saves
+                    .failure_message()
+                    .is_some(),
+                fail_save
+            );
+            if fail_save {
+                assert!(window.find("retry-menu-preferences").visible());
+                std::fs::remove_file(&parent).unwrap();
+                window.click("retry-menu-preferences", cx);
+            }
+        })
+        .unwrap();
+        if fail_save {
+            finish_writes(&owner, cx);
+        }
+        let saved = store.load().unwrap();
+        assert_eq!(saved.appearance, AppearancePreference::Dark);
+        assert!(!saved.traffic_tray_visible);
+        cx.update_window(window.into(), |_, window, cx| {
+            assert!(
+                owner
+                    .read(cx)
+                    .menu_preference_saves
+                    .failure_message()
+                    .is_none()
+            );
+            assert_eq!(
+                owner.read(cx).preferences.appearance,
+                AppearancePreference::Dark
+            );
+            window.remove_window();
+        })
+        .unwrap();
+    }
+}
+
+#[gpui_kit::test]
 fn failed_menu_save_is_visible_and_retry_commits_only_the_selected_field(cx: &mut TestAppContext) {
     let fixture = crate::pages::runtime::test_support::RuntimePageFixture::new();
     let services = app_test_services(&fixture);

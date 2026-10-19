@@ -10,7 +10,10 @@ use gpui_kit::component::{
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
 };
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{ClickEvent, Pixels, RenderOnce, TestSupportExt, WindowControlArea, px};
+use gpui_kit::{
+    ClickEvent, Pixels, RenderOnce, StatefulInteractiveElement, TestSupportExt, WindowControlArea,
+    px,
+};
 
 const MAIN_WINDOW_TITLE_BAR_SELECTOR: &str = "main-window-title-bar";
 const MAIN_WINDOW_DRAG_SELECTOR: &str = "main-window-drag-area";
@@ -409,6 +412,25 @@ impl Render for ZenClashApp {
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.retry_menu_preferences(cx)
                                                     })),
+                                            ),
+                                    )
+                                },
+                            )
+                            .when_some(
+                                self.tray_command_error
+                                    .clone()
+                                    .or_else(|| self.tray_error.clone()),
+                                |view, message| {
+                                    view.child(
+                                        div()
+                                            .id("tray-feedback")
+                                            .test_support()
+                                            .aria_label(message.clone())
+                                            .flex_shrink_0()
+                                            .px_4()
+                                            .py_2()
+                                            .child(
+                                                Alert::error("tray-error-alert", message).small(),
                                             ),
                                     )
                                 },

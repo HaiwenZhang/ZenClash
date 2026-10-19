@@ -4,6 +4,49 @@ use gpui_kit::test::TestWindowExt;
 use gpui_kit::{AppContext, TestAppContext, size};
 
 #[gpui_kit::test]
+fn selected_group_measurement_uses_its_controller_key_even_when_another_key_matches_its_label(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    cx.foreground_executor().clone().block_test(async {
+        use tokio::io::AsyncWriteExt;
+        let catalog = ProxyCatalog::from_group_nodes(vec![
+            (ProxyGroup::new("wire/key").with_display_name("Visible label"), vec![ProxyNode { name: "intended".into(), ..Default::default() }]),
+            (ProxyGroup::new("Visible label").with_display_name("Other label"), vec![ProxyNode { name: "wrong".into(), ..Default::default() }]),
+        ], 2);
+        let (window, page, runtime) = open_catalog(cx, catalog);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = zenclash_core::MihomoEndpoint::new(format!("http://{}", listener.local_addr().unwrap()), "");
+        let server = runtime.spawn(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let (headers, _) = zenclash_core::test_support::read_controller_request(&mut stream).await.unwrap().into_parts();
+            assert!(headers.starts_with("GET /proxies/intended/delay?"), "{headers}");
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\n{\"delay\":42}").await.unwrap();
+        });
+        cx.update_window(window, |_, window, cx| {
+            page.update(cx, |page, _| { page.client = MihomoClient::new(endpoint).unwrap(); });
+            window.render_frame(cx);
+            window.click((gpui_kit::ElementId::from("test-group"), "wire/key"), cx);
+        }).unwrap();
+        for _ in 0..200 {
+            if cx.update(|cx| page.read(cx).group_progress.is_empty()) { break; }
+            runtime.spawn(async { tokio::time::sleep(std::time::Duration::from_millis(5)).await; }).await.unwrap();
+        }
+        runtime.spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(2), server).await.unwrap().unwrap();
+        }).await.unwrap();
+        cx.update_window(window, |_, window, cx| {
+            let catalog = page.read(cx).catalog.as_ref().unwrap();
+            assert_eq!(catalog.node(&ProxyNodeId::new("intended".into(), None)).unwrap().latest_delay(), Some(42));
+            assert_eq!(catalog.node(&ProxyNodeId::new("wrong".into(), None)).unwrap().latest_delay(), None);
+            window.remove_window();
+        }).unwrap();
+    });
+}
+
+#[gpui_kit::test]
 fn acknowledged_request_keeps_actual_member_until_delayed_confirmation(cx: &mut TestAppContext) {
     cx.foreground_executor().clone().block_test(async {
             use tokio::io::{AsyncWriteExt};

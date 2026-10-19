@@ -7,6 +7,72 @@ use zenclash_core::{
 };
 
 #[tokio::test]
+async fn profile_activation_waits_for_override_admission_before_reading_the_chain() {
+    let root = std::env::temp_dir().join(format!(
+        "zenclash-override-admission-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let profiles = ProfileStore::new(root.join("profiles")).unwrap();
+    let source = root.join("source.yaml");
+    std::fs::write(&source, "mode: rule\nrules: ['MATCH,DIRECT']\n").unwrap();
+    let record = profiles.import_local(&source).unwrap();
+    let path = profiles.activate(&record.id).unwrap();
+    let overrides = YamlOverrideStore::new(root.join("overrides")).unwrap();
+    std::fs::write(&source, "mode: direct\n").unwrap();
+    let overlay = overrides.import_paths([source]).unwrap().remove(0);
+    overrides.set_enabled(&overlay.id, false).unwrap();
+    let controlled = ControlledConfigStore::new(root.join("controlled"));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = MihomoClient::new(zenclash_core::MihomoEndpoint::new(
+        format!("http://{}", listener.local_addr().unwrap()),
+        "",
+    ))
+    .unwrap();
+    let session =
+        CoreSession::open_with_config(CoreKind::Mihomo, client, Some(path), vec![]).unwrap();
+    let commands = ApplicationCommands::new(session.clone(), Some(overrides.clone()));
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let (headers, body) = zenclash_core::test_support::read_controller_request(&mut stream)
+            .await
+            .unwrap()
+            .into_parts();
+        assert!(headers.starts_with("PUT /configs"));
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let payload: serde_yaml::Value =
+            serde_yaml::from_str(body["payload"].as_str().unwrap()).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        payload
+    });
+    let admission = session.begin_data_application().await.unwrap();
+    let mut activation =
+        tokio::spawn(async move { commands.activate(profiles, controlled, record.id).await });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut activation)
+            .await
+            .is_err(),
+        "profile application crossed an admitted override transaction"
+    );
+    overrides.set_enabled(&overlay.id, true).unwrap();
+    drop(admission);
+    tokio::time::timeout(std::time::Duration::from_secs(3), activation)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(server.await.unwrap()["mode"], "direct");
+    assert!(overrides.load().unwrap().items[0].enabled);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn service_config_reapply_without_a_committed_profile_preserves_the_noop_result() {
     let (commands, store) = maintenance_fixture();
     assert!(

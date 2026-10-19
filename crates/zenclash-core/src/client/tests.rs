@@ -9,6 +9,97 @@ use super::{api::encode_path_segment, *};
 use crate::DnsRecordType;
 
 #[tokio::test]
+async fn controller_proxy_environment_fixture() {
+    let Ok(controller) = std::env::var("ZENCLASH_CONTROLLER_PROXY_FIXTURE") else {
+        return;
+    };
+    let client =
+        MihomoClient::new(MihomoEndpoint::new(controller, "fixture-controller-secret")).unwrap();
+    assert_eq!(client.version().await.unwrap().version, "fixture");
+}
+
+#[test]
+fn controller_credentials_bypass_environment_proxies() {
+    let controller = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let proxy = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let controller_address = controller.local_addr().unwrap();
+    let proxy_address = proxy.local_addr().unwrap();
+    controller.set_nonblocking(true).unwrap();
+    proxy.set_nonblocking(true).unwrap();
+    let server = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            for (listener, proxied) in [(&proxy, true), (&controller, false)] {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .unwrap();
+                        let request =
+                            crate::test_support::read_controller_request_blocking(&mut stream)
+                                .unwrap();
+                        let body = r#"{"version":"fixture"}"#;
+                        write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                        return (proxied, request.into_bytes());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(error) => panic!("fixture accept failed: {error}"),
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "controller fixture received no request"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    });
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "client::tests::controller_proxy_environment_fixture",
+            "--nocapture",
+        ])
+        .env(
+            "ZENCLASH_CONTROLLER_PROXY_FIXTURE",
+            format!("http://{controller_address}"),
+        )
+        .env("NO_PROXY", "")
+        .env("no_proxy", "")
+        .env_remove("REQUEST_METHOD");
+    for name in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ] {
+        command.env(name, format!("http://{proxy_address}"));
+    }
+    let output = crate::platform_command::output_from_command(
+        command,
+        "controller proxy fixture",
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    let (proxied, request) = server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!proxied, "controller request reached the environment proxy");
+    let request = String::from_utf8(request).unwrap();
+    assert!(request.starts_with("GET /version "), "{request}");
+    assert!(
+        request.contains("Bearer fixture-controller-secret"),
+        "controller did not receive its credentials"
+    );
+}
+
+#[tokio::test]
 async fn response_decode_error_identifies_the_endpoint_and_nested_field() {
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
     let address = listener.local_addr().unwrap();

@@ -40,6 +40,7 @@ use supervision::supervisor_observation;
 mod binding;
 mod capture_recovery;
 use capture_recovery::CoreRecoveryCapture;
+mod connections;
 mod observation;
 mod observed_mutation;
 mod resources;

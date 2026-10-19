@@ -17,7 +17,7 @@ use crate::{
         SessionListenerFallback, apply_session_fallbacks, resolve_conflicts,
         validate_listener_change,
     },
-    profile::{merge_payload_overrides, merge_profile_patch, merge_yaml},
+    profile::{merge_controlled_yaml, merge_payload_overrides, merge_profile_patch, merge_yaml},
     profiles::{MAX_PROFILE_BYTES, atomic_write, read_profile_bytes},
 };
 

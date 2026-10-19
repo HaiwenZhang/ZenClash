@@ -205,23 +205,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let shutdown_result = runtime.block_on(async {
         let _ = finished_receiver.await;
         let completed = cleanup.lock().take();
-        let mut failures = Vec::new();
-        if let Some(history) = completed.as_ref().and_then(|owner| owner.history.as_ref())
-            && let Err(error) = history.shutdown().await
-        {
-            failures.push(error);
-        }
-        // The native event loop has already exited: always stop the owned child,
-        // even when history persistence failed. Any failure prevents restart.
-        if let Some(owner) = completed
-            && let Err(error) = owner.core.shutdown().await
-        {
-            failures.push(error.to_string());
-        }
-        if failures.is_empty() {
-            Ok(())
+        if let Some(owner) = completed {
+            app::finish_native_shutdown(
+                &owner.core,
+                owner.capture.as_ref(),
+                owner.history.as_deref(),
+            )
+            .await
         } else {
-            Err(failures.join("; "))
+            Ok(())
         }
     });
     shutdown_result.map_err(std::io::Error::other)?;
@@ -242,6 +234,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 struct StartupOwner {
     core: CoreSession,
+    capture: Option<zenclash_core::TrafficCaptureSession>,
     history: Option<Arc<app::TrafficHistorySession>>,
 }
 type StartupCleanup = Arc<parking_lot::Mutex<Option<StartupOwner>>>;
@@ -270,7 +263,14 @@ fn prepare_pending_services(
         preferences_store: inputs.preferences_store.clone(),
         preferences: inputs.preferences.clone(),
         core_kind: inputs.requested_core,
-        core_session: pending.session,
+        core_session: pending.session.clone(),
+        traffic_capture: zenclash_core::TrafficCaptureSession::new(
+            pending.session,
+            inputs.controlled_config_store.clone(),
+            None,
+            None,
+        ),
+        system_proxy_session: None,
         traffic_monitor: TrafficMonitor::start_with_client(runtime, pending.client.clone()),
         log_monitor: LogMonitor::start_with_client(
             runtime,
@@ -546,9 +546,21 @@ fn prepare_application(
     }
     *cleanup.lock() = Some(StartupOwner {
         core: core_session.clone(),
+        capture: None,
         history: None,
     });
     let controlled_config_store = controlled_config_store.with_runtime_tun_policy(&client);
+    let proxy_controller = zenclash_core::SystemProxyController::default();
+    core_session.attach_pac_server(proxy_controller.pac_server());
+    let system_proxy_session = preferences_store
+        .clone()
+        .map(|store| zenclash_core::SystemProxySession::new(store, proxy_controller));
+    let traffic_capture = zenclash_core::TrafficCaptureSession::new(
+        core_session.clone(),
+        controlled_config_store.clone(),
+        system_proxy_session.clone(),
+        profile_path.clone(),
+    );
     remember_working_core(
         preferences_store.as_ref(),
         &mut preferences,
@@ -574,6 +586,7 @@ fn prepare_application(
     });
     *cleanup.lock() = Some(StartupOwner {
         core: core_session.clone(),
+        capture: Some(traffic_capture.clone()),
         history: traffic_history_session.clone(),
     });
     Ok(app::BootstrappedApplication {
@@ -586,6 +599,8 @@ fn prepare_application(
             preferences,
             core_kind,
             core_session,
+            traffic_capture,
+            system_proxy_session,
             client,
             traffic_monitor: traffic,
             log_monitor: logs,

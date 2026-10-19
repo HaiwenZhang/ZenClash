@@ -68,7 +68,7 @@
 | 配置及日常维护 | [core_session.rs](../../crates/zenclash-core/src/core_session.rs) 从 pinned binding 取得当前 Local 后，进入 [controlled_config.rs](../../crates/zenclash-core/src/controlled_config.rs) 的应用、重启和回滚；Stop/Restart 前后读取同代进程事实。公开本地更新 API 尚在，仓库内未找到绕 Session 的生产调用者 |
 | 内核更新 | `CoreSession::install_release` 调用 [core_update/workflow.rs](../../crates/zenclash-core/src/core_update/workflow.rs) 的停止、用户文件替换、重启和回滚；此入口不是服务保护副本升级实现 |
 | 首次服务交接 | [service_tun.rs](../../crates/zenclash-core/src/core_session/service_tun.rs) 在同一 Capture/Session 准入中停止 Local A，发布 Service；失败恢复仍使用被冻结的 A 描述与实际进程 |
-| 权限与授权后重启 | [permissions.rs](../../crates/zenclash-core/src/core_session/permissions.rs) 动态区分当前 Local 与 Service。Local 的旧 `request_grant` 及授权后 restart 仍在；首页统一服务接线见 §5.1，不能据 Session 准入就认定所有配置生命周期均已使用 ServiceManager |
+| 权限与授权后重启 | [permissions.rs](../../crates/zenclash-core/src/core_session/permissions.rs) 动态区分当前 Local 与 Service。Local 仅读取现有权限，Service 核对认证 owner；2026-10-19 已删除无生产调用的旧 setuid manager/脚本。首页统一服务接线见 §5.1，完整配置生命周期仍按各自验收证据判断 |
 | 快照、页面与恢复 | [operational_status.rs](../../crates/zenclash-core/src/operational_status.rs) 后台转换当前 Session 进程事实；页面使用 `runtime_descriptor` 的内存元数据或当前 owner 的后台日志；[automatic.rs](../../crates/zenclash-core/src/core_session/automatic.rs) 的监督及源变化恢复继续使用同一 Session |
 | 退出 | `CoreSession::shutdown`、[app/system_proxy.rs](../../crates/zenclash-ui/src/app/system_proxy.rs) 显式退出、[app/bootstrap.rs](../../crates/zenclash-ui/src/app/bootstrap.rs) 原生 quit observer 和 main event-loop 返回后的收尾共同覆盖正常出口；[managed_core_process.rs](../../crates/zenclash-core/src/managed_core_process.rs) 的 Drop 只作底层兜底 |
 
@@ -156,7 +156,7 @@ UI 使用 `CoreSession::runtime_descriptor` 读取已准备的类型、执行方
 
 ### 5.1 第一次开启的接入点
 
-[traffic_capture.rs](../../crates/zenclash-core/src/traffic_capture.rs) 的 `ProductionCaptureBackend::ensure_tun_permission` 当前调用 `TunPermissionManager::request_grant`，Unix 新授权后重启本地内核；`set_tun` 通过 `CoreSession::apply` 持久化 TUN/DNS patch。这是服务工作流替换入口，不能保留隐式 setuid fallback。
+2026-10-19 核对：[ProductionCaptureBackend::ensure_tun_permission](../../crates/zenclash-core/src/traffic_capture/backend.rs) 调用 `CoreSession::ensure_tun_permission`，仅核对当前执行权限或认证 Service owner，不再执行 setuid 授权或授权后本地重启。旧 `TunPermissionManager` 及平台授权脚本已按 [core 审计修复](zenclash-core-audit-2026-10-19.md) 删除；`set_tun` 继续经现有配置应用准入处理，不能重新引入隐式 setuid fallback。
 
 当前应用级 [ServiceManager](../../crates/zenclash-core/src/service_manager.rs) 记录待开启意图、binding/generation、操作阶段和未知结果。页面/托盘共用 `enable_tun`：后台检查服务状态，缺失时安装、停止时启动、健康时连接；授权后重新核对原意图，再进入 `TrafficCaptureSession::enable_service_tun` 的单一准入事务。首次服务使用 Stage→Validate→Start→新鲜状态回读→保存→Commit；已有服务内核仍沿用相应配置事务。对话框和收据分类修复已通过相关行为验证及第二轮独立审查，随后 Windows 完整 UI 库 294 项和 binary 11 项通过；UI CI 附加 lint 和真实设备/路由验收尚未完成。
 
@@ -266,7 +266,7 @@ TUN 页已通过标准 Kit 按钮和确认框调用上述业务入口；已有�
 
 直接重启待选择的是产品语义，已提出用户选择，尚未接线。推荐保留当前生成配置语义：在后台及现有会话准入中一次有界读取并冻结准确字节；TUN-off 继续普通重启，TUN-on 经 Manager 授权与 capture/Core 交接。冻结候选不得重新叠加设置或补开 DNS；旧资源和 TUN-off 恢复沿已批准 §5.5 持有、物化和失败恢复路径，原 home 保持不变。授权等待不持 Data lease、capture/transition/store 锁；授权后必须重新核对 binding/generation、候选源与受控状态，陈旧结果在 Stage/Stop 前拒绝，退出继续同步清理唯一 owner。另一选项是明确改为重建 profile/overrides/settings 后再重启；该行为不能从既有配置操作自动授权的批准中自行推断。
 
-判断必须基于最终 effective 配置：源 profile → controlled patch → 有序 YAML overrides。源 `tun.enable=true` 可以被后层覆盖为 false，源 false 也可以被覆盖为 true；不能只检查订阅源。Mihomo normalizer 不关闭 TUN，`-t` 只验证配置，不能代替运行时服务准入。这些配置链未调用旧 `request_grant`；遗留公开 `TrafficCaptureSession::apply(Tun)` 的授权路径是另一项待迁移边界。
+判断必须基于最终 effective 配置：源 profile → controlled patch → 有序 YAML overrides。源 `tun.enable=true` 可以被后层覆盖为 false，源 false 也可以被覆盖为 true；不能只检查订阅源。Mihomo normalizer 不关闭 TUN，`-t` 只验证配置，不能代替运行时服务准入。这些配置链未调用旧 `request_grant`。2026-10-19 已核对并移除旧 manager/授权脚本；公开捕获入口的权限检查也通过 `CoreSession::ensure_tun_permission`，不再保留该 setuid 授权路径。
 
 建议复用一个 core 私有政策函数，只对实际 Local owner + Mihomo 生效：完整 payload 在验证、缓存和发送前检查最终 YAML；PATCH 在发送前检查启用请求；ControlledConfig 重启在最终合并后、写缓存前检查，Process 重启再检查真实启动缓存。现有单点不能同时覆盖 HTTP 与进程启动，不能仅按 endpoint 或 core kind 推断所有权。Service 保持受控 revision 事务，External 不获得本地控制能力。
 

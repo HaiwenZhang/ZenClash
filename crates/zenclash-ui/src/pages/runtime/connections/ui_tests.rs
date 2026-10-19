@@ -7,6 +7,130 @@ use gpui_kit::component::WindowExt;
 use gpui_kit::test::TestWindowExt;
 
 #[gpui_kit::test]
+fn closed_list_and_pause_preserve_global_metrics_and_history(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (window, page) = open(cx, &fixture, Page::Connections);
+    fixture.wait_for_initial_reads(cx, &page);
+    let snapshot = |ids: &[&str], bytes| {
+        PageSnapshotData::Connections(Arc::new(ConnectionsSnapshot {
+            connections: ids
+                .iter()
+                .map(|id| zenclash_core::Connection {
+                    id: (*id).into(),
+                    ..Default::default()
+                })
+                .collect(),
+            upload_total: bytes,
+            download_total: bytes * 2,
+            memory: bytes * 3,
+        }))
+    };
+    for (ids, bytes) in [(vec!["gone", "live"], 10), (vec!["live"], 20)] {
+        cx.update(|cx| {
+            page.update(cx, |page, cx| {
+                page.invalidate_page_load();
+                page.replace_page_data(
+                    page.page_task_token_for(Page::Connections),
+                    snapshot(&ids, bytes),
+                    cx,
+                );
+            })
+        });
+        fixture.settle_connections(cx, &page);
+    }
+    cx.update_window(window, |_, window, cx| {
+        window.clear_notifications(cx);
+        window.render_frame(cx);
+        window.click("connections-closed", cx);
+    })
+    .unwrap();
+    fixture.settle_connections(cx, &page);
+    cx.update_window(window, |_, window, cx| {
+        let view = page.read(cx).connections.read(cx);
+        assert_eq!(view.history.samples.len(), 2);
+        assert_eq!(*view.history.samples.back().unwrap(), [1, 20, 40, 60]);
+        assert_eq!(
+            view.projection.as_ref().unwrap().snapshot.connections[0].id,
+            "gone"
+        );
+        window.render_frame(cx);
+        window.click("pause-connections-display", cx);
+        page.update(cx, |page, cx| {
+            page.replace_page_data(
+                page.page_task_token_for(Page::Connections),
+                snapshot(&["live"], 100),
+                cx,
+            );
+        });
+    })
+    .unwrap();
+    fixture.settle_connections(cx, &page);
+    cx.update_window(window, |_, window, cx| {
+        let view = page.read(cx).connections.read(cx);
+        assert_eq!(view.paused_snapshot.as_ref().unwrap().upload_total, 20);
+        assert_eq!(*view.history.samples.back().unwrap(), [1, 20, 40, 60]);
+        window.render_frame(cx);
+        window.click("pause-connections-display", cx);
+    })
+    .unwrap();
+    fixture.settle_connections(cx, &page);
+    cx.update_window(window, |_, window, cx| {
+        let view = page.read(cx).connections.read(cx);
+        assert_eq!(view.history.samples.len(), 3);
+        assert_eq!(*view.history.samples.back().unwrap(), [1, 100, 200, 300]);
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn previous_page_uses_the_visible_page_after_connections_shrink(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let (window, page) = open(cx, &fixture, Page::Connections);
+    fixture.wait_for_initial_reads(cx, &page);
+    for count in [501, 51] {
+        cx.update(|cx| {
+            page.update(cx, |page, cx| {
+                page.invalidate_page_load();
+                page.replace_page_data(
+                    page.page_task_token_for(Page::Connections),
+                    PageSnapshotData::Connections(Arc::new(ConnectionsSnapshot {
+                        connections: (0..count)
+                            .map(|index| zenclash_core::Connection {
+                                id: format!("row-{index}"),
+                                ..Default::default()
+                            })
+                            .collect(),
+                        ..Default::default()
+                    })),
+                    cx,
+                );
+                if count == 501 {
+                    page.connections
+                        .update(cx, |view, cx| view.set_connections_page(10, cx));
+                }
+            })
+        });
+        fixture.settle_connections(cx, &page);
+    }
+    cx.update_window(window, |_, window, cx| {
+        window.clear_notifications(cx);
+        window.render_frame(cx);
+        let first_row = gpui_kit::ElementId::from((
+            gpui_kit::ElementId::from("connection-details"),
+            "row-0".to_owned(),
+        ));
+        assert!(window.try_find(first_row.clone()).is_none());
+        window.click("previous-connections-page", cx);
+        window.render_frame(cx);
+        assert_eq!(page.read(cx).connections.read(cx).page_index, 0);
+        assert!(window.find(first_row).visible());
+        window.remove_window();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn busy_hidden_connections_cancel_presentation_and_resume_retained_data(cx: &mut TestAppContext) {
     let fixture = Fixture::new();
     let (window, page) = open(cx, &fixture, Page::Connections);

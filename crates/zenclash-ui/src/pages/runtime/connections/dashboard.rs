@@ -53,6 +53,11 @@ impl ConnectionsView {
             .into_any_element();
         };
         let data = &projection.snapshot;
+        let metrics = self
+            .paused_snapshot
+            .as_ref()
+            .or(self.live_snapshot.as_ref())
+            .unwrap_or(data);
         let page = list_page(
             projection.order.len(),
             self.page_index,
@@ -514,7 +519,7 @@ impl ConnectionsView {
                                 .label(zenclash_i18n::text("common.actions.previous_page"))
                                 .disabled(page.index == 0)
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.set_connections_page(this.page_index.saturating_sub(1), cx)
+                                    this.set_connections_page(page.index.saturating_sub(1), cx)
                                 })),
                         )
                         .child(
@@ -525,7 +530,7 @@ impl ConnectionsView {
                                 .label(zenclash_i18n::text("common.actions.next_page"))
                                 .disabled(page.index + 1 >= page.count)
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.set_connections_page(this.page_index + 1, cx)
+                                    this.set_connections_page(page.index + 1, cx)
                                 })),
                         ),
                 ),
@@ -553,7 +558,7 @@ impl ConnectionsView {
                             .child(connection_metric(
                                 IconName::Network,
                                 zenclash_i18n::text("connections.metrics.active"),
-                                data.connections.len().to_string(),
+                                metrics.connections.len().to_string(),
                                 self.history.points(0),
                                 theme.chart_1,
                                 0,
@@ -562,7 +567,7 @@ impl ConnectionsView {
                             .child(connection_metric(
                                 IconName::ArrowUp,
                                 zenclash_i18n::text("connections.metrics.upload"),
-                                format_bytes(data.upload_total),
+                                format_bytes(metrics.upload_total),
                                 self.history.points(1),
                                 theme.chart_2,
                                 1,
@@ -571,7 +576,7 @@ impl ConnectionsView {
                             .child(connection_metric(
                                 IconName::ArrowDown,
                                 zenclash_i18n::text("connections.metrics.download"),
-                                format_bytes(data.download_total),
+                                format_bytes(metrics.download_total),
                                 self.history.points(2),
                                 theme.chart_1,
                                 2,
@@ -580,7 +585,7 @@ impl ConnectionsView {
                             .child(connection_metric(
                                 IconName::Cpu,
                                 zenclash_i18n::text("connections.metrics.memory"),
-                                format_bytes(data.memory),
+                                format_bytes(metrics.memory),
                                 self.history.points(3),
                                 theme.chart_1,
                                 3,

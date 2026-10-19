@@ -14,6 +14,9 @@ pub mod platform;
 pub mod probe;
 pub mod runstate;
 
+#[cfg(windows)]
+pub(crate) use owner_identity::protect_current_user_file;
+
 /// Isolated native controller fixture; never enable `service-ipc-tests` in a release build.
 #[cfg(feature = "service-ipc-tests")]
 pub mod test_core;

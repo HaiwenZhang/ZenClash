@@ -1,14 +1,11 @@
 use std::{collections::HashMap, rc::Rc, sync::Arc};
 
-use super::{
-    DelayTestFailure, GroupOrders, NodeSummary, ProxyCatalog, ProxyGroup, ProxyNodeId, SearchIndex,
-};
+use super::{DelayTestFailure, GroupOrders, ProxyCatalog, ProxyGroup, ProxyNodeId, SearchIndex};
 
 /// Derived facts for the page's current catalog, replaced and released with that catalog.
 /// The page retains async admission and runtime identity; this state owns cache coherence.
 #[derive(Default)]
 pub(in crate::pages::proxies) struct ProxyCatalogPresentation {
-    summary: NodeSummary,
     orders: GroupOrders,
     search: Option<Arc<SearchIndex>>,
     failures: HashMap<ProxyNodeId, DelayTestFailure>,
@@ -17,17 +14,13 @@ pub(in crate::pages::proxies) struct ProxyCatalogPresentation {
 impl ProxyCatalogPresentation {
     pub(in crate::pages::proxies) fn install(&mut self, catalog: &ProxyCatalog) {
         self.orders.clear();
-        self.orders.prepare_current(catalog);
         self.failures.clear();
-        self.summary = NodeSummary::new(catalog);
         self.search = Some(Arc::new(SearchIndex::new(catalog, &self.failures)));
     }
 
     pub(in crate::pages::proxies) fn release(&mut self) {
         self.orders.clear();
-        self.orders.release_current();
         self.search = None;
-        self.summary = NodeSummary::default();
         self.failures.clear();
     }
 
@@ -64,14 +57,6 @@ impl ProxyCatalogPresentation {
         self.orders.invalidate(controller_key);
     }
 
-    pub(in crate::pages::proxies) fn observe_current(
-        &self,
-        catalog: &ProxyCatalog,
-        controller_key: &str,
-    ) {
-        self.orders.update_current(catalog, controller_key);
-    }
-
     /// Apply one admitted delay result to the catalog and all derived display facts.
     pub(in crate::pages::proxies) fn record_delay(
         &mut self,
@@ -86,7 +71,6 @@ impl ProxyCatalogPresentation {
             return;
         };
         super::super::append_delay(node, delay, mean_delay);
-        self.summary.record(id, node.latest_delay());
         if let Some(search) = &self.search {
             search.update(id, node, failure.is_some());
         }

@@ -53,9 +53,9 @@
 
 | 现有实现 | 状态与接入点 |
 | --- | --- |
-| [Windows TUN 权限](../../crates/zenclash-core/src/tun_permissions/windows.rs) | 只检测当前进程是否为管理员，尚无可请求的受限 helper |
-| [Linux TUN 权限](../../crates/zenclash-core/src/tun_permissions/linux.rs) | 通过 `pkexec` 把内核改为 root 所有并设置 setuid |
-| [macOS TUN 权限](../../crates/zenclash-core/src/tun_permissions/macos.rs) | 通过管理员授权脚本把内核改为 root 所有并设置 setuid |
+| 旧 Windows TUN 权限（原 `tun_permissions/windows.rs`，已删除） | 只检测当前进程是否为管理员，尚无可请求的受限 helper |
+| 旧 Linux TUN 权限（原 `tun_permissions/linux.rs`，已删除） | 通过 `pkexec` 把内核改为 root 所有并设置 setuid |
+| 旧 macOS TUN 权限（原 `tun_permissions/macos.rs`，已删除） | 通过管理员授权脚本把内核改为 root 所有并设置 setuid |
 | [内核会话](../../crates/zenclash-core/src/core_session.rs) | `CoreSession` 串行管理配置、重启、恢复和退出，持有本地 `ManagedCoreProcess` |
 | [进程管理](../../crates/zenclash-core/src/managed_core_process.rs) | 本地子进程启动、停止、就绪等待、日志缓冲与退出状态 |
 | [捕获模式事务](../../crates/zenclash-core/src/traffic_capture.rs) | `TrafficCaptureCoordinator` 协调系统代理、TUN、权限与失败回滚 |
@@ -356,7 +356,7 @@ macOS 另需证明已加载 job 的实际程序和参数。当前查询分类只
 - [ ] 在进程边界接入本地与服务两种执行方式，保持受管内核快照的一致含义。
 - [ ] 应用启动先核对服务身份、健康和授权内核版本；已安装且健康时直接建立服务 owner。缺失、不兼容、占用或结果未知时准确反馈，不先启动带 TUN 的本地内核或静默使用旧 setuid。
 - [ ] 改造 `CoreSession`、配置事务、内核安装/更新和状态回读；保留串行事务、取消与 generation 校验。
-- [ ] `TunPermissionManager` 改为识别服务可用性及真正执行方式，不能仅凭 GUI 的管理员状态判定权限。
+- [x] 2026-10-19 删除无生产调用的旧 `TunPermissionManager` 和 setuid 授权脚本；当前权限由 `CoreSession` 按实际 Local/Service owner 观察，Service 核对认证状态。三平台原生验收仍单独推进，见 [core 审计修复](zenclash-core-audit-2026-10-19.md)。
 - [ ] 接入首次安装后的内核切换、TUN 应用及回滚；覆盖控制器热加载和流式状态读取。
 - [ ] 处理正常退出、重启、异常断线及网络恢复，证明不存在双重拉起或遗留高权限内核。
 - [ ] 完成旧 setuid 权限迁移及内核版本升级流程。

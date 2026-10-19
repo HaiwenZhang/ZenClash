@@ -6,7 +6,10 @@ use std::{
 #[cfg(unix)]
 use std::fs::File;
 
-use super::{CoreUpdateError, CoreUpdateResult};
+use super::{
+    CoreUpdateError, CoreUpdateResult,
+    recovery::{self, UpdateJournal},
+};
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -43,55 +46,34 @@ impl PreparedCoreUpdate {
     /// Returns an error when the current core cannot be backed up, the staging
     /// file cannot be renamed into place, or the directory cannot be synced.
     pub fn activate(mut self) -> CoreUpdateResult<CoreUpdateTransaction> {
-        let staging = self.candidate_path()?;
-        let backup = sibling_path(&self.target, "backup")?;
-        std::fs::rename(&self.target, &backup).map_err(|error| {
-            CoreUpdateError::Io(zenclash_i18n::text_with(
-                "core_update.details.backup_target",
-                &[
-                    ("path", self.target.display().to_string()),
-                    ("backup", backup.display().to_string()),
-                    ("error", error.to_string()),
-                ],
-            ))
-        })?;
-        if let Err(error) = std::fs::rename(staging, &self.target) {
-            let restore = std::fs::rename(&backup, &self.target);
-            return Err(CoreUpdateError::Io(zenclash_i18n::text_with(
-                "core_update.details.activate_restore",
-                &[
-                    ("error", error.to_string()),
-                    (
-                        "restore",
-                        restore.map_or_else(
-                            |restore| restore.to_string(),
-                            |()| zenclash_i18n::text("core_update.details.restore_succeeded"),
-                        ),
-                    ),
-                ],
-            )));
+        let staging = self.candidate_path()?.to_path_buf();
+        let target = recovery::resolve_target(&self.target)?;
+        if !target.is_file() || !staging.is_file() {
+            return Err(CoreUpdateError::Io(
+                "core update requires existing executable files".into(),
+            ));
         }
-        // The candidate is now at target. Until this rename succeeds, Drop owns
-        // cleanup even when choosing a backup path or moving the old core fails.
-        self.staging = None;
-        let transaction = CoreUpdateTransaction {
-            target: self.target.clone(),
+        let lock = recovery::lock_target(&target)?;
+        recovery::recover_locked(&target)?;
+        let backup = sibling_path(&target, "backup")?;
+        let journal = UpdateJournal::create(&target, &backup, &staging)?;
+        let mut transaction = CoreUpdateTransaction {
+            target,
             backup,
             tag: self.tag.clone(),
             active: true,
+            journal,
+            _lock: lock,
         };
-        if let Err(error) = sync_parent(&self.target) {
+        if let Err(error) = transaction.journal.install(&transaction.target) {
             return match transaction.rollback() {
                 Ok(()) => Err(error),
-                Err(rollback) => Err(CoreUpdateError::Io(zenclash_i18n::text_with(
-                    "core_update.details.rollback_also_failed",
-                    &[
-                        ("error", error.to_string()),
-                        ("rollback", rollback.to_string()),
-                    ],
+                Err(rollback) => Err(CoreUpdateError::Io(format!(
+                    "{error}; core rollback failed: {rollback}"
                 ))),
             };
         }
+        self.staging = None;
         Ok(transaction)
     }
 }
@@ -110,6 +92,8 @@ pub struct CoreUpdateTransaction {
     backup: PathBuf,
     tag: String,
     active: bool,
+    journal: UpdateJournal,
+    _lock: crate::AppInstanceLock,
 }
 
 impl CoreUpdateTransaction {
@@ -123,20 +107,25 @@ impl CoreUpdateTransaction {
     ///
     /// # Errors
     ///
-    /// Returns an error when the backup cannot be removed after the new core
-    /// has already been accepted. The new core remains active in that case.
+    /// Returns an error when acceptance cannot be recorded or backup cleanup fails.
+    /// The candidate remains in place; an unrecorded commit retains the old backup
+    /// for startup recovery rather than replacing a potentially running executable.
     pub fn commit(mut self) -> CoreUpdateResult<()> {
-        self.active = false;
-        std::fs::remove_file(&self.backup).map_err(|error| {
-            CoreUpdateError::Io(zenclash_i18n::text_with(
-                "core_update.details.remove_backup",
-                &[
-                    ("path", self.backup.display().to_string()),
-                    ("error", error.to_string()),
-                ],
-            ))
-        })?;
-        sync_parent(&self.target)
+        if let Err(error) = self.record_commit() {
+            // The verified candidate may still be running; retain files for startup recovery.
+            self.active = false;
+            return Err(error);
+        }
+        self.journal.cleanup(&self.target)
+    }
+
+    pub(crate) fn record_commit(&mut self) -> CoreUpdateResult<()> {
+        if self.active {
+            // Commit follows live-core verification; only the workflow may stop and roll it back.
+            self.active = false;
+            self.journal.commit(&self.target)?;
+        }
+        Ok(())
     }
 
     /// Restores the previous executable and removes the rejected candidate.
@@ -152,7 +141,7 @@ impl CoreUpdateTransaction {
     }
 
     pub(crate) fn rollback_with_status(mut self) -> (CoreUpdateResult<()>, bool) {
-        let result = restore_backup(&self.target, &self.backup);
+        let result = self.journal.rollback(&self.target);
         let restored = self.target.is_file() && !self.backup.exists();
         if restored {
             self.active = false;
@@ -160,16 +149,22 @@ impl CoreUpdateTransaction {
         (result, restored)
     }
 
-    pub(super) fn preserve_for_manual_recovery(mut self) -> PathBuf {
+    pub(super) fn preserve_for_manual_recovery(mut self) -> CoreUpdateResult<PathBuf> {
         self.active = false;
-        self.backup.clone()
+        self.journal.preserve(&self.target).map_err(|error| {
+            CoreUpdateError::Io(format!(
+                "{error}; previous executable retained at {}",
+                self.backup.display()
+            ))
+        })?;
+        Ok(self.backup.clone())
     }
 }
 
 impl Drop for CoreUpdateTransaction {
     fn drop(&mut self) {
         if self.active {
-            let _ = restore_backup(&self.target, &self.backup);
+            let _ = self.journal.rollback(&self.target);
         }
     }
 }
@@ -203,53 +198,8 @@ pub(super) fn sibling_path(target: &Path, label: &str) -> CoreUpdateResult<PathB
     Ok(parent.join(name))
 }
 
-fn restore_backup(target: &Path, backup: &Path) -> CoreUpdateResult<()> {
-    if !backup.is_file() {
-        return Err(CoreUpdateError::Io(zenclash_i18n::text_with(
-            "core_update.details.missing_backup",
-            &[("path", backup.display().to_string())],
-        )));
-    }
-    let rejected = sibling_path(target, "rejected")?;
-    if target.exists() {
-        std::fs::rename(target, &rejected).map_err(|error| {
-            CoreUpdateError::Io(zenclash_i18n::text_with(
-                "core_update.details.move_candidate",
-                &[
-                    ("path", target.display().to_string()),
-                    ("error", error.to_string()),
-                ],
-            ))
-        })?;
-    }
-    if let Err(error) = std::fs::rename(backup, target) {
-        if rejected.exists() {
-            let _ = std::fs::rename(&rejected, target);
-        }
-        return Err(CoreUpdateError::Io(zenclash_i18n::text_with(
-            "core_update.details.restore_backup",
-            &[
-                ("path", backup.display().to_string()),
-                ("error", error.to_string()),
-            ],
-        )));
-    }
-    let cleanup = if rejected.exists() {
-        std::fs::remove_file(&rejected)
-    } else {
-        Ok(())
-    };
-    sync_parent(target)?;
-    cleanup.map_err(|error| {
-        CoreUpdateError::Io(zenclash_i18n::text_with(
-            "core_update.details.remove_rejected",
-            &[("error", error.to_string())],
-        ))
-    })
-}
-
 #[cfg(unix)]
-fn sync_parent(path: &Path) -> CoreUpdateResult<()> {
+pub(super) fn sync_parent(path: &Path) -> CoreUpdateResult<()> {
     let parent = path.parent().ok_or_else(|| {
         CoreUpdateError::Io(zenclash_i18n::text("core_update.details.core_parent"))
     })?;
@@ -264,6 +214,6 @@ fn sync_parent(path: &Path) -> CoreUpdateResult<()> {
 }
 
 #[cfg(not(unix))]
-fn sync_parent(_path: &Path) -> CoreUpdateResult<()> {
+pub(super) fn sync_parent(_path: &Path) -> CoreUpdateResult<()> {
     Ok(())
 }

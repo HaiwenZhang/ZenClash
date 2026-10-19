@@ -75,6 +75,9 @@ impl ZenClashApp {
         request: TrayProxySelectionRequest,
         cx: &mut Context<Self>,
     ) {
+        self.publish_tray_proxy_feedback(&request.observation, |this| {
+            this.tray_command_error = None
+        });
         let session = self.core_session.clone();
         let submitted = request.clone();
         let task = self

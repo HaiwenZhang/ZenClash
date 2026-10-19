@@ -18,7 +18,7 @@ pub(super) fn find_core_binary(kind: CoreKind) -> Option<PathBuf> {
     })
 }
 
-fn core_path_filenames(kind: CoreKind) -> Vec<String> {
+pub(super) fn core_path_filenames(kind: CoreKind) -> Vec<String> {
     let name = crate::application_paths::core_executable_filename(kind);
     #[cfg(windows)]
     {
@@ -28,6 +28,20 @@ fn core_path_filenames(kind: CoreKind) -> Vec<String> {
     {
         vec![name]
     }
+}
+
+pub(super) fn startup_binary(
+    paths: impl IntoIterator<Item = PathBuf>,
+    lease: Option<&crate::data_coordinator::DataWriteLease>,
+) -> MihomoResult<Option<PathBuf>> {
+    for path in paths {
+        crate::core_update::recover_interrupted_update(&path, lease)
+            .map_err(|error| MihomoError::Process(error.to_string()))?;
+        if is_core_binary_candidate(&path) {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }
 
 pub(super) fn bundled_core_binary(kind: CoreKind) -> Option<PathBuf> {

@@ -10,8 +10,7 @@ use gpui_kit::{
 use zenclash_core::{
     AppPreferences, AppPreferencesStore, AppearancePreference, ControlledConfigStore, CoreKind,
     CoreSession, LogMonitor, MihomoClient, MihomoLogLevel, OperationalStatus, ServiceManager,
-    SystemProxyController, SystemProxySession, TrafficCaptureSession, TrafficHistoryStore,
-    TrafficMonitor,
+    SystemProxySession, TrafficCaptureSession, TrafficHistoryStore, TrafficMonitor,
 };
 
 mod actions;
@@ -36,6 +35,7 @@ pub use bootstrap::{
     create_main_window_with_service_startup, init, reopen_main_window,
 };
 use platform::open_directory;
+pub use system_proxy::finish_native_shutdown;
 pub use traffic_history::TrafficHistorySession;
 
 /// Process arguments prepared only after capture and kernel shutdown succeeds.
@@ -121,7 +121,6 @@ pub struct ZenClashApp {
     core_kind: CoreKind,
     core_session: CoreSession,
     application_commands: crate::ApplicationCommands,
-    client: MihomoClient,
     runtime: tokio::runtime::Handle,
     focus_handle: gpui_kit::FocusHandle,
     proxies_page: Entity<ProxiesPage>,
@@ -179,6 +178,10 @@ pub struct AppServices {
     pub core_kind: CoreKind,
     /// Serialized runtime-core transition owner.
     pub core_session: CoreSession,
+    /// Capture owner shared with final process cleanup, including native quit.
+    pub traffic_capture: TrafficCaptureSession,
+    /// Native proxy session shared with the runtime page's settings editor.
+    pub system_proxy_session: Option<SystemProxySession>,
     /// Typed client following the shared runtime binding.
     pub client: MihomoClient,
     /// Shared reconnecting traffic stream.
@@ -222,6 +225,8 @@ impl ZenClashApp {
             preferences: _,
             core_kind,
             core_session,
+            traffic_capture,
+            system_proxy_session,
             client,
             traffic_monitor,
             log_monitor,
@@ -241,17 +246,15 @@ impl ZenClashApp {
             cx.new(|cx| ProxiesPage::new_with_session(core_session.clone(), runtime.clone(), cx));
         let app_profile_path = profile_path.clone();
         let app_controlled_config_store = controlled_config_store.clone();
-        let system_proxy_controller = SystemProxyController::default();
-        core_session.attach_pac_server(system_proxy_controller.pac_server());
-        let system_proxy_session = preferences_store
-            .clone()
-            .map(|store| SystemProxySession::new(store, system_proxy_controller.clone()));
-        let traffic_capture = TrafficCaptureSession::new(
-            core_session.clone(),
-            controlled_config_store.clone(),
-            system_proxy_session.clone(),
-            profile_path.clone(),
-        );
+        if !initializing {
+            system_proxy::observe_native_quit(
+                &core_session,
+                &traffic_capture,
+                traffic_history_session.as_ref(),
+                &runtime,
+                cx,
+            );
+        }
         let _supervisor_started = !initializing
             && core_session.start_supervisor_with_capture(&runtime, traffic_capture.clone());
         let operational_status = OperationalStatus::start(
@@ -342,7 +345,6 @@ impl ZenClashApp {
             core_kind,
             core_session,
             application_commands,
-            client,
             runtime,
             focus_handle,
             proxies_page,
@@ -438,6 +440,9 @@ impl ZenClashApp {
         {
             services.preferences = preferences;
         }
+        self.menu_preference_saves
+            .previews()
+            .apply(&mut services.preferences);
         let preferences = services.preferences.clone();
         let preferences_store = services.preferences_store.clone();
         let network_tray = NetworkTrayIcon::new()
@@ -457,6 +462,34 @@ impl ZenClashApp {
         ) {
             tracing::warn!(%error, "failed to configure core log persistence after startup");
         }
+        self.adopt_startup(
+            BootstrappedApplication {
+                services,
+                initialization,
+            },
+            network_tray,
+            window,
+            cx,
+        );
+    }
+
+    fn adopt_startup(
+        &mut self,
+        application: BootstrappedApplication,
+        network_tray: Option<NetworkTrayIcon>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let BootstrappedApplication {
+            mut services,
+            initialization,
+        } = application;
+        let preference_saves = std::mem::take(&mut self.menu_preference_saves);
+        let preference_save_task = self.preferences_save_task.take();
+        let previews = preference_saves.previews();
+        previews.apply(&mut services.preferences);
+        let preferences = services.preferences.clone();
+        let preferences_store = services.preferences_store.clone();
         let page = self.current_page;
         let sidebar_collapsed = self.sidebar_collapsed;
         let window_visible = self.main_window_visible;
@@ -471,6 +504,10 @@ impl ZenClashApp {
             window,
             cx,
         );
+        self.menu_preference_saves = preference_saves;
+        self.preferences_save_task = preference_save_task;
+        self.runtime_page
+            .update(cx, |page, cx| page.set_preference_previews(previews, cx));
         self.sidebar_collapsed = sidebar_collapsed;
         #[cfg(target_os = "macos")]
         {

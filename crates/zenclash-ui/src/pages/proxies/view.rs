@@ -612,7 +612,7 @@ impl ProxiesPage {
                 &self.visible_group_indices,
                 self.selected_group.as_deref(),
             )
-            .map(|index| catalog.groups()[index].name.clone())
+            .map(|index| catalog.groups()[index].controller_name().to_owned())
         });
         let testing = selected
             .as_ref()

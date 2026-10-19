@@ -1,6 +1,51 @@
 use super::*;
 
 #[test]
+fn oversized_output_is_discarded_until_the_next_line_and_eof_is_flushed() {
+    let input = io::repeat(b'x')
+        .take((MAX_LINE_BYTES * 32) as u64)
+        .chain(io::Cursor::new(b"\nnext\r\nlast"));
+    let mut lines = Vec::new();
+    read_output(input, |line| lines.push(line.to_owned())).unwrap();
+    assert_eq!(
+        lines,
+        vec!["x".repeat(MAX_LINE_BYTES), "next".into(), "last".into()]
+    );
+}
+
+#[test]
+fn unterminated_output_still_has_a_byte_limit() {
+    let mut last = String::new();
+    read_output(
+        io::repeat(b'x').take((MAX_LINE_BYTES * 32) as u64),
+        |line| last = line.to_owned(),
+    )
+    .unwrap();
+    assert_eq!(last.len(), MAX_LINE_BYTES);
+}
+
+#[test]
+fn history_enforces_byte_and_utf8_limits_before_its_line_count_limit() {
+    let mut logs = LaunchLogHistory::default();
+    let launch = logs.begin_launch();
+    let long = "配".repeat(MAX_LINE_BYTES);
+    for _ in 0..100 {
+        logs.record(&launch, "CORE", &long);
+    }
+    assert!(logs.history.len() < super::super::MAX_LOG_LINES);
+    assert!(logs.history.iter().all(|line| line.len() <= MAX_LINE_BYTES));
+    assert_eq!(
+        logs.bytes,
+        logs.history.iter().map(|line| line.len()).sum::<usize>()
+    );
+    assert!(logs.bytes <= MAX_HISTORY_BYTES);
+    assert_eq!(
+        logs.current_last_line().unwrap(),
+        **logs.history.back().unwrap()
+    );
+}
+
+#[test]
 fn controller_listener_conflict_is_detected_without_confusing_proxy_listener_errors() {
     let mut controller = LaunchLogHistory::default();
     let launch = controller.begin_launch();

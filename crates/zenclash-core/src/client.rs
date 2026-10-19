@@ -89,6 +89,14 @@ pub enum MihomoError {
         /// Whether the original transport classified decoding failure as uncertain.
         outcome_unknown: bool,
     },
+    /// A direct controller response exceeded its defensive byte limit.
+    #[error("Mihomo response from {endpoint} exceeds {limit_bytes} bytes")]
+    ResponseTooLarge {
+        /// Controller route without query parameters or credentials.
+        endpoint: String,
+        /// Maximum accepted response size in bytes.
+        limit_bytes: usize,
+    },
     /// Non-success response returned by Mihomo, including its bounded message.
     #[error("Mihomo API returned HTTP {status}: {message}")]
     Api {
@@ -226,6 +234,8 @@ impl MihomoClient {
 
     fn build_http() -> MihomoResult<reqwest::Client> {
         Ok(reqwest::Client::builder()
+            // Controller credentials belong only to the selected controller, never an ambient proxy.
+            .no_proxy()
             .user_agent(concat!("ZenClash/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(30))
@@ -670,6 +680,7 @@ impl MihomoError {
     pub fn mutation_result_unknown(&self) -> bool {
         match self {
             Self::Http(_)
+            | Self::ResponseTooLarge { .. }
             | Self::StaleTransport
             | Self::RuntimeOutcomeUnknown
             | Self::RuntimePartiallyApplied(_) => true,

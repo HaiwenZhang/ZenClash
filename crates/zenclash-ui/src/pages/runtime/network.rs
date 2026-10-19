@@ -90,7 +90,10 @@ impl RuntimePage {
             .report()
             .map(|report| report.steps.as_slice())
             .unwrap_or_default();
-        let passed = steps.iter().filter(|step| step.outcome.is_ok()).count();
+        let passed = steps
+            .iter()
+            .filter(|step| model::diagnostic_step_succeeded(step))
+            .count();
         let elapsed = self.network_diagnostics.query.report().and_then(|report| {
             report
                 .steps

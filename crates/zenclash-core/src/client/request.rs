@@ -6,6 +6,7 @@ use super::transport::ControllerBackend;
 use super::{MihomoClient, MihomoError, MihomoResult};
 
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+const MAX_RESPONSE_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 impl MihomoClient {
     pub(super) async fn get_json<T: DeserializeOwned>(&self, path: &str) -> MihomoResult<T> {
@@ -193,7 +194,17 @@ impl ApiReply {
     pub(super) async fn json<T: DeserializeOwned>(self) -> MihomoResult<T> {
         let value = match self.response {
             ReplyBody::Direct(response) => {
-                let bytes = response.bytes().await?;
+                let bytes = crate::http_body::read_limited(response, MAX_RESPONSE_BODY_BYTES)
+                    .await
+                    .map_err(|error| match error {
+                        crate::http_body::ReadBodyError::Http(error) => MihomoError::Http(error),
+                        crate::http_body::ReadBodyError::TooLarge => {
+                            MihomoError::ResponseTooLarge {
+                                endpoint: self.endpoint.clone(),
+                                limit_bytes: MAX_RESPONSE_BODY_BYTES,
+                            }
+                        }
+                    })?;
                 decode_response(&self.endpoint, &bytes, true)?
             }
             ReplyBody::Service(value) => decode_response(&self.endpoint, &value, false)?,
@@ -284,8 +295,67 @@ fn error_message(payload: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_response, error_message};
+    use super::*;
     use crate::{ConnectionsSnapshot, RuntimeConfig};
+    use futures_util::stream;
+    use std::{io, time::Duration};
+
+    fn direct_reply(response: Response) -> ApiReply {
+        let client = MihomoClient::new(crate::MihomoEndpoint::default()).unwrap();
+        ApiReply {
+            response: ReplyBody::Direct(response),
+            endpoint: "/version".into(),
+            generation: client.binding.generation(),
+            binding: client.binding,
+        }
+    }
+
+    #[tokio::test]
+    async fn controller_json_accepts_the_exact_response_byte_budget() {
+        let mut body = br#"{"version":"fixture"}"#.to_vec();
+        body.resize(MAX_RESPONSE_BODY_BYTES, b' ');
+        let response = Response::from(http::Response::new(body));
+        let version: crate::VersionInfo = direct_reply(response).json().await.unwrap();
+        assert_eq!(version.version, "fixture");
+    }
+
+    #[tokio::test]
+    async fn controller_json_rejects_oversized_content_length_before_reading() {
+        let response = Response::from(
+            http::Response::builder()
+                .header(http::header::CONTENT_LENGTH, MAX_RESPONSE_BODY_BYTES + 1)
+                .body(vec![b' '; MAX_RESPONSE_BODY_BYTES + 1])
+                .unwrap(),
+        );
+        assert_eq!(
+            response.content_length(),
+            Some((MAX_RESPONSE_BODY_BYTES + 1) as u64)
+        );
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            direct_reply(response).json::<crate::VersionInfo>(),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(matches!(error, MihomoError::ResponseTooLarge { .. }));
+        assert!(error.mutation_result_unknown());
+    }
+
+    #[tokio::test]
+    async fn controller_json_stops_an_oversized_stream_without_waiting_for_eof() {
+        let chunks = stream::iter([Ok::<_, io::Error>(vec![b' '; MAX_RESPONSE_BODY_BYTES + 1])])
+            .chain(stream::pending());
+        let response = Response::from(http::Response::new(reqwest::Body::wrap_stream(chunks)));
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            direct_reply(response).json::<crate::VersionInfo>(),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(matches!(error, MihomoError::ResponseTooLarge { .. }));
+    }
 
     #[test]
     fn decode_error_identifies_nested_field_without_query_credentials() {

@@ -10,8 +10,8 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let succeeded = step.is_some_and(|step| step.outcome.is_ok());
-        let failed = step.is_some_and(|step| step.outcome.is_err());
+        let succeeded = step.is_some_and(model::diagnostic_step_succeeded);
+        let failed = step.is_some_and(|step| !model::diagnostic_step_succeeded(step));
         h_flex()
             .px_3()
             .py_2()
@@ -34,13 +34,19 @@ impl RuntimePage {
                     .id(format!("diagnostic-status:{kind:?}"))
                     .test_support()
                     .when(step.is_some(), |row| {
-                        row.child(network_status_icon(succeeded, theme)).child(
-                            div().text_sm().child(zenclash_i18n::text(if succeeded {
+                        row.aria_label(zenclash_i18n::text(if succeeded {
+                            "network.latency.succeeded"
+                        } else {
+                            "network.latency.failed"
+                        }))
+                        .child(network_status_icon(succeeded, theme))
+                        .child(div().text_sm().child(
+                            zenclash_i18n::text(if succeeded {
                                 "network.latency.succeeded"
                             } else {
                                 "network.latency.failed"
-                            })),
-                        )
+                            }),
+                        ))
                     })
                     .when(step.is_none(), |row| {
                         row.child(

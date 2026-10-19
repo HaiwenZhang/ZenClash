@@ -1,10 +1,12 @@
 use thiserror::Error;
 
 mod archive;
+mod recovery;
 mod service;
 mod transaction;
 mod workflow;
 
+pub(crate) use recovery::recover_interrupted_update;
 pub(crate) use workflow::InstalledCore;
 
 #[cfg(test)]
