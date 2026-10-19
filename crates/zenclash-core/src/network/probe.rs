@@ -168,6 +168,18 @@ pub struct NetworkProbeSnapshot {
     pub latencies: Vec<NetworkLatencyResult>,
 }
 
+impl NetworkProbeSnapshot {
+    /// Returns whether the public-IP request or at least one latency probe succeeded.
+    #[must_use]
+    pub fn succeeded(&self) -> bool {
+        self.public_ip.is_some()
+            || self
+                .latencies
+                .iter()
+                .any(|result| result.latency_ms.is_some())
+    }
+}
+
 /// Errors produced while constructing or running network diagnostics.
 #[derive(Debug, Error)]
 #[non_exhaustive]

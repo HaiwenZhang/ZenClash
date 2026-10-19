@@ -102,6 +102,18 @@ pub struct DiagnosticStep {
     pub outcome: Result<DiagnosticData, DiagnosticFailure>,
 }
 
+impl DiagnosticStep {
+    /// Returns whether this step succeeded, including partial network-probe success.
+    #[must_use]
+    pub fn succeeded(&self) -> bool {
+        match &self.outcome {
+            Ok(DiagnosticData::Network(snapshot)) => snapshot.succeeded(),
+            Ok(_) => true,
+            Err(_) => false,
+        }
+    }
+}
+
 /// Complete result of one diagnostics run.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiagnosticReport {

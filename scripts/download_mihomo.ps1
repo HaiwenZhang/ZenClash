@@ -16,7 +16,8 @@ $Headers = @{
 if ($env:GH_TOKEN) {
     $Headers.Authorization = "Bearer $($env:GH_TOKEN)"
 }
-$AssetName = "mihomo-windows-$Architecture-$Version.zip"
+$AssetArchitecture = if ($Architecture -eq 'amd64') { 'amd64-v1' } else { $Architecture }
+$AssetName = "mihomo-windows-$AssetArchitecture-$Version.zip"
 $Release = Invoke-RestMethod -Headers $Headers -Uri "https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/$Version"
 $Asset = $Release.assets | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1
 if ($null -eq $Asset) { throw "Mihomo release asset not found: $AssetName" }

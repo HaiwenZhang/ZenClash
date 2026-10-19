@@ -111,7 +111,7 @@ fn startup_recovers_old_custom_core_after_every_uncommitted_replacement_and_roll
             b"old verified executable",
             "{step}"
         );
-        assert!(!recover_interrupted_update(&target(&root), None).unwrap());
+        assert!(!recover_interrupted_update(&target(&root)).unwrap());
         assert!(
             !fs::read_dir(&root).unwrap().flatten().any(|entry| {
                 let name = entry.file_name();
@@ -134,7 +134,55 @@ fn committed_update_survives_exit_before_or_during_backup_cleanup() {
             fs::read(target(&root)).unwrap(),
             b"new candidate executable"
         );
-        assert!(!recover_interrupted_update(&target(&root), None).unwrap());
+        assert!(!recover_interrupted_update(&target(&root)).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn ordinary_recovery_replays_custom_updates_outside_the_runtime_home() {
+    for step in ["preserved", "installed", "committed"] {
+        let root = root(step);
+        let binaries = root.join("custom");
+        let home = root.join("home");
+        fs::create_dir(&binaries).unwrap();
+        fs::create_dir(&home).unwrap();
+        crash(&binaries, step, "commit");
+        let restoring = crate::data_coordinator::DataWriteLease::exclusive([binaries.clone()]);
+        let recovery_root = root.clone();
+        let recovery_home = home.clone();
+        let binary = target(&binaries);
+        let mut recovery = tokio::spawn(async move {
+            crate::CoreLaunchConfig::discover_ordinary_recovery(
+                recovery_root.clone(),
+                Some(binary),
+                recovery_root.join("missing.yaml"),
+                recovery_home,
+            )
+            .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut recovery)
+                .await
+                .is_err()
+        );
+        drop(restoring);
+        let launch = tokio::time::timeout(std::time::Duration::from_secs(3), recovery)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(launch.home_dir, home);
+        assert_eq!(
+            fs::read(&launch.binary).unwrap(),
+            if step == "committed" {
+                b"new candidate executable".as_slice()
+            } else {
+                b"old verified executable".as_slice()
+            },
+            "{step}"
+        );
+        assert!(!journal_path(&launch.binary).unwrap().exists());
         fs::remove_dir_all(root).unwrap();
     }
 }
@@ -162,7 +210,7 @@ fn startup_recovers_a_custom_symlink_whose_target_is_temporarily_absent() {
 fn startup_cannot_roll_back_an_update_that_still_holds_its_file_lock() {
     let root = root("live-update");
     let transaction = prepare(&root).activate().unwrap();
-    assert!(recover_interrupted_update(&target(&root), None).is_err());
+    assert!(recover_interrupted_update(&target(&root)).is_err());
     assert_eq!(
         fs::read(target(&root)).unwrap(),
         b"new candidate executable"
@@ -206,7 +254,7 @@ fn unsafe_journal_paths_are_rejected_before_changing_any_executable() {
             "version": 1, "backup": backup, "staging": name(prepared.staging.as_ref().unwrap()).unwrap(),
             "rejected": name(&sibling_path(&target, "rejected").unwrap()).unwrap(), "phase": "Installing"
         })).unwrap()).unwrap();
-        assert!(recover_interrupted_update(&target, None).is_err());
+        assert!(recover_interrupted_update(&target).is_err());
         assert_eq!(fs::read(&target).unwrap(), b"old verified executable");
         assert_eq!(fs::read(&foreign).unwrap(), b"untouched");
     }
@@ -222,7 +270,7 @@ fn missing_original_backup_and_manual_recovery_never_accept_an_uncommitted_candi
     let journal = UpdateJournal::read(&actual).unwrap().unwrap();
     fs::remove_file(journal.sibling(&actual, &journal.backup).unwrap()).unwrap();
     drop(transaction);
-    assert!(recover_interrupted_update(&target(&root), None).is_err());
+    assert!(recover_interrupted_update(&target(&root)).is_err());
     assert_eq!(
         fs::read(target(&root)).unwrap(),
         b"new candidate executable"
@@ -235,7 +283,7 @@ fn missing_original_backup_and_manual_recovery_never_accept_an_uncommitted_candi
         .unwrap()
         .preserve_for_manual_recovery()
         .unwrap();
-    assert!(recover_interrupted_update(&target(&root), None).is_err());
+    assert!(recover_interrupted_update(&target(&root)).is_err());
     assert_eq!(fs::read(backup).unwrap(), b"old verified executable");
     fs::remove_dir_all(root).unwrap();
 }

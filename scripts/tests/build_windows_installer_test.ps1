@@ -168,6 +168,35 @@ $global:LASTEXITCODE = 0
             Write-Host "Rejected $Mode payload before ISCC"
         }
     }
+    # Exercise the production downloader with a real ZIP and only the compatible CPU asset.
+    $FixtureArchive = Join-Path $TestRoot 'mihomo.zip'
+    Compress-Archive -LiteralPath (Join-Path $TestRoot 'mihomo.exe') -DestinationPath $FixtureArchive
+    $FixtureDigest = 'sha256:' + (Get-FileHash -Algorithm SHA256 -LiteralPath $FixtureArchive).Hash.ToLowerInvariant()
+    $DownloadArchitecture = if ($Architecture -eq 'arm64') { 'arm64' } else { 'amd64' }
+    $AssetArchitecture = if ($Architecture -eq 'arm64') { 'arm64' } else { 'amd64-v1' }
+    $ExpectedDownloadAsset = "mihomo-windows-$AssetArchitecture-v1.19.30.zip"
+    function Invoke-RestMethod {
+        param($Headers, $Uri)
+        if ($Uri -ne 'https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/v1.19.30') {
+            throw "Unexpected metadata request: $Uri"
+        }
+        [pscustomobject]@{ assets = @([pscustomobject]@{
+            name = $ExpectedDownloadAsset
+            browser_download_url = 'https://fixture.invalid/mihomo.zip'
+            digest = $FixtureDigest
+        }) }
+    }
+    function Invoke-WebRequest {
+        param($Uri, $OutFile)
+        if ($Uri -ne 'https://fixture.invalid/mihomo.zip') { throw "Unexpected download: $Uri" }
+        Copy-Item -LiteralPath $FixtureArchive -Destination $OutFile
+    }
+    & (Join-Path $ProjectRoot 'scripts/download_mihomo.ps1') `
+        -OutputPath (Join-Path $TestRoot 'downloaded-mihomo.exe') -Version v1.19.30 -Architecture $DownloadArchitecture
+    if ((Get-FileHash -LiteralPath (Join-Path $TestRoot 'downloaded-mihomo.exe')).Hash -ne
+        (Get-FileHash -LiteralPath (Join-Path $TestRoot 'mihomo.exe')).Hash) {
+        throw 'Downloader changed the verified executable'
+    }
     $global:LASTEXITCODE = 0
     Write-Host "Windows $Architecture GUI/service payload packaging: 9 cases passed"
 } finally {

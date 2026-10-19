@@ -3709,9 +3709,6 @@ core_page:
     capture_restore_unknown:
       zh-CN: 捕获恢复状态无法确认，请检查当前内核和系统代理。
       en: Capture restoration could not be confirmed. Check the current core and system proxy.
-    local_identity_authority_failed:
-      zh-CN: 本地内核准备的写入权限已失效，请重新发起维护
-      en: Local core preparation lost its write authority. Start maintenance again.
     repair_title:
       zh-CN: 修复内核服务？
       en: Repair the core service?

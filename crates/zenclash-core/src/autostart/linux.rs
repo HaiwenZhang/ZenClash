@@ -56,14 +56,21 @@ fn desktop_entry(executable: &Path) -> String {
 }
 
 fn desktop_exec_quote(value: &str) -> String {
-    format!(
+    let quoted = format!(
         "\"{}\"",
         value
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
             .replace('`', "\\`")
             .replace('$', "\\$")
-    )
+            .replace('%', "%%")
+    );
+    // Desktop string escapes are decoded before Exec argument quoting.
+    quoted
+        .replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
 }
 
 #[cfg(test)]
@@ -76,8 +83,22 @@ mod tests {
     fn desktop_exec_escapes_shell_sensitive_path_characters() {
         assert_eq!(
             desktop_exec_quote(r#"/opt/Zen $Clash/"native"`bin`"#),
-            r#""/opt/Zen \$Clash/\"native\"\`bin\`""#
+            r#""/opt/Zen \\$Clash/\\"native\\"\\`bin\\`""#
         );
+    }
+
+    #[test]
+    fn desktop_exec_escapes_literal_backslashes_percent_and_line_breaks() {
+        for (path, expected) in [
+            (
+                r"/opt/Zen\Clash/zenclash",
+                r#""/opt/Zen\\\\Clash/zenclash""#,
+            ),
+            ("/opt/100%/zenclash", r#""/opt/100%%/zenclash""#),
+            ("/opt/Zen\nClash/zenclash", r#""/opt/Zen\nClash/zenclash""#),
+        ] {
+            assert_eq!(desktop_exec_quote(path), expected);
+        }
     }
 
     #[test]

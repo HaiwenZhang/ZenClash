@@ -315,11 +315,11 @@ pub(super) fn platform_asset_name(tag: &str) -> CoreUpdateResult<String> {
     }
     let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => "mihomo-darwin-arm64",
-        ("macos", "x86_64") => "mihomo-darwin-amd64-compatible",
+        ("macos", "x86_64") => "mihomo-darwin-amd64-v1",
         ("linux", "aarch64") => "mihomo-linux-arm64",
-        ("linux", "x86_64") => "mihomo-linux-amd64-compatible",
+        ("linux", "x86_64") => "mihomo-linux-amd64-v1",
         ("windows", "aarch64") => "mihomo-windows-arm64",
-        ("windows", "x86_64") => "mihomo-windows-amd64-compatible",
+        ("windows", "x86_64") => "mihomo-windows-amd64-v1",
         ("windows", "x86") => "mihomo-windows-386",
         (os, arch) => {
             return Err(CoreUpdateError::Metadata(zenclash_i18n::text_with(

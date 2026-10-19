@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use super::resources::{
-    bundled_core_binary, core_path_filenames, install_bundled_core,
-    install_bundled_core_with_lease, install_bundled_mihomo_data, startup_binary,
+    bundled_core_binary, core_path_filenames, install_bundled_core, install_bundled_mihomo_data,
+    startup_binary,
 };
 use crate::{
     CoreCapabilities, CoreConfigValidationError, CoreConfigValidator, CoreKind, MihomoEndpoint,
@@ -159,7 +159,7 @@ impl CoreLaunchConfig {
             kind,
             config_override,
         );
-        let binary = resolve_core_binary(project_root, kind, preferred_binary, &home_dir, None)?;
+        let binary = resolve_core_binary(project_root, kind, preferred_binary, &home_dir)?;
         if kind == CoreKind::Mihomo {
             install_bundled_mihomo_data(&home_dir)?;
         }
@@ -169,7 +169,7 @@ impl CoreLaunchConfig {
     /// Resolves ordinary Mihomo identity for Service recovery without reading source YAML.
     /// Preserves the supplied source path and home; the accepted bundle supplies runtime YAML.
     /// Executable selection follows normal startup rules and rejects privileged executables.
-    /// Packaged executable installation is protected by the existing home write lease.
+    /// Recovery and packaged installation acquire their own directory write leases.
     /// No GeoData is installed and no process is started.
     ///
     /// # Errors
@@ -181,13 +181,11 @@ impl CoreLaunchConfig {
         home_dir: PathBuf,
     ) -> MihomoResult<Self> {
         tokio::task::spawn_blocking(move || {
-            let lease = crate::data_coordinator::DataWriteLease::shared([home_dir.clone()])?;
             let binary = resolve_core_binary(
                 &project_root,
                 CoreKind::Mihomo,
                 preferred_binary.as_deref(),
                 &home_dir,
-                Some(&lease),
             )?;
             crate::verify_ordinary_local_executable(&binary)?;
             let endpoint = MihomoEndpoint::local_ipc(&home_dir)?;
@@ -232,11 +230,10 @@ fn resolve_core_binary(
     kind: CoreKind,
     preferred_binary: Option<&Path>,
     home_dir: &Path,
-    lease: Option<&crate::data_coordinator::DataWriteLease>,
 ) -> MihomoResult<PathBuf> {
     Ok({
         if let Some(binary) = preferred_binary {
-            if startup_binary([binary.to_path_buf()], lease)?.is_none() {
+            if startup_binary([binary.to_path_buf()])?.is_none() {
                 return Err(MihomoError::Process(format!(
                     "首选 {} 文件不可执行：{}",
                     kind.display_name(),
@@ -244,21 +241,15 @@ fn resolve_core_binary(
                 )));
             }
             binary.to_path_buf()
-        } else if let Some(managed) = startup_binary(
-            [
-                home_dir
-                    .join("cores")
-                    .join(crate::application_paths::core_executable_filename(kind)),
-                home_dir.join(crate::application_paths::core_executable_filename(kind)),
-            ],
-            lease,
-        )? {
+        } else if let Some(managed) = startup_binary([
+            home_dir
+                .join("cores")
+                .join(crate::application_paths::core_executable_filename(kind)),
+            home_dir.join(crate::application_paths::core_executable_filename(kind)),
+        ])? {
             managed
         } else if let Some(bundled) = bundled_core_binary(kind) {
-            match lease {
-                Some(lease) => install_bundled_core_with_lease(kind, &bundled, home_dir, lease)?,
-                None => install_bundled_core(kind, &bundled, home_dir)?,
-            }
+            install_bundled_core(kind, &bundled, home_dir)?
         } else {
             let mut candidates =
                 vec![crate::WorkspaceResources::new(project_root).core_binary(kind)];
@@ -269,7 +260,7 @@ fn resolve_core_binary(
                         .flat_map(|directory| names.iter().map(move |name| directory.join(name))),
                 );
             }
-            startup_binary(candidates, lease)?.ok_or_else(|| {
+            startup_binary(candidates)?.ok_or_else(|| {
                 MihomoError::Process(format!(
                     "找不到 {}；请在设置 → 运行内核中重新检测或选择文件",
                     kind.display_name()

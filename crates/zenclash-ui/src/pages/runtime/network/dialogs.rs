@@ -10,8 +10,8 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let succeeded = step.is_some_and(model::diagnostic_step_succeeded);
-        let failed = step.is_some_and(|step| !model::diagnostic_step_succeeded(step));
+        let succeeded = step.is_some_and(DiagnosticStep::succeeded);
+        let failed = step.is_some_and(|step| !step.succeeded());
         h_flex()
             .px_3()
             .py_2()

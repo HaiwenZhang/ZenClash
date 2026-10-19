@@ -71,17 +71,13 @@ struct SafeStep {
 
 impl From<&DiagnosticStep> for SafeStep {
     fn from(step: &DiagnosticStep) -> Self {
-        let (status, facts) = match &step.outcome {
-            Ok(data) => ("成功", Some(SafeFacts::from(data))),
-            Err(_) => ("失败", None),
-        };
         Self {
             kind: step.kind,
             route: step.route,
             completed_at_ms: step.completed_at_ms,
             duration_ms: step.duration_ms,
-            status,
-            facts,
+            status: if step.succeeded() { "成功" } else { "失败" },
+            facts: step.outcome.as_ref().ok().map(SafeFacts::from),
         }
     }
 }

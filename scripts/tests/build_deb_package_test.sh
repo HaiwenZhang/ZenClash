@@ -146,8 +146,10 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
   fixture_hash="$(shasum -a 256 "${test_root}/mihomo.gz" | awk '{print $1}')"
 fi
+asset_architecture="${test_architecture}"
+if [[ "${test_architecture}" == amd64 ]]; then asset_architecture=amd64-v1; fi
 cat >"${test_root}/release.json" <<EOF
-{"assets":[{"name":"mihomo-linux-${test_architecture}-v1.19.30.gz","browser_download_url":"https://fixture.invalid/mihomo.gz","digest":"sha256:${fixture_hash}"}]}
+{"assets":[{"name":"mihomo-linux-${asset_architecture}-v1.19.30.gz","browser_download_url":"https://fixture.invalid/mihomo.gz","digest":"sha256:${fixture_hash}"}]}
 EOF
 cat >"${mock_bin}/curl" <<'EOF'
 #!/usr/bin/env bash

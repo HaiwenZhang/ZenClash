@@ -30,10 +30,7 @@ pub(super) struct UpdateJournal {
     phase: Phase,
 }
 
-pub(crate) fn recover_interrupted_update(
-    path: &Path,
-    authority: Option<&crate::data_coordinator::DataWriteLease>,
-) -> CoreUpdateResult<bool> {
+pub(crate) fn recover_interrupted_update(path: &Path) -> CoreUpdateResult<bool> {
     let target = resolve_target(path)?;
     match fs::symlink_metadata(journal_path(&target)?) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -45,23 +42,6 @@ pub(crate) fn recover_interrupted_update(
             .parent()
             .ok_or_else(|| invalid("core has no parent"))?,
     );
-    let access = match authority {
-        Some(lease)
-            if lease.covers(
-                target
-                    .parent()
-                    .ok_or_else(|| invalid("core has no parent"))?,
-            ) =>
-        {
-            access.authorized(lease)
-        }
-        Some(_) => {
-            return Err(invalid(
-                "startup recovery lease does not cover the executable directory",
-            ));
-        }
-        None => access,
-    };
     let _lease = access.acquire().map_err(io_error)?;
     let _lock = lock_target(&target)?;
     recover_locked(&target)

@@ -10,6 +10,45 @@ use crate::{
 };
 
 #[test]
+fn exported_network_status_reflects_partial_success_and_total_failure() {
+    for (ip_ok, latency_ok) in [(false, false), (true, false), (false, true), (true, true)] {
+        let report = DiagnosticReport {
+            started_at_ms: 1,
+            steps: vec![DiagnosticStep {
+                kind: DiagnosticStepKind::NetworkDirect,
+                route: super::DiagnosticRoute::Direct,
+                completed_at_ms: 2,
+                duration_ms: 1,
+                outcome: Ok(DiagnosticData::Network(NetworkProbeSnapshot {
+                    public_ip: ip_ok.then(|| PublicIpInfo {
+                        ip: "203.0.113.1".into(),
+                        ..Default::default()
+                    }),
+                    public_ip_error: (!ip_ok).then(|| "offline".into()),
+                    latencies: vec![NetworkLatencyResult {
+                        target: NetworkLatencyTarget::new("test", "https://example.com/").unwrap(),
+                        latency_ms: latency_ok.then_some(42),
+                        error: (!latency_ok).then(|| "timeout".into()),
+                    }],
+                    ..Default::default()
+                })),
+            }],
+        };
+        let markdown = report.export_support_bundle(SupportSafe).markdown;
+        let status = if ip_ok || latency_ok {
+            "成功"
+        } else {
+            "失败"
+        };
+        assert!(
+            markdown.contains(&format!("| 直连网络 | 直连 | {status} |")),
+            "{markdown}"
+        );
+        assert!(markdown.contains(&format!("延迟测试成功：{}", usize::from(latency_ok))));
+    }
+}
+
+#[test]
 fn completed_report_exports_only_allowlisted_facts_without_execution_services() {
     let capture = CaptureStatus {
         system_proxy: Observation::Stale {

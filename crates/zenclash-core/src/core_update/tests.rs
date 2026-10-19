@@ -46,6 +46,8 @@ fn validates_release_digest_and_platform_asset_name() {
     let name = platform_asset_name(tag).expect("supported CI platform");
 
     assert!(name.contains(tag));
+    #[cfg(target_arch = "x86_64")]
+    assert!(name.contains("-amd64-v1-"), "{name}");
     assert_eq!(
         parse_digest(&format!("sha256:{}", "A1".repeat(32))).unwrap(),
         "a1".repeat(32)

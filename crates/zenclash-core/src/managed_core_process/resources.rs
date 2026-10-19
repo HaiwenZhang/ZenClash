@@ -32,10 +32,9 @@ pub(super) fn core_path_filenames(kind: CoreKind) -> Vec<String> {
 
 pub(super) fn startup_binary(
     paths: impl IntoIterator<Item = PathBuf>,
-    lease: Option<&crate::data_coordinator::DataWriteLease>,
 ) -> MihomoResult<Option<PathBuf>> {
     for path in paths {
-        crate::core_update::recover_interrupted_update(&path, lease)
+        crate::core_update::recover_interrupted_update(&path)
             .map_err(|error| MihomoError::Process(error.to_string()))?;
         if is_core_binary_candidate(&path) {
             return Ok(Some(path));
@@ -83,34 +82,7 @@ pub(super) fn install_bundled_core(
     bundled: &Path,
     home_dir: &Path,
 ) -> MihomoResult<PathBuf> {
-    let lease = crate::data_coordinator::DataWriteAccess::new(home_dir).acquire()?;
-    install_bundled_core_admitted(kind, bundled, home_dir, lease)
-}
-
-pub(super) fn install_bundled_core_with_lease(
-    kind: CoreKind,
-    bundled: &Path,
-    home_dir: &Path,
-    parent: &crate::data_coordinator::DataWriteLease,
-) -> MihomoResult<PathBuf> {
-    let lease = crate::data_coordinator::DataWriteAccess::new(home_dir)
-        .authorized(parent)
-        .borrowed_authority(&[home_dir.to_path_buf()])
-        .map_err(MihomoError::Process)?
-        .ok_or_else(|| {
-            MihomoError::Process(zenclash_i18n::text(
-                "core_page.service.local_identity_authority_failed",
-            ))
-        })?;
-    install_bundled_core_admitted(kind, bundled, home_dir, lease)
-}
-
-fn install_bundled_core_admitted(
-    kind: CoreKind,
-    bundled: &Path,
-    home_dir: &Path,
-    _lease: crate::data_coordinator::DataWriteLease,
-) -> MihomoResult<PathBuf> {
+    let _lease = crate::data_coordinator::DataWriteAccess::new(home_dir).acquire()?;
     let cores = home_dir.join("cores");
     let name = crate::application_paths::core_executable_filename(kind);
     let target = cores.join(&name);
@@ -339,37 +311,9 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn borrowed_core_installation_finishes_while_restore_is_waiting() {
-        const CHILD_ROOT: &str = "ZENCLASH_TEST_BORROWED_CORE_INSTALL";
-        if let Some(root) = std::env::var_os(CHILD_ROOT) {
-            let root = PathBuf::from(root);
-            let home = root.join("home");
-            let bundled = root.join("packaged");
-            let parent = crate::data_coordinator::DataWriteLease::shared([home.clone()]).unwrap();
-            let restore_home = home.clone();
-            let restore = tokio::task::spawn_blocking(move || {
-                crate::data_coordinator::DataWriteLease::exclusive([restore_home])
-            });
-            tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                while !crate::data_coordinator::has_waiting_restore(&home) {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .unwrap();
-            let installed = tokio::task::spawn_blocking(move || {
-                install_bundled_core_with_lease(CoreKind::Mihomo, &bundled, &home, &parent)
-            })
-            .await
-            .unwrap()
-            .unwrap();
-            let guard = restore.await.unwrap();
-            assert_eq!(std::fs::read(installed).unwrap(), b"packaged");
-            drop(guard);
-            return;
-        }
+    async fn bundled_core_installation_waits_for_runtime_home_restore() {
         let root = std::env::temp_dir().join(format!(
-            "zenclash-borrowed-core-install-{}-{}",
+            "zenclash-core-install-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -377,46 +321,26 @@ mod tests {
                 .as_nanos(),
         ));
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("packaged"), b"packaged").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                root.join("packaged"),
-                std::fs::Permissions::from_mode(0o755),
-            )
+        let home = root.join("home");
+        let bundled = root.join("packaged");
+        std::fs::write(&bundled, b"packaged").unwrap();
+        let restore = crate::data_coordinator::DataWriteLease::exclusive([home.clone()]);
+        let mut installation = tokio::task::spawn_blocking(move || {
+            install_bundled_core(CoreKind::Mihomo, &bundled, &home)
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut installation)
+                .await
+                .is_err()
+        );
+        drop(restore);
+        let installed = tokio::time::timeout(std::time::Duration::from_secs(3), installation)
+            .await
+            .unwrap()
+            .unwrap()
             .unwrap();
-        }
-        let child_root = root.clone();
-        let output = tokio::task::spawn_blocking(move || {
-            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-                .arg("--exact").arg("managed_core_process::resources::tests::borrowed_core_installation_finishes_while_restore_is_waiting")
-                .env(CHILD_ROOT, child_root)
-                .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
-                .spawn().unwrap();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                if child.try_wait().unwrap().is_some() { break; }
-                if std::time::Instant::now() >= deadline {
-                    child.kill().unwrap();
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            child.wait_with_output().unwrap()
-        }).await.unwrap();
+        assert_eq!(std::fs::read(installed).unwrap(), b"packaged");
         std::fs::remove_dir_all(root).unwrap();
-        assert!(
-            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
-            "child selected no test: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        assert!(
-            output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
     }
 
     #[cfg(unix)]

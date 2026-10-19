@@ -57,7 +57,6 @@ mod proxy_operations;
 mod ruleset;
 #[cfg(test)]
 mod stream_publication_test_support;
-mod substore;
 mod system_proxy;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -179,7 +178,6 @@ pub use ruleset::{
     RulesetBehavior, RulesetConversion, RulesetConversionError, RulesetConversionResult,
     RulesetConverter,
 };
-pub use substore::{SubStoreClient, SubStoreItem, SubStoreItemKind, SubStoreSnapshot};
 pub use system_proxy::{
     NativePropertyListError, PacError, PacProxyStatus, PacServer, PacServerOperation,
     PacServerStatus, ProxyEndpointStatus, SystemProxyBackendKind, SystemProxyBackendUnavailable,

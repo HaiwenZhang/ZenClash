@@ -33,7 +33,7 @@ fn network_health_uses_probe_results_and_offers_retry_after_total_failure(cx: &m
             })),
         };
         let succeeded = ip_ok || latency_ok;
-        assert_eq!(network::model::diagnostic_step_succeeded(&step), succeeded);
+        assert_eq!(step.succeeded(), succeeded);
         cx.update_window(window, |_, window, cx| {
             page.update(cx, |page, cx| {
                 page.invalidate_page_load();

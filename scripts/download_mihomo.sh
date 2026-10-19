@@ -26,7 +26,9 @@ for command_name in curl jq gzip; do
   fi
 done
 
-asset_name="mihomo-${platform}-${arch}-${version}.gz"
+asset_arch="${arch}"
+if [[ "${arch}" == amd64 ]]; then asset_arch=amd64-v1; fi
+asset_name="mihomo-${platform}-${asset_arch}-${version}.gz"
 api_url="https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/${version}"
 work_dir="$(mktemp -d)"
 release_json="${work_dir}/release.json"
