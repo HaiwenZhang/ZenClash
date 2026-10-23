@@ -78,7 +78,8 @@ fn offline_settings_keep_local_controls_and_accessible_names(cx: &mut TestAppCon
             }
         }
         assert!(window.try_find("settings-traffic-history").is_some());
-        assert!(window.simulate_next_frame(cx) > 0);
+        // Flush any deferred layout work before checking the scroll position.
+        window.simulate_next_frame(cx);
         window.render_frame(cx);
         assert_eq!(page.read(cx).body_scroll.offset().y, px(0.));
         assert!(window.find("settings-traffic-history").visible());

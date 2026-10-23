@@ -192,14 +192,14 @@ async fn backup_changed_activated_candidate_is_rejected_before_local_reload() {
 
 #[tokio::test]
 async fn backup_local_apply_and_outer_rollback_recover_held_deleted_resources() {
-    let fixture = Fixture::new("geodata-backup-transaction-recovery", false).await;
+    let mut fixture = Fixture::new("geodata-backup-transaction-recovery", false).await;
     let pid = fixture.child.process.snapshot().pid;
     let (prepared, application) = fixture
         .manager
         .prepare_backup_restore(fixture.prepare())
         .await
         .unwrap();
-    let home = &fixture.child.process.launch_config().home_dir;
+    let home = fixture.child.process.launch_config().home_dir.clone();
     fs::remove_file(home.join("nodes.yaml")).unwrap();
     fs::remove_file(home.join("cert.pem")).unwrap();
     let admission = fixture
@@ -295,16 +295,7 @@ async fn backup_local_apply_and_outer_rollback_recover_held_deleted_resources() 
         .await
         .unwrap();
     fs::write(store.runtime_path(), &accepted).unwrap();
-    fixture.child.abort_responder();
-    tokio::task::yield_now().await;
-    let address = fixture
-        .child
-        .process
-        .launch_config()
-        .endpoint
-        .controller
-        .trim_start_matches("http://");
-    let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+    let listener = fixture.child.take_responder_listener().await;
     let mode = Arc::new(std::sync::atomic::AtomicU8::new(0));
     let requests = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let server_mode = mode.clone();

@@ -40,14 +40,14 @@ async fn local_recovery_launch_tracks_actual_owner_and_clears_for_external_bindi
 
 #[tokio::test]
 async fn maintenance_restart_failure_invalidates_an_observation_of_the_old_child() {
-    let fixture = ChildFixture::new("maintenance-restart-failure").await;
+    let mut fixture = ChildFixture::new("maintenance-restart-failure").await;
     let session = CoreSession::open(
         CoreKind::Mihomo,
         MihomoClient::from_process(fixture.process.clone()).unwrap(),
     )
     .unwrap();
     let previous_version = session.generation();
-    fixture.responder.abort();
+    drop(fixture.take_responder_listener().await);
     assert!(
         session
             .maintain_with_timeout(CoreMaintenanceIntent::Restart, Duration::from_millis(100))

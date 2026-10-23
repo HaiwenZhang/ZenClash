@@ -122,6 +122,18 @@ impl RuntimePageFixture {
     }
 
     pub(in crate::pages::runtime) fn with_controller(controller: String) -> Self {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        Self::with_controller_and_runtime(controller, runtime)
+    }
+
+    pub(in crate::pages::runtime) fn with_controller_and_runtime(
+        controller: String,
+        runtime: tokio::runtime::Runtime,
+    ) -> Self {
         let root = runtime_page_test_directory("review");
         let profiles = ProfileStore::new(root.join("profiles")).unwrap();
         let source = root.join("source.yaml");
@@ -130,11 +142,6 @@ impl RuntimePageFixture {
         let profile = profiles.activate(&record.id).unwrap();
         let overrides = YamlOverrideStore::new(root.join("overrides")).unwrap();
         let controlled = ControlledConfigStore::new(root.join("controlled"));
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
         let endpoint = zenclash_core::MihomoEndpoint::new("http://127.0.0.1:1", "");
         let client = MihomoClient::new(zenclash_core::MihomoEndpoint::new(controller, "")).unwrap();
         let core = CoreSession::open_with_config(

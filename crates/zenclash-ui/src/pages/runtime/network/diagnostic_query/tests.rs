@@ -8,26 +8,40 @@ use zenclash_core::{
 struct DiagnosticFixture {
     core: CoreSession,
     status: Arc<OperationalStatus>,
-    runtime: Handle,
     _fixture: Fixture,
 }
 
 impl DiagnosticFixture {
     fn new() -> Self {
-        let fixture = Fixture::new();
+        // Drive background sampling only inside block_on, so it cannot contend
+        // with the synchronous publication guard during state-machine assertions.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        Self::with_fixture(Fixture::with_controller_and_runtime(
+            "http://127.0.0.1:1".to_owned(),
+            runtime,
+        ))
+    }
+
+    fn with_fixture(fixture: Fixture) -> Self {
         let services = fixture.services();
         Self {
             core: services.core_session,
             status: services.operational_status,
-            runtime: services.runtime,
             _fixture: fixture,
         }
+    }
+
+    fn runtime(&self) -> &tokio::runtime::Runtime {
+        self._fixture.runtime.as_ref().unwrap()
     }
 }
 
 fn observed(fixture: &DiagnosticFixture, dns_name: &str) -> ObservedNetworkDiagnostic {
     let observation = fixture
-        .runtime
+        .runtime()
         .block_on(fixture.core.begin_observation())
         .unwrap();
     let latency = NetworkLatencyResult {
@@ -159,7 +173,7 @@ fn runtime_replacement_rejects_the_original_diagnostic_result() {
     let request = query.begin(NetworkProbeRoutePreference::Direct);
     let result = observed(&fixture, "retired.example");
     fixture
-        .runtime
+        .runtime()
         .block_on(
             fixture
                 .core
@@ -179,7 +193,7 @@ fn admitted_data_application_blocks_both_presentation_and_path_publication() {
     let request = query.begin(NetworkProbeRoutePreference::Direct);
     let result = observed(&fixture, "original.example");
     let admission = fixture
-        .runtime
+        .runtime()
         .block_on(fixture.core.begin_data_application())
         .unwrap();
     let before = fixture.status.snapshot().path;
@@ -219,13 +233,13 @@ fn current_query_failure_cannot_pair_a_new_error_with_an_old_report() {
 #[test]
 fn query_drop_aborts_its_owned_read_task() {
     let fixture = DiagnosticFixture::new();
-    let pending = fixture.runtime.spawn(std::future::pending::<()>());
+    let pending = fixture.runtime().spawn(std::future::pending::<()>());
     let mut query = NetworkDiagnosticQueryState::default();
     query.begin_pending_for_test(&pending);
     drop(query);
     assert!(
         fixture
-            .runtime
+            .runtime()
             .block_on(pending)
             .unwrap_err()
             .is_cancelled()
@@ -238,7 +252,7 @@ fn starting_a_diagnostic_reads_its_pinned_runtime_configuration_before_probing()
 
     let fixture = DiagnosticFixture::new();
     let listener = fixture
-        .runtime
+        .runtime()
         .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
         .unwrap();
     let session = CoreSession::open(
@@ -252,13 +266,13 @@ fn starting_a_diagnostic_reads_its_pinned_runtime_configuration_before_probing()
     .unwrap();
     let mut query = NetworkDiagnosticQueryState::default();
     let (_, task) = query.start(
-        &fixture.runtime,
+        fixture.runtime().handle(),
         session,
         fixture.status.clone(),
         DiagnosticPlan::new("submitted.example", PublicIpProvider::IpSb, Vec::new()).unwrap(),
         NetworkProbeRoutePreference::Direct,
     );
-    fixture.runtime.block_on(async {
+    fixture.runtime().block_on(async {
         let (mut stream, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
             .await
             .unwrap()
@@ -286,7 +300,7 @@ fn dns_details_keep_the_completed_query_name_after_the_input_draft_changes(
     use gpui_kit::AppContext;
     use gpui_kit::test::TestWindowExt;
 
-    let fixture = DiagnosticFixture::new();
+    let fixture = DiagnosticFixture::with_fixture(Fixture::new());
     let (window, page) = crate::pages::runtime::test_support::open_runtime_page_window(
         cx,
         &fixture._fixture,

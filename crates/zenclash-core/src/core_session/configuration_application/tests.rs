@@ -86,7 +86,7 @@ async fn local_config_applies_checked_payload_after_sources_change_and_rejects_s
 async fn local_config_restart_uses_frozen_cache_and_refuses_mutable_source_launch() {
     use tokio::io::AsyncWriteExt;
     for launch_cache in [false, true] {
-        let fixture = crate::core_session::test_support::OwnedCoreFixture::new(
+        let mut fixture = crate::core_session::test_support::OwnedCoreFixture::new(
             "geodata-frozen-local-restart",
         )
         .await;
@@ -103,25 +103,7 @@ async fn local_config_restart_uses_frozen_cache_and_refuses_mutable_source_launc
         } else {
             fixture.process.clone()
         };
-        fixture.abort_responder();
-        let address = process
-            .endpoint()
-            .controller
-            .strip_prefix("http://")
-            .unwrap();
-        let listener = tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                match tokio::net::TcpListener::bind(address).await {
-                    Ok(listener) => break listener,
-                    Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
-                        tokio::task::yield_now().await
-                    }
-                    Err(error) => panic!("{error}"),
-                }
-            }
-        })
-        .await
-        .unwrap();
+        let listener = fixture.take_responder_listener().await;
         let responder = tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
                 let bytes = crate::test_support::read_controller_request(&mut stream)
@@ -188,7 +170,7 @@ async fn local_config_restart_uses_frozen_cache_and_refuses_mutable_source_launc
 #[tokio::test]
 async fn catalog_restart_reuses_final_payload_when_sources_change_after_hot_reload_attempt() {
     use tokio::io::AsyncWriteExt;
-    let fixture =
+    let mut fixture =
         crate::core_session::test_support::OwnedCoreFixture::new("geodata-catalog-frozen-restart")
             .await;
     let home = fixture.process.launch_config().home_dir.clone();
@@ -204,25 +186,7 @@ async fn catalog_restart_reuses_final_payload_when_sources_change_after_hot_relo
     let mut launch = fixture.process.launch_config().clone();
     launch.config_file = store.runtime_path();
     let process = crate::ManagedCoreProcess::spawn(launch).unwrap();
-    fixture.abort_responder();
-    let address = process
-        .endpoint()
-        .controller
-        .strip_prefix("http://")
-        .unwrap();
-    let listener = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            match tokio::net::TcpListener::bind(address).await {
-                Ok(listener) => break listener,
-                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
-                    tokio::task::yield_now().await
-                }
-                Err(error) => panic!("{error}"),
-            }
-        }
-    })
-    .await
-    .unwrap();
+    let listener = fixture.take_responder_listener().await;
     let changed_profile = profile.clone();
     let changed_override = override_path.clone();
     let controlled_patch = store.root().join("override.yaml");

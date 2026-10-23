@@ -2,16 +2,21 @@
 use super::read_controller_request;
 use crate::{CoreKind, CoreLaunchConfig, ManagedCoreProcess, MihomoEndpoint};
 use std::{path::PathBuf, process::Command, sync::Arc, time::Duration};
-use tokio::{io::AsyncWriteExt, task::JoinHandle};
+use tokio::{io::AsyncWriteExt, net::TcpListener, task::JoinHandle};
 pub(crate) struct OwnedCoreFixture {
     pub(crate) process: Arc<ManagedCoreProcess>,
     pub(in crate::core_session) directory: PathBuf,
-    pub(in crate::core_session) responder: JoinHandle<()>,
+    responder: JoinHandle<()>,
+    listener: Option<Arc<TcpListener>>,
 }
 
 impl OwnedCoreFixture {
-    pub(crate) fn abort_responder(&self) {
+    pub(crate) async fn take_responder_listener(&mut self) -> TcpListener {
         self.responder.abort();
+        assert!((&mut self.responder).await.unwrap_err().is_cancelled());
+        // Transfer the bound socket only after the old task releases its clone.
+        // Rebinding the address races task cancellation and TCP socket cleanup.
+        Arc::try_unwrap(self.listener.take().unwrap()).unwrap()
     }
 
     pub(crate) async fn new(label: &str) -> Self {
@@ -58,12 +63,15 @@ impl OwnedCoreFixture {
         let config = directory.join(relative);
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         std::fs::write(&config, "rules:\n  - MATCH,DIRECT\n").unwrap();
-        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .unwrap();
+        let listener = Arc::new(
+            TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .await
+                .unwrap(),
+        );
         let address = listener.local_addr().unwrap();
+        let responder_listener = listener.clone();
         let responder = tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
+            while let Ok((mut stream, _)) = responder_listener.accept().await {
                 match read_controller_request(&mut stream).await {
                     Ok(_) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => continue,
@@ -90,6 +98,7 @@ impl OwnedCoreFixture {
             process,
             directory,
             responder,
+            listener: Some(listener),
         }
     }
 }
