@@ -144,6 +144,15 @@ impl LogsView {
     }
 
     pub(super) fn release_results(&mut self, cx: &mut Context<Self>) {
+        let was_active = self.context.as_ref().is_some_and(|context| context.active);
+        let had_state = self.loading
+            || !self.presentation.entries.is_empty()
+            || self.last_refresh.is_some()
+            || self.level.is_some()
+            || self.pending_entries != 0
+            || self.selected.is_some()
+            || self.paused
+            || was_active;
         self.cancel_refresh();
         self.presentation = Arc::default();
         self.last_refresh = None;
@@ -155,7 +164,9 @@ impl LogsView {
         if let Some(context) = &mut self.context {
             context.active = false;
         }
-        cx.notify();
+        if had_state {
+            cx.notify();
+        }
     }
 
     pub(super) fn new(
@@ -207,11 +218,15 @@ impl LogsView {
     }
 
     pub(super) fn suspend_presentation(&mut self, cx: &mut Context<Self>) {
+        let was_loading = self.loading;
+        let was_active = self.context.as_ref().is_some_and(|context| context.active);
         self.cancel_refresh();
         if let Some(context) = &mut self.context {
             context.active = false;
         }
-        cx.notify();
+        if was_loading || was_active {
+            cx.notify();
+        }
     }
 
     pub(super) fn set_context(&mut self, context: LogViewContext, cx: &mut Context<Self>) {

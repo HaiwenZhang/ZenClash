@@ -59,10 +59,13 @@ impl WavePercentage {
 }
 
 impl RenderOnce for WavePercentage {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let value = self.value;
         let waves = WaveSurface { value, phase: 0. };
-        let waves = if self.animated && value.is_some_and(|value| value > 0. && value < 100.) {
+        let waves = if self.animated
+            && window.is_window_active()
+            && value.is_some_and(|value| value > 0. && value < 100.)
+        {
             waves
                 .with_animation(
                     "water-phase",
@@ -212,6 +215,31 @@ mod tests {
         assert_eq!(
             window
                 .update(cx, |_, window, cx| window.simulate_next_frame(cx))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[gpui_kit::test]
+    fn inactive_window_does_not_schedule_animation_frames(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{AppContext, VisualTestContext};
+        cx.update(gpui_kit::init);
+        cx.update(|cx| cx.set_reduce_motion(false));
+        let window = cx.open_window(
+            gpui_kit::size(gpui_kit::px(240.), gpui_kit::px(240.)),
+            |window, cx| {
+                let view = cx.new(|_| WaveHost);
+                gpui_kit::component::Root::new(view, window, cx)
+            },
+        );
+        VisualTestContext::from_window(window.into(), cx).deactivate_window();
+        cx.run_until_parked();
+        assert_eq!(
+            window
+                .update(cx, |_, window, cx| {
+                    assert!(!window.is_window_active());
+                    window.simulate_next_frame(cx)
+                })
                 .unwrap(),
             0
         );

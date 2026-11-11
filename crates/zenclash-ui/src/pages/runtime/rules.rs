@@ -153,6 +153,15 @@ impl RulesView {
     }
 
     pub(super) fn release_presentation(&mut self, cx: &mut Context<Self>) {
+        let was_active = self.context.as_ref().is_some_and(|context| context.active);
+        let had_state = self.projecting
+            || self.source.is_some()
+            || self.observation.is_some()
+            || self.projection.is_some()
+            || !self.confirmed_disabled.is_empty()
+            || self.selected.is_some()
+            || self.details.is_some()
+            || was_active;
         self.cancel_projection();
         self.source = None;
         self.observation = None;
@@ -163,7 +172,9 @@ impl RulesView {
         if let Some(context) = &mut self.context {
             context.active = false;
         }
-        cx.notify();
+        if had_state {
+            cx.notify();
+        }
     }
 
     pub(super) fn is_snapshot_retainable(&self) -> bool {

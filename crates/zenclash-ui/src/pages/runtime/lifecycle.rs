@@ -569,6 +569,12 @@ impl RuntimePage {
                 this.set_window_visible(visibility.is_visible(), cx);
             });
         this._subscriptions.push(window_visibility_subscription);
+        let window_activation_subscription = cx.observe_window_activation(window, |this, _, cx| {
+            if this.page == Page::Home && this.live_updates_enabled() {
+                cx.notify();
+            }
+        });
+        this._subscriptions.push(window_activation_subscription);
         let feedback_subscription = cx.observe_in(&cx.entity(), window, |this, _, window, cx| {
             this.publish_feedback(window, cx);
         });

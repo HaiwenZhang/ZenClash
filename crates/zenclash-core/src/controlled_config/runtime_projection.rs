@@ -19,8 +19,8 @@ impl TunProjection {
         }
     }
 
-    pub(super) fn project_payload(&self, payload: String) -> ControlledConfigResult<String> {
-        let disable_tun = match self {
+    pub(super) fn should_disable_tun(&self) -> bool {
+        match self {
             Self::PreserveIntent => false,
             Self::Disabled => true,
             Self::FollowRuntimeBinding(binding) => binding.upgrade().is_some_and(|binding| {
@@ -29,8 +29,22 @@ impl TunProjection {
                     && runtime.backend() == crate::CoreRuntimeBackend::Local
                     && !crate::current_process_elevated()
             }),
-        };
-        if !disable_tun {
+        }
+    }
+
+    pub(super) fn project_value(&self, document: &mut Value) {
+        if !self.should_disable_tun() {
+            return;
+        }
+        let mut tun = serde_yaml::Mapping::new();
+        tun.insert(Value::String("enable".into()), Value::Bool(false));
+        let mut patch = serde_yaml::Mapping::new();
+        patch.insert(Value::String("tun".into()), Value::Mapping(tun));
+        merge_controlled_yaml(document, Value::Mapping(patch));
+    }
+
+    pub(super) fn project_payload(&self, payload: String) -> ControlledConfigResult<String> {
+        if !self.should_disable_tun() {
             return Ok(payload);
         }
         Ok(crate::profile::merge_payload_patch(
@@ -111,6 +125,17 @@ impl ControlledConfigStore {
                 current: fallback.current,
             })
             .collect())
+    }
+
+    pub(super) fn apply_session_listener_fallbacks_to_value(
+        &self,
+        document: &mut Value,
+    ) -> ControlledConfigResult<()> {
+        self.tun_projection.project_value(document);
+        let session = self.session_listener_fallbacks.lock();
+        apply_session_fallbacks_to_value(document, &session)
+            .map_err(ControlledConfigError::ListenerFallback)?;
+        Ok(())
     }
 
     pub(super) fn apply_session_listener_fallbacks(

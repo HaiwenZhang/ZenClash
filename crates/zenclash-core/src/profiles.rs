@@ -37,7 +37,9 @@ use validation::{
     normalized_profile_name, normalized_remote_url, normalized_user_agent, unique_id,
     unix_timestamp,
 };
-pub(crate) use validation::{safe_profile_file_name, validate_catalog_records};
+pub(crate) use validation::{
+    safe_profile_file_name, validate_catalog_records, validate_clash_yaml_value,
+};
 
 const DEFAULT_USER_AGENT: &str = "clash.meta";
 /// Default automatic refresh cadence for remote profiles.

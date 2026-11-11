@@ -418,6 +418,7 @@ impl RuntimePage {
                                     zenclash_i18n::text("profiles.design.used"),
                                 )
                                 .diameter(9.)
+                                .animated(self.live_updates_enabled())
                                 .value(
                                     quota.filter(|value| value.total > 0).map(|value| {
                                         100. * normalized_fraction(value.used(), value.total)

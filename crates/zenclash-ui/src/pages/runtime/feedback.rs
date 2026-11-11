@@ -14,7 +14,15 @@ impl RuntimePage {
             FeedbackKind::Error,
             self.startup_error.clone(),
         );
-        add("runtime-error", FeedbackKind::Error, self.error.clone());
+        add(
+            "runtime-error",
+            FeedbackKind::Error,
+            self.error.clone().or_else(|| {
+                self.loading
+                    .then(|| self.feedback_notifications.current_message("runtime-error"))
+                    .flatten()
+            }),
+        );
         add("runtime-notice", FeedbackKind::Success, self.notice.clone());
         match self.page {
             Page::Home | Page::Settings => {
