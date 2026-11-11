@@ -18,7 +18,7 @@ service-ipc-tests = ["hyper/server", "zenclash-service/standalone", "zenclash-se
 
 [dependencies]
 anyhow = "1.0.104"
-arc-swap = "1.9.2"
+arc-swap = "1.9.5"
 chrono.workspace = true
 cron.workspace = true
 flate2.workspace = true
@@ -39,7 +39,7 @@ serde_path_to_error.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true
 socket2.workspace = true
-sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite = { workspace = true, features = ["connect", "rustls-tls-webpki-roots"] }

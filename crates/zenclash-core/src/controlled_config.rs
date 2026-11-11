@@ -46,8 +46,8 @@ use runtime_application::{
 pub(crate) use runtime_application::{
     RuntimeApplicationTransaction, RuntimeCandidateValidation, RuntimeMutationError,
 };
-use runtime_normalization::{normalize_partial_tun_payload, normalize_runtime_value};
 pub(crate) use runtime_normalization::normalize_runtime_payload;
+use runtime_normalization::{normalize_partial_tun_payload, normalize_runtime_value};
 
 #[cfg(test)]
 mod tests;
