@@ -3,7 +3,7 @@
 name = "zenclash-service"
 version = "2.7.5+zenclash.2"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.99"
 authors = ["Tunglies", "ZenClash contributors"]
 license = "GPL-3.0-only"
 readme = "README.md"
