@@ -1214,7 +1214,7 @@ fn subscription_form_preserves_geometry_draft_and_focus_across_rem_zoom(cx: &mut
                 assert_eq!(window.rem_size(), px(font));
                 assert!(window.has_active_dialog(cx));
                 let field = window.find("subscription-user-agent-field").bounds();
-                let dialog = window.within("dialog").find(0usize).bounds();
+                let dialog = window.within("dialog").find("surface").bounds();
                 assert!(field.size.width > px(0.));
                 if dimensions.width == px(1280.) {
                     wide_dialog_ratios.push(f32::from(dialog.size.width) / font);
