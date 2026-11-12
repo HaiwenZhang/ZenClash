@@ -1219,7 +1219,7 @@ fn read_authoritative_snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
 fn archive_names(path: &Path) -> Vec<String> {
     let mut zip = ZipArchive::new(fs::File::open(path).unwrap()).unwrap();
     (0..zip.len())
-        .map(|index| zip.by_index(index).unwrap().name().to_owned())
+        .map(|index| zip.by_index(index).unwrap().name().unwrap().into_owned())
         .collect()
 }
 
@@ -1228,7 +1228,7 @@ fn rewrite_archive(source: &Path, destination: &Path, mutate: impl Fn(&str, &mut
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
     for index in 0..reader.len() {
         let mut entry = reader.by_index(index).unwrap();
-        let name = entry.name().to_owned();
+        let name = entry.name().unwrap().into_owned();
         let mut bytes = Vec::new();
         entry.read_to_end(&mut bytes).unwrap();
         mutate(&name, &mut bytes);
@@ -1245,7 +1245,7 @@ fn make_legacy_v1_archive(source: &Path, destination: &Path) {
     let mut entries = Vec::new();
     for index in 0..reader.len() {
         let mut entry = reader.by_index(index).unwrap();
-        let name = entry.name().to_owned();
+        let name = entry.name().unwrap().into_owned();
         let mut bytes = Vec::new();
         entry.read_to_end(&mut bytes).unwrap();
         if !name.starts_with("yaml-overrides/") {

@@ -123,16 +123,15 @@ fn extract_and_validate(archive_path: &Path, staging_root: &Path) -> BackupResul
 }
 
 fn validate_entry_type<R: Read + ?Sized>(entry: &zip::read::ZipFile<'_, R>) -> BackupResult<()> {
+    let name = entry.name()?;
     if entry.encrypted() {
         return Err(BackupError::InvalidArchive(format!(
-            "不支持加密条目 {}",
-            entry.name()
+            "不支持加密条目 {name}"
         )));
     }
     if entry.is_dir() || entry.is_symlink() {
         return Err(BackupError::InvalidArchive(format!(
-            "条目必须是普通文件：{}",
-            entry.name()
+            "条目必须是普通文件：{name}"
         )));
     }
     Ok(())
@@ -298,9 +297,10 @@ fn validate_profile_file_set(staging_root: &Path, catalog: &ProfileCatalog) -> B
 fn normalized_archive_path<R: Read + ?Sized>(
     entry: &zip::read::ZipFile<'_, R>,
 ) -> BackupResult<String> {
-    let enclosed = entry.enclosed_name().ok_or_else(|| {
-        BackupError::InvalidArchive(format!("不安全的 ZIP 路径 {}", entry.name()))
-    })?;
+    let name = entry.name()?;
+    let enclosed = entry
+        .enclosed_name()
+        .ok_or_else(|| BackupError::InvalidArchive(format!("不安全的 ZIP 路径 {name}")))?;
     let normalized = enclosed
         .components()
         .map(|component| match component {
@@ -309,16 +309,14 @@ fn normalized_archive_path<R: Read + ?Sized>(
                 .map(str::to_owned)
                 .ok_or_else(|| BackupError::InvalidArchive("ZIP 路径不是 UTF-8".into())),
             _ => Err(BackupError::InvalidArchive(format!(
-                "不安全的 ZIP 路径 {}",
-                entry.name()
+                "不安全的 ZIP 路径 {name}"
             ))),
         })
         .collect::<BackupResult<Vec<_>>>()?
         .join("/");
-    if normalized != entry.name() {
+    if normalized != name.as_ref() {
         return Err(BackupError::InvalidArchive(format!(
-            "ZIP 路径未规范化：{}",
-            entry.name()
+            "ZIP 路径未规范化：{name}"
         )));
     }
     Ok(normalized)

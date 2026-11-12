@@ -69,7 +69,7 @@ jobs:
       - name: Set up minimum Rust
         uses: ./.github/actions/setup-rust
         with:
-          version: "1.98.1"
+          version: "1.99.1"
 
       - name: Install Linux dependencies
         run: sudo scripts/install_linux_build_deps.sh

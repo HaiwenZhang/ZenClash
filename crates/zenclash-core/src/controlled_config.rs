@@ -14,8 +14,8 @@ use crate::{
     CoreKind, ManagedCoreProcess, MihomoClient, MihomoError,
     data_coordinator::{DataWriteAccess, DataWriteLease, shared_transaction},
     listener_fallback::{
-        SessionListenerFallback, apply_session_fallbacks, resolve_conflicts,
-        validate_listener_change,
+        SessionListenerFallback, apply_session_fallbacks, apply_session_fallbacks_to_value,
+        resolve_conflicts, validate_listener_change,
     },
     profile::{merge_controlled_yaml, merge_payload_overrides, merge_profile_patch, merge_yaml},
     profiles::{MAX_PROFILE_BYTES, atomic_write, read_profile_bytes},
@@ -46,8 +46,8 @@ use runtime_application::{
 pub(crate) use runtime_application::{
     RuntimeApplicationTransaction, RuntimeCandidateValidation, RuntimeMutationError,
 };
-use runtime_normalization::normalize_partial_tun_payload;
 pub(crate) use runtime_normalization::normalize_runtime_payload;
+use runtime_normalization::{normalize_partial_tun_payload, normalize_runtime_value};
 
 #[cfg(test)]
 mod tests;

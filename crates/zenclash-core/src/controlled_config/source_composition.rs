@@ -3,6 +3,30 @@
 use super::*;
 
 impl ControlledConfigStore {
+    pub(super) fn effective_value(&self, profile: &Path) -> ControlledConfigResult<Value> {
+        let patch = self.load()?;
+        let mut document = crate::profile::merge_profile_patch_value(profile, patch)?;
+        crate::profile::validate_profile_value(&document)?;
+        self.tun_projection.project_value(&mut document);
+        crate::profile::validate_profile_value(&document)?;
+        Ok(document)
+    }
+
+    pub(super) fn effective_value_with_overrides(
+        &self,
+        profile: &Path,
+        overrides: &[PathBuf],
+    ) -> ControlledConfigResult<Value> {
+        let mut document = self.effective_value(profile)?;
+        if !overrides.is_empty() {
+            crate::profile::merge_value_overrides(&mut document, overrides)?;
+            crate::profile::validate_profile_value(&document)?;
+            self.tun_projection.project_value(&mut document);
+            crate::profile::validate_profile_value(&document)?;
+        }
+        Ok(document)
+    }
+
     /// Builds effective YAML for `profile` without modifying its source file.
     ///
     /// # Errors
@@ -10,9 +34,8 @@ impl ControlledConfigStore {
     /// Returns an error when the controlled layer or source profile cannot be
     /// read, parsed, merged, validated, or serialized.
     pub fn effective_payload(&self, profile: impl AsRef<Path>) -> ControlledConfigResult<String> {
-        let patch = self.load()?;
-        self.tun_projection
-            .project_payload(merge_profile_patch(profile.as_ref(), patch)?)
+        let document = self.effective_value(profile.as_ref())?;
+        Ok(crate::profile::serialize_profile(&document)?)
     }
 
     /// Reads the untouched UTF-8 source profile for diagnostics and previews.
@@ -45,8 +68,7 @@ impl ControlledConfigStore {
         &self,
         profile: impl AsRef<Path>,
     ) -> ControlledConfigResult<serde_json::Value> {
-        let payload = self.effective_payload(profile)?;
-        let yaml = serde_yaml::from_str::<Value>(&payload)?;
+        let yaml = self.effective_value(profile.as_ref())?;
         Ok(serde_json::to_value(yaml)?)
     }
 
@@ -62,9 +84,8 @@ impl ControlledConfigStore {
         profile: impl AsRef<Path>,
         overrides: &[PathBuf],
     ) -> ControlledConfigResult<String> {
-        let payload = self.effective_payload(profile)?;
-        self.tun_projection
-            .project_payload(merge_payload_overrides(&payload, overrides)?)
+        let document = self.effective_value_with_overrides(profile.as_ref(), overrides)?;
+        Ok(crate::profile::serialize_profile(&document)?)
     }
 
     pub(super) fn effective_source_with_overrides(
@@ -72,10 +93,12 @@ impl ControlledConfigStore {
         source: crate::profile::ProfileRuntimeSource,
         overrides: &[PathBuf],
     ) -> ControlledConfigResult<String> {
-        let payload = match source {
-            crate::profile::ProfileRuntimeSource::File(path) => self.effective_payload(path)?,
+        let mut document = match source {
+            crate::profile::ProfileRuntimeSource::File(path) => self.effective_value(&path)?,
             crate::profile::ProfileRuntimeSource::Frozen(payload) => {
-                crate::profile::merge_payload_patch(&payload, self.load()?)?
+                let document = crate::profile::merge_payload_patch_value(&payload, self.load()?)?;
+                crate::profile::validate_profile_value(&document)?;
+                document
             }
             crate::profile::ProfileRuntimeSource::Prepared(candidate) => {
                 let _transaction = self.transaction.lock();
@@ -89,8 +112,12 @@ impl ControlledConfigStore {
                 return Ok(update.next_payload);
             }
         };
-        self.tun_projection
-            .project_payload(merge_payload_overrides(&payload, overrides)?)
+        if !overrides.is_empty() {
+            crate::profile::merge_value_overrides(&mut document, overrides)?;
+            crate::profile::validate_profile_value(&document)?;
+        }
+        self.tun_projection.project_value(&mut document);
+        Ok(crate::profile::serialize_profile(&document)?)
     }
 
     /// Builds the final effective profile as JSON after ordered YAML overrides.
@@ -103,8 +130,7 @@ impl ControlledConfigStore {
         profile: impl AsRef<Path>,
         overrides: &[PathBuf],
     ) -> ControlledConfigResult<serde_json::Value> {
-        let payload = self.effective_with_overrides(profile, overrides)?;
-        let yaml = serde_yaml::from_str::<Value>(&payload)?;
+        let yaml = self.effective_value_with_overrides(profile.as_ref(), overrides)?;
         Ok(serde_json::to_value(yaml)?)
     }
 
@@ -212,19 +238,20 @@ impl ControlledConfigStore {
         overrides: &[PathBuf],
     ) -> ControlledConfigResult<Option<[u8; 32]>> {
         use sha2::{Digest, Sha256};
-        let candidate =
-            normalize_runtime_payload(kind, self.effective_with_overrides(profile, overrides)?)?;
-        let candidate = self.apply_session_listener_fallbacks(&candidate)?;
-        let candidate: Value = serde_yaml::from_str(&candidate)?;
+        let mut candidate = self.effective_value_with_overrides(profile, overrides)?;
+        normalize_runtime_value(kind, &mut candidate)?;
+        self.apply_session_listener_fallbacks_to_value(&mut candidate)?;
         if let Some(current) = self.cached_runtime_payload()? {
             let current: Value = serde_yaml::from_str(&current)?;
             if current == candidate {
                 return Ok(None);
             }
         }
-        Ok(Some(
-            Sha256::digest(serde_yaml::to_string(&candidate)?.as_bytes()).into(),
-        ))
+        let encoded = serde_yaml::to_string(&candidate)?;
+        if encoded.len() > MAX_PROFILE_BYTES {
+            return Err(ControlledConfigError::TooLarge);
+        }
+        Ok(Some(Sha256::digest(encoded.as_bytes()).into()))
     }
 
     pub(super) fn prepare_update(

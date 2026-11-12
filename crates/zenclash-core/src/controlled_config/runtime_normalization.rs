@@ -34,16 +34,24 @@ pub(super) fn normalize_partial_tun_payload(payload: String) -> ControlledConfig
     Ok(normalized)
 }
 
-pub(crate) fn normalize_runtime_payload(
+pub(super) fn normalize_runtime_value(
     _kind: CoreKind,
-    payload: String,
-) -> ControlledConfigResult<String> {
-    let mut document = serde_yaml::from_str::<Value>(&payload)?;
+    document: &mut Value,
+) -> ControlledConfigResult<bool> {
     let root = document
         .as_mapping_mut()
         .ok_or(ControlledConfigError::NotMapping)?;
     let tun_changed = crate::tun_config::normalize(root);
-    if !insert_missing_mihomo_geox_urls(root) && !tun_changed {
+    let geox_changed = insert_missing_mihomo_geox_urls(root);
+    Ok(tun_changed || geox_changed)
+}
+
+pub(crate) fn normalize_runtime_payload(
+    kind: CoreKind,
+    payload: String,
+) -> ControlledConfigResult<String> {
+    let mut document = serde_yaml::from_str::<Value>(&payload)?;
+    if !normalize_runtime_value(kind, &mut document)? {
         return Ok(payload);
     }
     let normalized = serde_yaml::to_string(&document)?;

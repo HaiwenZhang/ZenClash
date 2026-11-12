@@ -4,7 +4,7 @@ use serde_yaml::Value;
 
 use crate::{
     MihomoError, MihomoResult,
-    profiles::{MAX_PROFILE_BYTES, read_profile_bytes, validate_clash_yaml},
+    profiles::{MAX_PROFILE_BYTES, read_profile_bytes, validate_clash_yaml_value},
 };
 
 #[derive(Clone)]
@@ -32,6 +32,11 @@ impl ProfileSourceDocument {
         })
     }
 
+    pub(crate) fn into_patched_value(mut self, patch: Value) -> Value {
+        merge_controlled_yaml(&mut self.yaml, patch);
+        self.yaml
+    }
+
     pub(crate) fn patched_payload(&self, patch: Value) -> MihomoResult<String> {
         let mut document = self.yaml.clone();
         merge_controlled_yaml(&mut document, patch);
@@ -39,9 +44,14 @@ impl ProfileSourceDocument {
     }
 }
 
-pub(crate) fn merge_payload_patch(payload: &str, patch: Value) -> MihomoResult<String> {
+pub(crate) fn merge_payload_patch_value(payload: &str, patch: Value) -> MihomoResult<Value> {
     let mut document = parse_payload(payload)?;
     merge_controlled_yaml(&mut document, patch);
+    Ok(document)
+}
+
+pub(crate) fn merge_payload_patch(payload: &str, patch: Value) -> MihomoResult<String> {
+    let document = merge_payload_patch_value(payload, patch)?;
     serialize_profile(&document)
 }
 
@@ -58,23 +68,32 @@ pub fn merge_profile_overrides(
 ) -> MihomoResult<String> {
     let profile = profile.as_ref();
     let mut document = read_yaml(profile, "基础配置")?;
-    for path in overrides {
-        let patch = read_yaml(path, "覆写")?;
-        merge_yaml(&mut document, patch);
-    }
+    merge_value_overrides(&mut document, overrides)?;
     serialize_profile(&document)
+}
+
+pub(crate) fn merge_profile_patch_value(profile: &Path, patch: Value) -> MihomoResult<Value> {
+    Ok(ProfileSourceDocument::read(profile)?.into_patched_value(patch))
 }
 
 pub fn merge_profile_patch(profile: &Path, patch: Value) -> MihomoResult<String> {
     ProfileSourceDocument::read(profile)?.patched_payload(patch)
 }
 
-pub fn merge_payload_overrides(payload: &str, overrides: &[PathBuf]) -> MihomoResult<String> {
-    let mut document = parse_payload(payload)?;
+pub(crate) fn merge_value_overrides(
+    document: &mut Value,
+    overrides: &[PathBuf],
+) -> MihomoResult<()> {
     for path in overrides {
         let patch = read_yaml(path, "覆写")?;
-        merge_yaml(&mut document, patch);
+        merge_yaml(document, patch);
     }
+    Ok(())
+}
+
+pub fn merge_payload_overrides(payload: &str, overrides: &[PathBuf]) -> MihomoResult<String> {
+    let mut document = parse_payload(payload)?;
+    merge_value_overrides(&mut document, overrides)?;
     serialize_profile(&document)
 }
 
@@ -92,7 +111,13 @@ fn parse_payload(payload: &str) -> MihomoResult<Value> {
     Ok(document)
 }
 
-fn serialize_profile(document: &Value) -> MihomoResult<String> {
+pub(crate) fn validate_profile_value(document: &Value) -> MihomoResult<()> {
+    validate_clash_yaml_value(document)
+        .map_err(|error| MihomoError::Process(format!("合并后的 Mihomo 配置无效：{error}")))
+}
+
+pub(crate) fn serialize_profile(document: &Value) -> MihomoResult<String> {
+    validate_profile_value(document)?;
     let payload = serde_yaml::to_string(document).map_err(|error| {
         MihomoError::Process(format!("无法序列化合并后的 Mihomo 配置：{error}"))
     })?;
@@ -102,8 +127,6 @@ fn serialize_profile(document: &Value) -> MihomoResult<String> {
             MAX_PROFILE_BYTES / 1024 / 1024
         )));
     }
-    validate_clash_yaml(&payload)
-        .map_err(|error| MihomoError::Process(format!("合并后的 Mihomo 配置无效：{error}")))?;
     Ok(payload)
 }
 

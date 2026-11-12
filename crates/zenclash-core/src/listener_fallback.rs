@@ -174,15 +174,13 @@ pub(crate) fn resolve_conflicts(
     Ok(resolved)
 }
 
-pub(crate) fn apply_session_fallbacks(
-    payload: &str,
+pub(crate) fn apply_session_fallbacks_to_value(
+    document: &mut Value,
     session: &BTreeMap<String, SessionListenerFallback>,
-) -> Result<String, String> {
+) -> Result<bool, String> {
     if session.is_empty() {
-        return Ok(payload.to_owned());
+        return Ok(false);
     }
-    let mut document = serde_yaml::from_str::<Value>(payload)
-        .map_err(|error| format!("运行配置 YAML 无效：{error}"))?;
     let root = document
         .as_mapping_mut()
         .ok_or_else(|| "运行配置顶层必须是 YAML 映射".to_owned())?;
@@ -193,7 +191,19 @@ pub(crate) fn apply_session_fallbacks(
             changed = true;
         }
     }
-    if !changed {
+    Ok(changed)
+}
+
+pub(crate) fn apply_session_fallbacks(
+    payload: &str,
+    session: &BTreeMap<String, SessionListenerFallback>,
+) -> Result<String, String> {
+    if session.is_empty() {
+        return Ok(payload.to_owned());
+    }
+    let mut document = serde_yaml::from_str::<Value>(payload)
+        .map_err(|error| format!("运行配置 YAML 无效：{error}"))?;
+    if !apply_session_fallbacks_to_value(&mut document, session)? {
         return Ok(payload.to_owned());
     }
     serde_yaml::to_string(&document).map_err(|error| format!("无法生成端口回退配置：{error}"))

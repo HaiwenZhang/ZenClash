@@ -72,8 +72,11 @@ fn write_candidate(asset_name: &str, archive: &[u8], staging: &Path) -> CoreUpda
             .map_err(|error| CoreUpdateError::Archive(error.to_string()))?;
         let index = (0..zip.len())
             .find(|index| {
-                zip.by_index(*index)
-                    .is_ok_and(|entry| entry.name() == expected)
+                zip.by_index(*index).is_ok_and(|entry| {
+                    entry
+                        .name()
+                        .is_ok_and(|name| name.as_ref() == expected.as_str())
+                })
             })
             .ok_or_else(|| {
                 CoreUpdateError::Archive(zenclash_i18n::text_with(

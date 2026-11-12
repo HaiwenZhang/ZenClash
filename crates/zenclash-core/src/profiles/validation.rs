@@ -55,6 +55,10 @@ pub fn validate_clash_yaml(payload: &str) -> ProfileStoreResult<()> {
     }
     let document: serde_yaml::Value = serde_yaml::from_str(payload)
         .map_err(|error| ProfileStoreError::InvalidYaml(error.to_string()))?;
+    validate_clash_yaml_value(&document)
+}
+
+pub(crate) fn validate_clash_yaml_value(document: &serde_yaml::Value) -> ProfileStoreResult<()> {
     let mapping = document
         .as_mapping()
         .ok_or_else(|| ProfileStoreError::InvalidYaml("顶层必须是 YAML 映射".into()))?;

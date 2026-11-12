@@ -4,7 +4,7 @@ inputs:
   version:
     description: Rust toolchain version
     required: false
-    default: "1.99.0"
+    default: "1.99.1"
   target:
     description: Optional additional compilation target
     required: false
