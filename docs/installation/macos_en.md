@@ -9,7 +9,7 @@ This guide applies to macOS packages downloaded from the official ZenClash GitHu
 
 ## System requirements
 
-- An Apple Silicon Mac (M1, M2, M3, M4, or newer)
+- An Apple Silicon Mac (M1, M2, M3, M4, or newer) or Intel Mac
 - macOS 11 Big Sur or newer
 - An administrator account for installation and first launch
 
@@ -19,19 +19,19 @@ You can find the chip model under **Apple menu → About This Mac**, or run this
 uname -m
 ```
 
-The output must be `arm64`. The current release does not support the `x86_64` architecture used by Intel Macs.
+The output is `arm64` for Apple Silicon and `x86_64` for Intel Macs.
 
 ## Download the installer
 
 1. Open [ZenClash Releases](https://github.com/HaiwenZhang/zenclash/releases).
-2. Download `ZenClash-<version>-macOS-arm64.dmg` for the current release.
+2. Download `ZenClash-<version>-macOS-arm64.dmg` for Apple Silicon or `ZenClash-<version>-macOS-x64.dmg` for Intel.
 3. Download `SHA256SUMS` from the same release.
 
 Download ZenClash only from its official GitHub repository. A third-party repackaged file may differ from the public build.
 
 ## Verify the download
 
-Open Terminal and calculate the DMG's SHA-256 digest. Replace `<version>` with the version you downloaded:
+Open Terminal and calculate the DMG's SHA-256 digest. Replace `<version>` with the version you downloaded; for Intel, replace `arm64` with `x64`:
 
 ```sh
 cd ~/Downloads
@@ -126,10 +126,6 @@ First reopen ZenClash, disable the system proxy and TUN from the home page, and 
 4. Reinstall the app and run the `codesign --verify` command shown above.
 
 Do not force the app to run with `xattr` if its digest or signatures fail verification. Instead, open a [GitHub issue](https://github.com/HaiwenZhang/zenclash/issues) with the ZenClash version, macOS version, Mac chip, and complete error message.
-
-### ZenClash does not run on an Intel Mac
-
-The current DMG contains only the Apple Silicon `arm64` build. Intel Macs are not currently supported.
 
 ## Uninstall
 

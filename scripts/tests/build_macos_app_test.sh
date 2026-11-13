@@ -16,26 +16,26 @@ mkdir -p "${mock_bin}"
 cat >"${mock_bin}/uname" <<'EOF'
 #!/usr/bin/env bash
 [[ "${1:-}" == -m ]]
-printf 'arm64\n'
+printf '%s\n' "${MOCK_ARCH}"
 EOF
-cat >"${mock_bin}/file" <<'EOF'
+cat >"${mock_bin}/lipo" <<'EOF'
 #!/usr/bin/env bash
-printf '%s: Mach-O 64-bit executable arm64\n' "${1:?}"
+[[ "$1" == -verify_arch && "$2" == "${MOCK_ARCH}" && -f "$3" ]]
 EOF
 cat >"${mock_bin}/rustup" <<'EOF'
 #!/usr/bin/env bash
-[[ "$*" == 'target add aarch64-apple-darwin' ]]
+[[ "$*" == "target add ${MOCK_TARGET}" ]]
 EOF
 cat >"${mock_bin}/cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-output="${CARGO_TARGET_DIR}/aarch64-apple-darwin/release"
+output="${CARGO_TARGET_DIR}/${MOCK_TARGET}/release"
 mkdir -p "${output}"
 case " $* " in
   *' -p zenclash-service '*)
     [[ " $* " == *' --features standalone,client '* ]]
     [[ " $* " == *' --bin zenclash-service '* ]]
-    [[ " $* " == *' --target aarch64-apple-darwin '* ]]
+    [[ " $* " == *" --target ${MOCK_TARGET} "* ]]
     case "${MOCK_SERVICE_FAILURE:-}" in
       missing) exit 0 ;;
       empty) : >"${output}/zenclash-service" ;;
@@ -83,6 +83,7 @@ run_build() {
   # The fixed native plist utility is replaced only in this shell; the production
   # script is sourced unchanged and all copies/sign targets are real test files.
   PATH="${mock_bin}:${PATH}" \
+    MOCK_ARCH="${mock_arch}" MOCK_TARGET="${mock_triple}" \
     CARGO_TARGET_DIR="${mock_target}" \
     ZENCLASH_VERSION=9.8.7 \
     ZENCLASH_OUTPUT_DIR="${test_root}/output" \
@@ -99,10 +100,10 @@ run_build() {
 
 assert_payload_and_order() {
   cmp "${test_root}/geosite.dat" "${app_dir}/Contents/Resources/geosite.dat"
-  cmp "${mock_target}/aarch64-apple-darwin/release/zenclash-service" \
+  cmp "${mock_target}/${mock_triple}/release/zenclash-service" \
     "${app_dir}/Contents/MacOS/zenclash-service"
   for tool in zenclash-service-install zenclash-service-uninstall; do
-    cmp "${mock_target}/aarch64-apple-darwin/release/${tool}" "${app_dir}/Contents/MacOS/${tool}"
+    cmp "${mock_target}/${mock_triple}/release/${tool}" "${app_dir}/Contents/MacOS/${tool}"
     grep -Fq -- "--verify --strict --verbose=2 ${app_dir}/Contents/MacOS/${tool}" "${sign_log}"
   done
   local helper_sign helper_verify bundle_sign bundle_verify
@@ -114,9 +115,16 @@ assert_payload_and_order() {
   [[ "${helper_sign}" -lt "${helper_verify}" && "${helper_verify}" -lt "${bundle_sign}" && "${bundle_sign}" -lt "${bundle_verify}" ]]
 }
 
-run_build
-assert_payload_and_order
-grep -Fq -- '--sign - ' "${sign_log}"
+for mock_arch in arm64 x86_64; do
+  case "${mock_arch}" in
+    arm64) mock_triple=aarch64-apple-darwin ;;
+    x86_64) mock_triple=x86_64-apple-darwin ;;
+  esac
+  : >"${sign_log}"
+  run_build
+  assert_payload_and_order
+  grep -Fq -- '--sign - ' "${sign_log}"
+done
 : >"${sign_log}"
 run_build 'Fixture Developer ID'
 assert_payload_and_order
@@ -125,7 +133,7 @@ cp "${app_dir}/Contents/MacOS/zenclash-service" "${test_root}/accepted-helper"
 printf 'preserve existing bundle\n' >"${app_dir}/preserved-marker"
 
 for failure in missing empty version empty_version whitespace_version; do
-  rm -f "${mock_target}/aarch64-apple-darwin/release/zenclash-service"
+  rm -f "${mock_target}/${mock_triple}/release/zenclash-service"
   : >"${sign_log}"
   if run_build '' "${failure}" >"${test_root}/${failure}.log" 2>&1; then
     printf 'macOS packaging unexpectedly accepted %s service payload\n' "${failure}" >&2

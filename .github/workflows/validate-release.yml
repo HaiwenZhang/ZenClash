@@ -140,9 +140,19 @@ jobs:
           --exact --ignored --nocapture
 
   macos:
-    name: macOS Apple Silicon installer
+    name: macOS ${{ matrix.arch }} installer
     needs: [prepare, verify]
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-26
+            target: aarch64-apple-darwin
+          - arch: x64
+            runner: macos-26-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
       - name: Check out source
@@ -151,7 +161,7 @@ jobs:
       - name: Set up project Rust
         uses: ./.github/actions/setup-rust
         with:
-          target: aarch64-apple-darwin
+          target: ${{ matrix.target }}
 
       - name: Run shared Rust checks
         uses: ./.github/actions/verify-rust
@@ -167,8 +177,8 @@ jobs:
       - name: Upload macOS DMG
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: zenclash-macos-arm64
-          path: dist/ZenClash-${{ needs.prepare.outputs.version }}-macOS-arm64.dmg
+          name: zenclash-macos-${{ matrix.arch }}
+          path: dist/ZenClash-${{ needs.prepare.outputs.version }}-macOS-${{ matrix.arch }}.dmg
           if-no-files-found: error
           compression-level: 0
 

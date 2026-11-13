@@ -9,7 +9,7 @@
 
 ## 系统要求
 
-- Apple Silicon Mac（M1、M2、M3、M4 或更新型号）
+- Apple Silicon Mac（M1、M2、M3、M4 或更新型号）或 Intel Mac
 - macOS 11 Big Sur 或更高版本
 - 安装和首次打开时使用管理员账户
 
@@ -19,19 +19,19 @@
 uname -m
 ```
 
-输出应为 `arm64`。当前发布包不支持 Intel Mac 的 `x86_64` 架构。
+输出 `arm64` 表示 Apple Silicon，`x86_64` 表示 Intel。
 
 ## 下载安装包
 
 1. 打开 [ZenClash Releases](https://github.com/HaiwenZhang/zenclash/releases)。
-2. 下载当前版本的 `ZenClash-<version>-macOS-arm64.dmg`。
+2. 根据芯片下载当前版本的 `ZenClash-<version>-macOS-arm64.dmg`（Apple Silicon）或 `ZenClash-<version>-macOS-x64.dmg`（Intel）。
 3. 同时下载同一 Release 中的 `SHA256SUMS`。
 
 请只从 ZenClash 官方 GitHub 仓库下载。第三方重新打包的文件可能与公开构建不同。
 
 ## 校验下载文件
 
-打开“终端”，计算 DMG 的 SHA-256。将下面的 `<version>` 替换为实际版本号：
+打开“终端”，计算 DMG 的 SHA-256。将下面的 `<version>` 替换为实际版本号，Intel 用户将 `arm64` 替换为 `x64`：
 
 ```sh
 cd ~/Downloads
@@ -126,10 +126,6 @@ ZenClash 只会通知有新版本并打开官方 Release 页面，不会静默�
 4. 重新安装并运行前述 `codesign --verify` 命令。
 
 摘要或签名验证失败时，不要使用 `xattr` 强行运行；请在 [GitHub Issues](https://github.com/HaiwenZhang/zenclash/issues) 提交版本号、macOS 版本、Mac 芯片和完整错误信息。
-
-### Intel Mac 无法运行
-
-当前 DMG 仅包含 Apple Silicon `arm64` 版本，Intel Mac 暂不受支持。
 
 ## 卸载
 
