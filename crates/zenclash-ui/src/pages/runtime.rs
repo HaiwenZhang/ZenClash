@@ -180,6 +180,15 @@ pub struct ProfileActivated {
 
 impl EventEmitter<ProfileActivated> for RuntimePage {}
 
+/// Event emitted after the sole active profile is cleared with no fallback file.
+#[derive(Clone, Copy, Debug)]
+pub struct ProfileCleared {
+    /// Accepted core generation carried by the clearing transaction.
+    pub runtime_version: u64,
+}
+
+impl EventEmitter<ProfileCleared> for RuntimePage {}
+
 /// Event emitted after the active member of a Mihomo proxy group changes.
 #[derive(Clone, Copy, Debug)]
 pub struct ProxySelectionChanged;

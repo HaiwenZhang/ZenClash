@@ -608,3 +608,184 @@ fn background_latency_reordering_keeps_the_focused_measurement_control_actionabl
     cx.update_window(window, |_, window, _| window.remove_window())
         .unwrap();
 }
+
+#[gpui_kit::test]
+fn small_window_scrolls_proxy_groups_and_all_nodes_independently(cx: &mut TestAppContext) {
+    let nodes: Vec<_> = (0..120)
+        .map(|index| ProxyNode {
+            name: format!("node-{index:03}"),
+            ..Default::default()
+        })
+        .collect();
+    let catalog = ProxyCatalog::from_group_nodes(
+        (0..20)
+            .map(|index| {
+                (
+                    ProxyGroup::new(format!("group-{index:02}"))
+                        .with_behavior(ProxyGroupBehavior::Selector)
+                        .with_current_member("node-000"),
+                    nodes.clone(),
+                )
+            })
+            .collect(),
+        120,
+    );
+    let (window, page, _runtime) =
+        super::super::test_support::open_catalog_at(cx, catalog, size(px(1160.), px(460.)));
+    let panel_top = cx
+        .update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let viewport_height = window.viewport_size().height;
+            let nav_bounds = window.find("proxy-group-navigation").bounds();
+            let group_list_bounds = window.find("proxy-group-list").bounds();
+            let panel_bounds = window.find("proxy-node-panel").bounds();
+            let node_viewport = window.find("proxy-node-viewport").bounds();
+            assert!(
+                nav_bounds.bottom() <= viewport_height,
+                "navigation bottom {:?} exceeded viewport {:?}",
+                nav_bounds.bottom(),
+                viewport_height
+            );
+            assert!(
+                panel_bounds.bottom() <= viewport_height,
+                "panel bottom {:?} exceeded viewport {:?}",
+                panel_bounds.bottom(),
+                viewport_height
+            );
+            assert!(
+                node_viewport.bottom() <= viewport_height,
+                "node viewport bottom {:?} exceeded viewport {:?}",
+                node_viewport.bottom(),
+                viewport_height
+            );
+
+            let last_group = (
+                gpui_kit::ElementId::from("toggle-group"),
+                "group-19".to_owned(),
+            );
+            for _ in 0..15 {
+                window.scroll(
+                    "proxy-group-list",
+                    gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-400.))),
+                    cx,
+                );
+                window.render_frame(cx);
+                let handle = window.find(last_group.clone());
+                if handle.visible() && handle.bounds().bottom() <= group_list_bounds.bottom() {
+                    break;
+                }
+            }
+            let last_group_handle = window.find(last_group);
+            assert!(
+                last_group_handle.visible(),
+                "last proxy group was not reachable inside proxy-group-list"
+            );
+            assert!(
+                last_group_handle.bounds().bottom() <= group_list_bounds.bottom(),
+                "last group bottom {:?} exceeded group list {:?}",
+                last_group_handle.bounds().bottom(),
+                group_list_bounds.bottom()
+            );
+            assert_eq!(
+                window.find("proxy-node-panel").bounds().top(),
+                panel_bounds.top()
+            );
+            panel_bounds.top()
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        let last_node = view::proxy_element_id(
+            "select-proxy",
+            "group-00",
+            &ProxyNodeId::new("node-119".into(), None),
+        );
+        let node_viewport = window.find("proxy-node-viewport").bounds();
+        for _ in 0..40 {
+            window.scroll(
+                "proxy-node-viewport",
+                gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-600.))),
+                cx,
+            );
+            window.render_frame(cx);
+            if window.try_find(last_node.clone()).is_some_and(|node| {
+                node.visible() && node.bounds().bottom() <= node_viewport.bottom()
+            }) {
+                break;
+            }
+        }
+        let viewport_height = window.viewport_size().height;
+        let last_bounds = window.find(last_node.clone()).bounds();
+        assert!(window.find(last_node).visible());
+        assert!(
+            last_bounds.bottom() <= node_viewport.bottom()
+                && last_bounds.bottom() <= viewport_height,
+            "last node bottom {:?} fell below viewport {:?} / window {:?}",
+            last_bounds.bottom(),
+            node_viewport.bottom(),
+            viewport_height
+        );
+        assert_eq!(window.find("proxy-node-panel").bounds().top(), panel_top);
+        assert_ne!(page.read(cx).group_scroll.offset().y, px(0.));
+    })
+    .unwrap();
+    cx.update_window(window, |_, window, _| window.remove_window())
+        .unwrap();
+}
+
+#[gpui_kit::test]
+fn small_window_scrolls_compact_node_grid_to_last_node(cx: &mut TestAppContext) {
+    let nodes: Vec<_> = (0..24)
+        .map(|index| ProxyNode {
+            name: format!("node-{index:02}"),
+            ..Default::default()
+        })
+        .collect();
+    let catalog = ProxyCatalog::from_group_nodes(
+        vec![(
+            ProxyGroup::new("group")
+                .with_behavior(ProxyGroupBehavior::Selector)
+                .with_current_member("node-00"),
+            nodes,
+        )],
+        24,
+    );
+    let (window, _page, _runtime) =
+        super::super::test_support::open_catalog_at(cx, catalog, size(px(720.), px(420.)));
+    let last_node = view::proxy_element_id(
+        "select-proxy",
+        "group",
+        &ProxyNodeId::new("node-23".into(), None),
+    );
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let viewport_height = window.viewport_size().height;
+        let node_viewport = window.find("proxy-node-viewport").bounds();
+        assert!(node_viewport.bottom() <= viewport_height);
+        for _ in 0..20 {
+            window.scroll(
+                "proxy-node-viewport",
+                gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-400.))),
+                cx,
+            );
+            window.render_frame(cx);
+            let handle = window.find(last_node.clone());
+            if handle.visible() && handle.bounds().bottom() <= node_viewport.bottom() {
+                break;
+            }
+        }
+        let handle = window.find(last_node);
+        assert!(handle.visible());
+        assert!(
+            handle.bounds().bottom() <= node_viewport.bottom()
+                && handle.bounds().bottom() <= viewport_height,
+            "last compact node bottom {:?} exceeded viewport {:?} / window {:?}",
+            handle.bounds().bottom(),
+            node_viewport.bottom(),
+            viewport_height
+        );
+    })
+    .unwrap();
+    cx.update_window(window, |_, window, _| window.remove_window())
+        .unwrap();
+}

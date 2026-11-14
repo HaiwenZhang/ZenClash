@@ -1,25 +1,38 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use parking_lot::Mutex;
 use serde_yaml::{Mapping, Value};
 
 use super::{
     ControlledConfigError, ControlledConfigResult, ControlledConfigStore, ControlledConfigUpdate,
+    SessionListenerFallback,
 };
 use crate::profiles::{atomic_write, read_profile_bytes};
+
+pub(super) struct PendingSessionFallbacks {
+    target: Arc<Mutex<BTreeMap<String, SessionListenerFallback>>>,
+    next: BTreeMap<String, SessionListenerFallback>,
+}
 
 pub(super) struct RuntimeCacheTransaction {
     path: PathBuf,
     previous: Option<Vec<u8>>,
     active: bool,
+    pending_session_fallbacks: Option<PendingSessionFallbacks>,
     _write_lease: crate::data_coordinator::DataWriteLease,
 }
 
 impl RuntimeCacheTransaction {
     pub(super) fn commit(mut self) {
+        if let Some(pending) = self.pending_session_fallbacks.take() {
+            *pending.target.lock() = pending.next;
+        }
         self.active = false;
     }
 
@@ -33,6 +46,7 @@ impl RuntimeCacheTransaction {
     }
 
     pub(super) fn rollback(mut self) -> ControlledConfigResult<()> {
+        self.pending_session_fallbacks = None;
         restore_runtime_cache(&self.path, self.previous.as_deref())?;
         self.active = false;
         Ok(())
@@ -52,6 +66,14 @@ impl ControlledConfigStore {
         &self,
         payload: &str,
     ) -> ControlledConfigResult<RuntimeCacheTransaction> {
+        self.stage_runtime_payload_with_session(payload, None)
+    }
+
+    pub(super) fn stage_runtime_payload_with_session(
+        &self,
+        payload: &str,
+        next_session: Option<BTreeMap<String, SessionListenerFallback>>,
+    ) -> ControlledConfigResult<RuntimeCacheTransaction> {
         let write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
         let path = self.runtime_path();
@@ -61,6 +83,10 @@ impl ControlledConfigStore {
             path,
             previous,
             active: true,
+            pending_session_fallbacks: next_session.map(|next| PendingSessionFallbacks {
+                target: Arc::clone(&self.session_listener_fallbacks),
+                next,
+            }),
             _write_lease: write_lease,
         })
     }
@@ -80,6 +106,24 @@ impl ControlledConfigStore {
 
     pub(super) fn patch_path(&self) -> PathBuf {
         self.root.join("override.yaml")
+    }
+
+    /// Removes the generated runtime cache and resets session listener fallbacks
+    /// when no fallback profile exists after deleting the sole active profile.
+    ///
+    /// # Errors
+    /// Returns write-lease or filesystem errors other than missing files.
+    pub fn clear_runtime_cache(&self) -> ControlledConfigResult<()> {
+        let _write_lease = self.write_access.acquire()?;
+        let _transaction = self.transaction.lock();
+        let path = self.runtime_path();
+        if let Err(error) = fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error.into());
+        }
+        self.session_listener_fallbacks.lock().clear();
+        Ok(())
     }
 }
 

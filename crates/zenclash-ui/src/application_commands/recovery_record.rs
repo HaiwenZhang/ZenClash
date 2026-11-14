@@ -189,6 +189,10 @@ impl ApplicationRecoveryRecord {
         self.state.lock().accept_runtime(core.generation);
     }
 
+    pub(super) fn accept_generation(&self, generation: u64) {
+        self.state.lock().accept_runtime(generation);
+    }
+
     pub(super) fn accept_service_runtime(
         &self,
         facts: ServiceRuntimeFacts,

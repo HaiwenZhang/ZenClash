@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "0.2.2",
+    [string]$Version = "0.3.0",
     [string]$OutputDir = "",
     [string]$MihomoBinary = $env:ZENCLASH_MIHOMO_BINARY,
     [string]$GeoDataFile = $env:ZENCLASH_GEODATA_FILE,

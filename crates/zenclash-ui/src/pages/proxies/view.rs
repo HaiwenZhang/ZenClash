@@ -3,6 +3,7 @@ use gpui_kit::component::{
     Selectable, WindowExt,
     button::ButtonVariants,
     menu::{DropdownMenu, PopupMenuItem},
+    scroll::ScrollableElement,
 };
 use gpui_kit::{InteractiveElement, StatefulInteractiveElement, TestSupportExt};
 
@@ -33,87 +34,113 @@ impl ProxiesPage {
             return div().into_any_element();
         };
         let group = &catalog.groups()[selected];
-        let navigation = v_flex()
-            .id("proxy-group-navigation")
-            .test_support()
-            .w(gpui_kit::rems(17.))
-            .min_w_0()
-            .max_w_full()
-            .flex_shrink_0()
-            .gap_2()
-            .min_h_0()
-            .p_3()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.group_box)
-            .child(
-                div()
-                    .pb_2()
-                    .text_lg()
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .child(format!(
-                        "{} ({})",
-                        zenclash_i18n::text("home.proxy.groups"),
-                        self.visible_group_indices.len()
-                    )),
-            )
-            .children(visible.iter().map(|&index| {
-                let item = &catalog.groups()[index];
-                let name = item.controller_name().to_owned();
-                Button::new((gpui_kit::ElementId::from("toggle-group"), name.clone()))
-                    .accessibility_label(item.name.clone())
-                    .tooltip(item.name.clone())
-                    .ghost()
-                    .child(
-                        group_icon(&item.behavior)
-                            .size_8()
-                            .when(index == selected, |icon| icon.text_color(theme.primary)),
-                    )
-                    .when(index == selected, |this| this.bg(theme.list_active))
-                    .min_h_16()
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .min_w_0()
-                            .text_left()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                    .truncate()
-                                    .child(item.name.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .truncate()
-                                    .child(item.now.clone()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .px_2()
-                            .py_1()
-                            .rounded(theme.radius)
-                            .border_1()
-                            .border_color(theme.border)
-                            .child(group_behavior_label(&item.behavior)),
-                    )
-                    .selected(index == selected)
-                    .w_full()
-                    .min_w_0()
-                    .justify_start()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.selected_group.as_deref() != Some(name.as_str()) {
-                            this.toggle_group(&name, cx);
-                        }
-                    }))
-            }));
+        let navigation =
+            v_flex()
+                .id("proxy-group-navigation")
+                .test_support()
+                .w(gpui_kit::rems(17.))
+                .min_w_0()
+                .max_w_full()
+                .h_full()
+                .min_h_0()
+                .flex_shrink_0()
+                .rounded(theme.radius_lg)
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.group_box)
+                .overflow_hidden()
+                .child(
+                    div()
+                        .px_3()
+                        .pt_3()
+                        .pb_2()
+                        .text_lg()
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .child(format!(
+                            "{} ({})",
+                            zenclash_i18n::text("home.proxy.groups"),
+                            self.visible_group_indices.len()
+                        )),
+                )
+                .child(
+                    div()
+                        .id("proxy-group-list")
+                        .test_support()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.group_scroll)
+                        .child(v_flex().w_full().gap_2().px_3().pb_3().children(
+                            visible.iter().map(|&index| {
+                                let item = &catalog.groups()[index];
+                                let name = item.controller_name().to_owned();
+                                Button::new((
+                                    gpui_kit::ElementId::from("toggle-group"),
+                                    name.clone(),
+                                ))
+                                .accessibility_label(item.name.clone())
+                                .tooltip(item.name.clone())
+                                .ghost()
+                                .flex_shrink_0()
+                                .child(
+                                    group_icon(&item.behavior)
+                                        .size_8()
+                                        .when(index == selected, |icon| {
+                                            icon.text_color(theme.primary)
+                                        }),
+                                )
+                                .when(index == selected, |this| this.bg(theme.list_active))
+                                .min_h_16()
+                                .child(
+                                    v_flex()
+                                        .w_full()
+                                        .min_w_0()
+                                        .text_left()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                                .truncate()
+                                                .child(item.name.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .truncate()
+                                                .child(item.now.clone()),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded(theme.radius)
+                                        .border_1()
+                                        .border_color(theme.border)
+                                        .child(group_behavior_label(&item.behavior)),
+                                )
+                                .selected(index == selected)
+                                .w_full()
+                                .min_w_0()
+                                .justify_start()
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        if this.selected_group.as_deref() != Some(name.as_str()) {
+                                            this.toggle_group(&name, cx);
+                                        }
+                                    },
+                                ))
+                            }),
+                        ))
+                        .vertical_scrollbar(&self.group_scroll),
+                );
         h_flex()
+            .flex_1()
+            .min_h_0()
             .items_stretch()
             .gap_3()
             .when(!compact, |row| row.child(navigation))
@@ -123,6 +150,8 @@ impl ProxiesPage {
                     .flex_basis(gpui_kit::rems(30.))
                     .min_w_0()
                     .max_w_full()
+                    .h_full()
+                    .min_h_0()
                     .gap_3()
                     .when(compact, |column| {
                         let owner = cx.entity().downgrade();
@@ -139,7 +168,10 @@ impl ProxiesPage {
                                 .label(group.name.clone())
                                 .outline()
                                 .dropdown_caret(true)
-                                .dropdown_menu(move |mut menu, _, _| {
+                                .dropdown_menu(move |mut menu, window, _| {
+                                    menu = menu
+                                        .scrollable(true)
+                                        .max_h(window.viewport_size().height * 0.6);
                                     for (key, label) in &choices {
                                         let name = key.clone();
                                         let label = label.clone();
@@ -774,6 +806,7 @@ impl ProxiesPage {
     ) -> gpui_kit::AnyElement {
         let expanded = true;
         v_flex()
+            .flex_1()
             .min_h_0()
             .id("proxy-node-panel")
             .test_support()
@@ -823,6 +856,7 @@ impl ProxiesPage {
                 this.child(
                     v_flex()
                         .flex_1()
+                        .min_h_0()
                         .child(
                             h_flex()
                                 .px_3()

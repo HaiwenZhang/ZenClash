@@ -76,6 +76,39 @@ impl ProfileStore {
         if catalog.active.as_deref() == Some(id) {
             return Err(ProfileStoreError::ActiveProfile);
         }
+        self.remove_profile_entry(&mut catalog, id)
+    }
+
+    /// Deletes a non-active profile, or the sole remaining active profile.
+    ///
+    /// Returns `true` when the deleted profile was active (leaving `catalog.active`
+    /// cleared to `None`). When other profiles remain, deleting the active
+    /// profile still fails with [`ProfileStoreError::ActiveProfile`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the active profile is not the sole profile, when
+    /// the profile is missing, or when the file/index transaction fails.
+    pub fn delete_sole_or_inactive(&self, id: &str) -> ProfileStoreResult<bool> {
+        let _write_lease = self.write_access.acquire()?;
+        let _transaction = self.transaction.lock();
+        let mut catalog = self.load_unlocked()?;
+        let was_active = catalog.active.as_deref() == Some(id);
+        if was_active {
+            if catalog.profiles.len() > 1 {
+                return Err(ProfileStoreError::ActiveProfile);
+            }
+            catalog.active = None;
+        }
+        self.remove_profile_entry(&mut catalog, id)?;
+        Ok(was_active)
+    }
+
+    fn remove_profile_entry(
+        &self,
+        catalog: &mut super::ProfileCatalog,
+        id: &str,
+    ) -> ProfileStoreResult<()> {
         let index = catalog
             .profiles
             .iter()
@@ -84,7 +117,7 @@ impl ProfileStore {
         let previous_catalog = catalog.clone();
         let profile = catalog.profiles.remove(index);
         let path = self.profile_path(&profile);
-        self.save_unlocked(&catalog)?;
+        self.save_unlocked(catalog)?;
         if path.exists()
             && let Err(error) = fs::remove_file(&path)
         {

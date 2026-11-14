@@ -103,6 +103,7 @@ impl ControlledConfigStore {
             .accept_full_config(
                 client,
                 next_runtime,
+                None,
                 applied_payload,
                 RuntimeMutationGuards::new(mutation_guard, write_lease),
                 fallback,
@@ -165,12 +166,14 @@ impl ControlledConfigStore {
         store
             .validate_prepared_service_tun(update.clone(), expected_cache)
             .await?;
+        let next_session = update.next_session_fallbacks.clone();
         let payload = update.next_payload().to_owned();
         let previous_payload = store.cached_runtime_payload()?;
         let (transaction, kind) = store
             .accept_full_config(
                 &client,
                 payload,
+                next_session,
                 previous_payload,
                 RuntimeMutationGuards::new(mutation, lease),
                 ReloadFallback::OwnedLocal { cancelled },
@@ -288,12 +291,13 @@ impl ControlledConfigStore {
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        let payload =
-            store.validate_candidate_listeners(client.normalize_config_payload(payload)?, true)?;
+        let (payload, next_session) =
+            store.resolve_candidate_listeners(client.normalize_config_payload(payload)?, true)?;
         store
             .accept_full_config(
                 &client,
                 payload,
+                Some(next_session),
                 previous_payload,
                 RuntimeMutationGuards::new(mutation_guard, write_lease),
                 fallback,
@@ -341,12 +345,18 @@ impl ControlledConfigStore {
         &self,
         client: &MihomoClient,
         payload: String,
+        next_session_fallbacks: Option<BTreeMap<String, SessionListenerFallback>>,
         previous_payload: Option<String>,
         guards: RuntimeMutationGuards,
         fallback: ReloadFallback,
     ) -> Result<(RuntimeApplicationTransaction, crate::CoreApplyKind), RuntimeMutationError> {
         match self
-            .accept_runtime_payload_with_snapshot(client, payload.clone(), previous_payload)
+            .accept_runtime_payload_with_snapshot(
+                client,
+                payload.clone(),
+                next_session_fallbacks.clone(),
+                previous_payload,
+            )
             .await
         {
             Ok(accepted) => Ok((
@@ -378,6 +388,7 @@ impl ControlledConfigStore {
                     .accept_runtime_payload_with_restart_for_session(
                         process.clone(),
                         payload,
+                        next_session_fallbacks,
                         Some(cancelled.clone()),
                     )
                     .await
@@ -397,8 +408,9 @@ impl ControlledConfigStore {
         &self,
         client: &MihomoClient,
         payload: String,
+        next_session_fallbacks: Option<BTreeMap<String, SessionListenerFallback>>,
     ) -> ControlledConfigResult<AcceptedRuntime> {
-        self.accept_runtime_payload_for_session(client, payload)
+        self.accept_runtime_payload_for_session(client, payload, next_session_fallbacks)
             .await
             .map_err(|error| error.cause)
     }
@@ -407,27 +419,38 @@ impl ControlledConfigStore {
         &self,
         client: &MihomoClient,
         payload: String,
+        next_session_fallbacks: Option<BTreeMap<String, SessionListenerFallback>>,
     ) -> Result<AcceptedRuntime, RuntimeMutationError> {
         let previous_payload = self.cached_runtime_payload()?;
-        self.accept_runtime_payload_with_snapshot(client, payload, previous_payload)
-            .await
+        self.accept_runtime_payload_with_snapshot(
+            client,
+            payload,
+            next_session_fallbacks,
+            previous_payload,
+        )
+        .await
     }
 
     async fn accept_runtime_payload_with_snapshot(
         &self,
         client: &MihomoClient,
         payload: String,
+        next_session_fallbacks: Option<BTreeMap<String, SessionListenerFallback>>,
         previous_payload: Option<String>,
     ) -> Result<AcceptedRuntime, RuntimeMutationError> {
-        let payload = client.normalize_config_payload(payload)?;
-        let payload = self.apply_session_listener_fallbacks(&payload)?;
+        let payload = if next_session_fallbacks.is_some() {
+            payload
+        } else {
+            let payload = client.normalize_config_payload(payload)?;
+            self.apply_session_listener_fallbacks(&payload)?
+        };
         let prepared = client.prepare_runtime_payload(payload.clone()).await?;
         let worker_lease = self.write_access.acquire()?;
         let store = self.with_write_lease(&worker_lease);
         let cache_payload = payload.clone();
         let cache = tokio::task::spawn_blocking(move || {
             let _write_lease = worker_lease;
-            store.stage_runtime_payload(&cache_payload)
+            store.stage_runtime_payload_with_session(&cache_payload, next_session_fallbacks)
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
@@ -454,14 +477,19 @@ impl ControlledConfigStore {
         &self,
         process: Arc<ManagedCoreProcess>,
         payload: String,
+        next_session_fallbacks: Option<BTreeMap<String, SessionListenerFallback>>,
         cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<RuntimeCacheTransaction, RuntimeMutationError> {
         let write_lease = self
             .acquire_write_lease_for_paths(process.write_scopes())
             .await?;
         let leased_store = self.with_write_lease(&write_lease);
-        let payload = normalize_runtime_payload(process.kind(), payload)?;
-        let payload = self.apply_session_listener_fallbacks(&payload)?;
+        let payload = if next_session_fallbacks.is_some() {
+            payload
+        } else {
+            let payload = normalize_runtime_payload(process.kind(), payload)?;
+            self.apply_session_listener_fallbacks(&payload)?
+        };
         let worker_lease = leased_store.write_access.acquire()?;
         let store = leased_store.with_write_lease(&worker_lease);
         let validator = process.config_validator().with_write_lease(&worker_lease);
@@ -470,7 +498,7 @@ impl ControlledConfigStore {
             validator.validate_payload(&payload).map_err(|error| {
                 ControlledConfigError::Profile(MihomoError::Process(error.to_string()))
             })?;
-            store.stage_runtime_payload(&payload)
+            store.stage_runtime_payload_with_session(&payload, next_session_fallbacks)
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
@@ -589,9 +617,10 @@ impl ControlledConfigStore {
         let payload = tokio::task::spawn_blocking(move || store.effective_payload(profile))
             .await
             .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        let payload = leased_store.validate_candidate_listeners(payload, true)?;
+        let (payload, next_session) = leased_store
+            .resolve_candidate_listeners(client.normalize_config_payload(payload)?, true)?;
         leased_store
-            .accept_runtime_payload(client, payload)
+            .accept_runtime_payload(client, payload, Some(next_session))
             .await?
             .commit()
             .await?;
@@ -644,9 +673,10 @@ impl ControlledConfigStore {
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        let payload = leased_store.validate_candidate_listeners(payload, true)?;
+        let (payload, next_session) = leased_store
+            .resolve_candidate_listeners(client.normalize_config_payload(payload)?, true)?;
         leased_store
-            .accept_runtime_payload_for_session(client, payload)
+            .accept_runtime_payload_for_session(client, payload, Some(next_session))
             .await?
             .commit()
             .await
@@ -702,11 +732,13 @@ impl ControlledConfigStore {
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
         let payload = normalize_runtime_payload(process.kind(), payload)?;
-        let payload = leased_store.validate_candidate_listeners(payload, process.is_running())?;
+        let (payload, next_session) =
+            leased_store.resolve_candidate_listeners(payload, process.is_running())?;
         let cache = leased_store
             .accept_runtime_payload_with_restart_for_session(
                 process.clone(),
                 payload,
+                Some(next_session),
                 cancelled.clone(),
             )
             .await?;

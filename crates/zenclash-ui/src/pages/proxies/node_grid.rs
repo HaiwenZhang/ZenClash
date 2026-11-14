@@ -6,11 +6,11 @@ use std::{
 };
 
 use gpui_kit::base::ElementExt;
-use gpui_kit::component::{ActiveTheme, scroll::ScrollableElement};
+use gpui_kit::component::{ActiveTheme, scroll::ScrollableElement, v_flex};
 use gpui_kit::{
     Context, FocusHandle, InteractiveElement, IntoElement, ListAlignment, ListOffset, ListState,
-    ParentElement, Pixels, SharedString, Styled, TestSupportExt, Window, div, list,
-    prelude::FluentBuilder, rems,
+    ParentElement, Pixels, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
+    TestSupportExt, Window, div, list, prelude::FluentBuilder,
 };
 
 use super::{ProxiesPage, ProxyCatalog, ProxyGroup, ProxyNodeId};
@@ -73,6 +73,7 @@ pub(super) struct NodeGridState {
     geometry: Option<NodeGridGeometry>,
     row_focus_scopes: Vec<FocusHandle>,
     rows: ListState,
+    compact_scroll: ScrollHandle,
     measurements_stale: bool,
     row_height_hint_pending: bool,
     pending_scroll_anchor: Option<ListOffset>,
@@ -94,6 +95,7 @@ impl Default for NodeGridState {
             geometry: None,
             row_focus_scopes: Vec::new(),
             rows: ListState::new(0, ListAlignment::Top, Pixels::ZERO),
+            compact_scroll: ScrollHandle::default(),
             measurements_stale: true,
             row_height_hint_pending: false,
             pending_scroll_anchor: None,
@@ -251,6 +253,9 @@ impl ProxiesPage {
                     self.retire_node_grid_focus(window, cx);
                     self.node_grid.card_focus_scopes.clear();
                     self.node_grid.focus_restore_target = None;
+                    self.node_grid
+                        .compact_scroll
+                        .set_offset(gpui_kit::Point::default());
                 }
                 let keys = order
                     .iter()
@@ -368,7 +373,9 @@ impl ProxiesPage {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let order = self.displayed_nodes(catalog, group);
-        let mut body = div()
+        let mut body = v_flex()
+            .flex_1()
+            .min_h_0()
             .w_full()
             .when_some(self.node_grid.focus_scope.as_ref(), |this, scope| {
                 this.track_focus(scope)
@@ -399,16 +406,32 @@ impl ProxiesPage {
         if order.len() <= EXPANDED_NODE_LIMIT {
             let theme = cx.theme().clone();
             return body
-                .grid()
-                .grid_cols(columns)
-                .p_3()
-                .gap_3()
-                .children(order.iter().filter_map(|&index| {
-                    let id = &group.all[index];
-                    catalog
-                        .node(id)
-                        .map(|node| self.render_proxy(group, id, node, &theme, cx))
-                }))
+                .pt_3()
+                .child(
+                    div()
+                        .id("proxy-node-viewport")
+                        .test_support()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.node_grid.compact_scroll)
+                        .child(
+                            div()
+                                .grid()
+                                .grid_cols(columns)
+                                .w_full()
+                                .p_3()
+                                .gap_3()
+                                .children(order.iter().filter_map(|&index| {
+                                    let id = &group.all[index];
+                                    catalog
+                                        .node(id)
+                                        .map(|node| self.render_proxy(group, id, node, &theme, cx))
+                                })),
+                        )
+                        .vertical_scrollbar(&self.node_grid.compact_scroll),
+                )
                 .into_any_element();
         }
         let owner = cx.entity().downgrade();
@@ -438,6 +461,9 @@ impl ProxiesPage {
             div()
                 .id("proxy-node-viewport")
                 .test_support()
+                .flex_1()
+                .min_h_0()
+                .w_full()
                 .overflow_hidden()
                 .child(
                     list(scroll.clone(), move |row, _, cx| {
@@ -445,14 +471,7 @@ impl ProxiesPage {
                             .update(cx, |page, cx| page.render_node_grid_row(row, columns, cx))
                             .unwrap_or_else(|_| div().into_any_element())
                     })
-                    .w_full()
-                    .h(rems(36.))
-                    .max_h(
-                        self.node_grid
-                            .geometry
-                            .as_ref()
-                            .map_or(Pixels::ZERO, |geometry| geometry.height * 0.65),
-                    ),
+                    .size_full(),
                 )
                 .vertical_scrollbar(&scroll),
         );

@@ -387,18 +387,40 @@ impl RuntimePage {
     }
 
     pub(super) fn synchronize_committed_profile(&mut self, cx: &mut Context<Self>) {
+        self.synchronize_committed_profile_state(false, cx);
+    }
+
+    pub(super) fn synchronize_cleared_or_fallback_profile(&mut self, cx: &mut Context<Self>) {
+        self.synchronize_committed_profile_state(true, cx);
+    }
+
+    fn synchronize_committed_profile_state(
+        &mut self,
+        emit_when_cleared: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.synchronize_profile_recovery();
         let snapshot = self.application_commands.committed_profile();
-        let Some(path) = snapshot.profile_path else {
-            return;
-        };
-        self.profile_path = Some(path.clone());
-        self.invalidate_config_inputs(cx);
-        self.overrides.invalidate_preview();
-        cx.emit(ProfileActivated {
-            path,
-            runtime_version: snapshot.generation,
-        });
+        match snapshot.profile_path {
+            Some(path) => {
+                self.profile_path = Some(path.clone());
+                self.invalidate_config_inputs(cx);
+                self.overrides.invalidate_preview();
+                cx.emit(ProfileActivated {
+                    path,
+                    runtime_version: snapshot.generation,
+                });
+            }
+            None if emit_when_cleared => {
+                self.profile_path = None;
+                self.invalidate_config_inputs(cx);
+                self.overrides.invalidate_preview();
+                cx.emit(super::ProfileCleared {
+                    runtime_version: snapshot.generation,
+                });
+            }
+            None => {}
+        }
     }
 
     pub(super) fn synchronize_profile_recovery(&mut self) {

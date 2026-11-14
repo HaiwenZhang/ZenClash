@@ -61,8 +61,8 @@ use crate::{
         Page,
         proxies::ProxiesPage,
         runtime::{
-            PreferencesRestored, ProfileActivated, ProxySelectionChanged, RuntimeConfigApplied,
-            RuntimePage, RuntimePageServices,
+            PreferencesRestored, ProfileActivated, ProfileCleared, ProxySelectionChanged,
+            RuntimeConfigApplied, RuntimePage, RuntimePageServices,
         },
     },
 };
@@ -306,6 +306,7 @@ impl ZenClashApp {
             )
         });
         let profile_subscription = Self::subscribe_profile_events(&runtime_page, cx);
+        let profile_clear_subscription = Self::subscribe_profile_clear_events(&runtime_page, cx);
         let proxy_selection_subscription =
             Self::subscribe_proxy_selection_events(&runtime_page, cx);
         let runtime_config_subscription = Self::subscribe_runtime_config_events(&runtime_page, cx);
@@ -383,6 +384,7 @@ impl ZenClashApp {
             traffic_history_session,
             _subscriptions: vec![
                 profile_subscription,
+                profile_clear_subscription,
                 proxy_selection_subscription,
                 runtime_config_subscription,
                 preferences_subscription,
@@ -533,18 +535,37 @@ impl ZenClashApp {
             } else {
                 return;
             };
-            this.profile_path = Some(path.clone());
-            this.traffic_capture.set_profile(Some(path));
-            if this.current_page == Page::Proxies && this.main_window_visible {
-                this.proxies_page
-                    .update(cx, super::pages::proxies::ProxiesPage::profile_activated);
-            } else {
-                this.proxies_page
-                    .update(cx, |page, _| page.profile_invalidated());
-            }
-            this.restore_system_proxy(cx);
-            this.refresh_tray_menu(cx);
+            this.apply_profile_change(Some(path), cx);
         })
+    }
+
+    fn subscribe_profile_clear_events(
+        runtime_page: &Entity<RuntimePage>,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe(runtime_page, |this, _, event: &ProfileCleared, cx| {
+            let snapshot = this.application_commands.committed_profile();
+            let path = if snapshot.generation == event.runtime_version {
+                None
+            } else {
+                snapshot.profile_path
+            };
+            this.apply_profile_change(path, cx);
+        })
+    }
+
+    fn apply_profile_change(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
+        self.profile_path = path.clone();
+        self.traffic_capture.set_profile(path.clone());
+        if path.is_some() && self.current_page == Page::Proxies && self.main_window_visible {
+            self.proxies_page
+                .update(cx, super::pages::proxies::ProxiesPage::profile_activated);
+        } else {
+            self.proxies_page
+                .update(cx, |page, _| page.profile_invalidated());
+        }
+        self.restore_system_proxy(cx);
+        self.refresh_tray_menu(cx);
     }
 
     fn subscribe_proxy_selection_events(

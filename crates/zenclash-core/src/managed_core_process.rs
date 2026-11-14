@@ -27,8 +27,8 @@ mod tests;
 
 pub use launch_config::CoreLaunchConfig;
 pub use mihomo_resources::MihomoRuntimeResources;
-pub use resources::bundled_recovery_profile;
 pub(crate) use resources::service_core_source;
+pub use resources::{bundled_default_profile, bundled_recovery_profile};
 
 const MAX_LOG_LINES: usize = 1_000;
 #[cfg(unix)]

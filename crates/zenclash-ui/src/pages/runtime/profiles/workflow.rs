@@ -1,9 +1,10 @@
 //! Page presentation adapters over the shared application commands.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use zenclash_core::{
-    ControlledConfigStore, CoreApplyOutcome, ProfileStore, ProfileStoreResult, RemoteProfileOptions,
+    ControlledConfigStore, CoreApplyOutcome, CoreLifecyclePhase, ProfileStore,
+    RemoteProfileOptions, WorkspaceResources, bundled_default_profile,
 };
 
 use super::super::{Page, PageSnapshotData, load_page};
@@ -20,6 +21,20 @@ pub(super) struct UpdateOutcome {
     pub(super) refresh: Result<PageSnapshotData, String>,
     pub(super) receipt: ProfileReceipt,
     pub(super) refresh_version: u64,
+}
+
+pub(super) struct DeleteOutcome {
+    pub(super) was_active: bool,
+    pub(super) refresh: Option<PageSnapshotData>,
+    pub(super) refresh_version: u64,
+}
+
+fn fallback_default_profile() -> Option<PathBuf> {
+    bundled_default_profile().or_else(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent()?.parent()?;
+        let fallback = WorkspaceResources::new(root).default_profile();
+        fallback.is_file().then_some(fallback)
+    })
 }
 
 async fn activation_presentation(
@@ -101,8 +116,30 @@ pub(super) async fn update_remote(
     })
 }
 
-pub(super) async fn delete(store: ProfileStore, id: String) -> Result<(), String> {
-    run_store(move || store.delete(&id)).await
+pub(super) async fn delete(
+    store: ProfileStore,
+    controlled: ControlledConfigStore,
+    application_commands: ApplicationCommands,
+    id: String,
+) -> Result<DeleteOutcome, String> {
+    let outcome = application_commands
+        .delete_profile(store, controlled, id, fallback_default_profile())
+        .await?;
+    let refresh_version = application_commands.session().generation();
+    let running = !application_commands.session().is_offline_recovery()
+        && application_commands.session().lifecycle_snapshot().phase != CoreLifecyclePhase::Stopped;
+    let refresh = if outcome.was_active && running {
+        load_page(application_commands.client().clone(), Page::Profiles)
+            .await
+            .ok()
+    } else {
+        None
+    };
+    Ok(DeleteOutcome {
+        was_active: outcome.was_active,
+        refresh,
+        refresh_version,
+    })
 }
 
 pub(in super::super) async fn reload_effective(
@@ -116,22 +153,6 @@ pub(in super::super) async fn reload_effective(
         .and_then(|outcome| {
             outcome.ok_or_else(|| zenclash_i18n::text("profiles.errors.not_applied"))
         })
-}
-
-async fn run_store<T, F>(operation: F) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: FnOnce() -> ProfileStoreResult<T> + Send + 'static,
-{
-    tokio::task::spawn_blocking(operation)
-        .await
-        .map_err(|error| {
-            zenclash_i18n::text_with(
-                "profiles.errors.repository_task",
-                &[("error", error.to_string())],
-            )
-        })?
-        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

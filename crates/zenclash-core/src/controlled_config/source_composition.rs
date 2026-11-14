@@ -221,6 +221,7 @@ impl ControlledConfigStore {
             next_patch,
             previous_payload,
             next_payload,
+            next_session_fallbacks: None,
         })
     }
 
@@ -276,6 +277,7 @@ impl ControlledConfigStore {
             next_patch,
             previous_payload,
             next_payload,
+            next_session_fallbacks: None,
         })
     }
 }

@@ -7,9 +7,15 @@ use std::{
     sync::Arc,
 };
 use zenclash_core::{
-    ControlledConfigStore, CoreKind, ProfileApplication, ProfileApplyOutcome, ProfileChange,
-    ProfileStore, RemoteProfileOptions,
+    ControlledConfigStore, CoreKind, CoreLifecyclePhase, EffectiveConfigIntent, ProfileApplication,
+    ProfileApplyOutcome, ProfileChange, ProfileStore, RemoteProfileOptions,
 };
+
+/// Result of deleting a profile from the catalog.
+pub(crate) struct DeletedProfileOutcome {
+    /// Whether the removed entry was the active profile.
+    pub(crate) was_active: bool,
+}
 
 /// An accepted business result, retaining the complete core receipt.
 pub(crate) struct ProfileReceipt {
@@ -172,6 +178,82 @@ impl ApplicationCommands {
             ChangeContext::Editor,
         )
         .await
+    }
+
+    pub(crate) async fn delete_profile(
+        &self,
+        store: ProfileStore,
+        controlled: ControlledConfigStore,
+        id: String,
+        fallback_profile: Option<PathBuf>,
+    ) -> Result<DeletedProfileOutcome, String> {
+        let admission = self
+            .session
+            .begin_data_application()
+            .await
+            .map_err(|error| error.to_string())?;
+        let commands = self.clone();
+        tokio::spawn(async move {
+            let _admission = admission;
+            let was_active =
+                tokio::task::spawn_blocking(move || store.delete_sole_or_inactive(&id))
+                    .await
+                    .map_err(|error| {
+                        zenclash_i18n::text_with(
+                            "profiles.errors.delete_task",
+                            &[("error", error.to_string())],
+                        )
+                    })?
+                    .map_err(|error| error.to_string())?;
+            if !was_active {
+                return Ok(DeletedProfileOutcome { was_active: false });
+            }
+            let overrides = commands.enabled_overrides().await.unwrap_or_default();
+            let running = !commands.session.is_offline_recovery()
+                && commands.session.lifecycle_snapshot().phase != CoreLifecyclePhase::Stopped;
+            if running
+                && let Some(fallback) = fallback_profile.clone()
+                && commands
+                    .apply_config(
+                        &controlled,
+                        EffectiveConfigIntent::ActivateProfile {
+                            profile: fallback,
+                            overrides: overrides.clone(),
+                        },
+                    )
+                    .await
+                    .is_ok()
+            {
+                return Ok(DeletedProfileOutcome { was_active: true });
+            }
+            let kind = commands.kind();
+            let generation = commands
+                .session
+                .clear_committed_profile(fallback_profile.clone(), overrides.clone())
+                .await;
+            commands.recovery_record.accept_generation(generation);
+            let cache_result = tokio::task::spawn_blocking(move || match fallback_profile {
+                Some(fallback) => controlled
+                    .materialize_with_overrides_for_core(&fallback, &overrides, kind)
+                    .map(|_| ()),
+                None => controlled.clear_runtime_cache(),
+            })
+            .await;
+            if let Ok(Err(error)) = cache_result {
+                tracing::warn!(
+                    %error,
+                    "failed to reset runtime cache after deleting sole active profile"
+                );
+            }
+            Ok(DeletedProfileOutcome { was_active: true })
+        })
+        .await
+        .map_err(|error| {
+            zenclash_i18n::text_with(
+                "profiles.errors.delete_task",
+                &[("error", error.to_string())],
+            )
+        })?
     }
 
     async fn apply(

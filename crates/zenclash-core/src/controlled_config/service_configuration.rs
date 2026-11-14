@@ -117,13 +117,14 @@ impl ControlledConfigStore {
         let profile = profile.into();
         let store = self.clone();
         tokio::task::spawn_blocking(move || {
+            let is_patch = patch.is_some();
             let mut update =
                 if let (crate::profile::ProfileRuntimeSource::File(path), Some(patch)) =
                     (&profile, &patch)
                 {
                     store.prepare_update(path, serde_yaml::to_value(patch)?)?
                 } else {
-                    if patch.is_some() {
+                    if is_patch {
                         return Err(ControlledConfigError::PartialOverrideConflict);
                     }
                     let _transaction = store.transaction.lock();
@@ -144,18 +145,34 @@ impl ControlledConfigStore {
                         next_patch: serde_yaml::to_string(&current)?.into_bytes(),
                         previous_payload: payload.clone(),
                         next_payload: payload,
+                        next_session_fallbacks: None,
                     }
                 };
-            update.next_payload =
-                store.apply_session_listener_fallbacks(&normalize_runtime_payload(
-                    CoreKind::Mihomo,
-                    merge_payload_overrides(update.next_payload(), &overrides)?,
-                )?)?;
-            if let Some(payload) = previous_payload {
-                update.previous_payload = payload;
+            let candidate = normalize_runtime_payload(
+                CoreKind::Mihomo,
+                merge_payload_overrides(update.next_payload(), &overrides)?,
+            )?;
+            let previous_snapshot = previous_payload;
+            if let Some(payload) = previous_snapshot.as_ref() {
+                update.previous_payload = payload.clone();
             }
-            validate_listener_change(update.previous_payload(), update.next_payload(), true)
-                .map_err(ControlledConfigError::ListenerFallback)?;
+            if is_patch {
+                update.next_payload = store.apply_session_listener_fallbacks(&candidate)?;
+                validate_listener_change(update.previous_payload(), update.next_payload(), true)
+                    .map_err(ControlledConfigError::ListenerFallback)?;
+            } else {
+                let current_runtime = match previous_snapshot {
+                    Some(payload) => Some(payload),
+                    None => store.cached_runtime_payload()?,
+                };
+                let (next_payload, next_session) = store.resolve_candidate_listeners_against(
+                    candidate,
+                    current_runtime.as_deref(),
+                    true,
+                )?;
+                update.next_payload = next_payload;
+                update.next_session_fallbacks = Some(next_session);
+            }
             Ok(update)
         })
         .await
@@ -167,17 +184,15 @@ impl ControlledConfigStore {
         candidate: &crate::backup::BackupRuntimeCandidate,
         previous_payload: String,
     ) -> ControlledConfigResult<ControlledConfigUpdate> {
-        let next_payload = self.apply_session_listener_fallbacks(&normalize_runtime_payload(
-            CoreKind::Mihomo,
-            candidate.payload.clone(),
-        )?)?;
-        validate_listener_change(&previous_payload, &next_payload, true)
-            .map_err(ControlledConfigError::ListenerFallback)?;
+        let normalized = normalize_runtime_payload(CoreKind::Mihomo, candidate.payload.clone())?;
+        let (next_payload, next_session) =
+            self.resolve_candidate_listeners_against(normalized, Some(&previous_payload), true)?;
         Ok(ControlledConfigUpdate {
             expected_patch: Some(candidate.patch.clone()),
             next_patch: candidate.patch.clone(),
             previous_payload,
             next_payload,
+            next_session_fallbacks: Some(next_session),
         })
     }
 
@@ -313,7 +328,10 @@ impl ControlledConfigStore {
     ) -> ControlledConfigResult<super::ServiceTunPersistence> {
         let store = self.clone();
         tokio::task::spawn_blocking(move || {
-            let cache = store.stage_runtime_payload(&update.next_payload)?;
+            let cache = store.stage_runtime_payload_with_session(
+                &update.next_payload,
+                update.next_session_fallbacks.clone(),
+            )?;
             Ok(ServiceTunPersistence {
                 cache,
                 store,

@@ -112,6 +112,51 @@ pub(crate) fn resolve_conflicts(
     document: &mut Value,
     session: &mut BTreeMap<String, SessionListenerFallback>,
 ) -> Result<Vec<(String, SessionListenerFallback)>, String> {
+    resolve_conflicts_against_claims(document, session, &[])
+}
+
+/// Applies active session fallbacks to a candidate runtime payload and resolves
+/// any remaining external port conflicts or duplicate listener ports.
+///
+/// Claims held by the currently running core (`current_payload`) are treated as
+/// available so healthy listeners are not displaced when switching profiles.
+pub(crate) fn resolve_candidate_conflicts(
+    current_payload: Option<&str>,
+    candidate_payload: &str,
+    current_core_is_running: bool,
+    session: &mut BTreeMap<String, SessionListenerFallback>,
+) -> Result<String, String> {
+    let current_claims = if current_core_is_running {
+        match current_payload {
+            Some(current) => {
+                let current_doc = serde_yaml::from_str::<Value>(current)
+                    .map_err(|error| format!("当前运行配置 YAML 无效：{error}"))?;
+                let root = current_doc
+                    .as_mapping()
+                    .ok_or_else(|| "当前运行配置顶层必须是 YAML 映射".to_owned())?;
+                proxy_claims(root)?
+            }
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+
+    let mut candidate_doc = serde_yaml::from_str::<Value>(candidate_payload)
+        .map_err(|error| format!("候选运行配置 YAML 无效：{error}"))?;
+    let session_changed = apply_session_fallbacks_to_value(&mut candidate_doc, session)?;
+    let resolved = resolve_conflicts_against_claims(&mut candidate_doc, session, &current_claims)?;
+    if !session_changed && resolved.is_empty() {
+        return Ok(candidate_payload.to_owned());
+    }
+    serde_yaml::to_string(&candidate_doc).map_err(|error| format!("无法生成端口回退配置：{error}"))
+}
+
+fn resolve_conflicts_against_claims(
+    document: &mut Value,
+    session: &mut BTreeMap<String, SessionListenerFallback>,
+    current_claims: &[BindClaim],
+) -> Result<Vec<(String, SessionListenerFallback)>, String> {
     let root = document
         .as_mapping_mut()
         .ok_or_else(|| "运行配置顶层必须是 YAML 映射".to_owned())?;
@@ -129,18 +174,15 @@ pub(crate) fn resolve_conflicts(
             continue;
         };
         let claims = listener_claims(spec, &addresses, selected);
-        let duplicates_another_listener = claims.iter().any(|claim| {
-            selected_claims
-                .iter()
-                .any(|selected| claims_overlap(selected, claim))
-        });
-        match listener_available(&claims) {
+        let duplicates_another_listener = claims
+            .iter()
+            .any(|claim| claim_matches_any(claim, &selected_claims));
+        match listener_available_against_current(&claims, current_claims) {
             Ok(true) if !duplicates_another_listener => {
                 selected_claims.extend(claims);
                 continue;
             }
-            Ok(true) => {}
-            Ok(false) => {}
+            Ok(true) | Ok(false) => {}
             Err(error) => {
                 return Err(format!(
                     "无法确认 {} 监听端口 {} 是否可用：{error}",
@@ -151,15 +193,15 @@ pub(crate) fn resolve_conflicts(
 
         let replacement = find_available_port(selected, &reserved, |candidate| {
             let claims = listener_claims(spec, &addresses, candidate);
-            !claims.iter().any(|claim| {
-                selected_claims
-                    .iter()
-                    .any(|selected| claims_overlap(selected, claim))
-            }) && listener_available(&claims).unwrap_or(false)
+            !claims
+                .iter()
+                .any(|claim| claim_matches_any(claim, &selected_claims))
+                && listener_available_against_current(&claims, current_claims).unwrap_or(false)
         })
         .ok_or_else(|| format!("{} 没有可用的回退端口", spec.key))?;
         let original = session
             .get(spec.key)
+            .filter(|fallback| fallback.current == selected)
             .map_or(selected, |fallback| fallback.original);
         let fallback = SessionListenerFallback {
             original,
@@ -330,6 +372,10 @@ fn internal_conflict(claims: &[BindClaim]) -> Option<BindClaim> {
     })
 }
 
+fn claim_matches_any(claim: &BindClaim, existing: &[BindClaim]) -> bool {
+    existing.iter().any(|item| claims_overlap(item, claim))
+}
+
 fn claims_overlap(left: &BindClaim, right: &BindClaim) -> bool {
     left.port == right.port
         && left.transport == right.transport
@@ -337,6 +383,24 @@ fn claims_overlap(left: &BindClaim, right: &BindClaim) -> bool {
         && (left.address == right.address
             || left.address.is_unspecified()
             || right.address.is_unspecified())
+}
+
+fn listener_available_against_current(
+    claims: &[BindClaim],
+    current_claims: &[BindClaim],
+) -> io::Result<bool> {
+    if current_claims.is_empty() {
+        return listener_available(claims);
+    }
+    let remaining: Vec<BindClaim> = claims
+        .iter()
+        .filter(|claim| !claim_matches_any(claim, current_claims))
+        .copied()
+        .collect();
+    if remaining.is_empty() {
+        return Ok(true);
+    }
+    listener_available(&remaining)
 }
 
 fn listener_available(claims: &[BindClaim]) -> io::Result<bool> {
@@ -449,8 +513,8 @@ fn listener_supported_on_platform(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        SessionListenerFallback, apply_session_fallbacks, mapping_port, resolve_conflicts,
-        validate_listener_change,
+        SessionListenerFallback, apply_session_fallbacks, mapping_port,
+        resolve_candidate_conflicts, resolve_conflicts, validate_listener_change,
     };
     use serde_yaml::Value;
     use std::{
@@ -578,6 +642,63 @@ mod tests {
         assert_ne!(
             mapping_port(root, "mixed-port").unwrap(),
             mapping_port(root, "port").unwrap()
+        );
+    }
+
+    #[test]
+    fn candidate_resolution_moves_duplicate_port_while_preserving_running_core_port() {
+        let held_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = held_listener.local_addr().unwrap().port();
+        let current = format!("mixed-port: {port}\nallow-lan: false\nipv6: false\n");
+        let candidate = format!("mixed-port: {port}\nport: {port}\nallow-lan: true\nipv6: false\n");
+        let mut session = BTreeMap::new();
+
+        let resolved =
+            resolve_candidate_conflicts(Some(&current), &candidate, true, &mut session).unwrap();
+
+        let doc: Value = serde_yaml::from_str(&resolved).unwrap();
+        let root = doc.as_mapping().unwrap();
+        assert_eq!(mapping_port(root, "mixed-port").unwrap(), Some(port));
+        let fallback_port = mapping_port(root, "port").unwrap().unwrap();
+        assert_ne!(fallback_port, port);
+        assert_eq!(
+            session.get("port"),
+            Some(&SessionListenerFallback {
+                original: port,
+                current: fallback_port,
+            })
+        );
+    }
+
+    #[test]
+    fn candidate_resolution_updates_prior_session_fallback_when_profile_port_collides() {
+        let _running_p0 = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let _running_p1 = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let p0 = _running_p0.local_addr().unwrap().port();
+        let p1 = _running_p1.local_addr().unwrap().port();
+        let current = format!("mixed-port: {p0}\nport: {p1}\nallow-lan: false\nipv6: false\n");
+        let candidate = format!("socks-port: {p1}\nport: {p0}\nallow-lan: false\nipv6: false\n");
+        let mut session = BTreeMap::from([(
+            "port".to_owned(),
+            SessionListenerFallback {
+                original: p0,
+                current: p1,
+            },
+        )]);
+
+        let resolved =
+            resolve_candidate_conflicts(Some(&current), &candidate, true, &mut session).unwrap();
+        let doc: Value = serde_yaml::from_str(&resolved).unwrap();
+        let root = doc.as_mapping().unwrap();
+        assert_eq!(mapping_port(root, "socks-port").unwrap(), Some(p1));
+        let moved_port = mapping_port(root, "port").unwrap().unwrap();
+        assert_ne!(moved_port, p1);
+        assert_eq!(
+            session.get("port"),
+            Some(&SessionListenerFallback {
+                original: p0,
+                current: moved_port,
+            })
         );
     }
 }

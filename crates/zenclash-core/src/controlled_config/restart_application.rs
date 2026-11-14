@@ -84,6 +84,7 @@ impl AdmittedManagedRestart {
             .accept_runtime_payload_with_restart_for_session(
                 self.process.clone(),
                 next_runtime,
+                None,
                 cancelled.clone(),
             )
             .await?;
@@ -130,13 +131,14 @@ impl AdmittedManagedRestart {
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
         let payload = normalize_runtime_payload(self.process.kind(), payload)?;
-        let payload = self
+        let (payload, next_session) = self
             .store
-            .validate_candidate_listeners(payload, self.process.is_running())?;
+            .resolve_candidate_listeners(payload, self.process.is_running())?;
         self.store
             .accept_runtime_payload_with_restart_for_session(
                 self.process.clone(),
                 payload,
+                Some(next_session),
                 cancelled,
             )
             .await?

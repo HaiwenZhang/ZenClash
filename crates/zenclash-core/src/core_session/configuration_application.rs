@@ -176,6 +176,24 @@ impl CoreSession {
         Ok(CoreApplyOutcome { kind, generation })
     }
 
+    /// Replaces the committed source snapshot without requiring a live controller.
+    ///
+    /// Used when the sole active profile has been deleted while the core is
+    /// stopped or unreachable so subsequent operations never target the removed file.
+    pub async fn clear_committed_profile(
+        &self,
+        fallback_profile: Option<PathBuf>,
+        overrides: Vec<PathBuf>,
+    ) -> u64 {
+        let mut active_profile = self.transition.lock().await;
+        let committed = CommittedConfig {
+            profile: fallback_profile,
+            overrides,
+        };
+        *active_profile = committed.clone();
+        self.next_generation_with_config(Some(committed))
+    }
+
     /// Changes the outbound mode on the currently committed profile.
     ///
     /// Resolves profile identity after entering the same transition gate used

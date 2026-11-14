@@ -117,7 +117,7 @@ pub use logs::{
 };
 pub use managed_core_process::{
     CoreLaunchConfig, CoreProcessSnapshot, ManagedCoreProcess, MihomoRuntimeResources,
-    bundled_recovery_profile,
+    bundled_default_profile, bundled_recovery_profile,
 };
 pub use models::{
     Connection, ConnectionMetadata, ConnectionsSnapshot, ConnectionsSummary, DnsAnswer,

@@ -633,9 +633,10 @@ impl RuntimePage {
                         .dropdown_menu(move |mut menu, _, cx| {
                             let can_delete = menu_owner.upgrade().is_some_and(|page| {
                                 let page = page.read(cx);
+                                let catalog = page.profiles.catalog();
                                 !page.core_busy()
-                                    && page.profiles.catalog().active.as_deref()
-                                        != Some(menu_id.as_str())
+                                    && (catalog.profiles.len() <= 1
+                                        || catalog.active.as_deref() != Some(menu_id.as_str()))
                             });
                             if remote {
                                 let owner = menu_owner.clone();

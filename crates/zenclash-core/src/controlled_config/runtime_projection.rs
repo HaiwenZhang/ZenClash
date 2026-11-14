@@ -152,18 +152,38 @@ impl ControlledConfigStore {
         Ok(payload)
     }
 
-    pub(super) fn validate_candidate_listeners(
+    pub(super) fn resolve_candidate_listeners(
         &self,
         candidate: String,
         current_core_is_running: bool,
-    ) -> ControlledConfigResult<String> {
-        let candidate = self.apply_session_listener_fallbacks(&candidate)?;
-        let current = self
-            .cached_runtime_payload()?
-            .unwrap_or_else(|| candidate.clone());
-        validate_listener_change(&current, &candidate, current_core_is_running)
-            .map_err(ControlledConfigError::ListenerFallback)?;
-        Ok(candidate)
+    ) -> ControlledConfigResult<(String, BTreeMap<String, SessionListenerFallback>)> {
+        let current = self.cached_runtime_payload()?;
+        self.resolve_candidate_listeners_against(
+            candidate,
+            current.as_deref(),
+            current_core_is_running,
+        )
+    }
+
+    pub(super) fn resolve_candidate_listeners_against(
+        &self,
+        candidate: String,
+        current: Option<&str>,
+        current_core_is_running: bool,
+    ) -> ControlledConfigResult<(String, BTreeMap<String, SessionListenerFallback>)> {
+        let candidate = self.tun_projection.project_payload(candidate)?;
+        let mut next_session = self.session_listener_fallbacks.lock().clone();
+        let resolved = resolve_candidate_conflicts(
+            current,
+            &candidate,
+            current_core_is_running,
+            &mut next_session,
+        )
+        .map_err(ControlledConfigError::ListenerFallback)?;
+        if resolved.len() > MAX_PROFILE_BYTES {
+            return Err(ControlledConfigError::TooLarge);
+        }
+        Ok((resolved, next_session))
     }
     /// Materializes effective YAML for managed-core startup.
     ///
