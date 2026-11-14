@@ -75,7 +75,7 @@ There is no official release yet. Visit **[Releases to browse ZenClash test buil
 
 | Platform | Architecture | Installer |
 | --- | --- | --- |
-| macOS | Apple Silicon (arm64) | `.dmg` |
+| macOS | Apple Silicon (arm64), Intel (x64) | `.dmg` |
 | Windows | x86_64, arm64 | Setup wizard `.exe` |
 | Ubuntu 24.04+ | x86_64, arm64 | `.deb` |
 

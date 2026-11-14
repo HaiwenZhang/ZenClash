@@ -5,10 +5,15 @@ SCRIPT_DIR="${0:A:h}"
 PROJECT_ROOT="${SCRIPT_DIR:h}"
 VERSION="${1:-${ZENCLASH_VERSION:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' "${PROJECT_ROOT}/Cargo.toml" | head -n 1)}}"
 OUTPUT_DIR="${2:-${ZENCLASH_PACKAGE_DIR:-${PROJECT_ROOT}/dist}}"
+case "$(uname -m)" in
+  arm64) ARCH="arm64" ;;
+  x86_64) ARCH="x64" ;;
+  *) echo "Unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
+esac
 WORK_DIR="$(mktemp -d)"
 APP_OUTPUT_DIR="${WORK_DIR}/app"
 DMG_ROOT="${WORK_DIR}/dmg"
-DMG_PATH="${OUTPUT_DIR}/ZenClash-${VERSION}-macOS-arm64.dmg"
+DMG_PATH="${OUTPUT_DIR}/ZenClash-${VERSION}-macOS-${ARCH}.dmg"
 
 cleanup() {
   rm -rf "${WORK_DIR}"

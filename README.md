@@ -75,7 +75,7 @@
 
 | 平台 | 架构 | 安装包 |
 | --- | --- | --- |
-| macOS | Apple Silicon（arm64） | `.dmg` |
+| macOS | Apple Silicon（arm64）、Intel（x64） | `.dmg` |
 | Windows | x86_64、arm64 | 安装向导 `.exe` |
 | Ubuntu 24.04+ | x86_64、arm64 | `.deb` |
 

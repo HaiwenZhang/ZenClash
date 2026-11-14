@@ -5,7 +5,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 VERSION="${ZENCLASH_VERSION:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' "${PROJECT_ROOT}/Cargo.toml" | head -n 1)}"
 OUTPUT_DIR="${ZENCLASH_OUTPUT_DIR:-${PROJECT_ROOT}/target}"
-TARGET_TRIPLE="aarch64-apple-darwin"
+case "$(uname -m)" in
+  arm64) TARGET_TRIPLE="aarch64-apple-darwin"; MIHOMO_ARCH="arm64"; MACH_ARCH="arm64" ;;
+  x86_64) TARGET_TRIPLE="x86_64-apple-darwin"; MIHOMO_ARCH="amd64"; MACH_ARCH="x86_64" ;;
+  *) echo "Unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
+esac
 APP_DIR="${OUTPUT_DIR}/ZenClash.app"
 CONTENTS_DIR="${APP_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
@@ -31,11 +35,6 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-
-if [[ "$(uname -m)" != "arm64" ]]; then
-  echo "The macOS release bundle must be built on an Apple Silicon runner." >&2
-  exit 1
-fi
 
 if [[ -n "${GEODATA_PATH}" ]]; then
   if [[ ! -f "${GEODATA_PATH}" ]]; then
@@ -67,7 +66,7 @@ if [[ -n "${MIHOMO_PATH}" ]]; then
 else
   MIHOMO_WORK_DIR="$(mktemp -d)"
   MIHOMO_PATH="${MIHOMO_WORK_DIR}/mihomo"
-  "${SCRIPT_DIR}/download_mihomo.sh" darwin arm64 "${MIHOMO_PATH}"
+  "${SCRIPT_DIR}/download_mihomo.sh" darwin "${MIHOMO_ARCH}" "${MIHOMO_PATH}"
 fi
 
 if [[ ! -f "${PROFILE_PATH}" ]]; then
@@ -75,8 +74,8 @@ if [[ ! -f "${PROFILE_PATH}" ]]; then
   exit 1
 fi
 
-if ! file "${MIHOMO_PATH}" | grep -Eq 'arm64|universal binary'; then
-  echo "Mihomo is not an Apple Silicon binary: ${MIHOMO_PATH}" >&2
+if ! lipo "${MIHOMO_PATH}" -verify_arch "${MACH_ARCH}"; then
+  echo "Mihomo does not contain ${MACH_ARCH}: ${MIHOMO_PATH}" >&2
   exit 1
 fi
 
