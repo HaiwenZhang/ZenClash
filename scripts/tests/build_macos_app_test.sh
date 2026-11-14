@@ -20,7 +20,8 @@ printf '%s\n' "${MOCK_ARCH}"
 EOF
 cat >"${mock_bin}/lipo" <<'EOF'
 #!/usr/bin/env bash
-[[ "$1" == -verify_arch && "$2" == "${MOCK_ARCH}" && -f "$3" ]]
+# -verify_arch consumes all remaining arguments as architectures.
+[[ "$#" == 3 && -f "$1" && "$2" == -verify_arch && "$3" == "${MOCK_ARCH}" ]]
 EOF
 cat >"${mock_bin}/rustup" <<'EOF'
 #!/usr/bin/env bash

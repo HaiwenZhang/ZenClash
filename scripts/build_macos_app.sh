@@ -74,7 +74,7 @@ if [[ ! -f "${PROFILE_PATH}" ]]; then
   exit 1
 fi
 
-if ! lipo -verify_arch "${MACH_ARCH}" "${MIHOMO_PATH}"; then
+if ! lipo "${MIHOMO_PATH}" -verify_arch "${MACH_ARCH}"; then
   echo "Mihomo does not contain ${MACH_ARCH}: ${MIHOMO_PATH}" >&2
   exit 1
 fi
