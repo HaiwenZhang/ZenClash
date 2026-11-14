@@ -39,37 +39,14 @@ env:
   # official releases keep Cargo.toml's full release profile untouched.
   CARGO_PROFILE_RELEASE_LTO: "false"
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+  # Keep file/line backtraces while avoiding full debuginfo link and cache cost.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
   RUST_BACKTRACE: "1"
   MIHOMO_VERSION: ${{ inputs.mihomo_version || 'v1.19.30' }}
 
+# The project toolchain in .github/actions/setup-rust equals the declared MSRV
+# (1.99.1), so Clippy in verify-rust already covers the former MSRV check.
 jobs:
-  msrv:
-    name: Minimum supported Rust version
-    if: >-
-      ${{ !startsWith(github.ref_name, 'v') &&
-      !startsWith(github.head_ref, 'v') }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Set up minimum Rust
-        uses: ./.github/actions/setup-rust
-        with:
-          version: "1.99.1"
-
-      - name: Cache Cargo dependencies and build artifacts
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          shared-key: ci-msrv
-
-      - name: Install Linux dependencies
-        run: sudo scripts/install_linux_build_deps.sh
-
-      - name: Check workspace on the declared MSRV
-        run: cargo check --workspace --all-features --locked
-
   linux:
     name: Linux amd64 checks and package
     if: >-
@@ -102,6 +79,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ci-linux-amd64
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install Linux dependencies
         run: sudo scripts/install_linux_build_deps.sh
@@ -203,6 +181,11 @@ jobs:
           fi
           printf 'version=%s\n' "${manifest_version}" >>"${GITHUB_OUTPUT}"
 
+      - name: Disable Windows Defender real-time scanning
+        continue-on-error: true
+        shell: pwsh
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+
       - name: Set up project Rust
         uses: ./.github/actions/setup-rust
         with:
@@ -212,6 +195,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ci-windows-x64
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run shared Rust checks
         uses: ./.github/actions/verify-rust
@@ -280,6 +264,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: ci-macos-arm64
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run shared Rust checks
         uses: ./.github/actions/verify-rust
