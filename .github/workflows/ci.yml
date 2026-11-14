@@ -26,15 +26,286 @@ on:
 
 permissions:
   contents: read
+  actions: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # Disable fat LTO and single-unit codegen for faster non-release CI builds;
+  # official releases keep Cargo.toml's full release profile untouched.
+  CARGO_PROFILE_RELEASE_LTO: "false"
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+  RUST_BACKTRACE: "1"
+  MIHOMO_VERSION: ${{ inputs.mihomo_version || 'v1.19.30' }}
 
 jobs:
-  verify:
-    # PR filters inspect the base; case-insensitive startsWith also covers V.
+  msrv:
+    name: Minimum supported Rust version
     if: >-
       ${{ !startsWith(github.ref_name, 'v') &&
       !startsWith(github.head_ref, 'v') }}
-    uses: ./.github/workflows/validate-release.yml
-    with:
-      mihomo_version: ${{ inputs.mihomo_version }}
-    secrets:
-      test_profile_url: ${{ secrets.ZENCLASH_TEST_PROFILE_URL }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up minimum Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          version: "1.99.1"
+
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ci-msrv
+
+      - name: Install Linux dependencies
+        run: sudo scripts/install_linux_build_deps.sh
+
+      - name: Check workspace on the declared MSRV
+        run: cargo check --workspace --all-features --locked
+
+  linux:
+    name: Linux amd64 checks and package
+    if: >-
+      ${{ !startsWith(github.ref_name, 'v') &&
+      !startsWith(github.head_ref, 'v') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Read Cargo workspace version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [[ -z "${manifest_version}" ]]; then
+            echo "Workspace package version was not found" >&2
+            exit 1
+          fi
+          printf 'version=%s\n' "${manifest_version}" >>"${GITHUB_OUTPUT}"
+
+      - name: Set up project Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          target: x86_64-unknown-linux-gnu
+
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ci-linux-amd64
+
+      - name: Install Linux dependencies
+        run: sudo scripts/install_linux_build_deps.sh
+
+      - name: Run shared Rust checks
+        uses: ./.github/actions/verify-rust
+
+      - name: Test Debian packaging
+        run: scripts/tests/build_deb_package_test.sh amd64
+
+      - name: Prepare bundled integration profile
+        shell: bash
+        run: cp platforms/common/default.yaml "${RUNNER_TEMP}/real-profile.yaml"
+
+      - name: Download verified Mihomo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/download_mihomo.sh linux amd64 "${RUNNER_TEMP}/mihomo"
+
+      - name: Run real Mihomo integration with the bundled profile
+        env:
+          ZENCLASH_MIHOMO_BINARY: ${{ runner.temp }}/mihomo
+          ZENCLASH_INTEGRATION_HOME: ${{ runner.temp }}/mihomo-home
+          ZENCLASH_CONFIG: ${{ runner.temp }}/real-profile.yaml
+        run: cargo test --locked --all-features -p zenclash-core --test real_mihomo -- --ignored --nocapture
+
+      - name: Prepare optional private integration profile
+        id: private_profile
+        shell: bash
+        env:
+          PROFILE_URL: ${{ secrets.ZENCLASH_TEST_PROFILE_URL }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${PROFILE_URL}" ]]; then
+            printf 'available=false\n' >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          curl --fail --silent --show-error --location --retry 3 \
+            --header 'Accept: text/yaml, application/yaml, text/plain, */*' \
+            --header 'User-Agent: clash.meta' \
+            "${PROFILE_URL}" --output "${RUNNER_TEMP}/private-profile.yaml"
+          printf 'available=true\n' >>"${GITHUB_OUTPUT}"
+
+      - name: Run the optional private-profile Mihomo integration test
+        if: steps.private_profile.outputs.available == 'true'
+        env:
+          ZENCLASH_MIHOMO_BINARY: ${{ runner.temp }}/mihomo
+          ZENCLASH_INTEGRATION_HOME: ${{ runner.temp }}/mihomo-private-home
+          ZENCLASH_CONFIG: ${{ runner.temp }}/private-profile.yaml
+        run: >-
+          cargo test --locked --all-features -p zenclash-core --test real_mihomo
+          drives_the_supplied_profile_through_a_real_mihomo_process --
+          --exact --ignored --nocapture
+
+      - name: Build Ubuntu amd64 Debian package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZENCLASH_MIHOMO_BINARY: ${{ runner.temp }}/mihomo
+        run: scripts/build_deb_package.sh '${{ steps.version.outputs.version }}' dist
+
+      - name: Upload Ubuntu Debian package
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-zenclash-ubuntu-24.04-amd64
+          path: dist/ZenClash-${{ steps.version.outputs.version }}-Ubuntu-24.04+-amd64.deb
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - name: Delete temporary CI artifact after upload verification
+        if: steps.upload.outputs.artifact-id != ''
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${{ steps.upload.outputs.artifact-id }}"
+
+  windows:
+    name: Windows x64 checks and installer
+    if: >-
+      ${{ !startsWith(github.ref_name, 'v') &&
+      !startsWith(github.head_ref, 'v') }}
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Read Cargo workspace version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [[ -z "${manifest_version}" ]]; then
+            echo "Workspace package version was not found" >&2
+            exit 1
+          fi
+          printf 'version=%s\n' "${manifest_version}" >>"${GITHUB_OUTPUT}"
+
+      - name: Set up project Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ci-windows-x64
+
+      - name: Run shared Rust checks
+        uses: ./.github/actions/verify-rust
+
+      - name: Test Windows installer packaging
+        shell: pwsh
+        run: scripts/tests/build_windows_installer_test.ps1 -Architecture 'x64'
+
+      - name: Build Windows x64 setup installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          scripts/build_windows_installer.ps1
+          -Version '${{ steps.version.outputs.version }}'
+          -Architecture 'x64'
+          -OutputDir dist
+
+      - name: Upload Windows setup installer
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-zenclash-windows-x64
+          path: dist/ZenClash-${{ steps.version.outputs.version }}-windows-x64-setup.exe
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - name: Delete temporary CI artifact after upload verification
+        if: steps.upload.outputs.artifact-id != ''
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${{ steps.upload.outputs.artifact-id }}"
+
+  macos:
+    name: macOS arm64 checks and installer
+    if: >-
+      ${{ !startsWith(github.ref_name, 'v') &&
+      !startsWith(github.head_ref, 'v') }}
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Read Cargo workspace version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [[ -z "${manifest_version}" ]]; then
+            echo "Workspace package version was not found" >&2
+            exit 1
+          fi
+          printf 'version=%s\n' "${manifest_version}" >>"${GITHUB_OUTPUT}"
+
+      - name: Set up project Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          target: aarch64-apple-darwin
+
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: ci-macos-arm64
+
+      - name: Run shared Rust checks
+        uses: ./.github/actions/verify-rust
+
+      - name: Test macOS application packaging
+        run: bash scripts/tests/build_macos_app_test.sh
+
+      - name: Build macOS arm64 DMG
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/build_macos_package.sh '${{ steps.version.outputs.version }}' dist
+
+      - name: Upload macOS DMG
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-zenclash-macos-arm64
+          path: dist/ZenClash-${{ steps.version.outputs.version }}-macOS-arm64.dmg
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - name: Delete temporary CI artifact after upload verification
+        if: steps.upload.outputs.artifact-id != ''
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${{ steps.upload.outputs.artifact-id }}"
