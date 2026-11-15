@@ -22,9 +22,14 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # Keep file/line backtraces while avoiding full debuginfo link and cache cost.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
   RUST_BACKTRACE: "1"
   MIHOMO_VERSION: ${{ inputs.mihomo_version || 'v1.19.30' }}
 
+# The project toolchain in .github/actions/setup-rust equals the declared MSRV
+# (1.99.1), so Clippy in verify-rust already covers the former MSRV check.
 jobs:
   prepare:
     name: Validate release version
@@ -35,8 +40,6 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
 
       - name: Match tag and Cargo version
         id: version
@@ -57,26 +60,6 @@ jobs:
           fi
           printf 'version=%s\n' "${manifest_version}" >>"${GITHUB_OUTPUT}"
 
-  msrv:
-    name: Minimum supported Rust version
-    needs: prepare
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Set up minimum Rust
-        uses: ./.github/actions/setup-rust
-        with:
-          version: "1.99.1"
-
-      - name: Install Linux dependencies
-        run: sudo scripts/install_linux_build_deps.sh
-
-      - name: Check workspace on the declared MSRV
-        run: cargo check --workspace --all-features --locked
-
   verify:
     name: Rust checks and real Mihomo integration
     needs: prepare
@@ -88,6 +71,11 @@ jobs:
 
       - name: Set up project Rust
         uses: ./.github/actions/setup-rust
+
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: release-verify
 
       - name: Install Linux dependencies
         run: sudo scripts/install_linux_build_deps.sh
@@ -163,8 +151,19 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: release-macos-${{ matrix.arch }}
+
       - name: Run shared Rust checks
+        # The arm64 runner covers full Rust lint/feature checks; x64 still runs workspace tests.
+        if: matrix.arch == 'arm64'
         uses: ./.github/actions/verify-rust
+
+      - name: Run workspace tests with all features
+        if: matrix.arch != 'arm64'
+        run: cargo test --workspace --all-features --locked
 
       - name: Test macOS application packaging
         run: bash scripts/tests/build_macos_app_test.sh
@@ -201,13 +200,34 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Disable Windows Defender real-time scanning
+        continue-on-error: true
+        shell: pwsh
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+
       - name: Set up project Rust
         uses: ./.github/actions/setup-rust
         with:
           target: ${{ matrix.target }}
 
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: release-windows-${{ matrix.arch }}
+
       - name: Run shared Rust checks
+        # The x64 runner covers full Rust lint/feature checks; arm64 still runs workspace tests.
+        if: matrix.arch == 'x64'
         uses: ./.github/actions/verify-rust
+
+      - name: Run workspace tests with all features
+        if: matrix.arch != 'x64'
+        run: cargo test --workspace --all-features --locked
+
+      - name: Test Windows authorization result classification
+        if: matrix.arch != 'x64'
+        shell: pwsh
+        run: scripts/tests/service_authorization_test.ps1
 
       - name: Test Windows installer packaging
         shell: pwsh
@@ -255,13 +275,18 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: release-ubuntu-${{ matrix.arch }}
+
       - name: Install Linux dependencies
         run: sudo scripts/install_linux_build_deps.sh
 
-      - name: Run shared Rust checks
+      - name: Run workspace tests with all features
         # The prerequisite verify job already checks the amd64 runner.
         if: matrix.arch == 'arm64'
-        uses: ./.github/actions/verify-rust
+        run: cargo test --workspace --all-features --locked
 
       - name: Test Debian packaging
         run: scripts/tests/build_deb_package_test.sh '${{ matrix.arch }}'

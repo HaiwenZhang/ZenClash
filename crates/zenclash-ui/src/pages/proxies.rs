@@ -5,8 +5,7 @@ use std::{
 };
 
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Icon, IconName, Sizable, button::Button, h_flex,
-    scroll::ScrollableElement, v_flex,
+    ActiveTheme, Disableable, Icon, IconName, Sizable, button::Button, h_flex, v_flex,
 };
 use gpui_kit::{
     App, Context, Focusable, InteractiveElement, IntoElement, ParentElement, Render, Styled,
@@ -78,6 +77,7 @@ pub struct ProxiesPage {
     notice: Option<String>,
     node_focus: HashMap<(String, ProxyNodeId), gpui_kit::FocusHandle>,
     details_focus: HashMap<(String, ProxyNodeId), gpui_kit::FocusHandle>,
+    group_scroll: gpui_kit::ScrollHandle,
     node_grid: node_grid::NodeGridState,
     focus_handle: gpui_kit::FocusHandle,
 }
@@ -249,6 +249,7 @@ impl ProxiesPage {
             notice: None,
             node_focus: HashMap::new(),
             details_focus: HashMap::new(),
+            group_scroll: gpui_kit::ScrollHandle::default(),
             node_grid: Default::default(),
             focus_handle: cx.focus_handle(),
         }
@@ -361,7 +362,6 @@ impl Render for ProxiesPage {
                 v_flex()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scrollbar()
                     .gap_4()
                     .px_8()
                     .py_3()

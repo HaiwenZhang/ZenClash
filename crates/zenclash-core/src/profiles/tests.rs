@@ -698,6 +698,50 @@ fn delete_removes_non_active_profile_from_disk_and_catalog() {
 }
 
 #[test]
+fn delete_sole_or_inactive_deletes_sole_active_profile_and_clears_active() {
+    let root = test_root("sole-active-delete");
+    let source = root.join("source.yaml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&source, "mixed-port: 7890\n").unwrap();
+    let store = ProfileStore::new(root.join("store")).unwrap();
+    let profile = store.import_local(source).unwrap();
+    store.activate(&profile.id).unwrap();
+    let profile_path = store.profile_path(&profile);
+
+    let was_active = store.delete_sole_or_inactive(&profile.id).unwrap();
+
+    assert!(was_active);
+    let catalog = store.load().unwrap();
+    assert!(catalog.active.is_none());
+    assert!(catalog.profiles.is_empty());
+    assert!(!profile_path.exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn delete_sole_or_inactive_refuses_active_profile_when_other_profiles_exist() {
+    let root = test_root("multi-active-delete");
+    let first_source = root.join("first.yaml");
+    let second_source = root.join("second.yaml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&first_source, "mixed-port: 7890\n").unwrap();
+    fs::write(&second_source, "mixed-port: 7891\n").unwrap();
+    let store = ProfileStore::new(root.join("store")).unwrap();
+    let first = store.import_local(first_source).unwrap();
+    let second = store.import_local(second_source).unwrap();
+    store.activate(&first.id).unwrap();
+
+    assert!(matches!(
+        store.delete_sole_or_inactive(&first.id),
+        Err(ProfileStoreError::ActiveProfile)
+    ));
+    assert!(!store.delete_sole_or_inactive(&second.id).unwrap());
+    assert!(store.delete_sole_or_inactive(&first.id).unwrap());
+    assert!(store.load().unwrap().profiles.is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn atomic_write_replaces_existing_file() {
     let root = test_root("atomic-replace");
     let path = root.join("profiles.json");

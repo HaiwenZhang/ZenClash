@@ -283,6 +283,12 @@ pub fn bundled_recovery_profile() -> Option<PathBuf> {
     bundled_resource("recovery.yaml")
 }
 
+/// Locates the default fallback profile packaged beside the application.
+#[must_use]
+pub fn bundled_default_profile() -> Option<PathBuf> {
+    bundled_resource("profile.yaml")
+}
+
 fn bundled_resource(name: &str) -> Option<PathBuf> {
     crate::BundledResources::discover()
         .ok()?

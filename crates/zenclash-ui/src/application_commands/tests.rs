@@ -1044,3 +1044,133 @@ async fn shared_recovery_survives_a_preflight_rejection_until_a_profile_is_accep
     assert_eq!(store.load().unwrap().active, Some(previous.id));
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn delete_profile_sole_active_offline_clears_session_and_cache() {
+    let root = std::env::temp_dir().join(format!(
+        "zenclash-delete-sole-offline-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store = ProfileStore::new(root.join("profiles")).unwrap();
+    let source = root.join("sole.yaml");
+    std::fs::write(&source, "mixed-port: 0\nrules: [MATCH,DIRECT]\n").unwrap();
+    let record = store.import_local(&source).unwrap();
+    let profile_path = store.activate(&record.id).unwrap();
+    let controlled = ControlledConfigStore::new(root.join("controlled"));
+    controlled
+        .materialize_with_overrides_for_core(&profile_path, &[], CoreKind::Mihomo)
+        .unwrap();
+    assert!(controlled.runtime_path().is_file());
+
+    let session = CoreSession::open_offline(CoreKind::Mihomo, root.clone(), None).unwrap();
+    session
+        .clear_committed_profile(Some(profile_path.clone()), Vec::new())
+        .await;
+    let commands = ApplicationCommands::new(session.clone(), None);
+
+    let outcome = commands
+        .delete_profile(store.clone(), controlled.clone(), record.id.clone(), None)
+        .await
+        .unwrap();
+    assert!(outcome.was_active);
+    let saved = store.load().unwrap();
+    assert!(saved.profiles.is_empty());
+    assert_eq!(saved.active, None);
+    assert!(!profile_path.exists());
+    assert_eq!(commands.committed_profile().profile_path, None);
+    assert!(!controlled.runtime_path().exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn delete_profile_sole_active_running_reloads_controller_to_fallback() {
+    let root = std::env::temp_dir().join(format!(
+        "zenclash-delete-sole-running-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store = ProfileStore::new(root.join("profiles")).unwrap();
+    let source = root.join("sole.yaml");
+    std::fs::write(&source, "mixed-port: 0\nrules: [MATCH,DIRECT]\n").unwrap();
+    let record = store.import_local(&source).unwrap();
+    let profile_path = store.activate(&record.id).unwrap();
+    let fallback = root.join("default.yaml");
+    std::fs::write(
+        &fallback,
+        "mixed-port: 0\nmode: direct\nrules: [MATCH,DIRECT]\n",
+    )
+    .unwrap();
+    let controlled = ControlledConfigStore::new(root.join("controlled"));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let put_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let put_seen_task = std::sync::Arc::clone(&put_seen);
+    let server = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = &mut shutdown_rx => break,
+                accepted = listener.accept() => {
+                    let Ok((mut stream, _)) = accepted else { break; };
+                    let request = zenclash_core::test_support::read_controller_request(&mut stream)
+                        .await
+                        .unwrap()
+                        .into_bytes();
+                    if request.starts_with(b"PUT /configs") {
+                        put_seen_task.store(true, std::sync::atomic::Ordering::SeqCst);
+                        stream
+                            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                            .await
+                            .unwrap();
+                    } else {
+                        let body = r#"{"mixed-port":0,"mode":"direct"}"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        stream.write_all(response.as_bytes()).await.unwrap();
+                    }
+                }
+            }
+        }
+    });
+
+    let client = MihomoClient::new(zenclash_core::MihomoEndpoint::new(
+        format!("http://{address}"),
+        "",
+    ))
+    .unwrap();
+    let session =
+        CoreSession::open_with_config(CoreKind::Mihomo, client, Some(profile_path.clone()), vec![])
+            .unwrap();
+    let commands = ApplicationCommands::new(session, None);
+
+    let outcome = commands
+        .delete_profile(
+            store.clone(),
+            controlled.clone(),
+            record.id.clone(),
+            Some(fallback.clone()),
+        )
+        .await
+        .unwrap();
+    let _ = shutdown_tx.send(());
+    server.await.unwrap();
+
+    assert!(outcome.was_active);
+    assert!(put_seen.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!profile_path.exists());
+    let saved = store.load().unwrap();
+    assert!(saved.profiles.is_empty());
+    assert_eq!(saved.active, None);
+    assert_eq!(commands.committed_profile().profile_path, Some(fallback));
+    std::fs::remove_dir_all(root).unwrap();
+}

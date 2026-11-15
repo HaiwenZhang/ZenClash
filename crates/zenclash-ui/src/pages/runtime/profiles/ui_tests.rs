@@ -559,6 +559,37 @@ fn profile_more_menu_cancels_and_deletes_only_the_inactive_profile(cx: &mut Test
 }
 
 #[gpui_kit::test]
+fn sole_active_profile_more_menu_enables_and_deletes_the_only_profile(cx: &mut TestAppContext) {
+    let fixture = Fixture::new();
+    let active = fixture.profiles.load().unwrap().active.unwrap();
+    let active_file = fixture.profile.clone();
+    assert!(active_file.is_file());
+    let (window, page) = open(cx, &fixture, Page::Profiles);
+    fixture.settle(cx, &page, |page| !page.persistent_loading);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(format!("profile-more:{active}"), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("down", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    fixture.settle(cx, &page, |page| {
+        page.profiles.catalog().profiles.is_empty()
+    });
+    let saved = fixture.profiles.load().unwrap();
+    assert!(saved.profiles.is_empty());
+    assert_eq!(saved.active, None);
+    assert!(!active_file.exists());
+    cx.update_window(window, |_, window, _| window.remove_window())
+        .unwrap();
+}
+
+#[gpui_kit::test]
 fn blurring_preserves_loaded_yaml_preview_until_the_window_is_hidden(cx: &mut TestAppContext) {
     let fixture = Fixture::new();
     let _runtime_context = fixture.runtime.as_ref().unwrap().enter();

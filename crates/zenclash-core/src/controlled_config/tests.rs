@@ -1493,3 +1493,212 @@ async fn full_candidate_keeps_the_supplied_previous_snapshot_when_cache_changes(
     ));
     std::fs::remove_dir_all(root).unwrap();
 }
+
+fn spawn_reload_controller() -> (
+    std::net::SocketAddr,
+    std::sync::mpsc::Sender<()>,
+    thread::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (stop, stopped) = std::sync::mpsc::channel();
+    let handle = thread::spawn(move || {
+        while stopped.try_recv().is_err() {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                        .unwrap();
+                    let request =
+                        crate::test_support::read_controller_request_blocking(&mut stream)
+                            .unwrap()
+                            .into_bytes();
+                    let request = String::from_utf8_lossy(&request);
+                    let (status, body) = if request.starts_with("GET ") {
+                        ("200 OK", r#"{"mode":"rule"}"#)
+                    } else {
+                        ("204 No Content", "")
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(std::time::Duration::from_millis(2));
+                }
+                Err(error) => panic!("controller accept failed: {error}"),
+            }
+        }
+    });
+    (address, stop, handle)
+}
+
+#[tokio::test]
+async fn profile_switch_resolves_duplicate_listener_with_controlled_override_and_updates_revision()
+{
+    let root = test_root("subscription-duplicate-listener");
+    fs::create_dir_all(&root).unwrap();
+    let held_port = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = held_port.local_addr().unwrap().port();
+    let first = root.join("first.yaml");
+    fs::write(
+        &first,
+        format!("mixed-port: {port}\nallow-lan: false\nipv6: false\nrules: [MATCH,DIRECT]\n"),
+    )
+    .unwrap();
+    let second = root.join("second.yaml");
+    let second_original =
+        format!("port: {port}\nallow-lan: true\nipv6: false\nrules: [MATCH,DIRECT]\n");
+    fs::write(&second, &second_original).unwrap();
+    let store = ControlledConfigStore::new(root.join("store"));
+    let patch_update = store
+        .prepare_json_update(&first, &serde_json::json!({"mixed-port": port}))
+        .unwrap();
+    store.commit(&patch_update).unwrap();
+    store
+        .materialize_with_overrides_for_core(&first, &[], CoreKind::Mihomo)
+        .unwrap();
+
+    let (address, stop, server) = spawn_reload_controller();
+    let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+
+    store
+        .reload_with_overrides_for_session(&client, &second, vec![])
+        .await
+        .unwrap();
+    let _ = stop.send(());
+    server.join().unwrap();
+
+    let effective: serde_yaml::Value =
+        serde_yaml::from_str(&store.cached_runtime_payload().unwrap().unwrap()).unwrap();
+    assert_eq!(effective["mixed-port"].as_u64(), Some(u64::from(port)));
+    let fallback_port = effective["port"].as_u64().unwrap();
+    assert_ne!(fallback_port, u64::from(port));
+    assert_eq!(fs::read_to_string(&second).unwrap(), second_original);
+    assert_eq!(
+        store
+            .load_json()
+            .unwrap()
+            .get("mixed-port")
+            .and_then(serde_json::Value::as_u64),
+        Some(u64::from(port))
+    );
+    assert_eq!(
+        store
+            .pending_source_revision(CoreKind::Mihomo, &second, &[])
+            .unwrap(),
+        None
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn rolled_back_profile_stage_does_not_persist_session_listener_fallbacks() {
+    let root = test_root("rollback-session-fallback");
+    fs::create_dir_all(&root).unwrap();
+    let held_port = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = held_port.local_addr().unwrap().port();
+    let first = root.join("first.yaml");
+    fs::write(
+        &first,
+        format!("mixed-port: {port}\nallow-lan: false\nipv6: false\nrules: [MATCH,DIRECT]\n"),
+    )
+    .unwrap();
+    let second = root.join("second.yaml");
+    fs::write(
+        &second,
+        format!("port: {port}\nallow-lan: true\nipv6: false\nrules: [MATCH,DIRECT]\n"),
+    )
+    .unwrap();
+    let store = ControlledConfigStore::new(root.join("store"));
+    let patch_update = store
+        .prepare_json_update(&first, &serde_json::json!({"mixed-port": port}))
+        .unwrap();
+    store.commit(&patch_update).unwrap();
+    store
+        .materialize_with_overrides_for_core(&first, &[], CoreKind::Mihomo)
+        .unwrap();
+
+    let (address, stop, server) = spawn_reload_controller();
+    let client = MihomoClient::new(MihomoEndpoint::new(format!("http://{address}"), "")).unwrap();
+
+    let transaction = store
+        .stage_profile_reload(&client, second, None, vec![])
+        .await
+        .unwrap();
+    transaction.rollback().await.unwrap();
+    let _ = stop.send(());
+    server.join().unwrap();
+
+    assert!(store.session_listener_fallbacks.lock().is_empty());
+    assert_eq!(
+        store
+            .pending_source_revision(CoreKind::Mihomo, &first, &[])
+            .unwrap(),
+        None
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn service_profile_prepare_commits_session_fallbacks_only_when_saved() {
+    let root = test_root("service-session-fallback-commit");
+    fs::create_dir_all(&root).unwrap();
+    let held_port = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = held_port.local_addr().unwrap().port();
+    let first = root.join("first.yaml");
+    fs::write(
+        &first,
+        format!("mixed-port: {port}\nallow-lan: false\nipv6: false\nrules: [MATCH,DIRECT]\n"),
+    )
+    .unwrap();
+    let store = ControlledConfigStore::new(root.join("store"));
+    let patch_update = store
+        .prepare_json_update(&first, &serde_json::json!({"mixed-port": port}))
+        .unwrap();
+    store.commit(&patch_update).unwrap();
+    store
+        .materialize_with_overrides_for_core(&first, &[], CoreKind::Mihomo)
+        .unwrap();
+    let previous = store.cached_runtime_payload().unwrap().unwrap();
+    let candidate = format!("port: {port}\nallow-lan: true\nipv6: false\nrules: [MATCH,DIRECT]\n");
+
+    let update = store
+        .prepare_service_config_update(
+            crate::profile::ProfileRuntimeSource::Frozen(candidate.into()),
+            None,
+            vec![],
+            Some(previous.clone()),
+        )
+        .await
+        .unwrap();
+    assert!(store.session_listener_fallbacks.lock().is_empty());
+
+    let resolved: serde_yaml::Value = serde_yaml::from_str(update.next_payload()).unwrap();
+    assert_eq!(resolved["mixed-port"].as_u64(), Some(u64::from(port)));
+    let fallback_port = resolved["port"].as_u64().unwrap();
+    assert_ne!(fallback_port, u64::from(port));
+
+    let persistence = store
+        .stage_service_tun_update(update.clone())
+        .await
+        .unwrap();
+    persistence.rollback().await.unwrap();
+    assert!(store.session_listener_fallbacks.lock().is_empty());
+
+    let persistence = store.stage_service_tun_update(update).await.unwrap();
+    persistence.saved();
+    let session = store.session_listener_fallbacks.lock();
+    assert_eq!(
+        session
+            .get("port")
+            .map(|item| (item.original, item.current)),
+        Some((port, u16::try_from(fallback_port).unwrap()))
+    );
+    drop(session);
+    fs::remove_dir_all(root).unwrap();
+}

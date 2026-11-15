@@ -15,7 +15,7 @@ use crate::{
     data_coordinator::{DataWriteAccess, DataWriteLease, shared_transaction},
     listener_fallback::{
         SessionListenerFallback, apply_session_fallbacks, apply_session_fallbacks_to_value,
-        resolve_conflicts, validate_listener_change,
+        resolve_candidate_conflicts, resolve_conflicts, validate_listener_change,
     },
     profile::{merge_controlled_yaml, merge_payload_overrides, merge_profile_patch, merge_yaml},
     profiles::{MAX_PROFILE_BYTES, atomic_write, read_profile_bytes},
@@ -176,6 +176,7 @@ pub struct ControlledConfigUpdate {
     next_patch: Vec<u8>,
     previous_payload: String,
     next_payload: String,
+    next_session_fallbacks: Option<BTreeMap<String, SessionListenerFallback>>,
 }
 
 impl ControlledConfigUpdate {

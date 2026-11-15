@@ -553,7 +553,11 @@ impl RuntimePage {
         let Some(token) = self.begin_mutation(Page::Profiles) else {
             return;
         };
-        let task = self.runtime.spawn(workflow::delete(store, id));
+        let controlled = self.controlled_config_store.clone();
+        let commands = self.application_commands.clone();
+        let task = self
+            .runtime
+            .spawn(workflow::delete(store, controlled, commands, id));
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
@@ -567,7 +571,18 @@ impl RuntimePage {
             let _ = this.update(cx, |this, cx| {
                 this.finish_mutation(token);
                 match result {
-                    Ok(()) => {
+                    Ok(outcome) => {
+                        if outcome.was_active {
+                            this.synchronize_cleared_or_fallback_profile(cx);
+                            if !this
+                                .application_commands
+                                .is_current(outcome.refresh_version)
+                            {
+                                this.refresh(cx);
+                            } else if let Some(data) = outcome.refresh {
+                                let _ = this.replace_page_data(token, data, cx);
+                            }
+                        }
                         this.reload_profile_catalog(cx);
                         if this.is_page_task_current(token) {
                             this.notice = Some(zenclash_i18n::text("profiles.notices.deleted"));
