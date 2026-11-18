@@ -20,11 +20,13 @@ pub enum PublicIpProvider {
     IpWhoIs,
     /// `api.ipapi.is` network intelligence response.
     IpApiIs,
+    /// `api.vpndetection.io` VPN, Tor and relay detection response.
+    VpnDetection,
 }
 
 impl PublicIpProvider {
     /// All providers in stable UI order.
-    pub const ALL: [Self; 3] = [Self::IpSb, Self::IpWhoIs, Self::IpApiIs];
+    pub const ALL: [Self; 4] = [Self::IpSb, Self::IpWhoIs, Self::IpApiIs, Self::VpnDetection];
 
     /// Short provider label.
     #[must_use]
@@ -33,6 +35,7 @@ impl PublicIpProvider {
             Self::IpSb => "IP.SB",
             Self::IpWhoIs => "ipwho.is",
             Self::IpApiIs => "ipapi.is",
+            Self::VpnDetection => "VPNDetection",
         }
     }
 
@@ -41,6 +44,7 @@ impl PublicIpProvider {
             Self::IpSb => "https://api.ip.sb/geoip",
             Self::IpWhoIs => "https://ipwho.is/",
             Self::IpApiIs => "https://api.ipapi.is/",
+            Self::VpnDetection => "https://api.vpndetection.io/myip",
         }
     }
 }
@@ -495,6 +499,27 @@ fn parse_public_ip(provider: PublicIpProvider, value: &Value) -> NetworkProbeRes
                 ..Default::default()
             }
         }
+        PublicIpProvider::VpnDetection => {
+            let location = object.get("location").and_then(Value::as_object);
+            let asn = object.get("asn").and_then(Value::as_object);
+            let anonymizer = [boolean("is_tor"), boolean("is_relay")];
+            PublicIpInfo {
+                ip: string("ip").unwrap_or_default(),
+                country: nested_string(location, "country_name"),
+                country_code: nested_string(location, "country"),
+                asn: asn
+                    .and_then(|item| parse_asn(item.get("asn")))
+                    .filter(|number| *number != 0),
+                organization: nested_string(asn, "name"),
+                is_proxy: anonymizer
+                    .iter()
+                    .any(Option::is_some)
+                    .then_some(anonymizer.contains(&Some(true))),
+                is_vpn: boolean("is_vpn"),
+                timezone: nested_string(location, "timezone"),
+                ..Default::default()
+            }
+        }
     };
     info.ip = info.ip.trim().to_owned();
     if info.ip.is_empty() {
@@ -578,6 +603,14 @@ mod tests {
             "location": {"country": "Example", "latitude": 1.5},
             "asn": {"asn": 64502, "org": "Third Org"}
         });
+        let vpnd = serde_json::json!({
+            "ip": "198.51.100.9", "is_vpn": true, "is_tor": false, "is_relay": true,
+            "location": {"country": "EX", "country_name": "Example", "timezone": "Etc/UTC"},
+            "asn": {"asn": 64503, "name": "Fourth Org", "type": "hosting"}
+        });
+        let unknown_asn = serde_json::json!({
+            "ip": "198.51.100.10", "is_vpn": false, "asn": {"asn": 0}
+        });
 
         assert_eq!(
             parse_public_ip(PublicIpProvider::IpSb, &sb).unwrap().asn,
@@ -596,6 +629,16 @@ mod tests {
                 .is_proxy,
             Some(true)
         );
+        let parsed = parse_public_ip(PublicIpProvider::VpnDetection, &vpnd).unwrap();
+        assert_eq!(parsed.country_code.as_deref(), Some("EX"));
+        assert_eq!(parsed.country.as_deref(), Some("Example"));
+        assert_eq!(parsed.asn, Some(64503));
+        assert_eq!(parsed.organization.as_deref(), Some("Fourth Org"));
+        assert_eq!(parsed.is_vpn, Some(true));
+        assert_eq!(parsed.is_proxy, Some(true));
+        let parsed = parse_public_ip(PublicIpProvider::VpnDetection, &unknown_asn).unwrap();
+        assert_eq!(parsed.asn, None);
+        assert_eq!(parsed.is_proxy, None);
     }
 
     #[tokio::test]
