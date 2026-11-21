@@ -1,4 +1,6 @@
 use super::super::ApplicationCommands;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use zenclash_core::{
@@ -6,6 +8,19 @@ use zenclash_core::{
     YamlOverrideStore,
 };
 use zenclash_core::{AppearancePreference, CoreKind, CoreSession, MihomoClient, MihomoEndpoint};
+
+fn unique_test_root(prefix: &str) -> PathBuf {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "{prefix}-{}-{}-{}",
+        std::process::id(),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
 
 #[tokio::test]
 async fn cancelled_backup_waiter_keeps_completion_owned_until_shutdown() {
@@ -23,24 +38,17 @@ async fn failed_optional_controller_observation_keeps_the_committed_restore() {
 }
 
 async fn successful_backup(cancel_waiter: bool, readback_succeeds: bool) {
-    let root = std::env::temp_dir().join(format!(
-        "zenclash-backup-owned-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = unique_test_root("zenclash-backup-owned");
     let source = root.join("source");
     let target = root.join("target");
-    for (data_root, port) in [(&source, 7890), (&target, 7891)] {
+    for (data_root, marker) in [(&source, "BACKUP_SOURCE"), (&target, "BACKUP_TARGET")] {
         AppPreferencesStore::new(data_root.join("preferences.json"))
             .save(&AppPreferences::default())
             .unwrap();
         let input = data_root.join("input.yaml");
         std::fs::write(
             &input,
-            format!("mixed-port: {port}\nrules: [MATCH,DIRECT]\n"),
+            format!("mixed-port: 0\nrules:\n  - MATCH,{marker}\n"),
         )
         .unwrap();
         let profiles = ProfileStore::new(data_root.join("profiles")).unwrap();
@@ -131,7 +139,7 @@ async fn successful_backup(cancel_waiter: bool, readback_succeeds: bool) {
                     .unwrap()
             )
             .unwrap()
-            .contains("7890")
+            .contains("BACKUP_SOURCE")
         );
     } else {
         release_tx.send(()).unwrap();
@@ -147,7 +155,7 @@ async fn successful_backup(cancel_waiter: bool, readback_succeeds: bool) {
         );
         server.await.unwrap();
         let input = root.join("after.yaml");
-        std::fs::write(&input, "mixed-port: 7892\nrules: [MATCH,DIRECT]\n").unwrap();
+        std::fs::write(&input, "mixed-port: 0\nrules:\n  - MATCH,DIRECT\n").unwrap();
         tokio::task::spawn_blocking(move || {
             outcome.profile_store().import_local(&input).unwrap();
             outcome.controlled_store().materialize(&input).unwrap();
@@ -165,19 +173,12 @@ async fn a_lost_reload_response_restores_the_exact_previous_runtime_before_relea
 }
 
 async fn verify_ambiguous_restore(block_rollback: bool) {
-    let root = std::env::temp_dir().join(format!(
-        "zenclash-backup-ambiguous-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = unique_test_root("zenclash-backup-ambiguous");
     let source = root.join("source");
     let target = root.join("target");
-    for (data_root, port, appearance) in [
-        (&source, 7890, AppearancePreference::Light),
-        (&target, 7891, AppearancePreference::Dark),
+    for (data_root, marker, appearance) in [
+        (&source, "BACKUP_SOURCE", AppearancePreference::Light),
+        (&target, "PREVIOUS_RUNTIME", AppearancePreference::Dark),
     ] {
         AppPreferencesStore::new(data_root.join("preferences.json"))
             .save(&AppPreferences {
@@ -188,7 +189,7 @@ async fn verify_ambiguous_restore(block_rollback: bool) {
         let input = data_root.join("input.yaml");
         std::fs::write(
             &input,
-            format!("mixed-port: {port}\nrules: [MATCH,DIRECT]\n"),
+            format!("mixed-port: 0\nrules:\n  - MATCH,{marker}\n"),
         )
         .unwrap();
         let profiles = ProfileStore::new(data_root.join("profiles")).unwrap();
@@ -244,7 +245,7 @@ async fn verify_ambiguous_restore(block_rollback: bool) {
     let session =
         CoreSession::open_with_config(CoreKind::Mihomo, client, Some(previous.clone()), Vec::new())
             .unwrap();
-    std::fs::write(&previous, "mixed-port: 7899\nrules: [MATCH,REJECT]\n").unwrap();
+    std::fs::write(&previous, "mixed-port: 0\nrules:\n  - MATCH,STALE_DISK\n").unwrap();
     let commands = ApplicationCommands::new(session.clone(), None);
     let archive = root.join("backup.zip");
     BackupManager::new(&source).export_to(&archive).unwrap();
@@ -288,9 +289,9 @@ async fn verify_ambiguous_restore(block_rollback: bool) {
         Some(previous)
     );
     let payloads = server.await.unwrap();
-    assert!(payloads[0].contains("7890"));
-    assert!(payloads[1].contains("7891"));
-    assert!(!payloads[1].contains("7899"));
+    assert!(payloads[0].contains("BACKUP_SOURCE"));
+    assert!(payloads[1].contains("PREVIOUS_RUNTIME"));
+    assert!(!payloads[1].contains("STALE_DISK"));
     assert_eq!(
         AppPreferencesStore::new(target.join("preferences.json"))
             .load()
