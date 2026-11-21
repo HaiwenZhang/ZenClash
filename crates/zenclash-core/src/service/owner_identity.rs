@@ -106,8 +106,8 @@ mod windows_owner {
         GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner,
         GetTokenInformation, IsValidSid, IsWellKnownSid, OWNER_SECURITY_INFORMATION,
         PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
-        SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid,
-        WinLocalSystemSid,
+        SECURITY_ATTRIBUTES, TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
+        TokenOwner, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateFileW, FILE_ALL_ACCESS,
@@ -126,6 +126,21 @@ mod windows_owner {
     const REGENERATED_FILES: [&str; 2] = [OWNER_TOKEN_FILE_NAME, "instance.lock"];
 
     pub(super) fn current_sid() -> Result<String> {
+        let buffer = query_process_token(TokenUser, "SID")?;
+        let token_user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+        sid_to_string(token_user.User.Sid)
+    }
+
+    fn current_token_owner_matches(file: &std::fs::File) -> Result<bool> {
+        let buffer = query_process_token(TokenOwner, "owner SID")?;
+        let token_owner = unsafe { &*buffer.as_ptr().cast::<TOKEN_OWNER>() };
+        if token_owner.Owner.is_null() {
+            return Ok(false);
+        }
+        owner_matches(file, token_owner.Owner)
+    }
+
+    fn query_process_token(info_class: TOKEN_INFORMATION_CLASS, label: &str) -> Result<Vec<usize>> {
         let mut token = std::ptr::null_mut();
         if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
             return Err(std::io::Error::last_os_error()).context("failed to open process token");
@@ -133,27 +148,27 @@ mod windows_owner {
         let token = OwnedHandle(token);
 
         let mut required = 0_u32;
-        unsafe { GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut required) };
+        unsafe { GetTokenInformation(token.0, info_class, std::ptr::null_mut(), 0, &mut required) };
         if required == 0 {
             return Err(std::io::Error::last_os_error())
-                .context("failed to size process SID buffer");
+                .with_context(|| format!("failed to size process {label} buffer"));
         }
         let words = (required as usize).div_ceil(std::mem::size_of::<usize>());
         let mut buffer = vec![0_usize; words];
         if unsafe {
             GetTokenInformation(
                 token.0,
-                TokenUser,
+                info_class,
                 buffer.as_mut_ptr().cast(),
                 required,
                 &mut required,
             )
         } == 0
         {
-            return Err(std::io::Error::last_os_error()).context("failed to read process SID");
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("failed to read process {label}"));
         }
-        let token_user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
-        sid_to_string(token_user.User.Sid)
+        Ok(buffer)
     }
 
     pub(super) fn load_or_create_token(app_data_root: &Path, sid: &str) -> Result<String> {
@@ -222,6 +237,7 @@ mod windows_owner {
 
     pub(super) fn protect_file(path: &Path, create: bool) -> Result<std::fs::File> {
         let descriptor = LocalSecurityDescriptor::from_sid(&current_sid()?)?;
+        let expected_owner = descriptor.owner()?;
         let open = || {
             open_no_reparse(
                 path,
@@ -238,11 +254,17 @@ mod windows_owner {
         } else {
             open()?
         };
-        if !owner_matches(&file, descriptor.owner()?)? {
-            bail!("refusing to change another user's file permissions");
+        if !owner_matches(&file, expected_owner)? {
+            // Elevated Windows processes default new file ownership (e.g., SQLite sidecars) to
+            // TokenOwner (BUILTIN\Administrators) instead of TokenUser. Normalize those files to
+            // the current user while still refusing files owned by any other account.
+            if !current_token_owner_matches(&file)? {
+                bail!("refusing to change another user's file permissions");
+            }
+            take_file_ownership(path, &file, expected_owner)?;
         }
         descriptor.apply_dacl(file.as_raw_handle())?;
-        validate_private_file(&file, descriptor.owner()?)?;
+        validate_private_file(&file, expected_owner)?;
         Ok(file)
     }
 
@@ -589,6 +611,47 @@ mod windows_owner {
         }
         std::fs::remove_dir(root).context("failed to remove the partially rebuilt root")?;
         std::fs::rename(stale, root).context("failed to restore the application data root")
+    }
+
+    fn take_file_ownership(path: &Path, existing: &std::fs::File, expected: PSID) -> Result<()> {
+        let file = open_no_reparse(path, false, WRITE_OWNER)?;
+        if !same_file(existing, &file)? {
+            bail!("file changed while normalizing private current-user file owner");
+        }
+        let status = unsafe {
+            SetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                expected,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        if status != 0 {
+            return Err(std::io::Error::from_raw_os_error(status as i32))
+                .context("failed to set private current-user file owner");
+        }
+        Ok(())
+    }
+
+    fn same_file(left: &std::fs::File, right: &std::fs::File) -> Result<bool> {
+        let mut left_info = BY_HANDLE_FILE_INFORMATION::default();
+        if unsafe { GetFileInformationByHandle(left.as_raw_handle(), &mut left_info) } == 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("failed to inspect existing private file identity");
+        }
+        let mut right_info = BY_HANDLE_FILE_INFORMATION::default();
+        if unsafe { GetFileInformationByHandle(right.as_raw_handle(), &mut right_info) } == 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("failed to inspect reopened private file identity");
+        }
+        Ok(
+            left_info.dwVolumeSerialNumber == right_info.dwVolumeSerialNumber
+                && left_info.nFileIndexHigh == right_info.nFileIndexHigh
+                && left_info.nFileIndexLow == right_info.nFileIndexLow,
+        )
     }
 
     fn take_directory_ownership(path: &Path, expected: PSID) -> Result<()> {

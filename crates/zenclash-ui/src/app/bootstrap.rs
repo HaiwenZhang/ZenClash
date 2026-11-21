@@ -137,6 +137,7 @@ fn open_main_window(
     let title = SharedString::from("ZenClash");
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::centered(
+            None,
             gpui_kit::size(px(1280.), px(820.)),
             cx,
         )),
