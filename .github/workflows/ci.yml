@@ -159,11 +159,21 @@ jobs:
         run: gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${{ steps.upload.outputs.artifact-id }}"
 
   windows:
-    name: Windows x64 checks and installer
+    name: Windows ${{ matrix.arch }} checks and installer
     if: >-
       ${{ !startsWith(github.ref_name, 'v') &&
       !startsWith(github.head_ref, 'v') }}
-    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
       - name: Check out source
@@ -189,37 +199,48 @@ jobs:
       - name: Set up project Rust
         uses: ./.github/actions/setup-rust
         with:
-          target: x86_64-pc-windows-msvc
+          target: ${{ matrix.target }}
 
       - name: Cache Cargo dependencies and build artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: ci-windows-x64
+          shared-key: ci-windows-${{ matrix.arch }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run shared Rust checks
+        # The x64 runner covers full Rust lint/feature checks; arm64 still runs workspace tests.
+        if: matrix.arch == 'x64'
         uses: ./.github/actions/verify-rust
+
+      - name: Run workspace tests with all features
+        if: matrix.arch != 'x64'
+        run: cargo test --workspace --all-features --locked
+
+      - name: Test Windows authorization result classification
+        if: matrix.arch != 'x64'
+        shell: pwsh
+        run: scripts/tests/service_authorization_test.ps1
 
       - name: Test Windows installer packaging
         shell: pwsh
-        run: scripts/tests/build_windows_installer_test.ps1 -Architecture 'x64'
+        run: scripts/tests/build_windows_installer_test.ps1 -Architecture '${{ matrix.arch }}'
 
-      - name: Build Windows x64 setup installer
+      - name: Build Windows ${{ matrix.arch }} setup installer
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: >-
           scripts/build_windows_installer.ps1
           -Version '${{ steps.version.outputs.version }}'
-          -Architecture 'x64'
+          -Architecture '${{ matrix.arch }}'
           -OutputDir dist
 
       - name: Upload Windows setup installer
         id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: ci-zenclash-windows-x64
-          path: dist/ZenClash-${{ steps.version.outputs.version }}-windows-x64-setup.exe
+          name: ci-zenclash-windows-${{ matrix.arch }}
+          path: dist/ZenClash-${{ steps.version.outputs.version }}-windows-${{ matrix.arch }}-setup.exe
           if-no-files-found: error
           compression-level: 0
           retention-days: 1

@@ -162,3 +162,26 @@ fn sqlite_creates_live_sidecars_with_private_acls() {
     drop(connection);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(windows)]
+#[test]
+fn default_owned_history_files_are_normalized_to_current_user_acls() {
+    let root = std::env::temp_dir().join(format!(
+        "zenclash-default-owner-history-{}-{}",
+        std::process::id(),
+        unix_millis()
+    ));
+    fs::create_dir(&root).unwrap();
+    let database = root.join("history.sqlite3");
+    let wal = root.join("history.sqlite3-wal");
+    let shm = root.join("history.sqlite3-shm");
+    for path in [&database, &wal, &shm] {
+        fs::write(path, b"retained").unwrap();
+    }
+    private_io::prepare(&database).unwrap();
+    for path in [&database, &wal, &shm] {
+        drop(crate::service::open_private_current_user_file(path).unwrap());
+        assert_eq!(fs::read(path).unwrap(), b"retained");
+    }
+    fs::remove_dir_all(root).unwrap();
+}
