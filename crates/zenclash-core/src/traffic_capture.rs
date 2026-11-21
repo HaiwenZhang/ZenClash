@@ -533,11 +533,16 @@ impl TrafficCaptureSession {
                     prepared_config,
                 )
                 .await;
-            if result.is_err()
+            if let Err(original_error) = &result
                 && let Some(acquired) = acquired
                 && !session.backend.owns_service(&acquired)
+                && let Err(cleanup_error) = session.backend.stop_unowned_service(acquired).await
             {
-                acquired.stop().await.map_err(crate::MihomoError::from)?;
+                tracing::warn!(
+                    %original_error,
+                    %cleanup_error,
+                    "failed to stop unowned service session after service TUN admission error"
+                );
             }
             result
         })
@@ -924,6 +929,13 @@ trait CaptureBackend: Send + Sync {
 
     fn owns_service(&self, _service: &Arc<crate::service::ServiceSession>) -> bool {
         false
+    }
+
+    fn stop_unowned_service(
+        &self,
+        service: Arc<crate::service::ServiceSession>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), crate::service::ServiceCallError>> + Send>> {
+        Box::pin(async move { service.stop().await })
     }
     fn validate_service_tun_request(
         &self,
@@ -1639,6 +1651,8 @@ mod tests {
         blocked_handover: Arc<Mutex<Option<BlockedWrite>>>,
         service_reply:
             Arc<Mutex<Option<crate::core_session::service_tun::ServiceTunRuntimeOutcome>>>,
+        service_error: Arc<Mutex<Option<crate::CoreSessionError>>>,
+        stop_unowned_error: Arc<Mutex<Option<crate::service::ServiceCallError>>>,
     }
 
     struct FakeState {
@@ -1667,6 +1681,8 @@ mod tests {
                 blocked_write: Arc::default(),
                 blocked_handover: Arc::default(),
                 service_reply: Arc::default(),
+                service_error: Arc::default(),
+                stop_unowned_error: Arc::default(),
                 state: Arc::new(Mutex::new(FakeState {
                     system_proxy: SystemProxySessionSnapshot {
                         intent_enabled: system_active,
@@ -1749,6 +1765,25 @@ mod tests {
     }
 
     impl CaptureBackend for FakeBackend {
+        fn stop_unowned_service(
+            &self,
+            _service: Arc<crate::service::ServiceSession>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), crate::service::ServiceCallError>> + Send>>
+        {
+            self.state
+                .lock()
+                .unwrap()
+                .operations
+                .push("stop-unowned-service".into());
+            let error = self.stop_unowned_error.lock().unwrap().take();
+            Box::pin(async move {
+                match error {
+                    Some(error) => Err(error),
+                    None => Ok(()),
+                }
+            })
+        }
+
         fn enable_service_tun(
             &self,
             _service: Option<(Arc<crate::service::ServiceSession>, PathBuf)>,
@@ -1778,6 +1813,9 @@ mod tests {
                     .unwrap()
                     .operations
                     .push("service-handover".into());
+                if let Some(error) = self.service_error.lock().unwrap().take() {
+                    return Err(error);
+                }
                 Ok(self.service_reply.lock().unwrap().take().unwrap_or(
                     crate::core_session::service_tun::ServiceTunRuntimeOutcome {
                         saved: Some(crate::CoreApplyOutcome {
@@ -2589,5 +2627,54 @@ mod tests {
         assert!(restarted_proxy.actual.active());
         assert_eq!(restarted_proxy.ownership, SystemProxyOwnershipState::Owned);
         assert_eq!(backend.operations(), ["reconcile", "reconcile"]);
+    }
+
+    #[tokio::test]
+    async fn enable_service_tun_cleanup_failure_preserves_original_rollback_error() {
+        let backend = Arc::new(FakeBackend::new(
+            true,
+            SystemProxyOwnershipState::Owned,
+            false,
+        ));
+        *backend.service_error.lock().unwrap() = Some(crate::CoreSessionError::Process(
+            crate::MihomoError::Process("service handover failed".into()),
+        ));
+        backend.fail_next("system-proxy:true");
+        *backend.stop_unowned_error.lock().unwrap() =
+            Some(crate::service::ServiceCallError::StartUnconfirmed);
+        let session = TrafficCaptureSession::with_backend(backend.clone());
+        let acquired = Arc::new(crate::service::ServiceSession::disconnected_for_test());
+
+        let error = session
+            .enable_service_tun_with_bundle(
+                Some((acquired, PathBuf::from("/tmp"))),
+                RuntimeConfigurationRevision {
+                    binding_generation: 0,
+                    configuration_generation: 0,
+                },
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                &error,
+                crate::CoreSessionError::Capture(capture)
+                    if matches!(capture.as_ref(), TrafficCaptureError::Rollback { .. })
+            ),
+            "cleanup failure must not mask the original Rollback error, got: {error:?}"
+        );
+        assert_eq!(
+            backend.operations(),
+            [
+                "system-proxy:false",
+                "service-handover",
+                "system-proxy:true",
+                "stop-unowned-service",
+            ]
+        );
     }
 }

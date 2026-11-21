@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use super::resources::{
     bundled_core_binary, core_path_filenames, install_bundled_core, install_bundled_mihomo_data,
-    startup_binary,
+    startup_binary, startup_path_binary,
 };
 use crate::{
     CoreCapabilities, CoreConfigValidationError, CoreConfigValidator, CoreKind, MihomoEndpoint,
@@ -250,17 +250,21 @@ fn resolve_core_binary(
             managed
         } else if let Some(bundled) = bundled_core_binary(kind) {
             install_bundled_core(kind, &bundled, home_dir)?
+        } else if let Some(workspace) =
+            startup_binary([crate::WorkspaceResources::new(project_root).core_binary(kind)])?
+        {
+            workspace
         } else {
-            let mut candidates =
-                vec![crate::WorkspaceResources::new(project_root).core_binary(kind)];
-            if let Some(paths) = std::env::var_os("PATH") {
+            let path_binary = if let Some(paths) = std::env::var_os("PATH") {
                 let names = core_path_filenames(kind);
-                candidates.extend(
+                startup_path_binary(
                     std::env::split_paths(&paths)
                         .flat_map(|directory| names.iter().map(move |name| directory.join(name))),
-                );
-            }
-            startup_binary(candidates)?.ok_or_else(|| {
+                )?
+            } else {
+                None
+            };
+            path_binary.ok_or_else(|| {
                 MihomoError::Process(format!(
                     "找不到 {}；请在设置 → 运行内核中重新检测或选择文件",
                     kind.display_name()

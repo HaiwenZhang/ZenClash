@@ -1382,3 +1382,45 @@ fn observed_backup_snapshot_pairs_preferences_with_the_actual_source_of_its_root
     assert_eq!(manager.read_snapshot().unwrap().preferences, latest);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn restore_rejects_archive_with_case_insensitive_duplicate_entries() {
+    let root = test_root("case-insensitive-archive-dup");
+    fs::create_dir_all(&root).unwrap();
+    let archive = root.join("dup.zip");
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default();
+    writer
+        .start_file("yaml-overrides/files/dup.yaml", options)
+        .unwrap();
+    writer.write_all(b"mode: rule\n").unwrap();
+    writer
+        .start_file("yaml-overrides/files/DUP.yaml", options)
+        .unwrap();
+    writer.write_all(b"mode: global\n").unwrap();
+    fs::write(&archive, writer.finish().unwrap().into_inner()).unwrap();
+
+    let error = BackupManager::new(root.join("target"))
+        .prepare_restore(&archive)
+        .unwrap_err();
+    assert!(matches!(error, BackupError::InvalidArchive(_)), "{error}");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn restore_rejects_entry_exceeding_per_type_byte_cap() {
+    let root = test_root("per-type-entry-cap");
+    fs::create_dir_all(&root).unwrap();
+    let archive = root.join("oversized-prefs.zip");
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    writer.start_file(PREFERENCES_PATH, options).unwrap();
+    writer.write_all(&vec![b' '; 1024 * 1024 + 1]).unwrap();
+    fs::write(&archive, writer.finish().unwrap().into_inner()).unwrap();
+
+    let error = BackupManager::new(root.join("target"))
+        .prepare_restore(&archive)
+        .unwrap_err();
+    assert!(matches!(error, BackupError::TooLarge(_)), "{error}");
+    fs::remove_dir_all(root).unwrap();
+}

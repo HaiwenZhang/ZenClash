@@ -144,8 +144,8 @@ impl Diagnostics {
             .timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("ZenClash/", env!("CARGO_PKG_VERSION")));
-        if let NetworkProbeRoute::MihomoHttp { host, port } = route {
-            match reqwest::Proxy::all(format!("http://{host}:{port}")) {
+        if let Some(proxy_url) = route.http_proxy_url() {
+            match reqwest::Proxy::all(proxy_url) {
                 Ok(proxy) => builder = builder.proxy(proxy),
                 Err(error) => {
                     return Self {
@@ -339,4 +339,21 @@ fn risk_result(ip: &str, risk: Option<&Value>, spam: Option<&Value>) -> CheckRes
         json!({"ip":ip, "risk_score":score, "abuse_listed":appears,
             "type":risk.and_then(|v| v[ip]["type"].as_str())}),
     )
+}
+
+#[cfg(test)]
+mod proxy_route_tests {
+    use super::*;
+
+    #[test]
+    fn ipv6_mihomo_proxy_route_builds_valid_http_client() {
+        for host in ["::1", "[::1]", "2001:db8::1"] {
+            let route = NetworkProbeRoute::MihomoHttp {
+                host: host.into(),
+                port: 7890,
+            };
+            let diagnostics = Diagnostics::new(&route, None);
+            assert!(diagnostics.http.is_ok(), "host={host}");
+        }
+    }
 }

@@ -66,9 +66,34 @@ where
         )
 }
 
+fn visible_description(description: gpui_kit::SharedString) -> Option<gpui_kit::SharedString> {
+    (!description.trim().is_empty()).then_some(description)
+}
+
+fn settings_row_heading(
+    label: gpui_kit::SharedString,
+    description: gpui_kit::SharedString,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Div {
+    let mut heading = v_flex()
+        .flex_1()
+        .min_w_0()
+        .gap_1()
+        .child(div().text_sm().child(label));
+    if let Some(description) = visible_description(description) {
+        heading = heading.child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(description),
+        );
+    }
+    heading
+}
+
 pub(in crate::pages::runtime) fn settings_input_row(
     label: impl Into<gpui_kit::SharedString>,
-    _description: impl Into<gpui_kit::SharedString>,
+    description: impl Into<gpui_kit::SharedString>,
     input: impl IntoElement,
     theme: &gpui_kit::component::Theme,
 ) -> gpui_kit::AnyElement {
@@ -80,14 +105,18 @@ pub(in crate::pages::runtime) fn settings_input_row(
         .gap_4()
         .border_b_1()
         .border_color(theme.border)
-        .child(div().flex_1().min_w_0().text_sm().child(label.into()))
+        .child(settings_row_heading(
+            label.into(),
+            description.into(),
+            theme,
+        ))
         .child(div().flex_1().min_w_0().child(input))
         .into_any_element()
 }
 
 pub(in crate::pages::runtime) fn settings_switch<F>(
     label: impl Into<gpui_kit::SharedString>,
-    _description: impl Into<gpui_kit::SharedString>,
+    description: impl Into<gpui_kit::SharedString>,
     checked: bool,
     id: &'static str,
     theme: &gpui_kit::component::Theme,
@@ -96,12 +125,12 @@ pub(in crate::pages::runtime) fn settings_switch<F>(
 where
     F: Fn(&bool, &mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
 {
-    settings_switch_disabled(label, _description, checked, id, theme, false, listener)
+    settings_switch_disabled(label, description, checked, id, theme, false, listener)
 }
 
 pub(in crate::pages::runtime) fn settings_switch_disabled<F>(
     label: impl Into<gpui_kit::SharedString>,
-    _description: impl Into<gpui_kit::SharedString>,
+    description: impl Into<gpui_kit::SharedString>,
     checked: bool,
     id: &'static str,
     theme: &gpui_kit::component::Theme,
@@ -120,7 +149,11 @@ where
         .gap_4()
         .border_b_1()
         .border_color(theme.border)
-        .child(div().flex_1().min_w_0().text_sm().child(label.clone()))
+        .child(settings_row_heading(
+            label.clone(),
+            description.into(),
+            theme,
+        ))
         .child(
             crate::components::mint_switch::MintSwitch::new(id)
                 .accessibility_label(label)
@@ -414,5 +447,97 @@ impl RuntimePage {
                     })),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{settings_input_row, settings_switch_disabled, visible_description};
+
+    #[test]
+    fn visible_description_filters_blank_text_and_preserves_meaningful_copy() {
+        assert_eq!(visible_description("".into()), None);
+        assert_eq!(visible_description("   \t\n ".into()), None);
+        assert_eq!(
+            visible_description("Autostart points to an older executable".into()),
+            Some("Autostart points to an older executable".into())
+        );
+    }
+
+    #[gpui_kit::test]
+    fn settings_rows_render_non_empty_descriptions_beneath_labels(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::component::{ActiveTheme, Root, v_flex};
+        use gpui_kit::test::TestWindowExt;
+        use gpui_kit::{
+            AppContext, Context, InteractiveElement, IntoElement, ParentElement, Render, Styled,
+            TestSupportExt, Window, div, px, size,
+        };
+
+        struct RowsView;
+        impl Render for RowsView {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = cx.theme().clone();
+                let long_desc = "Autostart currently points to an older executable path and should be re-enabled to launch this build.";
+                v_flex()
+                    .w(px(280.))
+                    .child(div().id("switch-no-desc").test_support().child(
+                        settings_switch_disabled(
+                            "Autostart",
+                            "",
+                            false,
+                            "test-switch-empty",
+                            &theme,
+                            true,
+                            |_, _, _| {},
+                        ),
+                    ))
+                    .child(div().id("switch-with-desc").test_support().child(
+                        settings_switch_disabled(
+                            "Autostart",
+                            long_desc,
+                            false,
+                            "test-switch-desc",
+                            &theme,
+                            true,
+                            |_, _, _| {},
+                        ),
+                    ))
+                    .child(
+                        div()
+                            .id("input-no-desc")
+                            .test_support()
+                            .child(settings_input_row("Mixed port", "", div(), &theme)),
+                    )
+                    .child(
+                        div()
+                            .id("input-with-desc")
+                            .test_support()
+                            .child(settings_input_row("Mixed port", long_desc, div(), &theme)),
+                    )
+            }
+        }
+
+        cx.update(gpui_kit::init);
+        let handle = cx.open_window(size(px(320.), px(600.)), |window, cx| {
+            let view = cx.new(|_| RowsView);
+            Root::new(view, window, cx)
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.find("switch-with-desc").bounds().size.height
+                    > window.find("switch-no-desc").bounds().size.height,
+                "disabled switch row must render non-empty description beneath label"
+            );
+            assert!(
+                window.find("input-with-desc").bounds().size.height
+                    > window.find("input-no-desc").bounds().size.height,
+                "settings input row must render non-empty description beneath label"
+            );
+            window.remove_window();
+        })
+        .unwrap();
     }
 }

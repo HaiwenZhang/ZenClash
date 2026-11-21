@@ -42,11 +42,13 @@ fn usable_address(address: &MIB_UNICASTIPADDRESS_ROW) -> bool {
                 ))
             }
             AF_INET6 => {
+                let ip = std::net::Ipv6Addr::from(address.Address.Ipv6.sin6_addr.u.Byte);
                 let temporary = address.PrefixOrigin == IpPrefixOriginRouterAdvertisement
                     && address.SuffixOrigin == IpSuffixOriginRandom;
-                let link_local = address.PrefixOrigin == IpPrefixOriginWellKnown
-                    && address.SuffixOrigin == IpSuffixOriginLinkLayerAddress;
-                !temporary && !link_local
+                let link_local = ip.is_unicast_link_local()
+                    || (address.PrefixOrigin == IpPrefixOriginWellKnown
+                        && address.SuffixOrigin == IpSuffixOriginLinkLayerAddress);
+                !ip.is_unspecified() && !ip.is_loopback() && !temporary && !link_local
             }
             _ => false,
         }
@@ -130,6 +132,40 @@ mod tests {
                 &[address(3, "fe80::1".parse().unwrap())]
             ),
             NetworkReachability::Offline
+        );
+    }
+
+    #[test]
+    fn ipv6_unspecified_loopback_and_random_iid_link_local_do_not_prove_an_uplink() {
+        let mut random_iid_link_local = address(3, "fe80::1234:5678".parse().unwrap());
+        random_iid_link_local.PrefixOrigin = IpPrefixOriginWellKnown;
+        random_iid_link_local.SuffixOrigin = IpSuffixOriginRandom;
+
+        let mut zero_origin_link_local = address(3, "fe80::2".parse().unwrap());
+        zero_origin_link_local.PrefixOrigin = 0;
+        zero_origin_link_local.SuffixOrigin = 0;
+
+        for candidate in [
+            random_iid_link_local,
+            zero_origin_link_local,
+            address(3, "::".parse().unwrap()),
+            address(3, "::1".parse().unwrap()),
+        ] {
+            assert_eq!(
+                classify(&[interface(3, true, true)], &[candidate]),
+                NetworkReachability::Offline
+            );
+        }
+
+        assert_eq!(
+            classify(
+                &[interface(3, true, true)],
+                &[
+                    random_iid_link_local,
+                    address(3, "2001:db8::1".parse().unwrap()),
+                ]
+            ),
+            NetworkReachability::Online
         );
     }
 

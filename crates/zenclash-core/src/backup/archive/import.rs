@@ -23,6 +23,8 @@ use crate::{
 };
 
 const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_PREFERENCES_ENTRY_BYTES: u64 = 1024 * 1024;
+const MAX_PROFILE_INDEX_ENTRY_BYTES: u64 = 4 * 1024 * 1024;
 
 pub(in crate::backup) fn prepare_restore(
     manager: &BackupManager,
@@ -63,6 +65,14 @@ pub(in crate::backup) fn prepare_restore(
 }
 
 fn extract_and_validate(archive_path: &Path, staging_root: &Path) -> BackupResult<(usize, u64)> {
+    extract_and_validate_with_budget(archive_path, staging_root, MAX_BACKUP_BYTES)
+}
+
+fn extract_and_validate_with_budget(
+    archive_path: &Path,
+    staging_root: &Path,
+    max_backup_bytes: u64,
+) -> BackupResult<(usize, u64)> {
     let mut zip = ZipArchive::new(fs::File::open(archive_path)?)?;
     if zip.len() > MAX_BACKUP_FILES + 1 {
         return Err(BackupError::TooLarge(format!(
@@ -78,7 +88,7 @@ fn extract_and_validate(archive_path: &Path, staging_root: &Path) -> BackupResul
         let mut entry = zip.by_index(index)?;
         validate_entry_type(&entry)?;
         let normalized = normalized_archive_path(&entry)?;
-        if !seen.insert(normalized.clone()) {
+        if !seen.insert(normalized.to_lowercase()) {
             return Err(BackupError::InvalidArchive(format!(
                 "ZIP 包含重复条目 {normalized}"
             )));
@@ -93,10 +103,29 @@ fn extract_and_validate(archive_path: &Path, staging_root: &Path) -> BackupResul
                 "不允许恢复路径 {normalized}"
             )));
         }
-        let bytes = read_limited(&mut entry, MAX_BACKUP_BYTES, &normalized)?;
+        let remaining_budget = max_backup_bytes.saturating_sub(payload_bytes);
+        let per_type = entry_byte_limit(&normalized);
+        let entry_limit = per_type.map_or(remaining_budget, |limit| limit.min(remaining_budget));
+        let bytes = read_limited(&mut entry, entry_limit, &normalized).map_err(|error| {
+            if normalized == PROFILE_INDEX_PATH
+                && matches!(error, BackupError::TooLarge(_))
+                && remaining_budget >= MAX_PROFILE_INDEX_ENTRY_BYTES
+            {
+                BackupError::Profiles(ProfileStoreError::IndexTooLarge {
+                    limit_mib: (MAX_PROFILE_INDEX_ENTRY_BYTES / (1024 * 1024)) as usize,
+                })
+            } else {
+                error
+            }
+        })?;
         payload_bytes = payload_bytes
             .checked_add(bytes.len() as u64)
             .ok_or_else(|| BackupError::TooLarge("未压缩数据大小溢出".into()))?;
+        if payload_bytes > max_backup_bytes {
+            return Err(BackupError::TooLarge(format!(
+                "未压缩数据超过 {max_backup_bytes} 字节"
+            )));
+        }
         ensure_payload_limits(observed.len() + 1, payload_bytes)?;
         let destination = staging_root.join(&normalized);
         if let Some(parent) = destination.parent() {
@@ -120,6 +149,20 @@ fn extract_and_validate(archive_path: &Path, staging_root: &Path) -> BackupResul
     }
     validate_staged_snapshot(staging_root)?;
     Ok((observed.len(), payload_bytes))
+}
+
+fn entry_byte_limit(path: &str) -> Option<u64> {
+    match path {
+        PREFERENCES_PATH => Some(MAX_PREFERENCES_ENTRY_BYTES),
+        CONTROLLED_PATH => Some(crate::profiles::MAX_PROFILE_BYTES as u64),
+        PROFILE_INDEX_PATH => Some(MAX_PROFILE_INDEX_ENTRY_BYTES),
+        YAML_OVERRIDE_INDEX_PATH => Some(crate::yaml_overrides::MAX_MANIFEST_BYTES as u64),
+        _ if path.starts_with("profiles/files/") => Some(crate::profiles::MAX_PROFILE_BYTES as u64),
+        _ if path.starts_with("yaml-overrides/files/") => {
+            Some(crate::yaml_overrides::MAX_OVERRIDE_BYTES as u64)
+        }
+        _ => None,
+    }
 }
 
 fn validate_entry_type<R: Read + ?Sized>(entry: &zip::read::ZipFile<'_, R>) -> BackupResult<()> {
@@ -148,6 +191,7 @@ fn verify_manifest(
         )));
     }
     let mut declared = BTreeMap::new();
+    let mut declared_folded = HashSet::new();
     for file in &manifest.files {
         if !is_authoritative_path(&file.path) {
             return Err(BackupError::InvalidArchive(format!(
@@ -155,7 +199,9 @@ fn verify_manifest(
                 file.path
             )));
         }
-        if declared.insert(file.path.clone(), file.clone()).is_some() {
+        if !declared_folded.insert(file.path.to_lowercase())
+            || declared.insert(file.path.clone(), file.clone()).is_some()
+        {
             return Err(BackupError::InvalidArchive(format!(
                 "清单包含重复路径 {}",
                 file.path
@@ -324,9 +370,82 @@ fn normalized_archive_path<R: Read + ?Sized>(
 
 fn read_limited(reader: &mut impl Read, limit: u64, label: &str) -> BackupResult<Vec<u8>> {
     let mut bytes = Vec::new();
-    reader.take(limit + 1).read_to_end(&mut bytes)?;
+    reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > limit {
         return Err(BackupError::TooLarge(format!("{label} 超过大小限制")));
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Cursor, Write as _};
+
+    use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
+
+    use super::*;
+
+    #[test]
+    fn extract_deducts_remaining_total_budget_across_entries() {
+        let root = std::env::temp_dir().join(format!(
+            "zenclash-backup-budget-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("budget.zip");
+        let staging = root.join("staging");
+        fs::create_dir_all(&staging).unwrap();
+
+        let first = vec![b'a'; 600];
+        let second = vec![b'b'; 600];
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        writer
+            .start_file("profiles/files/first.yaml", options)
+            .unwrap();
+        writer.write_all(&first).unwrap();
+        writer
+            .start_file("profiles/files/second.yaml", options)
+            .unwrap();
+        writer.write_all(&second).unwrap();
+        fs::write(&archive, writer.finish().unwrap().into_inner()).unwrap();
+
+        // With a 1,000-byte total budget, first.yaml uses 600 bytes leaving only 400 bytes,
+        // so reading second.yaml (600 bytes) must fail immediately during streaming read
+        // before writing second.yaml to staging.
+        let error = extract_and_validate_with_budget(&archive, &staging, 1_000).unwrap_err();
+        assert!(matches!(error, BackupError::TooLarge(_)), "{error}");
+        assert!(staging.join("profiles/files/first.yaml").is_file());
+        assert!(!staging.join("profiles/files/second.yaml").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verify_manifest_rejects_case_insensitive_duplicate_paths() {
+        let manifest = BackupManifest {
+            format_version: BACKUP_FORMAT_VERSION,
+            app_version: "0.3.0".into(),
+            created_at: 0,
+            files: vec![
+                ManifestFile {
+                    path: "yaml-overrides/files/a.yaml".into(),
+                    size: 1,
+                    sha256: "00".into(),
+                },
+                ManifestFile {
+                    path: "yaml-overrides/files/A.yaml".into(),
+                    size: 1,
+                    sha256: "11".into(),
+                },
+            ],
+        };
+        let error = verify_manifest(&manifest, &BTreeMap::new()).unwrap_err();
+        assert!(matches!(error, BackupError::InvalidArchive(_)), "{error}");
+    }
 }

@@ -249,7 +249,9 @@ fn validate_official_release_api_url(url: &reqwest::Url) -> AppUpdateResult<()> 
         || !url
             .host_str()
             .is_some_and(|host| host.eq_ignore_ascii_case("api.github.com"))
-        || url.path() != "/repos/HaiwenZhang/zenclash/releases/latest"
+        || !url
+            .path()
+            .eq_ignore_ascii_case("/repos/HaiwenZhang/zenclash/releases/latest")
         || url.query().is_some()
         || url.fragment().is_some()
     {
@@ -384,15 +386,17 @@ mod tests {
 
     #[test]
     fn release_metadata_rejects_untrusted_api_hosts_and_redirect_targets() {
-        assert!(
-            validate_official_release_api_url(
-                &reqwest::Url::parse(
-                    "https://api.github.com/repos/HaiwenZhang/zenclash/releases/latest"
-                )
-                .unwrap()
-            )
-            .is_ok()
-        );
+        for value in [
+            "https://api.github.com/repos/HaiwenZhang/zenclash/releases/latest",
+            "https://api.github.com/repos/HaiwenZhang/ZenClash/releases/latest",
+            "https://api.github.com/repos/haiwenzhang/zenclash/releases/latest",
+            "https://API.GITHUB.COM/repos/HAIWENZHANG/ZENCLASH/releases/latest",
+        ] {
+            assert!(
+                validate_official_release_api_url(&reqwest::Url::parse(value).unwrap()).is_ok(),
+                "{value}"
+            );
+        }
         for value in [
             "https://github.example/repos/HaiwenZhang/zenclash/releases/latest",
             "http://api.github.com/repos/HaiwenZhang/zenclash/releases/latest",

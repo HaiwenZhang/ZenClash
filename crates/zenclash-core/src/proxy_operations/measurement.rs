@@ -41,11 +41,12 @@ impl ProxyOperations {
         test_url: Option<&str>,
         timeout_ms: u64,
     ) -> MihomoResult<ProxyGroupMeasurementOutcome> {
-        let client = self.client.pin_binding()?;
+        let operations = self.pin_current_runtime()?;
+        let client = &operations.client;
         let delays = client
             .proxy_group_delay(group, test_url, timeout_ms)
             .await?;
-        let selection = Self::read_selection_on(&client, group, Vec::new()).await;
+        let selection = Self::read_selection_on(client, group, Vec::new()).await;
         Ok(ProxyGroupMeasurementOutcome { delays, selection })
     }
 
@@ -65,8 +66,9 @@ impl ProxyOperations {
         test_url: Option<&str>,
         timeout_ms: u64,
     ) -> MihomoResult<BTreeMap<String, u32>> {
-        self.client
-            .pin_binding()?
+        let operations = self.pin_current_runtime()?;
+        operations
+            .client
             .proxy_group_delay(group, test_url, timeout_ms)
             .await
     }
@@ -102,5 +104,43 @@ impl ProxyOperations {
             .await?;
         operations.verify_observation_current()?;
         Ok(delay)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::{CoreKind, CoreSession, MihomoClient, MihomoEndpoint};
+
+    #[tokio::test]
+    async fn group_measurements_reject_stale_observation_before_sending() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = MihomoClient::new(MihomoEndpoint::new(
+            format!("http://{}", listener.local_addr().unwrap()),
+            "",
+        ))
+        .unwrap();
+        let session = CoreSession::open(CoreKind::Mihomo, client).unwrap();
+        let observation = session.begin_observation().await.unwrap();
+        let operations = ProxyOperations::from_observation(&observation);
+        session.invalidate_runtime_observations();
+
+        assert!(matches!(
+            operations.measure_group("Proxy", None, 500).await,
+            Err(MihomoError::StaleBinding)
+        ));
+        assert!(matches!(
+            operations
+                .measure_group_and_restore_auto("Auto Group", None, 500)
+                .await,
+            Err(MihomoError::StaleBinding)
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
     }
 }

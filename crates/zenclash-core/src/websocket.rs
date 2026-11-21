@@ -11,6 +11,8 @@ use tokio_tungstenite::{
 use crate::MihomoEndpoint;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const LOG_STREAM_MAX_BYTES: usize = 128 * 1024;
+const DEFAULT_STREAM_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 /// Bounded exponential reconnect delay shared by the traffic and log streams.
 #[derive(Default)]
@@ -45,14 +47,17 @@ pub async fn connect_stream(
     timeout_message: &str,
 ) -> Result<MihomoSocket, String> {
     let request = stream_request(endpoint, path, query)?;
-    let config = (path == "/logs").then(|| {
-        WebSocketConfig::default()
-            .max_message_size(Some(128 * 1024))
-            .max_frame_size(Some(128 * 1024))
-    });
+    let max_bytes = if path == "/logs" {
+        LOG_STREAM_MAX_BYTES
+    } else {
+        DEFAULT_STREAM_MAX_BYTES
+    };
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(max_bytes))
+        .max_frame_size(Some(max_bytes));
     tokio::time::timeout(
         CONNECT_TIMEOUT,
-        connect_async_with_config(request, config, false),
+        connect_async_with_config(request, Some(config), false),
     )
     .await
     .map_err(|_| timeout_message.to_owned())?
@@ -97,7 +102,8 @@ mod tests {
 
     use super::*;
 
-    async fn log_socket_fixture(
+    async fn socket_fixture(
+        path: &str,
         messages: Vec<Message>,
     ) -> (MihomoSocket, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -114,10 +120,46 @@ mod tests {
                 }
             }
         });
-        let socket = connect_stream(&endpoint, "/logs", &[], "fixture timed out")
+        let socket = connect_stream(&endpoint, path, &[], "fixture timed out")
             .await
             .unwrap();
         (socket, server)
+    }
+
+    async fn log_socket_fixture(
+        messages: Vec<Message>,
+    ) -> (MihomoSocket, tokio::task::JoinHandle<()>) {
+        socket_fixture("/logs", messages).await
+    }
+
+    #[tokio::test]
+    async fn non_log_socket_accepts_a_legal_frame_and_rejects_one_above_4_mib() {
+        let legal = r#"{"up":128,"down":256}"#;
+        let (mut socket, server) = socket_fixture(
+            "/traffic",
+            vec![
+                Message::Text(legal.into()),
+                Message::Binary(vec![b'x'; DEFAULT_STREAM_MAX_BYTES + 1].into()),
+            ],
+        )
+        .await;
+
+        let first = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.into_text().unwrap(), legal);
+        let oversized = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            oversized,
+            Err(tokio_tungstenite::tungstenite::Error::Capacity(_))
+        ));
+        drop(socket);
+        server.await.unwrap();
     }
 
     #[tokio::test]

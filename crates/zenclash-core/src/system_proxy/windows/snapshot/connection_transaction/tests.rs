@@ -15,6 +15,7 @@ struct MemoryDefaultConnection {
     fail_after_write: Cell<bool>,
     fail_refresh: Cell<bool>,
     foreign_after_write: Cell<bool>,
+    delete_on_empty_option: Cell<bool>,
     api_server_override: RefCell<Option<String>>,
 }
 
@@ -47,8 +48,15 @@ impl MemoryDefaultConnection {
             fail_after_write: Cell::new(false),
             fail_refresh: Cell::new(false),
             foreign_after_write: Cell::new(false),
+            delete_on_empty_option: Cell::new(false),
             api_server_override: RefCell::new(None),
         }
+    }
+
+    fn new_deleting_on_empty() -> Self {
+        let access = Self::new();
+        access.delete_on_empty_option.set(true);
+        access
     }
 
     fn failure() -> crate::MihomoError {
@@ -116,27 +124,21 @@ impl DefaultConnectionAccess for MemoryDefaultConnection {
                 }
                 DefaultConnectionOption::ProxyServer(value) => {
                     connection.proxy_server = Some(value.clone());
-                    self.store(
-                        "ProxyServer",
-                        Some(registry_string_value("ProxyServer", value)),
-                        true,
-                    );
+                    let raw = (!value.is_empty() || !self.delete_on_empty_option.get())
+                        .then(|| registry_string_value("ProxyServer", value));
+                    self.store("ProxyServer", raw, true);
                 }
                 DefaultConnectionOption::ProxyBypass(value) => {
                     connection.proxy_bypass = Some(value.clone());
-                    self.store(
-                        "ProxyOverride",
-                        Some(registry_string_value("ProxyOverride", value)),
-                        true,
-                    );
+                    let raw = (!value.is_empty() || !self.delete_on_empty_option.get())
+                        .then(|| registry_string_value("ProxyOverride", value));
+                    self.store("ProxyOverride", raw, true);
                 }
                 DefaultConnectionOption::AutoConfigUrl(value) => {
                     connection.auto_config_url = Some(value.clone());
-                    self.store(
-                        "AutoConfigURL",
-                        Some(registry_string_value("AutoConfigURL", value)),
-                        true,
-                    );
+                    let raw = (!value.is_empty() || !self.delete_on_empty_option.get())
+                        .then(|| registry_string_value("AutoConfigURL", value));
+                    self.store("AutoConfigURL", raw, true);
                 }
             }
         }
@@ -382,7 +384,9 @@ fn every_native_apply_failure_retains_a_known_prefix_for_original_scope_restore(
                 .is_err()
             );
             let actual = capture(&access).unwrap();
-            assert_eq!(attempts.len(), failed_step + 1);
+            let expected_attempts =
+                1 + failed_step + usize::from(failed_step >= 2) + usize::from(failed_step >= 4);
+            assert_eq!(attempts.len(), expected_attempts);
             assert!(
                 attempts
                     .iter()
@@ -416,7 +420,9 @@ fn every_native_or_raw_restore_failure_retains_a_known_prefix_for_retry() {
             let mut attempts = vec![after.clone()];
             assert!(restore(&access, &after, &before, |state| attempts.push(state)).is_err());
             let actual = capture(&access).unwrap();
-            assert_eq!(attempts.len(), failed_step + 1);
+            let expected_attempts =
+                1 + failed_step + usize::from(failed_step >= 3) + usize::from(failed_step >= 4);
+            assert_eq!(attempts.len(), expected_attempts);
             assert!(
                 attempts
                     .iter()
@@ -479,4 +485,240 @@ fn refresh_failure_retains_owned_values_and_requires_a_successful_restore_refres
             .same_state(&before)
             .unwrap()
     );
+}
+
+#[test]
+fn predicted_snapshots_emits_two_candidates_only_for_empty_string_options() {
+    let access = MemoryDefaultConnection::new();
+    let current = capture(&access).unwrap();
+
+    for (option, registry_name, expected_name) in [
+        (
+            DefaultConnectionOption::ProxyServer(String::new()),
+            "ProxyServer",
+            "pRoXySeRvEr",
+        ),
+        (
+            DefaultConnectionOption::ProxyBypass(String::new()),
+            "ProxyOverride",
+            "ProxyOverride",
+        ),
+        (
+            DefaultConnectionOption::AutoConfigUrl(String::new()),
+            "AutoConfigURL",
+            "AutoConfigURL",
+        ),
+    ] {
+        let candidates = DefaultConnectionWriteStep::SetOption(option)
+            .predicted_snapshots(&current)
+            .unwrap();
+        assert_eq!(candidates.len(), 2);
+        let key = ascii_folded_value_name(&utf16_units(registry_name));
+        let empty_value = candidates[0].values.get(&key).unwrap();
+        assert_eq!(empty_value.name, utf16_units(expected_name));
+        assert_eq!(
+            registry_string(&candidates[0].values, registry_name).unwrap(),
+            ""
+        );
+        assert!(!candidates[1].values.contains_key(&key));
+        assert!(!candidates[0].same_state(&candidates[1]).unwrap());
+    }
+
+    for step in [
+        DefaultConnectionWriteStep::SetOption(DefaultConnectionOption::Flags(PROXY_TYPE_DIRECT)),
+        DefaultConnectionWriteStep::SetOption(DefaultConnectionOption::ProxyServer(
+            "http=127.0.0.1:7890".into(),
+        )),
+        DefaultConnectionWriteStep::SetOption(DefaultConnectionOption::ProxyBypass(
+            "localhost".into(),
+        )),
+        DefaultConnectionWriteStep::SetOption(DefaultConnectionOption::AutoConfigUrl(
+            "http://127.0.0.1:1234/pac".into(),
+        )),
+        DefaultConnectionWriteStep::RestoreRegistryValue {
+            name: "AutoConfigURL",
+            value: None,
+        },
+        DefaultConnectionWriteStep::RestoreRegistryValue {
+            name: "AutoConfigURL",
+            value: Some(registry_string_value("AutoConfigURL", "")),
+        },
+    ] {
+        assert_eq!(step.predicted_snapshots(&current).unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn deleting_empty_string_options_succeeds_for_disable_manual_pac_and_restore() {
+    let access = MemoryDefaultConnection::new_deleting_on_empty();
+    let before = capture(&access).unwrap();
+
+    let disabled = apply(&access, &before, &NativeProxyChange::Disable, |_| {}).unwrap();
+    assert!(!disabled.summary().active());
+    assert!(
+        !disabled
+            .values
+            .contains_key(&ascii_folded_value_name(&utf16_units("AutoConfigURL")))
+    );
+
+    let manual = apply(
+        &access,
+        &disabled,
+        &NativeProxyChange::Manual {
+            host: "127.0.0.1",
+            port: 7890,
+            bypass: &[],
+        },
+        |_| {},
+    )
+    .unwrap();
+    assert!(manual.summary().http().is_enabled() && manual.summary().https().is_enabled());
+    assert!(
+        !manual
+            .values
+            .contains_key(&ascii_folded_value_name(&utf16_units("ProxyOverride")))
+    );
+    assert!(
+        !manual
+            .values
+            .contains_key(&ascii_folded_value_name(&utf16_units("AutoConfigURL")))
+    );
+
+    let pac = apply(
+        &access,
+        &manual,
+        &NativeProxyChange::Pac {
+            url: "http://127.0.0.1:1234/pac",
+        },
+        |_| {},
+    )
+    .unwrap();
+    assert!(pac.summary().pac().is_enabled());
+    assert!(
+        pac.values
+            .contains_key(&ascii_folded_value_name(&utf16_units("AutoConfigURL")))
+    );
+
+    let pac_disabled = apply(&access, &pac, &NativeProxyChange::Disable, |_| {}).unwrap();
+    assert!(!pac_disabled.summary().active());
+    assert!(
+        !pac_disabled
+            .values
+            .contains_key(&ascii_folded_value_name(&utf16_units("AutoConfigURL")))
+    );
+
+    let restored = restore(&access, &pac_disabled, &before, |_| {}).unwrap();
+    assert!(restored.same_state(&before).unwrap());
+}
+
+#[test]
+fn deleting_empty_string_options_retains_known_prefix_for_every_apply_and_restore_rollback() {
+    for failed_step in 1..=5 {
+        for after_write in [false, true] {
+            let access = MemoryDefaultConnection::new_deleting_on_empty();
+            let before = capture(&access).unwrap();
+            access.fail_write_at.set(Some(failed_step));
+            access.fail_after_write.set(after_write);
+            let mut attempts = vec![before.clone()];
+            assert!(
+                apply(
+                    &access,
+                    &before,
+                    &NativeProxyChange::Manual {
+                        host: "new",
+                        port: 7890,
+                        bypass: &[],
+                    },
+                    |state| attempts.push(state),
+                )
+                .is_err()
+            );
+            let actual = capture(&access).unwrap();
+            let expected_attempts =
+                1 + failed_step + usize::from(failed_step >= 2) + usize::from(failed_step >= 4);
+            assert_eq!(attempts.len(), expected_attempts);
+            assert!(
+                attempts
+                    .iter()
+                    .any(|known| known.same_state(&actual).unwrap())
+            );
+            access.fail_write_at.set(None);
+            let restored = restore(&access, &actual, &before, |_| {}).unwrap();
+            assert!(restored.same_state(&before).unwrap());
+        }
+    }
+
+    for failed_step in 1..=2 {
+        for after_write in [false, true] {
+            let access = MemoryDefaultConnection::new_deleting_on_empty();
+            let before = capture(&access).unwrap();
+            let pac = apply(
+                &access,
+                &before,
+                &NativeProxyChange::Pac {
+                    url: "http://127.0.0.1:1234/pac",
+                },
+                |_| {},
+            )
+            .unwrap();
+            access.write_count.set(0);
+            access.fail_write_at.set(Some(failed_step));
+            access.fail_after_write.set(after_write);
+            let mut attempts = vec![pac.clone()];
+            assert!(
+                apply(&access, &pac, &NativeProxyChange::Disable, |state| {
+                    attempts.push(state)
+                })
+                .is_err()
+            );
+            let actual = capture(&access).unwrap();
+            let expected_attempts = 1 + failed_step + usize::from(failed_step >= 2);
+            assert_eq!(attempts.len(), expected_attempts);
+            assert!(
+                attempts
+                    .iter()
+                    .any(|known| known.same_state(&actual).unwrap())
+            );
+            access.fail_write_at.set(None);
+            let restored = restore(&access, &actual, &before, |_| {}).unwrap();
+            assert!(restored.same_state(&before).unwrap());
+        }
+    }
+
+    for failed_step in 1..=9 {
+        for after_write in [false, true] {
+            let access = MemoryDefaultConnection::new_deleting_on_empty();
+            let before = capture(&access).unwrap();
+            let after = apply(
+                &access,
+                &before,
+                &NativeProxyChange::Pac {
+                    url: "http://127.0.0.1:1234/pac",
+                },
+                |_| {},
+            )
+            .unwrap();
+            access.write_count.set(0);
+            access.fail_write_at.set(Some(failed_step));
+            access.fail_after_write.set(after_write);
+            let mut attempts = vec![after.clone()];
+            assert!(restore(&access, &after, &before, |state| attempts.push(state)).is_err());
+            let actual = capture(&access).unwrap();
+            let expected_attempts =
+                1 + failed_step + usize::from(failed_step >= 3) + usize::from(failed_step >= 4);
+            assert_eq!(attempts.len(), expected_attempts);
+            assert!(
+                attempts
+                    .iter()
+                    .any(|known| known.same_state(&actual).unwrap())
+            );
+            access.fail_write_at.set(None);
+            assert!(
+                restore(&access, &actual, &before, |_| {})
+                    .unwrap()
+                    .same_state(&before)
+                    .unwrap()
+            );
+        }
+    }
 }

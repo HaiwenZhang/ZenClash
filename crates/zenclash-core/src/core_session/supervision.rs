@@ -81,7 +81,10 @@ async fn supervise_managed_core(
         }
         let client = match session.client.pin_binding() {
             Ok(client) => client,
-            Err(_) => continue,
+            Err(_) => {
+                tokio::time::sleep(policy.interval).await;
+                continue;
+            }
         };
         let observation = match client.owned_core() {
             Some(crate::owned_core::OwnedCore::Local(process)) => {
@@ -356,3 +359,38 @@ async fn recover_managed_core(session: &CoreSession, policy: CoreRecoveryPolicy)
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(test)]
+mod pin_binding_backoff_tests {
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+
+    use super::*;
+    use crate::MihomoEndpoint;
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_binding_in_supervisor_sleeps_instead_of_spinning() {
+        let client = MihomoClient::new(MihomoEndpoint::default()).unwrap();
+        let pinned = client.pin_binding().unwrap();
+        let session = CoreSession::open(CoreKind::Mihomo, pinned).unwrap();
+        client
+            .switch_to_direct(MihomoEndpoint::new("http://127.0.0.1:9", ""))
+            .await
+            .unwrap();
+        let policy = CoreRecoveryPolicy {
+            interval: Duration::from_secs(10),
+            ..CoreRecoveryPolicy::default()
+        };
+        let mut supervisor = Box::pin(supervise_managed_core(session.clone(), policy, None));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(matches!(supervisor.as_mut().poll(&mut cx), Poll::Pending));
+
+        session.shutdown_requested.store(true, Ordering::Release);
+        tokio::time::advance(policy.interval).await;
+        tokio::time::timeout(Duration::from_secs(1), supervisor)
+            .await
+            .expect("supervisor should exit cleanly after sleep when shutdown is requested");
+    }
+}

@@ -1,14 +1,15 @@
 use chrono::{DateTime, Local, Utc};
+use gpui_kit::base::Button as RowButton;
 use gpui_kit::component::chart::AreaChart;
-use gpui_kit::{SharedString, TestSupportExt};
+use gpui_kit::{SharedString, StatefulInteractiveElement, TestSupportExt};
 use zenclash_core::{TrafficDimension, TrafficOverview, TrafficTrendPoint};
 
 use super::{TrafficHistoryFreshness, TrafficRange, dimension_label};
 use crate::pages::runtime::{
     Button, ButtonVariants, Context, Disableable, FluentBuilder, IconName, InteractiveElement,
-    IntoElement, PageSnapshotData, ParentElement, RuntimePage, Selectable, Sizable,
-    StatefulInteractiveElement, Styled, div, empty_dash, empty_state, format_bytes,
-    format_profile_age, format_speed, h_flex, metric, v_flex,
+    IntoElement, PageSnapshotData, ParentElement, RuntimePage, Selectable, Sizable, Styled, div,
+    empty_dash, empty_state, format_bytes, format_profile_age, format_speed, h_flex, metric,
+    v_flex,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -393,35 +394,46 @@ impl RuntimePage {
                         let selected = presentation
                             .and_then(|presentation| presentation.selected_parent())
                             == Some(item.label.as_str());
-                        h_flex()
-                            .id(("traffic-ranking", index))
-                            .min_h(gpui_kit::rems(2.75))
-                            .px_4()
-                            .gap_3()
-                            .border_b_1()
-                            .border_color(theme.border)
-                            .when(selected, |this| this.bg(theme.primary.opacity(0.1)))
-                            .when(can_inspect, |row| {
-                                row.cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.select_traffic_parent(label.clone(), cx);
-                                    }))
-                            })
-                            .child(
-                                div()
-                                    .w_6()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(format!("{:02}", index + 1)),
-                            )
-                            .child(div().flex_1().min_w_0().text_sm().child(item.label.clone()))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                    .child(format_bytes(item.total)),
-                            )
-                            .child(div().text_color(theme.muted_foreground).child("›"))
+                        RowButton::new((
+                            gpui_kit::ElementId::from("traffic-ranking"),
+                            item.label.clone(),
+                        ))
+                        .accessibility_label(item.label.clone())
+                        .selected(selected)
+                        .aria_selected(selected)
+                        .disabled(!can_inspect)
+                        .w_full()
+                        .min_h(gpui_kit::rems(2.75))
+                        .px_4()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .when(selected, |this| this.bg(theme.primary.opacity(0.1)))
+                        .hover(|style| style.bg(theme.list_hover))
+                        .focus(|style| style.border_2().border_color(theme.ring))
+                        .styles(|styles| styles.disabled(|style| style.opacity(0.6)))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .w_6()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(format!("{:02}", index + 1)),
+                                )
+                                .child(div().flex_1().min_w_0().text_sm().child(item.label.clone()))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                        .child(format_bytes(item.total)),
+                                )
+                                .child(div().text_color(theme.muted_foreground).child("›")),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.select_traffic_parent(label.clone(), cx);
+                        }))
                     }),
             )
     }
@@ -531,33 +543,43 @@ impl RuntimePage {
             .map_or(&[][..], |presentation| presentation.details())
             .iter()
             .take(12)
-            .enumerate()
-            .map(|(index, item)| {
+            .map(|item| {
                 let label = item.label.clone();
                 let selected = presentation.and_then(|presentation| presentation.selected_detail())
                     == Some(item.label.as_str());
-                h_flex()
-                    .id(("traffic-detail", index))
-                    .min_h(gpui_kit::rems(2.5))
-                    .px_4()
-                    .gap_3()
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .when(selected, |this| this.bg(theme.primary.opacity(0.1)))
-                    .when(can_inspect, |row| {
-                        row.cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.select_traffic_detail(label.clone(), cx);
-                            }))
-                    })
-                    .child(div().flex_1().min_w_0().text_sm().child(item.label.clone()))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(format_bytes(item.total)),
-                    )
-                    .into_any_element()
+                RowButton::new((
+                    gpui_kit::ElementId::from("traffic-detail"),
+                    item.label.clone(),
+                ))
+                .accessibility_label(item.label.clone())
+                .selected(selected)
+                .aria_selected(selected)
+                .disabled(!can_inspect)
+                .w_full()
+                .min_h(gpui_kit::rems(2.5))
+                .px_4()
+                .border_t_1()
+                .border_color(theme.border)
+                .when(selected, |this| this.bg(theme.primary.opacity(0.1)))
+                .hover(|style| style.bg(theme.list_hover))
+                .focus(|style| style.border_2().border_color(theme.ring))
+                .styles(|styles| styles.disabled(|style| style.opacity(0.6)))
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_3()
+                        .child(div().flex_1().min_w_0().text_sm().child(item.label.clone()))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(format_bytes(item.total)),
+                        ),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.select_traffic_detail(label.clone(), cx);
+                }))
+                .into_any_element()
             })
             .collect()
     }
@@ -597,3 +619,124 @@ fn chart_value(bytes: u64) -> f64 {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod keyboard_tests {
+    use gpui_kit::AppContext;
+    use gpui_kit::test::TestWindowExt;
+
+    #[gpui_kit::test]
+    fn ranking_and_detail_rows_are_keyboard_focusable_and_activatable(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use crate::pages::Page;
+        use crate::pages::runtime::test_support::{
+            RuntimePageFixture as Fixture, open_runtime_page_window as open,
+        };
+
+        let fixture = Fixture::new();
+        let services = fixture.services();
+        let store = services.traffic_history_store.unwrap();
+        let now = super::super::unix_millis();
+        store
+            .insert_and_cleanup(
+                &[zenclash_core::TrafficHistoryEntry {
+                    timestamp_ms: now,
+                    host: "host.example".into(),
+                    process: "browser.exe".into(),
+                    source_ip: "127.0.0.1".into(),
+                    outbound: "DIRECT".into(),
+                    upload: 2048,
+                    download: 4096,
+                }],
+                0,
+            )
+            .unwrap();
+        let (window, page) = open(cx, &fixture, Page::Traffic);
+        cx.update_window(window, |_, window, _| window.activate_window())
+            .unwrap();
+        fixture.settle(cx, &page, |page| {
+            page.traffic_history.completed_query().is_some()
+        });
+
+        let ranking_id = (
+            gpui_kit::ElementId::from("traffic-ranking"),
+            "host.example".to_owned(),
+        );
+        cx.update_window(window, |_, window, cx| {
+            use gpui_kit::Focusable;
+            window.render_frame(cx);
+            let focus = page.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+            assert_eq!(
+                window.find(ranking_id.clone()).label(),
+                Some("host.example")
+            );
+            for _ in 0..40 {
+                if window.find(ranking_id.clone()).focused() == Some(true) {
+                    break;
+                }
+                window.press("tab", cx);
+            }
+            assert_eq!(
+                window.find(ranking_id.clone()).focused(),
+                Some(true),
+                "traffic ranking row must be reachable by Tab"
+            );
+            window.press("enter", cx);
+        })
+        .unwrap();
+        fixture.settle(cx, &page, |page| {
+            !page.traffic_history.is_loading()
+                && page
+                    .traffic_history
+                    .presentation()
+                    .and_then(|presentation| presentation.selected_parent())
+                    == Some("host.example")
+        });
+
+        let detail_label = cx.update(|cx| {
+            page.read(cx)
+                .traffic_history
+                .presentation()
+                .unwrap()
+                .details()[0]
+                .label
+                .clone()
+        });
+        let detail_id = (
+            gpui_kit::ElementId::from("traffic-detail"),
+            detail_label.clone(),
+        );
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find(detail_id.clone()).label(),
+                Some(detail_label.as_str())
+            );
+            for _ in 0..40 {
+                if window.find(detail_id.clone()).focused() == Some(true) {
+                    break;
+                }
+                window.press("tab", cx);
+            }
+            assert_eq!(
+                window.find(detail_id.clone()).focused(),
+                Some(true),
+                "traffic detail row must be reachable by Tab"
+            );
+            window.press("enter", cx);
+        })
+        .unwrap();
+        fixture.settle(cx, &page, |page| {
+            !page.traffic_history.is_loading()
+                && page
+                    .traffic_history
+                    .presentation()
+                    .and_then(|presentation| presentation.selected_detail())
+                    == Some(detail_label.as_str())
+        });
+        cx.update_window(window, |_, window, _| window.remove_window())
+            .unwrap();
+    }
+}

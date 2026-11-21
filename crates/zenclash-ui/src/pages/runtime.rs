@@ -13,8 +13,8 @@ use gpui_kit::component::{
 use gpui_kit::px;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext, ClipboardItem, Context, Entity, EventEmitter, Focusable,
-    InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render,
-    StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::FluentBuilder,
+    InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render, Styled,
+    Subscription, Window, div, prelude::FluentBuilder,
 };
 use serde_json::{Value, json};
 use zenclash_core::{

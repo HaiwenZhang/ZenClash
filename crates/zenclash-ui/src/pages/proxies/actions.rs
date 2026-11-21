@@ -43,13 +43,19 @@ impl ProxiesPage {
         self.search_input = Some(input);
     }
 
+    pub(super) fn should_refresh_search_on_delay(&self) -> bool {
+        !self.search_query.is_empty() && (self.sort_by_latency || self.hide_unavailable)
+    }
+
     pub(super) fn prepare_search(&mut self, cx: &mut Context<Self>) {
-        self.cancel_search();
-        let generation = self.search_generation;
         if self.search_query.is_empty() {
+            self.cancel_search();
             return;
         }
+        self.cancel_pending_search();
+        let generation = self.search_generation;
         let Some(index) = self.catalog_presentation.search_index() else {
+            self.search_projection = None;
             return;
         };
         let query = self.search_query.clone();
@@ -97,13 +103,17 @@ impl ProxiesPage {
         .detach();
     }
 
-    fn cancel_search(&mut self) {
+    fn cancel_pending_search(&mut self) {
         self.search_generation = self.search_generation.wrapping_add(1);
         self.search_epoch
             .store(self.search_generation, std::sync::atomic::Ordering::Release);
         if let Some(task) = self.search_task.take() {
             task.abort();
         }
+    }
+
+    fn cancel_search(&mut self) {
+        self.cancel_pending_search();
         self.search_projection = None;
     }
 
@@ -374,8 +384,10 @@ impl ProxiesPage {
         let Some(catalog) = self.catalog.as_mut() else {
             return;
         };
+        let before = std::sync::Arc::downgrade(catalog);
         self.catalog_presentation
             .record_delay(catalog, id, delay, mean_delay, failure);
+        self.node_grid.sync_delay_catalog_source(&before, catalog);
     }
 
     fn next_catalog_task(&mut self) -> CatalogTaskToken {
@@ -453,6 +465,7 @@ pub(super) async fn receive_batch<T, D: std::future::Future<Output = ()>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::AppContext;
 
     #[test]
     fn coalescing_delay_starts_only_after_the_first_measurement() {
@@ -544,5 +557,77 @@ mod tests {
         tasks.cancel();
         assert!(first.await.unwrap_err().is_cancelled());
         assert!(second.await.unwrap_err().is_cancelled());
+    }
+
+    #[gpui_kit::test]
+    fn prepare_search_preserves_previous_projection_and_skips_unrelated_delay_refresh(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use super::super::test_support::open_catalog;
+        use super::super::{ProxyCatalog, ProxyGroup, ProxyGroupBehavior, ProxyNode};
+
+        cx.foreground_executor().clone().block_test(async {
+            cx.executor().allow_parking();
+            let catalog = ProxyCatalog::from_group_nodes(
+                vec![(
+                    ProxyGroup::new("Proxy").with_behavior(ProxyGroupBehavior::Selector),
+                    ["Tokyo-01", "Tokyo-02", "London"]
+                        .into_iter()
+                        .map(|name| ProxyNode {
+                            name: name.into(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                )],
+                3,
+            );
+            let (window, page, runtime) = open_catalog(cx, catalog);
+            page.update(cx, |page, cx| {
+                page.search_query = "tokyo".into();
+                assert!(!page.should_refresh_search_on_delay());
+                page.prepare_search(cx);
+            });
+            for _ in 0..200 {
+                if cx.update(|cx| page.read(cx).search_projection.is_some()) {
+                    break;
+                }
+                runtime
+                    .spawn(async {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    })
+                    .await
+                    .unwrap();
+            }
+            let search_guard = cx
+                .update(|cx| page.read(cx).search_gate.clone())
+                .try_lock_owned()
+                .expect("search must be idle");
+            page.update(cx, |page, cx| {
+                page.sort_by_latency = true;
+                assert!(page.should_refresh_search_on_delay());
+                page.prepare_search(cx);
+            });
+            cx.update(|cx| {
+                let state = page.read(cx);
+                assert!(
+                    state.search_projection.is_some(),
+                    "re-running search must keep the previous search projection visible"
+                );
+                let catalog = state.catalog.as_ref().unwrap();
+                assert_eq!(
+                    &*state.displayed_nodes(catalog, &catalog.groups()[0]),
+                    &[0, 1]
+                );
+            });
+            drop(search_guard);
+            page.update(cx, |page, cx| {
+                page.search_query.clear();
+                page.prepare_search(cx);
+                assert!(page.search_projection.is_none());
+                page.suspend();
+            });
+            cx.update_window(window, |_, window, _| window.remove_window())
+                .unwrap();
+        });
     }
 }

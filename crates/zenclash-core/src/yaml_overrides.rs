@@ -19,7 +19,7 @@ use crate::profiles::atomic_write;
 mod tests;
 
 pub(crate) const MAX_OVERRIDE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
 const MAX_OVERRIDE_COUNT: usize = 1_024;
 const MAX_IMPORT_BYTES: usize = 256 * 1024 * 1024;
 
@@ -288,7 +288,7 @@ impl YamlOverrideStore {
         self.save_unlocked(next)
     }
 
-    /// Deletes one managed override with file rollback on manifest failure.
+    /// Deletes one managed override by persisting the manifest before removing its file.
     ///
     /// # Errors
     ///
@@ -345,15 +345,15 @@ impl YamlOverrideStore {
         validate(&catalog.items[index])?;
         let record = catalog.items.remove(index);
         let path = self.files_dir().join(&record.file_name);
-        let payload = read_bounded(&path, MAX_OVERRIDE_BYTES)?;
-        fs::remove_file(&path)?;
-        if let Err(error) = self.save_unlocked(&catalog) {
-            return match atomic_write(&path, &payload) {
-                Ok(()) => Err(error),
-                Err(rollback) => Err(YamlOverrideError::Transaction(format!(
-                    "保存删除后的清单失败：{error}；恢复覆写文件失败：{rollback}"
-                ))),
-            };
+        // Persist the updated manifest before deleting the YAML file so a crash
+        // leaves an inert orphan file instead of a broken manifest reference.
+        self.save_unlocked(&catalog)?;
+        if let Err(error) = fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(YamlOverrideError::Transaction(format!(
+                "清单已更新，但删除覆写文件失败：{error}"
+            )));
         }
         Ok(catalog)
     }
@@ -385,11 +385,11 @@ impl YamlOverrideStore {
         &self.root
     }
 
-    /// Quarantines a malformed manifest while retaining every managed YAML file.
+    /// Quarantines a malformed or inconsistent manifest while retaining every managed YAML file.
     ///
     /// The timestamped manifest can be inspected or restored manually. Only
-    /// manifest/validation failures are eligible; filesystem errors remain
-    /// visible and are not rewritten.
+    /// manifest, validation, and missing-managed-file inconsistencies are
+    /// eligible; other filesystem errors remain visible and are not rewritten.
     ///
     /// # Errors
     ///
@@ -404,8 +404,11 @@ impl YamlOverrideStore {
         };
         if !matches!(
             error,
-            YamlOverrideError::Manifest(_) | YamlOverrideError::Invalid(_)
-        ) {
+            YamlOverrideError::Manifest(_)
+                | YamlOverrideError::Invalid(_)
+                | YamlOverrideError::NotFound(_)
+        ) && !matches!(&error, YamlOverrideError::Io(io) if io.kind() == std::io::ErrorKind::NotFound)
+        {
             return Err(error);
         }
         let source = self.manifest_path();
@@ -600,7 +603,7 @@ fn validate_catalog(catalog: &YamlOverrideCatalog, files_dir: &Path) -> YamlOver
                 record.file_name
             )));
         }
-        if !ids.insert(record.id.as_str()) || !file_names.insert(record.file_name.as_str()) {
+        if !ids.insert(record.id.as_str()) || !file_names.insert(record.file_name.to_lowercase()) {
             return Err(YamlOverrideError::Invalid(
                 "覆写清单包含重复 ID 或文件名".into(),
             ));
@@ -690,6 +693,12 @@ fn unique_override_id(catalog: &YamlOverrideCatalog, name: &str) -> YamlOverride
                 format!("{base}-{suffix}")
             }
         })
-        .find(|candidate| catalog.items.iter().all(|record| record.id != *candidate))
+        .find(|candidate| {
+            let candidate_file = format!("{candidate}.yaml");
+            catalog.items.iter().all(|record| {
+                !record.id.eq_ignore_ascii_case(candidate)
+                    && !record.file_name.eq_ignore_ascii_case(&candidate_file)
+            })
+        })
         .ok_or_else(|| YamlOverrideError::Transaction("无法生成唯一覆写 ID".into()))
 }

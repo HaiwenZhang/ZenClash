@@ -5,7 +5,7 @@ use super::{
     YamlOverrideStore, config_input_snapshot,
 };
 use gpui_kit::component::WindowExt;
-use zenclash_core::{CoreApplyKind, EffectiveConfigIntent};
+use zenclash_core::CoreApplyKind;
 
 const LIVE_UPDATE_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -1147,18 +1147,10 @@ impl RuntimePage {
         };
         let submitted_inputs = self.config_inputs.submitted(&patch, cx);
         let controlled = self.controlled_config_store.clone();
-        let overrides = self.enabled_override_paths();
         let commands = self.application_commands.clone();
         let task = self.runtime.spawn(async move {
             let outcome = commands
-                .apply_config(
-                    &controlled,
-                    EffectiveConfigIntent::Patch {
-                        profile,
-                        patch,
-                        overrides,
-                    },
-                )
+                .apply_controlled_patch(&controlled, profile, patch)
                 .await
                 .map_err(|error| error.to_string())?;
             Ok::<_, String>(outcome)

@@ -73,6 +73,197 @@ async fn profile_activation_waits_for_override_admission_before_reading_the_chai
 }
 
 #[tokio::test]
+async fn reapply_current_waits_for_override_admission_before_reading_the_chain() {
+    let root = std::env::temp_dir().join(format!(
+        "zenclash-reapply-admission-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let profiles = ProfileStore::new(root.join("profiles")).unwrap();
+    let source = root.join("source.yaml");
+    std::fs::write(&source, "mode: rule\nrules: ['MATCH,DIRECT']\n").unwrap();
+    let record = profiles.import_local(&source).unwrap();
+    let path = profiles.activate(&record.id).unwrap();
+    let overrides = YamlOverrideStore::new(root.join("overrides")).unwrap();
+    std::fs::write(&source, "mode: direct\n").unwrap();
+    let overlay = overrides.import_paths([source]).unwrap().remove(0);
+    overrides.set_enabled(&overlay.id, false).unwrap();
+    let controlled = ControlledConfigStore::new(root.join("controlled"));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = MihomoClient::new(zenclash_core::MihomoEndpoint::new(
+        format!("http://{}", listener.local_addr().unwrap()),
+        "",
+    ))
+    .unwrap();
+    let session =
+        CoreSession::open_with_config(CoreKind::Mihomo, client, Some(path), vec![]).unwrap();
+    let commands = ApplicationCommands::new(session.clone(), Some(overrides.clone()));
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let (headers, body) = zenclash_core::test_support::read_controller_request(&mut stream)
+            .await
+            .unwrap()
+            .into_parts();
+        assert!(headers.starts_with("PUT /configs"));
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let payload: serde_yaml::Value =
+            serde_yaml::from_str(body["payload"].as_str().unwrap()).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        payload
+    });
+    let admission = session.begin_data_application().await.unwrap();
+    let mut reapply = tokio::spawn(async move { commands.reapply_current(controlled).await });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut reapply)
+            .await
+            .is_err(),
+        "reapply_current crossed an admitted override transaction"
+    );
+    overrides.set_enabled(&overlay.id, true).unwrap();
+    drop(admission);
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(3), reapply)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(outcome.is_some());
+    assert_eq!(server.await.unwrap()["mode"], "direct");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn apply_controlled_patch_waits_for_override_admission_before_reading_the_chain() {
+    let root = std::env::temp_dir().join(format!(
+        "zenclash-patch-admission-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let profiles = ProfileStore::new(root.join("profiles")).unwrap();
+    let source = root.join("source.yaml");
+    std::fs::write(&source, "mode: rule\nrules: ['MATCH,DIRECT']\n").unwrap();
+    let record = profiles.import_local(&source).unwrap();
+    let path = profiles.activate(&record.id).unwrap();
+    let overrides = YamlOverrideStore::new(root.join("overrides")).unwrap();
+    std::fs::write(&source, "mode: direct\n").unwrap();
+    let overlay = overrides.import_paths([source]).unwrap().remove(0);
+    overrides.set_enabled(&overlay.id, false).unwrap();
+    let controlled = ControlledConfigStore::new(root.join("controlled"));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = MihomoClient::new(zenclash_core::MihomoEndpoint::new(
+        format!("http://{}", listener.local_addr().unwrap()),
+        "",
+    ))
+    .unwrap();
+    let session = CoreSession::open(CoreKind::Mihomo, client).unwrap();
+    let commands = ApplicationCommands::new(session.clone(), Some(overrides.clone()));
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let (headers, body) = zenclash_core::test_support::read_controller_request(&mut stream)
+            .await
+            .unwrap()
+            .into_parts();
+        assert!(headers.starts_with("PUT /configs"));
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let payload: serde_yaml::Value =
+            serde_yaml::from_str(body["payload"].as_str().unwrap()).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        payload
+    });
+    let admission = session.begin_data_application().await.unwrap();
+    let mut patch_task = tokio::spawn(async move {
+        commands
+            .apply_controlled_patch(&controlled, path, serde_json::json!({"allow-lan": true}))
+            .await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut patch_task)
+            .await
+            .is_err(),
+        "apply_controlled_patch crossed an admitted override transaction"
+    );
+    overrides.set_enabled(&overlay.id, true).unwrap();
+    drop(admission);
+    tokio::time::timeout(std::time::Duration::from_secs(3), patch_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let payload = server.await.unwrap();
+    assert_eq!(payload["allow-lan"], true);
+    assert_eq!(payload["mode"], "direct");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn reapply_with_overrides_waits_for_data_application_admission() {
+    let root = std::env::temp_dir().join(format!(
+        "zenclash-apply-config-admission-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let profiles = ProfileStore::new(root.join("profiles")).unwrap();
+    let source = root.join("source.yaml");
+    std::fs::write(&source, "mode: rule\nrules: ['MATCH,DIRECT']\n").unwrap();
+    let record = profiles.import_local(&source).unwrap();
+    let path = profiles.activate(&record.id).unwrap();
+    let controlled = ControlledConfigStore::new(root.join("controlled"));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = MihomoClient::new(zenclash_core::MihomoEndpoint::new(
+        format!("http://{}", listener.local_addr().unwrap()),
+        "",
+    ))
+    .unwrap();
+    let session =
+        CoreSession::open_with_config(CoreKind::Mihomo, client, Some(path), vec![]).unwrap();
+    let commands = ApplicationCommands::new(session.clone(), None);
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let (headers, _body) = zenclash_core::test_support::read_controller_request(&mut stream)
+            .await
+            .unwrap()
+            .into_parts();
+        assert!(headers.starts_with("PUT /configs"));
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+    });
+    let admission = session.begin_data_application().await.unwrap();
+    let mut reapply =
+        tokio::spawn(async move { commands.reapply_with_overrides(controlled, vec![]).await });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut reapply)
+            .await
+            .is_err(),
+        "reapply_with_overrides bypassed data application admission"
+    );
+    drop(admission);
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(3), reapply)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(outcome.is_some());
+    server.await.unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn service_config_reapply_without_a_committed_profile_preserves_the_noop_result() {
     let (commands, store) = maintenance_fixture();
     assert!(

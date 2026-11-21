@@ -7,7 +7,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use super::{ControlledConfigError, ControlledConfigStore, normalize_runtime_payload};
+use serde_yaml::Value;
+
+use super::{
+    ControlledConfigError, ControlledConfigStore, normalize_runtime_payload,
+    partial_configuration_application::finalize_partial_delta,
+};
 use crate::{CoreKind, MihomoClient, MihomoEndpoint};
 
 #[cfg(unix)]
@@ -1700,5 +1705,222 @@ async fn service_profile_prepare_commits_session_fallbacks_only_when_saved() {
         Some((port, u16::try_from(fallback_port).unwrap()))
     );
     drop(session);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn independent_stores_for_same_path_share_mutation_gate_and_session_fallbacks() {
+    let root = test_root("shared-store-path-state");
+    fs::create_dir_all(&root).unwrap();
+    let store_path = root.join("store");
+    let alias_path = root.join(".").join("store");
+    let first = ControlledConfigStore::new(&store_path);
+    let second = ControlledConfigStore::new(&alias_path);
+
+    let guard = first.lock_service_tun_mutation().await;
+    assert!(second.owns_service_tun_mutation(&guard));
+    assert!(
+        second.mutation_gate.try_lock().is_err(),
+        "second handle to the same store root must share mutation_gate"
+    );
+    drop(guard);
+
+    let held_port = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = held_port.local_addr().unwrap().port();
+    let profile = root.join("profile.yaml");
+    fs::write(
+        &profile,
+        format!("mixed-port: {port}\nallow-lan: false\nipv6: false\nrules: [MATCH,DIRECT]\n"),
+    )
+    .unwrap();
+    let startup = first
+        .prepare_service_startup_payload(profile, vec![])
+        .await
+        .unwrap();
+    let persistence = first.stage_service_startup_payload(startup).await.unwrap();
+    persistence.saved();
+
+    let fallback = second
+        .session_listener_fallbacks
+        .lock()
+        .get("mixed-port")
+        .cloned();
+    assert!(
+        fallback.is_some_and(|item| item.original == port && item.current != port),
+        "second handle must observe committed session listener fallbacks"
+    );
+
+    second.clear_runtime_cache().unwrap();
+    assert!(
+        first.session_listener_fallbacks.lock().is_empty(),
+        "clearing runtime cache on second handle must clear shared session fallbacks"
+    );
+    drop(held_port);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn service_startup_prepare_commits_session_fallbacks_only_when_saved() {
+    let root = test_root("service-startup-fallback-commit");
+    fs::create_dir_all(&root).unwrap();
+    let held_port = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = held_port.local_addr().unwrap().port();
+    let profile = root.join("profile.yaml");
+    fs::write(
+        &profile,
+        format!("mixed-port: {port}\nallow-lan: false\nipv6: false\nrules: [MATCH,DIRECT]\n"),
+    )
+    .unwrap();
+    let store = ControlledConfigStore::new(root.join("store"));
+
+    let startup = store
+        .prepare_service_startup_payload(profile.clone(), vec![])
+        .await
+        .unwrap();
+    assert_eq!(startup.listener_fallbacks().len(), 1);
+    assert_eq!(startup.listener_fallbacks()[0].listener, "mixed-port");
+    assert_eq!(startup.listener_fallbacks()[0].original, port);
+    assert_ne!(startup.listener_fallbacks()[0].current, port);
+    assert!(
+        store.session_listener_fallbacks.lock().is_empty(),
+        "prepare_service_startup_payload must not mutate session_listener_fallbacks before save"
+    );
+
+    let persistence = store.stage_service_startup_payload(startup).await.unwrap();
+    persistence.rollback().await.unwrap();
+    assert!(
+        store.session_listener_fallbacks.lock().is_empty(),
+        "rolling back service startup must discard staged session_listener_fallbacks"
+    );
+
+    let startup = store
+        .prepare_service_startup_payload(profile, vec![])
+        .await
+        .unwrap();
+    let expected_fallback = startup.listener_fallbacks()[0].current;
+    let persistence = store.stage_service_startup_payload(startup).await.unwrap();
+    persistence.saved();
+    let session = store.session_listener_fallbacks.lock();
+    assert_eq!(
+        session
+            .get("mixed-port")
+            .map(|item| (item.original, item.current)),
+        Some((port, expected_fallback))
+    );
+    drop(session);
+    drop(held_port);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn partial_update_handles_yaml_merge_keys_non_string_keys_and_special_floats() {
+    let root = test_root("partial-yaml-native");
+    fs::create_dir_all(&root).unwrap();
+    let base_payload = "\
+base: &base
+  mode: rule
+<<: *base
+123: numeric-key
+true: bool-key
+nan_val: .nan
+inf_val: .inf
+rules:
+  - MATCH,DIRECT
+";
+    let override_path = root.join("override.yaml");
+    fs::write(
+        &override_path,
+        "\
+anchor: &anchor
+  mode: direct
+<<: *anchor
+",
+    )
+    .unwrap();
+
+    // Non-conflicting mode update on a profile with non-string keys, .nan/.inf,
+    // and << merge keys must succeed without failing JSON conversion.
+    let update = ControlledConfigStore::prepare_partial_payload_update(
+        None,
+        Value::Mapping(Default::default()),
+        base_payload.to_owned(),
+        &serde_json::json!({"mode": "global"}),
+        &[],
+    )
+    .unwrap();
+    let updated: Value = serde_yaml::from_str(update.next_payload()).unwrap();
+    assert_eq!(updated["mode"].as_str(), Some("global"));
+
+    // An override that sets mode via << merge key must be detected as a conflict.
+    let conflict = ControlledConfigStore::prepare_partial_payload_update(
+        None,
+        Value::Mapping(Default::default()),
+        base_payload.to_owned(),
+        &serde_json::json!({"mode": "global"}),
+        std::slice::from_ref(&override_path),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            conflict,
+            ControlledConfigError::ModeOverrideConflict {
+                ref requested,
+                ref effective,
+            } if requested == "global" && effective == "direct"
+        ),
+        "{conflict:?}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn effective_delta_added_fields_are_checked_against_yaml_overrides() {
+    let root = test_root("effective-delta-override-conflict");
+    fs::create_dir_all(&root).unwrap();
+    let override_path = root.join("disable-tun.yaml");
+    fs::write(&override_path, "tun:\n  enable: false\n").unwrap();
+
+    let previous_payload =
+        "mode: rule\ntun:\n  enable: false\n  stack: system\nrules:\n  - MATCH,DIRECT\n";
+    let requested = serde_json::json!({"tun": {"stack": "gvisor"}});
+    let update = ControlledConfigStore::prepare_partial_payload_update(
+        None,
+        Value::Mapping(Default::default()),
+        previous_payload.to_owned(),
+        &requested,
+        std::slice::from_ref(&override_path),
+    )
+    .unwrap();
+
+    // Service-side effective_delta adds tun.enable: true, which conflicts with the
+    // enabled YAML override setting tun.enable: false.
+    let effective_delta = serde_json::json!({"tun": {"stack": "gvisor", "enable": true}});
+    let error = finalize_partial_delta(
+        &update.previous_payload,
+        &update.next_patch,
+        &requested,
+        &effective_delta,
+        std::slice::from_ref(&override_path),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, ControlledConfigError::PartialOverrideConflict),
+        "{error:?}"
+    );
+
+    // Without the conflicting override, the expanded effective_delta succeeds and is persisted.
+    let (next_patch, next_runtime) = finalize_partial_delta(
+        &update.previous_payload,
+        &update.next_patch,
+        &requested,
+        &effective_delta,
+        &[],
+    )
+    .unwrap();
+    let persisted: Value = serde_yaml::from_slice(&next_patch).unwrap();
+    assert_eq!(persisted["tun"]["enable"].as_bool(), Some(true));
+    assert_eq!(persisted["tun"]["stack"].as_str(), Some("gvisor"));
+    let runtime_doc: Value = serde_yaml::from_str(&next_runtime).unwrap();
+    assert_eq!(runtime_doc["tun"]["enable"].as_bool(), Some(true));
     fs::remove_dir_all(root).unwrap();
 }

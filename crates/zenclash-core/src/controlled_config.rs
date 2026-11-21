@@ -1,9 +1,9 @@
 //! Persistent, non-destructive configuration overrides for active profiles.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock, Weak},
 };
 
 use parking_lot::Mutex;
@@ -26,7 +26,7 @@ mod partial_configuration_application;
 mod service_configuration;
 #[cfg(test)]
 use partial_configuration_application::ModePatchGate;
-use partial_configuration_application::contains_delta;
+use partial_configuration_application::ensure_delta_compatible_with_overrides;
 pub(crate) use partial_configuration_application::{merge_held_delta, service_partial_patch};
 pub(crate) use service_configuration::{ServiceStartupPersistence, ServiceTunPersistence};
 mod exact_runtime_restore;
@@ -230,13 +230,14 @@ impl ControlledConfigStore {
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
+        let paths = crate::data_coordinator::coordinated_paths(&root);
         Self {
             tun_projection: TunProjection::PreserveIntent,
             write_access: DataWriteAccess::new(&root),
             transaction: shared_transaction(&root),
+            mutation_gate: shared_mutation_gate(&paths),
+            session_listener_fallbacks: shared_session_listener_fallbacks(&paths),
             root,
-            mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
-            session_listener_fallbacks: Arc::new(Mutex::new(BTreeMap::new())),
             #[cfg(test)]
             commit_gate: None,
             #[cfg(test)]
@@ -270,4 +271,35 @@ impl ControlledConfigStore {
             ..self.clone()
         }
     }
+}
+
+fn shared_mutation_gate(paths: &[PathBuf; 2]) -> Arc<tokio::sync::Mutex<()>> {
+    static GATES: OnceLock<Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let mut gates = GATES.get_or_init(Mutex::default).lock();
+    gates.retain(|_, gate| gate.strong_count() > 0);
+    let gate = paths
+        .iter()
+        .find_map(|path| gates.get(path).and_then(Weak::upgrade))
+        .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
+    for path in paths {
+        gates.insert(path.clone(), Arc::downgrade(&gate));
+    }
+    gate
+}
+
+fn shared_session_listener_fallbacks(
+    paths: &[PathBuf; 2],
+) -> Arc<Mutex<BTreeMap<String, SessionListenerFallback>>> {
+    type FallbackMap = Mutex<BTreeMap<String, SessionListenerFallback>>;
+    static FALLBACKS: OnceLock<Mutex<HashMap<PathBuf, Weak<FallbackMap>>>> = OnceLock::new();
+    let mut fallbacks = FALLBACKS.get_or_init(Mutex::default).lock();
+    fallbacks.retain(|_, entry| entry.strong_count() > 0);
+    let entry = paths
+        .iter()
+        .find_map(|path| fallbacks.get(path).and_then(Weak::upgrade))
+        .unwrap_or_else(|| Arc::new(Mutex::new(BTreeMap::new())));
+    for path in paths {
+        fallbacks.insert(path.clone(), Arc::downgrade(&entry));
+    }
+    entry
 }

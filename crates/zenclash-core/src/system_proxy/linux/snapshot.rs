@@ -1,5 +1,52 @@
 //! GSettings user values and effective values form one guarded proxy snapshot.
 
+#[cfg(any(target_os = "linux", test))]
+const GNOME_PORT_VARIANT_TYPE: &str = "i";
+
+#[cfg(any(target_os = "linux", test))]
+fn validate_gnome_port_type(kind: &str) -> crate::MihomoResult<()> {
+    if kind != GNOME_PORT_VARIANT_TYPE {
+        return Err(crate::system_proxy::native::invalid_snapshot());
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_gnome_port(value: i32) -> crate::MihomoResult<u16> {
+    u16::try_from(value).map_err(|_| crate::system_proxy::native::invalid_snapshot())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn manual_endpoint_enabled(mode: &str, host: &str, port: u16) -> bool {
+    mode == "manual" && !host.is_empty() && port != 0
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn build_summary(
+    mode: &str,
+    http_host: String,
+    http_port: i32,
+    https_host: String,
+    https_port: i32,
+    bypass: Vec<String>,
+    auto_url: String,
+) -> crate::MihomoResult<crate::system_proxy::SystemProxyStatus> {
+    let port = parse_gnome_port(http_port)?;
+    let secure_port = parse_gnome_port(https_port)?;
+    Ok(crate::system_proxy::SystemProxyStatus {
+        service: "GNOME".into(),
+        enabled: manual_endpoint_enabled(mode, &http_host, port),
+        secure_enabled: manual_endpoint_enabled(mode, &https_host, secure_port),
+        server: http_host,
+        port,
+        secure_server: https_host,
+        secure_port,
+        bypass,
+        auto_enabled: mode == "auto",
+        auto_url,
+    })
+}
+
 #[cfg(target_os = "linux")]
 mod settings {
     use crate::{
@@ -79,10 +126,10 @@ mod settings {
             trusted: i32,
         ) -> *mut c_void;
         fn g_variant_new_string(value: *const c_char) -> *mut c_void;
-        fn g_variant_new_uint32(value: u32) -> *mut c_void;
+        fn g_variant_new_int32(value: i32) -> *mut c_void;
         fn g_variant_new_strv(values: *const *const c_char, length: isize) -> *mut c_void;
         fn g_variant_get_string(value: *mut c_void, length: *mut usize) -> *const c_char;
-        fn g_variant_get_uint32(value: *mut c_void) -> u32;
+        fn g_variant_get_int32(value: *mut c_void) -> i32;
         fn g_variant_get_boolean(value: *mut c_void) -> i32;
         fn g_variant_n_children(value: *mut c_void) -> usize;
         fn g_variant_get_child_value(value: *mut c_void, index: usize) -> *mut c_void;
@@ -190,12 +237,10 @@ mod settings {
                 .map(str::to_owned)
                 .map_err(|_| invalid_snapshot())
         }
-        fn uint32(&self) -> MihomoResult<u32> {
-            if self.kind != "u" {
-                return Err(invalid_snapshot());
-            }
+        fn int32(&self) -> MihomoResult<i32> {
+            super::validate_gnome_port_type(&self.kind)?;
             let value = self.native()?;
-            Ok(unsafe { g_variant_get_uint32(value.0.as_ptr()) })
+            Ok(unsafe { g_variant_get_int32(value.0.as_ptr()) })
         }
         fn boolean(&self) -> MihomoResult<bool> {
             if self.kind != "b" {
@@ -421,20 +466,15 @@ mod settings {
                 },
             };
             let mode = snapshot.value(ROOT, "mode")?.string()?;
-            snapshot.summary = SystemProxyStatus {
-                service: "GNOME".into(),
-                enabled: mode == "manual",
-                secure_enabled: mode == "manual",
-                server: snapshot.value(HTTP, "host")?.string()?,
-                port: u16::try_from(snapshot.value(HTTP, "port")?.uint32()?)
-                    .map_err(|_| invalid_snapshot())?,
-                secure_server: snapshot.value(HTTPS, "host")?.string()?,
-                secure_port: u16::try_from(snapshot.value(HTTPS, "port")?.uint32()?)
-                    .map_err(|_| invalid_snapshot())?,
-                bypass: snapshot.value(ROOT, "ignore-hosts")?.strings()?,
-                auto_enabled: mode == "auto",
-                auto_url: snapshot.value(ROOT, "autoconfig-url")?.string()?,
-            };
+            snapshot.summary = super::build_summary(
+                &mode,
+                snapshot.value(HTTP, "host")?.string()?,
+                snapshot.value(HTTP, "port")?.int32()?,
+                snapshot.value(HTTPS, "host")?.string()?,
+                snapshot.value(HTTPS, "port")?.int32()?,
+                snapshot.value(ROOT, "ignore-hosts")?.strings()?,
+                snapshot.value(ROOT, "autoconfig-url")?.string()?,
+            )?;
             Ok(snapshot)
         }
     }
@@ -496,7 +536,7 @@ mod settings {
                     steps.push((
                         SettingKey::new(schema, "port"),
                         captured(unsafe {
-                            OwnedVariant::owned(g_variant_new_uint32(u32::from(*port)), true)
+                            OwnedVariant::owned(g_variant_new_int32(i32::from(*port)), true)
                         }?)?,
                     ));
                 }
@@ -647,7 +687,7 @@ mod settings {
                 if schema == ROOT {
                     xml.push_str("<key name='mode' type='s'><default>'none'</default></key><key name='autoconfig-url' type='s'><default>''</default></key><key name='ignore-hosts' type='as'><default>[]</default></key><key name='use-same-proxy' type='b'><default>false</default></key><key name='native-extra' type='s'><default>'inherited fixture value'</default></key>");
                 } else {
-                    xml.push_str("<key name='host' type='s'><default>''</default></key><key name='port' type='u'><default>0</default></key><key name='native-extra' type='s'><default>'inherited fixture value'</default></key>");
+                    xml.push_str("<key name='host' type='s'><default>''</default></key><key name='port' type='i'><default>0</default></key><key name='native-extra' type='s'><default>'inherited fixture value'</default></key>");
                 }
                 xml.push_str("</schema>");
             }
@@ -716,6 +756,12 @@ mod settings {
                 after.value(FTP, "host").unwrap().string().unwrap(),
                 "foreign.ftp"
             );
+            assert_eq!(after.value(HTTP, "port").unwrap().kind, "i");
+            assert_eq!(after.value(HTTP, "port").unwrap().int32().unwrap(), 7890);
+            assert_eq!(after.value(HTTPS, "port").unwrap().kind, "i");
+            assert_eq!(after.value(HTTPS, "port").unwrap().int32().unwrap(), 7890);
+            assert!(after.summary.enabled);
+            assert!(after.summary.secure_enabled);
             assert_eq!(
                 after.summary.bypass,
                 ["host,with,commas", "quote'and\\slash"]
@@ -787,7 +833,176 @@ mod settings {
             assert!(catalog.read().unwrap().same_state(&external).unwrap());
             assert!(!witness.has_steps());
         }
+
+        #[test]
+        fn int32_ports_validate_range_and_manual_enable_predicate() {
+            let (_directory, catalog) = fixture();
+            let int32_value = |port: i32| {
+                captured(unsafe { OwnedVariant::owned(g_variant_new_int32(port), true) }.unwrap())
+                    .unwrap()
+            };
+
+            catalog
+                .write(
+                    &SettingKey::new(ROOT, "mode"),
+                    string("manual").unwrap().user.as_ref(),
+                )
+                .unwrap();
+            let empty_manual = catalog.read().unwrap();
+            assert!(!empty_manual.summary.enabled);
+            assert!(!empty_manual.summary.secure_enabled);
+
+            catalog
+                .write(
+                    &SettingKey::new(HTTP, "host"),
+                    string("127.0.0.1").unwrap().user.as_ref(),
+                )
+                .unwrap();
+            let zero_port = catalog.read().unwrap();
+            assert!(!zero_port.summary.enabled);
+            assert!(!zero_port.summary.secure_enabled);
+
+            catalog
+                .write(
+                    &SettingKey::new(HTTP, "port"),
+                    int32_value(7890).user.as_ref(),
+                )
+                .unwrap();
+            let http_only = catalog.read().unwrap();
+            assert!(http_only.summary.enabled);
+            assert_eq!(http_only.summary.port, 7890);
+            assert!(!http_only.summary.secure_enabled);
+
+            for invalid_port in [-1, 65536] {
+                catalog
+                    .write(
+                        &SettingKey::new(HTTP, "port"),
+                        int32_value(invalid_port).user.as_ref(),
+                    )
+                    .unwrap();
+                assert!(matches!(
+                    catalog.read(),
+                    Err(crate::MihomoError::SystemProxy(error))
+                        if matches!(
+                            error.as_ref(),
+                            crate::SystemProxyError::InvalidNativeSnapshot { .. }
+                        )
+                ));
+            }
+        }
     }
 }
 #[cfg(target_os = "linux")]
 pub(in crate::system_proxy) use settings::{ProxySnapshot, apply, capture, restore};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gnome_port_variant_type_requires_int32_and_rejects_uint32() {
+        assert!(validate_gnome_port_type("i").is_ok());
+        for invalid in ["u", "q", "s", ""] {
+            assert!(matches!(
+                validate_gnome_port_type(invalid),
+                Err(crate::MihomoError::SystemProxy(error))
+                    if matches!(
+                        error.as_ref(),
+                        crate::SystemProxyError::InvalidNativeSnapshot { .. }
+                    )
+            ));
+        }
+    }
+
+    #[test]
+    fn gnome_port_validation_accepts_u16_range_and_rejects_negative_or_overflow() {
+        assert_eq!(parse_gnome_port(0).unwrap(), 0);
+        assert_eq!(parse_gnome_port(7890).unwrap(), 7890);
+        assert_eq!(parse_gnome_port(65535).unwrap(), 65535);
+
+        for out_of_range in [-1, i32::MIN, 65536, i32::MAX] {
+            assert!(matches!(
+                parse_gnome_port(out_of_range),
+                Err(crate::MihomoError::SystemProxy(error))
+                    if matches!(
+                        error.as_ref(),
+                        crate::SystemProxyError::InvalidNativeSnapshot { .. }
+                    )
+            ));
+        }
+    }
+
+    #[test]
+    fn gnome_manual_enable_predicate_requires_manual_mode_host_and_nonzero_port() {
+        let active = build_summary(
+            "manual",
+            "127.0.0.1".into(),
+            7890,
+            "127.0.0.1".into(),
+            7890,
+            vec!["localhost".into()],
+            String::new(),
+        )
+        .unwrap();
+        assert!(active.enabled);
+        assert!(active.secure_enabled);
+        assert_eq!(active.port, 7890);
+        assert_eq!(active.secure_port, 7890);
+
+        let missing_host = build_summary(
+            "manual",
+            String::new(),
+            7890,
+            "127.0.0.1".into(),
+            0,
+            Vec::new(),
+            String::new(),
+        )
+        .unwrap();
+        assert!(!missing_host.enabled);
+        assert!(!missing_host.secure_enabled);
+
+        let asymmetric = build_summary(
+            "manual",
+            "127.0.0.1".into(),
+            7890,
+            String::new(),
+            0,
+            Vec::new(),
+            String::new(),
+        )
+        .unwrap();
+        assert!(asymmetric.enabled);
+        assert!(!asymmetric.secure_enabled);
+
+        let disabled = build_summary(
+            "none",
+            "127.0.0.1".into(),
+            7890,
+            "127.0.0.1".into(),
+            7890,
+            Vec::new(),
+            String::new(),
+        )
+        .unwrap();
+        assert!(!disabled.enabled);
+        assert!(!disabled.secure_enabled);
+
+        assert!(matches!(
+            build_summary(
+                "manual",
+                "127.0.0.1".into(),
+                -1,
+                "127.0.0.1".into(),
+                7890,
+                Vec::new(),
+                String::new(),
+            ),
+            Err(crate::MihomoError::SystemProxy(error))
+                if matches!(
+                    error.as_ref(),
+                    crate::SystemProxyError::InvalidNativeSnapshot { .. }
+                )
+        ));
+    }
+}

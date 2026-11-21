@@ -182,7 +182,6 @@ impl ProxiesPage {
         cx: &mut Context<Self>,
     ) -> Self {
         let feedback_subscription = cx.observe_self(|this, cx| {
-            this.node_grid.invalidate_measurements();
             if let Some(handle) = this.window_handle {
                 let mut messages = Vec::new();
                 if let Some(error) = this.error.clone().or_else(|| {

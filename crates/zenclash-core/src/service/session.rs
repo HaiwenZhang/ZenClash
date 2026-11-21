@@ -343,6 +343,10 @@ impl ServiceSession {
     /// Calls Mihomo directly over its native controller, using an authenticated owner PID.
     /// The secret comes from the caller's immutable runtime snapshot. This is not a service RPC relay.
     ///
+    /// Read-only queries such as `GET /configs` perform no privileged mutations and do not acquire
+    /// the session mutation lock; macOS TUN DNS synchronization is invoked explicitly via
+    /// [`Self::sync_tun_dns`] at configuration admission points.
+    ///
     /// # Errors
     /// Returns lost ownership, native peer, transport or budget errors. Requests sent before a failure may have taken effect.
     pub async fn controller_request(
@@ -354,7 +358,7 @@ impl ServiceSession {
         timeout: std::time::Duration,
     ) -> Result<crate::service::NativeHttpResponse, ServiceCallError> {
         #[cfg(target_os = "macos")]
-        let _configuration_mutation = if path.split('?').next() == Some("/configs") {
+        let _configuration_mutation = if controller_request_requires_mutation_lock(method, path) {
             Some(self.mutations.lock().await)
         } else {
             None
@@ -362,25 +366,86 @@ impl ServiceSession {
         let (proof, pid, controller) = self.controller_for_owner(secret).await?;
         let response = controller.request(method, path, body, timeout).await?;
         self.confirm_controller_owner(&proof, pid).await?;
-        #[cfg(target_os = "macos")]
-        if method == "GET" && path == "/configs" && (200..300).contains(&response.status) {
-            let config: serde_json::Value = serde_json::from_slice(&response.body)
-                .map_err(|_| ServiceCallError::MissingReply("TUN configuration readback"))?;
-            if let Some(enabled) = macos_tun_dns_required(&config) {
-                // CRITICAL REGRESSION (2026-10-10): accepted TUN configuration
-                // does not mean macOS system DNS enters TUN. LAN DNS can bypass
-                // `any:53`, breaking Google/ChatGPT while system proxy works.
-                // Keep this privileged readback step; see service core/tun_dns.rs.
-                // Every accepted load is followed by this readback, including
-                // initial service handoff, hot reload and recovery. Refuse to
-                // report success if the privileged DNS step failed.
-                let result =
-                    zenclash_service::set_tun_dns(&self.credentials, &proof, enabled).await?;
-                check_response(result.code, result.message)?;
-                self.confirm_controller_owner(&proof, pid).await?;
-            }
-        }
         Ok(response)
+    }
+
+    /// Synchronizes macOS system DNS state for TUN against the accepted `/configs` readback.
+    ///
+    /// This privileged step must be called explicitly at configuration admission points
+    /// (initial start, hot reload, patch, and recovery) rather than hidden inside read-only
+    /// `GET /configs` queries. On non-macOS platforms this is a no-op.
+    ///
+    /// # Errors
+    /// Returns lost ownership, native peer, transport, readback decoding or service-refusal errors.
+    pub async fn sync_tun_dns(
+        &self,
+        secret: &str,
+        timeout: std::time::Duration,
+    ) -> Result<(), ServiceCallError> {
+        #[cfg(target_os = "macos")]
+        {
+            self.sync_tun_dns_with(
+                || async {
+                    let (proof, pid, controller) = self.controller_for_owner(secret).await?;
+                    let response = controller.request("GET", "/configs", None, timeout).await?;
+                    self.confirm_controller_owner(&proof, pid).await?;
+                    Ok((proof, pid, response))
+                },
+                |proof, enabled| async move {
+                    let result =
+                        zenclash_service::set_tun_dns(&self.credentials, &proof, enabled).await?;
+                    check_response(result.code, result.message)
+                },
+                |proof, pid| async move { self.confirm_controller_owner(&proof, pid).await },
+            )
+            .await
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (secret, timeout);
+            Ok(())
+        }
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    async fn sync_tun_dns_with<R, RFut, A, AFut, C, CFut>(
+        &self,
+        read_configs: R,
+        apply_dns: A,
+        confirm_owner: C,
+    ) -> Result<(), ServiceCallError>
+    where
+        R: FnOnce() -> RFut,
+        RFut: std::future::Future<
+                Output = Result<
+                    (OwnerSessionProof, u32, crate::service::NativeHttpResponse),
+                    ServiceCallError,
+                >,
+            >,
+        A: FnOnce(OwnerSessionProof, bool) -> AFut,
+        AFut: std::future::Future<Output = Result<(), ServiceCallError>>,
+        C: FnOnce(OwnerSessionProof, u32) -> CFut,
+        CFut: std::future::Future<Output = Result<(), ServiceCallError>>,
+    {
+        let _configuration_mutation = self.mutations.lock().await;
+        let (proof, pid, response) = read_configs().await?;
+        if !(200..300).contains(&response.status) {
+            return Err(ServiceCallError::MissingReply("TUN configuration readback"));
+        }
+        let config: serde_json::Value = serde_json::from_slice(&response.body)
+            .map_err(|_| ServiceCallError::MissingReply("TUN configuration readback"))?;
+        if let Some(enabled) = macos_tun_dns_required(&config) {
+            // CRITICAL REGRESSION (2026-10-10): accepted TUN configuration
+            // does not mean macOS system DNS enters TUN. LAN DNS can bypass
+            // `any:53`, breaking Google/ChatGPT while system proxy works.
+            // Keep this privileged readback step; see service core/tun_dns.rs.
+            // Every accepted load calls this explicit sync, including initial
+            // service handoff, hot reload, patch, and recovery. Refuse to
+            // report success if the privileged DNS step failed.
+            apply_dns(proof.clone(), enabled).await?;
+            confirm_owner(proof, pid).await?;
+        }
+        Ok(())
     }
 
     /// Opens a bounded Mihomo native WebSocket; callers retire it with the controller binding.
@@ -543,12 +608,38 @@ impl ServiceSession {
     /// Stops only the captured owner session; a stale proof cannot stop a replacement session.
     ///
     /// # Errors
-    /// Returns native owner, transport or unconfirmed-Start errors. Only an authenticated native acknowledgement retires the held proof.
+    /// Returns native owner, transport or unconfirmed-Start errors. Only an authenticated native
+    /// acknowledgement or confirmed inactive status retires the held proof.
     pub async fn stop(&self) -> Result<(), ServiceCallError> {
+        self.stop_with(
+            || self.status(),
+            |proof| async move {
+                let response = zenclash_service::stop_clash(&self.credentials, &proof).await?;
+                Ok((response.code, response.message))
+            },
+        )
+        .await
+    }
+
+    async fn stop_with<S, SFut, C, CFut>(
+        &self,
+        read_status: S,
+        stop_clash: C,
+    ) -> Result<(), ServiceCallError>
+    where
+        S: FnOnce() -> SFut,
+        SFut: std::future::Future<Output = Result<ServiceStatusSnapshot, ServiceCallError>>,
+        C: FnOnce(OwnerSessionProof) -> CFut,
+        CFut: std::future::Future<Output = Result<(u16, String), ServiceCallError>>,
+    {
         let _mutation = self.mutations.lock().await;
         let pending_token = self.pending_start.read().clone();
         if let Some(token) = pending_token {
-            let status = self.status().await?;
+            let status = read_status().await?;
+            if !status.is_active && status.core_pid.is_none() {
+                self.clear_all_session_state();
+                return Ok(());
+            }
             let generation = status
                 .active_generation
                 .filter(|_| status.is_active)
@@ -557,30 +648,81 @@ impl ServiceSession {
             // for Stop: the native service verifies both token and generation. Never
             // adopt a controller or stop a replacement merely because its SID matches.
             let proof = OwnerSessionProof { generation, token };
-            let response = zenclash_service::stop_clash(&self.credentials, &proof).await?;
-            check_response(response.code, response.message)?;
-            self.pending_start.write().take();
-            self.pending_keepalive.write().take();
-            self.active.write().take();
-            self.observed_status.write().take();
+            let (code, message) = stop_clash(proof).await?;
+            if code > 0 && code != ServiceErrorCode::NotActive as u16 {
+                return Err(ServiceCallError::Rejected { code, message });
+            }
+            self.clear_all_session_state();
             return Ok(());
         }
         let Some(session) = self.active.read().clone() else {
             return Ok(());
         };
-        let response = zenclash_service::stop_clash(&self.credentials, &session.proof).await?;
-        if response.code > 0
-            && response.code != ServiceErrorCode::NotActive as u16
-            && response.code != ServiceErrorCode::StaleOwnerSession as u16
+        let (code, message) = stop_clash(session.proof).await?;
+        if code > 0
+            && code != ServiceErrorCode::NotActive as u16
+            && code != ServiceErrorCode::StaleOwnerSession as u16
         {
-            return Err(ServiceCallError::Rejected {
-                code: response.code,
-                message: response.message,
-            });
+            return Err(ServiceCallError::Rejected { code, message });
         }
-        self.active.write().take();
+        let retired = self.active.write().take();
         self.observed_status.write().take();
+        drop(retired);
         Ok(())
+    }
+
+    /// Retires local session and pending-start keepalive state after a fresh status observation
+    /// independently proves the service is inactive or the captured generation is gone.
+    pub(crate) fn retire_confirmed_stop(
+        &self,
+        expected_generation: Option<u64>,
+        status: &ServiceStatusSnapshot,
+    ) {
+        if !status.is_active && status.core_pid.is_none() {
+            self.clear_all_session_state();
+            return;
+        }
+        if let Some(generation) = expected_generation
+            && status.active_generation != Some(generation)
+        {
+            let retired = {
+                let mut active = self.active.write();
+                if active
+                    .as_ref()
+                    .is_some_and(|session| session.proof.generation == generation)
+                {
+                    active.take()
+                } else {
+                    None
+                }
+            };
+            self.observed_status.write().take();
+            drop(retired);
+        }
+    }
+
+    fn clear_all_session_state(&self) {
+        self.pending_start.write().take();
+        let pending_keepalive = self.pending_keepalive.write().take();
+        let active = self.active.write().take();
+        self.observed_status.write().take();
+        drop((pending_keepalive, active));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn disconnected_for_test() -> Self {
+        Self {
+            credentials: OwnerCredentials {
+                identity: zenclash_service::OwnerIdentity::Unix { uid: 0, gid: 0 },
+                app_data_dir: String::new(),
+                token: None,
+            },
+            active: RwLock::new(None),
+            pending_start: RwLock::new(None),
+            pending_keepalive: RwLock::new(None),
+            observed_status: RwLock::new(None),
+            mutations: Mutex::new(()),
+        }
     }
 
     /// Reads a manifest-declared provider cache chunk using the captured proof.
@@ -650,6 +792,11 @@ impl ServiceSession {
 }
 
 #[cfg(any(target_os = "macos", test))]
+fn controller_request_requires_mutation_lock(method: &str, path: &str) -> bool {
+    !matches!(method, "GET" | "HEAD") && path.split('?').next() == Some("/configs")
+}
+
+#[cfg(any(target_os = "macos", test))]
 fn macos_tun_dns_required(config: &serde_json::Value) -> Option<bool> {
     let tun = config.get("tun")?;
     if !tun.get("enable")?.as_bool()? {
@@ -707,6 +854,41 @@ async fn probe_service_capabilities() -> ServiceCapabilities {
 mod error_tests {
     use super::*;
     use crate::service::NativeHttpError;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use zenclash_service::ServiceLifecycleState;
+
+    fn status_snapshot(
+        is_active: bool,
+        active_generation: Option<u64>,
+        core_pid: Option<u32>,
+    ) -> ServiceStatusSnapshot {
+        ServiceStatusSnapshot {
+            is_active,
+            active_generation,
+            service_state: if is_active {
+                ServiceLifecycleState::Running
+            } else {
+                ServiceLifecycleState::Starting
+            },
+            core_pid,
+            core_started_at: None,
+            last_core_exit_reason: None,
+            restart_count: 0,
+            last_recovery_at: None,
+            desired_core_should_be_running: is_active,
+            desired_generation: active_generation.unwrap_or(0),
+            desired_updated_at: 0,
+        }
+    }
+
+    fn dummy_runtime_bundle() -> RuntimeBundle {
+        RuntimeBundle {
+            yaml: "mode: rule\n".into(),
+            assets: Vec::new(),
+            remote_providers: Vec::new(),
+            core_path: String::new(),
+        }
+    }
 
     #[test]
     fn macos_lan_dns_is_replaced_only_for_confirmed_udp_tun_capture() {
@@ -728,6 +910,213 @@ mod error_tests {
             );
         }
         assert_eq!(macos_tun_dns_required(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn read_only_get_configs_does_not_require_mutation_lock() {
+        assert!(!controller_request_requires_mutation_lock(
+            "GET", "/configs"
+        ));
+        assert!(!controller_request_requires_mutation_lock(
+            "HEAD", "/configs"
+        ));
+        assert!(!controller_request_requires_mutation_lock(
+            "GET",
+            "/configs?force=true"
+        ));
+        assert!(!controller_request_requires_mutation_lock(
+            "PUT", "/proxies"
+        ));
+        assert!(controller_request_requires_mutation_lock("PUT", "/configs"));
+        assert!(controller_request_requires_mutation_lock(
+            "PUT",
+            "/configs?force=true"
+        ));
+        assert!(controller_request_requires_mutation_lock(
+            "PATCH", "/configs"
+        ));
+    }
+
+    #[tokio::test]
+    async fn explicit_sync_tun_dns_applies_and_confirms_owner_and_propagates_errors() {
+        let session = ServiceSession::disconnected_for_test();
+        let proof = OwnerSessionProof {
+            generation: 7,
+            token: "tok".into(),
+        };
+        let applied = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let confirmed = Arc::new(AtomicBool::new(false));
+        let applied_ref = applied.clone();
+        let confirmed_ref = confirmed.clone();
+        let proof_copy = proof.clone();
+        session
+            .sync_tun_dns_with(
+                || async move {
+                    Ok((
+                        proof_copy,
+                        42,
+                        crate::service::NativeHttpResponse {
+                            status: 200,
+                            body: br#"{"tun":{"enable":true,"auto-route":true,"dns-hijack":["any:53"]}}"#
+                                .to_vec(),
+                        },
+                    ))
+                },
+                |proof, enabled| async move {
+                    applied_ref.lock().push((proof.generation, enabled));
+                    Ok(())
+                },
+                |proof, pid| async move {
+                    assert_eq!(proof.generation, 7);
+                    assert_eq!(pid, 42);
+                    confirmed_ref.store(true, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(*applied.lock(), vec![(7, true)]);
+        assert!(confirmed.load(Ordering::SeqCst));
+
+        // Failure in privileged DNS sync must propagate instead of succeeding silently.
+        let proof_copy = proof.clone();
+        let error = session
+            .sync_tun_dns_with(
+                || async move {
+                    Ok((
+                        proof_copy,
+                        42,
+                        crate::service::NativeHttpResponse {
+                            status: 200,
+                            body: br#"{"tun":{"enable":false}}"#.to_vec(),
+                        },
+                    ))
+                },
+                |_proof, enabled| async move {
+                    assert!(!enabled);
+                    Err(ServiceCallError::Rejected {
+                        code: ServiceErrorCode::ProxyApplyFailed as u16,
+                        message: "dns write failed".into(),
+                    })
+                },
+                |_proof, _pid| async { panic!("confirm_owner must not run after DNS failure") },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ServiceCallError::Rejected { .. }));
+    }
+
+    #[tokio::test]
+    async fn stop_clears_pending_start_and_aborts_keepalive_when_service_is_inactive() {
+        let session = ServiceSession::disconnected_for_test();
+        let lost = session
+            .start_exchange(dummy_runtime_bundle(), |_request| async {
+                Err(ServiceCallError::Transport(anyhow::anyhow!(
+                    "start response timed out"
+                )))
+            })
+            .await
+            .unwrap_err();
+        assert!(lost.mutation_result_unknown());
+        assert!(matches!(
+            session.active_proof(),
+            Err(ServiceCallError::StartUnconfirmed)
+        ));
+        assert!(session.pending_start.read().is_some());
+        assert!(session.pending_keepalive.read().is_some());
+
+        // Service actually reports inactive: stop() must clear pending state & keepalive.
+        let stop_called = Arc::new(AtomicBool::new(false));
+        let stop_called_ref = stop_called.clone();
+        session
+            .stop_with(
+                || async { Ok(status_snapshot(false, None, None)) },
+                |_proof| async move {
+                    stop_called_ref.store(true, Ordering::SeqCst);
+                    Ok((0, String::new()))
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!stop_called.load(Ordering::SeqCst));
+        assert!(session.pending_start.read().is_none());
+        assert!(session.pending_keepalive.read().is_none());
+        assert!(matches!(
+            session.active_proof(),
+            Err(ServiceCallError::NoActiveSession)
+        ));
+
+        // Subsequent start must no longer be permanently blocked by StartUnconfirmed.
+        let reached_exchange = Arc::new(AtomicBool::new(false));
+        let reached_ref = reached_exchange.clone();
+        let err = session
+            .start_exchange(dummy_runtime_bundle(), |_request| async move {
+                reached_ref.store(true, Ordering::SeqCst);
+                Err(ServiceCallError::Rejected {
+                    code: ServiceErrorCode::InvalidRuntimeAsset as u16,
+                    message: "definitive refusal".into(),
+                })
+            })
+            .await
+            .unwrap_err();
+        assert!(reached_exchange.load(Ordering::SeqCst));
+        assert!(matches!(err, ServiceCallError::Rejected { .. }));
+    }
+
+    #[tokio::test]
+    async fn stop_preserves_pending_start_when_replacement_rejects_with_stale_owner() {
+        let session = ServiceSession::disconnected_for_test();
+        session
+            .start_exchange(dummy_runtime_bundle(), |_request| async {
+                Err(ServiceCallError::Transport(anyhow::anyhow!("timeout")))
+            })
+            .await
+            .unwrap_err();
+
+        let err = session
+            .stop_with(
+                || async { Ok(status_snapshot(true, Some(9), Some(999))) },
+                |proof| async move {
+                    assert_eq!(proof.generation, 9);
+                    Ok((
+                        ServiceErrorCode::StaleOwnerSession as u16,
+                        "replacement owns session".into(),
+                    ))
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ServiceCallError::Rejected { code, .. }
+                if code == ServiceErrorCode::StaleOwnerSession as u16
+        ));
+        assert!(matches!(
+            session.active_proof(),
+            Err(ServiceCallError::StartUnconfirmed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn retire_confirmed_stop_clears_pending_state_when_service_confirmed_inactive() {
+        let session = ServiceSession::disconnected_for_test();
+        session
+            .start_exchange(dummy_runtime_bundle(), |_request| async {
+                Err(ServiceCallError::Transport(anyhow::anyhow!("timeout")))
+            })
+            .await
+            .unwrap_err();
+        assert!(session.pending_start.read().is_some());
+        assert!(session.pending_keepalive.read().is_some());
+
+        session.retire_confirmed_stop(None, &status_snapshot(false, None, None));
+
+        assert!(session.pending_start.read().is_none());
+        assert!(session.pending_keepalive.read().is_none());
+        assert!(matches!(
+            session.active_proof(),
+            Err(ServiceCallError::NoActiveSession)
+        ));
     }
 
     #[test]

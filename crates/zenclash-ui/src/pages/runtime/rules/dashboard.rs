@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use super::*;
 use crate::components::mint_switch::MintSwitch as Switch;
 use gpui_kit::component::Selectable;
@@ -7,6 +9,68 @@ use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, WindowExt};
 
 impl RulesView {
+    fn update_rule_presentation_immediate(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = &self.source else {
+            self.release_presentation(cx);
+            return;
+        };
+        if !self.context.is_some_and(|context| context.active) {
+            return;
+        }
+        let snapshot = &source.catalog;
+        if self.projection.as_ref().is_some_and(|projection| {
+            Arc::ptr_eq(&projection.snapshot, snapshot)
+                && projection.filter == self.filters
+                && projection.confirmed_disabled == self.confirmed_disabled
+        }) {
+            self.cancel_projection();
+            return;
+        }
+        let source = snapshot.clone();
+        let (generation, task) = self.worker.start_with_options(
+            &self.runtime,
+            source.clone(),
+            self.filters.clone(),
+            self.confirmed_disabled.clone(),
+            std::time::Duration::ZERO,
+        );
+        self.projecting = true;
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                if !this.worker.is_current(generation)
+                    || !this
+                        .source
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(&current.catalog, &source))
+                {
+                    return;
+                }
+                this.projecting = false;
+                match result {
+                    Ok(Some(projection)) => this.projection = Some(projection),
+                    Ok(None) => {}
+                    Err(error) => {
+                        if let Some(context) = this.context {
+                            cx.emit(RuleEvent::PresentationFailed {
+                                navigation: context.navigation,
+                                error: zenclash_i18n::text_with(
+                                    "rules.errors.filter_task",
+                                    &[("error", error)],
+                                ),
+                            });
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn rule_dashboard(
         &self,
         compact: bool,
@@ -32,11 +96,38 @@ impl RulesView {
                 .into_any_element();
         };
         let rules = &projection.snapshot.rules;
-        let show_results = !self.projecting && projection.filter == self.filters;
-        let indices = if show_results {
-            projection.indices.as_slice()
+        let query_changing = self.projecting && projection.filter.query != self.filters.query;
+        let show_results =
+            !query_changing && (projection.filter == self.filters || self.projecting);
+        let indices: Cow<'_, [usize]> = if !show_results {
+            Cow::Borrowed(&[])
+        } else if self.filters.disabled_only
+            && projection.filter == self.filters
+            && projection.confirmed_disabled != self.confirmed_disabled
+        {
+            Cow::Owned(
+                rules
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, rule)| {
+                        (projection::rule_is_disabled(rule, &self.confirmed_disabled)
+                            && rule_matches(rule, &self.filters.query)
+                            && self
+                                .filters
+                                .rule_kind
+                                .as_ref()
+                                .is_none_or(|kind| *kind == rule.kind)
+                            && self
+                                .filters
+                                .policy
+                                .as_ref()
+                                .is_none_or(|policy| *policy == rule.proxy))
+                        .then_some(index)
+                    })
+                    .collect(),
+            )
         } else {
-            &[]
+            Cow::Borrowed(projection.indices.as_slice())
         };
         let page = list_page(indices.len(), self.page_index, RULES_PER_PAGE);
         let filters = h_flex().gap_2().flex_wrap().children(
@@ -80,8 +171,7 @@ impl RulesView {
                                             view.filters.policy = value.clone();
                                         }
                                         view.page_index = 0;
-                                        view.projection = None;
-                                        view.update_rule_presentation(cx);
+                                        view.update_rule_presentation_immediate(cx);
                                         cx.notify();
                                     });
                                 }),
@@ -118,8 +208,7 @@ impl RulesView {
                             .on_click(cx.listener(|this, checked, _, cx| {
                                 this.filters.disabled_only = *checked;
                                 this.page_index = 0;
-                                this.projection = None;
-                                this.update_rule_presentation(cx);
+                                this.update_rule_presentation_immediate(cx);
                                 cx.notify();
                             })),
                     ),
@@ -220,11 +309,7 @@ impl RulesView {
         let known = rules.iter().all(|rule| rule.extra.is_some());
         let disabled = rules
             .iter()
-            .filter(|rule| {
-                rule.index
-                    .and_then(|index| self.confirmed_disabled.get(&index).copied())
-                    .unwrap_or_else(|| rule.extra.as_ref().is_some_and(|stats| stats.disabled))
-            })
+            .filter(|rule| projection::rule_is_disabled(rule, &self.confirmed_disabled))
             .count();
         v_flex()
             .h_full()

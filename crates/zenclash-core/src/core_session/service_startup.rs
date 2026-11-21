@@ -127,12 +127,13 @@ impl CoreSession {
             .profile
             .clone()
             .ok_or(CoreSessionError::NoCommittedProfile)?;
-        let (payload, listener_fallbacks) = store
+        let startup = store
             .prepare_service_startup_payload(profile, next.overrides.clone())
             .await?;
-        let prepared = runtime.prepare(&payload).await?;
+        let listener_fallbacks = startup.listener_fallbacks().to_vec();
+        let prepared = runtime.prepare(startup.payload()).await?;
         self.ensure_not_shutting_down()?;
-        let cache = store.stage_service_startup_payload(payload).await?;
+        let cache = store.stage_service_startup_payload(startup).await?;
         if let Err(error) = self.ensure_not_shutting_down() {
             drop(prepared);
             cache.rollback().await?;

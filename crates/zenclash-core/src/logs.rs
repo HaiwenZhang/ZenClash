@@ -476,7 +476,7 @@ async fn run_monitor(
     let mut transport_updates = binding.subscribe();
     loop {
         let transport_generation = transport_updates.borrow_and_update().generation;
-        let requested_level = *level.borrow();
+        let requested_level = *level.borrow_and_update();
         let generation = *generation_updates.borrow_and_update();
         let mut level_changed = false;
         let mut generation_changed = false;
@@ -1201,5 +1201,70 @@ mod tests {
         assert!(!log_level_accepts(MihomoLogLevel::Warning, "info"));
         assert!(!log_level_accepts(MihomoLogLevel::Info, "debug"));
         assert!(!log_level_accepts(MihomoLogLevel::Info, "unrecognized"));
+    }
+
+    #[tokio::test]
+    async fn pending_level_update_before_connect_does_not_trigger_redundant_reconnect() {
+        use futures_util::SinkExt;
+        use std::time::Duration;
+        use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let endpoint =
+            MihomoEndpoint::new(format!("http://{}", listener.local_addr().unwrap()), "");
+        let (level_tx, level_rx) = watch::channel(MihomoLogLevel::Info);
+        level_tx.send_replace(MihomoLogLevel::Debug);
+        let (_generation_tx, generation_rx) = watch::channel(1_u64);
+        let entries = Arc::new(RwLock::new(LogBuffer::default()));
+        let stream = Arc::new(RwLock::new(LogStreamSnapshot::default()));
+        let revision = Arc::new(AtomicU64::new(0));
+        let expected_generation = Arc::new(AtomicU64::new(1));
+        let file = file::LogFileWorker::start();
+        let state = LogMonitorState {
+            entries: entries.clone(),
+            stream,
+            revision,
+            expected_generation,
+            file_sender: file.sender(),
+        };
+
+        let monitor = tokio::spawn(run_monitor(
+            ControllerBinding::direct(endpoint),
+            level_rx,
+            generation_rx,
+            state,
+        ));
+
+        let (tcp, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut socket = accept_async(tcp).await.unwrap();
+        socket
+            .send(Message::Text(
+                r#"{"type":"debug","payload":"single-connect"}"#.into(),
+            ))
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while entries.read().entries.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "level update already applied to the initial connection must not trigger a reconnect"
+        );
+        monitor.abort();
+        drop(socket);
+        drop(level_tx);
     }
 }

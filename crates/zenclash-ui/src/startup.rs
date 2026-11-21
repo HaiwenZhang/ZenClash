@@ -2,6 +2,79 @@
 
 use zenclash_core::{CoreKind, MihomoError, ServiceHealthKind, ServiceStartupRejection};
 
+#[derive(Clone)]
+pub(crate) struct StartupCancellation {
+    sender: tokio::sync::watch::Sender<bool>,
+}
+
+impl StartupCancellation {
+    pub(crate) fn new() -> Self {
+        let (sender, _) = tokio::sync::watch::channel(false);
+        Self { sender }
+    }
+
+    pub(crate) fn cancel(&self) {
+        let _ = self.sender.send_replace(true);
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        *self.sender.borrow()
+    }
+
+    pub(crate) fn ensure_active(&self) -> std::io::Result<()> {
+        if self.is_cancelled() {
+            Err(startup_cancelled_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) async fn cancelled(&self) {
+        let mut receiver = self.sender.subscribe();
+        if *receiver.borrow_and_update() {
+            return;
+        }
+        while receiver.changed().await.is_ok() {
+            if *receiver.borrow_and_update() {
+                return;
+            }
+        }
+    }
+
+    pub(crate) async fn run_until_cancelled<F, T>(&self, future: F) -> std::io::Result<T>
+    where
+        F: std::future::Future<Output = T> + Send,
+    {
+        if self.is_cancelled() {
+            return Err(startup_cancelled_error());
+        }
+        tokio::select! {
+            biased;
+            () = self.cancelled() => Err(startup_cancelled_error()),
+            output = future => {
+                if self.is_cancelled() {
+                    Err(startup_cancelled_error())
+                } else {
+                    Ok(output)
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn startup_cancelled_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Interrupted,
+        "application closed during startup",
+    )
+}
+
+pub(crate) fn is_startup_cancelled(error: &(dyn std::error::Error + 'static)) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|io| io.kind() == std::io::ErrorKind::Interrupted)
+}
+
 pub(crate) struct StartupLayers {
     pub(crate) overrides: Vec<std::path::PathBuf>,
     pub(crate) notices: Vec<String>,
@@ -391,5 +464,33 @@ mod tests {
             blocked_message(StartupBlocked::Health(ServiceHealthKind::VersionMismatch)),
             message
         );
+    }
+
+    #[tokio::test]
+    async fn startup_cancellation_interrupts_pending_wait_promptly() {
+        let cancellation = StartupCancellation::new();
+        let trigger = cancellation.clone();
+        let started = std::time::Instant::now();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            trigger.cancel();
+        });
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            cancellation.run_until_cancelled(std::future::pending::<()>()),
+        )
+        .await
+        .expect("cancellation must interrupt pending startup waits promptly");
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn startup_cancellation_recognizes_interrupted_errors_only() {
+        let cancelled: Box<dyn std::error::Error> = Box::new(startup_cancelled_error());
+        let other: Box<dyn std::error::Error> = Box::new(std::io::Error::other("startup failed"));
+        assert!(is_startup_cancelled(cancelled.as_ref()));
+        assert!(!is_startup_cancelled(other.as_ref()));
     }
 }

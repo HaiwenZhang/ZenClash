@@ -192,24 +192,7 @@ impl ControlledConfigStore {
     ) -> ControlledConfigResult<ControlledConfigUpdate> {
         let next_payload =
             normalize_partial_tun_payload(merge_held_delta(&previous_payload, patch)?)?;
-        let overridden = merge_payload_overrides(&next_payload, overrides)?;
-        let actual: serde_json::Value = serde_yaml::from_str(&overridden)?;
-        if !contains_delta(&actual, patch) {
-            if let Some(mode) = patch.get("mode").and_then(serde_json::Value::as_str) {
-                return Err(ControlledConfigError::ModeOverrideConflict {
-                    requested: mode.into(),
-                    effective: actual.get("mode").map_or_else(
-                        || "null".into(),
-                        |value| {
-                            value
-                                .as_str()
-                                .map_or_else(|| value.to_string(), str::to_owned)
-                        },
-                    ),
-                });
-            }
-            return Err(ControlledConfigError::PartialOverrideConflict);
-        }
+        ensure_delta_compatible_with_overrides(&next_payload, patch, overrides)?;
         merge_yaml(&mut current, serde_yaml::to_value(patch)?);
         require_mapping(&current)?;
         let next_patch = serde_yaml::to_string(&current)?.into_bytes();
@@ -243,7 +226,8 @@ impl ControlledConfigStore {
         normalize_runtime_value(kind, &mut candidate)?;
         self.apply_session_listener_fallbacks_to_value(&mut candidate)?;
         if let Some(current) = self.cached_runtime_payload()? {
-            let current: Value = serde_yaml::from_str(&current)?;
+            let mut current: Value = serde_yaml::from_str(&current)?;
+            crate::profile::expand_yaml_merges(&mut current)?;
             if current == candidate {
                 return Ok(None);
             }

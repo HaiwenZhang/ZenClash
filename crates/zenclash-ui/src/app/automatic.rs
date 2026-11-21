@@ -1,9 +1,15 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use gpui_kit::Context;
 use zenclash_core::NetworkReachability;
 
 use super::{ZenClashApp, system_proxy::QuitState};
+
+const INITIAL_RETRY_BACKOFF: Duration = Duration::from_secs(2);
+const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 struct StableObservation<T> {
@@ -15,6 +21,56 @@ impl<T: PartialEq> StableObservation<T> {
         let stable = self.candidate.as_ref() == Some(&value);
         self.candidate = Some(value);
         stable
+    }
+}
+
+#[derive(Debug)]
+struct EdgeStableObservation<T> {
+    candidate: Option<T>,
+    committed: Option<T>,
+    retry_after: Option<Instant>,
+    retry_backoff: Duration,
+}
+
+impl<T> Default for EdgeStableObservation<T> {
+    fn default() -> Self {
+        Self {
+            candidate: None,
+            committed: None,
+            retry_after: None,
+            retry_backoff: INITIAL_RETRY_BACKOFF,
+        }
+    }
+}
+
+impl<T: PartialEq> EdgeStableObservation<T> {
+    fn observe(&mut self, value: T, now: Instant) -> bool {
+        if self.candidate.as_ref() != Some(&value) {
+            self.candidate = Some(value);
+            self.retry_after = None;
+            self.retry_backoff = INITIAL_RETRY_BACKOFF;
+            return false;
+        }
+        if self.committed.as_ref() == Some(&value) {
+            return false;
+        }
+        if let Some(deadline) = self.retry_after
+            && now < deadline
+        {
+            return false;
+        }
+        true
+    }
+
+    fn mark_committed(&mut self, value: T) {
+        self.committed = Some(value);
+        self.retry_after = None;
+        self.retry_backoff = INITIAL_RETRY_BACKOFF;
+    }
+
+    fn record_failure(&mut self, now: Instant) {
+        self.retry_after = Some(now + self.retry_backoff);
+        self.retry_backoff = (self.retry_backoff * 2).min(MAX_RETRY_BACKOFF);
     }
 }
 
@@ -102,13 +158,23 @@ impl ZenClashApp {
         let controlled = self.controlled_config_store.clone();
         let scanner = std::sync::Arc::new(parking_lot::Mutex::new(SourceScanner::default()));
         cx.spawn(async move |this, cx| {
-            let mut network = StableObservation { candidate: None };
+            let mut network = EdgeStableObservation::default();
             let mut source = StableObservation::<Option<SourceRevisionKey>>::default();
             let mut rejected_source = None;
             let mut last_error = None;
             loop {
-                let Ok((quitting, profile)) = this.update(cx, |this, _| (this.quit_state != QuitState::Idle, this.profile_path.clone())) else { return; };
-                if quitting { return; }
+                if core.is_shutting_down() {
+                    return;
+                }
+                let Ok((quitting, profile)) = this.update(cx, |this, _| {
+                    (this.quit_state == QuitState::InProgress, this.profile_path.clone())
+                }) else {
+                    return;
+                };
+                if quitting {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
                 let kind = core.kind();
                 let generation = core.generation();
                 let store = controlled.clone();
@@ -123,7 +189,10 @@ impl ZenClashApp {
                 let mut error = None;
                 match scan {
                     Ok((reachability, configuration)) => {
-                        if network.observe(reachability) {
+                        let now = Instant::now();
+                        if network.observe(reachability, now)
+                            && reachability != NetworkReachability::Unknown
+                        {
                             let task_core = core.clone();
                             let task_capture = capture.clone();
                             let action = runtime.spawn(async move {
@@ -133,15 +202,22 @@ impl ZenClashApp {
                                     NetworkReachability::Unknown => None,
                                 }
                             }).await;
-                            let action = match action {
-                                Ok(action) => action,
-                                Err(failure) => { error = Some(failure.to_string()); None }
-                            };
-                            if let Some((result, key)) = action {
-                                match result {
-                                    Ok(true) => notice = Some(key),
-                                    Ok(false) => {},
-                                    Err(failure) => error = Some(failure.to_string()),
+                            match action {
+                                Ok(Some((Ok(true), key))) => {
+                                    network.mark_committed(reachability);
+                                    notice = Some(key);
+                                }
+                                Ok(Some((Ok(false), _))) => {
+                                    network.mark_committed(reachability);
+                                }
+                                Ok(Some((Err(failure), _))) => {
+                                    network.record_failure(Instant::now());
+                                    error = Some(failure.to_string());
+                                }
+                                Ok(None) => {}
+                                Err(failure) => {
+                                    network.record_failure(Instant::now());
+                                    error = Some(failure.to_string());
                                 }
                             }
                         }
@@ -180,7 +256,9 @@ impl ZenClashApp {
                 last_error = error;
                 if notice.is_some() || reported_error.is_some() {
                     let _ = this.update(cx, |this, cx| {
-                        if this.quit_state != QuitState::Idle { return; }
+                        if this.quit_state == QuitState::InProgress || core.is_shutting_down() {
+                            return;
+                        }
                         this.runtime_page.update(cx, |page, cx| {
                             page.report_automatic_runtime(notice, reported_error, cx);
                         });
@@ -206,11 +284,74 @@ mod tests {
 
     #[test]
     fn unstable_network_and_unknown_observations_do_not_confirm_link_loss() {
-        let mut state = StableObservation { candidate: None };
-        assert!(!state.observe(NetworkReachability::Offline));
-        assert!(!state.observe(NetworkReachability::Unknown));
-        assert!(!state.observe(NetworkReachability::Offline));
-        assert!(state.observe(NetworkReachability::Offline));
+        let now = Instant::now();
+        let mut state = EdgeStableObservation::default();
+        assert!(!state.observe(NetworkReachability::Offline, now));
+        assert!(!state.observe(NetworkReachability::Unknown, now));
+        assert!(!state.observe(NetworkReachability::Offline, now));
+        assert!(state.observe(NetworkReachability::Offline, now));
+    }
+
+    #[test]
+    fn edge_stable_observation_does_not_refire_after_commit_until_state_changes() {
+        let now = Instant::now();
+        let mut state = EdgeStableObservation::default();
+        assert!(!state.observe(NetworkReachability::Online, now));
+        assert!(state.observe(NetworkReachability::Online, now));
+        state.mark_committed(NetworkReachability::Online);
+
+        for offset in 1..=5 {
+            assert!(!state.observe(
+                NetworkReachability::Online,
+                now + Duration::from_secs(offset)
+            ));
+        }
+
+        // Single-tick Offline glitch followed by Online must not refire Online.
+        assert!(!state.observe(NetworkReachability::Offline, now + Duration::from_secs(6)));
+        assert!(!state.observe(NetworkReachability::Online, now + Duration::from_secs(7)));
+        assert!(!state.observe(NetworkReachability::Online, now + Duration::from_secs(8)));
+
+        // Two consecutive Offline observations trigger suspension once.
+        assert!(!state.observe(NetworkReachability::Offline, now + Duration::from_secs(9)));
+        assert!(state.observe(NetworkReachability::Offline, now + Duration::from_secs(10)));
+        state.mark_committed(NetworkReachability::Offline);
+        assert!(!state.observe(NetworkReachability::Offline, now + Duration::from_secs(11)));
+
+        // Returning to Online requires two stable ticks and fires once.
+        assert!(!state.observe(NetworkReachability::Online, now + Duration::from_secs(12)));
+        assert!(state.observe(NetworkReachability::Online, now + Duration::from_secs(13)));
+    }
+
+    #[test]
+    fn edge_stable_observation_retries_failed_state_with_exponential_backoff() {
+        let start = Instant::now();
+        let mut state = EdgeStableObservation::default();
+        assert!(!state.observe(NetworkReachability::Offline, start));
+        assert!(state.observe(NetworkReachability::Offline, start));
+
+        state.record_failure(start);
+        assert!(!state.observe(NetworkReachability::Offline, start + Duration::from_secs(1)));
+        assert!(state.observe(NetworkReachability::Offline, start + Duration::from_secs(2)));
+
+        let second_attempt = start + Duration::from_secs(2);
+        state.record_failure(second_attempt);
+        assert!(!state.observe(
+            NetworkReachability::Offline,
+            second_attempt + Duration::from_secs(3)
+        ));
+        assert!(state.observe(
+            NetworkReachability::Offline,
+            second_attempt + Duration::from_secs(4)
+        ));
+
+        // State change clears backoff immediately.
+        let switch = second_attempt + Duration::from_secs(4);
+        state.record_failure(switch);
+        assert!(!state.observe(NetworkReachability::Online, switch + Duration::from_secs(1)));
+        assert!(state.observe(NetworkReachability::Online, switch + Duration::from_secs(2)));
+        state.mark_committed(NetworkReachability::Online);
+        assert!(!state.observe(NetworkReachability::Online, switch + Duration::from_secs(3)));
     }
 
     #[test]

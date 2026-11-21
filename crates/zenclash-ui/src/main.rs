@@ -159,7 +159,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let override_store = YamlOverrideStore::discover()?;
     let runtime_handle = runtime.handle().clone();
     let restart_after_exit = Arc::new(parking_lot::Mutex::new(None));
-    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancellation = startup::StartupCancellation::new();
     let cleanup: StartupCleanup = Arc::new(parking_lot::Mutex::new(None));
     let inputs = StartupInputs {
         preferences_store,
@@ -175,14 +175,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         prepare_pending_services(&inputs, &runtime_handle, restart_after_exit.clone())?;
     let (finished_sender, finished_receiver) = tokio::sync::oneshot::channel();
     let worker_runtime = runtime.clone();
-    let worker_cancelled = cancelled.clone();
+    let worker_cancellation = cancellation.clone();
     let worker_cleanup = cleanup.clone();
     let worker_restart = restart_after_exit.clone();
     let startup_task = runtime.spawn_blocking(move || {
         let result = prepare_application(
             &worker_runtime,
             inputs,
-            worker_cancelled,
+            worker_cancellation,
             worker_cleanup,
             worker_restart,
         )
@@ -201,7 +201,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     });
     // GPUI's native quit observers have a 200 ms deadline. Finish on Tokio after
     // the event loop returns, before dropping the runtime or allowing restart.
-    cancelled.store(true, Ordering::Release);
+    cancellation.cancel();
     let shutdown_result = runtime.block_on(async {
         let _ = finished_receiver.await;
         let completed = cleanup.lock().take();
@@ -289,20 +289,10 @@ fn prepare_pending_services(
     })
 }
 
-fn ensure_startup_active(cancelled: &AtomicBool) -> Result<(), Box<dyn std::error::Error>> {
-    if cancelled.load(Ordering::Acquire) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Interrupted,
-            "application closed during startup",
-        )
-        .into());
-    }
-    Ok(())
-}
 fn prepare_application(
     runtime: &tokio::runtime::Runtime,
     inputs: StartupInputs,
-    cancelled: Arc<AtomicBool>,
+    cancellation: startup::StartupCancellation,
     cleanup: StartupCleanup,
     restart_after_exit: Arc<parking_lot::Mutex<Option<app::RestartRequest>>>,
 ) -> Result<app::BootstrappedApplication, Box<dyn std::error::Error>> {
@@ -316,7 +306,7 @@ fn prepare_application(
         override_store,
         mut recovery_notices,
     } = inputs;
-    ensure_startup_active(&cancelled)?;
+    cancellation.ensure_active()?;
     let external = std::env::var_os("ZENCLASH_CONTROLLER").is_some();
     let managed_mihomo = !external && requested_core == CoreKind::Mihomo;
     let mut await_service_handoff = false;
@@ -354,16 +344,22 @@ fn prepare_application(
                     let candidate = zenclash_core::WorkspaceResources::new(&root).default_profile();
                     candidate.is_file().then_some(candidate)
                 });
-            Some(runtime.block_on(MihomoRuntimeResources::prepare(root, selected))?)
+            Some(runtime.block_on(
+                cancellation.run_until_cancelled(MihomoRuntimeResources::prepare(root, selected)),
+            )??)
         } else {
             None
         };
-        let mut health = resources.as_ref().map(|resources| {
-            runtime.block_on(zenclash_core::startup_service_health_for(
-                resources.home_dir().to_path_buf(),
-                preferred_binary.clone(),
-            ))
-        });
+        let mut health = if let Some(resources) = resources.as_ref() {
+            Some(runtime.block_on(cancellation.run_until_cancelled(
+                zenclash_core::startup_service_health_for(
+                    resources.home_dir().to_path_buf(),
+                    preferred_binary.clone(),
+                ),
+            ))?)
+        } else {
+            None
+        };
         let mut tun_enabled = if health.is_some() && !configuration_unknown {
             resources.as_ref().and_then(|resources| {
                 controlled_config_store
@@ -391,18 +387,25 @@ fn prepare_application(
                 runtime.block_on(async {
                     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
                     while tokio::time::Instant::now() < deadline {
-                        tokio::time::sleep(Duration::from_millis(200)).await;
-                        if cancelled.load(Ordering::Acquire) {
+                        tokio::select! {
+                            biased;
+                            () = cancellation.cancelled() => break,
+                            () = tokio::time::sleep(Duration::from_millis(200)) => {}
+                        }
+                        if cancellation.is_cancelled() {
                             break;
                         }
                         if let Some(resources) = &resources {
-                            health = Some(
-                                zenclash_core::startup_service_health_for(
+                            let Ok(observed) = cancellation
+                                .run_until_cancelled(zenclash_core::startup_service_health_for(
                                     resources.home_dir().to_path_buf(),
                                     preferred_binary.clone(),
-                                )
-                                .await,
-                            );
+                                ))
+                                .await
+                            else {
+                                break;
+                            };
+                            health = Some(observed);
                         }
                         if health == Some(ServiceHealthKind::Ready) {
                             break;
@@ -411,7 +414,7 @@ fn prepare_application(
                 });
             }
         }
-        ensure_startup_active(&cancelled)?;
+        cancellation.ensure_active()?;
         if (health == Some(ServiceHealthKind::NotInstalled) || explicit_local)
             && tun_enabled == Some(true)
             && !elevated
@@ -444,19 +447,22 @@ fn prepare_application(
             tun_enabled,
             explicit_local,
             || {
-                ensure_startup_active(&cancelled)?;
+                cancellation.ensure_active()?;
                 prepare_service_startup(
                     runtime,
                     resources.as_ref(),
                     preferred_binary.clone(),
                     &controlled_config_store,
                     &override_paths,
+                    &cancellation,
                 )
             },
             || {
-                ensure_startup_active(&cancelled)?;
+                cancellation.ensure_active()?;
                 if managed_mihomo {
-                    runtime.block_on(zenclash_core::check_sidecar_available())?;
+                    runtime.block_on(
+                        cancellation.run_until_cancelled(zenclash_core::check_sidecar_available()),
+                    )??;
                     if explicit_local || health != Some(ServiceHealthKind::NotInstalled) {
                         recovery_notices.push(zenclash_i18n::text(if explicit_local {
                             "startup.local_choice"
@@ -477,17 +483,29 @@ fn prepare_application(
                     environment_core.is_none(),
                     &local_store,
                     &override_paths,
+                    &cancellation,
                 )
             },
         )
         .or_else(|failure| {
+            if matches!(
+                &failure,
+                startup::StartupFailure::Operation(error)
+                    if startup::is_startup_cancelled(error.as_ref())
+            ) || cancellation.is_cancelled()
+            {
+                return Err(failure);
+            }
             // A lost/refused service Start must be checked afresh, never inferred idle.
             if cfg!(windows)
                 && health == Some(ServiceHealthKind::Ready)
                 && matches!(&failure, startup::StartupFailure::Operation(_))
-                && runtime
-                    .block_on(zenclash_core::check_sidecar_available())
-                    .is_ok()
+                && matches!(
+                    runtime.block_on(
+                        cancellation.run_until_cancelled(zenclash_core::check_sidecar_available()),
+                    ),
+                    Ok(Ok(()))
+                )
             {
                 if let startup::StartupFailure::Operation(error) = &failure {
                     // Preserve the readable Start refusal, rather than publishing
@@ -496,7 +514,9 @@ fn prepare_application(
                         Some(ServiceHealthKind::Unavailable(error.to_string()));
                 }
                 recovery_notices.push(zenclash_i18n::text("startup.local_fallback"));
-                ensure_startup_active(&cancelled).map_err(startup::StartupFailure::Operation)?;
+                cancellation
+                    .ensure_active()
+                    .map_err(|error| startup::StartupFailure::Operation(error.into()))?;
                 return prepare_legacy_startup(
                     runtime,
                     &mut preferences,
@@ -505,6 +525,7 @@ fn prepare_application(
                     environment_core.is_none(),
                     &local_store,
                     &override_paths,
+                    &cancellation,
                 )
                 .map_err(startup::StartupFailure::Operation);
             }
@@ -519,18 +540,16 @@ fn prepare_application(
         })
     })()
     .or_else(|error| {
-        if managed_mihomo {
-            prepare_offline_startup_with_binary(
-                requested_core,
-                error.to_string(),
-                preferences
-                    .core_binaries
-                    .path(requested_core)
-                    .map(Path::to_path_buf),
-            )
-        } else {
-            prepare_disconnected_startup(requested_core, Some(error.to_string()))
-        }
+        recover_offline_startup(
+            managed_mihomo,
+            requested_core,
+            preferences
+                .core_binaries
+                .path(requested_core)
+                .map(Path::to_path_buf),
+            &cancellation,
+            error,
+        )
     })?;
     let PreparedStartup {
         kind: core_kind,
@@ -549,6 +568,7 @@ fn prepare_application(
         capture: None,
         history: None,
     });
+    cancellation.ensure_active()?;
     let controlled_config_store = controlled_config_store.with_runtime_tun_policy(&client);
     let proxy_controller = zenclash_core::SystemProxyController::default();
     core_session.attach_pac_server(proxy_controller.pac_server());
@@ -687,6 +707,30 @@ fn prepare_disconnected_startup(
     })
 }
 
+fn recover_offline_startup(
+    managed_mihomo: bool,
+    requested_core: CoreKind,
+    preferred_binary: Option<PathBuf>,
+    cancellation: &startup::StartupCancellation,
+    error: Box<dyn std::error::Error>,
+) -> Result<PreparedStartup, Box<dyn std::error::Error>> {
+    if startup::is_startup_cancelled(error.as_ref()) {
+        return Err(error);
+    }
+    if cancellation.is_cancelled() {
+        return Err(Box::new(startup::startup_cancelled_error()));
+    }
+    if managed_mihomo {
+        prepare_offline_startup_with_binary(requested_core, error.to_string(), preferred_binary)
+    } else {
+        prepare_disconnected_startup(requested_core, Some(error.to_string()))
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "startup helpers will be consolidated into BootstrapOrchestrator"
+)]
 fn prepare_legacy_startup(
     runtime: &tokio::runtime::Runtime,
     preferences: &mut AppPreferences,
@@ -695,7 +739,9 @@ fn prepare_legacy_startup(
     allow_core_recovery: bool,
     controlled_config_store: &ControlledConfigStore,
     override_paths: &[PathBuf],
+    cancellation: &startup::StartupCancellation,
 ) -> Result<PreparedStartup, Box<dyn std::error::Error>> {
+    cancellation.ensure_active()?;
     let initial = bootstrap_core(
         runtime,
         requested_core,
@@ -704,6 +750,7 @@ fn prepare_legacy_startup(
         override_paths,
         None,
         true,
+        cancellation,
     );
     let startup = match initial {
         Ok(bootstrapped) => CoreStartupState {
@@ -714,7 +761,11 @@ fn prepare_legacy_startup(
             notice: bootstrapped.startup_notice,
             error: None,
         },
+        Err(initial_error) if initial_error.kind() == std::io::ErrorKind::Interrupted => {
+            return Err(initial_error.into());
+        }
         Err(initial_error) if allow_core_recovery => {
+            cancellation.ensure_active()?;
             match recover_core(
                 runtime,
                 preferences,
@@ -723,6 +774,7 @@ fn prepare_legacy_startup(
                 controlled_config_store,
                 override_paths,
                 &initial_error,
+                cancellation,
             ) {
                 Ok(recovered) => {
                     let source = recovered.binary.as_ref().map_or_else(
@@ -752,7 +804,10 @@ fn prepare_legacy_startup(
                         error: None,
                     }
                 }
-                Err(recovery_error) => recover_safe_profile(
+                Err(recovery_error) if recovery_error.kind() == std::io::ErrorKind::Interrupted => {
+                    return Err(recovery_error.into());
+                }
+                Err(recovery_error) => match recover_safe_profile(
                     runtime,
                     preferences,
                     requested_core,
@@ -760,13 +815,20 @@ fn prepare_legacy_startup(
                     controlled_config_store,
                     true,
                     &recovery_error,
-                )
-                .unwrap_or_else(|error| offline_core_state(requested_core, &error)),
+                    cancellation,
+                ) {
+                    Ok(state) => state,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                        return Err(error.into());
+                    }
+                    Err(error) => offline_core_state(requested_core, &error),
+                },
             }
         }
         Err(error) => {
+            cancellation.ensure_active()?;
             if std::env::var_os("ZENCLASH_CONFIG").is_none() {
-                recover_safe_profile(
+                match recover_safe_profile(
                     runtime,
                     preferences,
                     requested_core,
@@ -774,8 +836,14 @@ fn prepare_legacy_startup(
                     controlled_config_store,
                     false,
                     &error,
-                )
-                .unwrap_or_else(|recovery| offline_core_state(requested_core, &recovery))
+                    cancellation,
+                ) {
+                    Ok(state) => state,
+                    Err(recovery) if recovery.kind() == std::io::ErrorKind::Interrupted => {
+                        return Err(recovery.into());
+                    }
+                    Err(recovery) => offline_core_state(requested_core, &recovery),
+                }
             } else {
                 offline_core_state(requested_core, &error)
             }
@@ -831,21 +899,38 @@ fn prepare_service_startup(
     core_source: Option<PathBuf>,
     store: &ControlledConfigStore,
     overrides: &[PathBuf],
+    cancellation: &startup::StartupCancellation,
 ) -> Result<PreparedStartup, Box<dyn std::error::Error>> {
+    cancellation.ensure_active()?;
     let resources = resources
         .ok_or_else(|| std::io::Error::other(zenclash_i18n::text("core_page.service.unknown")))?;
     let client = runtime
-        .block_on(MihomoClient::connect_service_with_core(
-            resources.home_dir().to_path_buf(),
-            core_source,
-        ))
+        .block_on(
+            cancellation.run_until_cancelled(MihomoClient::connect_service_with_core(
+                resources.home_dir().to_path_buf(),
+                core_source,
+            )),
+        )?
         .map_err(|error| std::io::Error::other(startup::connection_message(&error)))?;
     let session = CoreSession::open(CoreKind::Mihomo, client.clone())?;
+    let cancel_watch = {
+        let session = session.clone();
+        let cancellation = cancellation.clone();
+        runtime.spawn(async move {
+            cancellation.cancelled().await;
+            session.request_shutdown();
+        })
+    };
     let result = runtime.block_on(session.initialize_service_runtime(
         store,
         resources.config_file().to_path_buf(),
         overrides.to_vec(),
     ));
+    cancel_watch.abort();
+    if cancellation.is_cancelled() {
+        let _ = runtime.block_on(session.shutdown());
+        return Err(startup::startup_cancelled_error().into());
+    }
     let (initialization, error) = match result {
         Ok(outcome) => {
             // A saved Commit awaiting acknowledgement has a shared, dynamic
@@ -928,6 +1013,20 @@ fn load_preferences(
     Ok((store.load()?, None))
 }
 
+async fn wait_for_managed_core_ready(
+    process: &ManagedCoreProcess,
+    timeout: Duration,
+    cancellation: &startup::StartupCancellation,
+) -> std::io::Result<Result<(), zenclash_core::MihomoError>> {
+    cancellation
+        .run_until_cancelled(Box::pin(process.wait_until_ready(timeout)))
+        .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "startup helpers will be consolidated into BootstrapOrchestrator"
+)]
 fn bootstrap_core(
     runtime: &tokio::runtime::Runtime,
     core_kind: CoreKind,
@@ -936,7 +1035,9 @@ fn bootstrap_core(
     override_paths: &[PathBuf],
     profile_override: Option<&Path>,
     apply_persisted_layers: bool,
+    cancellation: &startup::StartupCancellation,
 ) -> std::io::Result<BootstrappedCore> {
+    cancellation.ensure_active()?;
     let project_root = project_root()?;
     let selected_profile = profile_override
         .map(Path::to_path_buf)
@@ -1033,6 +1134,7 @@ fn bootstrap_core(
         ))
     })?;
     for attempt in 1..=MANAGED_CONTROLLER_ATTEMPTS {
+        cancellation.ensure_active()?;
         let controller = (if core_kind == CoreKind::Mihomo {
             MihomoEndpoint::local_ipc(&launch.home_dir).map_err(std::io::Error::other)
         } else {
@@ -1058,8 +1160,12 @@ fn bootstrap_core(
                 ],
             ))
         })?;
-        match runtime.block_on(process.wait_until_ready(Duration::from_secs(20))) {
-            Ok(()) => {
+        match runtime.block_on(wait_for_managed_core_ready(
+            &process,
+            Duration::from_secs(20),
+            cancellation,
+        )) {
+            Ok(Ok(())) => {
                 tracing::info!(core = %core_kind, controller = %endpoint.controller, attempt, "managed core is ready");
                 return Ok(BootstrappedCore {
                     endpoint,
@@ -1068,7 +1174,14 @@ fn bootstrap_core(
                     startup_notice: listener_notice,
                 });
             }
-            Err(error) => {
+            Err(cancelled) => {
+                tracing::info!(core = %core_kind, attempt, "stopping managed core because startup was cancelled");
+                if let Err(stop_error) = process.stop() {
+                    tracing::warn!(%stop_error, core = %core_kind, "failed to stop cancelled managed core");
+                }
+                return Err(cancelled);
+            }
+            Ok(Err(error)) => {
                 let controller_conflict = is_controller_listener_conflict(&error.to_string());
                 tracing::error!(%error, core = %core_kind, attempt, "managed core failed to become ready");
                 for line in process.snapshot().logs.iter().rev().take(12).rev() {
@@ -1084,6 +1197,7 @@ fn bootstrap_core(
                         ],
                     )));
                 }
+                cancellation.ensure_active()?;
                 if controller_conflict && attempt < MANAGED_CONTROLLER_ATTEMPTS {
                     tracing::warn!(core = %core_kind, attempt, "managed controller port was taken before core bind; retrying");
                     continue;
@@ -1155,6 +1269,10 @@ fn offline_core_state(requested_core: CoreKind, error: &std::io::Error) -> CoreS
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "startup helpers will be consolidated into BootstrapOrchestrator"
+)]
 fn recover_core(
     runtime: &tokio::runtime::Runtime,
     preferences: &AppPreferences,
@@ -1163,7 +1281,9 @@ fn recover_core(
     controlled_config_store: &ControlledConfigStore,
     override_paths: &[PathBuf],
     initial_error: &std::io::Error,
+    cancellation: &startup::StartupCancellation,
 ) -> std::io::Result<RecoveredCore> {
+    cancellation.ensure_active()?;
     let mut candidates = Vec::new();
     if let Some(kind) = preferences.last_known_good_core {
         let binary = preferences.last_known_good_binary.clone();
@@ -1177,6 +1297,7 @@ fn recover_core(
 
     let mut failures = vec![initial_error.to_string()];
     for (kind, binary) in candidates {
+        cancellation.ensure_active()?;
         match bootstrap_core(
             runtime,
             kind,
@@ -1185,6 +1306,7 @@ fn recover_core(
             override_paths,
             None,
             true,
+            cancellation,
         ) {
             Ok(bootstrapped) => {
                 let actual_binary = bootstrapped
@@ -1201,6 +1323,7 @@ fn recover_core(
                     startup_notice: bootstrapped.startup_notice,
                 });
             }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => return Err(error),
             Err(error) => failures.push(error.to_string()),
         }
     }
@@ -1213,6 +1336,10 @@ fn recover_core(
     )))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "startup helpers will be consolidated into BootstrapOrchestrator"
+)]
 fn recover_safe_profile(
     runtime: &tokio::runtime::Runtime,
     preferences: &AppPreferences,
@@ -1221,7 +1348,9 @@ fn recover_safe_profile(
     controlled_config_store: &ControlledConfigStore,
     allow_binary_fallback: bool,
     cause: &std::io::Error,
+    cancellation: &startup::StartupCancellation,
 ) -> std::io::Result<CoreStartupState> {
+    cancellation.ensure_active()?;
     let recovery_profile = bundled_recovery_profile()
         .unwrap_or(zenclash_core::WorkspaceResources::new(project_root()?).recovery_profile());
     if !recovery_profile.is_file() {
@@ -1252,6 +1381,7 @@ fn recover_safe_profile(
 
     let mut failures = vec![cause.to_string()];
     for (kind, binary) in candidates {
+        cancellation.ensure_active()?;
         match bootstrap_core(
             runtime,
             kind,
@@ -1260,6 +1390,7 @@ fn recover_safe_profile(
             &[],
             Some(&recovery_profile),
             false,
+            cancellation,
         ) {
             Ok(bootstrapped) => {
                 let mut notice = zenclash_i18n::text_with(
@@ -1283,6 +1414,7 @@ fn recover_safe_profile(
                     error: None,
                 });
             }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => return Err(error),
             Err(error) => failures.push(error.to_string()),
         }
     }
@@ -1413,10 +1545,12 @@ mod tracing_tests {
         };
         let cleanup = std::sync::Arc::new(parking_lot::Mutex::new(None));
         let runtime = tokio::runtime::Runtime::new().unwrap();
+        let cancellation = super::startup::StartupCancellation::new();
+        cancellation.cancel();
         let result = super::prepare_application(
             &runtime,
             inputs,
-            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            cancellation,
             cleanup.clone(),
             std::sync::Arc::new(parking_lot::Mutex::new(None)),
         );
@@ -1429,6 +1563,141 @@ mod tracing_tests {
         assert_eq!(std::fs::read_to_string(damaged).unwrap(), "tun: [invalid");
         assert!(root.starts_with(std::env::temp_dir()));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancelled_startup_error_is_not_swallowed_into_offline_startup() {
+        let active = super::startup::StartupCancellation::new();
+        for managed_mihomo in [true, false] {
+            let error = super::recover_offline_startup(
+                managed_mihomo,
+                CoreKind::Mihomo,
+                None,
+                &active,
+                Box::new(super::startup::startup_cancelled_error()),
+            )
+            .err()
+            .expect("Interrupted startup error must not degrade to offline startup");
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::Interrupted
+            );
+        }
+
+        let cancelled = super::startup::StartupCancellation::new();
+        cancelled.cancel();
+        let error = super::recover_offline_startup(
+            true,
+            CoreKind::Mihomo,
+            None,
+            &cancelled,
+            Box::new(std::io::Error::other("controller failed after quit")),
+        )
+        .err()
+        .expect("cancelled flag must suppress offline startup fallback");
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::Interrupted
+        );
+
+        let offline = super::recover_offline_startup(
+            true,
+            CoreKind::Mihomo,
+            None,
+            &active,
+            Box::new(std::io::Error::other("service unavailable")),
+        )
+        .unwrap();
+        assert!(offline.session.is_offline_recovery());
+        assert_eq!(offline.error.as_deref(), Some("service unavailable"));
+    }
+
+    #[tokio::test]
+    async fn wait_for_managed_core_ready_exits_promptly_when_cancelled() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let home = std::env::temp_dir().join(format!(
+            "zenclash-cancel-ready-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let process =
+            zenclash_core::ManagedCoreProcess::prepare_stopped(zenclash_core::CoreLaunchConfig {
+                kind: CoreKind::Mihomo,
+                binary: home.join("mihomo"),
+                config_file: home.join("config.yaml"),
+                home_dir: home,
+                endpoint: zenclash_core::MihomoEndpoint::new(format!("http://{address}"), ""),
+                controller_override: None,
+            });
+        let cancellation = super::startup::StartupCancellation::new();
+        let trigger = cancellation.clone();
+        let started = std::time::Instant::now();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            trigger.cancel();
+        });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            super::wait_for_managed_core_ready(
+                &process,
+                std::time::Duration::from_secs(20),
+                &cancellation,
+            ),
+        )
+        .await
+        .expect("cancelled readiness wait must not block on the 20s startup timeout");
+        server.abort();
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn recover_core_and_safe_profile_stop_immediately_when_cancelled() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let store = zenclash_core::ControlledConfigStore::new(
+            std::env::temp_dir().join("zenclash-cancel-recover-unused"),
+        );
+        let cancellation = super::startup::StartupCancellation::new();
+        cancellation.cancel();
+        let cause = std::io::Error::other("initial core start failed");
+
+        let core_error = super::recover_core(
+            &runtime,
+            &zenclash_core::AppPreferences::default(),
+            CoreKind::Mihomo,
+            None,
+            &store,
+            &[],
+            &cause,
+            &cancellation,
+        )
+        .err()
+        .expect("cancelled recover_core must stop immediately");
+        assert_eq!(core_error.kind(), std::io::ErrorKind::Interrupted);
+
+        let profile_error = super::recover_safe_profile(
+            &runtime,
+            &zenclash_core::AppPreferences::default(),
+            CoreKind::Mihomo,
+            None,
+            &store,
+            true,
+            &cause,
+            &cancellation,
+        )
+        .err()
+        .expect("cancelled recover_safe_profile must stop immediately");
+        assert_eq!(profile_error.kind(), std::io::ErrorKind::Interrupted);
     }
 
     #[test]

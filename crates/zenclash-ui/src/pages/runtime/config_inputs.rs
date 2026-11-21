@@ -210,6 +210,17 @@ impl ConfigInputs {
                     key,
                     "/port" | "/mixed-port" | "/socks-port" | "/bind-address"
                 ),
+                Page::Mihomo => matches!(
+                    key,
+                    "/port"
+                        | "/mixed-port"
+                        | "/socks-port"
+                        | "/redir-port"
+                        | "/tproxy-port"
+                        | "/bind-address"
+                        | "/interface-name"
+                        | "/log-level"
+                ),
                 _ => false,
             };
             if !matches {
@@ -1077,6 +1088,103 @@ mod tests {
                 "hosts": { "router.local": "192.0.2.1" }
             })
         );
+    }
+
+    #[gpui_kit::test]
+    fn reset_page_mihomo_restores_all_mihomo_inputs_without_touching_other_pages(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use std::path::Path;
+
+        use gpui_kit::component::Root;
+        use gpui_kit::{AppContext, IntoElement, Render, Window, div, px, size};
+
+        struct EmptyView;
+        impl Render for EmptyView {
+            fn render(
+                &mut self,
+                _: &mut Window,
+                _: &mut gpui_kit::Context<Self>,
+            ) -> impl IntoElement {
+                div()
+            }
+        }
+
+        cx.update(gpui_kit::init);
+        let handle = cx.open_window(size(px(400.), px(300.)), |window, cx| {
+            let view = cx.new(|_| EmptyView);
+            Root::new(view, window, cx)
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            let mut inputs = super::ConfigInputs::new(
+                &json!({
+                    "port": 7891,
+                    "socks-port": 7892,
+                    "mixed-port": 7890,
+                    "redir-port": 7893,
+                    "tproxy-port": 7894,
+                    "bind-address": "127.0.0.1",
+                    "interface-name": "en0",
+                    "log-level": "info",
+                    "dns": { "nameserver": ["1.1.1.1"] }
+                }),
+                Some(Path::new("profile.yaml")),
+                window,
+                cx,
+            );
+
+            inputs
+                .core
+                .port
+                .update(cx, |input, cx| input.set_value("10001", window, cx));
+            inputs
+                .core
+                .socks_port
+                .update(cx, |input, cx| input.set_value("10002", window, cx));
+            inputs
+                .core
+                .mixed_port
+                .update(cx, |input, cx| input.set_value("10000", window, cx));
+            inputs
+                .core
+                .redir_port
+                .update(cx, |input, cx| input.set_value("10003", window, cx));
+            inputs
+                .core
+                .tproxy_port
+                .update(cx, |input, cx| input.set_value("10004", window, cx));
+            inputs
+                .core
+                .bind_address
+                .update(cx, |input, cx| input.set_value("0.0.0.0", window, cx));
+            inputs
+                .core
+                .interface_name
+                .update(cx, |input, cx| input.set_value("eth0", window, cx));
+            inputs
+                .core
+                .log_level
+                .update(cx, |input, cx| input.set_value("debug", window, cx));
+            inputs
+                .dns
+                .nameserver
+                .update(cx, |input, cx| input.set_value("8.8.8.8", window, cx));
+
+            inputs.reset_page(crate::pages::Page::Mihomo, window, cx);
+
+            assert_eq!(inputs.core.port.read(cx).value(), "7891");
+            assert_eq!(inputs.core.socks_port.read(cx).value(), "7892");
+            assert_eq!(inputs.core.mixed_port.read(cx).value(), "7890");
+            assert_eq!(inputs.core.redir_port.read(cx).value(), "7893");
+            assert_eq!(inputs.core.tproxy_port.read(cx).value(), "7894");
+            assert_eq!(inputs.core.bind_address.read(cx).value(), "127.0.0.1");
+            assert_eq!(inputs.core.interface_name.read(cx).value(), "en0");
+            assert_eq!(inputs.core.log_level.read(cx).value(), "info");
+            assert_eq!(inputs.dns.nameserver.read(cx).value(), "8.8.8.8");
+
+            window.remove_window();
+        })
+        .unwrap();
     }
 }
 

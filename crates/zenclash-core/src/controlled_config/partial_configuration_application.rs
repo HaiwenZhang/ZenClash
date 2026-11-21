@@ -91,13 +91,14 @@ impl ControlledConfigStore {
         let worker_lease = self.write_access.acquire()?;
         let worker = self.with_write_lease(&worker_lease);
         let requested = patch.clone();
+        let prepare_overrides = overrides.clone();
         let fallback_bundle = client.service_runtime_snapshot()?;
         let mut update = tokio::task::spawn_blocking(move || {
             let _lease = worker_lease;
             worker.prepare_partial_update(
                 &profile,
                 &requested,
-                &overrides,
+                &prepare_overrides,
                 fallback_bundle.as_deref(),
             )
         })
@@ -112,17 +113,22 @@ impl ControlledConfigStore {
         let delta = prepared
             .as_ref()
             .and_then(|prepared| prepared.effective_delta())
-            .unwrap_or(patch);
-        // Persist the effective delta too so implicit TUN enable survives later
-        // full applications. Generated defaults belong only to runtime YAML.
-        update.next_patch = merge_held_delta(
-            std::str::from_utf8(&update.next_patch)
-                .map_err(|_| ControlledConfigError::NotMapping)?,
-            &delta,
-        )?
-        .into_bytes();
-        let next_runtime =
-            normalize_partial_tun_payload(merge_held_delta(&previous_payload, &delta)?)?;
+            .unwrap_or_else(|| patch.clone());
+        let next_patch_bytes = update.next_patch;
+        let check_previous = previous_payload.clone();
+        let check_delta = delta.clone();
+        let (next_patch, next_runtime) = tokio::task::spawn_blocking(move || {
+            finalize_partial_delta(
+                &check_previous,
+                &next_patch_bytes,
+                &patch,
+                &check_delta,
+                &overrides,
+            )
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
+        update.next_patch = next_patch;
         let worker_lease = self.write_access.acquire()?;
         let worker = self.with_write_lease(&worker_lease);
         let cache = tokio::task::spawn_blocking(move || {
@@ -302,6 +308,7 @@ pub(crate) fn merge_held_delta(
     patch: &serde_json::Value,
 ) -> ControlledConfigResult<String> {
     let mut value: Value = serde_yaml::from_str(payload)?;
+    crate::profile::expand_yaml_merges(&mut value)?;
     merge_yaml(&mut value, serde_yaml::to_value(patch)?);
     let payload = serde_yaml::to_string(&value)?;
     if payload.len() > MAX_PROFILE_BYTES {
@@ -310,10 +317,65 @@ pub(crate) fn merge_held_delta(
     Ok(payload)
 }
 
-pub(super) fn contains_delta(actual: &serde_json::Value, patch: &serde_json::Value) -> bool {
+pub(super) fn finalize_partial_delta(
+    previous_payload: &str,
+    next_patch_bytes: &[u8],
+    requested: &serde_json::Value,
+    delta: &serde_json::Value,
+    overrides: &[PathBuf],
+) -> ControlledConfigResult<(Vec<u8>, String)> {
+    // Persist the effective delta too so implicit TUN enable survives later
+    // full applications. Generated defaults belong only to runtime YAML.
+    let next_patch = merge_held_delta(
+        std::str::from_utf8(next_patch_bytes).map_err(|_| ControlledConfigError::NotMapping)?,
+        delta,
+    )?
+    .into_bytes();
+    let next_runtime = normalize_partial_tun_payload(merge_held_delta(previous_payload, delta)?)?;
+    if delta != requested {
+        ensure_delta_compatible_with_overrides(&next_runtime, delta, overrides)?;
+    }
+    Ok((next_patch, next_runtime))
+}
+
+pub(super) fn ensure_delta_compatible_with_overrides(
+    payload: &str,
+    delta: &serde_json::Value,
+    overrides: &[PathBuf],
+) -> ControlledConfigResult<()> {
+    let overridden = merge_payload_overrides(payload, overrides)?;
+    let mut actual: Value = serde_yaml::from_str(&overridden)?;
+    crate::profile::expand_yaml_merges(&mut actual)?;
+    let patch_yaml = serde_yaml::to_value(delta)?;
+    if !contains_delta(&actual, &patch_yaml) {
+        if let Some(mode) = delta.get("mode").and_then(serde_json::Value::as_str) {
+            let effective = actual.get("mode").map_or_else(
+                || "null".into(),
+                |value| {
+                    value.as_str().map_or_else(
+                        || {
+                            serde_yaml::to_string(value)
+                                .map(|rendered| rendered.trim().to_owned())
+                                .unwrap_or_else(|_| "null".into())
+                        },
+                        str::to_owned,
+                    )
+                },
+            );
+            return Err(ControlledConfigError::ModeOverrideConflict {
+                requested: mode.into(),
+                effective,
+            });
+        }
+        return Err(ControlledConfigError::PartialOverrideConflict);
+    }
+    Ok(())
+}
+
+pub(super) fn contains_delta(actual: &Value, patch: &Value) -> bool {
     match patch {
-        serde_json::Value::Object(object) => actual.as_object().is_some_and(|actual| {
-            object.iter().all(|(key, value)| {
+        Value::Mapping(mapping) => actual.as_mapping().is_some_and(|actual| {
+            mapping.iter().all(|(key, value)| {
                 actual
                     .get(key)
                     .is_some_and(|actual| contains_delta(actual, value))

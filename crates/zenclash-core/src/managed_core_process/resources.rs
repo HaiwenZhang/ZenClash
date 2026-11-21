@@ -43,6 +43,93 @@ pub(super) fn startup_binary(
     Ok(None)
 }
 
+pub(super) fn startup_path_binary(
+    paths: impl IntoIterator<Item = PathBuf>,
+) -> MihomoResult<Option<PathBuf>> {
+    for path in paths {
+        if !can_probe_path_candidate(&path) {
+            continue;
+        }
+        crate::core_update::recover_interrupted_update(&path)
+            .map_err(|error| MihomoError::Process(error.to_string()))?;
+        if is_core_binary_candidate(&path) {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn is_skippable_path_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::PermissionDenied | io::ErrorKind::NotADirectory
+    ) || {
+        #[cfg(unix)]
+        {
+            matches!(error.raw_os_error(), Some(libc::EACCES | libc::ENOTDIR))
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+}
+
+fn can_probe_path_candidate(path: &Path) -> bool {
+    let mut current = match std::path::absolute(path) {
+        Ok(path) => path,
+        Err(error) if is_skippable_path_error(&error) => return false,
+        Err(_) => return true,
+    };
+    for _ in 0..40 {
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                match std::fs::read_link(&current) {
+                    Ok(link) => {
+                        current = if link.is_absolute() {
+                            link
+                        } else {
+                            let Some(parent) = current.parent() else {
+                                return true;
+                            };
+                            parent.join(link)
+                        };
+                    }
+                    Err(error) if is_skippable_path_error(&error) => return false,
+                    Err(_) => return true,
+                }
+            }
+            Ok(_) => break,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) if is_skippable_path_error(&error) => return false,
+            Err(_) => return true,
+        }
+    }
+    let Some(parent) = current.parent() else {
+        return true;
+    };
+    let resolved_parent = match std::fs::canonicalize(parent) {
+        Ok(parent) => parent,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return true,
+        Err(error) if is_skippable_path_error(&error) => return false,
+        Err(_) => return true,
+    };
+    match std::fs::metadata(&resolved_parent) {
+        Ok(metadata) if !metadata.is_dir() => return false,
+        Err(error) if is_skippable_path_error(&error) => return false,
+        Ok(_) | Err(_) => {}
+    }
+    if let Some(file_name) = current.file_name().and_then(|name| name.to_str()) {
+        let journal = resolved_parent.join(format!(".{file_name}.zenclash-update.json"));
+        if let Err(error) = std::fs::symlink_metadata(journal)
+            && is_skippable_path_error(&error)
+        {
+            return false;
+        }
+    }
+    true
+}
+
 pub(super) fn bundled_core_binary(kind: CoreKind) -> Option<PathBuf> {
     let name = crate::application_paths::core_executable_filename(kind);
     bundled_resource(&name).filter(|candidate| is_core_binary_candidate(candidate))
@@ -435,5 +522,116 @@ mod tests {
             b"updated sites"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn skippable_path_error_matches_permission_denied_and_not_a_directory_only() {
+        assert!(is_skippable_path_error(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
+        assert!(is_skippable_path_error(&io::Error::from(
+            io::ErrorKind::NotADirectory
+        )));
+        assert!(!is_skippable_path_error(&io::Error::from(
+            io::ErrorKind::NotFound
+        )));
+        assert!(!is_skippable_path_error(&io::Error::other("unexpected")));
+    }
+
+    #[test]
+    fn path_fallback_skips_not_a_directory_entry_while_explicit_lookup_fails() {
+        let root = std::env::temp_dir().join(format!(
+            "zenclash-path-enotdir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let not_a_dir = root.join("regular-file");
+        std::fs::write(&not_a_dir, b"not a directory").unwrap();
+        let valid_dir = root.join("bin");
+        std::fs::create_dir_all(&valid_dir).unwrap();
+        let name = crate::application_paths::core_executable_filename(CoreKind::Mihomo);
+        let binary = valid_dir.join(&name);
+        std::fs::write(&binary, b"fake binary").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let fallback = startup_path_binary([not_a_dir.join(&name), binary.clone()]);
+        #[cfg(unix)]
+        let explicit = startup_binary([not_a_dir.join(&name)]);
+
+        std::fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(fallback.unwrap(), Some(binary));
+        #[cfg(unix)]
+        assert!(explicit.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_fallback_skips_unsearchable_directory_while_explicit_lookup_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "zenclash-path-eacces-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let locked = root.join("locked");
+        let valid_dir = root.join("bin");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::create_dir_all(&valid_dir).unwrap();
+        let binary = valid_dir.join("mihomo");
+        std::fs::write(&binary, b"fake binary").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let locked_candidate = locked.join("mihomo");
+        let fallback = startup_path_binary([locked_candidate.clone(), binary.clone()]);
+        // SAFETY: `geteuid` has no preconditions or memory effects.
+        let is_root = unsafe { libc::geteuid() == 0 };
+        let explicit = startup_binary([locked_candidate]);
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(fallback.unwrap(), Some(binary));
+        if !is_root {
+            assert!(explicit.is_err());
+        }
+    }
+
+    #[test]
+    fn path_fallback_still_surfaces_corrupt_update_journal_in_accessible_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "zenclash-path-corrupt-journal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let name = crate::application_paths::core_executable_filename(CoreKind::Mihomo);
+        let binary = root.join(&name);
+        std::fs::write(
+            root.join(format!(".{name}.zenclash-update.json")),
+            b"{broken",
+        )
+        .unwrap();
+
+        let result = startup_path_binary([binary]);
+        std::fs::remove_dir_all(&root).unwrap();
+
+        assert!(result.is_err());
     }
 }

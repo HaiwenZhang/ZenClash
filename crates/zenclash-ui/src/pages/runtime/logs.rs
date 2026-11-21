@@ -558,12 +558,7 @@ fn log_matches(entry: &zenclash_core::LogEntry, query: &str) -> bool {
     query.is_empty()
         || contains_ascii_case_insensitive(&entry.level, query)
         || contains_ascii_case_insensitive(&entry.payload, query)
-        || entry.fields.as_object().is_some_and(|fields| {
-            fields.iter().any(|(key, value)| {
-                contains_ascii_case_insensitive(key, query) || json_value_matches(value, query)
-            })
-        })
-        || (!entry.fields.is_object() && json_value_matches(&entry.fields, query))
+        || (!entry.fields.is_null() && json_value_matches(&entry.fields, query))
 }
 
 fn normalize_log_query(query: &str) -> String {
@@ -572,7 +567,7 @@ fn normalize_log_query(query: &str) -> String {
 
 fn json_value_matches(value: &serde_json::Value, query: &str) -> bool {
     match value {
-        serde_json::Value::Null => contains_ascii_case_insensitive("null", query),
+        serde_json::Value::Null => false,
         serde_json::Value::Bool(value) => {
             contains_ascii_case_insensitive(if *value { "true" } else { "false" }, query)
         }
@@ -593,6 +588,42 @@ impl gpui_kit::Render for LogsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         self.log_dashboard(&theme, cx)
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::log_matches;
+
+    #[test]
+    fn null_structured_fields_never_match_null_substrings() {
+        let plain = zenclash_core::LogEntry {
+            level: "error".into(),
+            payload: "tcp proxy ok".into(),
+            fields: serde_json::Value::Null,
+            ..Default::default()
+        };
+        for query in ["null", "NULL", "n", "u", "l", "nu", "ul", "ll"] {
+            assert!(
+                !log_matches(&plain, query),
+                "plain log entry with Value::Null fields must not match query {query:?}"
+            );
+        }
+
+        let structured = zenclash_core::LogEntry {
+            level: "error".into(),
+            payload: "tcp proxy ok".into(),
+            fields: serde_json::json!({ "host": null, "port": 443 }),
+            ..Default::default()
+        };
+        for query in ["null", "n", "u", "l"] {
+            assert!(
+                !log_matches(&structured, query),
+                "null field value inside structured object must not match query {query:?}"
+            );
+        }
+        assert!(log_matches(&structured, "host"));
+        assert!(log_matches(&structured, "443"));
     }
 }
 

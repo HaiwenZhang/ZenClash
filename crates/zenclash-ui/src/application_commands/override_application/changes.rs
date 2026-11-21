@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use zenclash_core::{
-    CoreApplyOutcome, CoreSessionError, EffectiveConfigIntent, YamlOverrideCatalog,
+    CoreApplyOutcome, CoreDataApplicationAdmission, CoreSessionError, EffectiveConfigIntent,
+    YamlOverrideCatalog,
 };
 
 use super::{
@@ -42,8 +43,8 @@ impl OverrideApplication {
         let application = self.clone();
         // No await separates admission from transfer to the independent completion owner.
         tokio::spawn(async move {
-            let _admission = admission;
-            application.apply_change(change).await
+            let admission = admission;
+            application.apply_change(&admission, change).await
         })
         .await
         .map_err(|error| OverrideApplicationFailure {
@@ -59,12 +60,13 @@ impl OverrideApplication {
 
     async fn apply_change(
         &self,
+        admission: &CoreDataApplicationAdmission,
         change: OverrideChange,
     ) -> Result<OverrideApplicationReceipt, OverrideApplicationFailure> {
         match change {
-            OverrideChange::Import { paths } => self.import_admitted(paths).await,
+            OverrideChange::Import { paths } => self.import_admitted(admission, paths).await,
             OverrideChange::ReplaceCatalog { expected, next } => {
-                self.replace_admitted(expected, next).await
+                self.replace_admitted(admission, expected, next).await
             }
             OverrideChange::DeleteDisabled { id } => {
                 let store = self.store.clone();
@@ -94,7 +96,7 @@ impl OverrideApplication {
                             runtime_unconfirmed: false,
                         })?;
                 let generation = self.application_commands.session.generation();
-                match self.apply_runtime(&catalog).await {
+                match self.apply_runtime(admission, &catalog).await {
                     Ok(runtime) => Ok(OverrideApplicationReceipt {
                         catalog,
                         runtime,
@@ -114,6 +116,7 @@ impl OverrideApplication {
 
     async fn import_admitted(
         &self,
+        admission: &CoreDataApplicationAdmission,
         paths: Vec<PathBuf>,
     ) -> Result<OverrideApplicationReceipt, OverrideApplicationFailure> {
         let store = self.store.clone();
@@ -142,7 +145,7 @@ impl OverrideApplication {
             Err(error) => return Err(self.compensate_import(imported, error, false).await),
         };
         let generation = self.application_commands.session.generation();
-        match self.apply_runtime(&catalog).await {
+        match self.apply_runtime(admission, &catalog).await {
             Ok(runtime) => Ok(OverrideApplicationReceipt {
                 catalog,
                 runtime,
@@ -160,6 +163,7 @@ impl OverrideApplication {
 
     async fn replace_admitted(
         &self,
+        admission: &CoreDataApplicationAdmission,
         expected: YamlOverrideCatalog,
         next: YamlOverrideCatalog,
     ) -> Result<OverrideApplicationReceipt, OverrideApplicationFailure> {
@@ -176,7 +180,7 @@ impl OverrideApplication {
                 .await);
         }
         let generation = self.application_commands.session.generation();
-        match self.apply_runtime(&next).await {
+        match self.apply_runtime(admission, &next).await {
             Ok(runtime) => Ok(OverrideApplicationReceipt {
                 catalog: next,
                 runtime,
@@ -203,11 +207,13 @@ impl OverrideApplication {
 
     async fn apply_runtime(
         &self,
+        admission: &CoreDataApplicationAdmission,
         catalog: &YamlOverrideCatalog,
     ) -> Result<Option<CoreApplyOutcome>, String> {
         match self
             .application_commands
-            .apply_config(
+            .apply_config_admitted(
+                admission,
                 &self.controlled_config,
                 EffectiveConfigIntent::ReapplyCurrent {
                     overrides: self.store.enabled_paths(catalog),

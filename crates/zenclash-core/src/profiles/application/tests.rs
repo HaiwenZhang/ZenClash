@@ -1495,6 +1495,143 @@ async fn override_parse_failure_only_removes_the_staging_candidate() {
     assert!(!fixture.controlled.runtime_path().exists());
 }
 
+#[tokio::test]
+async fn remote_profile_prepare_does_not_hold_data_write_lease_during_download() {
+    let fixture = Fixture::new("remote-prepare-no-lease");
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let origin_address = listener.local_addr().unwrap();
+    let (request_seen_tx, request_seen_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let origin = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _request = crate::test_support::read_controller_request_blocking(&mut stream).unwrap();
+        request_seen_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+        let response = http_ok_response("text/yaml", &profile_payload("DOWNLOADED"));
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    let application = fixture.application("127.0.0.1:9".parse().unwrap());
+    let prepare = tokio::spawn(async move {
+        application
+            .prepare_change(ProfileChange::AddRemote {
+                name: "Slow Remote".into(),
+                url: format!("http://{origin_address}/profile.yaml"),
+                user_agent: "ZenClash-NoLease-Test".into(),
+                options: RemoteProfileOptions::default().with_route(RemoteProfileRoute::Direct),
+                overrides: Vec::new(),
+            })
+            .await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), request_seen_rx)
+        .await
+        .expect("remote download request did not arrive")
+        .unwrap();
+
+    // An exclusive restore lease must be immediately acquirable while the download is in flight.
+    let root = fixture.root.clone();
+    let exclusive = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        tokio::task::spawn_blocking(move || {
+            crate::data_coordinator::DataWriteLease::exclusive([root])
+        }),
+    )
+    .await
+    .expect("remote download must not hold DataWriteLease")
+    .unwrap();
+    drop(exclusive);
+
+    release_tx.send(()).unwrap();
+    let prepared = prepare.await.unwrap().unwrap();
+    origin.join().unwrap();
+    assert!(
+        prepared
+            .source_candidate
+            .payload()
+            .contains("MATCH,DOWNLOADED")
+    );
+    let _ = fs::remove_dir_all(&fixture.root);
+}
+
+#[tokio::test]
+async fn remote_update_prepare_releases_lease_during_download_and_enforces_cas_after() {
+    let fixture = Fixture::new("remote-update-no-lease-cas");
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let origin_address = listener.local_addr().unwrap();
+    let (request_seen_tx, request_seen_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let origin = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _request = crate::test_support::read_controller_request_blocking(&mut stream).unwrap();
+        request_seen_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+        let response = http_ok_response("text/yaml", &profile_payload("UPDATED"));
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    let remote = fixture
+        .store
+        .store_profile(
+            "Remote".into(),
+            ProfileSource::Remote {
+                url: format!("http://{origin_address}/profile.yaml"),
+                user_agent: "ZenClash-NoLease-CAS-Test".into(),
+                options: RemoteProfileOptions::default().with_route(RemoteProfileRoute::Direct),
+            },
+            &profile_payload("OLD"),
+        )
+        .unwrap();
+
+    let application = fixture.application("127.0.0.1:9".parse().unwrap());
+    let remote_id = remote.id.clone();
+    let prepare = tokio::spawn(async move {
+        application
+            .prepare_change(ProfileChange::UpdateRemote {
+                id: remote_id,
+                overrides: Vec::new(),
+            })
+            .await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), request_seen_rx)
+        .await
+        .expect("remote update download request did not arrive")
+        .unwrap();
+
+    // Exclusive lease succeeds while download is in flight.
+    let root = fixture.root.clone();
+    let exclusive = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        tokio::task::spawn_blocking(move || {
+            crate::data_coordinator::DataWriteLease::exclusive([root])
+        }),
+    )
+    .await
+    .expect("remote update download must not hold DataWriteLease")
+    .unwrap();
+    drop(exclusive);
+
+    // Concurrent store mutation during download must be caught by CAS check after download.
+    fixture
+        .store
+        .set_update_policy(&remote.id, true, 30)
+        .unwrap();
+
+    release_tx.send(()).unwrap();
+    let error = prepare
+        .await
+        .unwrap()
+        .err()
+        .expect("concurrent store mutation should fail CAS preparation");
+    origin.join().unwrap();
+    assert!(matches!(
+        error.cause,
+        ProfileApplicationError::Store(ProfileStoreError::Transaction(_))
+    ));
+    let _ = fs::remove_dir_all(&fixture.root);
+}
+
 struct Fixture {
     root: PathBuf,
     store: ProfileStore,

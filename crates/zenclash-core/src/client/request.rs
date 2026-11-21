@@ -7,6 +7,15 @@ use super::{MihomoClient, MihomoError, MihomoResult};
 
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_BODY_BYTES: usize = 4 * 1024 * 1024;
+pub(super) const DEFAULT_IPC_REQUEST_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(12);
+
+const fn ipc_request_timeout(timeout: Option<std::time::Duration>) -> std::time::Duration {
+    match timeout {
+        Some(timeout) => timeout,
+        None => DEFAULT_IPC_REQUEST_TIMEOUT,
+    }
+}
 
 impl MihomoClient {
     pub(super) async fn get_json<T: DeserializeOwned>(&self, path: &str) -> MihomoResult<T> {
@@ -61,6 +70,20 @@ impl MihomoClient {
         Ok(())
     }
 
+    pub(super) async fn send_empty_with_timeout(
+        &self,
+        method: Method,
+        path: &str,
+        timeout: std::time::Duration,
+    ) -> MihomoResult<()> {
+        let client = self.pin_binding()?;
+        let _mutation_guard = client.mutation_gate.lock().await;
+        client
+            .send_api(method, path, &[], None, Some(timeout))
+            .await?;
+        Ok(())
+    }
+
     pub(super) async fn send_api(
         &self,
         method: Method,
@@ -92,7 +115,7 @@ impl MihomoClient {
                         method.as_str(),
                         &target,
                         body.as_ref(),
-                        timeout.unwrap_or(std::time::Duration::from_secs(12)),
+                        ipc_request_timeout(timeout),
                     )
                     .await
                     .map_err(MihomoError::Native)?;
@@ -148,7 +171,7 @@ impl MihomoClient {
                         &path,
                         body.as_ref(),
                         &runtime.controller_secret(),
-                        timeout.unwrap_or(std::time::Duration::from_secs(12)),
+                        ipc_request_timeout(timeout),
                     )
                     .await?;
                 if !(200..300).contains(&response.status) {
@@ -405,5 +428,14 @@ mod tests {
     #[test]
     fn error_message_preserves_plain_text_response() {
         assert_eq!(error_message(b"bad gateway"), "bad gateway");
+    }
+
+    #[test]
+    fn ipc_request_timeout_falls_back_to_default_only_when_unspecified() {
+        assert_eq!(ipc_request_timeout(None), DEFAULT_IPC_REQUEST_TIMEOUT);
+        assert_eq!(
+            ipc_request_timeout(Some(Duration::from_secs(45))),
+            Duration::from_secs(45)
+        );
     }
 }

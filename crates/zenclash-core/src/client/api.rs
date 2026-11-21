@@ -11,6 +11,33 @@ use crate::{
     proxy::RawProxyCatalog,
 };
 
+const LONG_OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
+const PROVIDER_UPDATE_TIMEOUT: Duration = Duration::from_secs(120);
+const PROVIDER_HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(120);
+const PROXY_DELAY_TIMEOUT_HEADROOM: Duration = Duration::from_secs(10);
+const GROUP_DELAY_TIMEOUT_HEADROOM: Duration = Duration::from_secs(30);
+const MIN_PROXY_DELAY_TRANSPORT_TIMEOUT: Duration = Duration::from_secs(15);
+const MIN_GROUP_DELAY_TRANSPORT_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_DELAY_TRANSPORT_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn proxy_delay_transport_timeout(timeout_ms: u64) -> Duration {
+    Duration::from_millis(timeout_ms)
+        .saturating_add(PROXY_DELAY_TIMEOUT_HEADROOM)
+        .clamp(
+            MIN_PROXY_DELAY_TRANSPORT_TIMEOUT,
+            MAX_DELAY_TRANSPORT_TIMEOUT,
+        )
+}
+
+fn proxy_group_delay_transport_timeout(timeout_ms: u64) -> Duration {
+    Duration::from_millis(timeout_ms)
+        .saturating_add(GROUP_DELAY_TIMEOUT_HEADROOM)
+        .clamp(
+            MIN_GROUP_DELAY_TRANSPORT_TIMEOUT,
+            MAX_DELAY_TRANSPORT_TIMEOUT,
+        )
+}
+
 impl MihomoClient {
     /// Reads one frame from the dedicated memory stream and releases the connection.
     ///
@@ -159,7 +186,7 @@ impl MihomoClient {
             &path,
             &[("url", url.as_str()), ("timeout", timeout.as_str())],
             None,
-            None,
+            Some(proxy_group_delay_transport_timeout(timeout_ms)),
         )
         .await?
         .json()
@@ -218,7 +245,7 @@ impl MihomoClient {
             &path,
             &[("url", url.as_str()), ("timeout", timeout.as_str())],
             None,
-            None,
+            Some(proxy_delay_transport_timeout(timeout_ms)),
         )
         .await?
         .json()
@@ -651,7 +678,8 @@ impl MihomoClient {
     pub async fn update_proxy_provider(&self, provider: &str) -> MihomoResult<()> {
         require_non_empty(provider, "代理 Provider 名称")?;
         let path = format!("/providers/proxies/{}", encode_path_segment(provider));
-        self.send_empty(Method::PUT, &path).await
+        self.send_empty_with_timeout(Method::PUT, &path, PROVIDER_UPDATE_TIMEOUT)
+            .await
     }
 
     /// Requests an immediate health check for every node in a proxy provider.
@@ -667,7 +695,14 @@ impl MihomoClient {
             "/providers/proxies/{}/healthcheck",
             encode_path_segment(provider)
         );
-        self.send_api(Method::GET, &path, &[], None, None).await?;
+        self.send_api(
+            Method::GET,
+            &path,
+            &[],
+            None,
+            Some(PROVIDER_HEALTHCHECK_TIMEOUT),
+        )
+        .await?;
         Ok(())
     }
 
@@ -679,7 +714,8 @@ impl MihomoClient {
     pub async fn update_rule_provider(&self, provider: &str) -> MihomoResult<()> {
         require_non_empty(provider, "规则 Provider 名称")?;
         let path = format!("/providers/rules/{}", encode_path_segment(provider));
-        self.send_empty(Method::PUT, &path).await
+        self.send_empty_with_timeout(Method::PUT, &path, PROVIDER_UPDATE_TIMEOUT)
+            .await
     }
 
     /// Closes every active Mihomo connection.
@@ -786,12 +822,8 @@ impl MihomoClient {
     }
 
     async fn send_long_operation(&self, method: Method, path: &str) -> MihomoResult<()> {
-        let client = self.pin_binding()?;
-        let _mutation_guard = client.mutation_gate.lock().await;
-        client
-            .send_api(method, path, &[], None, Some(Duration::from_secs(120)))
-            .await?;
-        Ok(())
+        self.send_empty_with_timeout(method, path, LONG_OPERATION_TIMEOUT)
+            .await
     }
 }
 
@@ -924,8 +956,14 @@ mod verification_tests {
     use parking_lot::Mutex;
     use tokio::io::AsyncWriteExt;
 
-    use super::json_contains;
-    use crate::{MihomoClient, MihomoEndpoint, MihomoError, MihomoResult};
+    use super::{
+        MAX_DELAY_TRANSPORT_TIMEOUT, PROVIDER_HEALTHCHECK_TIMEOUT, PROVIDER_UPDATE_TIMEOUT,
+        json_contains, proxy_delay_transport_timeout, proxy_group_delay_transport_timeout,
+    };
+    use crate::{
+        MihomoClient, MihomoEndpoint, MihomoError, MihomoResult,
+        client::request::DEFAULT_IPC_REQUEST_TIMEOUT,
+    };
 
     type SwitchFuture = Pin<Box<dyn Future<Output = MihomoResult<()>> + Send>>;
 
@@ -1097,5 +1135,43 @@ mod verification_tests {
             &actual,
             &serde_json::json!({"tun": {"enable": true}})
         ));
+    }
+
+    #[test]
+    fn delay_and_provider_transport_timeouts_exceed_ipc_default_and_scale_safely() {
+        assert!(proxy_delay_transport_timeout(500) > DEFAULT_IPC_REQUEST_TIMEOUT);
+        assert_eq!(
+            proxy_delay_transport_timeout(5_000),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            proxy_delay_transport_timeout(12_000),
+            Duration::from_secs(22)
+        );
+        assert_eq!(
+            proxy_delay_transport_timeout(30_000),
+            Duration::from_secs(40)
+        );
+        assert_eq!(
+            proxy_delay_transport_timeout(u64::MAX),
+            MAX_DELAY_TRANSPORT_TIMEOUT
+        );
+
+        assert!(proxy_group_delay_transport_timeout(500) > DEFAULT_IPC_REQUEST_TIMEOUT);
+        assert_eq!(
+            proxy_group_delay_transport_timeout(5_000),
+            Duration::from_secs(35)
+        );
+        assert_eq!(
+            proxy_group_delay_transport_timeout(15_000),
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            proxy_group_delay_transport_timeout(u64::MAX),
+            MAX_DELAY_TRANSPORT_TIMEOUT
+        );
+
+        assert!(PROVIDER_UPDATE_TIMEOUT > DEFAULT_IPC_REQUEST_TIMEOUT);
+        assert!(PROVIDER_HEALTHCHECK_TIMEOUT > DEFAULT_IPC_REQUEST_TIMEOUT);
     }
 }

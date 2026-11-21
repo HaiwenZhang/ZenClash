@@ -328,7 +328,8 @@ impl BoundedLogFile {
         if data.len() >= max_bytes {
             let start = data.len().saturating_sub(max_bytes);
             let mut tail = data[start..].to_vec();
-            trim_partial_utf8_prefix(&mut tail);
+            sanitize_utf8_tail(&mut tail);
+            drain_to_max_utf8_bytes(&mut tail, max_bytes);
             private_io::replace(&config.path, &tail)?;
             self.size = u64::try_from(tail.len()).unwrap_or(u64::MAX);
             return Ok(self.size);
@@ -378,7 +379,8 @@ impl BoundedLogFile {
         if rewritten.len() > max_bytes {
             let start = rewritten.len() - max_bytes;
             rewritten.drain(..start);
-            trim_partial_utf8_prefix(&mut rewritten);
+            sanitize_utf8_tail(&mut rewritten);
+            drain_to_max_utf8_bytes(&mut rewritten, max_bytes);
         }
         private_io::replace(&config.path, &rewritten)?;
         self.size = u64::try_from(rewritten.len()).unwrap_or(u64::MAX);
@@ -386,31 +388,72 @@ impl BoundedLogFile {
     }
 }
 
-fn read_utf8_tail(path: &Path, bytes: usize) -> LogPersistenceResult<Vec<u8>> {
-    if bytes == 0 {
+fn read_utf8_tail(path: &Path, max_bytes: usize) -> LogPersistenceResult<Vec<u8>> {
+    if max_bytes == 0 {
         return Ok(Vec::new());
     }
     let mut file = File::open(path)?;
     let length = file.metadata()?.len();
-    let bytes = u64::try_from(bytes).unwrap_or(u64::MAX).min(length);
-    let offset = i64::try_from(bytes).map_err(|_| std::io::Error::other("日志尾部读取范围过大"))?;
+    if length == 0 {
+        return Ok(Vec::new());
+    }
+    let keep = u64::try_from(max_bytes).unwrap_or(u64::MAX).min(length);
+    let sliced_mid_file = keep < length;
+    let read_len = if sliced_mid_file {
+        keep.saturating_add(1)
+    } else {
+        keep
+    };
+    let offset =
+        i64::try_from(read_len).map_err(|_| std::io::Error::other("日志尾部读取范围过大"))?;
     file.seek(SeekFrom::End(-offset))?;
-    let mut tail = Vec::with_capacity(usize::try_from(bytes).unwrap_or_default());
+    let mut tail = Vec::with_capacity(usize::try_from(read_len).unwrap_or_default());
     file.read_to_end(&mut tail)?;
-    trim_partial_utf8_prefix(&mut tail);
+    if sliced_mid_file {
+        // Check whether the byte immediately preceding the retained slice was a newline
+        // so already-aligned lines are kept intact while mid-line slices advance to the
+        // next complete line boundary.
+        let started_at_line_boundary = tail.first().copied() == Some(b'\n');
+        if !tail.is_empty() {
+            tail.drain(..1);
+        }
+        if !started_at_line_boundary
+            && let Some(newline) = tail.iter().position(|byte| *byte == b'\n')
+            && newline + 1 < tail.len()
+        {
+            tail.drain(..=newline);
+        }
+    }
+    sanitize_utf8_tail(&mut tail);
+    drain_to_max_utf8_bytes(&mut tail, max_bytes);
     Ok(tail)
 }
 
-fn trim_partial_utf8_prefix(bytes: &mut Vec<u8>) {
-    for prefix in 0..bytes.len().min(4) {
-        if std::str::from_utf8(&bytes[prefix..]).is_ok() {
-            bytes.drain(..prefix);
-            return;
-        }
+fn sanitize_utf8_tail(bytes: &mut Vec<u8>) {
+    let continuation_prefix = bytes
+        .iter()
+        .take(3)
+        .take_while(|byte| (**byte & 0b1100_0000) == 0b1000_0000)
+        .count();
+    if continuation_prefix > 0 {
+        bytes.drain(..continuation_prefix);
     }
     if std::str::from_utf8(bytes).is_err() {
-        bytes.clear();
+        // Replace only malformed byte sequences instead of clearing the entire log history.
+        let sanitized = String::from_utf8_lossy(bytes).into_owned().into_bytes();
+        *bytes = sanitized;
     }
+}
+
+fn drain_to_max_utf8_bytes(bytes: &mut Vec<u8>, max_bytes: usize) {
+    if bytes.len() <= max_bytes {
+        return;
+    }
+    let mut start = bytes.len() - max_bytes;
+    while start < bytes.len() && (bytes[start] & 0b1100_0000) == 0b1000_0000 {
+        start += 1;
+    }
+    bytes.drain(..start);
 }
 
 #[cfg(test)]
@@ -614,6 +657,69 @@ mod tests {
         assert!(size <= 180);
         assert!(content.contains("latest.example.com"));
         assert!(content.contains("Log compacted"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn compaction_preserves_log_history_across_invalid_utf8_bytes() {
+        let path = test_path("invalid-utf8-compact");
+        let config = LogFileConfig::from_bytes(path.clone(), true, 600);
+        let mut raw = Vec::new();
+        for index in 0..10 {
+            raw.extend_from_slice(
+                format!("old-line-{index:02}: padding-content-aaaa\n").as_bytes(),
+            );
+        }
+        raw.extend_from_slice(b"corrupted-line: ");
+        raw.push(0xFF);
+        raw.extend_from_slice(b" survived\n");
+        raw.extend_from_slice(b"recent-valid-line-one: keep-me\n");
+        raw.extend_from_slice(b"recent-valid-line-two: keep-me-too\n");
+        assert!(raw.len() as u64 <= 600);
+        // Push total size right up near the limit so the next append triggers compaction.
+        while (raw.len() as u64) < 580 {
+            raw.insert(0, b'x');
+        }
+        fs::write(&path, &raw).unwrap();
+
+        let mut writer = BoundedLogFile::default();
+        let size = writer
+            .append(&config, &entry("brand-new.example.com", 99))
+            .unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+
+        assert!(size <= 600);
+        assert!(content.contains("corrupted-line: \u{FFFD} survived"));
+        assert!(content.contains("recent-valid-line-one: keep-me"));
+        assert!(content.contains("recent-valid-line-two: keep-me-too"));
+        assert!(content.contains("brand-new.example.com"));
+        assert!(content.contains("Log compacted"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn compaction_aligns_retained_tail_to_newline_boundary() {
+        let path = test_path("newline-aligned-compact");
+        let config = LogFileConfig::from_bytes(path.clone(), true, 400);
+        let mut content = String::new();
+        for index in 0..12 {
+            content.push_str(&format!("LINE-{index:02}: abcdefghijklmnopqrstuv\n"));
+        }
+        fs::write(&path, content.as_bytes()).unwrap();
+
+        let mut writer = BoundedLogFile::default();
+        let size = writer
+            .append(&config, &entry("after-compaction", 10))
+            .unwrap();
+        let compacted = fs::read_to_string(&path).unwrap();
+        let first_line = compacted.lines().next().unwrap();
+
+        assert!(size <= 400);
+        assert!(
+            first_line.starts_with("LINE-"),
+            "compacted tail must start on a complete line boundary, got: {first_line:?}"
+        );
+        assert!(compacted.contains("after-compaction"));
         fs::remove_file(path).unwrap();
     }
 

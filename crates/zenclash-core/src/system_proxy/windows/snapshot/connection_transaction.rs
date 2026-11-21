@@ -64,13 +64,23 @@ fn execute_write_steps(
         if !capture(access)?.same_state(&current)? {
             return Err(ownership_changed());
         }
-        let next = step.predicted_snapshot(&current)?;
-        record(next.clone());
+        let candidates = step.predicted_snapshots(&current)?;
+        for candidate in &candidates {
+            record(candidate.clone());
+        }
         step.write(access)?;
-        if !capture(access)?.same_state(&next)? {
+        let actual = capture(access)?;
+        let mut matched = false;
+        for candidate in &candidates {
+            if actual.same_state(candidate)? {
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
             return Err(verification_failure());
         }
-        current = next;
+        current = actual;
     }
     access.refresh()?;
     let after = capture(access)?;

@@ -3,7 +3,7 @@ use super::SystemProxyStatus;
 #[cfg(target_os = "linux")]
 use crate::MihomoResult;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 mod snapshot;
 #[cfg(target_os = "linux")]
 pub(super) use snapshot::{ProxySnapshot, apply, capture, restore};

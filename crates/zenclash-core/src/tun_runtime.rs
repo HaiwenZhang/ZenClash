@@ -37,6 +37,27 @@ impl TunRuntimeObservation {
             detail: "Mihomo 未回读 TUN 设备名，无法把系统设备和路由归属到当前内核".into(),
         }
     }
+
+    fn invalid_device() -> Self {
+        Self {
+            device_name: None,
+            device: CapabilityState::Unknown,
+            route: CapabilityState::Unknown,
+            detail: "Mihomo 回读的 TUN 设备名包含非法字符，已拒绝执行系统观测".into(),
+        }
+    }
+}
+
+pub(super) fn is_valid_device_name(device_name: &str) -> bool {
+    const MAX_DEVICE_NAME_BYTES: usize = 256;
+
+    !device_name.is_empty()
+        && device_name.len() <= MAX_DEVICE_NAME_BYTES
+        && device_name.trim() == device_name
+        && !device_name.starts_with('-')
+        && device_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b' '))
 }
 
 /// Reads native TUN device and route facts without changing system state.
@@ -55,6 +76,9 @@ impl TunRuntimeObserver {
         let device = config.device.trim();
         if device.is_empty() {
             return TunRuntimeObservation::unnamed();
+        }
+        if !is_valid_device_name(device) {
+            return TunRuntimeObservation::invalid_device();
         }
         platform::observe(device)
     }
@@ -117,7 +141,7 @@ use macos as platform;
 mod linux;
 #[cfg(target_os = "linux")]
 use linux as platform;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 mod windows;
 #[cfg(target_os = "windows")]
 use windows as platform;
@@ -189,5 +213,56 @@ mod tests {
             route_state(Some("en0"), "utun42", CapabilityState::Active),
             CapabilityState::Inactive
         );
+    }
+
+    #[test]
+    fn device_name_allowlist_accepts_valid_names_and_rejects_injection_payloads() {
+        for valid in [
+            "Mihomo",
+            "utun0",
+            "ZenClash-TUN",
+            "Meta_TUN.1",
+            "Local Area Connection 2",
+        ] {
+            assert!(
+                is_valid_device_name(valid),
+                "expected valid device name to be accepted: {valid}"
+            );
+        }
+
+        for invalid in [
+            "",
+            "   ",
+            " Mihomo",
+            "-NoProfile",
+            "Mihomo; Start-Process calc #",
+            "Mihomo | whoami",
+            "Mihomo & calc",
+            "$env:PATH",
+            "Mihomo`ncalc",
+            "Mihomo'test",
+            "Mihomo\"test",
+            "Mihomo\0",
+            "Mihomo\ncalc",
+            "Mihomo\rcalc",
+            "*",
+            "Mihomo?",
+            "Mihomo[0]",
+        ] {
+            assert!(
+                !is_valid_device_name(invalid),
+                "expected unsafe device name to be rejected: {invalid:?}"
+            );
+        }
+
+        let observation = TunRuntimeObserver::observe(&TunConfig {
+            enable: true,
+            device: "Mihomo; Start-Process calc #".into(),
+            auto_route: true,
+            ..TunConfig::default()
+        });
+        assert_eq!(observation.device, CapabilityState::Unknown);
+        assert_eq!(observation.route, CapabilityState::Unknown);
+        assert!(observation.device_name.is_none());
     }
 }

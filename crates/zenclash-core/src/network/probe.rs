@@ -70,6 +70,22 @@ impl NetworkProbeRoute {
             Self::MihomoHttp { host, port } => format!("Mihomo {host}:{port}"),
         }
     }
+
+    pub(crate) fn http_proxy_url(&self) -> Option<String> {
+        match self {
+            Self::Direct => None,
+            Self::MihomoHttp { host, port } => Some(format_http_proxy_url(host, *port)),
+        }
+    }
+}
+
+fn format_http_proxy_url(host: &str, port: u16) -> String {
+    let host = host.trim();
+    if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
+        format!("http://[{host}]:{port}")
+    } else {
+        format!("http://{host}:{port}")
+    }
 }
 
 /// Normalized public address and location returned by a supported provider.
@@ -258,7 +274,7 @@ impl NetworkProbeService {
                     "Mihomo HTTP 代理地址或端口无效".into(),
                 ));
             }
-            let proxy_url = format!("http://{host}:{port}");
+            let proxy_url = format_http_proxy_url(host, *port);
             builder = builder.proxy(reqwest::Proxy::all(proxy_url)?);
         }
         Ok(Self {
@@ -560,6 +576,27 @@ mod tests {
         assert_eq!(target.name, "Example");
         assert_eq!(target.url, "https://example.com/health");
         assert!(NetworkLatencyTarget::new("private", "https://user:pass@example.com").is_err());
+    }
+
+    #[test]
+    fn proxy_url_brackets_ipv6_hosts_for_mihomo_route() {
+        assert_eq!(format_http_proxy_url("::1", 7890), "http://[::1]:7890");
+        assert_eq!(format_http_proxy_url("[::1]", 7890), "http://[::1]:7890");
+        assert_eq!(
+            format_http_proxy_url("2001:db8::1", 7890),
+            "http://[2001:db8::1]:7890"
+        );
+        assert_eq!(
+            format_http_proxy_url("127.0.0.1", 7890),
+            "http://127.0.0.1:7890"
+        );
+        let route = NetworkProbeRoute::MihomoHttp {
+            host: "::1".into(),
+            port: 7890,
+        };
+        assert_eq!(route.http_proxy_url().as_deref(), Some("http://[::1]:7890"));
+        assert!(NetworkProbeService::new(route).is_ok());
+        assert_eq!(NetworkProbeRoute::Direct.http_proxy_url(), None);
     }
 
     #[test]

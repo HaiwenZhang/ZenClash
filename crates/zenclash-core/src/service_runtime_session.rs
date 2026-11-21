@@ -50,6 +50,15 @@ pub(crate) trait RuntimeTransport: Send + Sync + 'static {
         &self,
         request: &RuntimeFileRequest,
     ) -> impl Future<Output = MihomoResult<RuntimeFileOutcome>> + Send;
+    fn sync_tun_dns(&self, _secret: &str) -> impl Future<Output = MihomoResult<()>> + Send {
+        std::future::ready(Ok(()))
+    }
+    fn retire_confirmed_stop(
+        &self,
+        _expected_generation: Option<u64>,
+        _status: &ServiceStatusSnapshot,
+    ) {
+    }
 }
 
 impl RuntimeTransport for ServiceSession {
@@ -99,6 +108,16 @@ impl RuntimeTransport for ServiceSession {
         request: &RuntimeFileRequest,
     ) -> MihomoResult<RuntimeFileOutcome> {
         Ok(ServiceSession::read_runtime_file(self, request).await?)
+    }
+    async fn sync_tun_dns(&self, secret: &str) -> MihomoResult<()> {
+        Ok(ServiceSession::sync_tun_dns(self, secret, Duration::from_secs(12)).await?)
+    }
+    fn retire_confirmed_stop(
+        &self,
+        expected_generation: Option<u64>,
+        status: &ServiceStatusSnapshot,
+    ) {
+        ServiceSession::retire_confirmed_stop(self, expected_generation, status);
     }
 }
 
@@ -360,11 +379,13 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
         if !self.client.owns_status(&status) || status.core_pid.is_none() {
             return Err(unknown());
         }
+        let secret = self.controller_secret();
         let response = self
             .client
-            .request("GET", "/configs", None, &self.controller_secret())
+            .request("GET", "/configs", None, &secret)
             .await?;
         ensure_success(response)?;
+        self.client.sync_tun_dns(&secret).await?;
         Ok(())
     }
 
@@ -429,9 +450,10 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
             return Ok(());
         }
         let status = self.client.status().await.map_err(|_| unknown())?;
-        if !status.is_active
+        if (!status.is_active && status.core_pid.is_none())
             || generation.is_some_and(|generation| status.active_generation != Some(generation))
         {
+            self.client.retire_confirmed_stop(generation, &status);
             return Ok(());
         }
         stopped.and(Err(unknown()))

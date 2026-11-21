@@ -31,6 +31,10 @@ impl StatusRefreshSchedule {
             false
         }
     }
+
+    fn request_platform_refresh(&mut self) {
+        self.ticks_until_platform_refresh = 0;
+    }
 }
 
 /// Recovery action associated with an observation that has no trustworthy value.
@@ -422,16 +426,16 @@ pub struct CaptureStatus {
 }
 
 impl CaptureStatus {
-    /// Returns true only for capture proven active by native or runtime readback.
+    /// Returns true only for ZenClash-owned capture proven active by native or runtime readback.
     #[must_use]
     pub fn is_active(&self) -> bool {
-        self.system_proxy
+        self.system_proxy.fresh_value().is_some_and(|snapshot| {
+            snapshot.actual.active()
+                && snapshot.ownership == crate::SystemProxyOwnershipState::Owned
+        }) || self
+            .tun
             .fresh_value()
-            .is_some_and(|snapshot| snapshot.actual.active())
-            || self
-                .tun
-                .fresh_value()
-                .is_some_and(|snapshot| snapshot.observed == CapabilityState::Active)
+            .is_some_and(|snapshot| snapshot.observed == CapabilityState::Active)
     }
 }
 
@@ -526,6 +530,13 @@ pub type OperationalStatusStream = watch::Receiver<OperationalSnapshot>;
 pub struct OperationalStatus {
     snapshot: watch::Sender<OperationalSnapshot>,
     task: std::sync::OnceLock<tokio::task::AbortHandle>,
+    wake: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for OperationalStatus {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 impl OperationalStatus {
@@ -540,9 +551,11 @@ impl OperationalStatus {
     ) -> Arc<Self> {
         let initial = OperationalSnapshot::default();
         let (snapshot, _) = watch::channel(initial);
+        let wake = Arc::new(tokio::sync::Notify::new());
         let status = Arc::new(Self {
             snapshot,
             task: std::sync::OnceLock::new(),
+            wake: wake.clone(),
         });
         let weak = Arc::downgrade(&status);
         let task = runtime.spawn(run_status_monitor(
@@ -551,9 +564,15 @@ impl OperationalStatus {
             system_proxy,
             traffic,
             logs,
+            wake,
         ));
         let _ = status.task.set(task.abort_handle());
         status
+    }
+
+    /// Wakes the background status monitor to perform an immediate platform and TUN refresh.
+    pub fn request_platform_refresh(&self) {
+        self.wake.notify_one();
     }
 
     /// Cancels outstanding sampling immediately when its owning target is closed.
@@ -627,19 +646,7 @@ impl OperationalSnapshot {
         if !capture_selected {
             return FirstRunStage::CaptureNotSelected;
         }
-        let capture_active = self
-            .capture
-            .system_proxy
-            .fresh_value()
-            .is_some_and(|proxy| {
-                proxy.actual.active() && proxy.ownership == crate::SystemProxyOwnershipState::Owned
-            })
-            || self
-                .capture
-                .tun
-                .fresh_value()
-                .is_some_and(|tun| tun.observed == CapabilityState::Active);
-        if !capture_active {
+        if !self.capture.is_active() {
             return FirstRunStage::CaptureUnconfirmed;
         }
         match &self.path {
@@ -663,9 +670,29 @@ async fn run_status_monitor(
     system_proxy: Option<SystemProxySession>,
     traffic: Arc<TrafficMonitor>,
     logs: Arc<LogMonitor>,
+    wake: Arc<tokio::sync::Notify>,
 ) {
     let mut schedule = StatusRefreshSchedule::default();
+    let mut binding_updates = core_session.client().binding.subscribe();
+    let mut run_state_updates = core_session.subscribe_run_state();
+    let capture_intent = core_session.capture_intent_revision();
+    let mut last_generation = core_session.generation();
+    let mut last_capture_intent = capture_intent.load(std::sync::atomic::Ordering::SeqCst);
+
     while let Some(status) = status.upgrade() {
+        let current_generation = core_session.generation();
+        let current_capture_intent = capture_intent.load(std::sync::atomic::Ordering::SeqCst);
+        let tun_loading = matches!(status.snapshot().capture.tun, Observation::Loading);
+        if current_generation != last_generation
+            || current_capture_intent != last_capture_intent
+            || tun_loading
+        {
+            schedule.request_platform_refresh();
+            last_generation = current_generation;
+            last_capture_intent = current_capture_intent;
+        }
+        let _ = binding_updates.borrow_and_update();
+        let _ = run_state_updates.borrow_and_update();
         let refresh_platform = schedule.next_refreshes_platform();
         Box::pin(refresh_status(
             &status,
@@ -676,8 +703,33 @@ async fn run_status_monitor(
             refresh_platform,
         ))
         .await;
+        let post_generation = core_session.generation();
+        let post_capture_intent = capture_intent.load(std::sync::atomic::Ordering::SeqCst);
+        let needs_immediate_retry =
+            post_generation != last_generation || post_capture_intent != last_capture_intent;
         drop(status);
-        tokio::time::sleep(STATUS_REFRESH_INTERVAL).await;
+        if needs_immediate_retry {
+            schedule.request_platform_refresh();
+            continue;
+        }
+        tokio::select! {
+            () = tokio::time::sleep(STATUS_REFRESH_INTERVAL) => {}
+            () = wake.notified() => {
+                schedule.request_platform_refresh();
+            }
+            result = binding_updates.changed() => {
+                if result.is_err() {
+                    break;
+                }
+                schedule.request_platform_refresh();
+            }
+            result = run_state_updates.changed() => {
+                if result.is_err() {
+                    break;
+                }
+                schedule.request_platform_refresh();
+            }
+        }
     }
 }
 
@@ -1148,6 +1200,7 @@ mod tests {
         let status = Arc::new(OperationalStatus {
             snapshot,
             task: std::sync::OnceLock::new(),
+            wake: Arc::new(tokio::sync::Notify::new()),
         });
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -1224,6 +1277,7 @@ mod tests {
         let status = Arc::new(OperationalStatus {
             snapshot,
             task: std::sync::OnceLock::new(),
+            wake: Arc::new(tokio::sync::Notify::new()),
         });
         let (entered, waiting) = tokio::sync::oneshot::channel();
         let (release, released) = tokio::sync::oneshot::channel();
@@ -1336,6 +1390,7 @@ mod tests {
             let status = OperationalStatus {
                 snapshot,
                 task: std::sync::OnceLock::new(),
+                wake: Arc::new(tokio::sync::Notify::new()),
             };
             core.invalidate_runtime_observations();
             let runtime = Handle::current();
@@ -1872,6 +1927,7 @@ mod tests {
         let status = OperationalStatus {
             snapshot: sender,
             task: std::sync::OnceLock::new(),
+            wake: Arc::new(tokio::sync::Notify::new()),
         };
 
         assert!(!status.record_path(
@@ -1883,5 +1939,200 @@ mod tests {
             })
         ));
         assert!(matches!(status.snapshot().path, Observation::Loading));
+    }
+
+    #[test]
+    fn capture_status_is_active_requires_owned_system_proxy() {
+        let active_proxy = SystemProxyStatus {
+            enabled: true,
+            secure_enabled: true,
+            port: 7890,
+            secure_port: 7890,
+            ..SystemProxyStatus::default()
+        };
+        for ownership in [
+            SystemProxyOwnershipState::Unowned,
+            SystemProxyOwnershipState::Lost,
+        ] {
+            let capture = CaptureStatus {
+                system_proxy: Observation::Fresh {
+                    value: SystemProxySessionSnapshot {
+                        intent_enabled: false,
+                        actual: active_proxy.clone(),
+                        ownership,
+                    },
+                    observed_at_ms: 1,
+                },
+                tun: Observation::Loading,
+            };
+            assert!(
+                !capture.is_active(),
+                "non-owned system proxy ({ownership:?}) must not be treated as active ZenClash capture"
+            );
+        }
+
+        let owned_capture = CaptureStatus {
+            system_proxy: Observation::Fresh {
+                value: SystemProxySessionSnapshot {
+                    intent_enabled: true,
+                    actual: active_proxy,
+                    ownership: SystemProxyOwnershipState::Owned,
+                },
+                observed_at_ms: 1,
+            },
+            tun: Observation::Loading,
+        };
+        assert!(owned_capture.is_active());
+    }
+
+    #[test]
+    fn status_refresh_schedule_can_request_immediate_platform_refresh() {
+        let mut schedule = StatusRefreshSchedule::default();
+        assert!(schedule.next_refreshes_platform());
+        assert!(!schedule.next_refreshes_platform());
+        schedule.request_platform_refresh();
+        assert!(schedule.next_refreshes_platform());
+    }
+
+    fn spawn_test_controller_server(
+        listener: std::net::TcpListener,
+    ) -> (
+        Arc<std::sync::atomic::AtomicBool>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::Write;
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_flag = stop.clone();
+        let handle = std::thread::spawn(move || {
+            while !stop_flag.load(std::sync::atomic::Ordering::Acquire) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let Ok(request) =
+                    crate::test_support::read_controller_request_blocking(&mut stream)
+                else {
+                    continue;
+                };
+                let bytes = request.into_bytes();
+                let req = String::from_utf8_lossy(&bytes);
+                let body = if req.starts_with("GET /version ") {
+                    r#"{"version":"test"}"#
+                } else if req.starts_with("GET /connections ") {
+                    r#"{"connections":[],"memory":47000000,"uploadTotal":0,"downloadTotal":0}"#
+                } else if req.starts_with("GET /configs ") {
+                    r#"{"mode":"rule","tun":{"enable":false}}"#
+                } else {
+                    "{}"
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        (stop, handle)
+    }
+
+    #[tokio::test]
+    async fn dropping_operational_status_without_stop_aborts_monitor_and_releases_resources() {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let endpoint =
+            crate::MihomoEndpoint::new(format!("http://{}", listener.local_addr().unwrap()), "");
+        let (stop_server, server) = spawn_test_controller_server(listener);
+        let runtime = Handle::current();
+        let client = crate::MihomoClient::new(endpoint.clone()).unwrap();
+        let core = CoreSession::open(CoreKind::Mihomo, client).unwrap();
+        let traffic = TrafficMonitor::start(&runtime, endpoint.clone());
+        let logs = LogMonitor::start(&runtime, endpoint, crate::MihomoLogLevel::Info);
+        let traffic_weak = Arc::downgrade(&traffic);
+        let logs_weak = Arc::downgrade(&logs);
+        let status = OperationalStatus::start(&runtime, core, None, traffic, logs);
+        let mut updates = status.subscribe();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !updates.borrow().controller.is_fresh() {
+                updates.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        drop(updates);
+        // Drop without calling `status.stop()` — Drop must abort the sleeping monitor task promptly.
+        drop(status);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while traffic_weak.upgrade().is_some() || logs_weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping OperationalStatus without stop() must promptly release owned monitors");
+        stop_server.store(true, std::sync::atomic::Ordering::Release);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn binding_switch_wakes_platform_refresh_immediately_without_30s_tun_loading_stall() {
+        let first_listener =
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let first_endpoint = crate::MihomoEndpoint::new(
+            format!("http://{}", first_listener.local_addr().unwrap()),
+            "",
+        );
+        let (stop_first, first_server) = spawn_test_controller_server(first_listener);
+
+        let second_listener =
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let second_endpoint = crate::MihomoEndpoint::new(
+            format!("http://{}", second_listener.local_addr().unwrap()),
+            "",
+        );
+        let (stop_second, second_server) = spawn_test_controller_server(second_listener);
+
+        let runtime = Handle::current();
+        let client = crate::MihomoClient::new(first_endpoint.clone()).unwrap();
+        let core = CoreSession::open(CoreKind::Mihomo, client).unwrap();
+        let traffic = TrafficMonitor::start(&runtime, first_endpoint.clone());
+        let logs = LogMonitor::start(&runtime, first_endpoint, crate::MihomoLogLevel::Info);
+        let status = OperationalStatus::start(&runtime, core.clone(), None, traffic, logs);
+        let mut updates = status.subscribe();
+
+        // Wait for the initial platform probe (tick 0) to complete; without immediate wake-up,
+        // the next platform probe would normally not happen for 30 seconds.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !updates.borrow().capture.tun.is_fresh() {
+                updates.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+
+        let next_generation = core.switch_to_direct(second_endpoint).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let snapshot = updates.borrow().clone();
+                if snapshot
+                    .process
+                    .fresh_value()
+                    .is_some_and(|process| process.generation == next_generation)
+                    && snapshot.capture.tun.is_fresh()
+                {
+                    break;
+                }
+                updates.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("TUN observation must refresh promptly after binding/generation switch");
+
+        drop(status);
+        stop_first.store(true, std::sync::atomic::Ordering::Release);
+        stop_second.store(true, std::sync::atomic::Ordering::Release);
+        first_server.join().unwrap();
+        second_server.join().unwrap();
     }
 }

@@ -25,7 +25,8 @@ impl MihomoClient {
         let mut cache = self.connections.snapshot.lock().await;
         loop {
             let epoch = self.connections.epoch.load(Ordering::Acquire);
-            let binding_generation = self.binding.generation();
+            let binding = self.operation_binding()?;
+            let binding_generation = binding.generation;
             if let Some(cached) = cache.as_ref()
                 && cached.epoch == epoch
                 && cached.binding_generation == binding_generation
@@ -34,7 +35,6 @@ impl MihomoClient {
             {
                 return Ok(cached.value.clone());
             }
-            let binding = self.operation_binding()?;
             let native = binding.is_service()
                 || binding
                     .endpoint()
@@ -127,6 +127,83 @@ mod tests {
             client.shared_connections().await.unwrap().download_total,
             20
         );
+        old_server.await.unwrap();
+        new_server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn expired_pinned_client_cannot_read_cached_connections_of_replacement_binding() {
+        let old = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let new = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let old_endpoint = MihomoEndpoint::new(format!("http://{}", old.local_addr().unwrap()), "");
+        let new_endpoint = MihomoEndpoint::new(format!("http://{}", new.local_addr().unwrap()), "");
+        let old_server = tokio::spawn(async move {
+            let (mut stream, _) = old.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            let body = r#"{"connections":[],"downloadTotal":10}"#;
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let new_server = tokio::spawn(async move {
+            let (mut stream, _) = new.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            let body = r#"{"connections":[],"downloadTotal":20}"#;
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = MihomoClient::new(old_endpoint).unwrap();
+        let pinned = client.pin_binding().unwrap();
+        assert_eq!(
+            pinned.shared_connections().await.unwrap().download_total,
+            10
+        );
+
+        client
+            .binding
+            .replace(ControllerBackend::Direct(new_endpoint))
+            .unwrap();
+        // Warm the shared connection cache under the replacement binding.
+        assert_eq!(
+            client.shared_connections().await.unwrap().download_total,
+            20
+        );
+
+        // The expired pinned client must reject the cached replacement snapshot instead of
+        // silently returning it on a cache hit.
+        let error = pinned.shared_connections().await.unwrap_err();
+        assert!(
+            matches!(error, crate::MihomoError::StaleBinding),
+            "expected StaleBinding for expired pinned client, got: {error}"
+        );
+        // The current unpinned client still reuses the warm cache without hitting `new` again.
+        assert_eq!(
+            client.shared_connections().await.unwrap().download_total,
+            20
+        );
+
         old_server.await.unwrap();
         new_server.await.unwrap();
     }

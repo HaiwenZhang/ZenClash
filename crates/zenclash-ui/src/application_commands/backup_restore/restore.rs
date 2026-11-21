@@ -86,6 +86,7 @@ impl BackupRestoration {
 
     async fn reload_backup_config(
         &self,
+        admission: &zenclash_core::CoreBackupAdmission,
         controlled: ControlledConfigStore,
         path: &Path,
         overrides: Vec<PathBuf>,
@@ -116,7 +117,7 @@ impl BackupRestoration {
                 .map_err(|error| error.to_string());
         }
         self.application_commands
-            .reload_with_overrides(controlled, path, overrides)
+            .reload_with_overrides_admitted(admission, controlled, path, overrides)
             .await
     }
 
@@ -161,6 +162,7 @@ impl BackupRestoration {
         let previous_runtime_version = commands.session().generation();
         let runtime_version = match self
             .reload_backup_config(
+                &admission,
                 loaded.controlled_store().clone(),
                 loaded.active_profile_path(),
                 overrides,

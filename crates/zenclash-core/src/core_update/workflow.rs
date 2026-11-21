@@ -294,13 +294,7 @@ async fn rollback_rejected_core(
         }
     };
     if !restored {
-        return CoreUpdateError::Runtime(zenclash_i18n::text_with(
-            "core_update.details.restore_failed",
-            &[
-                ("error", rejection.to_string()),
-                ("rollback", result.unwrap_err().to_string()),
-            ],
-        ));
+        return format_restore_failed(&rejection, result);
     }
     if cancelled.load(Ordering::Acquire) {
         return match result {
@@ -340,6 +334,23 @@ async fn rollback_rejected_core(
     CoreUpdateError::Runtime(with_cleanup_failure(message, cleanup))
 }
 
+fn format_restore_failed(
+    rejection: &CoreUpdateError,
+    rollback: CoreUpdateResult<()>,
+) -> CoreUpdateError {
+    let rollback_detail = match rollback {
+        Err(error) => error.to_string(),
+        Ok(()) => "previous executable was not restored to the target path".to_owned(),
+    };
+    CoreUpdateError::Runtime(zenclash_i18n::text_with(
+        "core_update.details.restore_failed",
+        &[
+            ("error", rejection.to_string()),
+            ("rollback", rollback_detail),
+        ],
+    ))
+}
+
 fn with_cleanup_failure(message: String, cleanup: Option<CoreUpdateError>) -> String {
     match cleanup {
         Some(cleanup) => zenclash_i18n::text_with(
@@ -352,4 +363,34 @@ fn with_cleanup_failure(message: String, cleanup: Option<CoreUpdateError>) -> St
 
 pub(super) fn versions_match(left: &str, right: &str) -> bool {
     left.trim().trim_start_matches('v') == right.trim().trim_start_matches('v')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unrestored_rollback_handles_ok_result_without_panicking() {
+        let rejection = CoreUpdateError::Runtime("candidate rejected".into());
+        let error = format_restore_failed(&rejection, Ok(()));
+        let CoreUpdateError::Runtime(message) = error else {
+            panic!("expected runtime rollback error");
+        };
+        assert!(message.contains("candidate rejected"), "{message}");
+        assert!(
+            message.contains("previous executable was not restored"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn unrestored_rollback_preserves_underlying_rollback_error() {
+        let rejection = CoreUpdateError::Runtime("candidate rejected".into());
+        let error = format_restore_failed(&rejection, Err(CoreUpdateError::Io("disk busy".into())));
+        let CoreUpdateError::Runtime(message) = error else {
+            panic!("expected runtime rollback error");
+        };
+        assert!(message.contains("candidate rejected"), "{message}");
+        assert!(message.contains("disk busy"), "{message}");
+    }
 }

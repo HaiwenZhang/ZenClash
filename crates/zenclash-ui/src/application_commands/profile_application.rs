@@ -194,7 +194,7 @@ impl ApplicationCommands {
             .map_err(|error| error.to_string())?;
         let commands = self.clone();
         tokio::spawn(async move {
-            let _admission = admission;
+            let admission = admission;
             let was_active =
                 tokio::task::spawn_blocking(move || store.delete_sole_or_inactive(&id))
                     .await
@@ -214,7 +214,8 @@ impl ApplicationCommands {
             if running
                 && let Some(fallback) = fallback_profile.clone()
                 && commands
-                    .apply_config(
+                    .apply_config_admitted(
+                        &admission,
                         &controlled,
                         EffectiveConfigIntent::ActivateProfile {
                             profile: fallback,

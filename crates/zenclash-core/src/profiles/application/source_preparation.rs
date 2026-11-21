@@ -2,14 +2,62 @@
 
 use super::*;
 
+pub(super) struct DownloadedNewProfile {
+    name: String,
+    source: ProfileSource,
+    payload: String,
+    metadata: SubscriptionMetadata,
+    last_known_good: Option<ProfileSourceMetadata>,
+    overrides: Vec<PathBuf>,
+}
+
+pub(super) struct DownloadedUpdateProfile {
+    expected_record: ProfileRecord,
+    payload: String,
+    metadata: SubscriptionMetadata,
+    last_known_good: Option<ProfileSourceMetadata>,
+    overrides: Vec<PathBuf>,
+}
+
+pub(super) enum PreparedSourceInput {
+    ImportLocal {
+        source: PathBuf,
+        overrides: Vec<PathBuf>,
+    },
+    DownloadedNew(Box<DownloadedNewProfile>),
+    DownloadedUpdate(Box<DownloadedUpdateProfile>),
+    EditYaml {
+        id: String,
+        expected_payload: String,
+        new_payload: String,
+        overrides: Vec<PathBuf>,
+    },
+    ActivateExisting {
+        id: String,
+        overrides: Vec<PathBuf>,
+    },
+}
+
+impl PreparedSourceInput {
+    pub(super) fn last_known_good(&self) -> Option<ProfileSourceMetadata> {
+        match self {
+            Self::DownloadedNew(downloaded) => downloaded.last_known_good.clone(),
+            Self::DownloadedUpdate(downloaded) => downloaded.last_known_good.clone(),
+            Self::ImportLocal { .. } | Self::EditYaml { .. } | Self::ActivateExisting { .. } => {
+                None
+            }
+        }
+    }
+}
+
 impl ProfileApplication {
-    pub(super) async fn stage_change(
+    pub(super) async fn prepare_source_input(
         &self,
         change: ProfileChange,
-    ) -> Result<(ProfileSourceCandidate, Vec<PathBuf>), ProfilePreparationError> {
+    ) -> Result<PreparedSourceInput, ProfilePreparationError> {
         match change {
             ProfileChange::ImportLocal { source, overrides } => {
-                self.import_local(source, overrides).await
+                Ok(PreparedSourceInput::ImportLocal { source, overrides })
             }
             ProfileChange::AddRemote {
                 name,
@@ -18,13 +66,92 @@ impl ProfileApplication {
                 options,
                 overrides,
             } => {
-                self.add_remote(name, url, user_agent, options, overrides)
+                self.download_new_remote(name, url, user_agent, options, overrides)
                     .await
             }
             ProfileChange::UpdateRemote { id, overrides } => {
-                self.update_remote(id, overrides).await
+                self.download_remote_update(id, overrides).await
             }
             ProfileChange::EditYaml {
+                id,
+                expected_payload,
+                new_payload,
+                overrides,
+            } => Ok(PreparedSourceInput::EditYaml {
+                id,
+                expected_payload,
+                new_payload,
+                overrides,
+            }),
+            ProfileChange::ActivateExisting { id, overrides } => {
+                Ok(PreparedSourceInput::ActivateExisting { id, overrides })
+            }
+        }
+    }
+
+    pub(super) async fn stage_prepared_input(
+        &self,
+        input: PreparedSourceInput,
+    ) -> Result<(ProfileSourceCandidate, Vec<PathBuf>), ProfilePreparationError> {
+        match input {
+            PreparedSourceInput::ImportLocal { source, overrides } => {
+                self.import_local(source, overrides).await
+            }
+            PreparedSourceInput::DownloadedNew(downloaded) => {
+                let DownloadedNewProfile {
+                    name,
+                    source,
+                    payload,
+                    metadata,
+                    last_known_good,
+                    overrides,
+                } = *downloaded;
+                let store = self.store.clone();
+                let source_candidate = match run_store(move || {
+                    ProfileSourceCandidate::new(store, name, source, payload, metadata)
+                })
+                .await
+                {
+                    Ok(source_candidate) => source_candidate,
+                    Err(cause) => {
+                        return Err(ProfilePreparationError {
+                            last_known_good,
+                            cause,
+                        });
+                    }
+                };
+                Ok((source_candidate, overrides))
+            }
+            PreparedSourceInput::DownloadedUpdate(downloaded) => {
+                let DownloadedUpdateProfile {
+                    expected_record,
+                    payload,
+                    metadata,
+                    last_known_good,
+                    overrides,
+                } = *downloaded;
+                let store = self.store.clone();
+                let source_candidate = match run_store(move || {
+                    ProfileSourceCandidate::remote_update(
+                        store,
+                        &expected_record,
+                        payload,
+                        metadata,
+                    )
+                })
+                .await
+                {
+                    Ok(source_candidate) => source_candidate,
+                    Err(cause) => {
+                        return Err(ProfilePreparationError {
+                            last_known_good,
+                            cause,
+                        });
+                    }
+                };
+                Ok((source_candidate, overrides))
+            }
+            PreparedSourceInput::EditYaml {
                 id,
                 expected_payload,
                 new_payload,
@@ -33,7 +160,7 @@ impl ProfileApplication {
                 self.edit_yaml(id, expected_payload, new_payload, overrides)
                     .await
             }
-            ProfileChange::ActivateExisting { id, overrides } => {
+            PreparedSourceInput::ActivateExisting { id, overrides } => {
                 self.activate_existing(id, overrides).await
             }
         }
@@ -67,11 +194,11 @@ impl ProfileApplication {
         Ok((source_candidate, overrides))
     }
 
-    async fn update_remote(
+    async fn download_remote_update(
         &self,
         id: String,
         overrides: Vec<PathBuf>,
-    ) -> Result<(ProfileSourceCandidate, Vec<PathBuf>), ProfilePreparationError> {
+    ) -> Result<PreparedSourceInput, ProfilePreparationError> {
         let store = self.store.clone();
         let lookup_id = id.clone();
         let (expected_record, last_known_good) = match run_store(move || {
@@ -130,18 +257,14 @@ impl ProfileApplication {
                 });
             }
         };
-        let store = self.store.clone();
-        let source_candidate = match run_store(move || {
-            ProfileSourceCandidate::remote_update(
-                store,
-                &expected_record,
-                downloaded.payload,
-                downloaded.metadata,
-            )
+        let payload = downloaded.payload;
+        let payload = match run_store(move || {
+            validate_clash_yaml(&payload)?;
+            Ok(payload)
         })
         .await
         {
-            Ok(source_candidate) => source_candidate,
+            Ok(payload) => payload,
             Err(cause) => {
                 return Err(ProfilePreparationError {
                     last_known_good,
@@ -149,7 +272,15 @@ impl ProfileApplication {
                 });
             }
         };
-        Ok((source_candidate, overrides))
+        Ok(PreparedSourceInput::DownloadedUpdate(Box::new(
+            DownloadedUpdateProfile {
+                expected_record,
+                payload,
+                metadata: downloaded.metadata,
+                last_known_good,
+                overrides,
+            },
+        )))
     }
 
     async fn edit_yaml(
@@ -185,14 +316,14 @@ impl ProfileApplication {
         Ok((source_candidate, overrides))
     }
 
-    async fn add_remote(
+    async fn download_new_remote(
         &self,
         name: String,
         url: String,
         user_agent: String,
         options: RemoteProfileOptions,
         overrides: Vec<PathBuf>,
-    ) -> Result<(ProfileSourceCandidate, Vec<PathBuf>), ProfilePreparationError> {
+    ) -> Result<PreparedSourceInput, ProfilePreparationError> {
         let last_known_good = match self.last_known_good().await {
             Ok(metadata) => metadata,
             Err(cause) => {
@@ -251,8 +382,23 @@ impl ProfileApplication {
                 });
             }
         };
+        let payload = downloaded.payload;
+        let payload = match run_store(move || {
+            validate_clash_yaml(&payload)?;
+            Ok(payload)
+        })
+        .await
+        {
+            Ok(payload) => payload,
+            Err(cause) => {
+                return Err(ProfilePreparationError {
+                    last_known_good,
+                    cause,
+                });
+            }
+        };
         let name = if name.is_empty() {
-            downloaded.suggested_name.clone()
+            downloaded.suggested_name
         } else {
             name
         };
@@ -261,27 +407,16 @@ impl ProfileApplication {
             user_agent,
             options,
         };
-        let store = self.store.clone();
-        let source_candidate = match run_store(move || {
-            ProfileSourceCandidate::new(
-                store,
+        Ok(PreparedSourceInput::DownloadedNew(Box::new(
+            DownloadedNewProfile {
                 name,
                 source,
-                downloaded.payload,
-                downloaded.metadata,
-            )
-        })
-        .await
-        {
-            Ok(source_candidate) => source_candidate,
-            Err(cause) => {
-                return Err(ProfilePreparationError {
-                    last_known_good,
-                    cause,
-                });
-            }
-        };
-        Ok((source_candidate, overrides))
+                payload,
+                metadata: downloaded.metadata,
+                last_known_good,
+                overrides,
+            },
+        )))
     }
 
     async fn activate_existing(

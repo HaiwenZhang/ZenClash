@@ -8,9 +8,13 @@ struct MockNative {
     generation: AtomicU64,
     running: AtomicBool,
     start_refused: AtomicBool,
+    start_unconfirmed: AtomicBool,
+    pending_start: AtomicBool,
     http_refused: AtomicBool,
     fail_get: AtomicUsize,
     gets: AtomicUsize,
+    fail_sync_tun_dns: AtomicBool,
+    sync_tun_dns_calls: AtomicUsize,
     lose_status: AtomicBool,
     restart_required: AtomicBool,
     cache_changes: AtomicBool,
@@ -41,6 +45,15 @@ impl RuntimeTransport for MockNative {
     }
     async fn start(&self, runtime: zenclash_service::RuntimeBundle) -> MihomoResult<()> {
         self.calls.lock().push("start".into());
+        if self.pending_start.load(Ordering::SeqCst) {
+            return Err(MihomoError::Service(ServiceCallError::StartUnconfirmed));
+        }
+        if self.start_unconfirmed.swap(false, Ordering::SeqCst) {
+            self.pending_start.store(true, Ordering::SeqCst);
+            return Err(MihomoError::Service(ServiceCallError::Transport(
+                anyhow::anyhow!("start timed out before daemon activated"),
+            )));
+        }
         if self.start_refused.load(Ordering::SeqCst) {
             return Err(MihomoError::Service(ServiceCallError::Rejected {
                 code: zenclash_service::ServiceErrorCode::InvalidRuntimeAsset as u16,
@@ -101,6 +114,9 @@ impl RuntimeTransport for MockNative {
     }
     async fn stop(&self) -> MihomoResult<()> {
         self.calls.lock().push("stop".into());
+        if self.pending_start.load(Ordering::SeqCst) && !self.running.load(Ordering::SeqCst) {
+            return Err(MihomoError::Service(ServiceCallError::StartUnconfirmed));
+        }
         self.running.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -159,6 +175,32 @@ impl RuntimeTransport for MockNative {
             len,
             mtime_ns: None,
         })
+    }
+    async fn sync_tun_dns(&self, secret: &str) -> MihomoResult<()> {
+        self.calls.lock().push("sync_tun_dns".into());
+        self.sync_tun_dns_calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(
+            secret,
+            *self.secret.lock(),
+            "DNS sync must authenticate with the currently active secret"
+        );
+        if self.fail_sync_tun_dns.load(Ordering::SeqCst) {
+            return Err(MihomoError::Service(ServiceCallError::Rejected {
+                code: zenclash_service::ServiceErrorCode::ProxyApplyFailed as u16,
+                message: "dns sync failed".into(),
+            }));
+        }
+        Ok(())
+    }
+    fn retire_confirmed_stop(
+        &self,
+        _expected_generation: Option<u64>,
+        status: &ServiceStatusSnapshot,
+    ) {
+        self.calls.lock().push("retire_confirmed_stop".into());
+        if !status.is_active && status.core_pid.is_none() {
+            self.pending_start.store(false, Ordering::SeqCst);
+        }
     }
 }
 
@@ -587,4 +629,103 @@ async fn restart_after_stop_retains_captured_provider_bytes_for_recovery() {
             .all(|asset| asset.destination != providers[0].path)
     );
     assert!(state.stopped_export.is_none());
+}
+
+#[tokio::test]
+async fn config_admission_explicitly_syncs_tun_dns_and_read_only_get_does_not() {
+    let fixture = Fixture::new();
+
+    // Initial start admission invokes explicit DNS sync.
+    fixture
+        .accept("mode: rule\ntun: {enable: true, auto-route: true, dns-hijack: [any:53]}\n")
+        .await;
+    let after_start = fixture.native.sync_tun_dns_calls.load(Ordering::SeqCst);
+    assert!(after_start > 0);
+
+    // Read-only GET /configs must NOT invoke DNS sync.
+    let response = fixture
+        .native
+        .request("GET", "/configs", None, "")
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        fixture.native.sync_tun_dns_calls.load(Ordering::SeqCst),
+        after_start
+    );
+
+    // Hot reload admission invokes explicit DNS sync.
+    fixture.accept("mode: direct\ntun: {enable: false}\n").await;
+    let after_reload = fixture.native.sync_tun_dns_calls.load(Ordering::SeqCst);
+    assert!(after_reload > after_start);
+
+    // Patch admission invokes explicit DNS sync.
+    fixture
+        .runtime
+        .prepare_patch(&serde_json::json!({"tun": {"enable": true}}))
+        .await
+        .unwrap()
+        .apply(false)
+        .await
+        .unwrap()
+        .commit()
+        .await
+        .unwrap();
+    let after_patch = fixture.native.sync_tun_dns_calls.load(Ordering::SeqCst);
+    assert!(after_patch > after_reload);
+
+    // Restart admission invokes explicit DNS sync.
+    fixture
+        .runtime
+        .restart_accepted(&AtomicBool::new(false))
+        .await
+        .unwrap();
+    let after_restart = fixture.native.sync_tun_dns_calls.load(Ordering::SeqCst);
+    assert!(after_restart > after_patch);
+
+    // Privileged DNS sync failure must fail config admission rather than succeeding silently.
+    fixture
+        .native
+        .fail_sync_tun_dns
+        .store(true, Ordering::SeqCst);
+    let err = fixture
+        .runtime
+        .prepare("mode: global\n")
+        .await
+        .unwrap()
+        .apply(true)
+        .await
+        .err()
+        .unwrap();
+    assert!(err.mutation_result_unknown());
+}
+
+#[tokio::test]
+async fn confirm_stop_retires_pending_start_when_service_is_inactive() {
+    let fixture = Fixture::new();
+    fixture
+        .native
+        .start_unconfirmed
+        .store(true, Ordering::SeqCst);
+    let failed_start = fixture
+        .runtime
+        .prepare("mode: rule\n")
+        .await
+        .unwrap()
+        .apply(true)
+        .await
+        .err()
+        .unwrap();
+    assert!(failed_start.mutation_result_unknown());
+    assert!(fixture.native.pending_start.load(Ordering::SeqCst));
+    assert!(!fixture.native.running.load(Ordering::SeqCst));
+
+    // Confirming stop against an inactive service must retire pending start state.
+    fixture.runtime.stop_confirmed().await.unwrap();
+    assert!(!fixture.native.pending_start.load(Ordering::SeqCst));
+
+    // A later start must succeed rather than remaining permanently stuck in StartUnconfirmed.
+    fixture.runtime.restore_active().await.unwrap_err();
+    fixture.accept("mode: direct\n").await;
+    assert!(fixture.native.running.load(Ordering::SeqCst));
 }

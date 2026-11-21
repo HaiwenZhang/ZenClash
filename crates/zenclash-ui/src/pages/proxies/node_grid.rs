@@ -28,6 +28,7 @@ struct NodeGridGeometry {
     width: Pixels,
     height: Pixels,
     rem: Pixels,
+    font_size: Pixels,
     font_family: SharedString,
     locale: String,
 }
@@ -74,7 +75,6 @@ pub(super) struct NodeGridState {
     row_focus_scopes: Vec<FocusHandle>,
     rows: ListState,
     compact_scroll: ScrollHandle,
-    measurements_stale: bool,
     row_height_hint_pending: bool,
     pending_scroll_anchor: Option<ListOffset>,
     viewport_anchor_node: Option<ProxyNodeId>,
@@ -83,6 +83,8 @@ pub(super) struct NodeGridState {
     focus_repair_subscription: Option<gpui_kit::Subscription>,
     card_focus_scopes: std::collections::HashMap<ProxyNodeId, FocusHandle>,
     focus_restore_target: Option<NodeFocusRestoreTarget>,
+    #[cfg(test)]
+    remeasure_items_calls: usize,
 }
 
 impl Default for NodeGridState {
@@ -96,7 +98,6 @@ impl Default for NodeGridState {
             row_focus_scopes: Vec::new(),
             rows: ListState::new(0, ListAlignment::Top, Pixels::ZERO),
             compact_scroll: ScrollHandle::default(),
-            measurements_stale: true,
             row_height_hint_pending: false,
             pending_scroll_anchor: None,
             viewport_anchor_node: None,
@@ -105,6 +106,8 @@ impl Default for NodeGridState {
             focus_repair_subscription: None,
             card_focus_scopes: Default::default(),
             focus_restore_target: None,
+            #[cfg(test)]
+            remeasure_items_calls: 0,
         }
     }
 }
@@ -115,20 +118,22 @@ impl NodeGridState {
         self.rows.logical_scroll_top()
     }
 
-    pub(super) fn invalidate_measurements(&mut self) {
-        self.measurements_stale = true;
-    }
-
     pub(super) fn card_focus_scope(&self, node: &ProxyNodeId) -> Option<&FocusHandle> {
         self.card_focus_scopes.get(node)
     }
 
+    pub(super) fn sync_delay_catalog_source(
+        &mut self,
+        before: &Weak<ProxyCatalog>,
+        after: &Arc<ProxyCatalog>,
+    ) {
+        if Weak::ptr_eq(&self.catalog_source, before) {
+            self.catalog_source = Arc::downgrade(after);
+        }
+    }
+
     fn apply_height_hint(&mut self, source: &NodeRowMeasurementSource, height: Pixels) -> bool {
-        if !self.row_height_hint_pending
-            || self.measurements_stale
-            || !source.matches(self)
-            || height <= Pixels::ZERO
-        {
+        if !self.row_height_hint_pending || !source.matches(self) || height <= Pixels::ZERO {
             return false;
         }
         let anchor = self
@@ -172,6 +177,7 @@ impl ProxiesPage {
             width: window.viewport_size().width,
             height: window.viewport_size().height,
             rem: window.rem_size(),
+            font_size: cx.theme().font_size,
             font_family: cx.theme().font_family.clone(),
             locale: zenclash_i18n::locale(),
         };
@@ -180,11 +186,7 @@ impl ProxiesPage {
         let geometry_changed = self.node_grid.geometry.as_ref() != Some(&geometry);
         let source = Arc::downgrade(catalog);
         let content_changed = !Weak::ptr_eq(&self.node_grid.catalog_source, &source);
-        if !projection_changed
-            && !geometry_changed
-            && !content_changed
-            && !self.node_grid.measurements_stale
-        {
+        if !projection_changed && !geometry_changed && !content_changed {
             return;
         }
 
@@ -320,18 +322,24 @@ impl ProxiesPage {
                 }
             }
             self.node_grid.group_controller_key = group.controller_name().to_owned();
-            self.node_grid.node_indices = order.clone();
+            self.node_grid.node_indices = order;
             self.node_grid.group_members = group.all.clone();
             self.node_grid.geometry = Some(geometry.clone());
             self.node_grid.reset_rows();
             self.node_grid.row_height_hint_pending = true;
-            let anchor_position = anchor
-                .as_ref()
-                .and_then(|id| order.iter().position(|&index| group.all[index] == *id));
+            let anchor_position = anchor.as_ref().and_then(|id| {
+                self.node_grid
+                    .node_indices
+                    .iter()
+                    .position(|&index| group.all[index] == *id)
+            });
             self.node_grid.viewport_anchor_node = if anchor_position.is_some() {
                 anchor
             } else {
-                order.first().map(|&index| group.all[index].clone())
+                self.node_grid
+                    .node_indices
+                    .first()
+                    .map(|&index| group.all[index].clone())
             };
             let anchor = ListOffset {
                 item_ix: anchor_position.map_or(0, |position| position / usize::from(columns)),
@@ -339,23 +347,23 @@ impl ProxiesPage {
             };
             self.node_grid.rows.scroll_to(anchor);
             self.node_grid.pending_scroll_anchor = Some(anchor);
-            self.node_grid.group_controller_key = group.controller_name().to_owned();
-            self.node_grid.node_indices = order;
-            self.node_grid.group_members = group.all.clone();
         } else if geometry_changed {
             // GPUI keeps the same fractional position within a resized row.
             self.node_grid.pending_scroll_anchor = None;
             self.node_grid.row_height_hint_pending = true;
             self.node_grid.rows.remeasure();
         } else {
-            // Content and feedback updates keep the existing viewport and focus.
+            // Catalog replacement keeps the existing viewport and focus.
+            #[cfg(test)]
+            {
+                self.node_grid.remeasure_items_calls += 1;
+            }
             self.node_grid
                 .rows
                 .remeasure_items(0..self.node_grid.rows.item_count());
         }
         self.node_grid.catalog_source = source;
         self.node_grid.geometry = Some(geometry);
-        self.node_grid.measurements_stale = false;
     }
 
     fn release_node_grid(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -395,11 +403,13 @@ impl ProxiesPage {
                         .pt_4()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child(zenclash_i18n::text(if self.search_projection.is_none() {
-                            "common.actions.loading"
-                        } else {
-                            "proxies.design.no_matches"
-                        })),
+                        .child(zenclash_i18n::text(
+                            if self.search_projection.is_none() || self.search_task.is_some() {
+                                "common.actions.loading"
+                            } else {
+                                "proxies.design.no_matches"
+                            },
+                        )),
                 )
                 .into_any_element();
         }
@@ -635,5 +645,59 @@ impl ProxiesPage {
             cx.notify();
             cx.stop_propagation();
         }
+    }
+}
+
+#[cfg(test)]
+mod measurement_loop_tests {
+    use super::super::test_support::open_catalog;
+    use super::super::{ProxyCatalog, ProxyGroup, ProxyGroupBehavior, ProxyNode, ProxyNodeId};
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::{AppContext, TestAppContext};
+
+    #[gpui_kit::test]
+    fn height_hint_and_delay_notifications_do_not_trigger_redundant_full_remeasure(
+        cx: &mut TestAppContext,
+    ) {
+        let nodes = (0..96)
+            .map(|index| ProxyNode {
+                name: format!("node-{index:03}"),
+                ..Default::default()
+            })
+            .collect();
+        let (window, page, _runtime) = open_catalog(
+            cx,
+            ProxyCatalog::from_group_nodes(
+                vec![(
+                    ProxyGroup::new("group")
+                        .with_behavior(ProxyGroupBehavior::Selector)
+                        .with_current_member("node-000"),
+                    nodes,
+                )],
+                96,
+            ),
+        );
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(!page.read(cx).node_grid.row_height_hint_pending);
+            assert_eq!(page.read(cx).node_grid.remeasure_items_calls, 0);
+            page.update(cx, |page, cx| {
+                page.record_node_delay(&ProxyNodeId::new("node-000".into(), None), 42, 42, None);
+                cx.notify();
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(page.read(cx).node_grid.remeasure_items_calls, 0);
+            window.remove_window();
+        })
+        .unwrap();
     }
 }

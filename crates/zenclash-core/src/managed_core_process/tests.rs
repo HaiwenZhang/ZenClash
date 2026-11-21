@@ -32,6 +32,7 @@ fn exited_process_snapshot_does_not_expose_a_stale_pid() {
     child.wait().unwrap();
     let process = ManagedCoreProcess {
         drop_gate: Mutex::new(None),
+        test_execution_slot: None,
         started_at_secs: AtomicU64::new(0),
         child: Mutex::new(Some(child)),
         execution: Mutex::new(None),
@@ -74,6 +75,7 @@ async fn unobservable_local_restart_rejection_invalidates_the_lifecycle() {
     let pid = child.id() as libc::pid_t;
     let process = Arc::new(ManagedCoreProcess {
         drop_gate: Mutex::new(None),
+        test_execution_slot: None,
         started_at_secs: AtomicU64::new(0),
         child: Mutex::new(Some(child)),
         execution: Mutex::new(None),
@@ -297,6 +299,7 @@ fn stop_gives_the_child_a_graceful_sigterm_window() {
 fn ui_metadata_and_logs_remain_available_while_lifecycle_lock_is_held() {
     let process = ManagedCoreProcess {
         drop_gate: Mutex::new(None),
+        test_execution_slot: None,
         child: parking_lot::Mutex::new(None),
         started_at_secs: AtomicU64::new(0),
         execution: parking_lot::Mutex::new(None),
@@ -388,6 +391,250 @@ fn local_tun_spawn_rejection_does_not_create_the_runtime_home() {
         "tun: {enable: true}\n"
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn restart_cancellation_after_stop_releases_execution_guard() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = std::env::temp_dir().join(format!(
+        "zenclash-guard-cancel-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let ready = directory.join("ready");
+    let stopping = directory.join("stopping");
+    let release = directory.join("release");
+    let binary = directory.join("mihomo");
+    std::fs::write(
+        &binary,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = '-t' ]; then exit 0; fi\ntrap 'printf stopping > {stopping}; while [ ! -f {release} ]; do sleep 0.01; done; exit 0' TERM\nprintf ready > {ready}\nwhile true; do sleep 0.05; done\n",
+            stopping = stopping.display(),
+            release = release.display(),
+            ready = ready.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let profile = directory.join("profile.yaml");
+    std::fs::write(&profile, "rules:\n  - MATCH,DIRECT\n").unwrap();
+
+    let child = Command::new(&binary).spawn().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !ready.is_file() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(ready.is_file(), "child did not install SIGTERM trap");
+
+    let slot = Arc::new(AtomicBool::new(true));
+    let process = Arc::new(ManagedCoreProcess {
+        drop_gate: Mutex::new(None),
+        test_execution_slot: Some(slot.clone()),
+        started_at_secs: AtomicU64::new(unix_timestamp_secs()),
+        child: Mutex::new(Some(child)),
+        execution: Mutex::new(Some(ExecutionReservation::Test(TestExecutionGuard {
+            held: slot.clone(),
+        }))),
+        isolated_test_child: true,
+        logs: Arc::new(RwLock::new(LaunchLogHistory::default())),
+        last_exit_reason: RwLock::new(None),
+        recovery_asset_root: RwLock::new(None),
+        config: CoreLaunchConfig {
+            kind: CoreKind::Mihomo,
+            binary,
+            config_file: profile,
+            home_dir: directory.join("data"),
+            endpoint: MihomoEndpoint::default(),
+            controller_override: None,
+        },
+    });
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_process = process.clone();
+    let worker_cancelled = cancelled.clone();
+    let handle = std::thread::spawn(move || {
+        let lease =
+            crate::data_coordinator::DataWriteLease::shared(worker_process.write_scopes()).unwrap();
+        worker_process.restart_payload_with_write_lease(
+            &lease,
+            Some(&worker_cancelled),
+            Some("rules:\n  - MATCH,DIRECT\n"),
+        )
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !stopping.is_file() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(stopping.is_file(), "restart did not enter stop_child");
+    cancelled.store(true, Ordering::Release);
+    std::fs::write(&release, b"go").unwrap();
+
+    let error = handle.join().unwrap().unwrap_err().to_string();
+    assert!(error.contains("内核重启在创建子进程前已取消"));
+    assert!(process.child.lock().is_none());
+    assert!(process.execution.lock().is_none());
+    assert!(
+        !slot.load(Ordering::Acquire),
+        "CoreExecutionGuard must be released when restart is cancelled after stop_child"
+    );
+    assert!(process.reserve_execution().is_ok());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn restart_spawn_failure_releases_execution_guard() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = std::env::temp_dir().join(format!(
+        "zenclash-guard-spawn-fail-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let binary = directory.join("mihomo");
+    let profile = directory.join("profile.yaml");
+    std::fs::write(&profile, "rules:\n  - MATCH,DIRECT\n").unwrap();
+
+    let write_vanishing_binary = || {
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\nif [ \"$1\" = '-t' ]; then rm -f \"$0\"; exit 0; fi\nsleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+
+    // Case 1: stopped owner acquires execution reservation during restart, then spawn fails.
+    write_vanishing_binary();
+    let slot = Arc::new(AtomicBool::new(false));
+    let stopped_process = ManagedCoreProcess {
+        drop_gate: Mutex::new(None),
+        test_execution_slot: Some(slot.clone()),
+        started_at_secs: AtomicU64::new(0),
+        child: Mutex::new(None),
+        execution: Mutex::new(None),
+        isolated_test_child: true,
+        logs: Arc::new(RwLock::new(LaunchLogHistory::default())),
+        last_exit_reason: RwLock::new(None),
+        recovery_asset_root: RwLock::new(None),
+        config: CoreLaunchConfig {
+            kind: CoreKind::Mihomo,
+            binary: binary.clone(),
+            config_file: profile.clone(),
+            home_dir: directory.join("data"),
+            endpoint: MihomoEndpoint::default(),
+            controller_override: None,
+        },
+    };
+    assert!(stopped_process.restart().is_err());
+    assert!(stopped_process.child.lock().is_none());
+    assert!(stopped_process.execution.lock().is_none());
+    assert!(
+        !slot.load(Ordering::Acquire),
+        "CoreExecutionGuard acquired during restart must be released when spawn_child fails"
+    );
+
+    // Case 2: running owner retains execution guard across stop_child, then spawn fails.
+    write_vanishing_binary();
+    let running_child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+    slot.store(true, Ordering::Release);
+    let running_process = ManagedCoreProcess {
+        drop_gate: Mutex::new(None),
+        test_execution_slot: Some(slot.clone()),
+        started_at_secs: AtomicU64::new(unix_timestamp_secs()),
+        child: Mutex::new(Some(running_child)),
+        execution: Mutex::new(Some(ExecutionReservation::Test(TestExecutionGuard {
+            held: slot.clone(),
+        }))),
+        isolated_test_child: true,
+        logs: Arc::new(RwLock::new(LaunchLogHistory::default())),
+        last_exit_reason: RwLock::new(None),
+        recovery_asset_root: RwLock::new(None),
+        config: CoreLaunchConfig {
+            kind: CoreKind::Mihomo,
+            binary,
+            config_file: profile,
+            home_dir: directory.join("data"),
+            endpoint: MihomoEndpoint::default(),
+            controller_override: None,
+        },
+    };
+    assert!(running_process.restart().is_err());
+    assert!(running_process.child.lock().is_none());
+    assert!(running_process.execution.lock().is_none());
+    assert!(
+        !slot.load(Ordering::Acquire),
+        "existing CoreExecutionGuard must be released when replacement spawn_child fails"
+    );
+    assert!(running_process.reserve_execution().is_ok());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn is_running_and_try_snapshot_release_execution_guard_when_reaping_exited_child() {
+    let make_exited = |slot: Arc<AtomicBool>| {
+        let mut child = Command::new("/usr/bin/true").spawn().unwrap();
+        child.wait().unwrap();
+        slot.store(true, Ordering::Release);
+        ManagedCoreProcess {
+            drop_gate: Mutex::new(None),
+            test_execution_slot: Some(slot.clone()),
+            started_at_secs: AtomicU64::new(unix_timestamp_secs()),
+            child: Mutex::new(Some(child)),
+            execution: Mutex::new(Some(ExecutionReservation::Test(TestExecutionGuard {
+                held: slot,
+            }))),
+            isolated_test_child: true,
+            logs: Arc::new(RwLock::new(LaunchLogHistory::default())),
+            last_exit_reason: RwLock::new(None),
+            recovery_asset_root: RwLock::new(None),
+            config: CoreLaunchConfig {
+                kind: CoreKind::Mihomo,
+                binary: PathBuf::from("/usr/bin/true"),
+                config_file: PathBuf::from("profile.yaml"),
+                home_dir: PathBuf::new(),
+                endpoint: MihomoEndpoint::default(),
+                controller_override: None,
+            },
+        }
+    };
+
+    let slot_running = Arc::new(AtomicBool::new(false));
+    let via_is_running = make_exited(slot_running.clone());
+    assert!(!via_is_running.is_running());
+    assert!(via_is_running.child.lock().is_none());
+    assert!(via_is_running.execution.lock().is_none());
+    assert!(
+        !slot_running.load(Ordering::Acquire),
+        "is_running must release CoreExecutionGuard after reaping an exited child"
+    );
+    assert!(via_is_running.last_exit_reason.read().is_some());
+    assert!(via_is_running.reserve_execution().is_ok());
+
+    let slot_snapshot = Arc::new(AtomicBool::new(false));
+    let via_snapshot = make_exited(slot_snapshot.clone());
+    let snapshot = via_snapshot.try_snapshot().unwrap();
+    assert_eq!((snapshot.running, snapshot.pid), (false, None));
+    assert!(snapshot.exit_reason.is_some());
+    assert!(via_snapshot.child.lock().is_none());
+    assert!(via_snapshot.execution.lock().is_none());
+    assert!(
+        !slot_snapshot.load(Ordering::Acquire),
+        "try_snapshot must release CoreExecutionGuard after reaping an exited child"
+    );
+    assert!(via_snapshot.reserve_execution().is_ok());
 }
 
 mod readiness_logs;

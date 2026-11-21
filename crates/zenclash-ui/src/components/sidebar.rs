@@ -174,6 +174,7 @@ impl RenderOnce for Sidebar {
         } else {
             "sidebar.collapse"
         });
+        let (appearance_icon, appearance_label) = appearance_toggle_copy(dark);
 
         GpuiSidebar::new("main-sidebar")
             .w(rems(9.))
@@ -242,33 +243,17 @@ impl RenderOnce for Sidebar {
                                             .size(rems(1.25))
                                             .flex_shrink_0()
                                             .child(
-                                                Icon::new(if dark {
-                                                    IconName::Moon
-                                                } else {
-                                                    IconName::Sun
-                                                })
-                                                .size(rems(1.25))
-                                                .flex_shrink_0(),
+                                                Icon::new(appearance_icon)
+                                                    .size(rems(1.25))
+                                                    .flex_shrink_0(),
                                             ),
                                     )
                                     .when(!self.collapsed, |this| {
-                                        this.child(zenclash_i18n::text(if dark {
-                                            "settings.appearance.dark"
-                                        } else {
-                                            "settings.appearance.light"
-                                        }))
+                                        this.child(appearance_label.clone())
                                     }),
                             )
-                            .accessibility_label(zenclash_i18n::text(if dark {
-                                "settings.appearance.light"
-                            } else {
-                                "settings.appearance.dark"
-                            }))
-                            .tooltip(zenclash_i18n::text(if dark {
-                                "settings.appearance.light"
-                            } else {
-                                "settings.appearance.dark"
-                            }))
+                            .accessibility_label(appearance_label.clone())
+                            .tooltip(appearance_label)
                             .on_click(move |_, window, cx| {
                                 if dark {
                                     window.dispatch_action(Box::new(SetLightTheme), cx);
@@ -322,6 +307,20 @@ impl RenderOnce for Sidebar {
                         )
                     }),
             )
+    }
+}
+
+fn appearance_toggle_copy(dark: bool) -> (IconName, String) {
+    if dark {
+        (
+            IconName::Sun,
+            zenclash_i18n::text("settings.appearance.light"),
+        )
+    } else {
+        (
+            IconName::Moon,
+            zenclash_i18n::text("settings.appearance.dark"),
+        )
     }
 }
 
@@ -483,5 +482,61 @@ mod tests {
         assert_eq!(sidebar_icon_path(Page::Connections), Some(RADIO_ICON_PATH));
         assert_eq!(sidebar_icon_path(Page::Rules), Some(RULER_ICON_PATH));
         assert_eq!(sidebar_icon_path(Page::Home), None);
+    }
+
+    #[gpui_kit::test]
+    fn appearance_toggle_aligns_visible_label_and_accessible_name_in_both_modes(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::component::{IconName, Root, ThemeMode};
+        use gpui_kit::test::TestWindowExt;
+        use gpui_kit::{
+            AppContext, Context, IntoElement, ParentElement, Render, Styled, div, px, size,
+        };
+
+        struct SidebarHost;
+        impl Render for SidebarHost {
+            fn render(
+                &mut self,
+                _: &mut gpui_kit::Window,
+                _: &mut Context<Self>,
+            ) -> impl IntoElement {
+                div().size_full().child(Sidebar::new(Page::Home))
+            }
+        }
+
+        cx.update(gpui_kit::init);
+        let handle = cx.open_window(size(px(240.), px(700.)), |window, cx| {
+            let view = cx.new(|_| SidebarHost);
+            Root::new(view, window, cx)
+        });
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            let dark = mode.is_dark();
+            let (expected_icon, expected_label) = super::appearance_toggle_copy(dark);
+            assert!(if dark {
+                matches!(expected_icon, IconName::Sun)
+            } else {
+                matches!(expected_icon, IconName::Moon)
+            });
+            assert_eq!(
+                expected_label,
+                zenclash_i18n::text(if dark {
+                    "settings.appearance.light"
+                } else {
+                    "settings.appearance.dark"
+                })
+            );
+            cx.update_window(handle.into(), |_, window, cx| {
+                crate::design::apply_zen_theme(mode, Some(window), cx);
+                window.render_frame(cx);
+                assert_eq!(
+                    window.find("sidebar-appearance").label(),
+                    Some(expected_label.as_str())
+                );
+            })
+            .unwrap();
+        }
+        cx.update_window(handle.into(), |_, window, _| window.remove_window())
+            .unwrap();
     }
 }

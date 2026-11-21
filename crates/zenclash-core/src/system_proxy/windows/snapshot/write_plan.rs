@@ -120,35 +120,39 @@ pub(super) enum DefaultConnectionWriteStep {
 }
 
 impl DefaultConnectionWriteStep {
-    pub(super) fn predicted_snapshot(
+    pub(super) fn predicted_snapshots(
         &self,
         current: &WinInetProxySnapshot,
-    ) -> MihomoResult<WinInetProxySnapshot> {
+    ) -> MihomoResult<Vec<WinInetProxySnapshot>> {
         let mut values = current.values.clone();
         let mut connection = current.connection()?.clone();
-        let (name, mut value) = match self {
+        let (name, mut value, may_delete_on_empty) = match self {
             Self::SetOption(option) => {
                 connection = connection.replacement(option);
                 match option {
                     DefaultConnectionOption::Flags(flags) => (
                         "ProxyEnable",
                         Some(proxy_enable_value(flags & PROXY_TYPE_PROXY != 0)),
+                        false,
                     ),
                     DefaultConnectionOption::ProxyServer(value) => (
                         "ProxyServer",
                         Some(registry_string_value("ProxyServer", value)),
+                        value.is_empty(),
                     ),
                     DefaultConnectionOption::ProxyBypass(value) => (
                         "ProxyOverride",
                         Some(registry_string_value("ProxyOverride", value)),
+                        value.is_empty(),
                     ),
                     DefaultConnectionOption::AutoConfigUrl(value) => (
                         "AutoConfigURL",
                         Some(registry_string_value("AutoConfigURL", value)),
+                        value.is_empty(),
                     ),
                 }
             }
-            Self::RestoreRegistryValue { name, value } => (*name, value.clone()),
+            Self::RestoreRegistryValue { name, value } => (*name, value.clone(), false),
         };
         let index = ascii_folded_value_name(&utf16_units(name));
         if matches!(self, Self::SetOption(_))
@@ -156,14 +160,25 @@ impl DefaultConnectionWriteStep {
         {
             value.name.clone_from(&previous.name);
         }
+        // Native storage effects outside these exact anticipated values are not
+        // adopted as write authority. An unfamiliar OS representation fails closed.
+        if may_delete_on_empty {
+            let mut deleted_values = values.clone();
+            deleted_values.remove(&index);
+            if let Some(value) = value {
+                values.insert(index, value);
+            }
+            return Ok(vec![
+                WinInetProxySnapshot::from_native(values, connection.clone())?,
+                WinInetProxySnapshot::from_native(deleted_values, connection)?,
+            ]);
+        }
         if let Some(value) = value {
             values.insert(index, value);
         } else {
             values.remove(&index);
         }
-        // Native storage effects outside this exact anticipated value are not
-        // adopted as write authority. An unfamiliar OS representation fails closed.
-        WinInetProxySnapshot::from_native(values, connection)
+        Ok(vec![WinInetProxySnapshot::from_native(values, connection)?])
     }
 
     pub(super) fn write(&self, access: &impl DefaultConnectionAccess) -> MihomoResult<()> {

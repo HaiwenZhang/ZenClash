@@ -34,11 +34,39 @@ const MAX_LOG_LINES: usize = 1_000;
 #[cfg(unix)]
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
+enum ExecutionReservation {
+    Native(crate::service::CoreExecutionGuard),
+    #[cfg(test)]
+    Test(TestExecutionGuard),
+}
+
+impl ExecutionReservation {
+    fn release_after_exit(self, confirm: impl FnMut() -> bool + Send + 'static) {
+        match self {
+            Self::Native(guard) => guard.release_after_exit(confirm),
+            #[cfg(test)]
+            Self::Test(_guard) => {}
+        }
+    }
+}
+
+#[cfg(test)]
+struct TestExecutionGuard {
+    held: Arc<AtomicBool>,
+}
+
+#[cfg(test)]
+impl Drop for TestExecutionGuard {
+    fn drop(&mut self) {
+        self.held.store(false, Ordering::Release);
+    }
+}
+
 /// Owns a managed Mihomo child, execution reservation, and bounded output history.
 pub struct ManagedCoreProcess {
     child: Mutex<Option<Child>>,
     started_at_secs: AtomicU64,
-    execution: Mutex<Option<crate::service::CoreExecutionGuard>>,
+    execution: Mutex<Option<ExecutionReservation>>,
     isolated_test_child: bool,
     logs: Arc<RwLock<LaunchLogHistory>>,
     last_exit_reason: RwLock<Option<String>>,
@@ -46,6 +74,8 @@ pub struct ManagedCoreProcess {
     recovery_asset_root: RwLock<Option<PathBuf>>,
     #[cfg(test)]
     drop_gate: Mutex<Option<TestDropGate>>,
+    #[cfg(test)]
+    test_execution_slot: Option<Arc<AtomicBool>>,
 }
 
 #[cfg(test)]
@@ -122,6 +152,8 @@ impl ManagedCoreProcess {
             recovery_asset_root: RwLock::new(None),
             #[cfg(test)]
             drop_gate: Mutex::new(None),
+            #[cfg(test)]
+            test_execution_slot: None,
         })
     }
 
@@ -155,7 +187,7 @@ impl ManagedCoreProcess {
             .map(|payload| input::snapshot(&config.home_dir, payload))
             .transpose()?;
         let logs = Arc::new(RwLock::new(LaunchLogHistory::default()));
-        let execution = reserve_execution(config.kind, isolated_test_child)?;
+        let execution = reserve_native_execution(config.kind, isolated_test_child)?;
         let child = spawn_child(&config, logs.clone(), input, None)?;
 
         Ok(Arc::new(Self {
@@ -169,6 +201,8 @@ impl ManagedCoreProcess {
             recovery_asset_root: RwLock::new(None),
             #[cfg(test)]
             drop_gate: Mutex::new(None),
+            #[cfg(test)]
+            test_execution_slot: None,
         }))
     }
 
@@ -253,19 +287,31 @@ impl ManagedCoreProcess {
             return Err(MihomoError::Process("内核重启在配置预检后已取消".into()));
         }
         stop_child(&mut child_slot)?;
+        self.started_at_secs.store(0, Ordering::Relaxed);
         let mut execution = self.execution.lock();
-        if execution.is_none() {
-            *execution = reserve_execution(self.kind(), self.isolated_test_child)?;
-        }
         if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            execution.take();
             return Err(MihomoError::Process("内核重启在创建子进程前已取消".into()));
         }
-        let child = spawn_child(
+        if execution.is_none() {
+            *execution = self.reserve_execution()?;
+        }
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            execution.take();
+            return Err(MihomoError::Process("内核重启在创建子进程前已取消".into()));
+        }
+        let child = match spawn_child(
             &self.config,
             self.logs.clone(),
             input,
             self.recovery_asset_root.read().as_deref(),
-        )?;
+        ) {
+            Ok(child) => child,
+            Err(error) => {
+                execution.take();
+                return Err(error);
+            }
+        };
         *self.last_exit_reason.write() = None;
         self.started_at_secs
             .store(unix_timestamp_secs(), Ordering::Relaxed);
@@ -509,18 +555,24 @@ impl ManagedCoreProcess {
     /// Run off the UI thread: a concurrent stop or restart can hold the child lock.
     #[must_use]
     pub fn is_running(&self) -> bool {
-        let mut child = self.child.lock();
-        child.as_mut().is_some_and(|child| match child.try_wait() {
+        let mut child_slot = self.child.lock();
+        let Some(child) = child_slot.as_mut() else {
+            return false;
+        };
+        match child.try_wait() {
             Ok(None) => true,
             Ok(Some(status)) => {
                 *self.last_exit_reason.write() = Some(format!("内核退出状态：{status}"));
+                self.started_at_secs.store(0, Ordering::Relaxed);
+                child_slot.take();
+                self.execution.lock().take();
                 false
             }
             Err(error) => {
                 tracing::warn!(%error, "failed to query managed core process status");
                 false
             }
-        })
+        }
     }
 
     /// Captures process paths, live PID, running state, and recent logs.
@@ -534,8 +586,8 @@ impl ManagedCoreProcess {
 
     pub(crate) fn try_snapshot(&self) -> std::io::Result<CoreProcessSnapshot> {
         let (running, pid, started_at_secs) = {
-            let mut child = self.child.lock();
-            match child.as_mut() {
+            let mut child_slot = self.child.lock();
+            match child_slot.as_mut() {
                 Some(process) => match process.try_wait()? {
                     None => (
                         true,
@@ -544,6 +596,9 @@ impl ManagedCoreProcess {
                     ),
                     Some(status) => {
                         *self.last_exit_reason.write() = Some(format!("内核退出状态：{status}"));
+                        self.started_at_secs.store(0, Ordering::Relaxed);
+                        child_slot.take();
+                        self.execution.lock().take();
                         (false, None, None)
                     }
                 },
@@ -581,8 +636,24 @@ impl ManagedCoreProcess {
     pub fn stop(&self) -> MihomoResult<()> {
         let mut child = self.child.lock();
         stop_child(&mut child)?;
+        self.started_at_secs.store(0, Ordering::Relaxed);
         self.execution.lock().take();
         Ok(())
+    }
+
+    fn reserve_execution(&self) -> MihomoResult<Option<ExecutionReservation>> {
+        #[cfg(test)]
+        if let Some(slot) = &self.test_execution_slot {
+            if slot.swap(true, Ordering::AcqRel) {
+                return Err(MihomoError::Process(
+                    "test core execution guard already held".into(),
+                ));
+            }
+            return Ok(Some(ExecutionReservation::Test(TestExecutionGuard {
+                held: slot.clone(),
+            })));
+        }
+        reserve_native_execution(self.kind(), self.isolated_test_child)
     }
 
     /// Stops and reaps the managed child without blocking an async caller.
@@ -817,16 +888,17 @@ impl Drop for ManagedCoreProcess {
     }
 }
 
-fn reserve_execution(
+fn reserve_native_execution(
     kind: CoreKind,
     isolated_test_child: bool,
-) -> MihomoResult<Option<crate::service::CoreExecutionGuard>> {
+) -> MihomoResult<Option<ExecutionReservation>> {
     // Unit fixtures intentionally run many isolated synthetic children in parallel.
     // Native reservation itself is exercised in zenclash-service and real-core tests.
     if kind != CoreKind::Mihomo || cfg!(test) || isolated_test_child {
         return Ok(None);
     }
     crate::service::CoreExecutionGuard::acquire()
+        .map(ExecutionReservation::Native)
         .map(Some)
         .map_err(|error| MihomoError::Process(error.to_string()))
 }

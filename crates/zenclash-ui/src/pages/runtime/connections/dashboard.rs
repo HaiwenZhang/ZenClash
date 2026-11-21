@@ -8,6 +8,126 @@ use gpui_kit::component::{
 use gpui_kit::{InteractiveElement, StatefulInteractiveElement, TestSupportExt};
 
 impl ConnectionsView {
+    fn update_projection_immediate(&mut self, cx: &mut Context<Self>) {
+        let mut data = match self
+            .paused_snapshot
+            .as_ref()
+            .or(self.live_snapshot.as_ref())
+        {
+            Some(snapshot) => snapshot.clone(),
+            None => {
+                self.release_presentation();
+                return;
+            }
+        };
+        let Some(runtime_context) = self.runtime_context.clone() else {
+            return;
+        };
+        if self.paused_snapshot.is_none() {
+            self.timeline.observe(
+                runtime_context.configuration_generation,
+                data.clone(),
+                std::time::Instant::now(),
+            );
+        }
+        self.history
+            .observe(runtime_context.configuration_generation, &data);
+        if self.show_closed {
+            data = self.timeline.closed();
+        }
+
+        self.worker.cancel();
+        let show_closed = self.show_closed;
+        let policy = self.worker.policy.clone();
+        let query = self.query.clone();
+        let transport = self.transport;
+        let sort = self.sort;
+        let expected_snapshot = data.clone();
+        let expected_policy = policy.clone();
+        let expected_query = query.clone();
+        let task = self.runtime.spawn_blocking(move || {
+            let mut order = present_connections(&data.connections, &query, transport, sort);
+            if let Some(policy) = &policy {
+                order.retain(|&index| data.connections[index].chains.last() == Some(policy));
+            }
+            let policies = data
+                .connections
+                .iter()
+                .filter_map(|connection| connection.chains.last().map(String::as_str))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            let (processes, protocols) = connection_distributions(&data.connections);
+            let by_id = data
+                .connections
+                .iter()
+                .enumerate()
+                .map(|(index, connection)| (connection.id.clone(), index))
+                .collect();
+            let now = chrono::Utc::now();
+            let durations = data
+                .connections
+                .iter()
+                .map(|connection| projection::connection_duration(&connection.start, now))
+                .collect();
+            projection::ConnectionProjection {
+                snapshot: data,
+                query,
+                transport,
+                sort,
+                order,
+                processes,
+                protocols,
+                by_id,
+                durations,
+                policies,
+            }
+        });
+        self.projecting = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = task.await.map_err(|error| error.to_string());
+            let _ = this.update(cx, |this, cx| {
+                let current_snapshot = if show_closed {
+                    Some(this.timeline.closed())
+                } else {
+                    this.paused_snapshot
+                        .as_ref()
+                        .or(this.live_snapshot.as_ref())
+                        .cloned()
+                };
+                let still_current = this.runtime_context.as_ref() == Some(&runtime_context)
+                    && this.show_closed == show_closed
+                    && this.worker.policy == expected_policy
+                    && this.query == expected_query
+                    && this.transport == transport
+                    && this.sort == sort
+                    && current_snapshot.as_ref().is_some_and(|snapshot| {
+                        std::sync::Arc::ptr_eq(snapshot, &expected_snapshot)
+                    });
+                if !still_current {
+                    return;
+                }
+                this.worker.cancel();
+                this.projecting = false;
+                match result {
+                    Ok(projection) => {
+                        this.projection = Some(projection);
+                    }
+                    Err(error) => cx.emit(ConnectionEvent::PresentationFailed(
+                        zenclash_i18n::text_with(
+                            "connections.errors.filter_task",
+                            &[("error", error)],
+                        ),
+                    )),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(in crate::pages::runtime) fn render_connection_close_all(
         &self,
         cx: &mut Context<Self>,
@@ -260,10 +380,9 @@ impl ConnectionsView {
                 .selected(self.show_closed == closed)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.show_closed = closed;
-                    this.projection = None;
                     this.page_index = 0;
                     this.paused_snapshot = None;
-                    this.update_projection(cx);
+                    this.update_projection_immediate(cx);
                     cx.notify();
                 }))
             }));
@@ -312,9 +431,8 @@ impl ConnectionsView {
                                             move |_, _, cx| {
                                                 let _ = owner.update(cx, |view, cx| {
                                                     view.worker.policy = value.clone();
-                                                    view.projection = None;
                                                     view.page_index = 0;
-                                                    view.update_projection(cx);
+                                                    view.update_projection_immediate(cx);
                                                     cx.notify();
                                                 });
                                             },
@@ -608,6 +726,30 @@ impl ConnectionsView {
             .child(table)
             .into_any_element()
     }
+}
+
+type DistributionSeries = Vec<(String, u64)>;
+
+fn connection_distributions(
+    connections: &[zenclash_core::Connection],
+) -> (DistributionSeries, DistributionSeries) {
+    let mut processes = std::collections::BTreeMap::<&str, u64>::new();
+    let mut protocols = std::collections::BTreeMap::<String, u64>::new();
+    for connection in connections {
+        *processes
+            .entry(connection.metadata.process.as_str())
+            .or_default() += 1;
+        *protocols
+            .entry(connection.metadata.network.to_uppercase())
+            .or_default() += 1;
+    }
+    let mut processes = processes
+        .into_iter()
+        .map(|(name, count)| (name.to_owned(), count))
+        .collect::<Vec<_>>();
+    processes.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    processes.truncate(5);
+    (processes, protocols.into_iter().collect())
 }
 
 fn connection_route(

@@ -202,6 +202,7 @@ async fn application_start_reload_displacement_and_shutdown_use_the_actual_nativ
         observer
             .controller_request("GET", "/configs", None, "", Duration::from_secs(3))
             .await?;
+        observer.sync_tun_dns("", Duration::from_secs(3)).await?;
         #[cfg(target_os = "macos")]
         ensure!(
             zenclash_service::test_tun_dns_enabled(),

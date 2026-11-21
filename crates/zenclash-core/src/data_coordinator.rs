@@ -414,7 +414,7 @@ fn normalized_path_with_limit(path: &Path, links_remaining: usize) -> PathBuf {
     lexical_path(&normalized)
 }
 
-fn coordinated_paths(path: &Path) -> [PathBuf; 2] {
+pub(crate) fn coordinated_paths(path: &Path) -> [PathBuf; 2] {
     let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     [lexical_path(&absolute), normalized_path(&absolute)]
 }

@@ -217,9 +217,10 @@ impl ProxyOperations {
         proxy: &str,
         connection_policy: ConnectionPolicy,
     ) -> MihomoResult<ProxySelectionOutcome> {
-        let client = self.client.pin_binding()?;
-        let receipt = Self::apply_selection_on(&client, group, proxy, connection_policy).await?;
-        Ok(Self::read_selection_on(&client, group, receipt.warnings).await)
+        let operations = self.pin_current_runtime()?;
+        let client = &operations.client;
+        let receipt = Self::apply_selection_on(client, group, proxy, connection_policy).await?;
+        Ok(Self::read_selection_on(client, group, receipt.warnings).await)
     }
 
     /// Requests a selection and returns its bound acknowledgement before any catalog readback.
@@ -346,9 +347,10 @@ impl ProxyOperations {
     ///
     /// Returns an error only when Mihomo rejects the restore command itself.
     pub async fn restore_auto(&self, group: &str) -> MihomoResult<ProxySelectionOutcome> {
-        let client = self.client.pin_binding()?;
+        let operations = self.pin_current_runtime()?;
+        let client = &operations.client;
         client.restore_proxy_group(group).await?;
-        Ok(Self::read_selection_on(&client, group, Vec::new()).await)
+        Ok(Self::read_selection_on(client, group, Vec::new()).await)
     }
 
     pub(super) async fn read_selection_on(
@@ -377,5 +379,43 @@ impl ProxyOperations {
             catalog,
             warnings,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::{CoreKind, CoreSession, MihomoEndpoint};
+
+    #[tokio::test]
+    async fn select_and_restore_auto_reject_stale_observation_before_sending() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = MihomoClient::new(MihomoEndpoint::new(
+            format!("http://{}", listener.local_addr().unwrap()),
+            "",
+        ))
+        .unwrap();
+        let session = CoreSession::open(CoreKind::Mihomo, client).unwrap();
+        let observation = session.begin_observation().await.unwrap();
+        let operations = ProxyOperations::from_observation(&observation);
+        session.invalidate_runtime_observations();
+
+        assert!(matches!(
+            operations
+                .select("Proxy", "HK 01", ConnectionPolicy::KeepExisting)
+                .await,
+            Err(MihomoError::StaleBinding)
+        ));
+        assert!(matches!(
+            operations.restore_auto("Auto Group").await,
+            Err(MihomoError::StaleBinding)
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
     }
 }

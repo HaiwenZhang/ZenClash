@@ -213,7 +213,14 @@ impl TemporaryOutput {
                 "zenclash-ruleset-{}-{timestamp}-{sequence}.{extension}",
                 std::process::id()
             ));
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            match options.open(&path) {
                 Ok(_) => return Ok(Self { path }),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(error.into()),
@@ -281,5 +288,15 @@ mod tests {
         };
 
         assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temporary_output_is_created_with_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = TemporaryOutput::reserve("txt").unwrap();
+        let mode = fs::metadata(temporary.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

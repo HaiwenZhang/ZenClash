@@ -141,3 +141,75 @@ fn malformed_manifest_is_quarantined_and_managed_files_are_retained() {
     assert!(store.quarantine_invalid_manifest().unwrap().is_none());
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn manifest_referencing_missing_file_is_quarantined_and_store_recovers() {
+    let root = test_root("missing-file-quarantine");
+    let source = root.join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.yaml"), "mode: direct\n").unwrap();
+    fs::write(source.join("b.yaml"), "mode: rule\n").unwrap();
+    let store = YamlOverrideStore::new(root.join("store")).unwrap();
+    let imported = store.import_paths([source]).unwrap();
+    fs::remove_file(store.managed_path(&imported[0])).unwrap();
+
+    assert!(matches!(store.load(), Err(YamlOverrideError::NotFound(_))));
+    let quarantine = store.quarantine_invalid_manifest().unwrap().unwrap();
+    assert!(quarantine.is_file());
+    assert!(store.managed_path(&imported[1]).is_file());
+    assert!(store.load().unwrap().items.is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_keeps_override_file_intact_when_manifest_save_fails() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    // Root bypasses directory write permissions; skip when running as uid 0.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let root = test_root("delete-manifest-first");
+    let source = root.join("source.yaml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&source, "mode: direct\n").unwrap();
+    let store = YamlOverrideStore::new(root.join("store")).unwrap();
+    let record = store.import_paths([source]).unwrap().remove(0);
+    let managed = store.managed_path(&record);
+
+    // Make only the store root read-only so writing the new manifest temp file
+    // fails while files/ remains writable. Because the manifest must be saved
+    // before removing the YAML file, the YAML file must never be deleted.
+    let original_perms = fs::metadata(store.root()).unwrap().permissions();
+    let mut readonly = original_perms.clone();
+    readonly.set_mode(0o500);
+    fs::set_permissions(store.root(), readonly).unwrap();
+
+    let result = store.delete(&record.id);
+    fs::set_permissions(store.root(), original_perms).unwrap();
+
+    assert!(result.is_err());
+    assert!(
+        managed.is_file(),
+        "override file must remain on disk when manifest persistence fails"
+    );
+    assert_eq!(store.load().unwrap().items, vec![record]);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn manifest_rejects_case_insensitive_duplicate_file_names() {
+    let root = test_root("case-insensitive-dup");
+    let store = YamlOverrideStore::new(root.join("store")).unwrap();
+    fs::write(store.files_dir().join("alpha.yaml"), "mode: direct\n").unwrap();
+    let _ = fs::write(store.files_dir().join("ALPHA.yaml"), "mode: rule\n");
+    fs::write(
+        store.manifest_path(),
+        r#"{"items":[{"id":"first","name":"alpha.yaml","file_name":"alpha.yaml","enabled":true},{"id":"second","name":"ALPHA.yaml","file_name":"ALPHA.yaml","enabled":true}]}"#,
+    )
+    .unwrap();
+
+    assert!(matches!(store.load(), Err(YamlOverrideError::Invalid(_))));
+    fs::remove_dir_all(root).unwrap();
+}

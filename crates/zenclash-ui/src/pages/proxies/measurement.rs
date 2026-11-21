@@ -295,7 +295,9 @@ impl ProxiesPage {
                         this.error = Some(error);
                     }
                 });
-                this.prepare_search(cx);
+                if this.should_refresh_search_on_delay() {
+                    this.prepare_search(cx);
+                }
                 cx.notify();
             });
         })
@@ -451,7 +453,7 @@ impl ProxiesPage {
                         cx.notify();
                         return false;
                     }
-                    if !this.search_query.is_empty() {
+                    if this.should_refresh_search_on_delay() {
                         this.prepare_search(cx);
                     }
                     cx.notify();
@@ -498,7 +500,7 @@ impl ProxiesPage {
                 this.error = Some(error);
             }
         });
-        if !self.search_query.is_empty() {
+        if self.should_refresh_search_on_delay() {
             self.prepare_search(cx);
         }
         cx.notify();

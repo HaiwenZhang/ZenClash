@@ -146,9 +146,8 @@ pub(in super::super) async fn reload_effective(
     controlled: ControlledConfigStore,
     application_commands: &ApplicationCommands,
 ) -> Result<CoreApplyOutcome, String> {
-    let overrides = application_commands.enabled_overrides().await?;
     application_commands
-        .reapply_with_overrides(controlled, overrides)
+        .reapply_current(controlled)
         .await
         .and_then(|outcome| {
             outcome.ok_or_else(|| zenclash_i18n::text("profiles.errors.not_applied"))

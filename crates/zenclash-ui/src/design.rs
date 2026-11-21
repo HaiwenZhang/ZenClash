@@ -15,6 +15,14 @@ const DARK_RAISED: u32 = 0x0021_3342;
 const DARK_BORDER: u32 = 0x002E_475A;
 const DARK_FOREGROUND: u32 = 0x00EC_F2F8;
 const DARK_MUTED_FOREGROUND: u32 = 0x00A8_B7C6;
+const DARK_SIGNAL_FOREGROUND: u32 = 0x0003_110F;
+const DARK_SUCCESS: u32 = 0x0043_C98B;
+const DARK_SUCCESS_FOREGROUND: u32 = 0x0004_140D;
+const DARK_WARNING_FOREGROUND: u32 = 0x0021_1600;
+const DARK_DANGER_FOREGROUND: u32 = 0x0026_0504;
+const DARK_INFO: u32 = 0x0062_A8FF;
+const DARK_SIDEBAR: u32 = 0x0013_1C23;
+const DARK_SIDEBAR_ACCENT: u32 = 0x0016_3B3B;
 const LIGHT_CANVAS: u32 = 0x00F0_FCF7;
 pub(crate) const LIGHT_PANEL: u32 = 0x00FF_FFFF;
 const LIGHT_RAISED: u32 = 0x00F1_F7F9;
@@ -25,7 +33,9 @@ const LIGHT_SIGNAL: u32 = 0x000B_7A71;
 const LIGHT_UPLINK: u32 = 0x009B_650E;
 const LIGHT_SUCCESS: u32 = 0x0016_7956;
 const LIGHT_DANGER: u32 = 0x00BD_3F3F;
+const LIGHT_INFO: u32 = 0x0024_6FDD;
 const LIGHT_SIDEBAR: u32 = 0x00F7_FDFB;
+const LIGHT_SIDEBAR_ACCENT: u32 = 0x00DA_F9EC;
 const LIGHT_MINT: u32 = 0x0000_CFA6;
 
 /// Converts a packed RGB value into GPUI's HSLA representation.
@@ -74,12 +84,20 @@ pub fn apply_zen_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut Ap
             LIGHT_MUTED_INK
         });
         let signal = color(if dark { SIGNAL_CYAN } else { LIGHT_SIGNAL });
-        let signal_foreground = color(if dark { 0x0003_110F } else { LIGHT_PANEL });
+        let signal_foreground = color(if dark {
+            DARK_SIGNAL_FOREGROUND
+        } else {
+            LIGHT_PANEL
+        });
         let amber = color(if dark { UPLINK_AMBER } else { LIGHT_UPLINK });
         let coral = color(if dark { FAULT_CORAL } else { LIGHT_DANGER });
-        let success = color(if dark { 0x0043_C98B } else { LIGHT_SUCCESS });
-        let sidebar = color(if dark { 0x0013_1C23 } else { LIGHT_SIDEBAR });
-        let sidebar_accent = color(if dark { 0x0016_3B3B } else { 0x00DA_F9EC });
+        let success = color(if dark { DARK_SUCCESS } else { LIGHT_SUCCESS });
+        let sidebar = color(if dark { DARK_SIDEBAR } else { LIGHT_SIDEBAR });
+        let sidebar_accent = color(if dark {
+            DARK_SIDEBAR_ACCENT
+        } else {
+            LIGHT_SIDEBAR_ACCENT
+        });
 
         configure_theme_metrics(theme);
 
@@ -109,20 +127,32 @@ pub fn apply_zen_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut Ap
         colors.accent = raised;
         colors.accent_foreground = foreground;
         colors.success = success;
-        colors.success_foreground = color(0x0004_140D);
+        colors.success_foreground = color(if dark {
+            DARK_SUCCESS_FOREGROUND
+        } else {
+            LIGHT_PANEL
+        });
         colors.success_hover = success.opacity(0.84);
         colors.success_active = success.opacity(0.72);
         colors.warning = amber;
-        colors.warning_foreground = color(0x0021_1600);
+        colors.warning_foreground = color(if dark {
+            DARK_WARNING_FOREGROUND
+        } else {
+            LIGHT_PANEL
+        });
         colors.warning_hover = amber.opacity(0.84);
         colors.warning_active = amber.opacity(0.72);
         colors.danger = coral;
-        colors.danger_foreground = color(0x0026_0504);
+        colors.danger_foreground = color(if dark {
+            DARK_DANGER_FOREGROUND
+        } else {
+            LIGHT_PANEL
+        });
         colors.danger_hover = coral.opacity(0.84);
         colors.danger_active = coral.opacity(0.72);
-        let info = color(if dark { 0x0062_A8FF } else { 0x0024_6FDD });
+        let info = color(if dark { DARK_INFO } else { LIGHT_INFO });
         colors.info = info;
-        colors.info_foreground = color(LIGHT_PANEL);
+        colors.info_foreground = color(if dark { DEEP_INK } else { LIGHT_PANEL });
         colors.info_hover = info.opacity(0.84);
         colors.info_active = info.opacity(0.72);
         colors.progress_bar = signal;
@@ -217,8 +247,12 @@ fn relative_luminance(rgb: u32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DARK_FOREGROUND, DARK_MUTED_FOREGROUND, DEEP_INK, LIGHT_CANVAS, LIGHT_INK, LIGHT_MUTED_INK,
-        LIGHT_SIGNAL, SIGNAL_CYAN, contrast_ratio, throughput_activity_percent,
+        DARK_DANGER_FOREGROUND, DARK_FOREGROUND, DARK_INFO, DARK_MUTED_FOREGROUND, DARK_PANEL,
+        DARK_RAISED, DARK_SIDEBAR, DARK_SIDEBAR_ACCENT, DARK_SIGNAL_FOREGROUND, DARK_SUCCESS,
+        DARK_SUCCESS_FOREGROUND, DARK_WARNING_FOREGROUND, DEEP_INK, FAULT_CORAL, LIGHT_CANVAS,
+        LIGHT_DANGER, LIGHT_INFO, LIGHT_INK, LIGHT_MUTED_INK, LIGHT_PANEL, LIGHT_RAISED,
+        LIGHT_SIDEBAR, LIGHT_SIDEBAR_ACCENT, LIGHT_SIGNAL, LIGHT_SUCCESS, LIGHT_UPLINK,
+        SIGNAL_CYAN, UPLINK_AMBER, color, contrast_ratio, throughput_activity_percent,
     };
 
     #[gpui_kit::test]
@@ -231,6 +265,7 @@ mod tests {
             cx.update(|cx| {
                 super::apply_zen_theme(mode, None, cx);
                 let theme = cx.theme();
+                let dark = mode.is_dark();
                 assert_eq!(theme.group_box, theme.secondary);
                 assert_eq!(theme.group_box_foreground, theme.foreground);
                 assert_ne!(theme.info, theme.primary);
@@ -238,7 +273,77 @@ mod tests {
                 assert_eq!(theme.tab_active_foreground, theme.primary);
                 assert_eq!(theme.tokens.button_primary.color, theme.primary);
                 assert_eq!(theme.button_primary_foreground, theme.primary_foreground);
+                assert_eq!(
+                    theme.success_foreground,
+                    color(if dark {
+                        DARK_SUCCESS_FOREGROUND
+                    } else {
+                        LIGHT_PANEL
+                    })
+                );
+                assert_eq!(
+                    theme.warning_foreground,
+                    color(if dark {
+                        DARK_WARNING_FOREGROUND
+                    } else {
+                        LIGHT_PANEL
+                    })
+                );
+                assert_eq!(
+                    theme.danger_foreground,
+                    color(if dark {
+                        DARK_DANGER_FOREGROUND
+                    } else {
+                        LIGHT_PANEL
+                    })
+                );
+                assert_eq!(
+                    theme.info_foreground,
+                    color(if dark { DEEP_INK } else { LIGHT_PANEL })
+                );
             });
+        }
+    }
+
+    #[test]
+    fn all_semantic_foreground_background_pairs_meet_wcag_aa_in_both_themes() {
+        let pairs = [
+            ("light.foreground/background", LIGHT_INK, LIGHT_CANVAS),
+            ("light.foreground/panel", LIGHT_INK, LIGHT_PANEL),
+            ("light.foreground/raised", LIGHT_INK, LIGHT_RAISED),
+            ("light.foreground/sidebar", LIGHT_INK, LIGHT_SIDEBAR),
+            ("light.muted/background", LIGHT_MUTED_INK, LIGHT_CANVAS),
+            ("light.muted/panel", LIGHT_MUTED_INK, LIGHT_PANEL),
+            ("light.muted/raised", LIGHT_MUTED_INK, LIGHT_RAISED),
+            ("light.muted/sidebar", LIGHT_MUTED_INK, LIGHT_SIDEBAR),
+            ("light.primary", LIGHT_PANEL, LIGHT_SIGNAL),
+            ("light.success", LIGHT_PANEL, LIGHT_SUCCESS),
+            ("light.warning", LIGHT_PANEL, LIGHT_UPLINK),
+            ("light.danger", LIGHT_PANEL, LIGHT_DANGER),
+            ("light.info", LIGHT_PANEL, LIGHT_INFO),
+            ("light.sidebar_accent", LIGHT_SIGNAL, LIGHT_SIDEBAR_ACCENT),
+            ("dark.foreground/background", DARK_FOREGROUND, DEEP_INK),
+            ("dark.foreground/panel", DARK_FOREGROUND, DARK_PANEL),
+            ("dark.foreground/raised", DARK_FOREGROUND, DARK_RAISED),
+            ("dark.foreground/sidebar", DARK_FOREGROUND, DARK_SIDEBAR),
+            ("dark.muted/background", DARK_MUTED_FOREGROUND, DEEP_INK),
+            ("dark.muted/panel", DARK_MUTED_FOREGROUND, DARK_PANEL),
+            ("dark.muted/raised", DARK_MUTED_FOREGROUND, DARK_RAISED),
+            ("dark.muted/sidebar", DARK_MUTED_FOREGROUND, DARK_SIDEBAR),
+            ("dark.primary", DARK_SIGNAL_FOREGROUND, SIGNAL_CYAN),
+            ("dark.success", DARK_SUCCESS_FOREGROUND, DARK_SUCCESS),
+            ("dark.warning", DARK_WARNING_FOREGROUND, UPLINK_AMBER),
+            ("dark.danger", DARK_DANGER_FOREGROUND, FAULT_CORAL),
+            ("dark.info", DEEP_INK, DARK_INFO),
+            ("dark.sidebar_accent", SIGNAL_CYAN, DARK_SIDEBAR_ACCENT),
+        ];
+
+        for (name, fg, bg) in pairs {
+            let ratio = contrast_ratio(fg, bg);
+            assert!(
+                ratio >= 4.5,
+                "semantic color pair {name} failed WCAG AA contrast: {ratio:.2}:1 (< 4.5:1)"
+            );
         }
     }
 

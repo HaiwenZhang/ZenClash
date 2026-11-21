@@ -462,3 +462,92 @@ async fn startup_public_entry_rejects_external_controller_before_service_mutatio
     assert_eq!(fixture.session.generation(), 0);
     assert!(!fixture.store.runtime_path().exists());
 }
+
+#[tokio::test]
+async fn failed_service_startup_does_not_leak_session_listener_fallbacks() {
+    let fixture = Fixture::new();
+    let held_port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = held_port.local_addr().unwrap().port();
+    std::fs::write(
+        &fixture.profile,
+        format!(
+            "mixed-port: {port}\nallow-lan: false\nipv6: false\nmode: rule\nproxies: []\nrules:\n  - MATCH,DIRECT\n"
+        ),
+    )
+    .unwrap();
+
+    let lease = fixture
+        .store
+        .acquire_write_lease_for_paths(vec![fixture.root.clone()])
+        .await
+        .unwrap();
+    let store = fixture.store.with_write_lease(&lease);
+    let committed = fixture.session.transition.clone().lock_owned().await;
+    let outcome = fixture
+        .session
+        .initialize_service_admitted(
+            &store,
+            fixture.runtime.clone(),
+            committed,
+            CommittedConfig {
+                profile: Some(fixture.profile.clone()),
+                overrides: Vec::new(),
+            },
+            async { Err(MihomoError::RuntimeOutcomeUnknown) },
+        )
+        .await
+        .unwrap();
+    drop(lease);
+
+    assert!(outcome.saved().is_none());
+    assert!(outcome.failure().is_some());
+    assert_eq!(outcome.listener_fallbacks().len(), 1);
+    assert_eq!(outcome.listener_fallbacks()[0].listener, "mixed-port");
+    assert_ne!(outcome.listener_fallbacks()[0].current, port);
+
+    // Materializing after the failed startup must keep the original configured port,
+    // proving the rolled-back startup did not leak temporary session fallbacks.
+    fixture.store.materialize(&fixture.profile).unwrap();
+    let rendered: serde_yaml::Value =
+        serde_yaml::from_str(&std::fs::read_to_string(fixture.store.runtime_path()).unwrap())
+            .unwrap();
+    assert_eq!(rendered["mixed-port"].as_u64(), Some(u64::from(port)));
+
+    // Once service startup actually succeeds on a fresh runtime session, the session
+    // fallback is committed and retained by the same store.
+    let fresh_runtime = RuntimeSession::new(fixture.service.clone(), fixture.root.clone());
+    let lease = fixture
+        .store
+        .acquire_write_lease_for_paths(vec![fixture.root.clone()])
+        .await
+        .unwrap();
+    let store = fixture.store.with_write_lease(&lease);
+    let committed = fixture.session.transition.clone().lock_owned().await;
+    let accepted = fixture
+        .session
+        .initialize_service_admitted(
+            &store,
+            fresh_runtime,
+            committed,
+            CommittedConfig {
+                profile: Some(fixture.profile.clone()),
+                overrides: Vec::new(),
+            },
+            async { Ok(()) },
+        )
+        .await
+        .unwrap();
+    drop(lease);
+    assert!(accepted.saved().is_some());
+    let committed_port = accepted.listener_fallbacks()[0].current;
+    assert_ne!(committed_port, port);
+    fixture.store.materialize(&fixture.profile).unwrap();
+    let rendered_after_commit: serde_yaml::Value =
+        serde_yaml::from_str(&std::fs::read_to_string(fixture.store.runtime_path()).unwrap())
+            .unwrap();
+    assert_eq!(
+        rendered_after_commit["mixed-port"].as_u64(),
+        Some(u64::from(committed_port))
+    );
+    drop(held_port);
+}

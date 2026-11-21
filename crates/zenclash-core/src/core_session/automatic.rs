@@ -25,6 +25,10 @@ impl CoreSession {
         &self,
         capture: &TrafficCaptureSession,
     ) -> Result<bool, CoreSessionError> {
+        self.ensure_not_shutting_down()?;
+        if !self.is_managed() || self.lifecycle.read().stop_requested {
+            return Ok(false);
+        }
         let session = self.clone();
         let capture = capture.clone();
         tokio::spawn(async move {
@@ -97,6 +101,13 @@ impl CoreSession {
         &self,
         capture: &TrafficCaptureSession,
     ) -> Result<bool, CoreSessionError> {
+        self.ensure_not_shutting_down()?;
+        if !self.network_suspended.load(Ordering::Acquire)
+            || !self.is_managed()
+            || self.lifecycle.read().stop_requested
+        {
+            return Ok(false);
+        }
         let session = self.clone();
         let capture = capture.clone();
         tokio::spawn(async move {
@@ -252,5 +263,107 @@ mod tests {
             session.lifecycle_snapshot().phase,
             CoreLifecyclePhase::External
         );
+    }
+
+    #[tokio::test]
+    async fn resume_after_network_fast_path_skips_pac_pause_and_locks_when_not_suspended() {
+        let home = std::env::temp_dir().join(format!(
+            "zenclash-resume-fast-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let process = ManagedCoreProcess::prepare_stopped(crate::CoreLaunchConfig {
+            kind: CoreKind::Mihomo,
+            binary: home.join("ordinary-mihomo"),
+            config_file: home.join("missing-source.yaml"),
+            home_dir: home.clone(),
+            endpoint: crate::MihomoEndpoint::default(),
+            controller_override: None,
+        });
+        let session = CoreSession::open(
+            CoreKind::Mihomo,
+            MihomoClient::from_process(process).unwrap(),
+        )
+        .unwrap();
+        let capture = TrafficCaptureSession::new(
+            session.clone(),
+            ControlledConfigStore::new(home.join("controlled")),
+            None,
+            None,
+        );
+        let state_rx = session.subscribe_run_state();
+        let transition_guard = session.transition.lock().await;
+
+        let resumed = tokio::time::timeout(
+            Duration::from_millis(200),
+            session.resume_after_network(&capture),
+        )
+        .await
+        .expect("fast-path resume must not block on transition lock")
+        .unwrap();
+        assert!(!resumed);
+        assert!(
+            !state_rx.has_changed().unwrap(),
+            "fast-path resume must not pause PAC or publish run-state transitions"
+        );
+        assert!(!session.run_state().op_in_flight);
+
+        drop(transition_guard);
+        session.request_shutdown();
+        assert!(matches!(
+            session.resume_after_network(&capture).await,
+            Err(CoreSessionError::ShuttingDown)
+        ));
+    }
+
+    #[tokio::test]
+    async fn suspend_for_network_fast_path_skips_pac_pause_and_locks_when_stopped() {
+        let home = std::env::temp_dir().join(format!(
+            "zenclash-suspend-fast-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let process = ManagedCoreProcess::prepare_stopped(crate::CoreLaunchConfig {
+            kind: CoreKind::Mihomo,
+            binary: home.join("ordinary-mihomo"),
+            config_file: home.join("missing-source.yaml"),
+            home_dir: home.clone(),
+            endpoint: crate::MihomoEndpoint::default(),
+            controller_override: None,
+        });
+        let session = CoreSession::open(
+            CoreKind::Mihomo,
+            MihomoClient::from_process(process).unwrap(),
+        )
+        .unwrap();
+        session.lifecycle.write().stop_requested = true;
+        let capture = TrafficCaptureSession::new(
+            session.clone(),
+            ControlledConfigStore::new(home.join("controlled")),
+            None,
+            None,
+        );
+        let state_rx = session.subscribe_run_state();
+        let _transition_guard = session.transition.lock().await;
+
+        let suspended = tokio::time::timeout(
+            Duration::from_millis(200),
+            session.suspend_for_network(&capture),
+        )
+        .await
+        .expect("fast-path suspend must not block on transition lock")
+        .unwrap();
+        assert!(!suspended);
+        assert!(
+            !state_rx.has_changed().unwrap(),
+            "fast-path suspend must not pause PAC or publish run-state transitions"
+        );
+        assert!(!session.run_state().op_in_flight);
     }
 }

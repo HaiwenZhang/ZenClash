@@ -309,6 +309,9 @@ impl ProfileApplication {
         &self,
         change: ProfileChange,
     ) -> Result<PreparedProfileChange, ProfilePreparationError> {
+        // Perform remote downloads and payload validation outside DataWriteLease
+        // so slow network requests never block concurrent restores or store writes.
+        let prepared_input = self.prepare_source_input(change).await?;
         let expected_runtime = self.session.runtime_revision();
         let mut scopes = self.session.write_scopes();
         scopes.extend([
@@ -321,7 +324,7 @@ impl ProfileApplication {
             .acquire_paths_async(scopes)
             .await
             .map_err(|error| ProfilePreparationError {
-                last_known_good: None,
+                last_known_good: prepared_input.last_known_good(),
                 cause: ProfileApplicationError::Task(error),
             })?;
         let application = Self {
@@ -331,7 +334,8 @@ impl ProfileApplication {
             #[cfg(test)]
             commit_gate: self.commit_gate.clone(),
         };
-        let (source_candidate, overrides) = application.stage_change(change).await?;
+        let (source_candidate, overrides) =
+            application.stage_prepared_input(prepared_input).await?;
         let last_known_good = source_candidate.last_known_good();
         let runtime = if source_candidate.changes_runtime()
             && self.session.kind() == crate::CoreKind::Mihomo

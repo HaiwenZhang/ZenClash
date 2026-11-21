@@ -37,6 +37,22 @@ impl ServiceTunPersistence {
     }
 }
 
+pub(crate) struct PreparedServiceStartup {
+    payload: String,
+    next_session_fallbacks: BTreeMap<String, SessionListenerFallback>,
+    listener_fallbacks: Vec<ListenerPortFallback>,
+}
+
+impl PreparedServiceStartup {
+    pub(crate) fn payload(&self) -> &str {
+        &self.payload
+    }
+
+    pub(crate) fn listener_fallbacks(&self) -> &[ListenerPortFallback] {
+        &self.listener_fallbacks
+    }
+}
+
 pub(crate) struct ServiceStartupPersistence(RuntimeCacheTransaction);
 
 impl ServiceStartupPersistence {
@@ -277,7 +293,7 @@ impl ControlledConfigStore {
         &self,
         profile: PathBuf,
         overrides: Vec<PathBuf>,
-    ) -> ControlledConfigResult<(String, Vec<ListenerPortFallback>)> {
+    ) -> ControlledConfigResult<PreparedServiceStartup> {
         let store = self.clone();
         tokio::task::spawn_blocking(move || {
             let payload = store.effective_with_overrides(profile, &overrides)?;
@@ -291,10 +307,10 @@ impl ControlledConfigStore {
             if payload.len() > MAX_PROFILE_BYTES {
                 return Err(ControlledConfigError::TooLarge);
             }
-            *store.session_listener_fallbacks.lock() = next_session;
-            Ok((
+            Ok(PreparedServiceStartup {
                 payload,
-                resolved
+                next_session_fallbacks: next_session,
+                listener_fallbacks: resolved
                     .into_iter()
                     .map(|(listener, fallback)| ListenerPortFallback {
                         listener,
@@ -302,7 +318,7 @@ impl ControlledConfigStore {
                         current: fallback.current,
                     })
                     .collect(),
-            ))
+            })
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))?
@@ -310,12 +326,15 @@ impl ControlledConfigStore {
 
     pub(crate) async fn stage_service_startup_payload(
         &self,
-        payload: String,
+        startup: PreparedServiceStartup,
     ) -> ControlledConfigResult<super::ServiceStartupPersistence> {
         let store = self.clone();
         tokio::task::spawn_blocking(move || {
             store
-                .stage_runtime_payload(&payload)
+                .stage_runtime_payload_with_session(
+                    &startup.payload,
+                    Some(startup.next_session_fallbacks),
+                )
                 .map(ServiceStartupPersistence)
         })
         .await
