@@ -90,7 +90,7 @@ impl RenderOnce for WavePercentage {
             .flex_shrink_0()
             .rounded_full()
             .border_1()
-            .border_color(crate::design::brand_accent(cx.theme()).opacity(0.65))
+            .border_color(crate::foundation::design::brand_accent(cx.theme()).opacity(0.65))
             .bg(cx.theme().group_box)
             .child(waves)
             .child(
@@ -126,7 +126,7 @@ struct WaveSurface {
 
 impl RenderOnce for WaveSurface {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let color = crate::design::brand_accent(cx.theme());
+        let color = crate::foundation::design::brand_accent(cx.theme());
         canvas(
             |_, _, _| (),
             move |bounds, (), window, _| {

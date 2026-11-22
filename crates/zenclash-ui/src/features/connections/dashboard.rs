@@ -1,0 +1,1176 @@
+use super::*;
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::{
+    chart::{AreaChart, PieChart},
+    progress::Progress,
+};
+use gpui_kit::{InteractiveElement, StatefulInteractiveElement, TestSupportExt};
+
+impl ConnectionsView {
+    fn update_projection_immediate(&mut self, cx: &mut Context<Self>) {
+        let mut data = match self
+            .paused_snapshot
+            .as_ref()
+            .or(self.live_snapshot.as_ref())
+        {
+            Some(snapshot) => snapshot.clone(),
+            None => {
+                self.release_presentation();
+                return;
+            }
+        };
+        let Some(runtime_context) = self.runtime_context.clone() else {
+            return;
+        };
+        if self.paused_snapshot.is_none() {
+            self.timeline.observe(
+                runtime_context.configuration_generation,
+                data.clone(),
+                std::time::Instant::now(),
+            );
+        }
+        self.history
+            .observe(runtime_context.configuration_generation, &data);
+        if self.show_closed {
+            data = self.timeline.closed();
+        }
+
+        self.worker.cancel();
+        let show_closed = self.show_closed;
+        let policy = self.worker.policy.clone();
+        let query = self.query.clone();
+        let transport = self.transport;
+        let sort = self.sort;
+        let expected_snapshot = data.clone();
+        let expected_policy = policy.clone();
+        let expected_query = query.clone();
+        let task = self.runtime.spawn_blocking(move || {
+            let mut order = present_connections(&data.connections, &query, transport, sort);
+            if let Some(policy) = &policy {
+                order.retain(|&index| data.connections[index].chains.last() == Some(policy));
+            }
+            let policies = data
+                .connections
+                .iter()
+                .filter_map(|connection| connection.chains.last().map(String::as_str))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            let (processes, protocols) = connection_distributions(&data.connections);
+            let by_id = data
+                .connections
+                .iter()
+                .enumerate()
+                .map(|(index, connection)| (connection.id.clone(), index))
+                .collect();
+            let now = chrono::Utc::now();
+            let durations = data
+                .connections
+                .iter()
+                .map(|connection| projection::connection_duration(&connection.start, now))
+                .collect();
+            projection::ConnectionProjection {
+                snapshot: data,
+                query,
+                transport,
+                sort,
+                order,
+                processes,
+                protocols,
+                by_id,
+                durations,
+                policies,
+            }
+        });
+        self.projecting = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = task.await.map_err(|error| error.to_string());
+            let _ = this.update(cx, |this, cx| {
+                let current_snapshot = if show_closed {
+                    Some(this.timeline.closed())
+                } else {
+                    this.paused_snapshot
+                        .as_ref()
+                        .or(this.live_snapshot.as_ref())
+                        .cloned()
+                };
+                let still_current = this.runtime_context.as_ref() == Some(&runtime_context)
+                    && this.show_closed == show_closed
+                    && this.worker.policy == expected_policy
+                    && this.query == expected_query
+                    && this.transport == transport
+                    && this.sort == sort
+                    && current_snapshot.as_ref().is_some_and(|snapshot| {
+                        std::sync::Arc::ptr_eq(snapshot, &expected_snapshot)
+                    });
+                if !still_current {
+                    return;
+                }
+                this.worker.cancel();
+                this.projecting = false;
+                match result {
+                    Ok(projection) => {
+                        this.projection = Some(projection);
+                    }
+                    Err(error) => cx.emit(ConnectionEvent::PresentationFailed(
+                        zenclash_i18n::text_with(
+                            "connections.errors.filter_task",
+                            &[("error", error)],
+                        ),
+                    )),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(in crate::features) fn render_connection_close_all(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Button {
+        let empty = self
+            .live_snapshot
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.connections.is_empty());
+
+        Button::new("close-all-connections")
+            .icon(gpui_kit::assets::IconName::Square)
+            .label(zenclash_i18n::text("connections.actions.close_all"))
+            .outline()
+            .danger()
+            .h_10()
+            .small()
+            .disabled(
+                self.show_closed
+                    || empty
+                    || !self.close_allowed
+                    || !self.closing_connections.is_empty(),
+            )
+            .on_click(
+                cx.listener(|this, _, window, cx| this.confirm_connection_close(None, window, cx)),
+            )
+    }
+
+    pub(super) fn connection_dashboard(
+        &self,
+        compact: bool,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let Some(projection) = &self.projection else {
+            return empty_state(
+                zenclash_i18n::text(if self.projecting {
+                    "connections.filtering"
+                } else {
+                    "connections.empty.active"
+                }),
+                theme,
+            )
+            .into_any_element();
+        };
+        let data = &projection.snapshot;
+        let metrics = self
+            .paused_snapshot
+            .as_ref()
+            .or(self.live_snapshot.as_ref())
+            .unwrap_or(data);
+        let page = list_page(
+            projection.order.len(),
+            self.page_index,
+            CONNECTIONS_PER_PAGE,
+        );
+        let selected = self
+            .inspected_connection
+            .as_ref()
+            .and_then(|id| projection.by_id.get(id))
+            .and_then(|&index| data.connections.get(index));
+        let mut inspector = panel(theme)
+            .id("connection-inspector")
+            .test_support()
+            .gap_2()
+            .min_h_0()
+            .w_full()
+            .max_w_full()
+            .flex_shrink_0()
+            .child(
+                div()
+                    .text_lg()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .child(zenclash_i18n::text("connections.details.title")),
+            );
+        if let Some(connection) = selected {
+            let id = connection.id.clone();
+            let host = if connection.metadata.host.is_empty() {
+                &connection.metadata.destination_ip
+            } else {
+                &connection.metadata.host
+            };
+            inspector = inspector
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xl()
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .child(endpoint_label(host, &connection.metadata.destination_port)),
+                        )
+                        .child(div().text_sm().text_color(theme.muted_foreground).child(
+                            if connection.metadata.process.is_empty() {
+                                zenclash_i18n::text("connections.unknown_process")
+                            } else {
+                                connection.metadata.process.clone()
+                            },
+                        )),
+                )
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .pt_2()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .child(connection_detail(
+                            zenclash_i18n::text("connections.details.source"),
+                            endpoint_label(
+                                &connection.metadata.source_ip,
+                                &connection.metadata.source_port,
+                            ),
+                            theme,
+                        ))
+                        .child(connection_detail(
+                            zenclash_i18n::text("connections.details.destination"),
+                            endpoint_label(
+                                if connection.metadata.destination_ip.is_empty() {
+                                    host
+                                } else {
+                                    &connection.metadata.destination_ip
+                                },
+                                &connection.metadata.destination_port,
+                            ),
+                            theme,
+                        ))
+                        .child(connection_detail(
+                            zenclash_i18n::text("connections.columns.protocol"),
+                            connection.metadata.network.clone(),
+                            theme,
+                        ))
+                        .child(connection_detail(
+                            zenclash_i18n::text("connections.ui.upload"),
+                            format_bytes(connection.upload),
+                            theme,
+                        ))
+                        .child(connection_detail(
+                            zenclash_i18n::text("connections.ui.download"),
+                            format_bytes(connection.download),
+                            theme,
+                        ))
+                        .child(connection_detail(
+                            zenclash_i18n::text("connections.columns.duration"),
+                            projection
+                                .by_id
+                                .get(&connection.id)
+                                .map(|&index| projection.durations[index].clone())
+                                .unwrap_or_else(|| "—".into()),
+                            theme,
+                        )),
+                )
+                .child(
+                    connection_detail_section("connections.details.rule", theme)
+                        .child(connection_detail(
+                            zenclash_i18n::text("connections.details.rule_type"),
+                            connection.rule.clone(),
+                            theme,
+                        ))
+                        .child(connection_detail(
+                            zenclash_i18n::text("connections.details.rule_content"),
+                            connection.rule_payload.clone(),
+                            theme,
+                        )),
+                )
+                .child(
+                    v_flex().gap_2().children(
+                        [
+                            (
+                                "unified.connections.inbound",
+                                connection.metadata.kind.clone(),
+                            ),
+                            ("unified.connections.host", connection.metadata.host.clone()),
+                            ("unified.connections.started", connection.start.clone()),
+                            (
+                                "unified.connections.process",
+                                connection.metadata.process.clone(),
+                            ),
+                            (
+                                "unified.connections.path",
+                                connection.metadata.process_path.clone(),
+                            ),
+                            ("unified.connections.id", connection.id.clone()),
+                        ]
+                        .into_iter()
+                        .map(|(key, value)| {
+                            connection_detail(
+                                zenclash_i18n::text(key),
+                                if value.is_empty() {
+                                    "—".into()
+                                } else {
+                                    value
+                                },
+                                theme,
+                            )
+                        }),
+                    ),
+                )
+                .child(
+                    connection_detail_section("connections.details.route", theme)
+                        .child(connection_route(connection, host, theme)),
+                )
+                .child(
+                    h_flex().child(
+                        Button::new(connection_element_id("close-connection", &id))
+                            .icon(gpui_kit::assets::IconName::Square)
+                            .label(zenclash_i18n::text("connections.actions.close"))
+                            .danger()
+                            .outline()
+                            .small()
+                            .h_10()
+                            .disabled(
+                                self.show_closed
+                                    || !self.close_allowed
+                                    || self.closing_connections.contains(&id),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.confirm_connection_close(Some(id.clone()), window, cx)
+                            })),
+                    ),
+                );
+        } else {
+            inspector = inspector.child(empty_state(
+                zenclash_i18n::text("connections.empty.details"),
+                theme,
+            ));
+        }
+        let mut inline_details = Some(inspector);
+        let tabs = h_flex()
+            .gap_1()
+            .children([false, true].into_iter().map(|closed| {
+                use gpui_kit::component::Selectable as _;
+                let count = if closed {
+                    self.timeline.closed().connections.len()
+                } else {
+                    self.timeline.active_count()
+                };
+                Button::new(if closed {
+                    "connections-closed"
+                } else {
+                    "connections-active"
+                })
+                .label(format!(
+                    "{}  {count}",
+                    zenclash_i18n::text(if closed {
+                        "unified.connections.closed"
+                    } else {
+                        "unified.connections.active"
+                    })
+                ))
+                .outline()
+                .selected(self.show_closed == closed)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.show_closed = closed;
+                    this.page_index = 0;
+                    this.paused_snapshot = None;
+                    this.update_projection_immediate(cx);
+                    cx.notify();
+                }))
+            }));
+        let mut table = panel(theme)
+            .id("connections-table")
+            .test_support()
+            .gap_0()
+            .flex_1()
+            .min_h(gpui_kit::rems(18.))
+            .w_full()
+            .min_w_0()
+            .child(tabs)
+            .child(
+                h_flex()
+                    .gap_3()
+                    .flex_wrap()
+                    .child(
+                        div().flex_1().min_w(gpui_kit::rems(12.)).child(
+                            Input::new(&self.filter_input)
+                                .prefix(gpui_kit::component::Icon::new(IconName::Search))
+                                .small()
+                                .h_10(),
+                        ),
+                    )
+                    .child({
+                        let owner = cx.entity().downgrade();
+                        let selected = self.worker.policy.clone();
+                        let policies = projection.policies.clone();
+                        Button::new("connections-policy-filter")
+                            .outline()
+                            .icon(IconName::ChevronDown)
+                            .label(selected.clone().unwrap_or_else(|| {
+                                zenclash_i18n::text("unified.rules.all_policies")
+                            }))
+                            .dropdown_menu(move |mut menu, _, _| {
+                                for value in
+                                    std::iter::once(None).chain(policies.iter().cloned().map(Some))
+                                {
+                                    let owner = owner.clone();
+                                    menu = menu.item(
+                                        PopupMenuItem::new(value.clone().unwrap_or_else(|| {
+                                            zenclash_i18n::text("unified.rules.all_policies")
+                                        }))
+                                        .checked(value == selected)
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                let _ = owner.update(cx, |view, cx| {
+                                                    view.worker.policy = value.clone();
+                                                    view.page_index = 0;
+                                                    view.update_projection_immediate(cx);
+                                                    cx.notify();
+                                                });
+                                            },
+                                        ),
+                                    );
+                                }
+                                menu
+                            })
+                    })
+                    .child(self.render_connection_options(cx)),
+            )
+            .when(!compact, |table| {
+                table.child(connection_columns(theme).mt_3())
+            });
+        let mut rows = v_flex().gap_0().when(projection.order.is_empty(), |this| {
+            this.child(empty_state(
+                zenclash_i18n::text(if data.connections.is_empty() {
+                    "connections.empty.active"
+                } else {
+                    "connections.empty.filtered"
+                }),
+                theme,
+            ))
+        });
+        for &index in &projection.order[page.start..page.end] {
+            let connection = &data.connections[index];
+            let id = connection.id.clone();
+            let detail_id = id.clone();
+            let rule_label = if connection.rule.is_empty() {
+                "—".to_owned()
+            } else if connection.rule_payload.is_empty() {
+                connection.rule.clone()
+            } else {
+                format!("{} ({})", connection.rule, connection.rule_payload)
+            };
+            let host = if connection.metadata.host.is_empty() {
+                &connection.metadata.destination_ip
+            } else {
+                &connection.metadata.host
+            };
+            let active = self.inspected_connection.as_deref() == Some(id.as_str());
+            let rates = if self.show_closed {
+                Some([0, 0])
+            } else {
+                self.timeline.rates(&id)
+            };
+            let duration = if self.show_closed {
+                self.timeline.duration(&id).unwrap_or("—").to_owned()
+            } else {
+                projection.durations[index].clone()
+            };
+            rows = rows.child(
+                h_flex()
+                    .flex_wrap()
+                    .when(compact, |row| row.gap_2().py_3())
+                    .gap_3()
+                    .min_h(gpui_kit::rems(2.875))
+                    .py_1()
+                    .px_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .when(active, |row| {
+                        row.rounded(theme.radius)
+                            .border_color(theme.table_active)
+                            .bg(theme.table_active)
+                    })
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .when(compact, |identity| identity.flex_none().w_full())
+                            .line_height(gpui_kit::relative(1.25))
+                            .child(
+                                Button::new(connection_element_id("connection-target", &id))
+                                    .label(host.clone())
+                                    .w_full()
+                                    .min_w_0()
+                                    .ghost()
+                                    .small()
+                                    .justify_start()
+                                    .icon(if active {
+                                        IconName::ChevronDown
+                                    } else {
+                                        IconName::ChevronRight
+                                    })
+                                    .on_click(cx.listener({
+                                        let id = id.clone();
+                                        move |this, _, _, cx| {
+                                            this.toggle_connection_details(id.clone(), cx)
+                                        }
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .truncate()
+                                    .child(format!(
+                                        "{} · {}",
+                                        if connection.metadata.process.is_empty() {
+                                            "—"
+                                        } else {
+                                            &connection.metadata.process
+                                        },
+                                        connection.metadata.source_ip
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w_16()
+                            .flex_shrink_0()
+                            .text_sm()
+                            .child(connection.metadata.network.to_uppercase()),
+                    )
+                    .child(
+                        div().w_24().flex_shrink_0().text_sm().truncate().child(
+                            connection
+                                .chains
+                                .iter()
+                                .rev()
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(" → "),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .id(connection_element_id("connection-rule", &id))
+                            .role(gpui_kit::Role::Status)
+                            .aria_label(rule_label.clone())
+                            .test_support()
+                            .w_24()
+                            .flex_shrink_0()
+                            .text_sm()
+                            .truncate()
+                            .child(rule_label),
+                    )
+                    .child(div().w_20().flex_shrink_0().text_sm().text_right().child(
+                        rates.map_or_else(
+                            || "—".into(),
+                            |rate| format!("↑ {}", zenclash_core::format_speed(rate[0])),
+                        ),
+                    ))
+                    .child(div().w_20().flex_shrink_0().text_sm().text_right().child(
+                        rates.map_or_else(
+                            || "—".into(),
+                            |rate| format!("↓ {}", zenclash_core::format_speed(rate[1])),
+                        ),
+                    ))
+                    .child(div().w_16().flex_shrink_0().text_sm().child(duration))
+                    .child(
+                        Button::new(connection_element_id("connection-details", &id))
+                            .label("⋯")
+                            .accessibility_label(zenclash_i18n::text(
+                                "connections.actions.show_details",
+                            ))
+                            .tooltip(zenclash_i18n::text("connections.actions.show_details"))
+                            .w_8()
+                            .flex_shrink_0()
+                            .ghost()
+                            .small()
+                            .bg(gpui_kit::transparent_black())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.toggle_connection_details(detail_id.clone(), cx)
+                            })),
+                    ),
+            );
+            if active && let Some(details) = inline_details.take() {
+                rows = rows.child(details);
+            }
+        }
+        table = table.child(
+            div()
+                .id("connection-table-viewport")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .child(rows)
+                .vertical_scrollbar(&self.scroll),
+        );
+        table = table.child(
+            h_flex()
+                .flex_wrap()
+                .gap_2()
+                .justify_between()
+                .pt_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(pagination_summary(page, projection.order.len())),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("previous-connections-page")
+                                .icon(IconName::ChevronLeft)
+                                .small()
+                                .outline()
+                                .label(zenclash_i18n::text("common.actions.previous_page"))
+                                .disabled(page.index == 0)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.set_connections_page(page.index.saturating_sub(1), cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("next-connections-page")
+                                .icon(IconName::ChevronRight)
+                                .small()
+                                .outline()
+                                .label(zenclash_i18n::text("common.actions.next_page"))
+                                .disabled(page.index + 1 >= page.count)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.set_connections_page(page.index + 1, cx)
+                                })),
+                        ),
+                ),
+        );
+        v_flex()
+            .h_full()
+            .gap_3()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .child(zenclash_i18n::text("unified.connections.analytics")),
+            )
+            .child(
+                v_flex()
+                    .id("connection-statistics")
+                    .test_support()
+                    .gap_3()
+                    .flex_shrink_0()
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .flex_wrap()
+                            .items_stretch()
+                            .child(connection_metric(
+                                IconName::Network,
+                                zenclash_i18n::text("connections.metrics.active"),
+                                metrics.connections.len().to_string(),
+                                self.history.points(0),
+                                theme.chart_1,
+                                0,
+                                theme,
+                            ))
+                            .child(connection_metric(
+                                IconName::ArrowUp,
+                                zenclash_i18n::text("connections.metrics.upload"),
+                                format_bytes(metrics.upload_total),
+                                self.history.points(1),
+                                theme.chart_2,
+                                1,
+                                theme,
+                            ))
+                            .child(connection_metric(
+                                IconName::ArrowDown,
+                                zenclash_i18n::text("connections.metrics.download"),
+                                format_bytes(metrics.download_total),
+                                self.history.points(2),
+                                theme.chart_1,
+                                2,
+                                theme,
+                            ))
+                            .child(connection_metric(
+                                IconName::Cpu,
+                                zenclash_i18n::text("connections.metrics.memory"),
+                                format_bytes(metrics.memory),
+                                self.history.points(3),
+                                theme.chart_1,
+                                3,
+                                theme,
+                            )),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .flex_wrap()
+                            .items_stretch()
+                            .child(distribution(
+                                "connections.charts.processes",
+                                &projection.processes,
+                                theme,
+                            ))
+                            .child(protocol_distribution(
+                                &projection.protocols,
+                                self.show_closed,
+                                theme,
+                            )),
+                    ),
+            )
+            .child(table)
+            .into_any_element()
+    }
+}
+
+type DistributionSeries = Vec<(String, u64)>;
+
+fn connection_distributions(
+    connections: &[zenclash_core::Connection],
+) -> (DistributionSeries, DistributionSeries) {
+    let mut processes = std::collections::BTreeMap::<&str, u64>::new();
+    let mut protocols = std::collections::BTreeMap::<String, u64>::new();
+    for connection in connections {
+        *processes
+            .entry(connection.metadata.process.as_str())
+            .or_default() += 1;
+        *protocols
+            .entry(connection.metadata.network.to_uppercase())
+            .or_default() += 1;
+    }
+    let mut processes = processes
+        .into_iter()
+        .map(|(name, count)| (name.to_owned(), count))
+        .collect::<Vec<_>>();
+    processes.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    processes.truncate(5);
+    (processes, protocols.into_iter().collect())
+}
+
+fn connection_route(
+    connection: &zenclash_core::Connection,
+    target: &str,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Div {
+    use gpui_kit::assets::IconName as RouteIcon;
+    // Mihomo appends a selector after its selected outbound has dialed. Display
+    // the reported chain in traffic direction, from outermost group to outlet.
+    // https://github.com/MetaCubeX/mihomo/blob/Meta/adapter/outboundgroup/selector.go
+    let mut steps = vec![(
+        RouteIcon::Laptop,
+        zenclash_i18n::text("connections.ui.local"),
+    )];
+    if connection.chains.is_empty() {
+        steps.push((RouteIcon::Server, "—".into()));
+    } else {
+        steps.extend(
+            connection
+                .chains
+                .iter()
+                .rev()
+                .map(|name| (RouteIcon::Server, name.clone())),
+        );
+    }
+    steps.push((
+        RouteIcon::Globe,
+        if target.is_empty() {
+            "—".into()
+        } else {
+            target.into()
+        },
+    ));
+    h_flex()
+        .gap_1()
+        .w_full()
+        .min_w_0()
+        .children(steps.into_iter().enumerate().map(|(index, (icon, name))| {
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_1()
+                .when(index > 0, |step| {
+                    step.child(
+                        gpui_kit::component::Icon::new(IconName::ArrowRight)
+                            .size_4()
+                            .text_color(theme.chart_1),
+                    )
+                })
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            h_flex()
+                                .size_9()
+                                .justify_center()
+                                .rounded(theme.radius)
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.secondary)
+                                .child(gpui_kit::component::Icon::new(icon).size_6()),
+                        )
+                        .child(
+                            div()
+                                .w_full()
+                                .text_xs()
+                                .text_center()
+                                .truncate()
+                                .child(name),
+                        ),
+                )
+        }))
+}
+
+fn endpoint_label(address: &str, port: &str) -> String {
+    if address.is_empty() {
+        return "—".into();
+    }
+    if port.is_empty() {
+        return address.to_owned();
+    }
+    if address.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{address}]:{port}")
+    } else {
+        format!("{address}:{port}")
+    }
+}
+
+fn connection_detail_section(title: &str, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
+    v_flex()
+        .gap_2()
+        .pt_3()
+        .border_t_1()
+        .border_color(theme.border)
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .child(zenclash_i18n::text(title)),
+        )
+}
+
+fn panel(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
+    v_flex()
+        .gap_3()
+        .p_4()
+        .border_1()
+        .border_color(theme.border)
+        .rounded(theme.radius_lg)
+        .bg(theme.group_box)
+}
+
+fn distribution(
+    title: &str,
+    values: &[(String, u64)],
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Div {
+    let maximum = values.iter().map(|value| value.1).max().unwrap_or(1).max(1);
+    panel(theme)
+        .flex_1()
+        .flex_grow(1.65)
+        .flex_basis(gpui_kit::rems(0.))
+        .min_w(gpui_kit::rems(30.))
+        .min_h(gpui_kit::rems(12.))
+        .child(
+            h_flex()
+                .gap_3()
+                .flex_wrap()
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .child(zenclash_i18n::text(title)),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(zenclash_i18n::text("connections.ui.process_hint")),
+                ),
+        )
+        .children(values.iter().map(|(label, count)| {
+            let label = if label.is_empty() {
+                zenclash_i18n::text("connections.unknown_process")
+            } else {
+                label.clone()
+            };
+            h_flex()
+                .gap_3()
+                .child(div().w_32().text_sm().truncate().child(label.clone()))
+                .child(
+                    Progress::new(connection_element_id("process-share", &label))
+                        .accessibility_label(label)
+                        .value(*count as f32 / maximum as f32 * 100.)
+                        .color(theme.chart_1)
+                        .h_3()
+                        .flex_1(),
+                )
+                .child(div().w_10().text_sm().text_right().child(count.to_string()))
+        }))
+}
+
+fn protocol_distribution(
+    values: &[(String, u64)],
+    show_closed: bool,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Div {
+    let colors = [
+        theme.chart_1,
+        theme.chart_1.opacity(0.65),
+        theme.muted_foreground,
+    ];
+    let total = values.iter().map(|(_, count)| *count).sum::<u64>();
+    let slices = values
+        .iter()
+        .enumerate()
+        .map(|(index, (name, value))| (name.clone(), *value as f32, colors[index % colors.len()]))
+        .collect::<Vec<_>>();
+    panel(theme)
+        .flex_1()
+        .flex_basis(gpui_kit::rems(0.))
+        .min_w(gpui_kit::rems(22.))
+        .max_w_full()
+        .min_h(gpui_kit::rems(12.))
+        .child(
+            h_flex()
+                .gap_3()
+                .flex_wrap()
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .child(zenclash_i18n::text("connections.charts.protocols")),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(zenclash_i18n::text("connections.ui.protocol_hint")),
+                ),
+        )
+        .child(
+            h_flex()
+                .gap_4()
+                .child(
+                    div()
+                        .relative()
+                        .size_32()
+                        .flex_shrink_0()
+                        .child(
+                            PieChart::new(slices)
+                                .id("connection-protocol-chart")
+                                .outer_radius(f32::from(theme.font_size) * 4.)
+                                .inner_radius(f32::from(theme.font_size) * 2.)
+                                .value(|entry| entry.1)
+                                .color(|entry| entry.2)
+                                .tooltip_name(|entry| entry.0.clone().into()),
+                        )
+                        .child(
+                            v_flex()
+                                .absolute()
+                                .inset_0()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .text_2xl()
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                        .child(total.to_string()),
+                                )
+                                .child(div().text_xs().text_color(theme.muted_foreground).child(
+                                    zenclash_i18n::text(if show_closed {
+                                        "unified.connections.closed"
+                                    } else {
+                                        "connections.metrics.active"
+                                    }),
+                                )),
+                        ),
+                )
+                .child(v_flex().gap_3().children(values.iter().enumerate().map(
+                    |(index, (label, count))| {
+                        let percent = if total == 0 {
+                            0.
+                        } else {
+                            *count as f64 / total as f64 * 100.
+                        };
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .size_4()
+                                    .rounded_full()
+                                    .bg(colors[index % colors.len()]),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .child(format!("{label}   {count} ({percent:.1}%)")),
+                            )
+                    },
+                ))),
+        )
+}
+
+fn connection_columns(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
+    h_flex()
+        .gap_3()
+        .py_2()
+        .px_2()
+        .bg(theme.table_head)
+        .text_sm()
+        .text_color(theme.muted_foreground)
+        .border_b_1()
+        .border_color(theme.border)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(zenclash_i18n::text("connections.columns.target")),
+        )
+        .child(
+            div()
+                .w_16()
+                .flex_shrink_0()
+                .child(zenclash_i18n::text("connections.columns.protocol")),
+        )
+        .child(
+            div()
+                .w_24()
+                .flex_shrink_0()
+                .child(zenclash_i18n::text("connections.columns.outbound")),
+        )
+        .child(
+            div()
+                .w_24()
+                .flex_shrink_0()
+                .child(zenclash_i18n::text("connections.details.rule")),
+        )
+        .child(
+            div()
+                .w_20()
+                .flex_shrink_0()
+                .text_right()
+                .child(zenclash_i18n::text("unified.connections.upload_rate")),
+        )
+        .child(
+            div()
+                .w_20()
+                .flex_shrink_0()
+                .text_right()
+                .child(zenclash_i18n::text("unified.connections.download_rate")),
+        )
+        .child(
+            div()
+                .w_16()
+                .flex_shrink_0()
+                .child(zenclash_i18n::text("connections.columns.duration")),
+        )
+        .child(div().w_8().flex_shrink_0())
+}
+
+fn connection_metric(
+    icon: IconName,
+    label: String,
+    value: String,
+    points: Vec<(gpui_kit::SharedString, f64)>,
+    color: gpui_kit::Hsla,
+    index: usize,
+    theme: &gpui_kit::component::Theme,
+) -> impl IntoElement {
+    let maximum = points.iter().map(|point| point.1).fold(1_f64, f64::max);
+    panel(theme)
+        .id(("connection-metric-card", index))
+        .test_support()
+        .relative()
+        .flex_1()
+        .flex_basis(gpui_kit::rems(14.))
+        .min_w_0()
+        .min_h(gpui_kit::rems(7.))
+        .child(
+            h_flex()
+                .gap_4()
+                .child(
+                    div()
+                        .size_11()
+                        .border_1()
+                        .border_color(theme.border)
+                        .rounded(theme.radius)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            gpui_kit::component::Icon::new(icon)
+                                .size_6()
+                                .text_color(color),
+                        ),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child(label),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_2xl()
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .child(value),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .absolute()
+                .right_4()
+                .bottom_2()
+                .w(gpui_kit::rems(5.))
+                .h(gpui_kit::rems(2.))
+                .flex_shrink_0()
+                .child(
+                    AreaChart::new(points)
+                        .id(("connection-metric-history", index))
+                        .x(|point| point.0.clone())
+                        .y(|point| point.1)
+                        .stroke(color)
+                        .fill(color.opacity(0.15))
+                        .y_domain(0., maximum)
+                        .natural()
+                        .x_axis(false)
+                        .y_axis(false)
+                        .grid(false)
+                        .interactive(false),
+                ),
+        )
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    #[test]
+    fn endpoint_labels_handle_missing_fields_and_ipv6() {
+        assert_eq!(super::endpoint_label("", "443"), "—");
+        assert_eq!(
+            super::endpoint_label("example.com", "443"),
+            "example.com:443"
+        );
+        assert_eq!(super::endpoint_label("127.0.0.1", ""), "127.0.0.1");
+        assert_eq!(super::endpoint_label("::1", "443"), "[::1]:443");
+    }
+}

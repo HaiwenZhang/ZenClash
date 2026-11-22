@@ -3,7 +3,7 @@ use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::{ActiveTheme, v_flex};
 use gpui_kit::{App, IntoElement, ParentElement, Styled, div, prelude::FluentBuilder};
 
-use crate::actions::Page;
+use crate::foundation::actions::Page;
 
 /// Title and supporting description aligned with the workspace content inset.
 pub(crate) fn title(page: Page, cx: &mut App) -> impl IntoElement {

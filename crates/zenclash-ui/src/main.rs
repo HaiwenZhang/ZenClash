@@ -19,9 +19,7 @@ use zenclash_app::{
     },
 };
 use zenclash_core::AppInstanceLockError;
-use zenclash_ui::{app, assets::Assets};
-
-mod startup_failure;
+use zenclash_ui::{app, assets::Assets, shell::platform::startup_failure};
 
 const DEFAULT_TRACING_FILTER: &str =
     "zenclash=info,zenclash_app=info,zenclash_core=info,zenclash_ui=info";

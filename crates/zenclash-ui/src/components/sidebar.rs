@@ -12,9 +12,11 @@ use gpui_kit::{
 };
 
 use crate::{
-    actions::{Page, SetDarkTheme, SetLightTheme, ToggleSidebar},
-    assets::{AppIcon, GROUP_ICON_PATH, RADIO_ICON_PATH, RSS_ICON_PATH, RULER_ICON_PATH},
     design::online_indicator,
+    foundation::actions::{Page, SetDarkTheme, SetLightTheme, ToggleSidebar},
+    foundation::assets::{
+        AppIcon, GROUP_ICON_PATH, RADIO_ICON_PATH, RSS_ICON_PATH, RULER_ICON_PATH,
+    },
 };
 
 pub(crate) fn runtime_uptime(process: Option<&zenclash_core::ProcessStatus>) -> Option<String> {
@@ -190,7 +192,7 @@ impl RenderOnce for Sidebar {
                                 .gap_2()
                                 .min_w_0()
                                 .child(
-                                    gpui_kit::img(crate::assets::ZENCLASH_LOGO_PATH)
+                                    gpui_kit::img(crate::foundation::assets::ZENCLASH_LOGO_PATH)
                                         .size_5()
                                         .flex_shrink_0(),
                                 )
@@ -341,7 +343,7 @@ const fn sidebar_icon_path(page: Page) -> Option<&'static str> {
 mod tests {
     use crate::{
         actions::Page,
-        assets::{GROUP_ICON_PATH, RADIO_ICON_PATH, RULER_ICON_PATH},
+        foundation::assets::{GROUP_ICON_PATH, RADIO_ICON_PATH, RULER_ICON_PATH},
     };
 
     use super::{Sidebar, sidebar_icon_path};
@@ -369,12 +371,12 @@ mod tests {
                 div()
                     .size_full()
                     .track_focus(&self.focus)
-                    .on_action(
-                        cx.listener(|this, _: &crate::actions::NavigateRules, _, cx| {
+                    .on_action(cx.listener(
+                        |this, _: &crate::foundation::actions::NavigateRules, _, cx| {
                             this.navigated = true;
                             cx.notify();
-                        }),
-                    )
+                        },
+                    ))
                     .child(
                         super::SidebarNavigation::new(Page::Home, [Page::Home, Page::Rules])
                             .collapsed(true),
@@ -522,7 +524,7 @@ mod tests {
                 })
             );
             cx.update_window(handle.into(), |_, window, cx| {
-                crate::design::apply_zen_theme(mode, Some(window), cx);
+                crate::foundation::design::apply_zen_theme(mode, Some(window), cx);
                 window.render_frame(cx);
                 assert_eq!(
                     window.find("sidebar-appearance").label(),

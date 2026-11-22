@@ -1,4 +1,4 @@
-//! Native GPUI application shell, components, and pages for `ZenClash`.
+//! Native GPUI application shell, components, and features for `ZenClash`.
 
 #![deny(missing_docs)]
 #![allow(
@@ -6,24 +6,23 @@
     reason = "GPUI handlers conventionally receive mutable entities and Context values even when a particular render path only uses shared methods"
 )]
 
-/// Shared GPUI application actions and declarative page routing metadata.
-pub mod actions;
-/// Application lifecycle, windows, actions, and native tray coordination.
-pub mod app;
-/// Embedded application-owned and component icon assets.
-pub mod assets;
-/// Reusable GPUI widgets used by the application shell and pages.
+/// Layer 1: reusable GPUI components and stateless page/form building blocks.
 pub mod components;
-/// `ZenClash` colors and GPUI Kit theme configuration.
-pub mod design;
-/// Navigable application pages and their live Mihomo views.
-pub mod pages;
-/// Native operating-system status tray icon, menu builder, and command bindings.
-pub mod tray;
+/// Layer 3: horizontally isolated feature views and the `RuntimePage` host.
+pub mod features;
+/// Layer 0: shared actions, icon assets, design tokens, and UI primitives.
+pub mod foundation;
+/// Layer 2: runtime-page state machines, observation readers, and lifecycle schedules.
+pub mod runtime_host;
+/// Layer 4: desktop shell, window lifecycle, background controllers, and native tray.
+pub mod shell;
 
-mod preference_previews;
-mod proxy_selection;
-mod runtime_read_source;
+#[cfg(test)]
+pub(crate) mod test_support;
+
+pub use foundation::{actions, assets, design};
+pub use shell::app;
+pub use shell::tray::native as tray;
 
 pub(crate) use zenclash_app::commands as application_commands;
 pub use zenclash_app::{ApplicationCommands, outbound_mode};

@@ -67,7 +67,7 @@ impl RenderOnce for MintSwitch {
             .flex_shrink_0()
             .rounded_full()
             .bg(if checked {
-                crate::design::brand_accent(theme)
+                crate::foundation::design::brand_accent(theme)
             } else {
                 theme.border
             })

@@ -100,15 +100,15 @@ fn ui_components_and_actions_never_depend_on_pages_or_app_transitively() {
         ui_src.display()
     );
     assert!(
-        graph.modules.contains("actions"),
-        "expected top-level `actions` module under {}",
+        graph.modules.contains("foundation"),
+        "expected top-level `foundation` module under {}",
         ui_src.display()
     );
 
-    let forbidden = ["pages", "app"];
+    let forbidden = ["runtime_host", "features", "shell"];
     let mut violations = Vec::new();
 
-    for entry in ["components", "actions"] {
+    for entry in ["foundation", "components"] {
         let closure = transitive_closure(&graph.edges, entry);
         for banned in forbidden {
             if closure.contains(banned) {
