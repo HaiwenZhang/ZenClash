@@ -4,7 +4,6 @@ use super::{
     SetDarkTheme, SetLightTheme, SetSystemTheme, ShowTrafficIcon, Sizable, Styled, div, h_flex,
     setting_card, v_flex,
 };
-use crate::app::navigation::dispatch_navigate;
 use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::{InteractiveElement, TestSupportExt};
@@ -112,7 +111,7 @@ impl RuntimePage {
                             .active(theme.sidebar_accent),
                     )
                 })
-                .on_click(move |_, window, cx| dispatch_navigate(page, window, cx))
+                .on_click(move |_, window, cx| page.dispatch_navigate(window, cx))
             }))
     }
 

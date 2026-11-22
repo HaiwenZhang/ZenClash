@@ -198,7 +198,7 @@ fn saving_yaml_preserves_edits_made_after_submission(cx: &mut TestAppContext) {
         window.click("preview-overrides", cx);
     })
     .unwrap();
-    fixture.settle(cx, &page, |page| page.overrides.preview().is_some());
+    fixture.settle(cx, &page, |page| page.library.overrides.preview().is_some());
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
         window.click("edit-source-profile", cx);
@@ -604,7 +604,7 @@ fn blurring_preserves_loaded_yaml_preview_until_the_window_is_hidden(cx: &mut Te
         window.click("preview-overrides", cx);
     })
     .unwrap();
-    fixture.settle(cx, &page, |page| page.overrides.preview().is_some());
+    fixture.settle(cx, &page, |page| page.library.overrides.preview().is_some());
 
     VisualTestContext::from_window(window, cx).deactivate_window();
     assert!(cx.update(|cx| page.read(cx).live_updates_enabled()));
@@ -616,7 +616,7 @@ fn blurring_preserves_loaded_yaml_preview_until_the_window_is_hidden(cx: &mut Te
         window.render_frame(cx);
         assert!(window.try_find("copy-source-config").is_none());
         assert!(window.try_find("copy-effective-config").is_none());
-        assert!(page.read(cx).overrides.preview().is_none());
+        assert!(page.read(cx).library.overrides.preview().is_none());
         window.remove_window();
     })
     .unwrap();

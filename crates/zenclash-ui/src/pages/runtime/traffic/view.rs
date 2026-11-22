@@ -25,7 +25,7 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let realtime = self.traffic_monitor.snapshot();
+        let realtime = self.monitors.traffic_monitor.snapshot();
         let connection_count = match self.page_observation.data() {
             PageSnapshotData::Connections(data) => Some(data.connections.len()),
             _ => None,

@@ -132,12 +132,24 @@ impl YamlOverrideStore {
         Ok(store)
     }
 
-    /// Loads the ordered manifest with a defensive size bound.
+    /// Loads the ordered manifest metadata with a defensive size bound without
+    /// parsing the full YAML body of every override file.
     ///
     /// # Errors
     ///
-    /// Returns an error for I/O, oversized, or malformed manifests.
+    /// Returns an error for I/O, oversized, missing managed files, or malformed manifests.
     pub fn load(&self) -> YamlOverrideResult<YamlOverrideCatalog> {
+        let _transaction = self.transaction.lock();
+        self.load_catalog_metadata_unlocked()
+    }
+
+    /// Loads the ordered manifest and parses every managed override YAML file to
+    /// verify all bodies are valid YAML mappings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for I/O, oversized, missing, or malformed manifests or YAML files.
+    pub fn load_validated(&self) -> YamlOverrideResult<YamlOverrideCatalog> {
         let _transaction = self.transaction.lock();
         self.load_unlocked()
     }
@@ -170,7 +182,7 @@ impl YamlOverrideStore {
         }
         let _write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
-        let mut catalog = self.load_unlocked()?;
+        let mut catalog = self.load_catalog_metadata_unlocked()?;
         let mut imported = Vec::with_capacity(candidates.len());
         let mut created_paths = Vec::with_capacity(candidates.len());
         for candidate in candidates {
@@ -223,7 +235,7 @@ impl YamlOverrideStore {
     pub fn set_enabled(&self, id: &str, enabled: bool) -> YamlOverrideResult<()> {
         let _write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
-        let mut catalog = self.load_unlocked()?;
+        let mut catalog = self.load_catalog_metadata_unlocked()?;
         let record = catalog
             .items
             .iter_mut()
@@ -241,7 +253,7 @@ impl YamlOverrideStore {
     pub fn move_to(&self, id: &str, position: usize) -> YamlOverrideResult<()> {
         let _write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
-        let mut catalog = self.load_unlocked()?;
+        let mut catalog = self.load_catalog_metadata_unlocked()?;
         if position >= catalog.items.len() {
             return Err(YamlOverrideError::Invalid(format!(
                 "覆写目标顺序 {position} 超出范围"
@@ -274,7 +286,7 @@ impl YamlOverrideStore {
         validate_catalog_reordering(expected, next)?;
         let _write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
-        let current = self.load_unlocked()?;
+        let current = self.load_catalog_metadata_unlocked()?;
         if &current != expected {
             return Err(YamlOverrideError::Transaction(
                 "覆写清单已被其他任务修改，请刷新后重试".into(),
@@ -336,7 +348,7 @@ impl YamlOverrideStore {
     ) -> YamlOverrideResult<YamlOverrideCatalog> {
         let _write_lease = self.write_access.acquire()?;
         let _transaction = self.transaction.lock();
-        let mut catalog = self.load_unlocked()?;
+        let mut catalog = self.load_catalog_metadata_unlocked()?;
         let index = catalog
             .items
             .iter()

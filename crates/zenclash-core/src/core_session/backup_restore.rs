@@ -99,9 +99,10 @@ impl CoreSession {
         admission: Option<CoreBackupAdmission>,
         expected_generation: Option<u64>,
     ) -> Result<CoreApplyOutcome, CoreSessionError> {
-        if admission.as_ref().is_some_and(|admission| {
-            !Arc::ptr_eq(&admission.inner.gate, &self.data_application_gate)
-        }) {
+        if admission
+            .as_ref()
+            .is_some_and(|admission| !admission.matches_gate(&self.data_application_gate))
+        {
             return Err(CoreSessionError::Process(MihomoError::StaleTransport));
         }
         let client = self.client.pin_binding()?;

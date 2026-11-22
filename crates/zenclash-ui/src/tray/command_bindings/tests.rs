@@ -31,7 +31,7 @@ async fn resolved_native_command_keeps_its_installed_observation_when_the_menu_i
     let resolved = bindings.resolve("old-id").unwrap();
     bindings = TrayCommandBindings::new(
         HashMap::from([(
-            "new-id".into(),
+            "new-id".to_owned(),
             TrayCommand::SelectProxy {
                 group: "group".into(),
                 proxy: "second".into(),
@@ -51,11 +51,47 @@ async fn resolved_native_command_keeps_its_installed_observation_when_the_menu_i
     assert!(current.is_same_observation(&second));
 }
 
+#[tokio::test]
+async fn updating_observation_in_place_preserves_existing_menu_command_ids() {
+    let session = CoreSession::open(
+        CoreKind::Mihomo,
+        MihomoClient::new(MihomoEndpoint::default()).unwrap(),
+    )
+    .unwrap();
+    let first = session
+        .begin_observation()
+        .await
+        .unwrap()
+        .identity()
+        .clone();
+    let second = session
+        .begin_observation()
+        .await
+        .unwrap()
+        .identity()
+        .clone();
+    let mut bindings = TrayCommandBindings::new(
+        HashMap::from([(
+            "stable-id".to_owned(),
+            TrayCommand::SelectProxy {
+                group: "group".into(),
+                proxy: "node".into(),
+            },
+        )]),
+        Some(first),
+    );
+    bindings.update_observation(Some(second.clone()));
+    let Some(TrayEvent::Command(_, Some(current))) = bindings.resolve("stable-id") else {
+        panic!("missing updated menu provenance");
+    };
+    assert!(current.is_same_observation(&second));
+}
+
 #[test]
 fn an_unobserved_menu_cannot_fabricate_runtime_provenance_for_its_commands() {
     let bindings = TrayCommandBindings::new(
         HashMap::from([(
-            "id".into(),
+            "id".to_owned(),
             TrayCommand::SelectProxy {
                 group: "group".into(),
                 proxy: "node".into(),

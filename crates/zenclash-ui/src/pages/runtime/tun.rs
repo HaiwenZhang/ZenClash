@@ -26,7 +26,7 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let tun = self.config().cloned().unwrap_or_default().tun;
-        let snapshot = self.operational_status.snapshot();
+        let snapshot = self.monitors.operational_status.snapshot();
         let status = super::home::tun_status_text(&snapshot.capture);
         let disabled_reason = self.capture_control_disabled_reason(false).or_else(|| {
             snapshot
@@ -300,7 +300,7 @@ impl RuntimePage {
     }
 
     fn render_tun_runtime(&self, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
-        let snapshot = self.operational_status.snapshot();
+        let snapshot = self.monitors.operational_status.snapshot();
         let tun = snapshot.capture.tun.value();
         let mut card = setting_card(zenclash_i18n::text("tun.runtime.title"), theme);
         if let Some(tun) = tun {
@@ -532,7 +532,7 @@ impl RuntimePage {
         let Some(token) = self.begin_mutation(self.page) else {
             return;
         };
-        let capture = self.traffic_capture.clone();
+        let capture = self.monitors.traffic_capture.clone();
         let task = self.runtime.spawn(async move {
             capture
                 .apply(if enabled {

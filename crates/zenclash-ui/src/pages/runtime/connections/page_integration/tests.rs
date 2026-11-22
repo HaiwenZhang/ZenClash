@@ -28,21 +28,38 @@ impl Controller {
         let task = runtime.spawn(async move {
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                let Ok(request) = zenclash_core::test_support::read_controller_request(&mut stream).await else { continue; };
-                let (headers, _) = request.into_parts();
-                let first = headers.lines().next().unwrap();
-                let response = if first.starts_with("DELETE /connections") {
-                    recorded.lock().push(first.to_owned());
-                    "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n".to_owned()
-                } else if first.starts_with("GET /connections ") {
-                    started.store(true, Ordering::Release);
-                    if delayed_readback { gate.notified().await; }
-                    let body = r#"{"connections":[{"id":"readback","metadata":{},"upload":0,"download":0}],"uploadTotal":0,"downloadTotal":0,"memory":0}"#;
-                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
-                } else {
-                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()
-                };
-                let _ = stream.write_all(response.as_bytes()).await;
+                let (started, gate, recorded) =
+                    (started.clone(), gate.clone(), recorded.clone());
+                tokio::spawn(async move {
+                    let Ok(request) =
+                        zenclash_core::test_support::read_controller_request(&mut stream).await
+                    else {
+                        return;
+                    };
+                    let (headers, _) = request.into_parts();
+                    let first = headers.lines().next().unwrap();
+                    let response = if first.starts_with("DELETE /connections") {
+                        recorded.lock().push(first.to_owned());
+                        "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n".to_owned()
+                    } else if first.starts_with("GET /connections ") {
+                        let is_post_delete_readback = !recorded.lock().is_empty();
+                        if is_post_delete_readback {
+                            started.store(true, Ordering::Release);
+                            if delayed_readback {
+                                gate.notified().await;
+                            }
+                        }
+                        let body = r#"{"connections":[{"id":"readback","metadata":{},"upload":0,"download":0}],"uploadTotal":0,"downloadTotal":0,"memory":0}"#;
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                    } else {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_owned()
+                    };
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
             }
         });
         Self {

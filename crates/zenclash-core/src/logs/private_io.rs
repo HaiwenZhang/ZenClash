@@ -12,10 +12,18 @@ pub(super) fn append(path: &Path, bytes: &[u8]) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        // Private from creation, before the first raw byte is visible.
-        options.mode(0o600);
+        // Private from creation, never follow symlinks, and never block on FIFOs.
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     let mut file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "log file target is not a regular file",
+        ));
+    }
     restrict_open_file(&file)?;
     file.write_all(bytes)
 }

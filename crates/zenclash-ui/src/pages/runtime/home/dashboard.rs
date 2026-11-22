@@ -144,7 +144,7 @@ impl RuntimePage {
                 |row| {
                     row.child(status_label(
                         zenclash_i18n::text("home.traffic.live"),
-                        theme.chart_3,
+                        crate::design::online_indicator(theme),
                         theme,
                     ))
                 },

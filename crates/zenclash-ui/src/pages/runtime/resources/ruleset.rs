@@ -45,11 +45,17 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let source = self.resources.ruleset.source().as_deref().map_or_else(
-            || zenclash_i18n::text("resources.ruleset.none"),
-            compact_path,
-        );
-        let conversion = self.resources.ruleset.conversion().as_ref();
+        let source = self
+            .library
+            .resources
+            .ruleset
+            .source()
+            .as_deref()
+            .map_or_else(
+                || zenclash_i18n::text("resources.ruleset.none"),
+                compact_path,
+            );
+        let conversion = self.library.resources.ruleset.conversion().as_ref();
         let output_size = conversion.map_or_else(
             || "—".into(),
             |result| super::super::format_bytes(result.output_bytes),
@@ -100,7 +106,7 @@ impl RuntimePage {
                         "ruleset-domain",
                         "DOMAIN",
                         RulesetBehavior::Domain,
-                        self.resources.ruleset.behavior(),
+                        self.library.resources.ruleset.behavior(),
                         self.core_busy(),
                         cx,
                     ))
@@ -108,7 +114,7 @@ impl RuntimePage {
                         "ruleset-ipcidr",
                         "IPCIDR",
                         RulesetBehavior::IpCidr,
-                        self.resources.ruleset.behavior(),
+                        self.library.resources.ruleset.behavior(),
                         self.core_busy(),
                         cx,
                     ))
@@ -116,7 +122,7 @@ impl RuntimePage {
                         "ruleset-classical",
                         "CLASSICAL",
                         RulesetBehavior::Classical,
-                        self.resources.ruleset.behavior(),
+                        self.library.resources.ruleset.behavior(),
                         self.core_busy(),
                         cx,
                     )),
@@ -161,7 +167,7 @@ impl RuntimePage {
                             .loading(self.core_busy())
                             .disabled(
                                 self.core_busy()
-                                    || self.resources.ruleset.source().is_none()
+                                    || self.library.resources.ruleset.source().is_none()
                                     || !self.core_kind.capabilities().ruleset_conversion,
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -247,7 +253,7 @@ impl RuntimePage {
             let _ = this.update(cx, |this, cx| match selection {
                 Ok(Ok(Some(paths))) if this.is_page_task_current(token) => {
                     if let Some(path) = paths.into_iter().next() {
-                        this.resources.ruleset.select_source(path);
+                        this.library.resources.ruleset.select_source(path);
                         this.error = None;
                         this.notice = Some(zenclash_i18n::text("resources.ruleset.selected"));
                         cx.notify();
@@ -291,7 +297,7 @@ impl RuntimePage {
             cx.notify();
             return;
         }
-        let Some(source) = self.resources.ruleset.source().clone() else {
+        let Some(source) = self.library.resources.ruleset.source().clone() else {
             return;
         };
         let Some(binary) = self.mihomo_binary() else {
@@ -301,7 +307,7 @@ impl RuntimePage {
             cx.notify();
             return;
         };
-        let behavior = self.resources.ruleset.behavior();
+        let behavior = self.library.resources.ruleset.behavior();
         let runtime_version = self.core_session.generation();
         let Some(token) = self.begin_mutation(Page::Resources) else {
             return;
@@ -333,7 +339,7 @@ impl RuntimePage {
                             "resources.ruleset.converted",
                             &[("behavior", conversion.behavior.as_str().to_owned())],
                         ));
-                        this.resources.ruleset.accept_conversion(conversion);
+                        this.library.resources.ruleset.accept_conversion(conversion);
                     }
                     Ok(_) => {}
                     Err(error) => this.set_page_error(token, error),
@@ -346,17 +352,18 @@ impl RuntimePage {
     }
 
     fn copy_ruleset(&self, cx: &mut Context<Self>) {
-        if let Some(result) = &self.resources.ruleset.conversion() {
+        if let Some(result) = &self.library.resources.ruleset.conversion() {
             cx.write_to_clipboard(ClipboardItem::new_string(result.content.clone()));
         }
     }
 
     fn choose_ruleset_export(&mut self, cx: &mut Context<Self>) {
-        let Some(result) = &self.resources.ruleset.conversion() else {
+        let Some(result) = &self.library.resources.ruleset.conversion() else {
             return;
         };
         let token = self.page_task_token_for(Page::Resources);
         let directory = self
+            .library
             .resources
             .ruleset
             .source()
@@ -464,7 +471,7 @@ fn behavior_button(
         .selected(behavior == selected)
         .disabled(disabled)
         .on_click(cx.listener(move |this, _, _, cx| {
-            this.resources.ruleset.select_behavior(behavior);
+            this.library.resources.ruleset.select_behavior(behavior);
             this.error = None;
             cx.notify();
         }))

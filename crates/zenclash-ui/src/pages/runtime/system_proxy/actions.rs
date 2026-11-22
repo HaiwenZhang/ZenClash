@@ -41,7 +41,7 @@ impl RuntimePage {
             return;
         };
         let client = self.client.clone();
-        let capture = self.traffic_capture.clone();
+        let capture = self.monitors.traffic_capture.clone();
         let task = self.runtime.spawn(async move {
             let outcome = capture
                 .apply(if enabled {
@@ -145,7 +145,7 @@ impl RuntimePage {
                 .default_value(preferences.system_proxy_pac_script)
                 .auto_grow(8, 20)
         });
-        self.system_proxy_editor = Some(SystemProxyEditorState {
+        self.settings.system_proxy_editor = Some(SystemProxyEditorState {
             mode: preferences.system_proxy_mode,
             host,
             bypass,
@@ -156,7 +156,8 @@ impl RuntimePage {
             let content = owner
                 .update(cx, |page, cx| {
                     let theme = cx.theme().clone();
-                    page.system_proxy_editor
+                    page.settings
+                        .system_proxy_editor
                         .as_ref()
                         .map(|editor| page.render_system_proxy_editor(editor, &theme, cx))
                 })
@@ -189,7 +190,7 @@ impl RuntimePage {
         mode: SystemProxyMode,
         cx: &mut Context<Self>,
     ) {
-        if let Some(editor) = self.system_proxy_editor.as_mut() {
+        if let Some(editor) = self.settings.system_proxy_editor.as_mut() {
             editor.mode = mode;
             cx.notify();
         }
@@ -200,7 +201,7 @@ impl RuntimePage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(editor) = self.system_proxy_editor.as_ref() else {
+        let Some(editor) = self.settings.system_proxy_editor.as_ref() else {
             return;
         };
         editor.host.update(cx, |input, cx| {
@@ -215,7 +216,7 @@ impl RuntimePage {
     }
 
     pub(super) fn cancel_system_proxy_editor(&mut self, cx: &mut Context<Self>) {
-        self.system_proxy_editor = None;
+        self.settings.system_proxy_editor = None;
         cx.notify();
     }
 
@@ -228,7 +229,7 @@ impl RuntimePage {
                 return;
             }
         };
-        let Some(session) = self.system_proxy_session.clone() else {
+        let Some(session) = self.settings.system_proxy_session.clone() else {
             self.error = Some(zenclash_i18n::text("system_proxy.errors.settings_store"));
             cx.notify();
             return;
@@ -277,12 +278,14 @@ impl RuntimePage {
                 this.finish_mutation(token);
                 match result {
                     Ok((preferences, data)) => {
-                        if this.is_page_task_current(token) && this.system_proxy_editor.is_some() {
-                            let _ = cx.update_window(this.window_handle, |_, window, cx| {
+                        if this.is_page_task_current(token)
+                            && this.settings.system_proxy_editor.is_some()
+                        {
+                            let _ = cx.update_window(this.shell.window_handle, |_, window, cx| {
                                 window.close_dialog(cx)
                             });
                         }
-                        this.system_proxy_editor = None;
+                        this.settings.system_proxy_editor = None;
                         this.accept_preferences(
                             preferences,
                             crate::pages::runtime::PreferenceScope::SystemProxy,
@@ -315,6 +318,7 @@ impl RuntimePage {
 
     fn read_system_proxy_form(&self, cx: &Context<Self>) -> Result<SystemProxyForm, String> {
         let editor = self
+            .settings
             .system_proxy_editor
             .as_ref()
             .ok_or_else(|| zenclash_i18n::text("system_proxy.errors.editor_closed"))?;

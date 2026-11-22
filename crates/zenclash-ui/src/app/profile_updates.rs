@@ -8,13 +8,13 @@ const PROFILE_UPDATE_SCAN_INTERVAL: Duration = Duration::from_secs(60);
 
 impl ZenClashApp {
     pub(super) fn start_profile_updates(&mut self, cx: &mut Context<Self>) {
-        let Some(profile_store) = self.profile_store.clone() else {
+        let Some(profile_store) = self.services.profile_store.clone() else {
             return;
         };
-        let runtime = self.runtime.clone();
-        let controlled = self.controlled_config_store.clone();
-        let application_commands = self.application_commands.clone();
-        cx.spawn(async move |this, cx| {
+        let runtime = self.services.runtime.clone();
+        let controlled = self.services.controlled_config_store.clone();
+        let application_commands = self.services.application_commands.clone();
+        let task = cx.spawn(async move |this, cx| {
             loop {
                 let store = profile_store.clone();
                 let scan = runtime.spawn_blocking(move || {
@@ -75,7 +75,7 @@ impl ZenClashApp {
                 }
                 tokio::time::sleep(PROFILE_UPDATE_SCAN_INTERVAL).await;
             }
-        })
-        .detach();
+        });
+        self.shell.tasks.push(task);
     }
 }

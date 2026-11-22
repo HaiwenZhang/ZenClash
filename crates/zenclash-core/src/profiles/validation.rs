@@ -8,16 +8,14 @@ use reqwest::header::HeaderValue;
 
 use super::{DEFAULT_USER_AGENT, ProfileCatalog, ProfileStoreError, ProfileStoreResult};
 
-const MAX_PROFILE_ID_CHARS: usize = 64;
+const MAX_PROFILE_ID_BYTES: usize = 64;
 
 pub(crate) fn safe_profile_file_name(name: &str) -> bool {
     let mut components = Path::new(name).components();
+    let first_stem = name.split('.').next().unwrap_or(name);
     !name.contains(['/', '\\', ':', '<', '>', '"', '|', '?', '*'])
         && !name.chars().any(char::is_control)
-        && !Path::new(name)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .is_some_and(is_windows_reserved_name)
+        && !is_windows_reserved_name(first_stem)
         && matches!(components.next(), Some(Component::Normal(_)))
         && components.next().is_none()
         && Path::new(name).extension().and_then(|value| value.to_str()) == Some("yaml")
@@ -138,20 +136,19 @@ pub(super) fn unique_id(catalog: &ProfileCatalog, name: &str) -> String {
 }
 
 fn slug(value: &str) -> String {
-    let slug = value
-        .chars()
-        .flat_map(char::to_lowercase)
-        .map(|character| {
-            if character.is_alphanumeric() || matches!(character, '-' | '_') {
-                character
-            } else {
-                '-'
-            }
-        })
-        .take(MAX_PROFILE_ID_CHARS)
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string();
+    let mut raw = String::new();
+    for character in value.chars().flat_map(char::to_lowercase) {
+        let mapped = if character.is_alphanumeric() || matches!(character, '-' | '_') {
+            character
+        } else {
+            '-'
+        };
+        if raw.len().saturating_add(mapped.len_utf8()) > MAX_PROFILE_ID_BYTES {
+            break;
+        }
+        raw.push(mapped);
+    }
+    let slug = raw.trim_matches('-').to_owned();
     if slug.is_empty() {
         return format!("profile-{}", unix_timestamp());
     }
@@ -163,7 +160,12 @@ fn slug(value: &str) -> String {
 }
 
 fn is_windows_reserved_name(value: &str) -> bool {
-    let value = value.to_ascii_lowercase();
+    let base = value
+        .split('.')
+        .next()
+        .unwrap_or(value)
+        .trim_end_matches(' ');
+    let value = base.to_ascii_lowercase();
     matches!(value.as_str(), "con" | "prn" | "aux" | "nul")
         || value
             .strip_prefix("com")
@@ -182,7 +184,7 @@ pub(super) fn unix_timestamp() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::slug;
+    use super::{safe_profile_file_name, slug};
 
     #[test]
     fn slug_prefixes_windows_reserved_file_names() {
@@ -192,5 +194,24 @@ mod tests {
     #[test]
     fn slug_limits_profile_file_name_length() {
         assert_eq!(slug(&"a".repeat(100)).len(), 64);
+    }
+
+    #[test]
+    fn slug_truncates_multibyte_utf8_by_byte_length() {
+        let cjk = slug(&"订阅".repeat(40));
+        assert!(
+            cjk.len() <= 64,
+            "UTF-8 byte length must be <= 64, got {}",
+            cjk.len()
+        );
+        assert!(!cjk.is_empty());
+    }
+
+    #[test]
+    fn safe_profile_file_name_rejects_windows_multidot_reserved_names() {
+        assert!(!safe_profile_file_name("CON.foo.yaml"));
+        assert!(!safe_profile_file_name("nul.backup.yaml"));
+        assert!(!safe_profile_file_name("COM1.extra.yaml"));
+        assert!(safe_profile_file_name("console.foo.yaml"));
     }
 }

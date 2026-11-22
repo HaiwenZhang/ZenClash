@@ -1,7 +1,9 @@
 //! Owned automatic-selection restoration and group-delay actions on their observed source.
 
-use super::{ControlledConfigError, CoreObservationIdentity, CoreSession, CoreSessionError};
-use crate::{ProxyGroupMeasurementOutcome, ProxyOperations, ProxySelectionOutcome};
+use crate::{
+    ControlledConfigError, CoreObservationIdentity, CoreSession, CoreSessionError,
+    ProxyGroupMeasurementOutcome, ProxyOperations, ProxySelectionOutcome,
+};
 
 /// Completed proxy-group action and its unleased original read/publication context.
 /// Readback failures remain outcome warnings after the command has been accepted.

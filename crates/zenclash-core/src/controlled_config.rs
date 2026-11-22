@@ -46,8 +46,8 @@ use runtime_application::{
 pub(crate) use runtime_application::{
     RuntimeApplicationTransaction, RuntimeCandidateValidation, RuntimeMutationError,
 };
-pub(crate) use runtime_normalization::normalize_runtime_payload;
-use runtime_normalization::{normalize_partial_tun_payload, normalize_runtime_value};
+use runtime_normalization::normalize_partial_tun_payload;
+pub(crate) use runtime_normalization::{normalize_runtime_payload, normalize_runtime_value};
 
 #[cfg(test)]
 mod tests;
@@ -55,6 +55,19 @@ mod tests;
 #[cfg(test)]
 pub(crate) use storage::CommitGate;
 use storage::{RuntimeCacheTransaction, require_mapping};
+
+pub(crate) fn should_restart_after_hot_reload(error: &ControlledConfigError) -> bool {
+    matches!(
+        error,
+        ControlledConfigError::Profile(
+            MihomoError::Http(_)
+                | MihomoError::ResponseDecode {
+                    outcome_unknown: true,
+                    ..
+                }
+        )
+    )
+}
 
 /// Receipt created only after durable business persistence, even if finalization fails.
 pub(crate) struct SavedRuntimeReceipt {

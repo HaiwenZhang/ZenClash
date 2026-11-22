@@ -172,7 +172,7 @@ impl RuntimePage {
             return;
         };
         let core = self.core_session.clone();
-        let capture = self.traffic_capture.clone();
+        let capture = self.monitors.traffic_capture.clone();
         let initial_version = core.generation();
         let task = self.runtime.spawn(async move {
             // Stop intent must suppress both crash recovery and network resume.
@@ -214,7 +214,7 @@ impl RuntimePage {
         };
         let client = self.client.clone();
         let core_session = self.core_session.clone();
-        let capture = self.traffic_capture.clone();
+        let capture = self.monitors.traffic_capture.clone();
         let initial_version = core_session.generation();
         let task = self.runtime.spawn(async move {
             let version = core_session
@@ -319,7 +319,7 @@ impl RuntimePage {
         let descriptor = self.core_session.runtime_descriptor();
         let managed_process = descriptor.backend() != CoreRuntimeBackend::Direct;
         let local_source = descriptor.backend() == CoreRuntimeBackend::Local;
-        let operational = self.operational_status.snapshot();
+        let operational = self.monitors.operational_status.snapshot();
         let (process_status, _) = core_status_copy(
             descriptor.backend(),
             &operational.process,

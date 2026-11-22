@@ -10,6 +10,8 @@ pub use catalog::ProxyWorkspaceObservation;
 #[cfg(test)]
 mod runtime_tests;
 mod selection;
+mod session_actions;
+pub use session_actions::ProxyGroupActionReceipt;
 #[cfg(test)]
 mod tests;
 

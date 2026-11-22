@@ -30,6 +30,7 @@ impl RuntimePage {
             .child(
                 h_flex()
                     .w_24()
+                    .flex_shrink_0()
                     .gap_2()
                     .id(format!("diagnostic-status:{kind:?}"))
                     .test_support()
@@ -58,32 +59,41 @@ impl RuntimePage {
                     }),
             )
             .child(
-                div().w_20().text_sm().child(
+                div().w_20().flex_shrink_0().text_sm().child(
                     step.map_or_else(|| "—".into(), |step| format!("{} ms", step.duration_ms)),
                 ),
             )
-            .when(failed, |row| {
-                row.child(
-                    Button::new(format!("retry-diagnostic:{kind:?}"))
-                        .small()
-                        .outline()
-                        .label(zenclash_i18n::text("common.actions.retry"))
-                        .tooltip(zenclash_i18n::text("redesign.recheck_all"))
-                        .disabled(self.network_diagnostics.query.is_loading() || self.core_busy())
-                        .on_click(
-                            cx.listener(|this, _, _, cx| this.refresh_network_diagnostics(cx)),
-                        ),
-                )
-            })
             .child(
-                Button::new(format!("diagnostic-details:{kind:?}"))
-                    .small()
-                    .outline()
-                    .label(zenclash_i18n::text("redesign.details"))
-                    .disabled(step.is_none())
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_diagnostic_details(kind, window, cx)
-                    })),
+                h_flex()
+                    .w(gpui_kit::rems(9.))
+                    .flex_shrink_0()
+                    .justify_end()
+                    .gap_2()
+                    .when(failed, |row| {
+                        row.child(
+                            Button::new(format!("retry-diagnostic:{kind:?}"))
+                                .small()
+                                .outline()
+                                .label(zenclash_i18n::text("common.actions.retry"))
+                                .tooltip(zenclash_i18n::text("redesign.recheck_all"))
+                                .disabled(
+                                    self.network_diagnostics.query.is_loading() || self.core_busy(),
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.refresh_network_diagnostics(cx)
+                                })),
+                        )
+                    })
+                    .child(
+                        Button::new(format!("diagnostic-details:{kind:?}"))
+                            .small()
+                            .outline()
+                            .label(zenclash_i18n::text("redesign.details"))
+                            .disabled(step.is_none())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_diagnostic_details(kind, window, cx)
+                            })),
+                    ),
             )
             .into_any_element()
     }
@@ -140,6 +150,7 @@ impl RuntimePage {
             content
         );
         v_flex()
+            .id("diagnostic-details-dialog-body")
             .gap_3()
             .child(
                 div()
@@ -231,6 +242,7 @@ impl RuntimePage {
                         _ => (RuntimeConfig::default(), SystemNetworkSnapshot::default()),
                     };
                     v_flex()
+                        .id("network-options-dialog-body")
                         .gap_3()
                         .child(
                             div()
@@ -285,6 +297,7 @@ impl RuntimePage {
                 )
                 .child(
                     v_flex()
+                        .id("latency-details-dialog-body")
                         .gap_3()
                         .child(result.target.name.clone())
                         .child(div().text_sm().child(result.target.url.clone()))
@@ -404,6 +417,7 @@ impl RuntimePage {
     fn network_target_content(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let busy = self.mutation_busy(crate::pages::runtime::busy::MutationDomain::Network);
         v_flex()
+            .id("network-target-dialog-body")
             .gap_3()
             .child(
                 div()

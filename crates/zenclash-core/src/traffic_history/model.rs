@@ -1,6 +1,3 @@
-/// Default number of days retained by the native traffic database.
-pub const DEFAULT_TRAFFIC_RETENTION_DAYS: u16 = 30;
-
 const MAX_BUCKETS: u64 = 512;
 const MAX_QUERY_RANGE_MS: u64 = 366 * 24 * 60 * 60 * 1_000;
 

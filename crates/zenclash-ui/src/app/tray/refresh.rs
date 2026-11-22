@@ -20,21 +20,22 @@ struct TrayMenuSnapshot {
 
 impl ZenClashApp {
     pub(in crate::app) fn refresh_tray_menu(&mut self, cx: &mut Context<Self>) {
-        if self.network_tray.is_none() {
+        if self.tray.icon.is_none() {
             return;
         }
-        if self.tray_refreshing {
-            self.tray_refresh_pending = true;
+        if self.tray.refreshing {
+            self.tray.refresh_pending = true;
             return;
         }
-        self.tray_refreshing = true;
-        self.tray_refresh_pending = false;
+        self.tray.refreshing = true;
+        self.tray.refresh_pending = false;
         let mode_intent_generation = self.outbound_mode.intent_generation();
-        let session = self.core_session.clone();
-        let operational_status = self.operational_status.clone();
-        let profile_store = self.profile_store.clone();
+        let session = self.services.core_session.clone();
+        let operational_status = self.services.operational_status.clone();
+        let profile_store = self.services.profile_store.clone();
         let data_root = self
-            .preferences_store
+            .preferences
+            .store
             .as_ref()
             .and_then(|store| store.path().parent().map(std::path::Path::to_path_buf))
             .or_else(|| {
@@ -44,7 +45,7 @@ impl ZenClashApp {
             });
         let read_source = std::sync::Arc::new(RuntimeReadSource::default());
         let submitted_source = read_source.clone();
-        let task = self.runtime.spawn(async move {
+        let task = self.services.runtime.spawn(async move {
             let runtime =
                 TrayRuntimeObservation::load_with_source(&session, &submitted_source).await?;
             let directories_profile = runtime.profile_path.clone();
@@ -90,7 +91,7 @@ impl ZenClashApp {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                this.tray_refreshing = false;
+                this.tray.refreshing = false;
                 match result {
                     Ok(Ok(snapshot)) => this.apply_tray_menu_state(snapshot, cx),
                     Ok(Err(error)) => {
@@ -102,15 +103,15 @@ impl ZenClashApp {
                 }
                 cx.notify();
 
-                if this.tray_refresh_pending {
+                if this.tray.refresh_pending {
                     this.refresh_tray_menu(cx);
                     return;
                 }
-                if this.tray_menu_requested {
-                    if let Some(tray) = this.network_tray.as_ref() {
+                if this.tray.menu_requested {
+                    if let Some(tray) = this.tray.icon.as_ref() {
                         tray.show_menu();
                     }
-                    this.tray_menu_requested = false;
+                    this.tray.menu_requested = false;
                 }
             });
         })
@@ -118,23 +119,23 @@ impl ZenClashApp {
     }
 
     fn publish_tray_refresh_error(&mut self, source: &RuntimeReadSource, error: String) -> bool {
-        if self.tray_refresh_pending {
+        if self.tray.refresh_pending {
             return false;
         }
         match source.identity() {
             Some(identity) => {
-                let published = identity.belongs_to(&self.core_session)
+                let published = identity.belongs_to(&self.services.core_session)
                     && identity
-                        .publish_if_current(|| self.tray_error = Some(error))
+                        .publish_if_current(|| self.tray.error = Some(error))
                         .is_some();
                 if !published {
-                    self.tray_refresh_pending = true;
+                    self.tray.refresh_pending = true;
                 }
                 published
             }
             None => {
                 // Only preflight/capture can fail here; no controller request has begun.
-                self.tray_error = Some(error);
+                self.tray.error = Some(error);
                 true
             }
         }
@@ -151,8 +152,8 @@ impl ZenClashApp {
             directories,
             profile_path,
         } = snapshot;
-        if !observation.belongs_to(&self.core_session) {
-            self.tray_refresh_pending = true;
+        if !observation.belongs_to(&self.services.core_session) {
+            self.tray.refresh_pending = true;
             return;
         }
         let mixed_port = config.system_proxy_port().unwrap_or_default();
@@ -214,23 +215,23 @@ impl ZenClashApp {
             self.proxies_page.update(cx, |page, cx| {
                 page.set_active_profile(active_profile.as_ref(), cx)
             });
-            self.tray_state = state;
-            self.tray_observation = Some(observation.clone());
-            self.tray_error = None;
+            self.tray.state = state;
+            self.tray.observation = Some(observation.clone());
+            self.tray.error = None;
         });
         if published.is_none() {
-            self.tray_refresh_pending = true;
+            self.tray.refresh_pending = true;
             return;
         }
         // Native menu work stays outside the ordinary-read publication guard.
-        if let Some(tray) = self.network_tray.as_mut()
+        if let Some(tray) = self.tray.icon.as_mut()
             && let Err(error) =
-                tray.update_menu_with_observation(&self.tray_state, Some(observation.clone()))
+                tray.update_menu_with_observation(&self.tray.state, Some(observation.clone()))
         {
             tracing::warn!(%error, "failed to update tray menu");
         }
         if !observation.is_current() {
-            self.tray_refresh_pending = true;
+            self.tray.refresh_pending = true;
         }
     }
 }
@@ -268,7 +269,7 @@ fn bounded_tray_proxy_nodes(
     proxies: &[zenclash_core::ProxyNodeId],
     current: &str,
 ) -> (Vec<TrayProxyNode>, bool) {
-    let limit = crate::components::tray::MAX_TRAY_PROXY_NODES;
+    let limit = crate::tray::MAX_TRAY_PROXY_NODES;
     let has_more = proxies.len() > limit;
     let current_index = has_more
         .then(|| {
@@ -327,7 +328,7 @@ mod tests {
                 nodes.iter().any(|node| node.name == "node-29"),
                 has_more,
             ),
-            (crate::components::tray::MAX_TRAY_PROXY_NODES, true, true)
+            (crate::tray::MAX_TRAY_PROXY_NODES, true, true)
         );
     }
 }

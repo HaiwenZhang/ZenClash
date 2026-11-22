@@ -5,9 +5,10 @@ use std::{
     net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
+    time::Duration,
 };
 
 use parking_lot::Mutex;
@@ -17,13 +18,8 @@ use crate::{MihomoResult, SystemProxyError, SystemProxySetting, SystemProxyValid
 
 mod error;
 mod http;
+pub use crate::system_proxy_types::normalize_pac_script;
 pub use error::{PacError, PacServerOperation};
-
-const MAX_PAC_SCRIPT_BYTES: usize = 256 * 1024;
-const DEFAULT_PAC_SCRIPT: &str = r#"function FindProxyForURL(url, host) {
-  return "PROXY 127.0.0.1:%mixed-port%; SOCKS5 127.0.0.1:%mixed-port%; DIRECT;";
-}
-"#;
 
 /// Snapshot of the PAC HTTP service currently owned by `ZenClash`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +28,15 @@ pub struct PacServerStatus {
     pub address: SocketAddr,
     /// URL written into the operating system's automatic-proxy setting.
     pub url: String,
+}
+
+impl PacServerStatus {
+    /// Returns a cache-busting PAC URL carrying an incrementing version query
+    /// parameter (`?v=<version>`) so OS and browser proxy caches reload on changes.
+    #[must_use]
+    pub fn versioned_url(&self, version: u64) -> String {
+        format!("{}?v={version}", self.url)
+    }
 }
 
 /// Cloneable owner for the bounded local PAC HTTP service.
@@ -54,6 +59,7 @@ struct PacServerInner {
     running: Mutex<Option<RunningPacServer>>,
     retained: Mutex<Option<RunningPacServer>>,
     availability: PacAvailability,
+    next_version: AtomicU64,
 }
 
 // Workers own only this atomic, never PacServerInner; dropping the last owner
@@ -78,18 +84,25 @@ impl Drop for PacServerInner {
 
 pub(super) struct RunningPacServer {
     status: PacServerStatus,
+    version: u64,
     shutdown: Arc<AtomicBool>,
-    active_connection: Arc<Mutex<Option<TcpStream>>>,
+    active_connections: http::ActiveConnections,
     worker: Option<thread::JoinHandle<()>>,
 }
 
 impl Drop for RunningPacServer {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
-        if let Some(connection) = self.active_connection.lock().take() {
-            // Interrupt both request reads and a response blocked by a slow client.
-            let _ = connection.shutdown(Shutdown::Both);
+        {
+            let mut connections = self.active_connections.lock();
+            for (_, connection) in connections.drain(..) {
+                // Interrupt both request reads and responses blocked by slow clients.
+                let _ = connection.shutdown(Shutdown::Both);
+            }
         }
+        // Self-connect wakes the blocking `TcpListener::accept()` loop immediately
+        // without polling or sleeping.
+        let _ = TcpStream::connect_timeout(&self.status.address, Duration::from_millis(200));
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -144,26 +157,21 @@ impl PacServer {
                 source: error,
             })
         })?;
-        listener.set_nonblocking(true).map_err(|error| {
-            SystemProxyError::Pac(PacError::Io {
-                operation: PacServerOperation::ConfigureListener,
-                source: error,
-            })
-        })?;
         let address = listener.local_addr().map_err(|error| {
             SystemProxyError::Pac(PacError::Io {
                 operation: PacServerOperation::ReadLocalAddress,
                 source: error,
             })
         })?;
+        let version = self.inner.next_version.fetch_add(1, Ordering::AcqRel) + 1;
         let status = PacServerStatus {
             address,
             url: format!("http://{}/pac", socket_authority(address)),
         };
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = shutdown.clone();
-        let active_connection = Arc::new(Mutex::new(None));
-        let worker_active_connection = active_connection.clone();
+        let active_connections = Arc::new(Mutex::new(Vec::new()));
+        let worker_active_connections = active_connections.clone();
         let availability = self.inner.availability.0.clone();
         let script: Arc<[u8]> = script.into();
         let worker = thread::Builder::new()
@@ -174,7 +182,7 @@ impl PacServer {
                     &script,
                     &worker_shutdown,
                     &availability,
-                    &worker_active_connection,
+                    &worker_active_connections,
                 );
             })
             .map_err(|error| {
@@ -185,8 +193,9 @@ impl PacServer {
             })?;
         Ok(RunningPacServer {
             status,
+            version,
             shutdown,
-            active_connection,
+            active_connections,
             worker: Some(worker),
         })
     }
@@ -208,17 +217,11 @@ impl PacServer {
     }
 
     pub(super) fn owns_url(&self, url: &str) -> bool {
-        self.inner
-            .running
-            .lock()
-            .as_ref()
-            .is_some_and(|server| server.status.url == url)
-            || self
-                .inner
-                .retained
-                .lock()
-                .as_ref()
-                .is_some_and(|server| server.status.url == url)
+        let matches = |server: &RunningPacServer| {
+            server.status.url == url || server.status.versioned_url(server.version) == url
+        };
+        self.inner.running.lock().as_ref().is_some_and(matches)
+            || self.inner.retained.lock().as_ref().is_some_and(matches)
     }
 
     /// Controls whether requests may receive the configured PAC document.
@@ -260,55 +263,22 @@ impl PacServer {
             .as_ref()
             .map(|running| running.status.clone())
     }
+
+    /// Returns a cache-busting versioned URL (`?v=<n>`) for the running PAC server.
+    #[must_use]
+    pub fn versioned_url(&self) -> Option<String> {
+        self.inner
+            .running
+            .lock()
+            .as_ref()
+            .map(|running| running.status.versioned_url(running.version))
+    }
 }
 
 impl RunningPacServer {
     pub(super) fn status(&self) -> &PacServerStatus {
         &self.status
     }
-}
-
-/// Returns the default PAC document used by a fresh installation.
-#[must_use]
-pub const fn default_pac_script() -> &'static str {
-    DEFAULT_PAC_SCRIPT
-}
-
-/// Validates and normalizes a user-supplied PAC document.
-///
-/// # Errors
-///
-/// Returns an error for an empty/oversized document, embedded NUL bytes, or a
-/// document that does not define `FindProxyForURL`.
-pub fn normalize_pac_script(script: &str) -> MihomoResult<String> {
-    let script = script.trim();
-    if script.is_empty() {
-        return Err(invalid_setting(
-            SystemProxySetting::PacScript,
-            SystemProxyValidationError::Empty,
-        ));
-    }
-    if script.len() > MAX_PAC_SCRIPT_BYTES {
-        return Err(invalid_setting(
-            SystemProxySetting::PacScript,
-            SystemProxyValidationError::TooLong {
-                maximum: MAX_PAC_SCRIPT_BYTES,
-            },
-        ));
-    }
-    if script.contains('\0') {
-        return Err(invalid_setting(
-            SystemProxySetting::PacScript,
-            SystemProxyValidationError::EmbeddedNul,
-        ));
-    }
-    if !script.contains("FindProxyForURL") {
-        return Err(invalid_setting(
-            SystemProxySetting::PacScript,
-            SystemProxyValidationError::MissingPacFunction,
-        ));
-    }
-    Ok(format!("{script}\n"))
 }
 
 fn socket_authority(address: SocketAddr) -> String {

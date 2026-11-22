@@ -48,37 +48,30 @@ impl AdmittedManagedRestart {
     ) -> Result<(), RuntimeMutationError> {
         let prepare_lease = self.store.write_access.acquire()?;
         let prepare_store = self.store.with_write_lease(&prepare_lease);
-        let (update, applied_payload) = tokio::task::spawn_blocking(move || {
+        let kind = self.process.kind();
+        let running = self.process.is_running();
+        let (update, next_runtime) = tokio::task::spawn_blocking(move || {
             let _write_lease = prepare_lease;
             let applied_payload = prepare_store.cached_runtime_payload()?;
-            Ok::<_, ControlledConfigError>((
-                prepare_store.prepare_json_update(profile, &patch)?,
-                applied_payload,
-            ))
+            let update = prepare_store.prepare_json_update(profile, &patch)?;
+            let next_runtime = normalize_runtime_payload(
+                kind,
+                merge_payload_overrides(update.next_payload(), &overrides)?,
+            )?;
+            let previous_runtime = normalize_runtime_payload(
+                kind,
+                merge_payload_overrides(update.previous_payload(), &overrides)?,
+            )?;
+            let next_runtime = prepare_store.apply_session_listener_fallbacks(&next_runtime)?;
+            let previous_runtime =
+                prepare_store.apply_session_listener_fallbacks(&previous_runtime)?;
+            let previous_runtime = applied_payload.as_deref().unwrap_or(&previous_runtime);
+            validate_listener_change(previous_runtime, &next_runtime, running)
+                .map_err(ControlledConfigError::ListenerFallback)?;
+            Ok::<_, ControlledConfigError>((update, next_runtime))
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        let next_base = update.next_payload().to_owned();
-        let previous_base = update.previous_payload().to_owned();
-        let kind = self.process.kind();
-        let (next_runtime, previous_runtime) = tokio::task::spawn_blocking(move || {
-            Ok::<_, ControlledConfigError>((
-                normalize_runtime_payload(kind, merge_payload_overrides(&next_base, &overrides)?)?,
-                normalize_runtime_payload(
-                    kind,
-                    merge_payload_overrides(&previous_base, &overrides)?,
-                )?,
-            ))
-        })
-        .await
-        .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        let next_runtime = self.store.apply_session_listener_fallbacks(&next_runtime)?;
-        let previous_runtime = self
-            .store
-            .apply_session_listener_fallbacks(&previous_runtime)?;
-        let previous_runtime = applied_payload.as_deref().unwrap_or(&previous_runtime);
-        validate_listener_change(previous_runtime, &next_runtime, self.process.is_running())
-            .map_err(ControlledConfigError::ListenerFallback)?;
         let cache = self
             .store
             .accept_runtime_payload_with_restart_for_session(
@@ -124,16 +117,16 @@ impl AdmittedManagedRestart {
     ) -> Result<(), RuntimeMutationError> {
         let worker_lease = self.store.write_access.acquire()?;
         let store = self.store.with_write_lease(&worker_lease);
-        let payload = tokio::task::spawn_blocking(move || {
+        let kind = self.process.kind();
+        let running = self.process.is_running();
+        let (payload, next_session) = tokio::task::spawn_blocking(move || {
             let _write_lease = worker_lease;
-            store.effective_with_overrides(profile, &overrides)
+            let payload = store.effective_with_overrides(profile, &overrides)?;
+            let payload = normalize_runtime_payload(kind, payload)?;
+            store.resolve_candidate_listeners(payload, running)
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        let payload = normalize_runtime_payload(self.process.kind(), payload)?;
-        let (payload, next_session) = self
-            .store
-            .resolve_candidate_listeners(payload, self.process.is_running())?;
         self.store
             .accept_runtime_payload_with_restart_for_session(
                 self.process.clone(),

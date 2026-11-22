@@ -66,7 +66,11 @@ impl RenderOnce for MintSwitch {
             .h(rems(1.5))
             .flex_shrink_0()
             .rounded_full()
-            .bg(if checked { theme.chart_3 } else { theme.border })
+            .bg(if checked {
+                crate::design::brand_accent(theme)
+            } else {
+                theme.border
+            })
             .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
             .border_1()
             .border_color(theme.transparent)

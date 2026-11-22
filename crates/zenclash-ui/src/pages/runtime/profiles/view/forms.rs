@@ -346,7 +346,7 @@ pub(super) fn configuration_edit_button(
             this.tooltip(zenclash_i18n::text("profiles.actions.activate_first"))
         })
         .on_click(|_, window, cx| {
-            crate::app::navigation::dispatch_navigate(crate::pages::Page::Override, window, cx);
+            crate::pages::Page::Override.dispatch_navigate(window, cx);
         })
 }
 
@@ -444,7 +444,7 @@ mod tests {
         let requests = Rc::new(Cell::new(0));
         let received = requests.clone();
         cx.update(|cx| {
-            cx.on_action(move |_: &crate::app::NavigateOverride, _| {
+            cx.on_action(move |_: &crate::actions::NavigateOverride, _| {
                 received.set(received.get() + 1);
             });
         });

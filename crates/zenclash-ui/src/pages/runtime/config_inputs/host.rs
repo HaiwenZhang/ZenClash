@@ -24,7 +24,7 @@ impl RuntimePage {
             );
             result
         });
-        let window_handle = self.window_handle;
+        let window_handle = self.shell.window_handle;
         cx.spawn(async move |this, cx| {
             let result = task
                 .await
@@ -53,7 +53,10 @@ impl RuntimePage {
                                 cx,
                             );
                         }
-                        Err(error) => this.error = Some(error),
+                        Err(error) => {
+                            this.config_inputs.record_read_failure(token);
+                            this.error = Some(error);
+                        }
                     }
                     cx.notify();
                 });

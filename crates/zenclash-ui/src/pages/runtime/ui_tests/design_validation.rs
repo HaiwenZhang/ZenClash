@@ -203,11 +203,11 @@ fn native_pages_render_for_design_validation() {
                                         page.invalidate_page_load();
                                         page.page = destination;
                                         page.persistent_loading = false;
-                                        page.startup_error = None;
+                                        page.shell.startup_error = None;
                                         page.error = None;
-                                        page.ui_visibility = lifecycle::UiVisibility::new(true);
-                                        page.live_updates_enabled.send_replace(false);
-                                        page.body_scroll
+                                        page.shell.ui_visibility = lifecycle::UiVisibility::new(true);
+                                        page.shell.live_updates_enabled.send_replace(false);
+                                        page.shell.body_scroll
                                             .set_offset(point(px(0.), px(0.)));
                                         let data = live
                                             .as_ref()
@@ -222,7 +222,7 @@ fn native_pages_render_for_design_validation() {
                                             );
                                         if live.is_none() && destination.is_settings() {
                                             let config = settings_fixture_config();
-                                            page.controlled_config = config.clone();
+                                            page.settings.controlled_config = config.clone();
                                             page.config_inputs.refresh(&config, page.profile_path.as_deref(), window, cx);
                                         }
                                         if let PageSnapshotData::Connections(snapshot) = &data {

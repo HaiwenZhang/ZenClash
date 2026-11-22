@@ -488,7 +488,12 @@ impl CoreSession {
             let runtime = match (&old, service) {
                 (OwnedCore::Service(runtime), None) => runtime.clone(),
                 (OwnedCore::Local(process), Some((client, _))) => {
-                    ServiceRuntimeSession::from_local(client, process.launch_config().clone())
+                    ServiceRuntimeSession::from_local(
+                        client,
+                        crate::runtime_launcher::CoreLaunchDescriptor::from(
+                            process.launch_config(),
+                        ),
+                    )
                 }
                 _ => return Err(CoreSessionError::ReleaseUnsupported { core: self.kind }),
             };

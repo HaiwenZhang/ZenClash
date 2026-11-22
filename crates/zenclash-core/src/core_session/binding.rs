@@ -15,7 +15,9 @@ impl CoreSession {
     /// the accepted resource bundle and verify the ordinary binary before startup.
     #[must_use]
     pub fn local_recovery_launch(&self) -> Option<crate::CoreLaunchConfig> {
-        self.client.local_recovery_launch()
+        self.client
+            .local_recovery_launch()
+            .map(crate::CoreLaunchConfig::from)
     }
 
     pub(crate) fn capture_publication_gate(&self) -> Arc<tokio::sync::Mutex<()>> {

@@ -34,8 +34,11 @@ pub(super) fn observe_native_quit(
 
 impl ZenClashApp {
     pub(super) fn restore_system_proxy(&mut self, cx: &mut Context<Self>) {
-        let capture = self.traffic_capture.clone();
-        let task = self.runtime.spawn(async move { capture.reconcile().await });
+        let capture = self.services.traffic_capture.clone();
+        let task = self
+            .services
+            .runtime
+            .spawn(async move { capture.reconcile().await });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -81,17 +84,17 @@ impl ZenClashApp {
         continue_local: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.quit_state == QuitState::InProgress {
+        if self.shell.quit_state == QuitState::InProgress {
             return;
         }
-        self.quit_state = QuitState::InProgress;
+        self.shell.quit_state = QuitState::InProgress;
         let coordinator = ShutdownCoordinator::new(
-            self.core_session.clone(),
-            Some(self.traffic_capture.clone()),
-            self.traffic_history_session.clone(),
+            self.services.core_session.clone(),
+            Some(self.services.traffic_capture.clone()),
+            self.services.traffic_history_session.clone(),
         );
-        let preferences = self.preferences_save_task.take();
-        let task = self.runtime.spawn(async move {
+        let preferences = self.preferences.save_task.take();
+        let task = self.services.runtime.spawn(async move {
             if let Some(preferences) = preferences {
                 let _ = preferences.await;
             }
@@ -113,7 +116,7 @@ impl ZenClashApp {
                         %error,
                         "quit cleanup failed; keeping the application and owned services alive"
                     );
-                    this.quit_state = QuitState::Blocked;
+                    this.shell.quit_state = QuitState::Blocked;
                     this.show_main_window(cx);
                     this.navigate(super::Page::SystemProxy, cx);
                     let message = zenclash_i18n::text_with(
@@ -126,7 +129,7 @@ impl ZenClashApp {
                     return;
                 }
                 if let Some(executable) = restart {
-                    *this.restart_after_exit.lock() = Some(super::RestartRequest {
+                    *this.shell.restart_after_exit.lock() = Some(super::RestartRequest {
                         executable,
                         continue_local,
                     });
@@ -256,7 +259,7 @@ mod tests {
         });
         cx.foreground_executor().clone().block_test(async {
             for _ in 0..1_000 {
-                if cx.update(|cx| owner.read(cx).quit_state == QuitState::Blocked) {
+                if cx.update(|cx| owner.read(cx).shell.quit_state == QuitState::Blocked) {
                     return;
                 }
                 runtime

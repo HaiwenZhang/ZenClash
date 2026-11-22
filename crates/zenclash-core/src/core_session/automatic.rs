@@ -17,20 +17,15 @@ impl CoreSession {
         self.shutdown_requested.load(Ordering::Acquire)
     }
 
-    /// Stops the actual owned core after link loss while retaining its accepted runtime.
-    ///
-    /// # Errors
-    /// Returns capture release, stale admission, native Stop confirmation or shutdown errors.
-    pub async fn suspend_for_network(
+    pub(crate) async fn suspend_for_network_with_capture(
         &self,
-        capture: &TrafficCaptureSession,
+        capture: Arc<dyn CoreRecoveryCapture>,
     ) -> Result<bool, CoreSessionError> {
         self.ensure_not_shutting_down()?;
         if !self.is_managed() || self.lifecycle.read().stop_requested {
             return Ok(false);
         }
         let session = self.clone();
-        let capture = capture.clone();
         tokio::spawn(async move {
             let _availability_pause = session.pause_pac_availability();
             let client = session.client.pin_binding()?;
@@ -53,7 +48,7 @@ impl CoreSession {
                     .await?;
             }
             // Capture may itself acquire Transition. Recheck the same pin afterward.
-            let released = CoreRecoveryCapture::release_owned(&capture).await;
+            let released = capture.release_owned().await;
             let lease = session.acquire_runtime_write_lease(&client).await?;
             let _transition = session.transition.clone().lock_owned().await;
             client.ensure_binding_current()?;
@@ -93,13 +88,9 @@ impl CoreSession {
         Ok(())
     }
 
-    /// Resumes the accepted runtime after link loss and restores capture intent.
-    ///
-    /// # Errors
-    /// Returns restart confirmation, capture, stale admission or shutdown failures.
-    pub async fn resume_after_network(
+    pub(crate) async fn resume_after_network_with_capture(
         &self,
-        capture: &TrafficCaptureSession,
+        capture: Arc<dyn CoreRecoveryCapture>,
     ) -> Result<bool, CoreSessionError> {
         self.ensure_not_shutting_down()?;
         if !self.network_suspended.load(Ordering::Acquire)
@@ -109,7 +100,6 @@ impl CoreSession {
             return Ok(false);
         }
         let session = self.clone();
-        let capture = capture.clone();
         tokio::spawn(async move {
             let _availability_pause = session.pause_pac_availability();
             let client = session.client.pin_binding()?;
@@ -139,9 +129,7 @@ impl CoreSession {
                 }
                 session.next_generation();
             }
-            CoreRecoveryCapture::reconcile(&capture)
-                .await
-                .map_err(CoreSessionError::from)?;
+            capture.reconcile().await.map_err(CoreSessionError::from)?;
             let _transition = session.transition.lock().await;
             client.ensure_binding_current()?;
             session.ensure_not_shutting_down()?;
@@ -246,6 +234,7 @@ impl CoreSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TrafficCaptureSession;
 
     #[tokio::test]
     async fn automatic_network_actions_never_control_an_external_process() {

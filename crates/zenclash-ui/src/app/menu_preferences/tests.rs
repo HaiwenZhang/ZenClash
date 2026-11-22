@@ -27,7 +27,7 @@ fn open_app(
 }
 
 fn finish_writes(owner: &Entity<ZenClashApp>, cx: &mut TestAppContext) {
-    let task = cx.update(|cx| owner.update(cx, |app, _| app.preferences_save_task.take()));
+    let task = cx.update(|cx| owner.update(cx, |app, _| app.preferences.save_task.take()));
     cx.foreground_executor().clone().block_test(async {
         if let Some(task) = task {
             task.await.unwrap();
@@ -57,7 +57,7 @@ fn startup_adoption_preserves_queued_preferences_and_failed_save_retries(cx: &mu
         let (release, gate) = tokio::sync::oneshot::channel();
         cx.update_window(window.into(), |_, window, cx| {
             owner.update(cx, |app, cx| {
-                app.preferences_save_task = Some(app.runtime.spawn(async move {
+                app.preferences.save_task = Some(app.services.runtime.spawn(async move {
                     gate.await.unwrap();
                 }));
                 app.on_set_dark_theme(&SetDarkTheme, window, cx);
@@ -71,9 +71,12 @@ fn startup_adoption_preserves_queued_preferences_and_failed_save_retries(cx: &mu
                     window,
                     cx,
                 );
-                assert!(app.preferences_save_task.is_some());
-                assert_eq!(app.preferences.appearance, AppearancePreference::Dark);
-                assert!(!app.preferences.traffic_tray_visible);
+                assert!(app.preferences.save_task.is_some());
+                assert_eq!(
+                    app.preferences.current.appearance,
+                    AppearancePreference::Dark
+                );
+                assert!(!app.preferences.current.traffic_tray_visible);
                 assert_eq!(
                     app.runtime_page.read(cx).presented_preferences().appearance,
                     AppearancePreference::Dark
@@ -88,7 +91,8 @@ fn startup_adoption_preserves_queued_preferences_and_failed_save_retries(cx: &mu
             assert_eq!(
                 owner
                     .read(cx)
-                    .menu_preference_saves
+                    .preferences
+                    .menu_saves
                     .failure_message()
                     .is_some(),
                 fail_save
@@ -110,12 +114,13 @@ fn startup_adoption_preserves_queued_preferences_and_failed_save_retries(cx: &mu
             assert!(
                 owner
                     .read(cx)
-                    .menu_preference_saves
+                    .preferences
+                    .menu_saves
                     .failure_message()
                     .is_none()
             );
             assert_eq!(
-                owner.read(cx).preferences.appearance,
+                owner.read(cx).preferences.current.appearance,
                 AppearancePreference::Dark
             );
             window.remove_window();
@@ -144,7 +149,7 @@ fn failed_menu_save_is_visible_and_retry_commits_only_the_selected_field(cx: &mu
             app.on_set_dark_theme(&SetDarkTheme, window, cx)
         });
         assert_eq!(
-            owner.read(cx).preferences.appearance,
+            owner.read(cx).preferences.current.appearance,
             AppearancePreference::Dark
         );
     })
@@ -153,7 +158,8 @@ fn failed_menu_save_is_visible_and_retry_commits_only_the_selected_field(cx: &mu
     assert!(
         cx.update(|cx| owner
             .read(cx)
-            .menu_preference_saves
+            .preferences
+            .menu_saves
             .failure_message()
             .is_some()),
         "a failed filesystem save must return an unsaved status to the application owner"
@@ -187,7 +193,8 @@ fn failed_menu_save_is_visible_and_retry_commits_only_the_selected_field(cx: &mu
         assert!(
             owner
                 .read(cx)
-                .menu_preference_saves
+                .preferences
+                .menu_saves
                 .failure_message()
                 .is_none()
         );
@@ -206,11 +213,12 @@ fn missing_preference_store_reports_unsaved_tray_visibility(cx: &mut TestAppCont
         });
         window.render_frame(cx);
         assert!(window.find("menu-preference-save-failure").visible());
-        assert!(!owner.read(cx).preferences.traffic_tray_visible);
+        assert!(!owner.read(cx).preferences.current.traffic_tray_visible);
         assert!(
             owner
                 .read(cx)
-                .menu_preference_saves
+                .preferences
+                .menu_saves
                 .failure_message()
                 .is_some()
         );
@@ -234,7 +242,7 @@ fn unsaved_menu_preference_can_be_retried_with_keyboard(cx: &mut TestAppContext)
     cx.update_window(window.into(), |_, window, cx| {
         owner.update(cx, |app, cx| {
             app.on_set_dark_theme(&SetDarkTheme, window, cx);
-            app.preferences_store = Some(store.clone());
+            app.preferences.store = Some(store.clone());
         });
         window.render_frame(cx);
         for _ in 0..30 {
@@ -272,7 +280,7 @@ fn queued_menu_choices_keep_latest_preview_and_save_order(cx: &mut TestAppContex
     let (release, waiting) = tokio::sync::oneshot::channel();
     cx.update_window(window.into(), |_, window, cx| {
         owner.update(cx, |app, cx| {
-            app.preferences_save_task = Some(app.runtime.spawn(async move {
+            app.preferences.save_task = Some(app.services.runtime.spawn(async move {
                 waiting.await.unwrap();
             }));
             app.on_set_dark_theme(&SetDarkTheme, window, cx);
@@ -280,7 +288,7 @@ fn queued_menu_choices_keep_latest_preview_and_save_order(cx: &mut TestAppContex
             app.update_menu_preference(MenuPreferenceChange::TrayVisibility(false), cx);
         });
         assert_eq!(
-            owner.read(cx).preferences.appearance,
+            owner.read(cx).preferences.current.appearance,
             AppearancePreference::Light
         );
     })
@@ -296,13 +304,14 @@ fn queued_menu_choices_keep_latest_preview_and_save_order(cx: &mut TestAppContex
     assert!(!saved.traffic_tray_visible);
     cx.update_window(window.into(), |_, window, cx| {
         assert_eq!(
-            owner.read(cx).preferences.appearance,
+            owner.read(cx).preferences.current.appearance,
             AppearancePreference::Light
         );
         assert!(
             owner
                 .read(cx)
-                .menu_preference_saves
+                .preferences
+                .menu_saves
                 .failure_message()
                 .is_none()
         );
@@ -386,15 +395,18 @@ fn a_restore_event_received_after_a_new_menu_commit_adopts_current_preferences(
     cx.update(|cx| {
         owner.update(cx, |app, cx| {
             app.accept_preferences_event(&event, cx);
-            assert_eq!(app.preferences.appearance, AppearancePreference::Dark);
+            assert_eq!(
+                app.preferences.current.appearance,
+                AppearancePreference::Dark
+            );
         })
     });
     cx.foreground_executor().clone().block_test(async {
         for _ in 0..200 {
-            if cx.update(|cx| owner.read(cx).preferences_reconciliation_read.is_none()) {
+            if cx.update(|cx| owner.read(cx).preferences.reconciliation_read.is_none()) {
                 break;
             }
-            let runtime = cx.update(|cx| owner.read(cx).runtime.clone());
+            let runtime = cx.update(|cx| owner.read(cx).services.runtime.clone());
             runtime
                 .spawn(async {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -404,9 +416,9 @@ fn a_restore_event_received_after_a_new_menu_commit_adopts_current_preferences(
         }
     });
     cx.update_window(window.into(), |_, window, cx| {
-        assert!(owner.read(cx).preferences_reconciliation_read.is_none());
+        assert!(owner.read(cx).preferences.reconciliation_read.is_none());
         assert_eq!(
-            owner.read(cx).preferences.appearance,
+            owner.read(cx).preferences.current.appearance,
             AppearancePreference::Dark
         );
         assert_eq!(
@@ -439,13 +451,16 @@ fn restore_adoption_preserves_pending_and_failed_menu_previews(cx: &mut TestAppC
     cx.update_window(window.into(), |_, _window, cx| {
         owner.update(cx, |app, cx| {
             let appearance = app
-                .menu_preference_saves
+                .preferences
+                .menu_saves
                 .begin(MenuPreferenceChange::Appearance(AppearancePreference::Dark));
             let _pending = app
-                .menu_preference_saves
+                .preferences
+                .menu_saves
                 .begin(MenuPreferenceChange::TrayVisibility(false));
             assert!(
-                app.menu_preference_saves
+                app.preferences
+                    .menu_saves
                     .complete(appearance, Err("fixture unsaved appearance".into()))
             );
             app.accept_preferences_event(&event, cx);
@@ -455,10 +470,10 @@ fn restore_adoption_preserves_pending_and_failed_menu_previews(cx: &mut TestAppC
     // Busy data publication can defer adoption to the existing reconciliation worker.
     cx.foreground_executor().clone().block_test(async {
         for _ in 0..200 {
-            if cx.update(|cx| owner.read(cx).preferences_reconciliation_read.is_none()) {
+            if cx.update(|cx| owner.read(cx).preferences.reconciliation_read.is_none()) {
                 return;
             }
-            let runtime = cx.update(|cx| owner.read(cx).runtime.clone());
+            let runtime = cx.update(|cx| owner.read(cx).services.runtime.clone());
             runtime
                 .spawn(async {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -470,16 +485,21 @@ fn restore_adoption_preserves_pending_and_failed_menu_previews(cx: &mut TestAppC
     });
     cx.update_window(window.into(), |_, window, cx| {
         owner.update(cx, |app, cx| {
-            assert_eq!(app.preferences.appearance, AppearancePreference::Dark);
-            assert!(!app.preferences.traffic_tray_visible);
+            assert_eq!(
+                app.preferences.current.appearance,
+                AppearancePreference::Dark
+            );
+            assert!(!app.preferences.current.traffic_tray_visible);
             assert!(
-                app.menu_preference_saves
+                app.preferences
+                    .menu_saves
                     .failure_message()
                     .unwrap()
                     .contains("fixture unsaved appearance")
             );
             assert!(
-                app.menu_preference_saves
+                app.preferences
+                    .menu_saves
                     .tray_visibility
                     .as_ref()
                     .unwrap()
@@ -532,12 +552,12 @@ fn a_queued_page_restore_event_checks_a_commit_made_after_emission(cx: &mut Test
     cx.foreground_executor().clone().block_test(async {
         for _ in 0..200 {
             if cx.update(|cx| {
-                owner.read(cx).preferences.appearance == AppearancePreference::Dark
-                    && owner.read(cx).preferences_reconciliation_read.is_none()
+                owner.read(cx).preferences.current.appearance == AppearancePreference::Dark
+                    && owner.read(cx).preferences.reconciliation_read.is_none()
             }) {
                 break;
             }
-            let runtime = cx.update(|cx| owner.read(cx).runtime.clone());
+            let runtime = cx.update(|cx| owner.read(cx).services.runtime.clone());
             runtime
                 .spawn(async {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -548,14 +568,14 @@ fn a_queued_page_restore_event_checks_a_commit_made_after_emission(cx: &mut Test
     });
     cx.update_window(window.into(), |_, window, cx| {
         assert_eq!(
-            owner.read(cx).preferences.appearance,
+            owner.read(cx).preferences.current.appearance,
             AppearancePreference::Dark
         );
         assert_eq!(
             page.read(cx).presented_preferences().appearance,
             AppearancePreference::Dark
         );
-        assert!(owner.read(cx).preferences_reconciliation_read.is_none());
+        assert!(owner.read(cx).preferences.reconciliation_read.is_none());
         window.remove_window();
     })
     .unwrap();
@@ -577,7 +597,8 @@ fn menu_completion_replaces_a_preview_with_the_preferences_committed_by_restore(
     let (owner, window) = open_app(&fixture, Some(store.clone()), cx);
     let receipt = cx.update(|cx| {
         owner.update(cx, |app, _| {
-            app.menu_preference_saves
+            app.preferences
+                .menu_saves
                 .begin(MenuPreferenceChange::Appearance(AppearancePreference::Dark))
         })
     });
@@ -592,19 +613,22 @@ fn menu_completion_replaces_a_preview_with_the_preferences_committed_by_restore(
     cx.update(|cx| {
         owner.update(cx, |app, cx| {
             app.accept_preferences_event(&event, cx);
-            assert_eq!(app.preferences.appearance, AppearancePreference::Dark);
+            assert_eq!(
+                app.preferences.current.appearance,
+                AppearancePreference::Dark
+            );
             app.complete_menu_preference(receipt, Ok(()), cx);
         })
     });
     cx.foreground_executor().clone().block_test(async {
         for _ in 0..200 {
             if cx.update(|cx| {
-                owner.read(cx).preferences.appearance == AppearancePreference::Light
-                    && owner.read(cx).preferences_reconciliation_read.is_none()
+                owner.read(cx).preferences.current.appearance == AppearancePreference::Light
+                    && owner.read(cx).preferences.reconciliation_read.is_none()
             }) {
                 break;
             }
-            let runtime = cx.update(|cx| owner.read(cx).runtime.clone());
+            let runtime = cx.update(|cx| owner.read(cx).services.runtime.clone());
             runtime
                 .spawn(async {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -615,7 +639,7 @@ fn menu_completion_replaces_a_preview_with_the_preferences_committed_by_restore(
     });
     cx.update_window(window.into(), |_, window, cx| {
         assert_eq!(
-            owner.read(cx).preferences.appearance,
+            owner.read(cx).preferences.current.appearance,
             AppearancePreference::Light
         );
         assert_eq!(
@@ -664,10 +688,11 @@ fn a_foreign_restore_event_does_not_cancel_current_preference_reconciliation(
                 &crate::pages::runtime::PreferencesRestored::restored(source),
                 cx,
             );
-            let identity = app.preferences_reconciliation_read.clone().unwrap();
+            let identity = app.preferences.reconciliation_read.clone().unwrap();
             app.accept_preferences_event(&foreign_event, cx);
             assert!(std::sync::Arc::ptr_eq(
-                &app.preferences_reconciliation_read
+                &app.preferences
+                    .reconciliation_read
                     .as_ref()
                     .unwrap()
                     .identity,
@@ -677,10 +702,10 @@ fn a_foreign_restore_event_does_not_cancel_current_preference_reconciliation(
     });
     cx.foreground_executor().clone().block_test(async {
         for _ in 0..200 {
-            if cx.update(|cx| owner.read(cx).preferences_reconciliation_read.is_none()) {
+            if cx.update(|cx| owner.read(cx).preferences.reconciliation_read.is_none()) {
                 break;
             }
-            let runtime = cx.update(|cx| owner.read(cx).runtime.clone());
+            let runtime = cx.update(|cx| owner.read(cx).services.runtime.clone());
             runtime
                 .spawn(async {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -691,10 +716,10 @@ fn a_foreign_restore_event_does_not_cancel_current_preference_reconciliation(
     });
     cx.update_window(window.into(), |_, window, cx| {
         assert_eq!(
-            owner.read(cx).preferences.appearance,
+            owner.read(cx).preferences.current.appearance,
             AppearancePreference::Light
         );
-        assert!(owner.read(cx).preferences_reconciliation_read.is_none());
+        assert!(owner.read(cx).preferences.reconciliation_read.is_none());
         window.remove_window();
     })
     .unwrap();
@@ -719,11 +744,13 @@ fn observed_capture_preferences_preserve_unresolved_menu_previews_and_current_fi
     let (owner, window) = open_app(&fixture, Some(store), cx);
     cx.update_window(window.into(), |_, _window, cx| {
         owner.update(cx, |app, cx| {
-            app.preferences.language = LanguagePreference::En;
+            app.preferences.current.language = LanguagePreference::En;
             let failed = app
-                .menu_preference_saves
+                .preferences
+                .menu_saves
                 .begin(MenuPreferenceChange::Appearance(AppearancePreference::Dark));
-            app.menu_preference_saves
+            app.preferences
+                .menu_saves
                 .complete(failed, Err("capture must keep this error".into()));
             app.accept_preferences_event(
                 &crate::pages::runtime::PreferencesRestored::observed(
@@ -738,10 +765,10 @@ fn observed_capture_preferences_preserve_unresolved_menu_previews_and_current_fi
     // Observed capture preferences may be adopted by the existing asynchronous reread.
     cx.foreground_executor().clone().block_test(async {
         for _ in 0..200 {
-            if cx.update(|cx| owner.read(cx).preferences_reconciliation_read.is_none()) {
+            if cx.update(|cx| owner.read(cx).preferences.reconciliation_read.is_none()) {
                 return;
             }
-            let runtime = cx.update(|cx| owner.read(cx).runtime.clone());
+            let runtime = cx.update(|cx| owner.read(cx).services.runtime.clone());
             runtime
                 .spawn(async {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -753,17 +780,24 @@ fn observed_capture_preferences_preserve_unresolved_menu_previews_and_current_fi
     });
     cx.update_window(window.into(), |_, window, cx| {
         owner.update(cx, |app, cx| {
-            assert_eq!(app.preferences.system_proxy_host, saved.system_proxy_host);
-            assert_eq!(app.preferences.language, LanguagePreference::En);
-            assert_eq!(app.preferences.appearance, AppearancePreference::Dark);
+            assert_eq!(
+                app.preferences.current.system_proxy_host,
+                saved.system_proxy_host
+            );
+            assert_eq!(app.preferences.current.language, LanguagePreference::En);
+            assert_eq!(
+                app.preferences.current.appearance,
+                AppearancePreference::Dark
+            );
             assert!(
-                app.menu_preference_saves
+                app.preferences
+                    .menu_saves
                     .failure_message()
                     .unwrap()
                     .contains("capture must keep")
             );
-            let preferences = app.preferences.clone();
-            let previews = app.menu_preference_saves.previews();
+            let preferences = app.preferences.current.clone();
+            let previews = app.preferences.menu_saves.previews();
             app.runtime_page.update(cx, |page, cx| {
                 page.preferences_restored_from_app(preferences, previews, cx)
             });
@@ -795,7 +829,7 @@ fn stale_capture_preference_reconciliation_preserves_its_partial_scope(cx: &mut 
     let (owner, window) = open_app(&fixture, Some(store), cx);
     cx.update(|cx| {
         owner.update(cx, |app, cx| {
-            app.preferences.language = LanguagePreference::En;
+            app.preferences.current.language = LanguagePreference::En;
             app.accept_preferences_event(
                 &crate::pages::runtime::PreferencesRestored::observed(
                     source,
@@ -807,10 +841,10 @@ fn stale_capture_preference_reconciliation_preserves_its_partial_scope(cx: &mut 
     });
     cx.foreground_executor().clone().block_test(async {
         for _ in 0..200 {
-            if cx.update(|cx| owner.read(cx).preferences_reconciliation_read.is_none()) {
+            if cx.update(|cx| owner.read(cx).preferences.reconciliation_read.is_none()) {
                 break;
             }
-            let runtime = cx.update(|cx| owner.read(cx).runtime.clone());
+            let runtime = cx.update(|cx| owner.read(cx).services.runtime.clone());
             runtime
                 .spawn(async {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -821,10 +855,13 @@ fn stale_capture_preference_reconciliation_preserves_its_partial_scope(cx: &mut 
     });
     cx.update_window(window.into(), |_, window, cx| {
         assert_eq!(
-            owner.read(cx).preferences.system_proxy_host,
+            owner.read(cx).preferences.current.system_proxy_host,
             "capture.example"
         );
-        assert_eq!(owner.read(cx).preferences.language, LanguagePreference::En);
+        assert_eq!(
+            owner.read(cx).preferences.current.language,
+            LanguagePreference::En
+        );
         assert_eq!(
             owner
                 .read(cx)
@@ -834,7 +871,7 @@ fn stale_capture_preference_reconciliation_preserves_its_partial_scope(cx: &mut 
                 .system_proxy_host,
             "capture.example"
         );
-        assert!(owner.read(cx).preferences_reconciliation_read.is_none());
+        assert!(owner.read(cx).preferences.reconciliation_read.is_none());
         window.remove_window();
     })
     .unwrap();
@@ -866,7 +903,7 @@ fn a_partial_reconciliation_retains_an_already_pending_full_restore(cx: &mut Tes
                 &crate::pages::runtime::PreferencesRestored::restored(before_restore),
                 cx,
             );
-            assert!(app.preferences_reconciliation_read.is_some());
+            assert!(app.preferences.reconciliation_read.is_some());
             app.accept_preferences_event(
                 &crate::pages::runtime::PreferencesRestored::observed(
                     before_capture,
@@ -878,10 +915,10 @@ fn a_partial_reconciliation_retains_an_already_pending_full_restore(cx: &mut Tes
     });
     cx.foreground_executor().clone().block_test(async {
         for _ in 0..200 {
-            if cx.update(|cx| owner.read(cx).preferences_reconciliation_read.is_none()) {
+            if cx.update(|cx| owner.read(cx).preferences.reconciliation_read.is_none()) {
                 break;
             }
-            let runtime = cx.update(|cx| owner.read(cx).runtime.clone());
+            let runtime = cx.update(|cx| owner.read(cx).services.runtime.clone());
             runtime
                 .spawn(async {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -892,14 +929,14 @@ fn a_partial_reconciliation_retains_an_already_pending_full_restore(cx: &mut Tes
     });
     cx.update_window(window.into(), |_, window, cx| {
         assert_eq!(
-            owner.read(cx).preferences.appearance,
+            owner.read(cx).preferences.current.appearance,
             AppearancePreference::Light
         );
         assert_eq!(
-            owner.read(cx).preferences.system_proxy_host,
+            owner.read(cx).preferences.current.system_proxy_host,
             "combined.example"
         );
-        assert!(owner.read(cx).preferences_reconciliation_read.is_none());
+        assert!(owner.read(cx).preferences.reconciliation_read.is_none());
         window.remove_window();
     })
     .unwrap();

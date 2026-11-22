@@ -26,29 +26,7 @@ pub(crate) const MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_BACKUP_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_BACKUP_FILES: usize = 4096;
 
-pub(crate) fn ensure_writes_available(paths: &[PathBuf]) -> std::io::Result<()> {
-    let mut inspected = std::collections::HashSet::new();
-    for path in paths {
-        for root in path.ancestors() {
-            if !inspected.insert(root) {
-                continue;
-            }
-            match recovery::RestoreJournal::read(root) {
-                Ok(Some(journal)) if journal.is_pending() => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::WouldBlock,
-                        zenclash_i18n::text("backup.errors.recovery_required"),
-                    ));
-                }
-                Ok(_) => {}
-                Err(BackupError::Io(error))
-                    if error.kind() == std::io::ErrorKind::NotADirectory => {}
-                Err(error) => return Err(std::io::Error::other(error)),
-            }
-        }
-    }
-    Ok(())
-}
+pub(crate) use crate::data_coordinator::ensure_writes_available;
 
 /// Errors produced while exporting, validating, or restoring a local backup.
 #[derive(Debug, Error)]

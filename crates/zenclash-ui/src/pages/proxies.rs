@@ -523,7 +523,7 @@ fn take_untested_proxies(
 
 fn append_delay(proxy: &mut ProxyNode, delay: u32, mean_delay: u32) {
     proxy.history.push(DelayHistory {
-        time: String::new(),
+        time: chrono::Utc::now().to_rfc3339(),
         delay,
         mean_delay,
     });

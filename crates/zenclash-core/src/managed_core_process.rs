@@ -11,8 +11,9 @@ use std::{
 use parking_lot::{Mutex, RwLock};
 
 use crate::{
-    CoreCapabilities, CoreConfigValidator, CoreKind, MihomoClient, MihomoEndpoint, MihomoError,
-    MihomoResult,
+    CoreCapabilities, CoreConfigValidator, CoreKind, MihomoEndpoint, MihomoError, MihomoResult,
+    VersionInfo,
+    runtime_launcher::{CoreLaunchDescriptor, CoreProcessLease},
 };
 
 mod input;
@@ -421,7 +422,12 @@ impl ManagedCoreProcess {
         timeout: Duration,
         cancelled: Option<Arc<AtomicBool>>,
     ) -> MihomoResult<()> {
-        let client = MihomoClient::new(self.config.endpoint.clone())?;
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .user_agent(concat!("ZenClash/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(30))
+            .build()?;
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             if cancelled
@@ -445,10 +451,10 @@ impl ManagedCoreProcess {
                             "Native controller is not ready".into(),
                         ));
                     }
-                    serde_json::from_slice::<crate::VersionInfo>(&response.body)?;
+                    serde_json::from_slice::<VersionInfo>(&response.body)?;
                     Ok(())
                 } else {
-                    client.version().await.map(|_| ())
+                    probe_http_version(&http, &self.config.endpoint).await
                 }
             })
             .await
@@ -886,6 +892,66 @@ impl Drop for ManagedCoreProcess {
             }
         }
     }
+}
+
+impl CoreProcessLease for ManagedCoreProcess {
+    fn kind(&self) -> CoreKind {
+        self.kind()
+    }
+
+    fn endpoint(&self) -> MihomoEndpoint {
+        self.endpoint().clone()
+    }
+
+    fn launch_descriptor(&self) -> CoreLaunchDescriptor {
+        CoreLaunchDescriptor::from(self.launch_config())
+    }
+
+    fn write_scopes(&self) -> Vec<PathBuf> {
+        self.write_scopes()
+    }
+
+    fn config_validator(&self) -> CoreConfigValidator {
+        self.config_validator()
+    }
+
+    fn native_controller(&self) -> MihomoResult<Option<crate::service::NativeController>> {
+        self.native_controller()
+    }
+
+    fn stop_process(&self) -> MihomoResult<()> {
+        self.stop()
+    }
+
+    fn pid(&self) -> Option<u32> {
+        self.child.lock().as_ref().map(Child::id)
+    }
+
+    fn is_running(&self) -> bool {
+        self.is_running()
+    }
+
+    fn into_any_arc(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
+        self
+    }
+}
+
+async fn probe_http_version(http: &reqwest::Client, endpoint: &MihomoEndpoint) -> MihomoResult<()> {
+    let url = endpoint.http_url("/version")?;
+    let mut request = http.get(url);
+    if !endpoint.secret.is_empty() {
+        request = request.bearer_auth(&endpoint.secret);
+    }
+    let response = request.send().await?;
+    if !response.status().is_success() {
+        return Err(MihomoError::Process(format!(
+            "HTTP controller is not ready: {}",
+            response.status()
+        )));
+    }
+    let bytes = response.bytes().await?;
+    serde_json::from_slice::<VersionInfo>(&bytes)?;
+    Ok(())
 }
 
 fn reserve_native_execution(

@@ -26,7 +26,7 @@ fn home_service_feedback_saved_commit_has_keyboard_details_without_resubmission(
     let received = navigations.clone();
     let target = page.downgrade();
     cx.update(|cx| {
-        cx.on_action(move |_: &crate::app::NavigateTun, cx| {
+        cx.on_action(move |_: &crate::actions::NavigateTun, cx| {
             received.set(received.get() + 1);
             let _ = target.update(cx, |page, cx| page.switch_to(Page::Tun, cx));
         });

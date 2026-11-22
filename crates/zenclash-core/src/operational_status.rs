@@ -37,159 +37,9 @@ impl StatusRefreshSchedule {
     }
 }
 
-/// Recovery action associated with an observation that has no trustworthy value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RecoveryAction {
-    /// Retry the read without mutating runtime state.
-    Retry,
-    /// Inspect or restart the managed runtime core.
-    InspectCore,
-    /// Review native capture settings and ownership.
-    ReviewCapture,
-    /// No action is available because the selected core does not support the fact.
-    Unsupported,
-}
-
-/// Failure attached to a stale or failed observation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OperationalFailure {
-    /// Human-readable failure suitable for diagnostics and localized UI wrapping.
-    pub message: String,
-    /// Unix timestamp in milliseconds when the failure was observed.
-    pub occurred_at_ms: u64,
-}
-
-/// Trust state shared by every independently refreshed operational slice.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum Observation<T> {
-    /// No successful value has been observed yet.
-    #[default]
-    Loading,
-    /// A successful current value and its observation time.
-    Fresh {
-        /// Most recent successful value.
-        value: T,
-        /// Unix timestamp in milliseconds when the value was observed.
-        observed_at_ms: u64,
-    },
-    /// The last successful value retained after a newer read failed.
-    Stale {
-        /// Last successful value.
-        value: T,
-        /// Unix timestamp in milliseconds of the last success.
-        observed_at_ms: u64,
-        /// Newer failure that made the value stale.
-        failure: OperationalFailure,
-    },
-    /// A failed read for which no trustworthy value exists.
-    Failed {
-        /// Failure reported by the observer.
-        failure: OperationalFailure,
-        /// Safe next action offered to the caller.
-        recovery: RecoveryAction,
-    },
-}
-
-impl<T> Observation<T> {
-    /// Returns the trustworthy current or last-successful value, if one exists.
-    #[must_use]
-    pub const fn value(&self) -> Option<&T> {
-        match self {
-            Self::Fresh { value, .. } | Self::Stale { value, .. } => Some(value),
-            Self::Loading | Self::Failed { .. } => None,
-        }
-    }
-
-    /// Returns current successful evidence; stale data remains available through `value`.
-    #[must_use]
-    pub const fn fresh_value(&self) -> Option<&T> {
-        match self {
-            Self::Fresh { value, .. } => Some(value),
-            _ => None,
-        }
-    }
-
-    /// Returns the timestamp of the current or last-successful value.
-    #[must_use]
-    pub const fn observed_at_ms(&self) -> Option<u64> {
-        match self {
-            Self::Fresh { observed_at_ms, .. } | Self::Stale { observed_at_ms, .. } => {
-                Some(*observed_at_ms)
-            }
-            Self::Loading | Self::Failed { .. } => None,
-        }
-    }
-
-    /// Returns whether this observation contains a current successful value.
-    #[must_use]
-    pub const fn is_fresh(&self) -> bool {
-        matches!(self, Self::Fresh { .. })
-    }
-}
-
-impl<T: Clone> Observation<T> {
-    /// Records an independent read while preserving a last-successful value on failure.
-    #[must_use]
-    pub fn record<E: ToString>(
-        previous: &Self,
-        result: Result<T, E>,
-        observed_at_ms: u64,
-        recovery: RecoveryAction,
-    ) -> Self {
-        match result {
-            Ok(value) => Self::Fresh {
-                value,
-                observed_at_ms,
-            },
-            Err(error) => {
-                let failure = OperationalFailure {
-                    message: error.to_string(),
-                    occurred_at_ms: observed_at_ms,
-                };
-                match previous {
-                    Self::Fresh {
-                        value,
-                        observed_at_ms,
-                    }
-                    | Self::Stale {
-                        value,
-                        observed_at_ms,
-                        ..
-                    } => Self::Stale {
-                        value: value.clone(),
-                        observed_at_ms: *observed_at_ms,
-                        failure,
-                    },
-                    Self::Loading | Self::Failed { .. } => Self::Failed { failure, recovery },
-                }
-            }
-        }
-    }
-
-    /// Keeps an older trustworthy value when an independently loaded replacement failed.
-    #[must_use]
-    pub fn retain_last_success(previous: &Self, next: Self) -> Self {
-        let Self::Failed { failure, recovery } = next else {
-            return next;
-        };
-        match previous {
-            Self::Fresh {
-                value,
-                observed_at_ms,
-            }
-            | Self::Stale {
-                value,
-                observed_at_ms,
-                ..
-            } => Self::Stale {
-                value: value.clone(),
-                observed_at_ms: *observed_at_ms,
-                failure,
-            },
-            Self::Loading | Self::Failed { .. } => Self::Failed { failure, recovery },
-        }
-    }
-}
+pub use crate::observation_types::{
+    CapabilityState, FirstRunStage, Observation, OperationalFailure, RecoveryAction,
+};
 
 /// Managed or external process facts associated with the active core session.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -315,19 +165,6 @@ pub struct ControllerStatus {
     pub compatibility: ControllerCompatibility,
     /// Core-session generation to which this response belongs.
     pub generation: u64,
-}
-
-/// Runtime support for one observable capability.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CapabilityState {
-    /// The capability is observed inactive.
-    Inactive,
-    /// The capability is observed active.
-    Active,
-    /// Configuration is known but runtime activation cannot be verified.
-    Unknown,
-    /// The selected core does not claim this capability.
-    Unsupported,
 }
 
 /// Requested, configured, and observed TUN state.
@@ -459,25 +296,6 @@ pub struct PathStatus {
     pub generation: u64,
 }
 
-/// Next incomplete step derived from persistent and observed runtime facts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FirstRunStage {
-    /// No managed profile is active yet.
-    NoProfile,
-    /// A profile exists, but the core/controller is not currently controllable.
-    CoreUnavailable,
-    /// No ZenClash-owned System Proxy or requested TUN plan exists.
-    CaptureNotSelected,
-    /// Capture was requested but its activation is not proven.
-    CaptureUnconfirmed,
-    /// Capture is active but no explicit path probe has completed.
-    PathUnknown,
-    /// The latest path probe failed or did not traverse Mihomo.
-    PathFailed,
-    /// Profile, runtime, capture, and path evidence are all present.
-    Ready,
-}
-
 /// Last successful observation for a runtime stream.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StreamStatus {
@@ -531,6 +349,7 @@ pub struct OperationalStatus {
     snapshot: watch::Sender<OperationalSnapshot>,
     task: std::sync::OnceLock<tokio::task::AbortHandle>,
     wake: Arc<tokio::sync::Notify>,
+    core_session: Option<CoreSession>,
 }
 
 impl Drop for OperationalStatus {
@@ -556,6 +375,7 @@ impl OperationalStatus {
             snapshot,
             task: std::sync::OnceLock::new(),
             wake: wake.clone(),
+            core_session: Some(core_session.clone()),
         });
         let weak = Arc::downgrade(&status);
         let task = runtime.spawn(run_status_monitor(
@@ -604,11 +424,14 @@ impl OperationalStatus {
     ) -> bool {
         let mut applied = false;
         self.snapshot.send_modify(|snapshot| {
-            let current_generation = snapshot
-                .process
-                .value()
-                .map_or(0, |process| process.generation);
-            if current_generation != expected_generation {
+            let current_generation = match &snapshot.process {
+                Observation::Fresh { value, .. } | Observation::Stale { value, .. } => {
+                    Some(value.generation)
+                }
+                Observation::Loading => self.core_session.as_ref().map(CoreSession::generation),
+                Observation::Failed { .. } => None,
+            };
+            if current_generation != Some(expected_generation) {
                 return;
             }
             snapshot.path =
@@ -836,47 +659,54 @@ async fn refresh_status_with_tun_reader<F, R>(
                 .and_then(|client| client.snapshot())
                 .and_then(|snapshot| snapshot.core_pid)
         });
-    let memory_read = async {
-        let reported = match client.memory_snapshot().await {
-            Ok(memory) if memory.inuse > 0 => return Ok(memory),
-            result => result,
-        };
-        if let Some(pid) = pid
-            && let Ok(Some(bytes)) =
-                tokio::task::spawn_blocking(move || memory::resident_memory(pid)).await
-        {
-            return Ok(crate::MemorySnapshot {
-                inuse: bytes,
-                oslimit: 0,
-            });
+    let config_read = async {
+        if !refresh_platform {
+            return None;
         }
-        let memory = reported?;
-        if memory.inuse == 0 {
-            return Err(crate::MihomoError::Process(
-                "Core memory is unavailable".into(),
-            ));
-        }
-        Ok(memory)
+        Some(client.runtime_config().await)
     };
-    let (version, config, connections, memory, native) = tokio::join!(
+    let (version, config, connections, native) = tokio::join!(
         client.version(),
-        client.runtime_config(),
+        config_read,
         client.connections_summary(),
-        memory_read,
         native,
     );
-    // The memory stream can report zero when the same poll's connections
-    // response still reports memory, including for a privileged service core.
-    let memory = memory.or_else(|error| match &connections {
-        Ok(connections) if connections.memory > 0 => Ok(crate::MemorySnapshot {
-            inuse: connections.memory,
+    // Reuse memory already reported by `/connections` before opening a dedicated
+    // `/memory` WebSocket or probing OS resident memory.
+    let memory = if let Ok(snapshot) = &connections
+        && snapshot.memory > 0
+    {
+        Ok(crate::MemorySnapshot {
+            inuse: snapshot.memory,
             oslimit: 0,
-        }),
-        _ => Err(error),
-    });
-    let tun = if refresh_platform {
-        Some(match &config {
-            Ok(config) => read_tun(expected.kind, config.clone()).await,
+        })
+    } else {
+        let reported = client.memory_snapshot().await;
+        match reported {
+            Ok(memory) if memory.inuse > 0 => Ok(memory),
+            reported => {
+                if let Some(pid) = pid
+                    && let Ok(Some(bytes)) =
+                        tokio::task::spawn_blocking(move || memory::resident_memory(pid)).await
+                {
+                    Ok(crate::MemorySnapshot {
+                        inuse: bytes,
+                        oslimit: 0,
+                    })
+                } else {
+                    match reported {
+                        Ok(_) => Err(crate::MihomoError::Process(
+                            "Core memory is unavailable".into(),
+                        )),
+                        Err(error) => Err(error),
+                    }
+                }
+            }
+        }
+    };
+    let tun = if let Some(config) = config {
+        Some(match config {
+            Ok(config) => read_tun(expected.kind, config).await,
             Err(error) => Err(error.to_string()),
         })
     } else {
@@ -1142,7 +972,7 @@ mod tests {
         let endpoint =
             crate::MihomoEndpoint::new(format!("http://{}", listener.local_addr().unwrap()), "");
         let server = std::thread::spawn(move || {
-            for _ in 0..4 {
+            for _ in 0..2 {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut request = Vec::new();
                 while !request.ends_with(b"\r\n\r\n") {
@@ -1151,33 +981,19 @@ mod tests {
                     request.push(byte[0]);
                 }
                 let request = String::from_utf8(request).unwrap();
-                if request.starts_with("GET /memory ") {
-                    let key = request
-                        .lines()
-                        .find_map(|line| {
-                            let (name, value) = line.split_once(':')?;
-                            name.eq_ignore_ascii_case("sec-websocket-key")
-                                .then(|| value.trim())
-                        })
-                        .unwrap();
-                    let accept = tokio_tungstenite::tungstenite::handshake::derive_accept_key(
-                        key.as_bytes(),
-                    );
-                    write!(stream, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\n\r\n").unwrap();
-                    let body = br#"{"inuse":0,"oslimit":0}"#;
-                    stream
-                        .write_all(&[0x81, u8::try_from(body.len()).unwrap()])
-                        .unwrap();
-                    stream.write_all(body).unwrap();
-                    continue;
-                }
+                assert!(
+                    !request.starts_with("GET /configs "),
+                    "fast tick without refresh_platform must not fetch /configs"
+                );
+                assert!(
+                    !request.starts_with("GET /memory "),
+                    "fast tick should reuse connections.memory instead of opening /memory"
+                );
                 let body = if request.starts_with("GET /version ") {
                     r#"{"version":"test"}"#
-                } else if request.starts_with("GET /connections ") {
-                    r#"{"connections":[],"memory":47000000,"uploadTotal":0,"downloadTotal":0}"#
                 } else {
-                    assert!(request.starts_with("GET /configs "));
-                    r#"{"mode":"rule"}"#
+                    assert!(request.starts_with("GET /connections "));
+                    r#"{"connections":[],"memory":47000000,"uploadTotal":0,"downloadTotal":0}"#
                 };
                 write!(
                     stream,
@@ -1201,6 +1017,7 @@ mod tests {
             snapshot,
             task: std::sync::OnceLock::new(),
             wake: Arc::new(tokio::sync::Notify::new()),
+            core_session: None,
         });
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -1278,6 +1095,7 @@ mod tests {
             snapshot,
             task: std::sync::OnceLock::new(),
             wake: Arc::new(tokio::sync::Notify::new()),
+            core_session: None,
         });
         let (entered, waiting) = tokio::sync::oneshot::channel();
         let (release, released) = tokio::sync::oneshot::channel();
@@ -1334,8 +1152,9 @@ mod tests {
                 format!("http://{}", listener.local_addr().unwrap()),
                 "",
             );
+            let expected_requests = if refresh_platform { 4 } else { 3 };
             let server = std::thread::spawn(move || {
-                for _ in 0..4 {
+                for _ in 0..expected_requests {
                     let (mut stream, _) = listener.accept().unwrap();
                     let request =
                         crate::test_support::read_controller_request_blocking(&mut stream)
@@ -1391,6 +1210,7 @@ mod tests {
                 snapshot,
                 task: std::sync::OnceLock::new(),
                 wake: Arc::new(tokio::sync::Notify::new()),
+                core_session: None,
             };
             core.invalidate_runtime_observations();
             let runtime = Handle::current();
@@ -1928,6 +1748,7 @@ mod tests {
             snapshot: sender,
             task: std::sync::OnceLock::new(),
             wake: Arc::new(tokio::sync::Notify::new()),
+            core_session: None,
         };
 
         assert!(!status.record_path(
@@ -2134,5 +1955,25 @@ mod tests {
         stop_second.store(true, std::sync::atomic::Ordering::Release);
         first_server.join().unwrap();
         second_server.join().unwrap();
+    }
+
+    #[test]
+    fn record_path_rejects_generation_zero_when_process_is_not_ready() {
+        let (sender, _) = watch::channel(OperationalSnapshot::default());
+        let status = OperationalStatus {
+            snapshot: sender,
+            task: std::sync::OnceLock::new(),
+            wake: Arc::new(tokio::sync::Notify::new()),
+            core_session: None,
+        };
+        assert!(!status.record_path(
+            0,
+            Ok(PathStatus {
+                route: ObservedPathRoute::Mihomo,
+                target: "https://example.com".into(),
+                generation: 0,
+            }),
+        ));
+        assert_eq!(status.snapshot().path, Observation::Loading);
     }
 }

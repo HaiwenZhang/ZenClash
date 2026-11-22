@@ -32,12 +32,12 @@ fn a_late_tray_snapshot_cannot_replace_new_configuration_menu_facts(cx: &mut Tes
         .unwrap();
     cx.update(|cx| {
         app.update(cx, |app, cx| {
-            app.tray_state.mode = "current menu".into();
-            app.tray_error = Some("current error".into());
+            app.tray.state.mode = "current menu".into();
+            app.tray.error = Some("current error".into());
             app.apply_tray_menu_state(snapshot(old), cx);
-            assert_eq!(app.tray_state.mode, "current menu");
-            assert_eq!(app.tray_error.as_deref(), Some("current error"));
-            assert!(app.tray_refresh_pending);
+            assert_eq!(app.tray.state.mode, "current menu");
+            assert_eq!(app.tray.error.as_deref(), Some("current error"));
+            assert!(app.tray.refresh_pending);
         })
     });
     cx.update_window(window, |_, window, _| window.remove_window())
@@ -63,10 +63,10 @@ fn a_tray_snapshot_from_another_actual_session_cannot_publish_equal_counter_fact
     let (window, app) = open_app(cx, &fixture, session);
     cx.update(|cx| {
         app.update(cx, |app, cx| {
-            app.tray_state.mode = "original".into();
+            app.tray.state.mode = "original".into();
             app.apply_tray_menu_state(snapshot(observed), cx);
-            assert_eq!(app.tray_state.mode, "original");
-            assert!(app.tray_observation.is_none());
+            assert_eq!(app.tray.state.mode, "original");
+            assert!(app.tray.observation.is_none());
         })
     });
     cx.update_window(window, |_, window, _| window.remove_window())
@@ -90,15 +90,16 @@ fn current_tray_facts_and_source_are_published_together_before_native_menu_work(
     cx.update(|cx| {
         app.update(cx, |app, cx| {
             app.apply_tray_menu_state(snapshot(observed), cx);
-            assert_eq!(app.tray_state.mode, "rule");
-            assert_eq!(app.tray_state.groups[0].controller_name(), "group");
+            assert_eq!(app.tray.state.mode, "rule");
+            assert_eq!(app.tray.state.groups[0].controller_name(), "group");
             assert!(
-                app.tray_observation
+                app.tray
+                    .observation
                     .as_ref()
                     .unwrap()
                     .is_same_observation(&identity)
             );
-            assert!(app.tray_error.is_none());
+            assert!(app.tray.error.is_none());
         })
     });
     cx.update_window(window, |_, window, _| window.remove_window())
@@ -125,9 +126,9 @@ fn tray_refresh_http_failures_keep_their_original_configuration_and_pending_quer
     let (window, app) = open_app(cx, &fixture, session.clone());
     cx.update(|cx| {
         app.update(cx, |app, _| {
-            assert!(app.tray_observation.is_none());
+            assert!(app.tray.observation.is_none());
             assert!(app.publish_tray_refresh_error(&source, error.clone()));
-            assert!(app.tray_error.as_deref().unwrap().contains("503"));
+            assert!(app.tray.error.as_deref().unwrap().contains("503"));
         })
     });
     services
@@ -136,13 +137,13 @@ fn tray_refresh_http_failures_keep_their_original_configuration_and_pending_quer
         .unwrap();
     cx.update(|cx| {
         app.update(cx, |app, _| {
-            app.tray_error = Some("current configuration feedback".into());
+            app.tray.error = Some("current configuration feedback".into());
             assert!(!app.publish_tray_refresh_error(&source, error));
             assert_eq!(
-                app.tray_error.as_deref(),
+                app.tray.error.as_deref(),
                 Some("current configuration feedback")
             );
-            assert!(app.tray_refresh_pending);
+            assert!(app.tray.refresh_pending);
         })
     });
     let current_source = RuntimeReadSource::default();
@@ -156,13 +157,13 @@ fn tray_refresh_http_failures_keep_their_original_configuration_and_pending_quer
         .unwrap();
     cx.update_window(window, |_, window, cx| {
         app.update(cx, |app, _| {
-            app.tray_refresh_pending = false;
+            app.tray.refresh_pending = false;
             assert!(app.publish_tray_refresh_error(&current_source, current_error.clone()));
-            assert!(app.tray_error.as_deref().unwrap().contains("503"));
-            app.tray_refresh_pending = true;
-            app.tray_error = Some("pending newer refresh".into());
+            assert!(app.tray.error.as_deref().unwrap().contains("503"));
+            app.tray.refresh_pending = true;
+            app.tray.error = Some("pending newer refresh".into());
             assert!(!app.publish_tray_refresh_error(&current_source, current_error));
-            assert_eq!(app.tray_error.as_deref(), Some("pending newer refresh"));
+            assert_eq!(app.tray.error.as_deref(), Some("pending newer refresh"));
         });
         window.remove_window();
     })
@@ -193,7 +194,8 @@ fn a_panicked_tray_refresh_keeps_its_source_for_worker_error_publication(cx: &mu
         app.update(cx, |app, _| {
             assert!(app.publish_tray_refresh_error(&source, error.clone()));
             assert!(
-                app.tray_error
+                app.tray
+                    .error
                     .as_deref()
                     .unwrap()
                     .contains("fixture menu worker")
@@ -206,10 +208,10 @@ fn a_panicked_tray_refresh_keeps_its_source_for_worker_error_publication(cx: &mu
         .unwrap();
     cx.update_window(window, |_, window, cx| {
         app.update(cx, |app, _| {
-            app.tray_error = Some("current configuration feedback".into());
+            app.tray.error = Some("current configuration feedback".into());
             assert!(!app.publish_tray_refresh_error(&source, error));
             assert_eq!(
-                app.tray_error.as_deref(),
+                app.tray.error.as_deref(),
                 Some("current configuration feedback")
             );
         });
@@ -240,9 +242,9 @@ fn a_foreign_tray_refresh_failure_cannot_publish_equal_counter_diagnostics(
     let (window, app) = open_app(cx, &fixture, session);
     cx.update_window(window, |_, window, cx| {
         app.update(cx, |app, _| {
-            app.tray_error = Some("actual owner feedback".into());
+            app.tray.error = Some("actual owner feedback".into());
             assert!(!app.publish_tray_refresh_error(&source, error));
-            assert_eq!(app.tray_error.as_deref(), Some("actual owner feedback"));
+            assert_eq!(app.tray.error.as_deref(), Some("actual owner feedback"));
         });
         window.remove_window();
     })

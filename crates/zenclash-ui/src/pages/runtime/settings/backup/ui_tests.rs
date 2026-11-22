@@ -454,13 +454,13 @@ fn delayed_backup_completion_synchronizes_current_business_state_after_navigatio
         .unwrap();
         fixture.settle(cx, &page, |page| {
             page.preferences.appearance == zenclash_core::AppearancePreference::Dark
-                && page.overrides.catalog().items.len() == 1
+                && page.library.overrides.catalog().items.len() == 1
                 && !page.mutation_busy(busy::MutationDomain::Backup)
         });
         cx.update(|cx| {
             let page = page.read(cx);
             assert_eq!(page.profile_path.as_ref(), Some(&candidate));
-            assert!(!page.overrides.catalog().items[0].enabled);
+            assert!(!page.library.overrides.catalog().items[0].enabled);
             assert!(page.preferences.traffic_tray_visible);
             assert_eq!(page.notice.as_deref(), Some("current page notice"));
         });

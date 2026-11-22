@@ -34,22 +34,12 @@ impl CoreSession {
         self.start_supervisor_with_policy(runtime, CoreRecoveryPolicy::default(), None)
     }
 
-    /// Starts managed-core supervision with capture release and restoration hooks.
-    ///
-    /// On an unexpected exit, owned native capture is released before restart;
-    /// after controller readiness succeeds, persistent intent is reconciled.
-    /// Returns false for an external core or when supervision was already started.
-    #[must_use]
-    pub fn start_supervisor_with_capture(
+    pub(crate) fn start_supervisor_with_recovery_capture(
         &self,
         runtime: &Handle,
-        capture: TrafficCaptureSession,
+        capture: Arc<dyn CoreRecoveryCapture>,
     ) -> bool {
-        self.start_supervisor_with_policy(
-            runtime,
-            CoreRecoveryPolicy::default(),
-            Some(Arc::new(capture)),
-        )
+        self.start_supervisor_with_policy(runtime, CoreRecoveryPolicy::default(), Some(capture))
     }
 
     fn start_supervisor_with_policy(

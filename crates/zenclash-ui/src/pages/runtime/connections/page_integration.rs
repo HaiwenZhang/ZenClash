@@ -42,7 +42,7 @@ impl RuntimePage {
         let source = match self.page_observation.data() {
             PageSnapshotData::Connections(snapshot)
                 if self.page == Page::Connections
-                    && self.ui_visibility.page_visible()
+                    && self.shell.ui_visibility.page_visible()
                     && self.page_observation.configuration_generation()
                         == self.core_session.generation() =>
             {

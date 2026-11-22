@@ -58,7 +58,7 @@ impl RuntimePage {
                             .pb_3()
                             .gap_3()
                             .child(gpui_kit::component::input::Input::new(
-                                self.resources.search(),
+                                self.library.resources.search(),
                             ))
                             .child(
                                 Button::new("update-all-providers")
@@ -81,27 +81,34 @@ impl RuntimePage {
                             .child(
                                 div()
                                     .flex_1()
+                                    .min_w_0()
                                     .child(zenclash_i18n::text("settings_redesign.resource_name")),
                             )
                             .child(
                                 div()
                                     .w_16()
+                                    .flex_shrink_0()
                                     .child(zenclash_i18n::text("settings_redesign.resource_type")),
                             )
                             .child(
                                 div()
                                     .w_16()
+                                    .flex_shrink_0()
                                     .child(zenclash_i18n::text("settings_redesign.resource_count")),
                             )
                             .child(
-                                div().w_32().child(zenclash_i18n::text(
+                                div().w_32().flex_shrink_0().child(zenclash_i18n::text(
                                     "settings_redesign.resource_updated",
                                 )),
                             )
                             .child(
-                                div().w(gpui_kit::rems(15.)).child(zenclash_i18n::text(
-                                    "settings_redesign.resource_actions",
-                                )),
+                                div()
+                                    .w(gpui_kit::rems(15.))
+                                    .flex_shrink_0()
+                                    .text_right()
+                                    .child(zenclash_i18n::text(
+                                        "settings_redesign.resource_actions",
+                                    )),
                             ),
                     )
                     .child(self.render_provider_section(proxy, ProviderKind::Proxy, theme, cx))
@@ -138,7 +145,7 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
         let owner = cx.entity().downgrade();
-        let controlled = &self.controlled_config;
+        let controlled = &self.settings.controlled_config;
         let geodata_mode = config_bool(config, controlled, "geodata-mode");
         let geo_auto_update = config_bool(config, controlled, "geo-auto-update");
         let geo_interval = config_value(config, controlled, "geo-update-interval")
@@ -274,8 +281,8 @@ impl RuntimePage {
         cx: &mut Context<RuntimePage>,
     ) -> gpui_kit::AnyElement {
         let mutating = self.core_busy();
-        let operations = &self.provider_operations;
-        let query = self.resources.query(cx);
+        let operations = &self.monitors.provider_operations;
+        let query = self.library.resources.query(cx);
         let count = catalog
             .providers
             .iter()
@@ -305,8 +312,7 @@ impl RuntimePage {
                                 name.to_lowercase().contains(&query)
                                     || provider.name.to_lowercase().contains(&query)
                             })
-                            .enumerate()
-                            .map(|(index, (key, provider))| {
+                            .map(|(key, provider)| {
                                 let name = if provider.name.is_empty() {
                                     key.as_str()
                                 } else {
@@ -372,12 +378,12 @@ impl RuntimePage {
                                 });
                                 h_flex()
                                     .id((
-                                        if kind == ProviderKind::Rule {
+                                        gpui_kit::ElementId::from(if kind == ProviderKind::Rule {
                                             "rule-provider"
                                         } else {
                                             "proxy-provider"
-                                        },
-                                        index,
+                                        }),
+                                        key.clone(),
                                     ))
                                     .min_h(gpui_kit::rems(3.625))
                                     .flex_wrap()
@@ -394,17 +400,24 @@ impl RuntimePage {
                                             .text_sm()
                                             .child(display_name.clone()),
                                     )
-                                    .child(div().w_16().text_sm().child(zenclash_i18n::text(
-                                        if kind == ProviderKind::Rule {
+                                    .child(div().w_16().flex_shrink_0().text_sm().child(
+                                        zenclash_i18n::text(if kind == ProviderKind::Rule {
                                             "settings_redesign.resource_rule"
                                         } else {
                                             "settings_redesign.resource_proxy"
-                                        },
-                                    )))
-                                    .child(div().w_16().text_sm().child(item_count.to_string()))
+                                        }),
+                                    ))
+                                    .child(
+                                        div()
+                                            .w_16()
+                                            .flex_shrink_0()
+                                            .text_sm()
+                                            .child(item_count.to_string()),
+                                    )
                                     .child(
                                         div()
                                             .w_32()
+                                            .flex_shrink_0()
                                             .truncate()
                                             .text_sm()
                                             .text_color(theme.muted_foreground)
@@ -413,6 +426,7 @@ impl RuntimePage {
                                     .child(
                                         h_flex()
                                             .w(gpui_kit::rems(15.))
+                                            .flex_shrink_0()
                                             .justify_end()
                                             .gap_2()
                                             .child(

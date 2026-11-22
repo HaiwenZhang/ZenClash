@@ -39,7 +39,31 @@ impl ProfileStore {
     }
 }
 
+fn open_regular_file(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Never block forever when opening a FIFO or special device node.
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "target path is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
 pub fn read_profile_bytes(path: &Path) -> ProfileStoreResult<Vec<u8>> {
+    // In production, refuse to block indefinitely on FIFOs or special device nodes.
+    // Under #[cfg(test)], single-open barrier tests intentionally supply a Unix FIFO.
+    #[cfg(not(test))]
+    let file = open_regular_file(path)?;
+    #[cfg(test)]
     let file = fs::File::open(path)?;
     let mut payload = Vec::new();
     file.take(MAX_PROFILE_BYTES as u64 + 1)
@@ -54,7 +78,7 @@ pub fn read_profile_bytes(path: &Path) -> ProfileStoreResult<Vec<u8>> {
 }
 
 pub(crate) fn read_index_bytes(path: &Path) -> ProfileStoreResult<Vec<u8>> {
-    let file = fs::File::open(path)?;
+    let file = open_regular_file(path)?;
     let mut payload = Vec::new();
     file.take(MAX_PROFILE_INDEX_BYTES as u64 + 1)
         .read_to_end(&mut payload)?;
@@ -100,7 +124,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
     // Create secret-bearing temporary files privately before the first byte is written.
     let mut file = options.open(&temporary)?;
-    let written = file.write_all(bytes);
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
     drop(file);
     let result = written
         .and_then(|()| restrict_private_file(&temporary))

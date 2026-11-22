@@ -29,8 +29,10 @@ pub use service_manager::{
 
 pub use service_runtime::{LocalGeoDataRecovery, ServiceRuntimeBundle};
 mod config_diff;
+mod config_pipeline;
 mod controlled_config;
 mod core_backend;
+mod core_errors;
 mod core_installation;
 mod core_session;
 mod core_update;
@@ -45,6 +47,7 @@ mod managed_core_process;
 mod models;
 mod network;
 mod network_diagnostics;
+mod observation_types;
 mod operational_status;
 mod owned_core;
 mod platform_command;
@@ -55,9 +58,12 @@ mod provider_operations;
 mod proxy;
 mod proxy_operations;
 mod ruleset;
+mod runtime_launcher;
+mod session_errors;
 #[cfg(test)]
 mod stream_publication_test_support;
 mod system_proxy;
+mod system_proxy_types;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 mod traffic;
@@ -70,12 +76,6 @@ mod tun_runtime;
 mod websocket;
 mod yaml_overrides;
 
-/// Compatibility name for the launch inputs shared by managed core implementations.
-pub use CoreLaunchConfig as MihomoLaunchConfig;
-/// Compatibility name for a managed core process snapshot.
-pub use CoreProcessSnapshot as MihomoProcessSnapshot;
-/// Compatibility name for the managed Mihomo process.
-pub use ManagedCoreProcess as MihomoProcess;
 pub use app_update::{
     AppRelease, AppUpdateError, AppUpdateResult, AppUpdateService, AppUpdateStatus,
     validate_external_https_url,
@@ -85,23 +85,33 @@ pub use backup::{
     BackupDataSnapshot, BackupError, BackupExportSummary, BackupManager, BackupRestoreTransaction,
     BackupResult, ObservedBackupSnapshot, PreparedBackupRestore,
 };
-pub use client::{MihomoClient, MihomoError, MihomoResult, ServiceStartupRejection, VersionInfo};
+pub use client::MihomoClient;
 pub use config_diff::{
     ConfigDiffEntry, ConfigDiffError, ConfigDiffKind, ConfigDiffReport, diff_yaml_configs,
+};
+pub use config_pipeline::{
+    EffectiveConfigArtifact, EffectiveConfigPipeline, EffectiveConfigRequest,
+    FULL_RELOAD_CONFIG_KEYS, HOT_UPDATE_CONFIG_KEYS, OverrideKeys, apply_controlled_override,
+    yaml_content_hash,
 };
 pub use controlled_config::{
     ControlledConfigError, ControlledConfigResult, ControlledConfigStore, ControlledConfigUpdate,
     ListenerPortFallback,
 };
 pub use core_backend::{CoreCapabilities, CoreKind, ParseCoreKindError};
+pub use core_errors::{
+    AppPreferencesError, AppPreferencesResult, MihomoError, MihomoResult, NativePropertyListError,
+    PacError, PacServerOperation, ServiceStartupRejection, SystemProxyBackendKind,
+    SystemProxyBackendUnavailable, SystemProxyError, SystemProxySetting,
+    SystemProxyTransactionCause, SystemProxyValidationError, VersionInfo,
+};
 pub use core_installation::{CoreBinaryError, CoreBinaryInfo, validate_core_binary};
 pub use core_session::{
-    BuiltinResourceUpdateReceipt, CoreApplyKind, CoreApplyOutcome, CoreBackupAdmission,
-    CoreCommittedProfileSnapshot, CoreDataApplicationAdmission, CoreInitializationOutcome,
-    CoreInstallOutcome, CoreLifecyclePhase, CoreLifecycleSnapshot, CoreLocalRecoveryOutcome,
-    CoreMaintenanceIntent, CoreObservation, CoreObservationIdentity, CoreResourceAction,
-    CoreRestoreSnapshot, CoreSession, CoreSessionError, CoreSessionSnapshot, EffectiveConfigIntent,
-    ProxyGroupActionReceipt, ResourceActionReceipt,
+    BuiltinResourceUpdateReceipt, CoreApplyOutcome, CoreCommittedProfileSnapshot,
+    CoreInitializationOutcome, CoreInstallOutcome, CoreLifecyclePhase, CoreLifecycleSnapshot,
+    CoreLocalRecoveryOutcome, CoreMaintenanceIntent, CoreObservation, CoreObservationIdentity,
+    CoreResourceAction, CoreRestoreSnapshot, CoreSession, CoreSessionSnapshot,
+    EffectiveConfigIntent, ResourceActionReceipt,
 };
 pub use core_update::{
     CoreUpdateError, CoreUpdateResult, CoreUpdateTransaction, MihomoRelease, MihomoReleaseAsset,
@@ -135,17 +145,19 @@ pub use network_diagnostics::{
     DiagnosticStep, DiagnosticStepKind, NetworkDiagnostics, NetworkDiagnosticsError,
     NetworkDiagnosticsResult, SupportBundle, SupportSafe,
 };
-pub use operational_status::{
-    CapabilityState, CaptureStatus, ControllerCompatibility, ControllerStatus, FirstRunStage,
-    Observation, ObservedPathRoute, OperationalFailure, OperationalSnapshot, OperationalStatus,
-    OperationalStatusStream, PathStatus, ProcessRecoveryStatus, ProcessStatus, RecoveryAction,
-    StreamStatus, StreamStatuses, TunCaptureStatus,
+pub use observation_types::{
+    CapabilityState, FirstRunStage, Observation, OperationalFailure, RecoveryAction,
 };
-pub use owned_core::{CoreRuntimeBackend, CoreRuntimeDescriptor, CoreTunPermissionStatus};
+pub use operational_status::{
+    CaptureStatus, ControllerCompatibility, ControllerStatus, ObservedPathRoute,
+    OperationalSnapshot, OperationalStatus, OperationalStatusStream, PathStatus,
+    ProcessRecoveryStatus, ProcessStatus, StreamStatus, StreamStatuses, TunCaptureStatus,
+};
+pub use owned_core::CoreTunPermissionStatus;
 pub use platform_command::{PlatformCommandError, PlatformCommandStage, PlatformCommandStream};
 pub use preferences::{
-    AppPreferences, AppPreferencesError, AppPreferencesObservation, AppPreferencesResult,
-    AppPreferencesStore, AppearancePreference, CoreBinaryPreferences, LanguagePreference,
+    AppPreferences, AppPreferencesObservation, AppPreferencesStore, AppearancePreference,
+    CoreBinaryPreferences, DEFAULT_TRAFFIC_RETENTION_DAYS, LanguagePreference,
     NetworkProbeRoutePreference,
 };
 
@@ -171,24 +183,29 @@ pub use proxy::{
 };
 pub use proxy_operations::{
     AcceptedProxySelection, ConnectionPolicy, ObservedProxySelection, ProxyDelayTarget,
-    ProxyGroupMeasurementOutcome, ProxyOperations, ProxySelectionOutcome, ProxySelectionReadback,
-    ProxySelectionReceipt, ProxyVisibility, ProxyWorkspaceObservation,
+    ProxyGroupActionReceipt, ProxyGroupMeasurementOutcome, ProxyOperations, ProxySelectionOutcome,
+    ProxySelectionReadback, ProxySelectionReceipt, ProxyVisibility, ProxyWorkspaceObservation,
 };
 pub use ruleset::{
     RulesetBehavior, RulesetConversion, RulesetConversionError, RulesetConversionResult,
     RulesetConverter,
 };
+pub use runtime_launcher::{
+    CoreApplyKind, CoreBackupAdmission, CoreDataApplicationAdmission, CoreLaunchDescriptor,
+    CoreProcessLauncher, CoreProcessLease, CoreRuntimeBackend, CoreRuntimeDescriptor, KernelOwner,
+    LauncherFuture, LeftoverLease, LeftoverLeaseTracker,
+};
+pub use session_errors::{CoreSessionError, TrafficCaptureError, TrafficCaptureTask};
 pub use system_proxy::{
-    NativePropertyListError, PacError, PacProxyStatus, PacServer, PacServerOperation,
-    PacServerStatus, ProxyEndpointStatus, SystemProxyBackendKind, SystemProxyBackendUnavailable,
-    SystemProxyConfiguration, SystemProxyController, SystemProxyError, SystemProxyManager,
-    SystemProxyMode, SystemProxyOperation, SystemProxyOwnership, SystemProxyOwnershipState,
+    PacProxyStatus, PacServer, PacServerStatus, ProxyEndpointStatus, SystemProxyConfiguration,
+    SystemProxyController, SystemProxyManager, SystemProxyOperation, SystemProxyOwnershipState,
     SystemProxyReconcileOutcome, SystemProxyReleaseReason, SystemProxySession,
     SystemProxySessionError, SystemProxySessionResult, SystemProxySessionSnapshot,
-    SystemProxySetting, SystemProxySettings, SystemProxyStatus, SystemProxySummary,
-    SystemProxyTransactionCause, SystemProxyValidationError, default_pac_script,
-    default_system_proxy_bypass, normalize_pac_script, normalize_system_proxy_bypass,
-    normalize_system_proxy_host,
+    SystemProxySettings, SystemProxyStatus, SystemProxySummary,
+};
+pub use system_proxy_types::{
+    SystemProxyMode, SystemProxyOwnership, default_pac_script, default_system_proxy_bypass,
+    normalize_pac_script, normalize_system_proxy_bypass, normalize_system_proxy_host,
 };
 pub use traffic::{
     LIVE_TRAFFIC_HISTORY_LIMIT, LIVE_TRAFFIC_SAMPLE_COUNT, TimedTrafficSample, TrafficMonitor,
@@ -196,14 +213,12 @@ pub use traffic::{
 };
 pub use traffic_capture::{
     CaptureOutcome, CapturePlan, ObservedCapturePlan, ServiceLocalRecoveryOutcome,
-    ServiceTunOutcome, TrafficCaptureError, TrafficCaptureSession, TrafficCaptureSnapshot,
-    TrafficCaptureTask,
+    ServiceTunOutcome, TrafficCaptureSession, TrafficCaptureSnapshot,
 };
 pub use traffic_history::{
-    DEFAULT_TRAFFIC_RETENTION_DAYS, TrafficAggregate, TrafficDeltaLogger, TrafficDimension,
-    TrafficHistoryEntry, TrafficHistoryError, TrafficHistoryQuery, TrafficHistoryResult,
-    TrafficHistorySelection, TrafficHistorySnapshot, TrafficHistoryStore, TrafficOverview,
-    TrafficTotals, TrafficTrendPoint,
+    TrafficAggregate, TrafficDeltaLogger, TrafficDimension, TrafficHistoryEntry,
+    TrafficHistoryError, TrafficHistoryQuery, TrafficHistoryResult, TrafficHistorySelection,
+    TrafficHistorySnapshot, TrafficHistoryStore, TrafficOverview, TrafficTotals, TrafficTrendPoint,
 };
 pub use tun_permissions::{TunPermissionError, TunPermissionResult, TunPermissionStatus};
 pub use tun_runtime::{TunRuntimeObservation, TunRuntimeObserver};

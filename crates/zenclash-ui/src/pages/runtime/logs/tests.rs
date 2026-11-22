@@ -35,8 +35,8 @@ fn pausing_log_display_keeps_filterable_rows_and_resume_reads_the_monitor(
         .collect::<Vec<_>>();
     cx.update_window(window, |_, window, cx| {
         page.update(cx, |page, cx| {
-            page.ui_visibility = super::super::lifecycle::UiVisibility::new(true);
-            let revision = page.log_monitor.revision();
+            page.shell.ui_visibility = super::super::lifecycle::UiVisibility::new(true);
+            let revision = page.monitors.log_monitor.revision();
             page.logs.update(cx, |view, cx| {
                 view.cancel_refresh();
                 let mut presentation = LogPresentation::default();
@@ -58,8 +58,8 @@ fn pausing_log_display_keeps_filterable_rows_and_resume_reads_the_monitor(
         window.press("escape", cx);
         assert!(!page.read(cx).logs.read(cx).oldest_first);
         page.update(cx, |page, cx| {
-            page.log_monitor.clear();
-            page.log_monitor.set_level(MihomoLogLevel::Warning);
+            page.monitors.log_monitor.clear();
+            page.monitors.log_monitor.set_level(MihomoLogLevel::Warning);
             page.update_log_presentation(cx);
         });
         window.render_frame(cx);
@@ -583,7 +583,7 @@ fn exercise_interrupted_log_projection(
     cx.update_window(window, |_, window, cx| {
         window.activate_window();
         page.update(cx, |page, cx| {
-            page.ui_visibility = super::super::lifecycle::UiVisibility::new(true);
+            page.shell.ui_visibility = super::super::lifecycle::UiVisibility::new(true);
             page.update_log_presentation(cx);
             cx.notify();
         });
@@ -625,7 +625,7 @@ fn exercise_interrupted_log_projection(
         assert!(view.presentation.entries.is_empty());
         assert!(!view.context.unwrap().active);
     });
-    let monitor = cx.update(|cx| page.read(cx).log_monitor.clone());
+    let monitor = cx.update(|cx| page.read(cx).monitors.log_monitor.clone());
     monitor.synchronize_generation(7001);
     let refreshed_revision = monitor.revision();
     cx.update(|cx| {

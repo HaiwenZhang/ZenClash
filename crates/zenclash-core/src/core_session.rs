@@ -1,4 +1,12 @@
 //! Serialized, intent-oriented access to runtime-core transitions.
+//!
+//! # Lock Acquisition Order
+//!
+//! [`CoreSession`] obeys the crate-wide 4-level lock order documented in
+//! [`crate::runtime_launcher`]:
+//! `CaptureGate` (Level 1) -> `DataApplicationGate` (`data_application_gate`, Level 2) ->
+//! `RuntimeTransitionGate` (`transition`) / `DataWriteLease` (Level 3) ->
+//! `ControllerMutationGate` (`MihomoClient::mutation_gate`) / short `MemoryLock`s (Level 4).
 
 use std::{
     path::PathBuf,
@@ -10,13 +18,16 @@ use std::{
 };
 
 use parking_lot::RwLock;
-use thiserror::Error;
 use tokio::runtime::Handle;
 
+pub(crate) use crate::runtime_launcher::RuntimeRestoreAuthority;
+pub use crate::runtime_launcher::{
+    CoreApplyKind, CoreBackupAdmission, CoreDataApplicationAdmission,
+};
+pub use crate::session_errors::CoreSessionError;
 use crate::{
-    ControlledConfigError, ControlledConfigStore, CoreKind, CoreUpdateError, ManagedCoreProcess,
-    MihomoClient, MihomoError, MihomoRelease, MihomoReleaseService, TrafficCaptureSession,
-    VersionInfo,
+    ControlledConfigError, ControlledConfigStore, CoreKind, ManagedCoreProcess, MihomoClient,
+    MihomoError, MihomoRelease, MihomoReleaseService, VersionInfo,
     controlled_config::{
         RuntimeApplicationTransaction, RuntimeCandidateValidation, RuntimeMutationError,
         SavedRuntimeReceipt,
@@ -39,15 +50,13 @@ pub use builtin_resources::BuiltinResourceUpdateReceipt;
 use supervision::supervisor_observation;
 mod binding;
 mod capture_recovery;
-use capture_recovery::CoreRecoveryCapture;
+pub(crate) use capture_recovery::{CoreRecoveryCapture, CoreRecoveryHookFuture};
 mod connections;
 mod observation;
 mod observed_mutation;
 mod resources;
 pub use resources::{CoreResourceAction, ResourceActionReceipt};
 mod permissions;
-mod proxy_selection;
-pub use proxy_selection::ProxyGroupActionReceipt;
 mod runtime_revision;
 pub use observation::{CoreObservation, CoreObservationIdentity};
 pub(crate) use runtime_revision::RuntimeConfigurationRevision;
@@ -100,17 +109,6 @@ pub enum CoreMaintenanceIntent {
     Stop,
 }
 
-/// Mechanism that successfully applied an effective configuration.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CoreApplyKind {
-    /// The controller accepted a complete hot reload.
-    HotReloaded,
-    /// The controller accepted a verified partial update without reloading listeners.
-    Patched,
-    /// A managed child restarted with the generated runtime cache.
-    Restarted,
-}
-
 /// Successful configuration transition and its monotonically increasing generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CoreApplyOutcome {
@@ -152,31 +150,6 @@ pub struct CoreRestoreSnapshot {
     committed: CommittedConfig,
     payload: Option<String>,
     service_bundle: Option<Arc<crate::ServiceRuntimeBundle>>,
-}
-
-/// Admission for one persistent-data application and its runtime reconciliation.
-///
-/// Keep this guard alive through the completion task. Shutdown waits for every clone
-/// before taking the runtime transition and stopping an owned kernel.
-/// Repository writes still acquire their own data leases; this is completion
-/// admission, not filesystem write authority.
-#[derive(Clone)]
-pub struct CoreDataApplicationAdmission {
-    inner: Arc<DataApplicationAdmissionInner>,
-}
-
-/// Compatibility name for backup callers sharing the data-application admission.
-pub type CoreBackupAdmission = CoreDataApplicationAdmission;
-
-struct DataApplicationAdmissionInner {
-    _guard: tokio::sync::OwnedMutexGuard<()>,
-    gate: Arc<tokio::sync::Mutex<()>>,
-}
-
-#[derive(Clone)]
-pub(crate) enum RuntimeRestoreAuthority {
-    Ordinary,
-    Backup(CoreBackupAdmission),
 }
 
 #[derive(Clone)]
@@ -252,57 +225,12 @@ impl CoreLifecycleSnapshot {
     }
 }
 
-/// Errors returned by intent-oriented core transitions.
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum CoreSessionError {
-    /// Retirement of the previous core resources after handover is unconfirmed.
-    #[error("{}", zenclash_i18n::text("core_page.service.cleanup_unconfirmed"))]
-    PreviousCoreCleanupUnconfirmed,
-    /// Effective configuration preparation, application, or persistence failed.
-    #[error(transparent)]
-    Config(#[from] ControlledConfigError),
-    /// Managed release preparation, activation or recovery failed.
-    #[error(transparent)]
-    Update(#[from] CoreUpdateError),
-    /// Managed process transition failed.
-    #[error(transparent)]
-    Process(#[from] MihomoError),
-    /// Capture validation, native operations or rollback failed.
-    #[error(transparent)]
-    Capture(#[from] Box<crate::TrafficCaptureError>),
-    /// An external core would require a process restart ZenClash does not own.
-    #[error(
-        "{}",
-        zenclash_i18n::text_with(
-            "core_page.errors.external_restart_unsupported",
-            &[("core", core.to_string())]
-        )
-    )]
-    ExternalRestartUnsupported {
-        /// External runtime-core implementation.
-        core: CoreKind,
-    },
-    /// The selected backend cannot install official Mihomo releases.
-    #[error("{}", zenclash_i18n::text_with("core_page.errors.release_unsupported", &[("core", core.display_name().to_owned())]))]
-    ReleaseUnsupported {
-        /// Runtime core implementation that rejected this operation.
-        core: CoreKind,
-    },
-    /// An operation raced with explicit application shutdown.
-    #[error("{}", zenclash_i18n::text("core_page.errors.shutting_down"))]
-    ShuttingDown,
-    /// A reapplication has no source configuration successfully committed to this session.
-    #[error("{}", zenclash_i18n::text("overrides.notices.saved_unapplied"))]
-    NoCommittedProfile,
-}
-
 /// Cloneable owner of serialized effective-config and lifecycle transitions.
 #[derive(Clone)]
 pub struct CoreSession {
     kind: CoreKind,
     client: MihomoClient,
-    transition: Arc<tokio::sync::Mutex<CommittedConfig>>,
+    pub(crate) transition: Arc<tokio::sync::Mutex<CommittedConfig>>,
     data_application_gate: Arc<tokio::sync::Mutex<()>>,
     capture_publication_gate: Arc<tokio::sync::Mutex<()>>,
     capture_intent_revision: Arc<AtomicU64>,
@@ -327,7 +255,7 @@ pub(crate) struct OfflineCoreSource {
 }
 
 #[derive(Clone, Default)]
-struct CommittedConfig {
+pub(crate) struct CommittedConfig {
     profile: Option<PathBuf>,
     overrides: Vec<PathBuf>,
 }
@@ -517,12 +445,10 @@ impl CoreSession {
         self.ensure_not_shutting_down()?;
         let guard = self.data_application_gate.clone().lock_owned().await;
         self.ensure_not_shutting_down()?;
-        Ok(CoreDataApplicationAdmission {
-            inner: Arc::new(DataApplicationAdmissionInner {
-                _guard: guard,
-                gate: self.data_application_gate.clone(),
-            }),
-        })
+        Ok(CoreDataApplicationAdmission::new(
+            guard,
+            self.data_application_gate.clone(),
+        ))
     }
 
     /// Returns the concrete runtime core.
@@ -727,18 +653,8 @@ fn advance_profile_snapshot(
     generation
 }
 
-pub(crate) fn should_restart_after_hot_reload(error: &ControlledConfigError) -> bool {
-    matches!(
-        error,
-        ControlledConfigError::Profile(
-            MihomoError::Http(_)
-                | MihomoError::ResponseDecode {
-                    outcome_unknown: true,
-                    ..
-                }
-        )
-    )
-}
+#[cfg(test)]
+pub(crate) use crate::controlled_config::should_restart_after_hot_reload;
 
 #[cfg(test)]
 pub(crate) async fn fixed_listener_ports_guard() -> tokio::sync::MutexGuard<'static, ()> {

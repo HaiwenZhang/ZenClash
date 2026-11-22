@@ -14,6 +14,13 @@ impl MenuPreferenceChange {
             Self::TrayVisibility(_) => "app.preferences.tray_visibility_unsaved",
         }
     }
+
+    const fn scope(self) -> crate::pages::runtime::PreferenceScope {
+        match self {
+            Self::Appearance(_) => crate::pages::runtime::PreferenceScope::Appearance,
+            Self::TrayVisibility(_) => crate::pages::runtime::PreferenceScope::TrayVisibility,
+        }
+    }
 }
 
 struct MenuPreferenceSaveReceipt {
@@ -117,14 +124,14 @@ impl ZenClashApp {
         change: MenuPreferenceChange,
         cx: &mut Context<Self>,
     ) {
-        change.apply(&mut self.preferences);
-        let receipt = self.menu_preference_saves.begin(change);
-        let preferences = self.preferences.clone();
-        let previews = self.menu_preference_saves.previews();
+        change.apply(&mut self.preferences.current);
+        let receipt = self.preferences.menu_saves.begin(change);
+        let preferences = self.preferences.current.clone();
+        let previews = self.preferences.menu_saves.previews();
         self.runtime_page.update(cx, |page, cx| {
             page.preferences_restored_from_app(preferences, previews, cx);
         });
-        let Some(store) = self.preferences_store.clone() else {
+        let Some(store) = self.preferences.store.clone() else {
             self.complete_menu_preference(
                 receipt,
                 Err(zenclash_i18n::text("app.errors.preferences_unavailable")),
@@ -132,11 +139,11 @@ impl ZenClashApp {
             );
             return;
         };
-        let previous = self.preferences_save_task.take();
+        let previous = self.preferences.save_task.take();
         let (completion, result) = tokio::sync::oneshot::channel();
         // Keep persistence owned by the existing task chain; quitting waits for
         // it even when the foreground result observer is dropped.
-        self.preferences_save_task = Some(self.runtime.spawn(async move {
+        self.preferences.save_task = Some(self.services.runtime.spawn(async move {
             if let Some(previous) = previous {
                 let _ = previous.await;
             }
@@ -171,23 +178,20 @@ impl ZenClashApp {
             tracing::warn!(%error, "failed to save application menu preference");
         }
         let committed = result.is_ok();
-        if self.menu_preference_saves.complete(receipt, result) {
-            let previews = self.menu_preference_saves.previews();
+        let scope = receipt.change.scope();
+        if self.preferences.menu_saves.complete(receipt, result) {
+            let previews = self.preferences.menu_saves.previews();
             self.runtime_page
                 .update(cx, |page, cx| page.set_preference_previews(previews, cx));
-            if committed && let Some(store) = self.preferences_store.as_ref() {
-                self.refresh_persisted_preferences(
-                    store.path().to_owned(),
-                    &[crate::pages::runtime::PreferenceScope::Restore],
-                    cx,
-                );
+            if committed && let Some(store) = self.preferences.store.as_ref() {
+                self.refresh_persisted_preferences(store.path().to_owned(), &[scope], cx);
             }
             cx.notify();
         }
     }
 
     pub(super) fn retry_menu_preferences(&mut self, cx: &mut Context<Self>) {
-        for change in self.menu_preference_saves.retry_changes() {
+        for change in self.preferences.menu_saves.retry_changes() {
             self.update_menu_preference(change, cx);
         }
     }

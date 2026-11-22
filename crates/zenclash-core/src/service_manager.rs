@@ -6,7 +6,7 @@ use crate::core_session::RuntimeConfigurationRevision;
 use std::{future::Future, path::PathBuf, sync::Arc};
 
 use crate::service::{health::ServiceHealth, maintenance::MaintenanceError};
-use tokio::sync::{Mutex, watch};
+use tokio::sync::watch;
 
 use crate::{CoreKind, CoreRuntimeBackend, CoreSession, CoreSessionError, TrafficCaptureSession};
 
@@ -241,7 +241,6 @@ impl ServiceTunRequest {
 pub struct ServiceManager {
     session: CoreSession,
     capture: TrafficCaptureSession,
-    command: Arc<Mutex<()>>,
     state: watch::Sender<ServiceManagerSnapshot>,
 }
 
@@ -260,7 +259,6 @@ impl ServiceManager {
         Self {
             session,
             capture,
-            command: Arc::new(Mutex::new(())),
             state,
         }
     }
@@ -456,14 +454,29 @@ impl ServiceManager {
         if self.session.is_shutting_down() {
             return Err(ServiceManagerError::Closed);
         }
-        if self.snapshot().phase == ServicePhase::Unconfirmed {
+        if self.snapshot().phase == ServicePhase::Unconfirmed
+            || self
+                .session
+                .run_state
+                .maintenance_unconfirmed
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
             return Err(ServiceManagerError::Busy);
         }
-        let guard = self
-            .command
-            .clone()
-            .try_lock_owned()
+        // Single session-wide operation admission via RunStateStore::claim_operation_slot;
+        // acquiring before mutating local state prevents competing ServiceManager
+        // handles from falsely marking their phase Failed on Busy rejection.
+        let operation_guard = OwnedServiceOperationGuard::claim(self.session.run_state.clone())
             .map_err(|_| ServiceManagerError::Busy)?;
+        if self
+            .session
+            .run_state
+            .maintenance_unconfirmed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            drop(operation_guard);
+            return Err(ServiceManagerError::Busy);
+        }
         self.state.send_modify(|state| {
             state.operation = Some(operation);
             state.phase = ServicePhase::Checking;
@@ -471,39 +484,23 @@ impl ServiceManager {
         });
         let manager = self.clone();
         let result = tokio::spawn(async move {
-            let _guard = guard;
-            let store = manager.session.run_state.store.clone();
-            let result = match store.begin_operation() {
-                Err(_) => Err(ServiceManagerError::Busy),
-                Ok(_operation) => {
-                    if manager
-                        .session
-                        .run_state
-                        .maintenance_unconfirmed
-                        .load(std::sync::atomic::Ordering::Acquire)
-                    {
-                        Err(ServiceManagerError::Busy)
-                    } else {
-                        let mut scope = ServiceCommandCompletion {
-                            state: manager.session.run_state.clone(),
-                            settled: false,
-                        };
-                        let result = completion(manager.clone()).await;
-                        if result
-                            .as_ref()
-                            .err()
-                            .is_some_and(ServiceManagerError::is_native_outcome_unconfirmed)
-                        {
-                            scope
-                                .state
-                                .maintenance_unconfirmed
-                                .store(true, std::sync::atomic::Ordering::Release);
-                        }
-                        scope.settled = true;
-                        result
-                    }
-                }
+            let _operation = operation_guard;
+            let mut scope = ServiceCommandCompletion {
+                state: manager.session.run_state.clone(),
+                settled: false,
             };
+            let result = completion(manager.clone()).await;
+            if result
+                .as_ref()
+                .err()
+                .is_some_and(ServiceManagerError::is_native_outcome_unconfirmed)
+            {
+                scope
+                    .state
+                    .maintenance_unconfirmed
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+            scope.settled = true;
             manager.state.send_modify(|state| {
                 state.phase = match &result {
                     Ok(_) => ServicePhase::Completed,
@@ -531,6 +528,23 @@ impl ServiceManager {
 }
 
 // An unwinding retained task cannot silently reopen native authorization.
+struct OwnedServiceOperationGuard {
+    state: Arc<crate::core_session::run_state::CoreRunState>,
+}
+
+impl OwnedServiceOperationGuard {
+    fn claim(state: Arc<crate::core_session::run_state::CoreRunState>) -> anyhow::Result<Self> {
+        state.store.claim_operation_slot()?;
+        Ok(Self { state })
+    }
+}
+
+impl Drop for OwnedServiceOperationGuard {
+    fn drop(&mut self) {
+        self.state.store.release_operation_slot();
+    }
+}
+
 struct ServiceCommandCompletion {
     state: Arc<crate::core_session::run_state::CoreRunState>,
     settled: bool,
@@ -942,5 +956,44 @@ mod tests {
             Some(PendingAction::ForceReinstall)
         );
         assert_eq!(manager.snapshot().phase(), ServicePhase::Unconfirmed);
+    }
+
+    #[tokio::test]
+    async fn competing_service_manager_returns_busy_without_marking_its_phase_failed() {
+        let session = CoreSession::open(
+            CoreKind::Mihomo,
+            MihomoClient::new(MihomoEndpoint::default()).unwrap(),
+        )
+        .unwrap();
+        let first = manager_for_session(session.clone());
+        let second = manager_for_session(session);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let entered_task = entered.clone();
+        let release_task = release.clone();
+        let first_handle = tokio::spawn({
+            let first = first.clone();
+            async move {
+                first
+                    .complete(ServiceOperation::Refresh, move |_| async move {
+                        entered_task.notify_one();
+                        release_task.notified().await;
+                        Ok(())
+                    })
+                    .await
+            }
+        });
+        entered.notified().await;
+
+        let busy = second
+            .complete(ServiceOperation::Refresh, |_| async { Ok(()) })
+            .await
+            .unwrap_err();
+        assert!(matches!(busy, ServiceManagerError::Busy));
+        // Second handle's own local state must NOT be overwritten to Failed.
+        assert_ne!(second.snapshot().phase(), ServicePhase::Failed);
+
+        release.notify_one();
+        first_handle.await.unwrap().unwrap();
     }
 }

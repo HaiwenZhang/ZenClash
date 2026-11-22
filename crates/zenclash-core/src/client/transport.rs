@@ -10,15 +10,18 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::{MihomoError, MihomoResult};
 use crate::{
-    ManagedCoreProcess, MihomoEndpoint,
-    owned_core::OwnedCore,
+    MihomoEndpoint,
+    runtime_launcher::{
+        CoreLaunchDescriptor, CoreProcessLease, CoreRuntimeBackend, CoreRuntimeDescriptor,
+        KernelOwner,
+    },
     websocket::{MihomoSocket, connect_stream},
 };
 
 #[derive(Clone)]
 pub(crate) enum ControllerBackend {
     Direct(MihomoEndpoint),
-    Local(Arc<ManagedCoreProcess>),
+    Local(Arc<dyn CoreProcessLease>),
     Service {
         runtime: Arc<crate::service_runtime_session::ServiceRuntimeSession>,
     },
@@ -36,18 +39,34 @@ impl BindingSnapshot {
         matches!(self.backend, ControllerBackend::Service { .. })
     }
 
-    pub(crate) fn owned_core(&self) -> Option<OwnedCore> {
+    pub(crate) fn local_lease(&self) -> Option<Arc<dyn CoreProcessLease>> {
         match &self.backend {
-            ControllerBackend::Direct(_) => None,
-            ControllerBackend::Local(process) => Some(OwnedCore::Local(process.clone())),
-            ControllerBackend::Service { runtime } => Some(OwnedCore::Service(runtime.clone())),
+            ControllerBackend::Local(lease) => Some(lease.clone()),
+            ControllerBackend::Direct(_) | ControllerBackend::Service { .. } => None,
+        }
+    }
+
+    pub(crate) fn service_runtime(
+        &self,
+    ) -> Option<Arc<crate::service_runtime_session::ServiceRuntimeSession>> {
+        match &self.backend {
+            ControllerBackend::Service { runtime } => Some(runtime.clone()),
+            ControllerBackend::Direct(_) | ControllerBackend::Local(_) => None,
+        }
+    }
+
+    pub(crate) fn kernel_owner(&self) -> Option<KernelOwner> {
+        match &self.backend {
+            ControllerBackend::Direct(endpoint) => Some(KernelOwner::External(endpoint.clone())),
+            ControllerBackend::Local(lease) => Some(KernelOwner::Managed(lease.clone())),
+            ControllerBackend::Service { .. } => None,
         }
     }
 
     pub(crate) fn endpoint(&self) -> Option<MihomoEndpoint> {
         match &self.backend {
             ControllerBackend::Direct(endpoint) => Some(endpoint.clone()),
-            ControllerBackend::Local(process) => Some(process.endpoint().clone()),
+            ControllerBackend::Local(process) => Some(process.endpoint()),
             ControllerBackend::Service { .. } => None,
         }
     }
@@ -73,19 +92,18 @@ impl ControllerBinding {
         }
     }
 
-    pub(crate) fn descriptor(&self) -> crate::owned_core::CoreRuntimeDescriptor {
-        use crate::owned_core::{CoreRuntimeBackend, CoreRuntimeDescriptor};
+    pub(crate) fn descriptor(&self) -> CoreRuntimeDescriptor {
         // Borrowing avoids giving a renderer the last Arc of a retired process.
         let binding = self.updates.borrow();
         let (backend, kind, binary, config_file, home_dir) = match &binding.backend {
             ControllerBackend::Local(process) => {
-                let launch = process.launch_config();
+                let launch = process.launch_descriptor();
                 (
                     CoreRuntimeBackend::Local,
                     launch.kind,
-                    Some(launch.binary.clone()),
-                    Some(launch.config_file.clone()),
-                    Some(launch.home_dir.clone()),
+                    Some(launch.binary),
+                    Some(launch.config_file),
+                    Some(launch.home_dir),
                 )
             }
             ControllerBackend::Service { .. } => (
@@ -109,10 +127,10 @@ impl ControllerBinding {
         }
     }
 
-    pub(crate) fn local_recovery_launch(&self) -> Option<crate::CoreLaunchConfig> {
+    pub(crate) fn local_recovery_launch(&self) -> Option<CoreLaunchDescriptor> {
         let binding = self.updates.borrow();
         match &binding.backend {
-            ControllerBackend::Local(process) => Some(process.launch_config().clone()),
+            ControllerBackend::Local(process) => Some(process.launch_descriptor()),
             ControllerBackend::Service { runtime } => runtime.local_launch().cloned(),
             ControllerBackend::Direct(_) => None,
         }
@@ -158,7 +176,7 @@ impl ControllerBinding {
         })
     }
 
-    pub(crate) fn process_binding(process: Arc<ManagedCoreProcess>) -> Arc<Self> {
+    pub(crate) fn lease_binding(process: Arc<dyn CoreProcessLease>) -> Arc<Self> {
         let (updates, _) = watch::channel(BindingSnapshot {
             generation: 0,
             kind: process.kind(),
@@ -220,17 +238,14 @@ impl ControllerBinding {
         let binding = self.updates.borrow();
         match &binding.backend {
             ControllerBackend::Direct(endpoint) => Some(endpoint.clone()),
-            ControllerBackend::Local(process) => Some(process.endpoint().clone()),
+            ControllerBackend::Local(process) => Some(process.endpoint()),
             ControllerBackend::Service { .. } => None,
         }
     }
     pub(crate) fn runtime(
         &self,
     ) -> Option<Arc<crate::service_runtime_session::ServiceRuntimeSession>> {
-        match self.snapshot().owned_core() {
-            Some(OwnedCore::Service(runtime)) => Some(runtime),
-            Some(OwnedCore::Local(_)) | None => None,
-        }
+        self.snapshot().service_runtime()
     }
     pub(crate) fn replace(&self, backend: ControllerBackend) -> MihomoResult<BindingSnapshot> {
         let mut retired = None;

@@ -6,15 +6,15 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use zenclash_core::{
-    ControlledConfigStore, CoreKind, CoreLifecyclePhase, CoreMaintenanceIntent, CoreSession,
-    MihomoClient, MihomoLaunchConfig, MihomoProcess, TrafficCaptureSession,
+    ControlledConfigStore, CoreKind, CoreLaunchConfig, CoreLifecyclePhase, CoreMaintenanceIntent,
+    CoreSession, ManagedCoreProcess, MihomoClient, TrafficCaptureSession,
 };
 
 struct Fixture {
     root: PathBuf,
     source: PathBuf,
     store: ControlledConfigStore,
-    process: Arc<MihomoProcess>,
+    process: Arc<ManagedCoreProcess>,
     session: CoreSession,
     capture: TrafficCaptureSession,
 }
@@ -41,8 +41,8 @@ impl Fixture {
         let runtime = store
             .materialize_with_overrides_for_core(&source, &[], CoreKind::Mihomo)
             .unwrap();
-        let launch = MihomoLaunchConfig::new(binary, runtime, root.join("home")).unwrap();
-        let process = MihomoProcess::spawn(launch).unwrap();
+        let launch = CoreLaunchConfig::new(binary, runtime, root.join("home")).unwrap();
+        let process = ManagedCoreProcess::spawn(launch).unwrap();
         process
             .wait_until_ready(Duration::from_secs(10))
             .await

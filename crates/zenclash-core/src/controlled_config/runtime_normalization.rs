@@ -34,7 +34,7 @@ pub(super) fn normalize_partial_tun_payload(payload: String) -> ControlledConfig
     Ok(normalized)
 }
 
-pub(super) fn normalize_runtime_value(
+pub(crate) fn normalize_runtime_value(
     _kind: CoreKind,
     document: &mut Value,
 ) -> ControlledConfigResult<bool> {

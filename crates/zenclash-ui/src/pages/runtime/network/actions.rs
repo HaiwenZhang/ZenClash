@@ -38,7 +38,7 @@ impl RuntimePage {
         let (request, task) = self.network_diagnostics.query.start(
             &self.runtime,
             self.core_session.clone(),
-            self.operational_status.clone(),
+            self.monitors.operational_status.clone(),
             plan,
             self.preferences.network_probe_route,
         );
@@ -70,7 +70,7 @@ impl RuntimePage {
             self.network_diagnostics.query.complete(
                 request,
                 &self.core_session,
-                &self.operational_status,
+                &self.monitors.operational_status,
                 result,
             );
             cx.notify();
@@ -284,7 +284,7 @@ impl RuntimePage {
                             this.network_diagnostics.adding_target = false;
                             use gpui_kit::AppContext;
                             use gpui_kit::component::WindowExt;
-                            let _ = cx.update_window(this.window_handle, |_, window, cx| {
+                            let _ = cx.update_window(this.shell.window_handle, |_, window, cx| {
                                 window.close_dialog(cx)
                             });
                         }

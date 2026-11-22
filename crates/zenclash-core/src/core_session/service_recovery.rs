@@ -89,6 +89,7 @@ impl CoreSession {
         let launch = runtime
             .local_launch()
             .cloned()
+            .map(crate::CoreLaunchConfig::from)
             .or(fallback)
             .ok_or_else(|| {
                 MihomoError::InvalidInput(zenclash_i18n::text("core_page.service.unknown"))

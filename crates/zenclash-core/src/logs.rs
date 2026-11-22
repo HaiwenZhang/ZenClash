@@ -54,7 +54,30 @@ impl BufferedLogEntry {
 }
 
 fn log_entry_bytes(entry: &LogEntry) -> usize {
-    serde_json::to_vec(entry).map_or(usize::MAX, |payload| payload.len())
+    const FIXED_ENTRY_OVERHEAD: usize = 64;
+    FIXED_ENTRY_OVERHEAD
+        .saturating_add(entry.level.len())
+        .saturating_add(entry.payload.len())
+        .saturating_add(entry.core_time.as_deref().map_or(0, str::len))
+        .saturating_add(json_value_bytes(&entry.fields))
+}
+
+fn json_value_bytes(value: &Value) -> usize {
+    match value {
+        Value::Null => 4,
+        Value::Bool(true) => 4,
+        Value::Bool(false) => 5,
+        Value::Number(number) => number.to_string().len(),
+        Value::String(text) => text.len().saturating_add(2),
+        Value::Array(items) => items.iter().fold(2usize, |acc, item| {
+            acc.saturating_add(json_value_bytes(item)).saturating_add(1)
+        }),
+        Value::Object(map) => map.iter().fold(2usize, |acc, (key, val)| {
+            acc.saturating_add(key.len())
+                .saturating_add(4)
+                .saturating_add(json_value_bytes(val))
+        }),
+    }
 }
 
 /// Severity threshold accepted by Mihomo's `/logs` stream.
@@ -1045,9 +1068,9 @@ mod tests {
         let bytes: usize = entries
             .entries
             .iter()
-            .map(|entry| serde_json::to_vec(entry.entry.as_ref()).unwrap().len())
+            .map(|entry| log_entry_bytes(entry.entry.as_ref()))
             .sum();
-        assert!(bytes <= 2 * 1024 * 1024);
+        assert!(bytes <= MAX_LOG_BUFFER_BYTES);
         assert_eq!(entries.bytes, bytes);
         assert!(
             entries

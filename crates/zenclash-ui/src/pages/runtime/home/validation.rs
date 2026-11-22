@@ -70,10 +70,6 @@ impl RuntimePage {
             },
             ..Default::default()
         };
-        self.home
-            .flow
-            .prepare_design_validation(connections, generation);
-        self.home.history.prepare_design_validation();
         self.home.design_validation = Some((operational, traffic));
     }
 }

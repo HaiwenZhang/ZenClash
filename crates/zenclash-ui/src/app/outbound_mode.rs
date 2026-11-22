@@ -17,9 +17,9 @@ impl ZenClashApp {
             .update(cx, |page, cx| page.set_outbound_mode(mode.api_value(), cx));
         if self.outbound_mode.request(
             mode,
-            &self.core_session,
-            &self.controlled_config_store,
-            &self.runtime,
+            &self.services.core_session,
+            &self.services.controlled_config_store,
+            &self.services.runtime,
         ) {
             let pending = self.outbound_mode.is_pending();
             self.runtime_page.update(cx, |page, cx| {
@@ -30,11 +30,11 @@ impl ZenClashApp {
     }
 
     pub(super) fn start_mode_sync(&mut self, cx: &mut Context<Self>) {
-        let session = self.core_session.clone();
-        let runtime = self.runtime.clone();
+        let session = self.services.core_session.clone();
+        let runtime = self.services.runtime.clone();
         let mode = self.outbound_mode.clone();
-        let logs = self.log_monitor.clone();
-        cx.spawn(async move |this, _cx| {
+        let logs = self.services.log_monitor.clone();
+        let task = cx.spawn(async move |this, _cx| {
             loop {
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 let intent_generation = mode.intent_generation();
@@ -57,7 +57,7 @@ impl ZenClashApp {
                     break;
                 }
             }
-        })
-        .detach();
+        });
+        self.shell.tasks.push(task);
     }
 }

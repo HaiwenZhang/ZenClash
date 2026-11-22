@@ -470,6 +470,11 @@ impl<E: RunStateEnv> RunStateStore<E> {
     /// # Errors
     /// Returns an error when another privileged operation already owns the slot.
     pub fn begin_operation(&self) -> Result<OperationGuard<'_, E>> {
+        self.claim_operation_slot()?;
+        Ok(OperationGuard { store: self })
+    }
+
+    pub(crate) fn claim_operation_slot(&self) -> Result<()> {
         let mut state = self.service.lock();
         if self.operation_running.swap(true, Ordering::AcqRel) {
             bail!("service operation already running");
@@ -477,7 +482,13 @@ impl<E: RunStateEnv> RunStateStore<E> {
         state.bump();
         drop(state);
         self.announce();
-        Ok(OperationGuard { store: self })
+        Ok(())
+    }
+
+    pub(crate) fn release_operation_slot(&self) {
+        self.operation_running.store(false, Ordering::Release);
+        self.operation_done.notify_waiters();
+        self.announce();
     }
 
     #[cfg(test)]

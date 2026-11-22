@@ -3,12 +3,12 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use zenclash_core::{
-    ControlledConfigStore, MihomoClient, MihomoLaunchConfig, MihomoProcess, ServiceRuntimeBundle,
+    ControlledConfigStore, CoreLaunchConfig, ManagedCoreProcess, MihomoClient, ServiceRuntimeBundle,
 };
 
 struct RecoveryFixture {
     root: PathBuf,
-    process: Option<Arc<MihomoProcess>>,
+    process: Option<Arc<ManagedCoreProcess>>,
 }
 
 impl Drop for RecoveryFixture {
@@ -104,8 +104,8 @@ async fn recover_with_real_mihomo(input: ProviderInput) {
             serde_yaml::Value::from(outside.to_str().unwrap());
         std::fs::write(&config, serde_yaml::to_string(&generated).unwrap()).unwrap();
     }
-    let launch = MihomoLaunchConfig::new(binary, config, home.clone()).unwrap();
-    let process = MihomoProcess::prepare_stopped(launch);
+    let launch = CoreLaunchConfig::new(binary, config, home.clone()).unwrap();
+    let process = ManagedCoreProcess::prepare_stopped(launch);
     fixture.process = Some(process.clone());
     drop(reservation);
     let restart = process.clone();

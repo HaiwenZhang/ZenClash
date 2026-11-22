@@ -45,7 +45,7 @@ fn log_collection_menu_updates_controlled_configuration_and_monitor(cx: &mut Tes
     .unwrap();
     fixture.settle(cx, &page, |page| {
         !page.core_busy()
-            && page.log_monitor.level() == MihomoLogLevel::Warning
+            && page.monitors.log_monitor.level() == MihomoLogLevel::Warning
             && page.config_inputs.effective()["log-level"].as_str() == Some("warning")
     });
     assert_eq!(fs::read_to_string(&fixture.profile).unwrap(), original);

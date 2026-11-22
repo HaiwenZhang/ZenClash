@@ -6,6 +6,10 @@ use zenclash_core::CoreKind;
 pub enum PreferenceScope {
     /// A validated backup explicitly replaces all preferences.
     Restore,
+    /// Interface appearance mode.
+    Appearance,
+    /// Native status tray icon visibility.
+    TrayVisibility,
     /// Interface language.
     Language,
     /// Continuous log persistence settings.
@@ -25,6 +29,8 @@ impl PreferenceScope {
     pub fn apply(self, current: &mut AppPreferences, saved: &AppPreferences) {
         match self {
             Self::Restore => *current = saved.clone(),
+            Self::Appearance => current.appearance = saved.appearance,
+            Self::TrayVisibility => current.traffic_tray_visible = saved.traffic_tray_visible,
             Self::Language => current.language = saved.language,
             Self::Logs => {
                 current.log_file_enabled = saved.log_file_enabled;
@@ -84,8 +90,10 @@ impl RuntimePage {
         for scope in scopes {
             scope.apply(&mut self.preferences, preferences);
         }
-        self.preference_previews = previews;
-        self.preference_previews.apply(&mut self.preferences);
+        self.settings.preference_previews = previews;
+        self.settings
+            .preference_previews
+            .apply(&mut self.preferences);
         cx.notify();
     }
 
@@ -94,8 +102,10 @@ impl RuntimePage {
         previews: crate::preference_previews::PreferencePreviews,
         cx: &mut Context<Self>,
     ) {
-        self.preference_previews = previews;
-        self.preference_previews.apply(&mut self.preferences);
+        self.settings.preference_previews = previews;
+        self.settings
+            .preference_previews
+            .apply(&mut self.preferences);
         cx.notify();
     }
 
@@ -129,8 +139,10 @@ impl RuntimePage {
         let accepted = observation
             .publish_if_current(|preferences| {
                 self.preferences = preferences.clone();
-                self.preference_previews.apply(&mut self.preferences);
-                self.system_proxy_editor = None;
+                self.settings
+                    .preference_previews
+                    .apply(&mut self.preferences);
+                self.settings.system_proxy_editor = None;
                 cx.emit(PreferencesRestored::restored(observation.clone()));
             })
             .is_some();
@@ -216,6 +228,30 @@ mod tests {
             Some(std::path::Path::new("new-mihomo"))
         );
         assert_eq!(current.appearance, AppearancePreference::Dark);
+    }
+
+    #[test]
+    fn narrow_appearance_and_tray_scopes_preserve_unrelated_preferences() {
+        let saved = AppPreferences {
+            appearance: AppearancePreference::Dark,
+            traffic_tray_visible: false,
+            language: LanguagePreference::En,
+            ..Default::default()
+        };
+        let mut current = AppPreferences {
+            appearance: AppearancePreference::Light,
+            traffic_tray_visible: true,
+            language: LanguagePreference::ZhCn,
+            ..Default::default()
+        };
+        PreferenceScope::Appearance.apply(&mut current, &saved);
+        assert_eq!(current.appearance, AppearancePreference::Dark);
+        assert!(current.traffic_tray_visible);
+        assert_eq!(current.language, LanguagePreference::ZhCn);
+
+        PreferenceScope::TrayVisibility.apply(&mut current, &saved);
+        assert!(!current.traffic_tray_visible);
+        assert_eq!(current.language, LanguagePreference::ZhCn);
     }
 
     #[test]

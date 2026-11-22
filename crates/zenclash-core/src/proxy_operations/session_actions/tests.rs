@@ -196,7 +196,7 @@ async fn selection_readback_in_flight_cannot_confirm_a_replaced_configuration() 
 #[tokio::test]
 async fn a_selection_receipt_retains_no_runtime_write_lease() {
     use crate::{CoreConfigValidator, data_coordinator::DataWriteLease};
-    let root = super::super::test_support::session_test_root("proxy-selection-receipt");
+    let root = crate::core_session::test_support::session_test_root("proxy-selection-receipt");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let client = MihomoClient::new(MihomoEndpoint::new(
         format!("http://{}", listener.local_addr().unwrap()),

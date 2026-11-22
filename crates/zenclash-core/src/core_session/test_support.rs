@@ -6,7 +6,7 @@ use crate::{CoreLaunchConfig, MihomoEndpoint};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-pub(super) fn session_test_root(label: &str) -> PathBuf {
+pub(crate) fn session_test_root(label: &str) -> PathBuf {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let root = loop {
         let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

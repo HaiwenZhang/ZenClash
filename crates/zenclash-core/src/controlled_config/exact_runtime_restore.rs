@@ -14,7 +14,7 @@ impl ControlledConfigStore {
         process: Option<Arc<ManagedCoreProcess>>,
         payload: String,
         service_bundle: Option<Arc<crate::ServiceRuntimeBundle>>,
-        authority: crate::core_session::RuntimeRestoreAuthority,
+        authority: crate::runtime_launcher::RuntimeRestoreAuthority,
         cancelled: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<(), RuntimeMutationError> {
         let client = client.pin_binding()?;

@@ -1,7 +1,9 @@
 //! Proxy selection admission and owned acknowledgement in the observed configuration.
 
-use super::{ControlledConfigError, CoreObservationIdentity, CoreSession, CoreSessionError};
-use crate::{AcceptedProxySelection, ConnectionPolicy, ProxyOperations};
+use crate::{
+    AcceptedProxySelection, ConnectionPolicy, ControlledConfigError, CoreObservationIdentity,
+    CoreSession, CoreSessionError, ProxyOperations,
+};
 
 mod automatic_groups;
 pub use automatic_groups::ProxyGroupActionReceipt;

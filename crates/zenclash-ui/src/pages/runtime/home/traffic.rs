@@ -17,16 +17,8 @@ struct TimedSample {
     value: TrafficSample,
 }
 
-#[derive(Clone, Copy)]
-struct ConnectionSample {
-    at_ms: u64,
-    count: usize,
-    memory: u64,
-}
-
 #[derive(Default)]
 pub(super) struct HomeChartState {
-    connection_samples: VecDeque<ConnectionSample>,
     generation: u64,
     traffic_revision: Option<u64>,
     samples: VecDeque<TimedSample>,
@@ -57,7 +49,6 @@ impl HomeChartState {
         if generation_changed {
             self.generation = generation;
             // Rates are historical observations, not current configuration facts.
-            self.connection_samples.clear();
         }
         generation_changed
     }
@@ -116,63 +107,23 @@ impl HomeChartState {
         true
     }
 
-    fn observe_connections(&mut self, status: Option<&StreamStatus>) -> bool {
-        let Some(status) = status
-            .filter(|status| status.generation == self.generation && status.last_success_at_ms > 0)
-        else {
-            return false;
-        };
-        if self
-            .connection_samples
-            .back()
-            .is_some_and(|sample| sample.at_ms >= status.last_success_at_ms)
-        {
-            return false;
-        }
-        if self.connection_samples.len() == HOME_CHART_SAMPLE_LIMIT {
-            self.connection_samples.pop_front();
-        }
-        self.connection_samples.push_back(ConnectionSample {
-            at_ms: status.last_success_at_ms,
-            count: status.item_count,
-            memory: status.memory,
-        });
-        true
-    }
-
     pub(super) fn sparkline(&self, metric: usize, generation: u64) -> Vec<(SharedString, f64)> {
         if self.generation != generation {
             return Vec::new();
         }
-        if metric < 2 {
-            self.samples
-                .iter()
-                .map(|sample| {
-                    (
-                        sample.at_ms.to_string().into(),
-                        if metric == 0 {
-                            sample.value.download as f64
-                        } else {
-                            sample.value.upload as f64
-                        },
-                    )
-                })
-                .collect()
-        } else {
-            self.connection_samples
-                .iter()
-                .map(|sample| {
-                    (
-                        sample.at_ms.to_string().into(),
-                        if metric == 2 {
-                            sample.count as f64
-                        } else {
-                            sample.memory as f64
-                        },
-                    )
-                })
-                .collect()
-        }
+        self.samples
+            .iter()
+            .map(|sample| {
+                (
+                    sample.at_ms.to_string().into(),
+                    if metric == 0 {
+                        sample.value.download as f64
+                    } else {
+                        sample.value.upload as f64
+                    },
+                )
+            })
+            .collect()
     }
 
     fn displayed(&self) -> impl Iterator<Item = &TimedSample> {
@@ -220,11 +171,6 @@ impl RuntimePage {
         if self.observe_home_traffic() {
             cx.notify();
         }
-        #[cfg(test)]
-        {
-            self.update_home_flow(cx);
-            self.update_home_history(cx);
-        }
     }
 
     pub(super) fn observe_home_traffic(&mut self) -> bool {
@@ -235,15 +181,8 @@ impl RuntimePage {
         let traffic_changed = self
             .home
             .chart
-            .observe_monitor(&self.traffic_monitor, self.home.generation);
-        let connections_changed = self.home.chart.observe_connections(
-            self.operational_status
-                .snapshot()
-                .streams
-                .connections
-                .value(),
-        );
-        generation_changed || traffic_changed || connections_changed
+            .observe_monitor(&self.monitors.traffic_monitor, self.home.generation);
+        generation_changed || traffic_changed
     }
 }
 
@@ -262,27 +201,14 @@ mod tests {
     #[test]
     fn metric_history_accepts_only_new_real_observations_and_releases_old_generation() {
         let mut state = HomeChartState::default();
-        state.observe(&frame(1_000), 1);
-        let status = StreamStatus {
-            generation: 1,
-            last_success_at_ms: 1_000,
-            item_count: 7,
-            memory: 4_096,
-            ..StreamStatus::default()
-        };
-        state.observe_connections(Some(&status));
-        state.observe_connections(Some(&status));
-        assert_eq!(state.sparkline(2, 1).len(), 1);
-        assert_eq!(state.sparkline(2, 1)[0].1, 7.);
-        assert_eq!(state.sparkline(3, 1)[0].1, 4_096.);
-        state.observe_connections(Some(&StreamStatus {
-            generation: 2,
-            last_success_at_ms: 2_000,
-            ..status
-        }));
-        assert_eq!(state.sparkline(2, 1).len(), 1);
-        state.observe(&frame(3_000), 2);
-        assert!(state.sparkline(2, 2).is_empty());
+        assert!(state.observe(&frame(1_000), 1));
+        assert!(!state.observe(&frame(1_000), 1));
+        assert_eq!(state.sparkline(0, 1).len(), 1);
+        assert_eq!(state.sparkline(0, 1)[0].1, 2_000.);
+        assert_eq!(state.sparkline(1, 1)[0].1, 1_000.);
+        assert!(state.sparkline(0, 2).is_empty());
+        assert!(state.observe(&frame(3_000), 2));
+        assert_eq!(state.sparkline(0, 2).len(), 1);
     }
 
     #[test]

@@ -6,6 +6,8 @@
     reason = "GPUI handlers conventionally receive mutable entities and Context values even when a particular render path only uses shared methods"
 )]
 
+/// Shared GPUI application actions and declarative page routing metadata.
+pub mod actions;
 /// Application lifecycle, windows, actions, and native tray coordination.
 pub mod app;
 /// Embedded application-owned and component icon assets.
@@ -16,6 +18,8 @@ pub mod components;
 pub mod design;
 /// Navigable application pages and their live Mihomo views.
 pub mod pages;
+/// Native operating-system status tray icon, menu builder, and command bindings.
+pub mod tray;
 
 mod preference_previews;
 mod proxy_selection;

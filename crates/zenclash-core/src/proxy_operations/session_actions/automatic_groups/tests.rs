@@ -245,7 +245,7 @@ async fn restoration_readback_failure_is_a_warning_and_receipt_releases_write_au
     use crate::{
         CoreConfigValidator, MihomoClient, MihomoEndpoint, data_coordinator::DataWriteLease,
     };
-    let root = super::super::super::test_support::session_test_root("automatic-group-receipt");
+    let root = crate::core_session::test_support::session_test_root("automatic-group-receipt");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let client = MihomoClient::new(MihomoEndpoint::new(
         format!("http://{}", listener.local_addr().unwrap()),

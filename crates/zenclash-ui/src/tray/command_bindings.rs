@@ -20,6 +20,10 @@ impl TrayCommandBindings {
         }
     }
 
+    pub(super) fn update_observation(&mut self, observation: Option<CoreObservationIdentity>) {
+        self.observation = observation;
+    }
+
     pub(super) fn resolve(&self, id: &str) -> Option<TrayEvent> {
         self.commands
             .get(id)

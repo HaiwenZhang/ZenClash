@@ -17,7 +17,7 @@ impl RuntimePage {
     ) -> impl IntoElement {
         let kind = self.preferences.core_kind;
         let custom = self.preferences.core_binaries.path(kind).is_some();
-        let state = &self.core_management;
+        let state = &self.settings.core_management;
         let path = self
             .preferences
             .core_binaries
@@ -149,7 +149,7 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let state = &self.core_management;
+        let state = &self.settings.core_management;
         let running = self.core_kind == kind && self.runtime_core_available();
         let (status, status_color, path, version) = if state.is_checking() {
             (
@@ -291,7 +291,7 @@ impl RuntimePage {
     }
 
     fn runtime_core_available(&self) -> bool {
-        let operational = self.operational_status.snapshot();
+        let operational = self.monitors.operational_status.snapshot();
         if operational.process.is_fresh()
             && let Some(process) = operational.process.value()
             && process.generation == self.core_session.generation()
@@ -313,11 +313,14 @@ impl RuntimePage {
 
     pub(in crate::pages::runtime) fn refresh_core_management(&mut self, cx: &mut Context<Self>) {
         let preferred = self.preferences.core_binaries.mihomo.clone();
-        let read = self.core_management.start_read(&self.runtime, preferred);
+        let read = self
+            .settings
+            .core_management
+            .start_read(&self.runtime, preferred);
         cx.spawn(async move |this, cx| {
             let completion = read.finish().await;
             let _ = this.update(cx, |this, cx| {
-                this.core_management.complete_read(completion);
+                this.settings.core_management.complete_read(completion);
                 cx.notify();
             });
         })
@@ -382,7 +385,7 @@ impl RuntimePage {
         let Some(token) = self.begin_mutation(self.page) else {
             return;
         };
-        self.core_management.begin_validation();
+        self.settings.core_management.begin_validation();
         let task = self.runtime.spawn(async move {
             tokio::task::spawn_blocking(move || {
                 let info = zenclash_core::validate_core_binary(kind, path)
@@ -417,7 +420,7 @@ impl RuntimePage {
                 this.finish_mutation(token);
                 match result {
                     Ok((info, preferences)) => {
-                        this.core_management.accept_validated(info);
+                        this.settings.core_management.accept_validated(info);
                         if this.is_page_task_current(token) {
                             this.notice = Some(zenclash_i18n::text_with(
                                 "core_management.notices.validated",
@@ -431,7 +434,9 @@ impl RuntimePage {
                         );
                     }
                     Err(error) => {
-                        this.core_management.validation_failed(error.clone());
+                        this.settings
+                            .core_management
+                            .validation_failed(error.clone());
                         this.set_page_error(token, error);
                     }
                 }

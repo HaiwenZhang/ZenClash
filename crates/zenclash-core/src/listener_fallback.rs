@@ -193,11 +193,15 @@ fn resolve_conflicts_against_claims(
 
         let replacement = find_available_port(selected, &reserved, |candidate| {
             let claims = listener_claims(spec, &addresses, candidate);
-            !claims
+            if claims
                 .iter()
                 .any(|claim| claim_matches_any(claim, &selected_claims))
-                && listener_available_against_current(&claims, current_claims).unwrap_or(false)
+            {
+                return Ok(false);
+            }
+            listener_available_against_current(&claims, current_claims)
         })
+        .map_err(|error| format!("无法确认 {} 回退端口是否可用：{error}", spec.key))?
         .ok_or_else(|| format!("{} 没有可用的回退端口", spec.key))?;
         let original = session
             .get(spec.key)
@@ -305,7 +309,7 @@ fn proxy_bind_addresses(root: &Mapping) -> Result<Vec<IpAddr>, String> {
     let ipv6 = root
         .get(Value::String("ipv6".into()))
         .and_then(Value::as_bool)
-        .unwrap_or(true);
+        .unwrap_or(false);
     let bind_address = root
         .get(Value::String("bind-address".into()))
         .and_then(Value::as_str)
@@ -480,16 +484,16 @@ fn is_bind_conflict(error: &io::Error) -> bool {
 fn find_available_port(
     current: u16,
     reserved: &HashSet<u16>,
-    mut available: impl FnMut(u16) -> bool,
-) -> Option<u16> {
+    mut available: impl FnMut(u16) -> io::Result<bool>,
+) -> io::Result<Option<u16>> {
     let mut candidate = next_candidate(current);
     for _ in MIN_FALLBACK_PORT..=u16::MAX {
-        if candidate != current && !reserved.contains(&candidate) && available(candidate) {
-            return Some(candidate);
+        if candidate != current && !reserved.contains(&candidate) && available(candidate)? {
+            return Ok(Some(candidate));
         }
         candidate = next_candidate(candidate);
     }
-    None
+    Ok(None)
 }
 
 const fn next_candidate(port: u16) -> u16 {
@@ -699,6 +703,33 @@ mod tests {
                 original: p0,
                 current: moved_port,
             })
+        );
+    }
+
+    #[test]
+    fn allow_lan_defaults_ipv6_binding_to_false_matching_mihomo() {
+        let doc: Value = serde_yaml::from_str("allow-lan: true\n").unwrap();
+        let addresses = super::proxy_bind_addresses(doc.as_mapping().unwrap()).unwrap();
+        assert_eq!(addresses, vec![std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED)]);
+    }
+
+    #[test]
+    fn find_available_port_short_circuits_immediately_on_non_conflict_error() {
+        let mut attempts = 0usize;
+        let result = super::find_available_port(7890, &std::collections::HashSet::new(), |_| {
+            attempts += 1;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::AddrNotAvailable,
+                "cannot assign requested address",
+            ))
+        });
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::AddrNotAvailable
+        );
+        assert_eq!(
+            attempts, 1,
+            "non-conflict bind error must short-circuit instead of scanning 64,511 ports"
         );
     }
 }

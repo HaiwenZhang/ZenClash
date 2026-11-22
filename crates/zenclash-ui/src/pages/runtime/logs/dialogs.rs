@@ -1,7 +1,9 @@
 use super::*;
 use crate::components::mint_switch::MintSwitch;
+use gpui_kit::InteractiveElement;
 use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, WindowExt};
 
 #[derive(Clone, Copy)]
@@ -67,6 +69,9 @@ impl LogsView {
             )))
             .child(
                 div()
+                    .id("log-detail-payload")
+                    .max_h(gpui_kit::rems(20.))
+                    .overflow_y_scrollbar()
                     .p_3()
                     .rounded(cx.theme().radius)
                     .bg(cx.theme().secondary)
@@ -316,7 +321,7 @@ mod tests {
         fixture.settle(cx, &page, |page| !page.persistent_loading);
         cx.update_window(window, |_, window, cx| {
             let enabled = page.read(cx).preferences.log_file_enabled;
-            let level = page.read(cx).log_monitor.level();
+            let level = page.read(cx).monitors.log_monitor.level();
             window.render_frame(cx);
             window.click("log-settings", cx);
             window.render_frame(cx);
@@ -330,7 +335,7 @@ mod tests {
             assert!(!window.has_active_dialog(cx));
             assert!(page.read(cx).logs.read(cx).settings.is_none());
             assert_eq!(page.read(cx).preferences.log_file_enabled, enabled);
-            assert_eq!(page.read(cx).log_monitor.level(), level);
+            assert_eq!(page.read(cx).monitors.log_monitor.level(), level);
             window.remove_window();
         })
         .unwrap();

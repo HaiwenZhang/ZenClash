@@ -1,4 +1,5 @@
 use super::*;
+use crate::TrafficCaptureSession;
 use crate::service::NativeHttpResponse;
 use crate::service_runtime::FrozenRuntime;
 use std::sync::atomic::{AtomicBool, AtomicUsize};

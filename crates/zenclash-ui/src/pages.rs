@@ -1,4 +1,11 @@
-use gpui_kit::component::IconName;
+use gpui_kit::{App, Window, component::IconName};
+
+use crate::actions::{
+    NavigateConnections, NavigateDns, NavigateHome, NavigateLogs, NavigateMihomo, NavigateNetwork,
+    NavigateOverride, NavigateProfiles, NavigateProxies, NavigateResources, NavigateRules,
+    NavigateSettings, NavigateSniffer, NavigateSystemProxy, NavigateTraffic, NavigateTun,
+    PageDescriptor, PageScrollPolicy,
+};
 
 /// Live proxy-group selection page.
 pub mod proxies;
@@ -170,6 +177,56 @@ impl Page {
             Self::Network => IconName::Globe,
             Self::Traffic => IconName::ChartPie,
             Self::Settings => IconName::Settings2,
+        }
+    }
+
+    /// Returns declarative chrome, title, and scroll-ownership metadata for this page.
+    #[must_use]
+    pub const fn descriptor(self) -> PageDescriptor {
+        PageDescriptor {
+            route: self.route(),
+            scroll_policy: match self {
+                Self::Connections | Self::Rules | Self::Logs | Self::Proxies => {
+                    PageScrollPolicy::ViewportOwned
+                }
+                Self::Home
+                | Self::SystemProxy
+                | Self::Tun
+                | Self::Profiles
+                | Self::Mihomo
+                | Self::Dns
+                | Self::Sniffer
+                | Self::Resources
+                | Self::Override
+                | Self::Network
+                | Self::Traffic
+                | Self::Settings => PageScrollPolicy::FormScroll,
+            },
+            is_settings: self.is_settings(),
+            use_label_as_title: matches!(self, Self::Logs),
+            show_subtitle: matches!(self, Self::Rules),
+        }
+    }
+
+    /// Dispatches the GPUI navigation action for this destination on `window`.
+    pub fn dispatch_navigate(self, window: &mut Window, cx: &mut App) {
+        match self {
+            Self::Home => window.dispatch_action(Box::new(NavigateHome), cx),
+            Self::SystemProxy => window.dispatch_action(Box::new(NavigateSystemProxy), cx),
+            Self::Tun => window.dispatch_action(Box::new(NavigateTun), cx),
+            Self::Profiles => window.dispatch_action(Box::new(NavigateProfiles), cx),
+            Self::Proxies => window.dispatch_action(Box::new(NavigateProxies), cx),
+            Self::Mihomo => window.dispatch_action(Box::new(NavigateMihomo), cx),
+            Self::Connections => window.dispatch_action(Box::new(NavigateConnections), cx),
+            Self::Dns => window.dispatch_action(Box::new(NavigateDns), cx),
+            Self::Sniffer => window.dispatch_action(Box::new(NavigateSniffer), cx),
+            Self::Logs => window.dispatch_action(Box::new(NavigateLogs), cx),
+            Self::Rules => window.dispatch_action(Box::new(NavigateRules), cx),
+            Self::Resources => window.dispatch_action(Box::new(NavigateResources), cx),
+            Self::Override => window.dispatch_action(Box::new(NavigateOverride), cx),
+            Self::Network => window.dispatch_action(Box::new(NavigateNetwork), cx),
+            Self::Traffic => window.dispatch_action(Box::new(NavigateTraffic), cx),
+            Self::Settings => window.dispatch_action(Box::new(NavigateSettings), cx),
         }
     }
 

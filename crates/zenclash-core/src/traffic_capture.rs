@@ -14,6 +14,7 @@ use std::{
 use parking_lot::RwLock;
 mod backend;
 use backend::ProductionCaptureBackend;
+mod core_recovery;
 mod error;
 use error::task_failure;
 pub use error::{TrafficCaptureError, TrafficCaptureTask};

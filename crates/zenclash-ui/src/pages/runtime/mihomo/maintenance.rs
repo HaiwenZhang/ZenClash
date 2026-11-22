@@ -13,17 +13,19 @@ use super::super::{
 impl RuntimePage {
     fn fetch_core_releases(&mut self, cx: &mut Context<Self>) {
         if !self.core_kind.capabilities().core_upgrade {
-            self.core_releases.reject_unsupported(self.core_kind);
+            self.settings
+                .core_releases
+                .reject_unsupported(self.core_kind);
             cx.notify();
             return;
         }
-        let Some(read) = self.core_releases.start_read(&self.runtime) else {
+        let Some(read) = self.settings.core_releases.start_read(&self.runtime) else {
             return;
         };
         cx.spawn(async move |this, cx| {
             let completion = read.finish().await;
             let _ = this.update(cx, |this, cx| {
-                this.core_releases.complete_read(completion);
+                this.settings.core_releases.complete_read(completion);
                 cx.notify();
             });
         })
@@ -119,7 +121,7 @@ impl RuntimePage {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let releases = self.core_releases.releases().to_vec();
+        let releases = self.settings.core_releases.releases().to_vec();
         setting_card(
             zenclash_i18n::text("core_page.maintenance.versioned_title"),
             theme,
@@ -199,18 +201,20 @@ impl RuntimePage {
             h_flex().justify_end().p_4().child(
                 Button::new("fetch-mihomo-releases")
                     .icon(crate::assets::AppIcon::RefreshCw)
-                    .label(zenclash_i18n::text(if self.core_releases.is_loading() {
-                        "core_page.maintenance.loading_versions"
-                    } else if self.core_releases.releases().is_empty() {
-                        "core_page.maintenance.load_versions"
-                    } else {
-                        "core_page.maintenance.refresh_versions"
-                    }))
+                    .label(zenclash_i18n::text(
+                        if self.settings.core_releases.is_loading() {
+                            "core_page.maintenance.loading_versions"
+                        } else if self.settings.core_releases.releases().is_empty() {
+                            "core_page.maintenance.load_versions"
+                        } else {
+                            "core_page.maintenance.refresh_versions"
+                        },
+                    ))
                     .small()
                     .primary()
-                    .loading(self.core_releases.is_loading())
+                    .loading(self.settings.core_releases.is_loading())
                     .disabled(
-                        self.core_releases.is_loading()
+                        self.settings.core_releases.is_loading()
                             || self.core_busy()
                             || !self.core_kind.capabilities().core_upgrade,
                     )

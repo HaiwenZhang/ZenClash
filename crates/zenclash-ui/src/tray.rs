@@ -1,6 +1,9 @@
 use std::{
     path::PathBuf,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use parking_lot::Mutex;
@@ -21,7 +24,7 @@ pub(crate) const MAX_TRAY_PROXY_NODES: usize = 24;
 use icon::app_icon;
 use menu::build_menu;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 /// Complete state used to rebuild the native status menu.
 pub struct TrayMenuState {
     /// Active Mihomo routing mode.
@@ -42,7 +45,7 @@ pub struct TrayMenuState {
     pub directories: Vec<(String, PathBuf)>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 /// One managed profile shown in the native status menu.
 pub struct TrayProfile {
     /// Stable profile identifier used by the profile store.
@@ -53,7 +56,7 @@ pub struct TrayProfile {
     pub active: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 /// One selectable Mihomo proxy group shown as a submenu.
 #[non_exhaustive]
 pub struct TrayProxyGroup {
@@ -205,18 +208,40 @@ pub(crate) enum NativeTrayEvent {
     Click(TrayIconEvent),
 }
 
-static NATIVE_EVENT_SENDER: OnceLock<Mutex<Option<mpsc::UnboundedSender<NativeTrayEvent>>>> =
-    OnceLock::new();
+type RegisteredNativeSender = (u64, mpsc::UnboundedSender<NativeTrayEvent>);
+
+static NEXT_TRAY_TOKEN: AtomicU64 = AtomicU64::new(1);
+static NATIVE_EVENT_SENDER: OnceLock<Mutex<Option<RegisteredNativeSender>>> = OnceLock::new();
 static NATIVE_EVENT_HANDLERS: OnceLock<()> = OnceLock::new();
 
-fn install_native_event_handlers(sender: mpsc::UnboundedSender<NativeTrayEvent>) {
-    *NATIVE_EVENT_SENDER.get_or_init(|| Mutex::new(None)).lock() = Some(sender);
+fn next_tray_token() -> u64 {
+    NEXT_TRAY_TOKEN.fetch_add(1, Ordering::Relaxed)
+}
+
+fn register_native_event_sender(token: u64, sender: mpsc::UnboundedSender<NativeTrayEvent>) {
+    *NATIVE_EVENT_SENDER.get_or_init(|| Mutex::new(None)).lock() = Some((token, sender));
+}
+
+fn unregister_native_event_sender(token: u64) {
+    if let Some(slot) = NATIVE_EVENT_SENDER.get() {
+        let mut guard = slot.lock();
+        if guard.as_ref().is_some_and(|(stored, _)| *stored == token) {
+            *guard = None;
+        }
+    }
+}
+
+fn current_native_event_sender() -> Option<mpsc::UnboundedSender<NativeTrayEvent>> {
+    NATIVE_EVENT_SENDER
+        .get()
+        .and_then(|slot| slot.lock().as_ref().map(|(_, sender)| sender.clone()))
+}
+
+fn install_native_event_handlers(token: u64, sender: mpsc::UnboundedSender<NativeTrayEvent>) {
+    register_native_event_sender(token, sender);
     NATIVE_EVENT_HANDLERS.get_or_init(|| {
         MenuEvent::set_event_handler(Some(|event| {
-            if let Some(sender) = NATIVE_EVENT_SENDER
-                .get()
-                .and_then(|sender| sender.lock().clone())
-            {
+            if let Some(sender) = current_native_event_sender() {
                 let _ = sender.send(NativeTrayEvent::Menu(event));
             }
         }));
@@ -230,10 +255,7 @@ fn install_native_event_handlers(sender: mpsc::UnboundedSender<NativeTrayEvent>)
             ) {
                 return;
             }
-            if let Some(sender) = NATIVE_EVENT_SENDER
-                .get()
-                .and_then(|sender| sender.lock().clone())
-            {
+            if let Some(sender) = current_native_event_sender() {
                 let _ = sender.send(NativeTrayEvent::Click(event));
             }
         }));
@@ -242,8 +264,10 @@ fn install_native_event_handlers(sender: mpsc::UnboundedSender<NativeTrayEvent>)
 
 /// Native application tray icon and its command menu.
 pub struct NetworkTrayIcon {
+    token: u64,
     icon: TrayIcon,
     commands: TrayCommandBindings,
+    last_menu_state: Option<TrayMenuState>,
     events: Option<mpsc::UnboundedReceiver<NativeTrayEvent>>,
 }
 
@@ -254,10 +278,11 @@ impl NetworkTrayIcon {
     ///
     /// Returns a platform error when the icon, menu, or native tray cannot be created.
     pub fn new() -> Result<Self, String> {
+        let token = next_tray_token();
         let (event_sender, events) = mpsc::unbounded_channel();
-        install_native_event_handlers(event_sender);
         let icon = app_icon()?;
-        let (menu, commands) = build_menu(&TrayMenuState::default())?;
+        let initial_state = TrayMenuState::default();
+        let (menu, commands) = build_menu(&initial_state)?;
         let builder = TrayIconBuilder::new()
             .with_tooltip("ZenClash")
             .with_title("");
@@ -273,9 +298,12 @@ impl NetworkTrayIcon {
             .map_err(|error| error.to_string())?;
         #[cfg(target_os = "macos")]
         macos::prepare_app_icon(&tray);
+        install_native_event_handlers(token, event_sender);
         Ok(Self {
+            token,
             icon: tray,
             commands: TrayCommandBindings::new(commands, None),
+            last_menu_state: Some(initial_state),
             events: Some(events),
         })
     }
@@ -296,7 +324,7 @@ impl NetworkTrayIcon {
         Ok(())
     }
 
-    /// Rebuilds the menu and atomically replaces its command mapping.
+    /// Rebuilds the menu when `state` changed and atomically replaces its command mapping.
     ///
     /// # Errors
     ///
@@ -310,9 +338,14 @@ impl NetworkTrayIcon {
         state: &TrayMenuState,
         observation: Option<zenclash_core::CoreObservationIdentity>,
     ) -> Result<(), String> {
+        if self.last_menu_state.as_ref() == Some(state) {
+            self.commands.update_observation(observation);
+            return Ok(());
+        }
         let (menu, commands) = build_menu(state)?;
         self.icon.set_menu(Some(Box::new(menu)));
         self.commands = TrayCommandBindings::new(commands, observation);
+        self.last_menu_state = Some(state.clone());
         Ok(())
     }
 
@@ -342,9 +375,7 @@ impl NetworkTrayIcon {
 
 impl Drop for NetworkTrayIcon {
     fn drop(&mut self) {
-        if let Some(sender) = NATIVE_EVENT_SENDER.get() {
-            *sender.lock() = None;
-        }
+        unregister_native_event_sender(self.token);
     }
 }
 
@@ -384,6 +415,69 @@ const fn right_click_action() -> Option<TrayClick> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropping_an_older_tray_token_does_not_clear_a_newer_sender() {
+        let old_token = next_tray_token();
+        let new_token = next_tray_token();
+        assert_ne!(old_token, new_token);
+
+        let (old_tx, _old_rx) = mpsc::unbounded_channel();
+        let (new_tx, _new_rx) = mpsc::unbounded_channel();
+
+        register_native_event_sender(old_token, old_tx);
+        register_native_event_sender(new_token, new_tx);
+
+        unregister_native_event_sender(old_token);
+        assert!(
+            current_native_event_sender().is_some(),
+            "dropping an outdated tray icon must not clear the active tray sender"
+        );
+
+        unregister_native_event_sender(new_token);
+        assert!(
+            current_native_event_sender().is_none(),
+            "dropping the current tray icon must clear the active tray sender"
+        );
+    }
+
+    #[test]
+    fn tray_menu_state_equality_detects_real_menu_changes() {
+        let base = TrayMenuState {
+            mode: "rule".into(),
+            system_proxy: true,
+            tun: false,
+            mixed_port: 7890,
+            profile_name: "Primary".into(),
+            profiles: vec![TrayProfile {
+                id: "p1".into(),
+                name: "Primary".into(),
+                active: true,
+            }],
+            groups: vec![TrayProxyGroup {
+                controller_name: "Proxy".into(),
+                selectable: true,
+                automatic: false,
+                has_more: false,
+                name: "Proxy".into(),
+                now: "HK-01".into(),
+                test_url: None,
+                proxies: vec![TrayProxyNode {
+                    name: "HK-01".into(),
+                    provider: None,
+                    delay: Some(42),
+                }]
+                .into(),
+            }],
+            directories: Vec::new(),
+        };
+        let identical = base.clone();
+        let mut changed = base.clone();
+        changed.tun = true;
+
+        assert_eq!(base, identical);
+        assert_ne!(base, changed);
+    }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]

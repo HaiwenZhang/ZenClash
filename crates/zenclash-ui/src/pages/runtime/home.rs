@@ -25,7 +25,10 @@ use zenclash_core::{
 };
 
 use crate::{
-    app::{NavigateProfiles, NavigateSystemProxy, SetDirectMode, SetGlobalMode, SetRuleMode},
+    actions::{
+        NavigateProfiles, NavigateSystemProxy, NavigateTun, SetDirectMode, SetGlobalMode,
+        SetRuleMode,
+    },
     components::{mint_switch::MintSwitch as Switch, wave_percentage::WavePercentage},
 };
 
@@ -38,10 +41,6 @@ mod dashboard;
 pub(in crate::pages::runtime) mod dashboard_read;
 mod menu_size;
 use menu_size::HomeMenuSize;
-#[cfg(test)]
-mod flow;
-#[cfg(test)]
-mod history;
 mod proxy_selection;
 mod selector;
 mod traffic;
@@ -65,10 +64,6 @@ pub(super) struct HomeUiState {
     generation: u64,
     selected_group: Option<String>,
     selector_width_rems: f32,
-    #[cfg(test)]
-    flow: flow::HomeFlowState,
-    #[cfg(test)]
-    history: history::HomeHistoryState,
     #[cfg(test)]
     design_validation: Option<(OperationalSnapshot, zenclash_core::TrafficSnapshot)>,
 }
@@ -115,7 +110,7 @@ impl RuntimePage {
         if let Some((snapshot, _)) = &self.home.design_validation {
             return snapshot.clone();
         }
-        self.operational_status.snapshot()
+        self.monitors.operational_status.snapshot()
     }
 
     fn home_traffic_snapshot(&self) -> zenclash_core::TrafficSnapshot {
@@ -123,15 +118,13 @@ impl RuntimePage {
         if let Some((_, snapshot)) = &self.home.design_validation {
             return snapshot.clone();
         }
-        self.traffic_monitor.snapshot()
+        self.monitors.traffic_monitor.snapshot()
     }
 
     pub(in crate::pages::runtime) fn release_home_presentation(&mut self) {
         #[cfg(test)]
         {
             self.home.design_validation = None;
-            self.home.flow.release();
-            self.home.history.release();
         }
         // Stream history is bounded and survives page/window presentation changes.
         self.home.projection = None;
@@ -395,7 +388,7 @@ impl RuntimePage {
                                     .px_2()
                                     .py_1()
                                     .rounded(theme.radius)
-                                    .bg(theme.chart_3.opacity(0.12))
+                                    .bg(crate::design::brand_accent(theme).opacity(0.12))
                                     .text_color(theme.primary)
                                     .child(profile.source_label()),
                             )
@@ -588,7 +581,7 @@ impl RuntimePage {
             |uptime| format!("{} · {uptime}", self.core_kind.display_name()),
         );
         let orb_color = if process.is_some_and(|process| process.running) {
-            theme.chart_3
+            crate::design::online_indicator(theme)
         } else {
             runtime_color
         };
@@ -766,8 +759,7 @@ impl RuntimePage {
                                     .small()
                                     .outline()
                                     .on_click(|_, window, cx| {
-                                        window
-                                            .dispatch_action(Box::new(crate::app::NavigateTun), cx)
+                                        window.dispatch_action(Box::new(NavigateTun), cx)
                                     }),
                             )
                         }),
@@ -865,7 +857,7 @@ impl RuntimePage {
                                                     .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                                     .on_click(|_, window, cx| {
                                                         window.dispatch_action(
-                                                            Box::new(crate::app::NavigateTun),
+                                                            Box::new(NavigateTun),
                                                             cx,
                                                         )
                                                     }),
@@ -1138,6 +1130,9 @@ impl RuntimePage {
             self.request_service_tun(window, cx);
             return;
         }
+        let Some(token) = self.begin_mutation(self.page) else {
+            return;
+        };
         let previous_transition = self.home.capture_transition.take();
         let confirmed = previous_transition
             .as_ref()
@@ -1149,8 +1144,7 @@ impl RuntimePage {
             confirmed,
         });
         self.home.action_error = None;
-        let token = self.page_task_token_for(self.page);
-        let capture = self.traffic_capture.clone();
+        let capture = self.monitors.traffic_capture.clone();
         let preferences_store = self.preferences_store.clone();
         let task = self.runtime.spawn(async move {
             let outcome = capture
@@ -1174,6 +1168,7 @@ impl RuntimePage {
                 .map_err(|error| error.to_string())
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
+                this.finish_mutation(token);
                 match result {
                     Ok((CaptureOutcome::RolledBack { failure, .. }, _))
                     | Ok((CaptureOutcome::ReconcileNeeded { failure, .. }, _)) => {
@@ -1559,7 +1554,7 @@ fn process_evidence(
         Some(ProcessRecoveryStatus::Stable | ProcessRecoveryStatus::External)
             if process.is_some_and(|process| process.running) =>
         {
-            theme.chart_3
+            crate::design::online_indicator(theme)
         }
         Some(
             ProcessRecoveryStatus::Recovering
@@ -2136,7 +2131,7 @@ mod tests {
         fixture.settle(cx, &page, |page| !page.persistent_loading);
         cx.update_window(window, |_, window, cx| {
             let token = page.update(cx, |page, _| {
-                let mut snapshot = page.operational_status.snapshot();
+                let mut snapshot = page.monitors.operational_status.snapshot();
                 snapshot.capture.tun = Observation::Fresh {
                     value: TunCaptureStatus {
                         requested: true,
@@ -2276,7 +2271,7 @@ mod tests {
                     page.home.capture_transition.is_some(),
                     "old observer data must not replace service readback"
                 );
-                let mut snapshot = page.operational_status.snapshot();
+                let mut snapshot = page.monitors.operational_status.snapshot();
                 snapshot.capture = capture(false, 1);
                 page.home.design_validation = Some((snapshot, Default::default()));
                 cx.notify();

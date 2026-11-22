@@ -128,7 +128,7 @@ pub(crate) struct RuntimeSession<T: RuntimeTransport> {
     source_home: PathBuf,
     core_source: Option<PathBuf>,
     controller_secret: parking_lot::RwLock<String>,
-    local_launch: Option<crate::CoreLaunchConfig>,
+    local_launch: Option<crate::runtime_launcher::CoreLaunchDescriptor>,
     state: Arc<Mutex<RuntimeState>>,
 }
 
@@ -187,7 +187,10 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
             state: Arc::new(Mutex::new(RuntimeState::default())),
         })
     }
-    pub(crate) fn from_local(client: Arc<T>, launch: crate::CoreLaunchConfig) -> Arc<Self> {
+    pub(crate) fn from_local(
+        client: Arc<T>,
+        launch: crate::runtime_launcher::CoreLaunchDescriptor,
+    ) -> Arc<Self> {
         Arc::new(Self {
             client,
             source_home: launch.home_dir.clone(),
@@ -197,7 +200,7 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
             state: Arc::new(Mutex::new(RuntimeState::default())),
         })
     }
-    pub(crate) fn local_launch(&self) -> Option<&crate::CoreLaunchConfig> {
+    pub(crate) fn local_launch(&self) -> Option<&crate::runtime_launcher::CoreLaunchDescriptor> {
         self.local_launch.as_ref()
     }
     pub(crate) fn core_source(&self) -> Option<&Path> {
@@ -275,13 +278,13 @@ impl<T: RuntimeTransport> RuntimeSession<T> {
     pub(crate) async fn prepare_restore(
         self: &Arc<Self>,
         bundle: Arc<ServiceRuntimeBundle>,
-        authority: &crate::core_session::RuntimeRestoreAuthority,
+        authority: &crate::runtime_launcher::RuntimeRestoreAuthority,
     ) -> MihomoResult<PreparedRuntime<T>> {
         match authority {
-            crate::core_session::RuntimeRestoreAuthority::Ordinary => {
+            crate::runtime_launcher::RuntimeRestoreAuthority::Ordinary => {
                 self.prepare_recovery(bundle).await
             }
-            crate::core_session::RuntimeRestoreAuthority::Backup(admission) => {
+            crate::runtime_launcher::RuntimeRestoreAuthority::Backup(admission) => {
                 // Keep backup admission alive while native confirmation is awaited.
                 let _admission = admission.clone();
                 self.prepare_backup_recovery(bundle).await

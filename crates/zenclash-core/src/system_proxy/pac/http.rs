@@ -1,9 +1,13 @@
-//! Bounded PAC HTTP requests, with shutdown of the current connection.
+//! Event-driven bounded PAC HTTP server with blocking `accept()`,
+//! self-connect shutdown wakeup, and bounded concurrent request handling.
 
 use std::{
     io::{Read, Write},
     net::{Shutdown, TcpListener, TcpStream},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -13,51 +17,131 @@ use parking_lot::Mutex;
 const MAX_REQUEST_HEADER_BYTES: usize = 8 * 1024;
 const REQUEST_HEADER_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_READ_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const MAX_CONCURRENT_CONNECTIONS: usize = 8;
+
+pub(super) type ActiveConnections = Arc<Mutex<Vec<(u64, TcpStream)>>>;
+
+struct ConnectionSlotGuard {
+    in_flight: Arc<AtomicUsize>,
+    active_connections: ActiveConnections,
+    id: u64,
+}
+
+impl Drop for ConnectionSlotGuard {
+    fn drop(&mut self) {
+        self.active_connections
+            .lock()
+            .retain(|(entry_id, _)| *entry_id != self.id);
+        self.in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 pub(super) fn run_server(
     listener: &TcpListener,
-    script: &[u8],
-    shutdown: &AtomicBool,
-    availability: &AtomicBool,
-    active_connection: &Mutex<Option<TcpStream>>,
+    script: &Arc<[u8]>,
+    shutdown: &Arc<AtomicBool>,
+    availability: &Arc<AtomicBool>,
+    active_connections: &ActiveConnections,
 ) {
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let next_connection_id = AtomicU64::new(1);
+    let mut handlers: Vec<thread::JoinHandle<()>> = Vec::new();
+
     while !shutdown.load(Ordering::Acquire) {
+        reap_finished_handlers(&mut handlers);
         match listener.accept() {
             Ok((_stream, _)) if shutdown.load(Ordering::Acquire) => break,
             Ok((stream, _)) => {
+                if !try_acquire_connection_slot(&in_flight) {
+                    tracing::debug!(
+                        limit = MAX_CONCURRENT_CONNECTIONS,
+                        "PAC concurrency limit reached; rejecting excess connection"
+                    );
+                    let _ = stream.shutdown(Shutdown::Both);
+                    continue;
+                }
+                let id = next_connection_id.fetch_add(1, Ordering::Relaxed);
                 let connection = match stream.try_clone() {
                     Ok(connection) => connection,
                     Err(error) => {
+                        in_flight.fetch_sub(1, Ordering::AcqRel);
                         tracing::warn!(%error, "PAC connection could not be retained for shutdown");
                         continue;
                     }
                 };
                 {
-                    let mut active = active_connection.lock();
+                    let mut active = active_connections.lock();
                     // Register under the same lock used by Drop, so shutdown
                     // cannot miss a connection accepted just before it began.
                     if shutdown.load(Ordering::Acquire) {
+                        in_flight.fetch_sub(1, Ordering::AcqRel);
+                        let _ = stream.shutdown(Shutdown::Both);
                         break;
                     }
-                    *active = Some(connection);
+                    active.push((id, connection));
                 }
-                let result = serve_connection(stream, script, availability, shutdown);
-                active_connection.lock().take();
-                if let Err(error) = result
-                    && !shutdown.load(Ordering::Acquire)
-                {
-                    tracing::warn!(%error, "PAC request failed");
+                let slot_guard = ConnectionSlotGuard {
+                    in_flight: in_flight.clone(),
+                    active_connections: active_connections.clone(),
+                    id,
+                };
+                let script = script.clone();
+                let availability = availability.clone();
+                let shutdown = shutdown.clone();
+                match thread::Builder::new()
+                    .name(format!("zenclash-pac-conn-{id}"))
+                    .spawn(move || {
+                        let _slot = slot_guard;
+                        let result = serve_connection(stream, &script, &availability, &shutdown);
+                        if let Err(error) = result
+                            && !shutdown.load(Ordering::Acquire)
+                        {
+                            tracing::warn!(%error, "PAC request failed");
+                        }
+                    }) {
+                    Ok(handle) => handlers.push(handle),
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to spawn PAC connection handler");
+                    }
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(5));
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) => {
-                tracing::warn!(%error, "PAC listener stopped unexpectedly");
+                if !shutdown.load(Ordering::Acquire) {
+                    tracing::warn!(%error, "PAC listener stopped unexpectedly");
+                }
                 break;
             }
         }
     }
+
+    for handle in handlers {
+        let _ = handle.join();
+    }
+}
+
+fn try_acquire_connection_slot(in_flight: &AtomicUsize) -> bool {
+    in_flight
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            (current < MAX_CONCURRENT_CONNECTIONS).then_some(current + 1)
+        })
+        .is_ok()
+}
+
+fn reap_finished_handlers(handlers: &mut Vec<thread::JoinHandle<()>>) {
+    let mut index = 0;
+    while index < handlers.len() {
+        if handlers[index].is_finished() {
+            let handle = handlers.swap_remove(index);
+            let _ = handle.join();
+        } else {
+            index += 1;
+        }
+    }
+}
+
+fn is_pac_request_target(target: &str) -> bool {
+    target == "/pac" || target.starts_with("/pac?")
 }
 
 fn serve_connection(
@@ -125,7 +209,10 @@ fn serve_connection(
         .split_whitespace()
         .next()
         .is_some_and(|method| method == "GET" || method == "HEAD")
-        && request_line.split_whitespace().nth(1) == Some("/pac");
+        && request_line
+            .split_whitespace()
+            .nth(1)
+            .is_some_and(is_pac_request_target);
     let (status, body, content_type) = if !serves_pac {
         (
             "404 Not Found",

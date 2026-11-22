@@ -3,9 +3,9 @@ use std::{path::PathBuf, sync::Arc};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme, ThemeMode, TitleBar, WindowExt, h_flex, v_flex};
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext, ClipboardItem, Context, Entity, Focusable,
-    InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, SharedString, Styled,
-    Subscription, Window, WindowBounds, WindowOptions, div, px,
+    App, AppContext, ClipboardItem, Context, Entity, Focusable, InteractiveElement, IntoElement,
+    KeyBinding, ParentElement, Render, SharedString, Styled, Subscription, Window, WindowBounds,
+    WindowOptions, div, px,
 };
 use zenclash_core::{
     AppPreferences, AppPreferencesStore, AppearancePreference, ControlledConfigStore, CoreKind,
@@ -28,6 +28,7 @@ mod tray;
 mod view;
 mod window;
 
+pub use crate::actions::*;
 use crate::outbound_mode::{OutboundMode, OutboundModeCoordinator};
 pub use bootstrap::{
     create_main_window, create_main_window_with_pending_startup,
@@ -35,20 +36,13 @@ pub use bootstrap::{
 };
 use platform::open_directory;
 pub use system_proxy::finish_native_shutdown;
-use tray::LatestCommandQueue;
 pub use zenclash_app::{
     TrafficHistorySession,
     bootstrap::{AppServices, BootstrappedApplication, RestartRequest},
 };
 
 use crate::{
-    components::{
-        sidebar::Sidebar,
-        tray::{
-            EnvironmentShell, NetworkTrayIcon, TrayClick, TrayCommand, TrayEvent, TrayMenuState,
-            TrayProfile, TrayProxyGroup, TrayProxyNode,
-        },
-    },
+    components::sidebar::Sidebar,
     design::apply_zen_theme,
     pages::{
         Page,
@@ -58,113 +52,64 @@ use crate::{
             RuntimeConfigApplied, RuntimePage, RuntimePageServices,
         },
     },
+    tray::{
+        EnvironmentShell, NetworkTrayIcon, TrayClick, TrayCommand, TrayEvent, TrayMenuState,
+        TrayProfile, TrayProxyGroup, TrayProxyNode,
+    },
 };
 
-// GPUI's macro offers no hook for documenting its generated marker structs, so
-// the exception is confined to this definition-only module.
-#[allow(
-    clippy::derive_partial_eq_without_eq,
-    missing_docs,
-    reason = "the gpui actions macro controls generated marker derives and documentation"
-)]
-mod action_types {
-    use gpui_kit::actions;
-
-    actions!(
-        zenclash,
-        [
-            Quit,
-            NavigateHome,
-            NavigateSystemProxy,
-            NavigateTun,
-            NavigateProfiles,
-            NavigateProxies,
-            NavigateMihomo,
-            NavigateConnections,
-            NavigateDns,
-            NavigateSniffer,
-            NavigateLogs,
-            NavigateRules,
-            NavigateResources,
-            NavigateOverride,
-            NavigateNetwork,
-            NavigateTraffic,
-            NavigateSettings,
-            SetRuleMode,
-            SetGlobalMode,
-            SetDirectMode,
-            SetSystemTheme,
-            SetLightTheme,
-            SetDarkTheme,
-            ShowTrafficIcon,
-            HideTrafficIcon,
-            ShowStatusMenu,
-            ToggleSidebar,
-        ]
-    );
+struct AppCoreHandles {
+    core_kind: CoreKind,
+    core_session: CoreSession,
+    application_commands: crate::ApplicationCommands,
+    runtime: tokio::runtime::Handle,
+    profile_store: Option<zenclash_core::ProfileStore>,
+    override_store: Option<zenclash_core::YamlOverrideStore>,
+    profile_path: Option<PathBuf>,
+    controlled_config_store: ControlledConfigStore,
+    operational_status: Arc<OperationalStatus>,
+    traffic_capture: TrafficCaptureSession,
+    log_monitor: Arc<LogMonitor>,
+    traffic_history_session: Option<Arc<TrafficHistorySession>>,
 }
 
-pub use action_types::*;
+struct WiredRuntime {
+    handles: AppCoreHandles,
+    proxies_page: Entity<ProxiesPage>,
+    runtime_page: Entity<RuntimePage>,
+    subscriptions: Vec<Subscription>,
+    initializing: bool,
+    await_service_handoff: bool,
+    restart_after_exit: Arc<parking_lot::Mutex<Option<RestartRequest>>>,
+    safe_mode: zenclash_app::SafeMode,
+}
 
 /// Root GPUI entity coordinating pages, windows, Mihomo state, and native tray.
 pub struct ZenClashApp {
     current_page: Page,
     sidebar_collapsed: bool,
     outbound_mode: OutboundModeCoordinator,
-    core_kind: CoreKind,
-    core_session: CoreSession,
-    application_commands: crate::ApplicationCommands,
-    runtime: tokio::runtime::Handle,
+    mode_error: Option<String>,
+    controller_indicator: view::ControllerIndicator,
     focus_handle: gpui_kit::FocusHandle,
     proxies_page: Entity<ProxiesPage>,
     runtime_page: Entity<RuntimePage>,
-    tray_core_running: Option<bool>,
-    profile_store: Option<zenclash_core::ProfileStore>,
-    override_store: Option<zenclash_core::YamlOverrideStore>,
-    profile_path: Option<PathBuf>,
-    controlled_config_store: ControlledConfigStore,
-    main_window: AnyWindowHandle,
-    main_window_visible: bool,
-    #[cfg(target_os = "macos")]
-    main_window_restore_size: window::MainWindowRestoreSize,
-    tray_state: TrayMenuState,
-    tray_observation: Option<zenclash_core::CoreObservationIdentity>,
-    tray_error: Option<String>,
-    tray_command_error: Option<String>,
-    mode_error: Option<String>,
-    tray_refreshing: bool,
-    tray_refresh_pending: bool,
-    tray_menu_requested: bool,
-    system_proxy_commands: LatestCommandQueue<(bool, u16)>,
-    operational_status: Arc<OperationalStatus>,
-    controller_indicator: view::ControllerIndicator,
-    traffic_capture: TrafficCaptureSession,
-    quit_state: system_proxy::QuitState,
-    tun_commands: LatestCommandQueue<bool>,
-    proxy_selection_commands: LatestCommandQueue<tray::proxy_commands::TrayProxySelectionRequest>,
-    profile_selection_commands: LatestCommandQueue<String>,
-    network_tray: Option<NetworkTrayIcon>,
-    preferences_store: Option<AppPreferencesStore>,
-    preferences: AppPreferences,
-    preferences_save_task: Option<tokio::task::JoinHandle<()>>,
-    menu_preference_saves: menu_preferences::MenuPreferenceSaves,
-    preferences_reconciliation_read: Option<preferences::PreferenceReconciliationRead>,
-    restart_after_exit: Arc<parking_lot::Mutex<Option<RestartRequest>>>,
-    log_monitor: Arc<LogMonitor>,
-    traffic_history_session: Option<Arc<TrafficHistorySession>>,
+    shell: window::WindowShellState,
+    tray: tray::TrayController,
+    preferences: preferences::PreferenceController,
+    services: AppCoreHandles,
     _subscriptions: Vec<Subscription>,
 }
 
 impl ZenClashApp {
-    fn new(
+    fn wire_runtime(
         services: AppServices,
         initialization: Option<zenclash_core::CoreInitializationOutcome>,
-        network_tray: Option<NetworkTrayIcon>,
         preferences_store: Option<AppPreferencesStore>,
         preferences: AppPreferences,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Self {
+    ) -> WiredRuntime {
         let AppServices {
             initializing,
             await_service_handoff,
@@ -187,11 +132,8 @@ impl ZenClashApp {
             startup_notice,
             startup_error,
             restart_after_exit,
-            safe_mode: _,
+            safe_mode,
         } = services;
-        let focus_handle = cx.focus_handle();
-        focus_handle.focus(window, cx);
-        let main_window = window.window_handle();
         let proxies_page =
             cx.new(|cx| ProxiesPage::new_with_session(core_session.clone(), runtime.clone(), cx));
         let app_profile_store = profile_store.clone();
@@ -246,10 +188,10 @@ impl ZenClashApp {
                     traffic_capture: traffic_capture.clone(),
                     profile_path,
                     controlled_config_store,
-                    preferences_store: preferences_store.clone(),
-                    preferences: preferences.clone(),
+                    preferences_store,
+                    preferences,
                     system_proxy_session,
-                    traffic_history_store: traffic_history_store.clone(),
+                    traffic_history_store,
                     startup_notice,
                     startup_error,
                 },
@@ -257,116 +199,128 @@ impl ZenClashApp {
                 cx,
             )
         });
-        let profile_subscription = Self::subscribe_profile_events(&runtime_page, cx);
-        let profile_clear_subscription = Self::subscribe_profile_clear_events(&runtime_page, cx);
-        let proxy_selection_subscription =
-            Self::subscribe_proxy_selection_events(&runtime_page, cx);
-        let runtime_config_subscription = Self::subscribe_runtime_config_events(&runtime_page, cx);
-        let preferences_subscription = Self::subscribe_preference_events(&runtime_page, cx);
-        let local_subscription = cx.subscribe(
-            &runtime_page,
-            |this, _, _: &crate::pages::runtime::ContinueLocalRequested, cx| {
-                match std::env::current_exe() {
-                    Ok(executable) => this.begin_quit_mode(Some(executable), true, cx),
-                    Err(error) => this.runtime_page.update(cx, |page, cx| {
-                        page.report_system_proxy_reconcile_error(&error.to_string(), cx)
-                    }),
+        let subscriptions = vec![
+            Self::subscribe_profile_events(&runtime_page, cx),
+            Self::subscribe_profile_clear_events(&runtime_page, cx),
+            Self::subscribe_proxy_selection_events(&runtime_page, cx),
+            Self::subscribe_runtime_config_events(&runtime_page, cx),
+            Self::subscribe_preference_events(&runtime_page, cx),
+            cx.subscribe(
+                &runtime_page,
+                |this, _, _: &crate::pages::runtime::ContinueLocalRequested, cx| {
+                    match std::env::current_exe() {
+                        Ok(executable) => this.begin_quit_mode(Some(executable), true, cx),
+                        Err(error) => this.runtime_page.update(cx, |page, cx| {
+                            page.report_system_proxy_reconcile_error(&error.to_string(), cx)
+                        }),
+                    }
+                },
+            ),
+            cx.subscribe(
+                &runtime_page,
+                |this, _, _: &crate::pages::runtime::ServiceRepairRestartRequested, cx| {
+                    match std::env::current_exe() {
+                        Ok(executable) => this.begin_quit(Some(executable), cx),
+                        Err(error) => this.runtime_page.update(cx, |page, cx| {
+                            page.report_system_proxy_reconcile_error(&error.to_string(), cx)
+                        }),
+                    }
+                },
+            ),
+            cx.observe_window_appearance(window, |this, window, cx| {
+                if this.preferences.current.appearance == AppearancePreference::System {
+                    apply_zen_theme(ThemeMode::from(window.appearance()), Some(window), cx);
+                    cx.notify();
                 }
-            },
-        );
-        let repair_subscription = cx.subscribe(
-            &runtime_page,
-            |this, _, _: &crate::pages::runtime::ServiceRepairRestartRequested, cx| {
-                match std::env::current_exe() {
-                    Ok(executable) => this.begin_quit(Some(executable), cx),
-                    Err(error) => this.runtime_page.update(cx, |page, cx| {
-                        page.report_system_proxy_reconcile_error(&error.to_string(), cx)
-                    }),
-                }
-            },
-        );
-        let appearance_subscription = cx.observe_window_appearance(window, |this, window, cx| {
-            if this.preferences.appearance == AppearancePreference::System {
-                apply_zen_theme(ThemeMode::from(window.appearance()), Some(window), cx);
-                cx.notify();
+            }),
+        ];
+        #[cfg(target_os = "linux")]
+        subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() && !this.shell.main_window_visible {
+                this.restore_main_window_after_activation(cx);
             }
-        });
+        }));
+        WiredRuntime {
+            handles: AppCoreHandles {
+                core_kind,
+                core_session,
+                application_commands,
+                runtime,
+                profile_store: app_profile_store,
+                override_store: app_override_store,
+                profile_path: app_profile_path,
+                controlled_config_store: app_controlled_config_store,
+                operational_status,
+                traffic_capture,
+                log_monitor,
+                traffic_history_session,
+            },
+            proxies_page,
+            runtime_page,
+            subscriptions,
+            initializing,
+            await_service_handoff,
+            restart_after_exit,
+            safe_mode,
+        }
+    }
+
+    fn new(
+        services: AppServices,
+        initialization: Option<zenclash_core::CoreInitializationOutcome>,
+        network_tray: Option<NetworkTrayIcon>,
+        preferences_store: Option<AppPreferencesStore>,
+        preferences: AppPreferences,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let focus_handle = cx.focus_handle();
+        focus_handle.focus(window, cx);
+        let main_window = window.window_handle();
+        let wired = Self::wire_runtime(
+            services,
+            initialization,
+            preferences_store.clone(),
+            preferences.clone(),
+            window,
+            cx,
+        );
         let mut app = Self {
             current_page: Page::default(),
             sidebar_collapsed: false,
             outbound_mode: OutboundModeCoordinator::new_unsynchronized(OutboundMode::default()),
-            core_kind,
-            core_session,
-            application_commands,
-            runtime,
-            focus_handle,
-            proxies_page,
-            runtime_page,
-            tray_core_running: None,
-            profile_store: app_profile_store,
-            override_store: app_override_store,
-            profile_path: app_profile_path,
-            controlled_config_store: app_controlled_config_store,
-            main_window,
-            main_window_visible: true,
-            #[cfg(target_os = "macos")]
-            main_window_restore_size: window::MainWindowRestoreSize::default(),
-            tray_state: TrayMenuState::default(),
-            tray_observation: None,
-            tray_error: None,
-            tray_command_error: None,
             mode_error: None,
-            tray_refreshing: false,
-            tray_refresh_pending: false,
-            tray_menu_requested: false,
-            system_proxy_commands: LatestCommandQueue::default(),
-            operational_status,
             controller_indicator: view::ControllerIndicator::default(),
-            traffic_capture,
-            quit_state: system_proxy::QuitState::default(),
-            tun_commands: LatestCommandQueue::default(),
-            proxy_selection_commands: LatestCommandQueue::default(),
-            profile_selection_commands: LatestCommandQueue::default(),
-            network_tray,
-            preferences_store,
-            preferences,
-            preferences_save_task: None,
-            menu_preference_saves: Default::default(),
-            preferences_reconciliation_read: None,
-            restart_after_exit,
-            log_monitor,
-            traffic_history_session,
-            _subscriptions: vec![
-                profile_subscription,
-                profile_clear_subscription,
-                proxy_selection_subscription,
-                runtime_config_subscription,
-                preferences_subscription,
-                local_subscription,
-                repair_subscription,
-                appearance_subscription,
-            ],
+            focus_handle,
+            proxies_page: wired.proxies_page,
+            runtime_page: wired.runtime_page,
+            shell: window::WindowShellState::new(
+                main_window,
+                wired.restart_after_exit,
+                wired.safe_mode,
+            ),
+            tray: tray::TrayController::new(network_tray),
+            preferences: preferences::PreferenceController::new(preferences_store, preferences),
+            services: wired.handles,
+            _subscriptions: wired.subscriptions,
         };
-        #[cfg(target_os = "linux")]
-        app._subscriptions
-            .push(cx.observe_window_activation(window, |this, window, cx| {
-                if window.is_window_active() && !this.main_window_visible {
-                    this.restore_main_window_after_activation(cx);
-                }
-            }));
-        if !initializing {
-            app.start_runtime_updates(cx);
-            app.restore_system_proxy(cx);
-            app.start_mode_sync(cx);
-            app.start_profile_updates(cx);
-            app.start_automatic_runtime(cx);
-            if await_service_handoff {
-                app.start_service_handoff(cx);
-            }
-            app.start_tray_updates(cx);
-            app.refresh_tray_menu(cx);
+        if !wired.initializing {
+            app.start_live_services(wired.await_service_handoff, cx);
         }
         app
+    }
+
+    fn start_live_services(&mut self, await_service_handoff: bool, cx: &mut Context<Self>) {
+        self.start_runtime_updates(cx);
+        self.restore_system_proxy(cx);
+        self.start_mode_sync(cx);
+        self.start_profile_updates(cx);
+        self.start_automatic_runtime(cx);
+        if await_service_handoff {
+            self.start_service_handoff(cx);
+        }
+        self.start_tray_updates(cx);
+        self.refresh_tray_menu(cx);
     }
 
     fn finish_startup(
@@ -375,7 +329,7 @@ impl ZenClashApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.quit_state != system_proxy::QuitState::Idle {
+        if self.shell.quit_state != system_proxy::QuitState::Idle {
             return;
         }
         let BootstrappedApplication {
@@ -396,7 +350,8 @@ impl ZenClashApp {
         {
             services.preferences = preferences;
         }
-        self.menu_preference_saves
+        self.preferences
+            .menu_saves
             .previews()
             .apply(&mut services.preferences);
         let preferences = services.preferences.clone();
@@ -440,35 +395,40 @@ impl ZenClashApp {
             mut services,
             initialization,
         } = application;
-        let preference_saves = std::mem::take(&mut self.menu_preference_saves);
-        let preference_save_task = self.preferences_save_task.take();
-        let previews = preference_saves.previews();
+        let previews = self.preferences.menu_saves.previews();
         previews.apply(&mut services.preferences);
         let preferences = services.preferences.clone();
         let preferences_store = services.preferences_store.clone();
         let page = self.current_page;
-        let sidebar_collapsed = self.sidebar_collapsed;
-        let window_visible = self.main_window_visible;
-        #[cfg(target_os = "macos")]
-        let restore_size = std::mem::take(&mut self.main_window_restore_size);
-        *self = Self::new(
+        let window_visible = self.shell.main_window_visible;
+
+        // Cancel any previously owned shell tasks before wiring live runtime services in place.
+        self.shell.tasks.clear();
+        let wired = Self::wire_runtime(
             services,
             initialization,
-            network_tray,
-            preferences_store,
-            preferences,
+            preferences_store.clone(),
+            preferences.clone(),
             window,
             cx,
         );
-        self.menu_preference_saves = preference_saves;
-        self.preferences_save_task = preference_save_task;
+        self.outbound_mode = OutboundModeCoordinator::new_unsynchronized(OutboundMode::default());
+        self.mode_error = None;
+        self.controller_indicator = view::ControllerIndicator::default();
+        self.proxies_page = wired.proxies_page;
+        self.runtime_page = wired.runtime_page;
+        self.services = wired.handles;
+        self.shell.restart_after_exit = wired.restart_after_exit;
+        self.shell.safe_mode = wired.safe_mode;
+        self.tray = tray::TrayController::new(network_tray);
+        self.preferences.store = preferences_store;
+        self.preferences.current = preferences;
+        self._subscriptions = wired.subscriptions;
+        if !wired.initializing {
+            self.start_live_services(wired.await_service_handoff, cx);
+        }
         self.runtime_page
             .update(cx, |page, cx| page.set_preference_previews(previews, cx));
-        self.sidebar_collapsed = sidebar_collapsed;
-        #[cfg(target_os = "macos")]
-        {
-            self.main_window_restore_size = restore_size;
-        }
         self.navigate(page, cx);
         if !window_visible {
             self.release_hidden_page_data(cx);
@@ -481,7 +441,7 @@ impl ZenClashApp {
         cx: &mut Context<Self>,
     ) -> Subscription {
         cx.subscribe(runtime_page, |this, _, event: &ProfileActivated, cx| {
-            let snapshot = this.application_commands.committed_profile();
+            let snapshot = this.services.application_commands.committed_profile();
             let path = if snapshot.generation == event.runtime_version {
                 event.path.clone()
             } else if let Some(path) = snapshot.profile_path {
@@ -498,7 +458,7 @@ impl ZenClashApp {
         cx: &mut Context<Self>,
     ) -> Subscription {
         cx.subscribe(runtime_page, |this, _, event: &ProfileCleared, cx| {
-            let snapshot = this.application_commands.committed_profile();
+            let snapshot = this.services.application_commands.committed_profile();
             let path = if snapshot.generation == event.runtime_version {
                 None
             } else {
@@ -509,9 +469,9 @@ impl ZenClashApp {
     }
 
     fn apply_profile_change(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
-        self.profile_path = path.clone();
-        self.traffic_capture.set_profile(path.clone());
-        if path.is_some() && self.current_page == Page::Proxies && self.main_window_visible {
+        self.services.profile_path = path.clone();
+        self.services.traffic_capture.set_profile(path.clone());
+        if path.is_some() && self.current_page == Page::Proxies && self.shell.main_window_visible {
             self.proxies_page
                 .update(cx, super::pages::proxies::ProxiesPage::profile_activated);
         } else {
@@ -557,12 +517,12 @@ impl ZenClashApp {
     fn start_runtime_updates(&mut self, cx: &mut Context<Self>) {
         let mode = self.outbound_mode.clone();
         let mut mode_updates = mode.subscribe();
-        let core = self.core_session.clone();
-        let mut operational_updates = self.operational_status.subscribe();
+        let core = self.services.core_session.clone();
+        let mut operational_updates = self.services.operational_status.subscribe();
         let mut run_state_updates = core.subscribe_run_state();
         let mut observed_process_running = None;
         let mut initialize = true;
-        cx.spawn(async move |this, cx| {
+        let task = cx.spawn(async move |this, cx| {
             loop {
                 let (mut mode_changed, mut process_changed) = (initialize, initialize);
                 let mut run_state_changed = initialize;
@@ -638,9 +598,13 @@ impl ZenClashApp {
                             if error != this.mode_error {
                                 this.mode_error = error.clone();
                                 if let Some(error) = error {
-                                    let _ = cx.update_window(this.main_window, |_, window, cx| {
-                                        window.push_notification(Notification::error(error), cx);
-                                    });
+                                    let _ = cx.update_window(
+                                        this.shell.main_window,
+                                        |_, window, cx| {
+                                            window
+                                                .push_notification(Notification::error(error), cx);
+                                        },
+                                    );
                                 }
                                 cx.notify();
                             }
@@ -653,7 +617,6 @@ impl ZenClashApp {
                             && process_running != observed_process_running
                         {
                             observed_process_running = process_running;
-                            this.tray_core_running = process_running;
                             refresh_tray = true;
                         }
                         if refresh_tray {
@@ -665,7 +628,7 @@ impl ZenClashApp {
                     break;
                 }
             }
-        })
-        .detach();
+        });
+        self.shell.tasks.push(task);
     }
 }

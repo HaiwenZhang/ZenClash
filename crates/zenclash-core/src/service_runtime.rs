@@ -279,11 +279,15 @@ fn prepare_bundle(payload: &str, source_home: &Path) -> MihomoResult<ServiceRunt
         }
     }
     builder.rewrite_tls(&mut value, 0)?;
-    for name in GEODATA {
-        match read_asset(&source_home.join(name)) {
-            Ok(bytes) => builder.insert(format!("assets/geodata/{name}"), bytes)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(invalid("Cannot read named GeoData resource")),
+    for (canonical, aliases) in [
+        ("GeoIP.dat", &["GeoIP.dat", "geoip.dat"][..]),
+        ("geosite.dat", &["geosite.dat", "GeoSite.dat"][..]),
+        ("ASN.mmdb", &["ASN.mmdb", "asn.mmdb"][..]),
+    ] {
+        if let Some(source) = case_insensitive_geodata_source(source_home, aliases)? {
+            let bytes =
+                read_asset(&source).map_err(|_| invalid("Cannot read named GeoData resource"))?;
+            builder.insert(format!("assets/geodata/{canonical}"), bytes)?;
         }
     }
     if let Some(source) = mmdb_source(source_home)? {
@@ -302,25 +306,20 @@ fn prepare_bundle(payload: &str, source_home: &Path) -> MihomoResult<ServiceRunt
     })
 }
 
-fn mmdb_source(home: &Path) -> MihomoResult<Option<PathBuf>> {
+fn case_insensitive_geodata_source(home: &Path, aliases: &[&str]) -> MihomoResult<Option<PathBuf>> {
     let entries = match std::fs::read_dir(home) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(invalid("Cannot inspect named GeoData resources")),
     };
-    // Mihomo v1.19.30 Path.MMDB takes the first sorted, case-insensitive alias
-    // from os.ReadDir. Only the selected bytes are uploaded under a fixed name.
-    let mut first = None;
+    let mut first: Option<PathBuf> = None;
     for entry in entries {
         let entry = entry.map_err(|_| invalid("Cannot inspect named GeoData resources"))?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             continue;
         };
-        if !["country.mmdb", "geoip.db", "geoip.metadb"]
-            .iter()
-            .any(|alias| name.eq_ignore_ascii_case(alias))
-        {
+        if !aliases.iter().any(|alias| name.eq_ignore_ascii_case(alias)) {
             continue;
         }
         if entry
@@ -330,13 +329,18 @@ fn mmdb_source(home: &Path) -> MihomoResult<Option<PathBuf>> {
         {
             continue;
         }
-        if first.as_ref().is_none_or(|previous: &PathBuf| {
-            entry.file_name() < previous.file_name().unwrap_or_default()
-        }) {
+        if first
+            .as_ref()
+            .is_none_or(|previous| entry.file_name() < previous.file_name().unwrap_or_default())
+        {
             first = Some(entry.path());
         }
     }
     Ok(first)
+}
+
+fn mmdb_source(home: &Path) -> MihomoResult<Option<PathBuf>> {
+    case_insensitive_geodata_source(home, &["country.mmdb", "geoip.db", "geoip.metadb"])
 }
 
 impl BundleBuilder<'_> {
@@ -807,6 +811,25 @@ mod tests {
         assert_eq!(bundle.assets.len(), 1);
         assert!(Arc::ptr_eq(&bundle.assets[0].bytes, &next.assets[0].bytes));
         assert_eq!(bundle.assets[0].path, next.assets[0].path);
+    }
+
+    #[tokio::test]
+    async fn geodata_scanning_matches_case_insensitively() {
+        let home = TestHome::new();
+        std::fs::write(home.0.join("geoip.dat"), b"geoip-bytes").unwrap();
+        std::fs::write(home.0.join("GeoSite.dat"), b"geosite-bytes").unwrap();
+        std::fs::write(home.0.join("asn.mmdb"), b"asn-bytes").unwrap();
+        let bundle = ServiceRuntimeBundle::prepare("mode: rule\n", home.0.clone())
+            .await
+            .unwrap();
+        let paths: Vec<&str> = bundle
+            .assets
+            .iter()
+            .map(|asset| asset.path.as_str())
+            .collect();
+        assert!(paths.contains(&"assets/geodata/GeoIP.dat"), "{paths:?}");
+        assert!(paths.contains(&"assets/geodata/geosite.dat"), "{paths:?}");
+        assert!(paths.contains(&"assets/geodata/ASN.mmdb"), "{paths:?}");
     }
 }
 

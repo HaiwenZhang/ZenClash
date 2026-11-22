@@ -10,10 +10,11 @@ use zenclash_service::{RemoteProvider, RuntimeAsset, RuntimeBundle};
 pub(crate) const GEO_ASSETS: &[&str] = &[
     "Country.mmdb",
     "ASN.mmdb",
+    "GeoIP.dat",
     "geoip.dat",
     "geosite.dat",
-    "geoip.metadb",
     "GeoSite.dat",
+    "geoip.metadb",
 ];
 
 /// Provider identity used by the runtime config and core API.
@@ -201,23 +202,59 @@ fn collect_runtime_parts(mut config: Value, config_root: &Path) -> Result<Runtim
         &mut assets,
         &mut remote_providers,
     )?;
-    for filename in GEO_ASSETS {
-        let source = config_root.join(filename);
-        if source.is_file() && destinations.insert((*filename).to_string()) {
-            assets.push(RuntimeAsset {
-                source: std::fs::canonicalize(&source)?
-                    .to_string_lossy()
-                    .into_owned(),
-                destination: (*filename).to_string(),
-            });
-        }
-    }
+    collect_geodata_assets(&config_root, &mut destinations, &mut assets)?;
 
     Ok(RuntimeParts {
         config,
         assets,
         remote_providers,
     })
+}
+
+fn collect_geodata_assets(
+    config_root: &Path,
+    destinations: &mut HashSet<String>,
+    assets: &mut Vec<RuntimeAsset>,
+) -> Result<()> {
+    let entries = match std::fs::read_dir(config_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut matched = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if !GEO_ASSETS
+            .iter()
+            .any(|candidate| name.eq_ignore_ascii_case(candidate))
+        {
+            continue;
+        }
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        matched.push((name.to_owned(), path));
+    }
+    matched.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut seen_folded = HashSet::new();
+    for (name, path) in matched {
+        let folded = name.to_ascii_lowercase();
+        if !seen_folded.insert(folded) {
+            continue;
+        }
+        if destinations.insert(name.clone()) {
+            assets.push(RuntimeAsset {
+                source: std::fs::canonicalize(&path)?.to_string_lossy().into_owned(),
+                destination: name,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Rewrites provider paths and records copied assets separately from core-downloaded providers.

@@ -44,6 +44,24 @@ pub fn color(hex: u32) -> Hsla {
     rgb(hex).into()
 }
 
+/// Product mint brand accent for active switches, progress rings, and highlights.
+///
+/// Use this token instead of chart palette colors (`theme.chart_3`) for UI controls.
+#[must_use]
+pub fn brand_accent(theme: &Theme) -> Hsla {
+    if theme.mode.is_dark() {
+        color(SIGNAL_CYAN)
+    } else {
+        color(LIGHT_MINT)
+    }
+}
+
+/// Semantic live/connected status indicator color aligned across all pages and chrome.
+#[must_use]
+pub fn online_indicator(theme: &Theme) -> Hsla {
+    theme.success
+}
+
 /// Subtle light canvas transition used by the approved desktop drafts.
 pub(crate) fn workspace_background(theme: &Theme) -> gpui_kit::Background {
     if theme.mode.is_dark() {
@@ -215,13 +233,26 @@ pub fn apply_zen_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut Ap
 }
 
 fn configure_theme_metrics(theme: &mut Theme) {
-    theme.font_family = ".SystemUIFont".into();
-    theme.mono_font_family = "SF Mono".into();
+    #[cfg(target_os = "macos")]
+    {
+        theme.font_family = ".SystemUIFont".into();
+        theme.mono_font_family = "SF Mono".into();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        theme.font_family = "Segoe UI".into();
+        theme.mono_font_family = "Cascadia Mono".into();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        theme.font_family = "sans-serif".into();
+        theme.mono_font_family = "monospace".into();
+    }
     theme.font_size = gpui_kit::px(16.);
     theme.mono_font_size = gpui_kit::px(12.);
-    theme.radius = gpui_kit::px(8.);
-    theme.radius_lg = gpui_kit::px(8.);
-    theme.shadow = false;
+    theme.radius = gpui_kit::px(6.);
+    theme.radius_lg = gpui_kit::px(10.);
+    theme.shadow = true;
 }
 
 #[cfg(test)]
@@ -300,6 +331,13 @@ mod tests {
                 assert_eq!(
                     theme.info_foreground,
                     color(if dark { DEEP_INK } else { LIGHT_PANEL })
+                );
+                assert!(theme.radius < theme.radius_lg);
+                assert!(theme.shadow);
+                assert_eq!(super::online_indicator(theme), theme.success);
+                assert_eq!(
+                    super::brand_accent(theme),
+                    color(if dark { SIGNAL_CYAN } else { super::LIGHT_MINT })
                 );
             });
         }

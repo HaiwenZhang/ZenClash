@@ -228,6 +228,40 @@ impl Focusable for RuntimePage {
 impl Render for RuntimePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        let compact = window.viewport_size().width
+            < window.rem_size() * if self.page.is_settings() { 60. } else { 68. };
+        let body = self.render_body(&theme, compact, cx);
+        let content = if self.page.descriptor().owns_viewport_scroll() {
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .overflow_hidden()
+                .gap_4()
+                .px_8()
+                .py_3()
+                .child(body)
+                .into_any_element()
+        } else {
+            v_flex()
+                .id("runtime-body-scroll")
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(&self.shell.body_scroll)
+                .child(
+                    v_flex()
+                        .min_w_0()
+                        .gap_4()
+                        .px_6()
+                        .when(!self.page.is_settings(), |view| view.px_8())
+                        .py_3()
+                        .child(body),
+                )
+                .vertical_scrollbar(&self.shell.body_scroll)
+                .into_any_element()
+        };
         v_flex()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event: &gpui_kit::KeyDownEvent, _, cx| {
@@ -258,39 +292,6 @@ impl Render for RuntimePage {
                         .child(self.render_settings_navigation(&theme, cx)),
                 )
             })
-            .child(
-                h_flex().flex_1().min_h_0().items_stretch().child(
-                    v_flex()
-                        .id("runtime-body-scroll")
-                        .flex_1()
-                        .min_w_0()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .track_scroll(&self.body_scroll)
-                        .child(
-                            v_flex()
-                                .min_w_0()
-                                .when(
-                                    matches!(
-                                        self.page,
-                                        Page::Connections | Page::Rules | Page::Logs
-                                    ),
-                                    |view| view.h_full(),
-                                )
-                                .gap_4()
-                                .px_6()
-                                .when(!self.page.is_settings(), |view| view.px_8())
-                                .py_3()
-                                .child(self.render_body(
-                                    &theme,
-                                    window.viewport_size().width
-                                        < window.rem_size()
-                                            * if self.page.is_settings() { 60. } else { 68. },
-                                    cx,
-                                )),
-                        )
-                        .vertical_scrollbar(&self.body_scroll),
-                ),
-            )
+            .child(h_flex().flex_1().min_h_0().items_stretch().child(content))
     }
 }

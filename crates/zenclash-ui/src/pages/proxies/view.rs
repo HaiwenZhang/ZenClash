@@ -256,7 +256,12 @@ impl ProxiesPage {
                                 .gap_2()
                                 .text_xs()
                                 .text_color(theme.primary)
-                                .child(div().size_2().rounded_full().bg(theme.chart_3))
+                                .child(
+                                    div()
+                                        .size_2()
+                                        .rounded_full()
+                                        .bg(crate::design::online_indicator(theme)),
+                                )
                                 .child(zenclash_i18n::text("proxies.design.selected")),
                         )
                     },
@@ -290,11 +295,11 @@ impl ProxiesPage {
                             h_flex()
                                 .size_16()
                                 .border_1()
-                                .border_color(theme.chart_3.opacity(0.3))
+                                .border_color(crate::design::brand_accent(theme).opacity(0.3))
                                 .flex_shrink_0()
                                 .justify_center()
                                 .rounded_full()
-                                .bg(theme.chart_3.opacity(0.12))
+                                .bg(crate::design::brand_accent(theme).opacity(0.12))
                                 .text_color(theme.primary)
                                 .child(Icon::new(gpui_kit::assets::IconName::Server).size_8()),
                         )
@@ -672,11 +677,15 @@ impl ProxiesPage {
                                 use crate::outbound_mode::OutboundMode;
                                 match mode {
                                     OutboundMode::Rule => window
-                                        .dispatch_action(Box::new(crate::app::SetRuleMode), cx),
-                                    OutboundMode::Global => window
-                                        .dispatch_action(Box::new(crate::app::SetGlobalMode), cx),
-                                    OutboundMode::Direct => window
-                                        .dispatch_action(Box::new(crate::app::SetDirectMode), cx),
+                                        .dispatch_action(Box::new(crate::actions::SetRuleMode), cx),
+                                    OutboundMode::Global => window.dispatch_action(
+                                        Box::new(crate::actions::SetGlobalMode),
+                                        cx,
+                                    ),
+                                    OutboundMode::Direct => window.dispatch_action(
+                                        Box::new(crate::actions::SetDirectMode),
+                                        cx,
+                                    ),
                                 }
                             })
                     }),
@@ -1057,11 +1066,14 @@ impl ProxiesPage {
                                 );
                             })),
                     )
-                    .child(
+                    .child({
+                        let focus_key = (group.controller_name().to_owned(), id.clone());
+                        let focus_ref = self.details_focus.get(&focus_key);
+                        let focus_for_click = focus_ref.cloned();
                         details_button(
                             proxy_element_id("proxy-node-details", group.controller_name(), id),
                             zenclash_i18n::text("unified.proxies.details"),
-                            &self.details_focus[&(group.controller_name().to_owned(), id.clone())],
+                            focus_ref,
                             theme,
                         )
                         .flex_1()
@@ -1069,15 +1081,14 @@ impl ProxiesPage {
                         .on_click(cx.listener({
                             let group_name = group.controller_name().to_owned();
                             let id = id.clone();
-                            let focus = self.details_focus
-                                [&(group.controller_name().to_owned(), id.clone())]
-                                .clone();
                             move |this, _, window, cx| {
-                                focus.focus(window, cx);
+                                if let Some(focus) = &focus_for_click {
+                                    focus.focus(window, cx);
+                                }
                                 this.open_node_details(group_name.clone(), id.clone(), window, cx)
                             }
-                        })),
-                    ),
+                        }))
+                    }),
             )
             .into_any_element()
     }
@@ -1086,11 +1097,11 @@ impl ProxiesPage {
 fn details_button(
     id: gpui_kit::ElementId,
     label: String,
-    focus: &gpui_kit::FocusHandle,
+    focus: Option<&gpui_kit::FocusHandle>,
     theme: &gpui_kit::component::Theme,
 ) -> gpui_kit::base::Button {
     gpui_kit::base::Button::new(id)
-        .track_focus(focus)
+        .when_some(focus, |button, focus| button.track_focus(focus))
         .accessibility_label(label.clone())
         .h_6()
         .px_2()

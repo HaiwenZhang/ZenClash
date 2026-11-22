@@ -265,16 +265,16 @@ impl Render for ZenClashApp {
         };
         let connected = self.controller_indicator == ControllerIndicator::Connected;
         let status_key = self.controller_indicator.key();
-        let operational = self.operational_status.snapshot();
+        let operational = self.services.operational_status.snapshot();
         let process = operational
             .process
             .is_fresh()
             .then(|| operational.process.value())
             .flatten()
-            .filter(|process| process.generation == self.core_session.generation());
+            .filter(|process| process.generation == self.services.core_session.generation());
         let (sidebar_core, sidebar_detail, sidebar_live) = if self.current_page == Page::Settings {
             (
-                self.core_kind.display_name().to_owned(),
+                self.services.core_kind.display_name().to_owned(),
                 zenclash_i18n::text(status_key),
                 connected,
             )
@@ -299,13 +299,14 @@ impl Render for ZenClashApp {
             (
                 format!(
                     "{} · {}",
-                    self.core_kind.display_name(),
+                    self.services.core_kind.display_name(),
                     zenclash_i18n::text(state)
                 ),
                 detail,
                 live,
             )
         };
+        let safe_mode_enabled = self.shell.safe_mode.is_enabled();
 
         v_flex()
             .id("zenclash-app")
@@ -354,6 +355,9 @@ impl Render for ZenClashApp {
                     },
                 )))
             })
+            .when(safe_mode_enabled, |shell| {
+                shell.child(safe_mode_banner(&theme))
+            })
             .child(
                 h_flex()
                     .flex_1()
@@ -374,7 +378,7 @@ impl Render for ZenClashApp {
                             .h_full()
                             .min_w_0()
                             .when_some(
-                                self.menu_preference_saves.failure_message(),
+                                self.preferences.menu_saves.failure_message(),
                                 |view, message| {
                                     view.child(
                                         h_flex()
@@ -402,11 +406,13 @@ impl Render for ZenClashApp {
                                                     .small()
                                                     .outline()
                                                     .disabled(
-                                                        self.menu_preference_saves
+                                                        self.preferences
+                                                            .menu_saves
                                                             .has_pending_retry(),
                                                     )
                                                     .loading(
-                                                        self.menu_preference_saves
+                                                        self.preferences
+                                                            .menu_saves
                                                             .has_pending_retry(),
                                                     )
                                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -416,25 +422,18 @@ impl Render for ZenClashApp {
                                     )
                                 },
                             )
-                            .when_some(
-                                self.tray_command_error
-                                    .clone()
-                                    .or_else(|| self.tray_error.clone()),
-                                |view, message| {
-                                    view.child(
-                                        div()
-                                            .id("tray-feedback")
-                                            .test_support()
-                                            .aria_label(message.clone())
-                                            .flex_shrink_0()
-                                            .px_4()
-                                            .py_2()
-                                            .child(
-                                                Alert::error("tray-error-alert", message).small(),
-                                            ),
-                                    )
-                                },
-                            )
+                            .when_some(self.tray.feedback_error(), |view, message| {
+                                view.child(
+                                    div()
+                                        .id("tray-feedback")
+                                        .test_support()
+                                        .aria_label(message.clone())
+                                        .flex_shrink_0()
+                                        .px_4()
+                                        .py_2()
+                                        .child(Alert::error("tray-error-alert", message).small()),
+                                )
+                            })
                             .child(div().flex_1().min_h_0().child(content))
                             .when(self.current_page == Page::Settings, |this| {
                                 this.child(
@@ -470,6 +469,29 @@ impl Render for ZenClashApp {
                     ),
             )
     }
+}
+
+fn safe_mode_banner(theme: &gpui_kit::component::Theme) -> impl IntoElement {
+    h_flex()
+        .id("safe-mode-banner")
+        .test_support()
+        .role(gpui_kit::Role::Status)
+        .aria_label("SAFE MODE")
+        .flex_shrink_0()
+        .w_full()
+        .px_4()
+        .py_1p5()
+        .gap_2()
+        .items_center()
+        .justify_center()
+        .bg(theme.warning)
+        .text_color(theme.warning_foreground)
+        .border_b_1()
+        .border_color(theme.border)
+        .text_xs()
+        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+        .child(gpui_kit::component::Icon::new(IconName::TriangleAlert).size_3p5())
+        .child("SAFE MODE")
 }
 
 #[cfg(test)]
@@ -737,5 +759,37 @@ mod tests {
             title_bar.id(),
             Some(ElementId::Name(MAIN_WINDOW_TITLE_BAR_SELECTOR.into()))
         );
+    }
+
+    #[gpui_kit::test]
+    fn safe_mode_banner_renders_only_when_safe_mode_is_enabled(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::component::Root;
+        use gpui_kit::test::TestWindowExt;
+        use gpui_kit::{AppContext, px, size};
+
+        for enabled in [false, true] {
+            let fixture = crate::pages::runtime::test_support::RuntimePageFixture::new();
+            let mut services = crate::app::test_support::app_test_services(&fixture);
+            services.safe_mode = if enabled {
+                zenclash_app::SafeMode::enabled()
+            } else {
+                zenclash_app::SafeMode::disabled()
+            };
+            cx.executor().allow_parking();
+            cx.update(crate::app::init);
+            let handle = cx.open_window(size(px(1000.), px(640.)), |window, cx| {
+                let preferences = services.preferences.clone();
+                let app = cx.new(|cx| {
+                    super::ZenClashApp::new(services, None, None, None, preferences, window, cx)
+                });
+                Root::new(app, window, cx)
+            });
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.render_frame(cx);
+                assert_eq!(window.try_find("safe-mode-banner").is_some(), enabled);
+                window.remove_window();
+            })
+            .unwrap();
+        }
     }
 }

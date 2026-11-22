@@ -47,7 +47,7 @@ impl RuntimePage {
     fn release_profile_yaml_editor_text(&self, saved: String, cx: &mut Context<Self>) {
         let input = self.profiles.forms.yaml_editor.input.clone();
         let page = cx.entity().downgrade();
-        let window_handle = self.window_handle;
+        let window_handle = self.shell.window_handle;
         cx.defer(move |cx| {
             let _ = cx.update_window(window_handle, |_, window, cx| {
                 let _ = page.update(cx, |page, cx| {
@@ -252,7 +252,7 @@ impl RuntimePage {
                 self.profiles.forms.yaml_editor.original_yaml = Some(saved);
             }
         }
-        self.overrides.invalidate_preview();
+        self.library.overrides.invalidate_preview();
         let was_applied = applied_path.is_some();
         let is_current = applied_path
             .as_ref()

@@ -1,4 +1,5 @@
-use super::{PacServer, default_pac_script, normalize_pac_script};
+use super::{PacServer, normalize_pac_script};
+use crate::default_pac_script;
 use std::{
     io::{Read, Write},
     net::TcpStream,
@@ -346,4 +347,29 @@ fn pac_script_requires_the_standard_entrypoint() {
     let error = normalize_pac_script("function proxy() { return 'DIRECT'; }").unwrap_err();
 
     assert!(error.to_string().contains("FindProxyForURL"));
+}
+
+#[test]
+fn pac_versioned_url_increments_and_serves_script_for_cache_busting() {
+    let server = PacServer::default();
+    let first = server
+        .start("127.0.0.1", default_pac_script(), 17_890)
+        .unwrap();
+    let first_versioned = server.versioned_url().unwrap();
+    assert_eq!(first_versioned, format!("{}?v=1", first.url));
+    assert!(server.owns_url(&first.url));
+    assert!(server.owns_url(&first_versioned));
+
+    let response = request(
+        first.address,
+        b"GET /pac?v=1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    assert!(response.contains("PROXY 127.0.0.1:17890"), "{response}");
+
+    let second = server
+        .start("127.0.0.1", default_pac_script(), 17_891)
+        .unwrap();
+    let second_versioned = server.versioned_url().unwrap();
+    assert_eq!(second_versioned, format!("{}?v=2", second.url));
 }

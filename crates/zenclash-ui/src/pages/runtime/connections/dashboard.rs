@@ -592,6 +592,7 @@ impl ConnectionsView {
                             ))
                             .tooltip(zenclash_i18n::text("connections.actions.show_details"))
                             .w_8()
+                            .flex_shrink_0()
                             .ghost()
                             .small()
                             .bg(gpui_kit::transparent_black())
@@ -720,7 +721,11 @@ impl ConnectionsView {
                                 &projection.processes,
                                 theme,
                             ))
-                            .child(protocol_distribution(&projection.protocols, theme)),
+                            .child(protocol_distribution(
+                                &projection.protocols,
+                                self.show_closed,
+                                theme,
+                            )),
                     ),
             )
             .child(table)
@@ -918,6 +923,7 @@ fn distribution(
 
 fn protocol_distribution(
     values: &[(String, u64)],
+    show_closed: bool,
     theme: &gpui_kit::component::Theme,
 ) -> gpui_kit::Div {
     let colors = [
@@ -983,12 +989,13 @@ fn protocol_distribution(
                                         .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                         .child(total.to_string()),
                                 )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(zenclash_i18n::text("connections.metrics.active")),
-                                ),
+                                .child(div().text_xs().text_color(theme.muted_foreground).child(
+                                    zenclash_i18n::text(if show_closed {
+                                        "unified.connections.closed"
+                                    } else {
+                                        "connections.metrics.active"
+                                    }),
+                                )),
                         ),
                 )
                 .child(v_flex().gap_3().children(values.iter().enumerate().map(
@@ -1029,6 +1036,7 @@ fn connection_columns(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
         .child(
             div()
                 .flex_1()
+                .min_w_0()
                 .child(zenclash_i18n::text("connections.columns.target")),
         )
         .child(
@@ -1040,22 +1048,26 @@ fn connection_columns(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
         .child(
             div()
                 .w_24()
+                .flex_shrink_0()
                 .child(zenclash_i18n::text("connections.columns.outbound")),
         )
         .child(
             div()
                 .w_24()
+                .flex_shrink_0()
                 .child(zenclash_i18n::text("connections.details.rule")),
         )
         .child(
             div()
                 .w_20()
+                .flex_shrink_0()
                 .text_right()
                 .child(zenclash_i18n::text("unified.connections.upload_rate")),
         )
         .child(
             div()
                 .w_20()
+                .flex_shrink_0()
                 .text_right()
                 .child(zenclash_i18n::text("unified.connections.download_rate")),
         )
@@ -1065,7 +1077,7 @@ fn connection_columns(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
                 .flex_shrink_0()
                 .child(zenclash_i18n::text("connections.columns.duration")),
         )
-        .child(div().w_8())
+        .child(div().w_8().flex_shrink_0())
 }
 
 fn connection_metric(

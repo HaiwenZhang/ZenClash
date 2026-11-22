@@ -192,16 +192,16 @@ impl RuntimePage {
         error: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        if let Some(notice) = notice {
+            self.notice = Some(zenclash_i18n::text(notice));
+            self.invalidate_config_inputs(cx);
+            self.refresh(cx);
+        }
         if let Some(error) = error {
             self.error = Some(zenclash_i18n::text_with(
                 "automatic.failed",
                 &[("error", error)],
             ));
-        }
-        if let Some(notice) = notice {
-            self.notice = Some(zenclash_i18n::text(notice));
-            self.invalidate_config_inputs(cx);
-            self.refresh(cx);
         }
         cx.notify();
     }
@@ -213,8 +213,10 @@ impl RuntimePage {
         cx: &mut Context<Self>,
     ) {
         self.preferences = preferences;
-        self.preference_previews = previews;
-        self.preference_previews.apply(&mut self.preferences);
+        self.settings.preference_previews = previews;
+        self.settings
+            .preference_previews
+            .apply(&mut self.preferences);
         cx.notify();
     }
 
@@ -405,7 +407,7 @@ impl RuntimePage {
             Some(path) => {
                 self.profile_path = Some(path.clone());
                 self.invalidate_config_inputs(cx);
-                self.overrides.invalidate_preview();
+                self.library.overrides.invalidate_preview();
                 cx.emit(ProfileActivated {
                     path,
                     runtime_version: snapshot.generation,
@@ -414,7 +416,7 @@ impl RuntimePage {
             None if emit_when_cleared => {
                 self.profile_path = None;
                 self.invalidate_config_inputs(cx);
-                self.overrides.invalidate_preview();
+                self.library.overrides.invalidate_preview();
                 cx.emit(super::ProfileCleared {
                     runtime_version: snapshot.generation,
                 });
@@ -522,92 +524,105 @@ impl RuntimePage {
         let traffic_history =
             super::traffic::TrafficHistory::new(runtime.clone(), traffic_history_store);
         let mut this = Self {
-            feedback_notifications: Default::default(),
             page,
             core_kind,
             core_session,
             application_commands,
             client,
             runtime,
-            traffic_monitor,
-            log_monitor,
-            operational_status,
-            traffic_capture,
+            monitors: super::RuntimeMonitors {
+                traffic_monitor,
+                log_monitor,
+                operational_status,
+                traffic_capture,
+                provider_operations,
+            },
+            settings: super::SettingsWorkspaceState {
+                controlled_config,
+                controlled_config_generation: 0,
+                core_management: super::settings::CoreManagementUiState::default(),
+                core_releases: super::CoreReleaseState::default(),
+                system_proxy_editor: None,
+                system_proxy_session,
+                preference_previews: Default::default(),
+            },
+            library: super::LibraryPagesState {
+                resources,
+                overrides: super::overrides::OverridesState::new(override_store, override_catalog),
+            },
+            shell: super::ShellPresentationState {
+                feedback_notifications: Default::default(),
+                body_scroll: gpui_kit::ScrollHandle::default(),
+                window_handle: window.window_handle(),
+                ui_visibility,
+                live_updates_enabled,
+                startup_error,
+                tasks: Vec::new(),
+                _subscriptions: vec![
+                    connection_events,
+                    connection_presentation,
+                    connection_availability,
+                    log_events,
+                    log_presentation,
+                    log_context,
+                    rule_events,
+                    rule_presentation,
+                    rule_context,
+                ],
+            },
             profile_path,
             controlled_config_store,
-            controlled_config,
             config_inputs,
             persistent_loading: true,
             preferences_store,
             preferences,
-            preference_previews: Default::default(),
-            core_management: super::settings::CoreManagementUiState::default(),
-            body_scroll: gpui_kit::ScrollHandle::default(),
-            resources,
-            system_proxy_session,
             profiles: super::profiles::ProfileLibrary::new(
                 profile_store,
                 profile_catalog,
                 profile_forms,
             ),
-            overrides: super::overrides::OverridesState::new(override_store, override_catalog),
             connections,
             logs,
             rules,
-            system_proxy_editor: None,
-            core_releases: super::CoreReleaseState::default(),
             page_observation: super::page_observation::PageObservationOwner::new(
                 initial_runtime_version,
             ),
             home: super::home::HomeUiState::default(),
             traffic_history,
             network_diagnostics,
-            provider_operations,
             navigation_generation: 0,
-            controlled_config_generation: 0,
             loading: false,
             mutations: super::busy::MutationState::default(),
             error,
-            startup_error,
             notice: startup_notice,
             focus_handle: cx.focus_handle(),
-            window_handle: window.window_handle(),
-            ui_visibility,
-            live_updates_enabled,
-            _subscriptions: vec![
-                connection_events,
-                connection_presentation,
-                connection_availability,
-                log_events,
-                log_presentation,
-                log_context,
-                rule_events,
-                rule_presentation,
-                rule_context,
-            ],
         };
         let window_visibility_subscription =
             cx.observe_window_visibility(window, |this, visibility, _, cx| {
                 this.set_window_visible(visibility.is_visible(), cx);
             });
-        this._subscriptions.push(window_visibility_subscription);
+        this.shell
+            ._subscriptions
+            .push(window_visibility_subscription);
         let window_activation_subscription = cx.observe_window_activation(window, |this, _, cx| {
             if this.page == Page::Home && this.live_updates_enabled() {
                 cx.notify();
             }
         });
-        this._subscriptions.push(window_activation_subscription);
+        this.shell
+            ._subscriptions
+            .push(window_activation_subscription);
         let feedback_subscription = cx.observe_in(&cx.entity(), window, |this, _, window, cx| {
             this.publish_feedback(window, cx);
         });
-        this._subscriptions.push(feedback_subscription);
+        this.shell._subscriptions.push(feedback_subscription);
         cx.defer_in(window, |this, window, cx| this.publish_feedback(window, cx));
         this.synchronize_log_context(cx);
         this.synchronize_rule_context(cx);
         this.finish_initial_persistent_state(persistent_task, initial_runtime_version, cx);
         this.refresh(cx);
         if let Some(mut updates) = this.application_commands.service_updates() {
-            cx.spawn(async move |this, cx| {
+            let service_task = cx.spawn(async move |this, cx| {
                 while updates.changed().await.is_ok() {
                     if this
                         .update(cx, |this, cx| {
@@ -620,20 +635,22 @@ impl RuntimePage {
                         break;
                     }
                 }
-            })
-            .detach();
+            });
+            this.shell.tasks.push(service_task);
         }
-        Self::start_operational_updates(
-            this.operational_status.subscribe(),
-            this.live_updates_enabled.subscribe(),
+        let operational_task = Self::start_operational_updates(
+            this.monitors.operational_status.subscribe(),
+            this.shell.live_updates_enabled.subscribe(),
             cx,
         );
-        Self::start_live_updates(
+        this.shell.tasks.push(operational_task);
+        let live_updates_task = Self::start_live_updates(
             live_update_activity,
-            this.log_monitor.revision(),
-            this.traffic_monitor.revision(),
+            this.monitors.log_monitor.revision(),
+            this.monitors.traffic_monitor.revision(),
             cx,
         );
+        this.shell.tasks.push(live_updates_task);
         this
     }
 
@@ -652,10 +669,11 @@ impl RuntimePage {
                     Ok(state) => {
                         this.profiles
                             .adopt_bootstrap(state.profile_store, state.profile_catalog);
-                        this.overrides
+                        this.library
+                            .overrides
                             .adopt_bootstrap(state.override_store, state.override_catalog);
                         if this.application_commands.is_current(runtime_version) {
-                            this.controlled_config = state.controlled_config;
+                            this.settings.controlled_config = state.controlled_config;
                             // A successful bootstrap must preserve feedback from a concurrent page read.
                             if let Some(error) = state.error {
                                 this.error = Some(error);
@@ -677,7 +695,7 @@ impl RuntimePage {
         mut updates: zenclash_core::OperationalStatusStream,
         activity: tokio::sync::watch::Receiver<bool>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> gpui_kit::Task<()> {
         cx.spawn(async move |this, cx| {
             while updates.changed().await.is_ok() {
                 if !*activity.borrow() {
@@ -700,7 +718,6 @@ impl RuntimePage {
                 }
             }
         })
-        .detach();
     }
 
     pub(super) fn restore_page_focus(&self, page: Page, cx: &mut Context<Self>) {
@@ -710,12 +727,12 @@ impl RuntimePage {
             let _ = entity.update(cx, |this, cx| {
                 if this.page != page
                     || this.navigation_generation != generation
-                    || !this.ui_visibility.page_presented
+                    || !this.shell.ui_visibility.page_presented
                 {
                     return;
                 }
                 let focus = this.focus_handle.clone();
-                let _ = cx.update_window(this.window_handle, |_, window, cx| {
+                let _ = cx.update_window(this.shell.window_handle, |_, window, cx| {
                     focus.focus(window, cx);
                 });
             });
@@ -746,9 +763,14 @@ impl RuntimePage {
             self.traffic_history.release_results();
         }
         if previous_page == Page::Override {
-            self.overrides.invalidate_preview();
+            self.library.overrides.invalidate_preview();
         }
         self.page = page;
+        if !page.descriptor().owns_viewport_scroll() {
+            self.shell
+                .body_scroll
+                .set_offset(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(0.)));
+        }
         if previous_page == Page::Home {
             self.release_home_presentation();
         }
@@ -757,11 +779,13 @@ impl RuntimePage {
         let page = cx.entity().downgrade();
         cx.defer(move |cx| {
             let _ = page.update(cx, |page, cx| {
-                if page.navigation_generation != generation || !page.ui_visibility.page_presented {
+                if page.navigation_generation != generation
+                    || !page.shell.ui_visibility.page_presented
+                {
                     return;
                 }
                 let focus = page.focus_handle.clone();
-                let _ = cx.update_window(page.window_handle, |_, window, cx| {
+                let _ = cx.update_window(page.shell.window_handle, |_, window, cx| {
                     if close_subscription {
                         window.close_dialog(cx);
                     }
@@ -790,27 +814,27 @@ impl RuntimePage {
     }
 
     pub(crate) fn set_presented(&mut self, presented: bool, cx: &mut Context<Self>) {
-        if self.ui_visibility.page_presented == presented {
+        if self.shell.ui_visibility.page_presented == presented {
             return;
         }
         if !presented && !self.core_busy() {
             self.release_inactive_page_data(cx);
         }
-        let was_enabled = self.ui_visibility.updates_enabled();
-        self.ui_visibility.page_presented = presented;
+        let was_enabled = self.shell.ui_visibility.updates_enabled();
+        self.shell.ui_visibility.page_presented = presented;
         self.update_live_update_activity(was_enabled, cx);
     }
 
     pub(crate) fn set_window_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
-        if self.ui_visibility.window_visible == visible {
+        if self.shell.ui_visibility.window_visible == visible {
             return;
         }
         if !visible && !self.core_busy() {
             self.release_inactive_page_data(cx);
             self.page_observation.clear_cache();
         }
-        let was_enabled = self.ui_visibility.updates_enabled();
-        self.ui_visibility.window_visible = visible;
+        let was_enabled = self.shell.ui_visibility.updates_enabled();
+        self.shell.ui_visibility.window_visible = visible;
         self.update_live_update_activity(was_enabled, cx);
     }
 
@@ -833,7 +857,7 @@ impl RuntimePage {
             self.traffic_history.release_results();
         }
         if self.page == Page::Override {
-            self.overrides.invalidate_preview();
+            self.library.overrides.invalidate_preview();
         }
         self.invalidate_page_load();
         self.page_observation.release_data();
@@ -844,7 +868,7 @@ impl RuntimePage {
     }
 
     fn update_live_update_activity(&mut self, was_enabled: bool, cx: &mut Context<Self>) {
-        let enabled = self.ui_visibility.updates_enabled();
+        let enabled = self.shell.ui_visibility.updates_enabled();
         if !enabled {
             self.release_home_presentation();
             self.connections
@@ -855,17 +879,17 @@ impl RuntimePage {
             self.logs
                 .update(cx, |view, cx| view.suspend_presentation(cx));
             self.traffic_history.cancel_query();
-            self.overrides.invalidate_preview();
+            self.library.overrides.invalidate_preview();
             self.rules
                 .update(cx, |view, cx| view.release_presentation(cx));
         }
         if was_enabled == enabled {
-            if self.ui_visibility.window_visible && self.ui_visibility.page_presented {
+            if self.shell.ui_visibility.window_visible && self.shell.ui_visibility.page_presented {
                 self.update_connection_presentation(cx);
             }
             return;
         }
-        self.live_updates_enabled.send_replace(enabled);
+        self.shell.live_updates_enabled.send_replace(enabled);
         if enabled {
             if matches!(self.page_observation.data(), PageSnapshotData::Empty) {
                 self.page_observation
@@ -880,7 +904,7 @@ impl RuntimePage {
     }
 
     pub(crate) const fn live_updates_enabled(&self) -> bool {
-        self.ui_visibility.updates_enabled()
+        self.shell.ui_visibility.updates_enabled()
     }
 
     fn refresh_visible_page(&mut self, cx: &mut Context<Self>) {
@@ -909,7 +933,7 @@ impl RuntimePage {
         log_revision: u64,
         traffic_revision: u64,
         cx: &mut Context<Self>,
-    ) {
+    ) -> gpui_kit::Task<()> {
         let mut schedule = LiveUpdateSchedule::new(log_revision, traffic_revision);
         cx.spawn(async move |this, cx| {
             loop {
@@ -922,8 +946,8 @@ impl RuntimePage {
                         && this
                             .update(cx, |this, _| {
                                 schedule.synchronize(
-                                    this.log_monitor.revision(),
-                                    this.traffic_monitor.revision(),
+                                    this.monitors.log_monitor.revision(),
+                                    this.monitors.traffic_monitor.revision(),
                                 );
                             })
                             .is_err()
@@ -941,8 +965,8 @@ impl RuntimePage {
                         if *activity.borrow_and_update()
                             && this.update(cx, |this, _| {
                                 schedule.synchronize(
-                                    this.log_monitor.revision(),
-                                    this.traffic_monitor.revision(),
+                                    this.monitors.log_monitor.revision(),
+                                    this.monitors.traffic_monitor.revision(),
                                 );
                             }).is_err()
                         {
@@ -953,8 +977,8 @@ impl RuntimePage {
                         if this.update(cx, |this, cx| {
                             let actions = schedule.tick(
                                 this.page,
-                                this.log_monitor.revision(),
-                                this.traffic_monitor.revision(),
+                                this.monitors.log_monitor.revision(),
+                                this.monitors.traffic_monitor.revision(),
                                 !this.loading && !this.core_busy(),
                                 this.connections.read(cx).is_idle(),
                             );
@@ -980,7 +1004,6 @@ impl RuntimePage {
                 }
             }
         })
-        .detach();
     }
 
     pub(super) fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -1027,7 +1050,7 @@ impl RuntimePage {
                         }
                     }
                     Err(error) => {
-                        if this.startup_error.is_none() {
+                        if this.shell.startup_error.is_none() {
                             this.publish_page_refresh_error(&read_source, error);
                         } else {
                             tracing::debug!(%error, "offline recovery controller probe failed");
@@ -1076,7 +1099,7 @@ impl RuntimePage {
             let data = match result {
                 Ok(data) => data,
                 Err(error) => {
-                    if self.startup_error.is_none() {
+                    if self.shell.startup_error.is_none() {
                         self.error = Some(error);
                     }
                     return;
@@ -1101,16 +1124,12 @@ impl RuntimePage {
         if let PageSnapshotData::Resources { proxy, rules, .. } = self.page_observation.data()
             && let Some(identity) = self.page_observation.source().as_ref()
         {
-            self.provider_operations.observe_catalog_for_runtime(
-                super::ProviderKind::Proxy,
-                proxy,
-                identity,
-            );
-            self.provider_operations.observe_catalog_for_runtime(
-                super::ProviderKind::Rule,
-                rules,
-                identity,
-            );
+            self.monitors
+                .provider_operations
+                .observe_catalog_for_runtime(super::ProviderKind::Proxy, proxy, identity);
+            self.monitors
+                .provider_operations
+                .observe_catalog_for_runtime(super::ProviderKind::Rule, rules, identity);
         }
         self.prepare_home_projection();
         self.update_connection_presentation(cx);
@@ -1178,10 +1197,10 @@ impl RuntimePage {
                         }
                         this.config_inputs.accept_submitted(submitted_inputs, cx);
                         if let Some(level) = requested_log_level {
-                            this.log_monitor.set_level(level);
+                            this.monitors.log_monitor.set_level(level);
                         }
                         this.reload_controlled_config(cx);
-                        this.overrides.invalidate_preview();
+                        this.library.overrides.invalidate_preview();
                         cx.emit(RuntimeConfigApplied);
                         this.invalidate_page_load();
                         this.refresh(cx);
@@ -1221,8 +1240,9 @@ impl RuntimePage {
     }
 
     pub(crate) fn reload_controlled_config(&mut self, cx: &mut Context<Self>) {
-        self.controlled_config_generation = self.controlled_config_generation.wrapping_add(1);
-        let generation = self.controlled_config_generation;
+        self.settings.controlled_config_generation =
+            self.settings.controlled_config_generation.wrapping_add(1);
+        let generation = self.settings.controlled_config_generation;
         let controlled = self.controlled_config_store.clone();
         let task = self
             .runtime
@@ -1233,12 +1253,12 @@ impl RuntimePage {
                 .map_err(|error| error.to_string())
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                if this.controlled_config_generation != generation {
+                if this.settings.controlled_config_generation != generation {
                     return;
                 }
                 match result {
                     Ok(controlled) => {
-                        this.controlled_config = controlled;
+                        this.settings.controlled_config = controlled;
                         this.invalidate_config_inputs(cx);
                     }
                     Err(error) => this.error = Some(error),
@@ -1348,9 +1368,11 @@ impl RuntimePage {
             return false;
         }
         if let PageSnapshotData::Resources { proxy, rules, .. } = &data {
-            self.provider_operations
+            self.monitors
+                .provider_operations
                 .observe_catalog(super::ProviderKind::Proxy, proxy);
-            self.provider_operations
+            self.monitors
+                .provider_operations
                 .observe_catalog(super::ProviderKind::Rule, rules);
         }
         self.page_observation
@@ -1480,6 +1502,42 @@ mod tests {
         let actions = schedule.tick(Page::Logs, 5, 8, true, true);
 
         assert_eq!(actions, LiveUpdateActions::default());
+    }
+
+    #[gpui_kit::test]
+    fn report_automatic_runtime_preserves_error_when_notice_triggers_refresh(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use crate::pages::runtime::test_support::{RuntimePageFixture, open_runtime_page_window};
+
+        let fixture = RuntimePageFixture::new();
+        let (window, page) = open_runtime_page_window(cx, &fixture, Page::Home);
+        fixture.wait_for_initial_reads(cx, &page);
+        cx.update_window(window, |_, window, cx| {
+            page.update(cx, |page, cx| {
+                page.report_automatic_runtime(
+                    Some("automatic.network_stopped"),
+                    Some("network probe failed".into()),
+                    cx,
+                );
+            });
+            assert_eq!(
+                page.read(cx).error.as_deref(),
+                Some(
+                    zenclash_i18n::text_with(
+                        "automatic.failed",
+                        &[("error", "network probe failed".to_owned())],
+                    )
+                    .as_str()
+                )
+            );
+            assert_eq!(
+                page.read(cx).notice.as_deref(),
+                Some(zenclash_i18n::text("automatic.network_stopped").as_str())
+            );
+            window.remove_window();
+        })
+        .unwrap();
     }
 }
 

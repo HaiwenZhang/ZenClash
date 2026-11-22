@@ -163,7 +163,7 @@ impl RuntimePage {
                 this.finish_mutation(token);
                 match result {
                     Ok(preferences) => {
-                        match this.log_monitor.configure_persistence(
+                        match this.monitors.log_monitor.configure_persistence(
                             log_path,
                             preferences.log_file_enabled,
                             preferences.log_file_max_mebibytes,
@@ -192,7 +192,7 @@ impl RuntimePage {
 
     fn copy_support_safe_logs(&mut self, cx: &mut Context<Self>) {
         let token = self.page_task_token_for(Page::Logs);
-        let monitor = self.log_monitor.clone();
+        let monitor = self.monitors.log_monitor.clone();
         let task = self
             .runtime
             .spawn_blocking(move || prepare_log_payload(monitor.shared_entries(), true));
@@ -226,7 +226,7 @@ impl RuntimePage {
         self.error = None;
         self.notice = None;
         let token = self.page_task_token_for(Page::Logs);
-        let monitor = self.log_monitor.clone();
+        let monitor = self.monitors.log_monitor.clone();
         let task = self.runtime.spawn_blocking(move || {
             (
                 std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),

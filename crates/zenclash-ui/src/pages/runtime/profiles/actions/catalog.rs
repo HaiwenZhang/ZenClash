@@ -217,7 +217,7 @@ impl RuntimePage {
                         this.reload_profile_catalog(cx);
                         let was_editing = this.profiles.forms.editing_profile_id.take().is_some();
                         if was_editing && this.is_page_task_current(token) {
-                            let _ = cx.update_window(this.window_handle, |_, window, cx| {
+                            let _ = cx.update_window(this.shell.window_handle, |_, window, cx| {
                                 window.close_dialog(cx)
                             });
                         }

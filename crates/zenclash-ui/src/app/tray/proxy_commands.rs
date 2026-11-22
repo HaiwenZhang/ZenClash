@@ -52,19 +52,21 @@ impl ZenClashApp {
         observation: Option<CoreObservationIdentity>,
         cx: &mut Context<Self>,
     ) {
-        let Some(observation) = observation.filter(|source| source.belongs_to(&self.core_session))
+        let Some(observation) =
+            observation.filter(|source| source.belongs_to(&self.services.core_session))
         else {
             self.report_tray_error(MihomoError::StaleBinding.to_string(), cx);
             self.refresh_tray_menu(cx);
             return;
         };
-        if let Some(request) = self
-            .proxy_selection_commands
-            .submit(TrayProxySelectionRequest {
-                group,
-                proxy,
-                observation,
-            })
+        if let Some(request) =
+            self.tray
+                .proxy_selection_commands
+                .submit(TrayProxySelectionRequest {
+                    group,
+                    proxy,
+                    observation,
+                })
         {
             self.start_proxy_selection(request, cx);
         }
@@ -76,32 +78,42 @@ impl ZenClashApp {
         cx: &mut Context<Self>,
     ) {
         self.publish_tray_proxy_feedback(&request.observation, |this| {
-            this.tray_command_error = None
+            this.tray.command_error = None
         });
-        let session = self.core_session.clone();
+        let session = self.services.core_session.clone();
         let submitted = request.clone();
         let task = self
+            .services
             .runtime
             .spawn(async move { submitted.execute(&session).await });
         cx.spawn(async move |this, cx| {
             let result = task.await.unwrap_or_else(|error| Err(error.to_string()));
             let _ = this.update(cx, |this, cx| {
-                if this.quit_state != crate::app::system_proxy::QuitState::Idle { return; }
+                if this.shell.quit_state != crate::app::system_proxy::QuitState::Idle {
+                    return;
+                }
                 match &result {
-                    Ok(warnings) => for warning in warnings { tracing::warn!(%warning, "tray proxy selection completed with a warning"); },
+                    Ok(warnings) => {
+                        for warning in warnings {
+                            tracing::warn!(%warning, "tray proxy selection completed with a warning");
+                        }
+                    }
                     Err(error) => {
-                        this.publish_tray_proxy_feedback(&request.observation, |this| this.tray_command_error = Some(error.clone()));
+                        this.publish_tray_proxy_feedback(&request.observation, |this| {
+                            this.tray.command_error = Some(error.clone())
+                        });
                     }
                 }
                 this.refresh_visible_proxies(cx);
-                if let Some(next) = this.proxy_selection_commands.complete() {
+                if let Some(next) = this.tray.proxy_selection_commands.complete() {
                     this.start_proxy_selection(next, cx);
                 } else {
                     this.refresh_tray_menu(cx);
                 }
                 cx.notify();
             });
-        }).detach();
+        })
+        .detach();
     }
 
     pub(super) fn test_group_from_tray(
@@ -112,16 +124,17 @@ impl ZenClashApp {
         observation: Option<CoreObservationIdentity>,
         cx: &mut Context<Self>,
     ) {
-        let Some(observation) = observation.filter(|source| source.belongs_to(&self.core_session))
+        let Some(observation) =
+            observation.filter(|source| source.belongs_to(&self.services.core_session))
         else {
             self.report_tray_error(MihomoError::StaleBinding.to_string(), cx);
             self.refresh_tray_menu(cx);
             return;
         };
-        let session = self.core_session.clone();
+        let session = self.services.core_session.clone();
         let submitted = observation.clone();
         let task_group = group.clone();
-        let task = self.runtime.spawn(async move {
+        let task = self.services.runtime.spawn(async move {
             if automatic {
                 session
                     .measure_observed_proxy_group(
@@ -149,12 +162,20 @@ impl ZenClashApp {
         cx.spawn(async move |this, cx| {
             let result = task.await.unwrap_or_else(|error| Err(error.to_string()));
             let _ = this.update(cx, |this, cx| {
-                if this.quit_state != crate::app::system_proxy::QuitState::Idle { return; }
+                if this.shell.quit_state != crate::app::system_proxy::QuitState::Idle {
+                    return;
+                }
                 match &result {
-                    Ok(warnings) => for warning in warnings { tracing::warn!(%group, %warning, "tray group delay completed with a readback warning"); },
+                    Ok(warnings) => {
+                        for warning in warnings {
+                            tracing::warn!(%group, %warning, "tray group delay completed with a readback warning");
+                        }
+                    }
                     Err(error) => {
                         tracing::warn!(%group, %error, "tray proxy delay test failed");
-                        this.publish_tray_proxy_feedback(&observation, |this| this.tray_command_error = Some(error.clone()));
+                        this.publish_tray_proxy_feedback(&observation, |this| {
+                            this.tray.command_error = Some(error.clone())
+                        });
                     }
                 }
                 tracing::info!(%group, "tray proxy group delay test completed");
@@ -162,7 +183,8 @@ impl ZenClashApp {
                 this.refresh_tray_menu(cx);
                 cx.notify();
             });
-        }).detach();
+        })
+        .detach();
     }
 
     pub(super) fn publish_tray_proxy_feedback(
@@ -170,7 +192,8 @@ impl ZenClashApp {
         source: &CoreObservationIdentity,
         publish: impl FnOnce(&mut Self),
     ) -> bool {
-        self.tray_observation
+        self.tray
+            .observation
             .as_ref()
             .is_some_and(|current| current.is_same_observation(source))
             && source.publish_if_current(|| publish(self)).is_some()

@@ -6,16 +6,16 @@ use super::{
 };
 use crate::{MihomoClient, MihomoError};
 
-pub(super) struct ObservedRuntimeMutationAdmission {
-    pub(super) client: MihomoClient,
-    pub(super) read_observation: CoreObservation,
+pub(crate) struct ObservedRuntimeMutationAdmission {
+    pub(crate) client: MihomoClient,
+    pub(crate) read_observation: CoreObservation,
     _write_lease: DataWriteLease,
     _transition: tokio::sync::OwnedMutexGuard<CommittedConfig>,
     _session_owner: CoreSession,
 }
 
 impl CoreSession {
-    pub(super) async fn admit_observed_runtime_mutation(
+    pub(crate) async fn admit_observed_runtime_mutation(
         &self,
         identity: &CoreObservationIdentity,
     ) -> Result<ObservedRuntimeMutationAdmission, CoreSessionError> {

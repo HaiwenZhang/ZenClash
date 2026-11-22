@@ -1,4 +1,5 @@
 use super::*;
+use crate::ServiceStartupRejection;
 use crate::service::ServiceCallError;
 use zenclash_service::ServiceErrorCode;
 

@@ -10,12 +10,18 @@ use std::{
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
+pub use crate::core_errors::{AppPreferencesError, AppPreferencesResult};
 use crate::profiles::atomic_write;
-use crate::{
-    CoreKind, NetworkLatencyTarget, PublicIpProvider, SystemProxyMode, SystemProxyOwnership,
+use crate::system_proxy_types::{
+    SystemProxyMode, SystemProxyOwnership, default_pac_script, default_system_proxy_bypass,
+    normalize_pac_script, normalize_system_proxy_bypass, normalize_system_proxy_host,
+    validate_system_proxy_ownership,
 };
+use crate::{CoreKind, NetworkLatencyTarget, PublicIpProvider};
+
+/// Default number of days traffic history entries are retained on disk.
+pub const DEFAULT_TRAFFIC_RETENTION_DAYS: u16 = 30;
 
 mod migration;
 mod observation;
@@ -156,60 +162,21 @@ impl Default for AppPreferences {
             language: LanguagePreference::ZhCn,
             traffic_tray_visible: true,
             traffic_history_enabled: true,
-            traffic_retention_days: crate::DEFAULT_TRAFFIC_RETENTION_DAYS,
+            traffic_retention_days: DEFAULT_TRAFFIC_RETENTION_DAYS,
             log_file_enabled: true,
             log_file_max_mebibytes: 10,
             network_ip_provider: PublicIpProvider::default(),
             network_probe_route: NetworkProbeRoutePreference::Mihomo,
             network_latency_targets: Vec::new(),
-            system_proxy_bypass: crate::default_system_proxy_bypass(),
+            system_proxy_bypass: default_system_proxy_bypass(),
             system_proxy_enabled: false,
             system_proxy_ownership: None,
             system_proxy_mode: SystemProxyMode::Manual,
             system_proxy_host: "127.0.0.1".into(),
-            system_proxy_pac_script: crate::default_pac_script().into(),
+            system_proxy_pac_script: default_pac_script().into(),
         }
     }
 }
-
-/// Errors produced while loading or saving application preferences.
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum AppPreferencesError {
-    /// Filesystem access failed.
-    #[error(
-        "{}",
-        zenclash_i18n::text_with("preferences.errors.io", &[("error", .0.to_string())])
-    )]
-    Io(#[from] std::io::Error),
-    /// The preferences document is malformed or incompatible.
-    #[error(
-        "{}",
-        zenclash_i18n::text_with("preferences.errors.json", &[("error", .0.to_string())])
-    )]
-    Json(#[from] serde_json::Error),
-    /// The document exceeded the defensive read limit.
-    #[error("{}", zenclash_i18n::text("preferences.errors.too_large"))]
-    TooLarge,
-    /// A platform data directory could not be determined.
-    #[error("{}", zenclash_i18n::text("preferences.errors.missing_data_directory"))]
-    MissingDataDirectory,
-    /// A preference value is outside its supported range.
-    #[error(
-        "{}",
-        zenclash_i18n::text_with("preferences.errors.invalid", &[("error", .0.clone())])
-    )]
-    Invalid(String),
-    /// Preferences changed after a reversible update was prepared.
-    #[error(
-        "{}",
-        zenclash_i18n::text("preferences.errors.concurrent_modification")
-    )]
-    ConcurrentModification,
-}
-
-/// Result type for persistent application-preference operations.
-pub type AppPreferencesResult<T> = Result<T, AppPreferencesError>;
 
 /// Atomic, cloneable store for [`AppPreferences`].
 #[derive(Clone, Debug)]
@@ -426,21 +393,21 @@ fn validate_preferences(preferences: &AppPreferences) -> AppPreferencesResult<()
         }
         urls.push(normalized.url);
     }
-    let normalized = crate::normalize_system_proxy_bypass(&preferences.system_proxy_bypass)
+    let normalized = normalize_system_proxy_bypass(&preferences.system_proxy_bypass)
         .map_err(|error| AppPreferencesError::Invalid(error.to_string()))?;
     if normalized != preferences.system_proxy_bypass {
         return Err(AppPreferencesError::Invalid(
             "系统代理绕过规则必须去除空行、首尾空格和重复项".into(),
         ));
     }
-    let host = crate::normalize_system_proxy_host(&preferences.system_proxy_host)
+    let host = normalize_system_proxy_host(&preferences.system_proxy_host)
         .map_err(|error| AppPreferencesError::Invalid(error.to_string()))?;
     if host != preferences.system_proxy_host {
         return Err(AppPreferencesError::Invalid(
             "系统代理主机必须去除首尾空格".into(),
         ));
     }
-    let script = crate::normalize_pac_script(&preferences.system_proxy_pac_script)
+    let script = normalize_pac_script(&preferences.system_proxy_pac_script)
         .map_err(|error| AppPreferencesError::Invalid(error.to_string()))?;
     if script != preferences.system_proxy_pac_script {
         return Err(AppPreferencesError::Invalid(
@@ -448,7 +415,7 @@ fn validate_preferences(preferences: &AppPreferences) -> AppPreferencesResult<()
         ));
     }
     if let Some(ownership) = &preferences.system_proxy_ownership {
-        crate::system_proxy::validate_system_proxy_ownership(ownership)
+        validate_system_proxy_ownership(ownership)
             .map_err(|error| AppPreferencesError::Invalid(error.to_string()))?;
     }
     Ok(())

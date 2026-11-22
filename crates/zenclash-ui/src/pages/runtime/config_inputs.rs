@@ -170,6 +170,10 @@ impl ConfigInputs {
         self.read.accept(config, token.profile);
     }
 
+    pub(super) fn record_read_failure(&mut self, token: ConfigInputsTaskToken) {
+        self.read.record_failure(token.profile);
+    }
+
     pub(super) fn submitted(&self, patch: &Value, cx: &gpui_kit::App) -> SubmittedInputs {
         SubmittedInputs {
             profile: self.profile.clone(),
@@ -587,6 +591,12 @@ impl DnsInputs {
                 .parse::<bool>()
                 .map_err(|_| zenclash_i18n::text("settings_redesign.invalid_bool"))?;
             fallback_filter.insert("geoip".into(), Value::Bool(geoip));
+        } else if self
+            .source
+            .pointer("/dns/fallback-filter/geoip")
+            .is_some_and(|value| !value.is_null())
+        {
+            fallback_filter.insert("geoip".into(), Value::Null);
         }
         insert_optional_string(
             &mut fallback_filter,
@@ -782,8 +792,16 @@ impl TunInputs {
             return Err(zenclash_i18n::text("config_inputs.errors.tun_stack"));
         }
         let mtu_text = text(&self.mtu, cx);
-        let mtu = if mtu_text.is_empty() && self.source.pointer("/tun/mtu").is_none() {
-            None
+        let mtu = if mtu_text.is_empty() {
+            if self
+                .source
+                .pointer("/tun/mtu")
+                .is_some_and(|value| !value.is_null())
+            {
+                Some(Value::Null)
+            } else {
+                None
+            }
         } else {
             let mtu = mtu_text
                 .parse::<u16>()
@@ -791,7 +809,7 @@ impl TunInputs {
             if mtu == 0 {
                 return Err(zenclash_i18n::text("config_inputs.errors.mtu_positive"));
             }
-            Some(mtu)
+            Some(Value::from(mtu))
         };
         let mut tun = Map::new();
         insert_optional_string(&mut tun, "stack", stack, &self.source, "/tun/stack");
@@ -803,7 +821,7 @@ impl TunInputs {
             "/tun/device",
         );
         if let Some(mtu) = mtu {
-            tun.insert("mtu".into(), Value::from(mtu));
+            tun.insert("mtu".into(), mtu);
         }
         let dns_hijack = csv(&self.dns_hijack, cx);
         if !dns_hijack.is_empty() || self.source.pointer("/tun/dns-hijack").is_some() {
@@ -1181,6 +1199,71 @@ mod tests {
             assert_eq!(inputs.core.interface_name.read(cx).value(), "en0");
             assert_eq!(inputs.core.log_level.read(cx).value(), "info");
             assert_eq!(inputs.dns.nameserver.read(cx).value(), "8.8.8.8");
+
+            window.remove_window();
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn clearing_tun_mtu_and_dns_fallback_geoip_emits_null_patches(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use std::path::Path;
+
+        use gpui_kit::component::Root;
+        use gpui_kit::{AppContext, IntoElement, Render, Window, div, px, size};
+
+        struct EmptyView;
+        impl Render for EmptyView {
+            fn render(
+                &mut self,
+                _: &mut Window,
+                _: &mut gpui_kit::Context<Self>,
+            ) -> impl IntoElement {
+                div()
+            }
+        }
+
+        cx.update(gpui_kit::init);
+        let handle = cx.open_window(size(px(400.), px(300.)), |window, cx| {
+            let view = cx.new(|_| EmptyView);
+            Root::new(view, window, cx)
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            let inputs = super::ConfigInputs::new(
+                &json!({
+                    "tun": { "mtu": 1500 },
+                    "dns": { "fallback-filter": { "geoip": true } }
+                }),
+                Some(Path::new("profile.yaml")),
+                window,
+                cx,
+            );
+
+            inputs
+                .tun
+                .mtu
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            inputs
+                .dns
+                .fallback_geoip
+                .update(cx, |input, cx| input.set_value("", window, cx));
+
+            let tun_patch = inputs.tun.patch(cx).expect("clearing mtu must succeed");
+            assert_eq!(
+                tun_patch.pointer("/tun/mtu"),
+                Some(&serde_json::Value::Null)
+            );
+
+            let dns_patch = inputs
+                .dns
+                .patch(cx)
+                .expect("clearing fallback geoip must succeed");
+            assert_eq!(
+                dns_patch.pointer("/dns/fallback-filter/geoip"),
+                Some(&serde_json::Value::Null)
+            );
 
             window.remove_window();
         })

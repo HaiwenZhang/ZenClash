@@ -55,10 +55,12 @@ impl RuntimePage {
                             Ok(refresh) => {
                                 let snapshot = refresh.snapshot;
                                 this.profiles.adopt_retry_catalog(snapshot.profiles);
-                                this.controlled_config = snapshot.controlled_config;
-                                this.controlled_config_generation =
-                                    this.controlled_config_generation.wrapping_add(1);
-                                this.overrides.adopt_restored_catalog(snapshot.overrides);
+                                this.settings.controlled_config = snapshot.controlled_config;
+                                this.settings.controlled_config_generation =
+                                    this.settings.controlled_config_generation.wrapping_add(1);
+                                this.library
+                                    .overrides
+                                    .adopt_restored_catalog(snapshot.overrides);
                                 preferences_pending = true;
                                 this.publish_restored_preferences(
                                     refresh.preferences_observation,
@@ -302,17 +304,21 @@ impl RuntimePage {
         self.profiles
             .adopt_restored_store(restored.profile_store().clone());
         self.controlled_config_store = restored.controlled_store().clone();
-        self.overrides
+        self.library
+            .overrides
             .adopt_restored_store(restored.override_store().clone());
         let preferences_observation = restored.preferences_observation().clone();
         let snapshot = restored.into_snapshot();
         self.profiles.adopt_restore_catalog(snapshot.profiles);
-        self.controlled_config_generation = self.controlled_config_generation.wrapping_add(1);
-        self.controlled_config = snapshot.controlled_config;
-        self.overrides.adopt_restored_catalog(snapshot.overrides);
+        self.settings.controlled_config_generation =
+            self.settings.controlled_config_generation.wrapping_add(1);
+        self.settings.controlled_config = snapshot.controlled_config;
+        self.library
+            .overrides
+            .adopt_restored_catalog(snapshot.overrides);
         self.config_inputs.reset_on_next_refresh();
         self.invalidate_config_inputs(cx);
-        self.overrides.invalidate_preview();
+        self.library.overrides.invalidate_preview();
         self.synchronize_committed_profile(cx);
         self.publish_restored_preferences(preferences_observation, token, cx);
         if self.application_commands.is_current(runtime_version)

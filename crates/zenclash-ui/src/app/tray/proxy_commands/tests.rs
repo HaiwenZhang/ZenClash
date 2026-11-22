@@ -1,5 +1,5 @@
 use super::super::test_support::{TrayController, open_app};
-use crate::components::tray::TrayCommand;
+use crate::tray::TrayCommand;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{AppContext, TestAppContext};
 use std::time::Duration;
@@ -23,7 +23,7 @@ fn queued_tray_selection_keeps_its_original_source_after_runtime_replacement(
         let (window, app) = open_app(cx, &fixture, session.clone());
         cx.update(|cx| {
             app.update(cx, |app, cx| {
-                app.tray_observation = Some(source.clone());
+                app.tray.observation = Some(source.clone());
                 app.handle_observed_tray_command(
                     TrayCommand::SelectProxy {
                         group: "group".into(),
@@ -55,7 +55,7 @@ fn queued_tray_selection_keeps_its_original_source_after_runtime_replacement(
                     Some(source.clone()),
                     cx,
                 );
-                assert!(app.proxy_selection_commands.is_running());
+                assert!(app.tray.proxy_selection_commands.is_running());
             })
         });
         original.release.take().unwrap().send(()).unwrap();
@@ -74,12 +74,12 @@ fn queued_tray_selection_keeps_its_original_source_after_runtime_replacement(
             .clone();
         cx.update(|cx| {
             app.update(cx, |app, _| {
-                app.tray_observation = Some(current);
-                app.tray_command_error = Some("new menu feedback".into());
+                app.tray.observation = Some(current);
+                app.tray.command_error = Some("new menu feedback".into());
             })
         });
         for _ in 0..200 {
-            if cx.update(|cx| !app.read(cx).proxy_selection_commands.is_running()) {
+            if cx.update(|cx| !app.read(cx).tray.proxy_selection_commands.is_running()) {
                 break;
             }
             services
@@ -91,9 +91,9 @@ fn queued_tray_selection_keeps_its_original_source_after_runtime_replacement(
                 .unwrap();
         }
         cx.update_window(window, |_, window, cx| {
-            assert!(!app.read(cx).proxy_selection_commands.is_running());
+            assert!(!app.read(cx).tray.proxy_selection_commands.is_running());
             assert_eq!(
-                app.read(cx).tray_command_error.as_deref(),
+                app.read(cx).tray.command_error.as_deref(),
                 Some("new menu feedback")
             );
             window.remove_window();
@@ -143,13 +143,13 @@ fn old_tray_feedback_cannot_replace_a_new_menu_query_in_the_same_configuration(
     let (window, app) = open_app(cx, &fixture, session);
     cx.update(|cx| {
         app.update(cx, |app, _| {
-            app.tray_observation = Some(current);
-            app.tray_command_error = Some("current query".into());
+            app.tray.observation = Some(current);
+            app.tray.command_error = Some("current query".into());
             assert!(
-                !app.publish_tray_proxy_feedback(&old, |app| app.tray_command_error =
+                !app.publish_tray_proxy_feedback(&old, |app| app.tray.command_error =
                     Some("old operation failed".into()))
             );
-            assert_eq!(app.tray_command_error.as_deref(), Some("current query"));
+            assert_eq!(app.tray.command_error.as_deref(), Some("current query"));
         })
     });
     cx.update_window(window, |_, window, cx| {
@@ -177,8 +177,8 @@ fn a_proxy_command_from_an_unobserved_native_menu_is_rejected(cx: &mut TestAppCo
                 None,
                 cx,
             );
-            assert!(!app.proxy_selection_commands.is_running());
-            assert!(app.tray_command_error.is_some());
+            assert!(!app.tray.proxy_selection_commands.is_running());
+            assert!(app.tray.command_error.is_some());
         })
     });
     assert!(
@@ -194,7 +194,7 @@ fn a_proxy_command_from_an_unobserved_native_menu_is_rejected(cx: &mut TestAppCo
         assert!(window.find("tray-feedback").visible());
         assert_eq!(
             window.find("tray-feedback").label(),
-            app.read(cx).tray_command_error.as_deref()
+            app.read(cx).tray.command_error.as_deref()
         );
         window.remove_window();
     })
@@ -219,7 +219,7 @@ fn current_tray_selection_is_admitted_and_confirms_on_its_original_controller(
         let (window, app) = open_app(cx, &fixture, session);
         cx.update(|cx| {
             app.update(cx, |app, cx| {
-                app.tray_observation = Some(source.clone());
+                app.tray.observation = Some(source.clone());
                 app.handle_observed_tray_command(
                     TrayCommand::SelectProxy {
                         group: "group".into(),
@@ -231,7 +231,7 @@ fn current_tray_selection_is_admitted_and_confirms_on_its_original_controller(
             })
         });
         for _ in 0..200 {
-            if cx.update(|cx| !app.read(cx).proxy_selection_commands.is_running()) {
+            if cx.update(|cx| !app.read(cx).tray.proxy_selection_commands.is_running()) {
                 break;
             }
             services
@@ -259,8 +259,8 @@ fn current_tray_selection_is_admitted_and_confirms_on_its_original_controller(
                 .any(|request| request.starts_with("GET /proxies/group "))
         );
         cx.update_window(window, |_, window, cx| {
-            assert!(!app.read(cx).proxy_selection_commands.is_running());
-            assert!(app.read(cx).tray_command_error.is_none());
+            assert!(!app.read(cx).tray.proxy_selection_commands.is_running());
+            assert!(app.read(cx).tray.command_error.is_none());
             window.remove_window();
         })
         .unwrap();

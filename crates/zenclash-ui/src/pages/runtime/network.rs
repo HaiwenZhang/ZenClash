@@ -229,11 +229,28 @@ impl RuntimePage {
                         .child(
                             div()
                                 .flex_1()
+                                .min_w_0()
                                 .child(zenclash_i18n::text("redesign.check_item")),
                         )
-                        .child(div().w_24().child(zenclash_i18n::text("redesign.result")))
-                        .child(div().w_20().child(zenclash_i18n::text("redesign.duration")))
-                        .child(div().w_16().child(zenclash_i18n::text("redesign.action"))),
+                        .child(
+                            div()
+                                .w_24()
+                                .flex_shrink_0()
+                                .child(zenclash_i18n::text("redesign.result")),
+                        )
+                        .child(
+                            div()
+                                .w_20()
+                                .flex_shrink_0()
+                                .child(zenclash_i18n::text("redesign.duration")),
+                        )
+                        .child(
+                            div()
+                                .w(gpui_kit::rems(9.))
+                                .flex_shrink_0()
+                                .text_right()
+                                .child(zenclash_i18n::text("redesign.action")),
+                        ),
                 )
                 .children(
                     report
@@ -342,7 +359,7 @@ impl RuntimePage {
                             ),
                         ))
                         .child(
-                            Button::new("refresh-network-probe")
+                            Button::new("dialog-refresh-network-probe")
                                 .icon(crate::assets::AppIcon::RefreshCw)
                                 .label(if self.network_diagnostics.query.is_loading() {
                                     zenclash_i18n::text("network.public_ip.probing")
@@ -561,15 +578,28 @@ impl RuntimePage {
                             .child(
                                 div()
                                     .w_24()
+                                    .flex_shrink_0()
                                     .child(zenclash_i18n::text("network.latency.column_target")),
                             )
                             .child(
                                 div()
                                     .flex_1()
+                                    .min_w_0()
                                     .child(zenclash_i18n::text("network.latency.column_latency")),
                             )
-                            .child(div().w_20().child(zenclash_i18n::text("redesign.status")))
-                            .child(div().w_16().child(zenclash_i18n::text("redesign.action"))),
+                            .child(
+                                div()
+                                    .w_20()
+                                    .flex_shrink_0()
+                                    .child(zenclash_i18n::text("redesign.status")),
+                            )
+                            .child(
+                                div()
+                                    .w(gpui_kit::rems(10.))
+                                    .flex_shrink_0()
+                                    .text_right()
+                                    .child(zenclash_i18n::text("redesign.action")),
+                            ),
                     )
                     .when(snapshot.latencies.is_empty(), |view| {
                         view.children(
@@ -591,16 +621,22 @@ impl RuntimePage {
                                     )
                                     .text_color(theme.muted_foreground)
                                     .child(div().flex_1().min_w_0().child("—"))
-                                    .child(div().w_20().child("—"))
+                                    .child(div().w_20().flex_shrink_0().child("—"))
                                     .child(
-                                        Button::new((
-                                            gpui_kit::ElementId::from(target.url),
-                                            "details",
-                                        ))
-                                        .small()
-                                        .outline()
-                                        .label(zenclash_i18n::text("redesign.details"))
-                                        .disabled(true),
+                                        h_flex()
+                                            .w(gpui_kit::rems(10.))
+                                            .flex_shrink_0()
+                                            .justify_end()
+                                            .child(
+                                                Button::new((
+                                                    gpui_kit::ElementId::from(target.url),
+                                                    "details",
+                                                ))
+                                                .small()
+                                                .outline()
+                                                .label(zenclash_i18n::text("redesign.details"))
+                                                .disabled(true),
+                                            ),
                                     )
                             }),
                         )
@@ -679,49 +715,57 @@ impl RuntimePage {
                         "network.latency.failed"
                     })),
             )
-            .when(result.latency_ms.is_none(), |row| {
-                row.child(
-                    Button::new((key.clone(), "retry"))
-                        .small()
-                        .outline()
-                        .label(zenclash_i18n::text("common.actions.retry"))
-                        .tooltip(zenclash_i18n::text("redesign.recheck_all"))
-                        .disabled(self.network_diagnostics.query.is_loading() || self.core_busy())
-                        .on_click(
-                            cx.listener(|this, _, _, cx| this.refresh_network_diagnostics(cx)),
-                        ),
-                )
-            })
             .child(
-                Button::new((key.clone(), "details"))
-                    .outline()
-                    .small()
-                    .label(zenclash_i18n::text("redesign.details"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_latency_details(detail_result.clone(), window, cx)
-                    })),
-            )
-            .when(custom, |row| {
-                row.child(
-                    Button::new((key, "remove"))
-                        .ghost()
-                        .small()
-                        .icon(IconName::Delete)
-                        .tooltip(zenclash_i18n::text("common.actions.delete"))
-                        .disabled(
-                            self.mutation_busy(
-                                crate::pages::runtime::busy::MutationDomain::Network,
-                            ),
+                h_flex()
+                    .w(gpui_kit::rems(10.))
+                    .flex_shrink_0()
+                    .justify_end()
+                    .gap_2()
+                    .when(result.latency_ms.is_none(), |row| {
+                        row.child(
+                            Button::new((key.clone(), "retry"))
+                                .small()
+                                .outline()
+                                .label(zenclash_i18n::text("common.actions.retry"))
+                                .tooltip(zenclash_i18n::text("redesign.recheck_all"))
+                                .disabled(
+                                    self.network_diagnostics.query.is_loading() || self.core_busy(),
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.refresh_network_diagnostics(cx)
+                                })),
                         )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.persist_network_preference(
-                                NetworkPreferenceChange::RemoveTarget(url.clone()),
-                                zenclash_i18n::text("network.notices.target_removed"),
-                                cx,
-                            )
-                        })),
-                )
-            })
+                    })
+                    .child(
+                        Button::new((key.clone(), "details"))
+                            .outline()
+                            .small()
+                            .label(zenclash_i18n::text("redesign.details"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_latency_details(detail_result.clone(), window, cx)
+                            })),
+                    )
+                    .when(custom, |row| {
+                        row.child(
+                            Button::new((key, "remove"))
+                                .ghost()
+                                .small()
+                                .icon(IconName::Delete)
+                                .accessibility_label(zenclash_i18n::text("common.actions.delete"))
+                                .tooltip(zenclash_i18n::text("common.actions.delete"))
+                                .disabled(self.mutation_busy(
+                                    crate::pages::runtime::busy::MutationDomain::Network,
+                                ))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.persist_network_preference(
+                                        NetworkPreferenceChange::RemoveTarget(url.clone()),
+                                        zenclash_i18n::text("network.notices.target_removed"),
+                                        cx,
+                                    )
+                                })),
+                        )
+                    }),
+            )
             .into_any_element()
     }
 
@@ -858,12 +902,20 @@ impl RuntimePage {
                     [
                         (
                             DnsCacheAction::Dns,
-                            "request-dns-cache-flush",
+                            if expanded {
+                                "dialog-request-dns-cache-flush"
+                            } else {
+                                "request-dns-cache-flush"
+                            },
                             "network.diagnostics.flush_dns",
                         ),
                         (
                             DnsCacheAction::FakeIp,
-                            "request-fake-ip-cache-flush",
+                            if expanded {
+                                "dialog-request-fake-ip-cache-flush"
+                            } else {
+                                "request-fake-ip-cache-flush"
+                            },
                             "network.diagnostics.flush_fake_ip",
                         ),
                     ]
@@ -918,7 +970,7 @@ fn network_capability_row(
                         .justify_center()
                         .rounded_full()
                         .bg(if enabled == Some(true) {
-                            theme.chart_3
+                            crate::design::online_indicator(theme)
                         } else {
                             theme.muted_foreground.opacity(0.55)
                         })
@@ -1114,7 +1166,7 @@ fn network_status_icon(succeeded: bool, theme: &gpui_kit::component::Theme) -> g
         .justify_center()
         .rounded_full()
         .bg(if succeeded {
-            theme.chart_3
+            crate::design::online_indicator(theme)
         } else {
             theme.danger
         })

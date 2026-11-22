@@ -62,7 +62,7 @@ impl RuntimePage {
             return;
         };
         let token = self.page_task_token_for(Page::Override);
-        let Some(read) = self.overrides.start_preview(
+        let Some(read) = self.library.overrides.start_preview(
             &self.runtime,
             profile,
             self.controlled_config_store.clone(),
@@ -75,7 +75,7 @@ impl RuntimePage {
                 if !this.is_page_task_current(token) {
                     return;
                 }
-                let Some(result) = this.overrides.complete_preview(completion) else {
+                let Some(result) = this.library.overrides.complete_preview(completion) else {
                     return;
                 };
                 match result {
@@ -93,7 +93,7 @@ impl RuntimePage {
     }
 
     fn copy_config_preview(&self, effective: bool, cx: &mut Context<Self>) {
-        let Some(preview) = self.overrides.preview() else {
+        let Some(preview) = self.library.overrides.preview() else {
             return;
         };
         let payload = if effective {
@@ -110,7 +110,7 @@ impl RuntimePage {
             cx.notify();
             return;
         }
-        let Some(store) = self.overrides.store().cloned() else {
+        let Some(store) = self.library.overrides.store().cloned() else {
             self.error = Some(zenclash_i18n::text("overrides.errors.store_unavailable"));
             cx.notify();
             return;
@@ -179,7 +179,7 @@ impl RuntimePage {
                 zenclash_i18n::text("overrides.chain.explanation"),
                 theme,
             ))
-            .children(self.overrides.preview().map(|preview| {
+            .children(self.library.overrides.preview().map(|preview| {
                 v_flex()
                     .gap_4()
                     .child(render_config_diff(&preview.diff, theme))
@@ -210,8 +210,9 @@ impl RuntimePage {
             || zenclash_i18n::text("overrides.chain.unspecified"),
             |path| path.display().to_string(),
         );
-        let count = self.overrides.catalog().items.len();
+        let count = self.library.overrides.catalog().items.len();
         let enabled = self
+            .library
             .overrides
             .catalog()
             .items
@@ -236,7 +237,8 @@ impl RuntimePage {
                 theme,
             ))
             .children(
-                self.overrides
+                self.library
+                    .overrides
                     .catalog()
                     .items
                     .iter()
@@ -252,8 +254,10 @@ impl RuntimePage {
                         Button::new("preview-overrides")
                             .icon(IconName::Eye)
                             .label(zenclash_i18n::text("overrides.actions.preview"))
-                            .loading(self.overrides.is_preview_loading())
-                            .disabled(self.core_busy() || self.overrides.is_preview_loading())
+                            .loading(self.library.overrides.is_preview_loading())
+                            .disabled(
+                                self.core_busy() || self.library.overrides.is_preview_loading(),
+                            )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.load_config_preview(cx);
                             })),
@@ -265,11 +269,11 @@ impl RuntimePage {
                             .outline()
                             .disabled(
                                 self.core_busy()
-                                    || self.overrides.preview().is_none()
+                                    || self.library.overrides.preview().is_none()
                                     || self.profiles.catalog().active.is_none(),
                             )
                             .on_click(cx.listener(|this, _, window, cx| {
-                                let Some(preview) = this.overrides.preview() else {
+                                let Some(preview) = this.library.overrides.preview() else {
                                     this.error = Some(zenclash_i18n::text(
                                         "overrides.errors.preview_required",
                                     ));
@@ -364,7 +368,10 @@ impl RuntimePage {
                     .icon(IconName::ArrowDown)
                     .xsmall()
                     .ghost()
-                    .disabled(index + 1 == self.overrides.catalog().items.len() || self.core_busy())
+                    .disabled(
+                        index + 1 == self.library.overrides.catalog().items.len()
+                            || self.core_busy(),
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.move_override(&down_id, 1, cx);
                     })),

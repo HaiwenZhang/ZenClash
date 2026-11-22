@@ -5,6 +5,7 @@ use zenclash_core::ProxyNodeId;
 
 pub(super) struct HomeProxyProjection {
     pub(super) current: CurrentProxySummary,
+    #[cfg(test)]
     switchable: bool,
     groups: Vec<HomeGroupRow>,
     nodes: Vec<HomeNodeRow>,
@@ -23,6 +24,7 @@ struct HomeNodeRow {
     delay: Option<u32>,
     current: bool,
     target_group: Option<String>,
+    target_group_name: Option<String>,
 }
 
 impl HomeUiState {
@@ -68,6 +70,7 @@ impl HomeUiState {
             target_group: target
                 .filter(|_| !direct)
                 .map(|group| group.controller_name().to_owned()),
+            target_group_name: target.filter(|_| !direct).map(|group| group.name.clone()),
         };
         let nodes = group.map_or_else(Vec::new, |group| {
             group
@@ -125,6 +128,7 @@ impl HomeUiState {
             .collect();
         self.projection = Some(HomeProxyProjection {
             current,
+            #[cfg(test)]
             switchable,
             groups,
             nodes,
@@ -415,7 +419,7 @@ impl RuntimePage {
             Some(_) => theme.warning,
             None => theme.muted_foreground,
         };
-        let tooltip = node.target_group.as_ref().map_or_else(
+        let tooltip = node.target_group_name.as_ref().map_or_else(
             || format!("{} · {}", id.controller_name(), delay),
             |group| {
                 zenclash_i18n::text_with(
@@ -483,7 +487,8 @@ impl RuntimePage {
                                             div()
                                                 .px_2()
                                                 .rounded(theme.radius)
-                                                .bg(theme.chart_3.opacity(0.12))
+                                                .bg(crate::design::brand_accent(theme)
+                                                    .opacity(0.12))
                                                 .text_xs()
                                                 .text_color(theme.primary)
                                                 .child(zenclash_i18n::text("home.proxy.current")),
@@ -572,21 +577,11 @@ impl RuntimePage {
                     for node in &projection.all_nodes {
                         let id = node.id.clone();
                         let owner = owner.clone();
-                        let group = node.target_group.as_deref().unwrap_or("");
-                        let label = format!(
-                            "{}  {}  · {}",
-                            id.controller_name(),
-                            dashboard::latency_presentation(node.delay).0,
-                            group
-                        );
+                        let label = more_node_menu_label(node);
                         menu = menu.item(
                             PopupMenuItem::new(label)
                                 .checked(node.current)
-                                .disabled(
-                                    node.current
-                                        || node.target_group.is_none()
-                                        || !projection.switchable,
-                                )
+                                .disabled(more_node_disabled(node))
                                 .on_click(move |_, _, cx| {
                                     let _ = owner.update(cx, |page, cx| {
                                         page.select_home_node(id.clone(), cx)
@@ -598,6 +593,20 @@ impl RuntimePage {
                 menu
             })
     }
+}
+
+fn more_node_menu_label(node: &HomeNodeRow) -> String {
+    let latency = dashboard::latency_presentation(node.delay).0;
+    match node.target_group_name.as_deref() {
+        Some(group) if !group.is_empty() => {
+            format!("{}  {}  · {}", node.id.controller_name(), latency, group)
+        }
+        _ => format!("{}  {}", node.id.controller_name(), latency),
+    }
+}
+
+fn more_node_disabled(node: &HomeNodeRow) -> bool {
+    node.current || node.target_group.is_none()
 }
 
 #[cfg(test)]
@@ -835,5 +844,68 @@ mod tests {
             node_element_id("home-node-card", &projection.all_nodes[0].id),
             node_element_id("home-node-card", &projection.all_nodes[1].id)
         );
+    }
+
+    #[test]
+    fn load_balance_group_keeps_other_switchable_group_nodes_enabled_and_uses_display_name() {
+        let mut selector_group = ProxyGroup::new("selector-controller")
+            .with_current_member("node-a")
+            .with_behavior(ProxyGroupBehavior::Selector);
+        selector_group.name = "Primary Selector".into();
+        let catalog = ProxyCatalog::from_group_nodes(
+            vec![
+                (
+                    ProxyGroup::new("balanced").with_behavior(ProxyGroupBehavior::LoadBalance),
+                    vec![ProxyNode {
+                        name: "lb-only".into(),
+                        ..Default::default()
+                    }],
+                ),
+                (
+                    selector_group,
+                    vec![
+                        ProxyNode {
+                            name: "node-a".into(),
+                            ..Default::default()
+                        },
+                        ProxyNode {
+                            name: "node-b".into(),
+                            ..Default::default()
+                        },
+                    ],
+                ),
+            ],
+            3,
+        );
+        let mut home = HomeUiState {
+            selected_group: Some("balanced".into()),
+            ..Default::default()
+        };
+        home.prepare(
+            &RuntimeConfig {
+                mode: "rule".into(),
+                ..Default::default()
+            },
+            &catalog,
+        );
+        let projection = home.projection.unwrap();
+        assert!(!projection.switchable);
+        let lb_only = projection
+            .all_nodes
+            .iter()
+            .find(|node| node.id.controller_name() == "lb-only")
+            .unwrap();
+        assert!(more_node_disabled(lb_only));
+        assert!(!more_node_menu_label(lb_only).contains('·'));
+
+        let switchable = projection
+            .all_nodes
+            .iter()
+            .find(|node| node.id.controller_name() == "node-b")
+            .unwrap();
+        assert!(!more_node_disabled(switchable));
+        let label = more_node_menu_label(switchable);
+        assert!(label.contains("· Primary Selector"));
+        assert!(!label.contains("selector-controller"));
     }
 }

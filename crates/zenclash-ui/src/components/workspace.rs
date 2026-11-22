@@ -7,6 +7,7 @@ use crate::pages::Page;
 
 /// Title and supporting description aligned with the workspace content inset.
 pub(crate) fn title(page: Page, cx: &mut App) -> impl IntoElement {
+    let descriptor = page.descriptor();
     v_flex()
         .min_w_0()
         .gap_1()
@@ -15,19 +16,19 @@ pub(crate) fn title(page: Page, cx: &mut App) -> impl IntoElement {
                 .id("workspace-page-title")
                 .test_support()
                 .text_2xl()
-                .when(page != Page::Settings, |title| {
+                .when(!descriptor.is_settings, |title| {
                     title
                         .text_size(gpui_kit::rems(1.75))
                         .line_height(gpui_kit::relative(1.25))
                 })
                 .font_weight(gpui_kit::FontWeight::BOLD)
-                .child(if page == Page::Logs {
+                .child(if descriptor.use_label_as_title {
                     page.label()
                 } else {
                     page.title()
                 }),
         )
-        .when(page == Page::Rules, |this| {
+        .when(descriptor.show_subtitle, |this| {
             this.child(
                 div()
                     .text_sm()

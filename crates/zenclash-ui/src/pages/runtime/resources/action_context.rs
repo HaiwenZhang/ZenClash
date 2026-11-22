@@ -110,7 +110,7 @@ impl RuntimePage {
             return;
         };
         let session = self.core_session.clone();
-        let providers = self.provider_operations.clone();
+        let providers = self.monitors.provider_operations.clone();
         let submitted = context.observation.clone();
         let task = self.runtime.spawn(ResourceActionCompletion::execute(
             session, providers, submitted, action,

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{MihomoError, MihomoResult};
+use crate::core_errors::{MihomoError, MihomoResult};
 
 /// Address and authentication information for Mihomo's external controller.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -33,7 +33,8 @@ fn keyboard_focus_and_delete_follow_the_same_override_after_reordering(cx: &mut 
         assert_eq!(window.find(target.clone()).focused(), Some(true));
         fixture.overrides.move_to(&records[0].id, 2).unwrap();
         page.update(cx, |page, cx| {
-            page.overrides
+            page.library
+                .overrides
                 .replace_fixture_catalog(fixture.overrides.load().unwrap());
             cx.notify();
         });
@@ -42,7 +43,9 @@ fn keyboard_focus_and_delete_follow_the_same_override_after_reordering(cx: &mut 
         window.press("enter", cx);
     })
     .unwrap();
-    fixture.settle(cx, &page, |page| page.overrides.catalog().items.len() == 2);
+    fixture.settle(cx, &page, |page| {
+        page.library.overrides.catalog().items.len() == 2
+    });
     let catalog = fixture.overrides.load().unwrap();
     assert!(
         !catalog

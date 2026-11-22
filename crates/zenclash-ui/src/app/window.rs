@@ -1,15 +1,51 @@
-//! Primary window presentation, retained visibility and platform restore size.
+//! Primary window presentation, retained visibility, shell tasks, and platform restore size.
+use std::sync::Arc;
+
+use gpui_kit::AnyWindowHandle;
 #[cfg(target_os = "macos")]
 use gpui_kit::{Pixels, Size, px};
 
-use super::{AppContext, Context, ZenClashApp};
+use super::{AppContext, Context, RestartRequest, ZenClashApp};
+
+pub(super) struct WindowShellState {
+    pub(super) main_window: AnyWindowHandle,
+    pub(super) main_window_visible: bool,
+    #[cfg(target_os = "macos")]
+    pub(super) main_window_restore_size: MainWindowRestoreSize,
+    pub(super) quit_state: super::system_proxy::QuitState,
+    pub(super) restart_after_exit: Arc<parking_lot::Mutex<Option<RestartRequest>>>,
+    pub(super) safe_mode: zenclash_app::SafeMode,
+    pub(super) tasks: Vec<gpui_kit::Task<()>>,
+}
+
+impl WindowShellState {
+    pub(super) fn new(
+        main_window: AnyWindowHandle,
+        restart_after_exit: Arc<parking_lot::Mutex<Option<RestartRequest>>>,
+        safe_mode: zenclash_app::SafeMode,
+    ) -> Self {
+        Self {
+            main_window,
+            main_window_visible: true,
+            #[cfg(target_os = "macos")]
+            main_window_restore_size: MainWindowRestoreSize::default(),
+            quit_state: super::system_proxy::QuitState::default(),
+            restart_after_exit,
+            safe_mode,
+            tasks: Vec::new(),
+        }
+    }
+}
 
 impl ZenClashApp {
     #[cfg(target_os = "macos")]
     pub(in crate::app) fn park_main_window(&mut self, window: &mut gpui_kit::Window) {
         #[cfg(not(test))]
         super::platform::hide_native_window(window);
-        let parked_size = self.main_window_restore_size.park(window.bounds().size);
+        let parked_size = self
+            .shell
+            .main_window_restore_size
+            .park(window.bounds().size);
         window.resize(parked_size);
     }
 
@@ -36,7 +72,7 @@ impl ZenClashApp {
     }
 
     pub(in crate::app) fn release_hidden_page_data(&mut self, cx: &mut Context<Self>) {
-        self.main_window_visible = false;
+        self.shell.main_window_visible = false;
         #[cfg(target_os = "macos")]
         cx.set_activation_policy(gpui_kit::ActivationPolicy::Accessory);
         self.refresh_visible_proxies(cx);
@@ -49,7 +85,7 @@ impl ZenClashApp {
     pub(in crate::app) fn restore_main_window_after_activation(&mut self, cx: &mut Context<Self>) {
         // A taskbar/compositor restore does not pass through the tray's show command.
         // Resume retained data without activating the window again inside its callback.
-        self.main_window_visible = true;
+        self.shell.main_window_visible = true;
         self.runtime_page.update(cx, |runtime_page, cx| {
             runtime_page.set_window_visible(true, cx);
         });
@@ -60,23 +96,25 @@ impl ZenClashApp {
     pub(in crate::app) fn show_main_window(&mut self, cx: &mut Context<Self>) {
         #[cfg(target_os = "macos")]
         cx.set_activation_policy(gpui_kit::ActivationPolicy::Regular);
-        self.main_window_visible = true;
+        self.shell.main_window_visible = true;
         self.runtime_page.update(cx, |runtime_page, cx| {
             runtime_page.set_window_visible(true, cx);
         });
         self.refresh_visible_proxies(cx);
         #[cfg(target_os = "macos")]
-        if let Some(restore_size) = self.main_window_restore_size.restore() {
-            let _ = cx.update_window(self.main_window, move |_, window, _| {
+        if let Some(restore_size) = self.shell.main_window_restore_size.restore() {
+            let _ = cx.update_window(self.shell.main_window, move |_, window, _| {
                 window.resize(restore_size);
             });
         }
         cx.activate(true);
         #[cfg(all(target_os = "windows", not(test)))]
-        let _ = cx.update_window(self.main_window, |_, window, _| {
+        let _ = cx.update_window(self.shell.main_window, |_, window, _| {
             super::platform::show_native_window(window);
         });
-        let _ = cx.update_window(self.main_window, |_, window, _| window.activate_window());
+        let _ = cx.update_window(self.shell.main_window, |_, window, _| {
+            window.activate_window()
+        });
     }
 }
 

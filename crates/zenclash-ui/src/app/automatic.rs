@@ -13,18 +13,18 @@ use zenclash_core::NetworkReachability;
 use super::{ZenClashApp, system_proxy::QuitState};
 
 impl ZenClashApp {
-    pub(super) fn start_service_handoff(&self, cx: &mut Context<Self>) {
+    pub(super) fn start_service_handoff(&mut self, cx: &mut Context<Self>) {
         if !cfg!(windows)
-            || !self.core_session.is_managed()
-            || self.core_session.runtime_descriptor().backend()
+            || !self.services.core_session.is_managed()
+            || self.services.core_session.runtime_descriptor().backend()
                 != zenclash_core::CoreRuntimeBackend::Local
         {
             return;
         }
-        let core = self.core_session.clone();
-        let capture = self.traffic_capture.clone();
-        let commands = self.application_commands.clone();
-        let runtime = self.runtime.clone();
+        let core = self.services.core_session.clone();
+        let capture = self.services.traffic_capture.clone();
+        let commands = self.services.application_commands.clone();
+        let runtime = self.services.runtime.clone();
         let descriptor = core.runtime_descriptor();
         let Some(home) = descriptor.home_dir().map(PathBuf::from) else {
             return;
@@ -32,7 +32,7 @@ impl ZenClashApp {
         let binary = descriptor.binary().map(PathBuf::from);
         let generation = core.generation();
         let revision = capture.intent_revision();
-        cx.spawn(async move |this, cx| {
+        let task = cx.spawn(async move |this, cx| {
             let deadline = Instant::now() + Duration::from_secs(120);
             while Instant::now() < deadline {
                 if core.is_shutting_down()
@@ -79,22 +79,22 @@ impl ZenClashApp {
                     .await
                     .ok();
             }
-        })
-        .detach();
+        });
+        self.shell.tasks.push(task);
     }
 
-    pub(super) fn start_automatic_runtime(&self, cx: &mut Context<Self>) {
-        if !self.core_session.is_managed() {
+    pub(super) fn start_automatic_runtime(&mut self, cx: &mut Context<Self>) {
+        if !self.services.core_session.is_managed() {
             return;
         }
-        let runtime = self.runtime.clone();
-        let core = self.core_session.clone();
-        let capture = self.traffic_capture.clone();
-        let controlled = self.controlled_config_store.clone();
+        let runtime = self.services.runtime.clone();
+        let core = self.services.core_session.clone();
+        let capture = self.services.traffic_capture.clone();
+        let controlled = self.services.controlled_config_store.clone();
         let scanner = std::sync::Arc::new(parking_lot::Mutex::new(SourceScanner::new(
-            self.override_store.clone(),
+            self.services.override_store.clone(),
         )));
-        cx.spawn(async move |this, cx| {
+        let task = cx.spawn(async move |this, cx| {
             let mut network = EdgeStableObservation::default();
             let mut source = StableObservation::<Option<SourceRevisionKey>>::default();
             let mut rejected_source = None;
@@ -105,8 +105,8 @@ impl ZenClashApp {
                 }
                 let Ok((quitting, profile)) = this.update(cx, |this, _| {
                     (
-                        this.quit_state == QuitState::InProgress,
-                        this.profile_path.clone(),
+                        this.shell.quit_state == QuitState::InProgress,
+                        this.services.profile_path.clone(),
                     )
                 }) else {
                     return;
@@ -248,7 +248,8 @@ impl ZenClashApp {
                 last_error = error;
                 if notice.is_some() || reported_error.is_some() {
                     let _ = this.update(cx, |this, cx| {
-                        if this.quit_state == QuitState::InProgress || core.is_shutting_down() {
+                        if this.shell.quit_state == QuitState::InProgress || core.is_shutting_down()
+                        {
                             return;
                         }
                         this.runtime_page.update(cx, |page, cx| {
@@ -256,7 +257,7 @@ impl ZenClashApp {
                         });
                         if notice.is_some() {
                             if this.current_page == crate::pages::Page::Proxies
-                                && this.main_window_visible
+                                && this.shell.main_window_visible
                             {
                                 this.proxies_page
                                     .update(cx, |page, cx| page.profile_activated(cx));
@@ -270,7 +271,7 @@ impl ZenClashApp {
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
-        })
-        .detach();
+        });
+        self.shell.tasks.push(task);
     }
 }

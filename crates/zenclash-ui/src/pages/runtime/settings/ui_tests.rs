@@ -81,11 +81,11 @@ fn offline_settings_keep_local_controls_and_accessible_names(cx: &mut TestAppCon
         // Flush any deferred layout work before checking the scroll position.
         window.simulate_next_frame(cx);
         window.render_frame(cx);
-        assert_eq!(page.read(cx).body_scroll.offset().y, px(0.));
+        assert_eq!(page.read(cx).shell.body_scroll.offset().y, px(0.));
         assert!(window.find("settings-traffic-history").visible());
         window.click("settings-traffic-history", cx);
         window.render_frame(cx);
-        assert_eq!(page.read(cx).body_scroll.offset().y, px(0.));
+        assert_eq!(page.read(cx).shell.body_scroll.offset().y, px(0.));
     })
     .unwrap();
     fixture.settle(cx, &page, |page| page.preferences.traffic_history_enabled);
@@ -98,7 +98,7 @@ fn offline_settings_keep_local_controls_and_accessible_names(cx: &mut TestAppCon
     let navigation_target = page.downgrade();
     cx.update(|cx| {
         // The fixture hosts RuntimePage alone; install its application's navigation receiver.
-        cx.on_action(move |_: &crate::app::NavigateDns, cx| {
+        cx.on_action(move |_: &crate::actions::NavigateDns, cx| {
             navigation_target
                 .update(cx, |page, cx| page.switch_to(Page::Dns, cx))
                 .unwrap();
@@ -191,6 +191,7 @@ fn settings_list_modal_stages_acceptance_and_cancels_without_saving(cx: &mut Tes
         );
         assert!(
             page.read(cx)
+                .settings
                 .controlled_config
                 .pointer("/dns/nameserver")
                 .is_none()
@@ -256,6 +257,7 @@ fn settings_enum_popover_accepts_keyboard_selection_without_saving(cx: &mut Test
         );
         assert!(
             page.read(cx)
+                .settings
                 .controlled_config
                 .pointer("/dns/enhanced-mode")
                 .is_none()

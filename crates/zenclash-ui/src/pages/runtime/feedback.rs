@@ -12,14 +12,18 @@ impl RuntimePage {
         add(
             "runtime-startup",
             FeedbackKind::Error,
-            self.startup_error.clone(),
+            self.shell.startup_error.clone(),
         );
         add(
             "runtime-error",
             FeedbackKind::Error,
             self.error.clone().or_else(|| {
                 self.loading
-                    .then(|| self.feedback_notifications.current_message("runtime-error"))
+                    .then(|| {
+                        self.shell
+                            .feedback_notifications
+                            .current_message("runtime-error")
+                    })
                     .flatten()
             }),
         );
@@ -90,7 +94,7 @@ impl RuntimePage {
                 add(
                     "core-release",
                     FeedbackKind::Error,
-                    self.core_releases.error().clone(),
+                    self.settings.core_releases.error().clone(),
                 );
                 if self.core_session.runtime_descriptor().backend()
                     == zenclash_core::CoreRuntimeBackend::Service
@@ -165,6 +169,7 @@ impl RuntimePage {
         }
         if self.page == Page::Override
             && self
+                .library
                 .overrides
                 .preview()
                 .is_some_and(|preview| preview.is_truncated())
@@ -175,6 +180,8 @@ impl RuntimePage {
                 Some(zenclash_i18n::text("overrides.preview.truncated")),
             );
         }
-        self.feedback_notifications.publish(messages, window, cx);
+        self.shell
+            .feedback_notifications
+            .publish(messages, window, cx);
     }
 }

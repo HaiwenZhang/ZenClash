@@ -12,7 +12,7 @@ impl ZenClashApp {
         command: TrayCommand,
         cx: &mut Context<Self>,
     ) {
-        self.handle_observed_tray_command(command, self.tray_observation.clone(), cx);
+        self.handle_observed_tray_command(command, self.tray.observation.clone(), cx);
     }
 
     pub(in crate::app) fn handle_observed_tray_command(
@@ -21,7 +21,7 @@ impl ZenClashApp {
         observation: Option<CoreObservationIdentity>,
         cx: &mut Context<Self>,
     ) {
-        if self.quit_state != crate::app::system_proxy::QuitState::Idle
+        if self.shell.quit_state != crate::app::system_proxy::QuitState::Idle
             && !matches!(command, TrayCommand::Quit | TrayCommand::ShowWindow)
         {
             return;
@@ -31,10 +31,10 @@ impl ZenClashApp {
             TrayCommand::SelectProxy { .. } | TrayCommand::TestGroup { .. }
         ) {
             if let Some(source) = observation.as_ref() {
-                self.publish_tray_proxy_feedback(source, |this| this.tray_command_error = None);
+                self.publish_tray_proxy_feedback(source, |this| this.tray.command_error = None);
             }
         } else {
-            self.tray_command_error = None;
+            self.tray.command_error = None;
         }
         match command {
             TrayCommand::ShowWindow => self.show_main_window(cx),
@@ -95,18 +95,18 @@ impl ZenClashApp {
             self.refresh_tray_menu(cx);
             return;
         }
-        if let Some((enabled, port)) = self.system_proxy_commands.submit((enabled, port)) {
+        if let Some((enabled, port)) = self.tray.system_proxy_commands.submit((enabled, port)) {
             self.start_system_proxy_command(enabled, port, cx);
         }
     }
 
     fn start_system_proxy_command(&mut self, enabled: bool, _port: u16, cx: &mut Context<Self>) {
         // Queued retries are admitted after the previous command publishes its result.
-        self.tray_command_error = None;
+        self.tray.command_error = None;
         cx.notify();
-        let capture = self.traffic_capture.clone();
-        let store = self.preferences_store.clone();
-        let task = self.runtime.spawn(async move {
+        let capture = self.services.traffic_capture.clone();
+        let store = self.preferences.store.clone();
+        let task = self.services.runtime.spawn(async move {
             let outcome = capture
                 .apply(if enabled {
                     CapturePlan::SystemProxy
@@ -129,7 +129,7 @@ impl ZenClashApp {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                if this.quit_state != crate::app::system_proxy::QuitState::Idle {
+                if this.shell.quit_state != crate::app::system_proxy::QuitState::Idle {
                     return;
                 }
                 match result {
@@ -152,7 +152,7 @@ impl ZenClashApp {
                     Ok(Err(error)) => this.report_tray_error(error, cx),
                     Err(error) => this.report_tray_error(error.to_string(), cx),
                 }
-                if let Some((enabled, port)) = this.system_proxy_commands.complete() {
+                if let Some((enabled, port)) = this.tray.system_proxy_commands.complete() {
                     this.start_system_proxy_command(enabled, port, cx);
                 } else {
                     this.refresh_tray_menu(cx);
@@ -163,30 +163,32 @@ impl ZenClashApp {
     }
 
     fn set_tun_from_tray(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if let Some(enabled) = self.tun_commands.submit(enabled) {
+        if let Some(enabled) = self.tray.tun_commands.submit(enabled) {
             self.start_tun_command(enabled, cx);
         }
     }
 
     fn start_tun_command(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        self.tray_command_error = None;
+        self.tray.command_error = None;
         cx.notify();
-        let service_request = if enabled && self.application_commands.service_state().is_some() {
-            match self.application_commands.request_service_tun() {
-                Ok(request) => Some(request),
-                Err(error) => {
-                    self.report_tray_error(error, cx);
-                    let _ = self.tun_commands.complete();
-                    self.refresh_tray_menu(cx);
-                    return;
+        let service_request =
+            if enabled && self.services.application_commands.service_state().is_some() {
+                match self.services.application_commands.request_service_tun() {
+                    Ok(request) => Some(request),
+                    Err(error) => {
+                        self.report_tray_error(error, cx);
+                        let _ = self.tray.tun_commands.complete();
+                        self.refresh_tray_menu(cx);
+                        return;
+                    }
                 }
-            }
-        } else {
-            None
-        };
+            } else {
+                None
+            };
         if let Some(request) = &service_request
             && request.needs_authorization_consent()
             && self
+                .services
                 .application_commands
                 .service_state()
                 .is_some_and(|state| {
@@ -201,20 +203,20 @@ impl ZenClashApp {
             self.navigate(Page::Tun, cx);
             self.show_main_window(cx);
             let page = self.runtime_page.clone();
-            if let Err(error) = cx.update_window(self.main_window, move |_, window, cx| {
+            if let Err(error) = cx.update_window(self.shell.main_window, move |_, window, cx| {
                 page.update(cx, |page, cx| {
                     page.present_service_tun_request(request, window, cx)
                 });
             }) {
                 self.report_tray_error(error.to_string(), cx);
             }
-            let _ = self.tun_commands.complete();
+            let _ = self.tray.tun_commands.complete();
             self.refresh_tray_menu(cx);
             return;
         }
-        let capture = self.traffic_capture.clone();
-        let commands = self.application_commands.clone();
-        let task = self.runtime.spawn(async move {
+        let capture = self.services.traffic_capture.clone();
+        let commands = self.services.application_commands.clone();
+        let task = self.services.runtime.spawn(async move {
             if let Some(request) = service_request {
                 return commands.enable_service_tun(request).await.map(|outcome| {
                     (
@@ -236,13 +238,13 @@ impl ZenClashApp {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                if this.quit_state != crate::app::system_proxy::QuitState::Idle {
+                if this.shell.quit_state != crate::app::system_proxy::QuitState::Idle {
                     return;
                 }
                 match result {
                     Ok(Ok((outcome, generation))) => {
                         if generation.is_none_or(|generation| {
-                            this.application_commands.is_current(generation)
+                            this.services.application_commands.is_current(generation)
                         }) {
                             if let CaptureOutcome::RolledBack { failure, .. }
                             | CaptureOutcome::ReconcileNeeded { failure, .. } = &outcome
@@ -257,7 +259,7 @@ impl ZenClashApp {
                     Ok(Err(error)) => this.report_tray_error(error, cx),
                     Err(error) => this.report_tray_error(error.to_string(), cx),
                 }
-                if let Some(enabled) = this.tun_commands.complete() {
+                if let Some(enabled) = this.tray.tun_commands.complete() {
                     this.start_tun_command(enabled, cx);
                 } else {
                     this.refresh_tray_menu(cx);
@@ -268,18 +270,18 @@ impl ZenClashApp {
     }
 
     fn select_profile_from_tray(&mut self, id: String, cx: &mut Context<Self>) {
-        if let Some(id) = self.profile_selection_commands.submit(id) {
+        if let Some(id) = self.tray.profile_selection_commands.submit(id) {
             self.start_profile_selection(id, cx);
         }
     }
 
     fn start_profile_selection(&mut self, id: String, cx: &mut Context<Self>) {
-        self.tray_command_error = None;
+        self.tray.command_error = None;
         cx.notify();
-        let profile_store = self.profile_store.clone();
-        let controlled = self.controlled_config_store.clone();
-        let application_commands = self.application_commands.clone();
-        let task = self.runtime.spawn(async move {
+        let profile_store = self.services.profile_store.clone();
+        let controlled = self.services.controlled_config_store.clone();
+        let application_commands = self.services.application_commands.clone();
+        let task = self.services.runtime.spawn(async move {
             let store = profile_store
                 .ok_or_else(|| zenclash_i18n::text("profiles.errors.store_unavailable"))?;
             application_commands
@@ -298,7 +300,7 @@ impl ZenClashApp {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                if this.quit_state != crate::app::system_proxy::QuitState::Idle {
+                if this.shell.quit_state != crate::app::system_proxy::QuitState::Idle {
                     return;
                 }
                 match result {
@@ -315,7 +317,7 @@ impl ZenClashApp {
                         });
                     }
                 }
-                if let Some(id) = this.profile_selection_commands.complete() {
+                if let Some(id) = this.tray.profile_selection_commands.complete() {
                     this.start_profile_selection(id, cx);
                 } else {
                     this.refresh_tray_menu(cx);
@@ -326,7 +328,7 @@ impl ZenClashApp {
     }
 
     pub(super) fn report_tray_error(&mut self, error: String, cx: &mut Context<Self>) {
-        self.tray_command_error = Some(error);
+        self.tray.command_error = Some(error);
         cx.notify();
     }
 }
@@ -371,16 +373,16 @@ mod tests {
         cx.update_window(window, |_, window, cx| {
             app.update(cx, |app, cx| {
                 assert_eq!(
-                    app.system_proxy_commands.submit((true, 7890)),
+                    app.tray.system_proxy_commands.submit((true, 7890)),
                     Some((true, 7890))
                 );
-                assert!(app.system_proxy_commands.submit((false, 0)).is_none());
+                assert!(app.tray.system_proxy_commands.submit((false, 0)).is_none());
                 app.report_tray_error("previous command failed".into(), cx);
             });
             window.render_frame(cx);
             assert!(window.find("tray-feedback").visible());
             app.update(cx, |app, cx| {
-                let (enabled, port) = app.system_proxy_commands.complete().unwrap();
+                let (enabled, port) = app.tray.system_proxy_commands.complete().unwrap();
                 app.start_system_proxy_command(enabled, port, cx);
             });
             window.render_frame(cx);

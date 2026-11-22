@@ -232,7 +232,7 @@ impl ZenClashApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(tray) = &self.network_tray
+        if let Some(tray) = &self.tray.icon
             && let Err(error) = tray.set_visible(true)
         {
             tracing::warn!(%error, "failed to show native traffic tray");
@@ -247,7 +247,7 @@ impl ZenClashApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(tray) = &self.network_tray
+        if let Some(tray) = &self.tray.icon
             && let Err(error) = tray.set_visible(false)
         {
             tracing::warn!(%error, "failed to hide native traffic tray");
@@ -262,7 +262,7 @@ impl ZenClashApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tray_menu_requested = true;
+        self.tray.menu_requested = true;
         self.refresh_tray_menu(cx);
     }
 

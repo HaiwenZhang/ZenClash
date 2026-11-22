@@ -1,5 +1,8 @@
 use super::*;
-use crate::{CoreTunPermissionStatus, Observation, RecoveryAction};
+use crate::{
+    CoreTunPermissionStatus,
+    observation_types::{Observation, OperationalFailure, RecoveryAction},
+};
 
 impl CoreSession {
     /// Observes the current runtime's native privilege authority on a background task.
@@ -47,7 +50,7 @@ impl CoreSession {
             }
             None => {
                 return Ok(Observation::Failed {
-                    failure: crate::OperationalFailure {
+                    failure: OperationalFailure {
                         message: zenclash_i18n::text(
                             "core_page.errors.runtime_authority_unavailable",
                         ),

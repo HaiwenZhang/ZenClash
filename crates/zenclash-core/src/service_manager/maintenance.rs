@@ -1,6 +1,7 @@
 //! Runtime preparation for explicit repair and uninstall commands.
 
 use super::*;
+use tokio::sync::Mutex;
 
 /// One repair or uninstall intent bound to the application's actual CoreSession.
 ///

@@ -361,7 +361,7 @@ impl RuntimePage {
             .rounded(theme.radius_lg)
             .border_1()
             .border_color(if selected {
-                theme.chart_3
+                crate::design::brand_accent(theme)
             } else {
                 theme.border
             })
@@ -839,9 +839,12 @@ fn render_subscription_usage(
                 h_flex()
                     .gap_3()
                     .child(
-                        div()
-                            .flex_1()
-                            .child(Progress::new(id).h_2().color(theme.chart_3).value(percent)),
+                        div().flex_1().child(
+                            Progress::new(id)
+                                .h_2()
+                                .color(crate::design::brand_accent(theme))
+                                .value(percent),
+                        ),
                     )
                     .child(
                         div()

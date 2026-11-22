@@ -74,31 +74,22 @@ impl ControlledConfigStore {
         let prepare_store = leased_store.with_write_lease(&prepare_lease);
         let profile = profile.as_ref().to_path_buf();
         let patch = patch.clone();
-        let (update, applied_payload) = tokio::task::spawn_blocking(move || {
+        let (update, applied_payload, next_runtime) = tokio::task::spawn_blocking(move || {
             let _write_lease = prepare_lease;
             let applied_payload = prepare_store.cached_runtime_payload()?;
-            Ok::<_, ControlledConfigError>((
-                prepare_store.prepare_json_update(profile, &patch)?,
-                applied_payload,
-            ))
+            let update = prepare_store.prepare_json_update(profile, &patch)?;
+            let next_runtime = merge_payload_overrides(update.next_payload(), &overrides)?;
+            let previous_runtime = merge_payload_overrides(update.previous_payload(), &overrides)?;
+            let previous_runtime =
+                prepare_store.apply_session_listener_fallbacks(&previous_runtime)?;
+            let next_runtime = prepare_store.apply_session_listener_fallbacks(&next_runtime)?;
+            let previous_runtime = applied_payload.as_deref().unwrap_or(&previous_runtime);
+            validate_listener_change(previous_runtime, &next_runtime, true)
+                .map_err(ControlledConfigError::ListenerFallback)?;
+            Ok::<_, ControlledConfigError>((update, applied_payload, next_runtime))
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        let next_base = update.next_payload().to_owned();
-        let previous_base = update.previous_payload().to_owned();
-        let (next_runtime, previous_runtime) = tokio::task::spawn_blocking(move || {
-            Ok::<_, MihomoError>((
-                merge_payload_overrides(&next_base, &overrides)?,
-                merge_payload_overrides(&previous_base, &overrides)?,
-            ))
-        })
-        .await
-        .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        let previous_runtime = leased_store.apply_session_listener_fallbacks(&previous_runtime)?;
-        let next_runtime = leased_store.apply_session_listener_fallbacks(&next_runtime)?;
-        let previous_runtime = applied_payload.as_deref().unwrap_or(&previous_runtime);
-        validate_listener_change(previous_runtime, &next_runtime, true)
-            .map_err(ControlledConfigError::ListenerFallback)?;
         let (transaction, kind) = leased_store
             .accept_full_config(
                 client,
@@ -281,18 +272,21 @@ impl ControlledConfigStore {
         client.ensure_binding_current()?;
         let worker_lease = store.write_access.acquire()?;
         let worker = store.with_write_lease(&worker_lease);
-        let (payload, previous_payload) = tokio::task::spawn_blocking(move || {
+        let worker_client = client.clone();
+        let (payload, next_session, previous_payload) = tokio::task::spawn_blocking(move || {
             let _lease = worker_lease;
             let previous_payload = worker.cached_runtime_payload()?;
-            Ok::<_, ControlledConfigError>((
-                worker.effective_source_with_overrides(candidate, &overrides)?,
-                previous_payload,
-            ))
+            let payload = worker.effective_source_with_overrides(candidate, &overrides)?;
+            let normalized = worker_client.normalize_config_payload(payload)?;
+            let (payload, next_session) = worker.resolve_candidate_listeners_against(
+                normalized,
+                previous_payload.as_deref(),
+                true,
+            )?;
+            Ok::<_, ControlledConfigError>((payload, next_session, previous_payload))
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        let (payload, next_session) =
-            store.resolve_candidate_listeners(client.normalize_config_payload(payload)?, true)?;
         store
             .accept_full_config(
                 &client,
@@ -367,7 +361,7 @@ impl ControlledConfigStore {
                 let ReloadFallback::OwnedLocal { cancelled } = fallback else {
                     return Err(error);
                 };
-                if !crate::core_session::should_restart_after_hot_reload(&error.cause) {
+                if !super::should_restart_after_hot_reload(&error.cause) {
                     return Err(error);
                 }
                 client
@@ -441,8 +435,14 @@ impl ControlledConfigStore {
         let payload = if next_session_fallbacks.is_some() {
             payload
         } else {
-            let payload = client.normalize_config_payload(payload)?;
-            self.apply_session_listener_fallbacks(&payload)?
+            let worker_client = client.clone();
+            let worker_store = self.clone();
+            tokio::task::spawn_blocking(move || {
+                let payload = worker_client.normalize_config_payload(payload)?;
+                worker_store.apply_session_listener_fallbacks(&payload)
+            })
+            .await
+            .map_err(|error| ControlledConfigError::Task(error.to_string()))??
         };
         let prepared = client.prepare_runtime_payload(payload.clone()).await?;
         let worker_lease = self.write_access.acquire()?;
@@ -484,17 +484,18 @@ impl ControlledConfigStore {
             .acquire_write_lease_for_paths(process.write_scopes())
             .await?;
         let leased_store = self.with_write_lease(&write_lease);
-        let payload = if next_session_fallbacks.is_some() {
-            payload
-        } else {
-            let payload = normalize_runtime_payload(process.kind(), payload)?;
-            self.apply_session_listener_fallbacks(&payload)?
-        };
         let worker_lease = leased_store.write_access.acquire()?;
         let store = leased_store.with_write_lease(&worker_lease);
         let validator = process.config_validator().with_write_lease(&worker_lease);
+        let kind = process.kind();
         let cache = tokio::task::spawn_blocking(move || {
             let _write_lease = worker_lease;
+            let payload = if next_session_fallbacks.is_some() {
+                payload
+            } else {
+                let payload = normalize_runtime_payload(kind, payload)?;
+                store.apply_session_listener_fallbacks(&payload)?
+            };
             validator.validate_payload(&payload).map_err(|error| {
                 ControlledConfigError::Profile(MihomoError::Process(error.to_string()))
             })?;
@@ -613,12 +614,15 @@ impl ControlledConfigStore {
         let _mutation_guard = leased_store.mutation_gate.lock().await;
         client.ensure_binding_current()?;
         let store = leased_store.clone();
+        let worker_client = client.clone();
         let profile = profile.as_ref().to_path_buf();
-        let payload = tokio::task::spawn_blocking(move || store.effective_payload(profile))
-            .await
-            .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        let (payload, next_session) = leased_store
-            .resolve_candidate_listeners(client.normalize_config_payload(payload)?, true)?;
+        let (payload, next_session) = tokio::task::spawn_blocking(move || {
+            let payload = store.effective_payload(profile)?;
+            let normalized = worker_client.normalize_config_payload(payload)?;
+            store.resolve_candidate_listeners(normalized, true)
+        })
+        .await
+        .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
         leased_store
             .accept_runtime_payload(client, payload, Some(next_session))
             .await?
@@ -666,15 +670,16 @@ impl ControlledConfigStore {
         client.ensure_binding_current()?;
         let worker_lease = leased_store.write_access.acquire()?;
         let store = leased_store.with_write_lease(&worker_lease);
+        let worker_client = client.clone();
         let profile = profile.as_ref().to_path_buf();
-        let payload = tokio::task::spawn_blocking(move || {
+        let (payload, next_session) = tokio::task::spawn_blocking(move || {
             let _write_lease = worker_lease;
-            store.effective_with_overrides(profile, &overrides)
+            let payload = store.effective_with_overrides(profile, &overrides)?;
+            let normalized = worker_client.normalize_config_payload(payload)?;
+            store.resolve_candidate_listeners(normalized, true)
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        let (payload, next_session) = leased_store
-            .resolve_candidate_listeners(client.normalize_config_payload(payload)?, true)?;
         leased_store
             .accept_runtime_payload_for_session(client, payload, Some(next_session))
             .await?
@@ -725,15 +730,16 @@ impl ControlledConfigStore {
         let mutation_guard = leased_store.mutation_gate.clone().lock_owned().await;
         let worker_lease = leased_store.write_access.acquire()?;
         let store = leased_store.with_write_lease(&worker_lease);
-        let payload = tokio::task::spawn_blocking(move || {
+        let kind = process.kind();
+        let running = process.is_running();
+        let (payload, next_session) = tokio::task::spawn_blocking(move || {
             let _write_lease = worker_lease;
-            store.effective_source_with_overrides(candidate, &overrides)
+            let payload = store.effective_source_with_overrides(candidate, &overrides)?;
+            let payload = normalize_runtime_payload(kind, payload)?;
+            store.resolve_candidate_listeners(payload, running)
         })
         .await
         .map_err(|error| ControlledConfigError::Task(error.to_string()))??;
-        let payload = normalize_runtime_payload(process.kind(), payload)?;
-        let (payload, next_session) =
-            leased_store.resolve_candidate_listeners(payload, process.is_running())?;
         let cache = leased_store
             .accept_runtime_payload_with_restart_for_session(
                 process.clone(),

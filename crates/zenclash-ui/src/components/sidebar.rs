@@ -12,8 +12,9 @@ use gpui_kit::{
 };
 
 use crate::{
-    app::{SetDarkTheme, SetLightTheme, ToggleSidebar},
+    actions::{SetDarkTheme, SetLightTheme, ToggleSidebar},
     assets::{AppIcon, GROUP_ICON_PATH, RADIO_ICON_PATH, RSS_ICON_PATH, RULER_ICON_PATH},
+    design::online_indicator,
     pages::Page,
 };
 
@@ -37,7 +38,6 @@ pub(crate) fn runtime_uptime(process: Option<&zenclash_core::ProcessStatus>) -> 
     ))
 }
 
-use crate::app::navigation::dispatch_navigate;
 /// Compatibility path for application outbound routing modes.
 pub use crate::outbound_mode::OutboundMode;
 
@@ -153,8 +153,8 @@ impl RenderOnce for SidebarNavigation {
                                 this.child(div().min_w_0().text_ellipsis().child(page.label()))
                             }),
                     )
-                    .tooltip(page.label())
-                    .on_click(move |_, window, cx| dispatch_navigate(page, window, cx))
+                    .when(self.collapsed, |this| this.tooltip(page.label()))
+                    .on_click(move |_, window, cx| page.dispatch_navigate(window, cx))
             }))
     }
 }
@@ -177,7 +177,7 @@ impl RenderOnce for Sidebar {
         let (appearance_icon, appearance_label) = appearance_toggle_copy(dark);
 
         GpuiSidebar::new("main-sidebar")
-            .w(rems(9.))
+            .w(rems(13.))
             .collapsible(true)
             .collapsed(self.collapsed)
             .header(
@@ -253,7 +253,7 @@ impl RenderOnce for Sidebar {
                                     }),
                             )
                             .accessibility_label(appearance_label.clone())
-                            .tooltip(appearance_label)
+                            .when(self.collapsed, |button| button.tooltip(appearance_label))
                             .on_click(move |_, window, cx| {
                                 if dark {
                                     window.dispatch_action(Box::new(SetLightTheme), cx);
@@ -272,11 +272,7 @@ impl RenderOnce for Sidebar {
                                 .gap_3()
                                 .child(div().size_2p5().flex_shrink_0().rounded_full().bg(
                                     if connected {
-                                        if self.current_page.is_settings() {
-                                            theme.success
-                                        } else {
-                                            theme.chart_3
-                                        }
+                                        online_indicator(theme)
                                     } else {
                                         theme.muted_foreground
                                     },
@@ -289,11 +285,9 @@ impl RenderOnce for Sidebar {
                                             .child(
                                                 div()
                                                     .text_sm()
-                                                    .when(
-                                                        !self.current_page.is_settings()
-                                                            && connected,
-                                                        |label| label.text_color(theme.primary),
-                                                    )
+                                                    .when(connected, |label| {
+                                                        label.text_color(theme.primary)
+                                                    })
                                                     .child(core),
                                             )
                                             .child(
@@ -376,10 +370,12 @@ mod tests {
                 div()
                     .size_full()
                     .track_focus(&self.focus)
-                    .on_action(cx.listener(|this, _: &crate::app::NavigateRules, _, cx| {
-                        this.navigated = true;
-                        cx.notify();
-                    }))
+                    .on_action(
+                        cx.listener(|this, _: &crate::actions::NavigateRules, _, cx| {
+                            this.navigated = true;
+                            cx.notify();
+                        }),
+                    )
                     .child(
                         super::SidebarNavigation::new(Page::Home, [Page::Home, Page::Rules])
                             .collapsed(true),

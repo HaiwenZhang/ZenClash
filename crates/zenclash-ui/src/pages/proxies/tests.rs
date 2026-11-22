@@ -1448,6 +1448,13 @@ fn local_delay_history_discards_oldest_samples() {
     assert_eq!(proxy.history.len(), MAX_LOCAL_DELAY_HISTORY);
     assert_eq!(proxy.history.first().map(|sample| sample.delay), Some(2));
     assert_eq!(proxy.latest_delay(), Some(21));
+    assert!(
+        proxy
+            .history
+            .iter()
+            .all(|sample| chrono::DateTime::parse_from_rfc3339(&sample.time).is_ok()),
+        "append_delay must record valid RFC3339 timestamps"
+    );
 }
 
 #[test]

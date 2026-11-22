@@ -78,7 +78,7 @@ impl DataWriteLease {
     pub(crate) fn shared(paths: impl IntoIterator<Item = PathBuf>) -> std::io::Result<Self> {
         let lease = acquire(paths, false);
         // Check after admission: a restore may have failed while this writer waited.
-        crate::backup::ensure_writes_available(lease.scopes())?;
+        ensure_writes_available(lease.scopes())?;
         Ok(lease)
     }
 
@@ -261,6 +261,101 @@ pub(crate) fn publish_if_data_available<T>(
     Some(publish())
 }
 
+/// Rejects ordinary writes while an uncommitted backup restore journal exists in
+/// any readable ancestor of `paths`.
+///
+/// Ancestor directories above the application data root (for example `/root` or
+/// restricted container parents) may return `PermissionDenied` or `NotADirectory`
+/// when probed; those inaccessible ancestors are skipped rather than blocking all
+/// ordinary store writes.
+pub(crate) fn ensure_writes_available(paths: &[PathBuf]) -> std::io::Result<()> {
+    let mut inspected = std::collections::HashSet::new();
+    for path in paths {
+        for root in path.ancestors() {
+            if !inspected.insert(root) {
+                continue;
+            }
+            match inspect_pending_restore_journal(root) {
+                Ok(true) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        zenclash_i18n::text("backup.errors.recovery_required"),
+                    ));
+                }
+                Ok(false) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotADirectory | std::io::ErrorKind::PermissionDenied
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn inspect_pending_restore_journal(root: &Path) -> std::io::Result<bool> {
+    use std::io::Read as _;
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct JournalHeader {
+        version: u32,
+        rollback_name: String,
+        staging_name: String,
+        #[allow(dead_code)]
+        original: [bool; 4],
+        #[allow(dead_code)]
+        states: [serde_json::Value; 4],
+        #[allow(dead_code)]
+        remove_empty_data_root: bool,
+        committed: bool,
+    }
+
+    const JOURNAL_FILE: &str = ".backup-restore.json";
+    const MAX_JOURNAL_BYTES: usize = 16 * 1024;
+
+    let path = root.join(JOURNAL_FILE);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_file() || metadata.len() > MAX_JOURNAL_BYTES as u64 {
+        return Err(std::io::Error::other("invalid backup restore journal file"));
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(MAX_JOURNAL_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_JOURNAL_BYTES {
+        return Err(std::io::Error::other(
+            "backup restore journal exceeds its size limit",
+        ));
+    }
+    let journal: JournalHeader = serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
+    if journal.version != 1
+        || !valid_generated_dir_name(&journal.rollback_name, ".zenclash-backup-rollback-")
+        || !valid_generated_dir_name(&journal.staging_name, ".zenclash-backup-staging-")
+    {
+        return Err(std::io::Error::other(
+            "invalid backup restore journal paths or version",
+        ));
+    }
+    Ok(!journal.committed)
+}
+
+fn valid_generated_dir_name(name: &str, prefix: &str) -> bool {
+    let Some((pid, sequence)) = name
+        .strip_prefix(prefix)
+        .and_then(|suffix| suffix.split_once('-'))
+    else {
+        return false;
+    };
+    pid.parse::<u32>().is_ok() && sequence.parse::<u64>().is_ok()
+}
+
 fn coordinator() -> &'static Coordinator {
     static COORDINATOR: OnceLock<Coordinator> = OnceLock::new();
     COORDINATOR.get_or_init(Coordinator::default)
@@ -293,10 +388,13 @@ fn acquire(paths: impl IntoIterator<Item = PathBuf>, exclusive: bool) -> DataWri
             break;
         }
         coordinator.changed.wait(&mut state);
-        // A preceding restore may have replaced a symlinked directory while
-        // this operation waited. Resolve its physical destination again before
-        // admitting it, retaining the stable logical scope throughout the wait.
+        // Release the global coordinator lock before performing filesystem
+        // canonicalize/read_link syscalls. A preceding restore may have replaced
+        // a symlinked directory while this operation waited; re-resolve its
+        // physical destination before checking conflicts again.
+        drop(state);
         paths = write_paths(&requested);
+        state = coordinator.state.lock();
         if let Some(waiting) = state
             .waiting_restores
             .iter_mut()
@@ -642,6 +740,34 @@ mod tests {
         restore.join().unwrap();
         assert_eq!(std::fs::read(root.join("completed")).unwrap(), b"committed");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_writes_available_ignores_permission_denied_on_ancestor_directories() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Root bypasses directory permission checks.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let root = test_root("ancestor-eperm");
+        let child = root.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        let target = child.join("store.json");
+        let original = std::fs::metadata(&root).unwrap().permissions();
+        // Remove read/search on `root` temporarily? Keeping execute (`0o100`) allows
+        // traversing to `child` while denying directory listing; removing write/read (`0o000`)
+        // triggers `PermissionDenied` when probing `root/.backup-restore.json`.
+        let mut restricted = original.clone();
+        restricted.set_mode(0o000);
+        std::fs::set_permissions(&root, restricted).unwrap();
+
+        let result = ensure_writes_available(std::slice::from_ref(&target));
+        std::fs::set_permissions(&root, original).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+
+        result.expect("PermissionDenied on an ancestor must not block writes");
     }
 
     fn test_root(label: &str) -> PathBuf {

@@ -178,9 +178,38 @@ pub(in crate::pages::runtime) struct ProfileCatalogView {
     lookup: HashMap<String, usize>,
     indices: Vec<usize>,
     pub(super) remote_count: usize,
-    catalog_address: usize,
+    catalog_fingerprint: u64,
     catalog_length: usize,
     identities: Vec<String>,
+}
+
+fn catalog_fingerprint(catalog: &ProfileCatalog) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    catalog.active.hash(&mut hasher);
+    catalog.profiles.len().hash(&mut hasher);
+    for profile in &catalog.profiles {
+        profile.id.hash(&mut hasher);
+        profile.name.hash(&mut hasher);
+        profile.file_name.hash(&mut hasher);
+        profile.is_remote().hash(&mut hasher);
+        profile.updated_at.hash(&mut hasher);
+        profile.size_bytes.hash(&mut hasher);
+        profile.auto_update.hash(&mut hasher);
+        profile.update_interval_minutes.hash(&mut hasher);
+        profile.update_cron.hash(&mut hasher);
+        if let Some(usage) = &profile.subscription.usage {
+            true.hash(&mut hasher);
+            usage.upload.hash(&mut hasher);
+            usage.download.hash(&mut hasher);
+            usage.total.hash(&mut hasher);
+            usage.expire.hash(&mut hasher);
+        } else {
+            false.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 impl ProfileCatalogView {
@@ -191,7 +220,7 @@ impl ProfileCatalogView {
             .enumerate()
             .map(|(index, profile)| (profile.id.clone(), index))
             .collect();
-        self.catalog_address = catalog.profiles.as_ptr() as usize;
+        self.catalog_fingerprint = catalog_fingerprint(catalog);
         self.catalog_length = catalog.profiles.len();
         self.identities = catalog
             .profiles
@@ -251,7 +280,7 @@ impl ProfileCatalogView {
     }
 
     pub(super) fn is_current(&self, catalog: &ProfileCatalog) -> bool {
-        self.catalog_address == catalog.profiles.as_ptr() as usize
+        self.catalog_fingerprint == catalog_fingerprint(catalog)
             && self.catalog_length == catalog.profiles.len()
             && self.active == catalog.active
             && self.visible_indices().iter().all(|&index| {
@@ -297,7 +326,7 @@ impl ProfileCatalogView {
         &self,
         catalog: &'a ProfileCatalog,
     ) -> Option<&'a zenclash_core::ProfileRecord> {
-        if self.catalog_address != catalog.profiles.as_ptr() as usize
+        if self.catalog_fingerprint != catalog_fingerprint(catalog)
             || self.catalog_length != catalog.profiles.len()
             || self.active != catalog.active
         {
@@ -419,12 +448,24 @@ mod tests {
     }
 
     #[test]
-    fn active_profile_lookup_rejects_replaced_reordered_and_changed_identities() {
+    fn active_profile_lookup_rejects_mutated_reordered_and_changed_identities() {
         let mut catalog = catalog();
         let mut view = ProfileCatalogView::default();
         view.prepare(&catalog);
         assert_eq!(view.active_profile(&catalog).unwrap().id, "profile-0");
-        assert!(view.active_profile(&catalog.clone()).is_none());
+        // Identical content at a different heap address stays valid; in-place metadata edits invalidate.
+        assert_eq!(
+            view.active_profile(&catalog.clone()).unwrap().id,
+            "profile-0"
+        );
+        catalog.profiles[0].name = "Renamed Profile 0".into();
+        assert!(!view.is_current(&catalog));
+        assert!(view.active_profile(&catalog).is_none());
+        view.prepare(&catalog);
+        assert_eq!(
+            view.active_profile(&catalog).unwrap().name,
+            "Renamed Profile 0"
+        );
         catalog.profiles.swap(0, 1);
         assert!(view.active_profile(&catalog).is_none());
         view.prepare(&catalog);

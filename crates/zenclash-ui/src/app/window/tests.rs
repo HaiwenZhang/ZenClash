@@ -1,14 +1,14 @@
 use super::*;
 use crate::app::test_support::app_test_services;
 #[cfg(target_os = "windows")]
-use crate::components::tray::TrayCommand;
+use crate::tray::TrayCommand;
 use gpui_kit::{px, size};
 
 #[gpui_kit::test]
 fn primary_tray_click_restores_the_same_main_window_and_keeps_it_visible(
     cx: &mut gpui_kit::TestAppContext,
 ) {
-    use crate::components::tray::TrayClick;
+    use crate::tray::TrayClick;
     use gpui_kit::component::Root;
     let fixture = crate::pages::runtime::test_support::RuntimePageFixture::new();
     let services = app_test_services(&fixture);
@@ -31,7 +31,7 @@ fn primary_tray_click_restores_the_same_main_window_and_keeps_it_visible(
         });
     })
     .unwrap();
-    assert!(!cx.update(|cx| owner.read(cx).main_window_visible));
+    assert!(!cx.update(|cx| owner.read(cx).shell.main_window_visible));
 
     for _ in 0..2 {
         cx.update(|cx| {
@@ -41,8 +41,8 @@ fn primary_tray_click_restores_the_same_main_window_and_keeps_it_visible(
         });
         cx.run_until_parked();
         cx.update(|cx| {
-            assert!(owner.read(cx).main_window_visible);
-            assert_eq!(owner.read(cx).main_window, main.into());
+            assert!(owner.read(cx).shell.main_window_visible);
+            assert_eq!(owner.read(cx).shell.main_window, main.into());
             assert_eq!(cx.windows().len(), 1);
         });
     }
@@ -76,13 +76,14 @@ fn application_reopen_restores_hidden_main_window(cx: &mut gpui_kit::TestAppCont
         });
     })
     .unwrap();
-    assert!(!cx.update(|cx| owner.read(cx).main_window_visible));
+    assert!(!cx.update(|cx| owner.read(cx).shell.main_window_visible));
     cx.update(crate::app::bootstrap::reopen_main_window);
-    assert!(cx.update(|cx| owner.read(cx).main_window_visible));
+    assert!(cx.update(|cx| owner.read(cx).shell.main_window_visible));
     #[cfg(target_os = "macos")]
     assert!(cx.update(|cx| {
         owner
             .read(cx)
+            .shell
             .main_window_restore_size
             .restore_size
             .is_none()
@@ -117,9 +118,9 @@ fn caption_close_keeps_app_alive_and_tray_show_restores_the_same_window(
     cx.update_window(main.into(), |_, window, cx| {
         window.render_frame(cx);
         window.click("main-window-close", cx);
-        assert!(!owner.read(cx).main_window_visible);
+        assert!(!owner.read(cx).shell.main_window_visible);
         assert_eq!(
-            owner.read(cx).quit_state,
+            owner.read(cx).shell.quit_state,
             crate::app::system_proxy::QuitState::Idle
         );
     })
@@ -129,8 +130,8 @@ fn caption_close_keeps_app_alive_and_tray_show_restores_the_same_window(
         owner.update(cx, |app, cx| {
             app.handle_tray_command(TrayCommand::ShowWindow, cx)
         });
-        assert!(owner.read(cx).main_window_visible);
-        assert_eq!(owner.read(cx).main_window, main.into());
+        assert!(owner.read(cx).shell.main_window_visible);
+        assert_eq!(owner.read(cx).shell.main_window, main.into());
     });
     cx.update_window(main.into(), |_, window, _| window.remove_window())
         .unwrap();
@@ -163,9 +164,9 @@ fn native_close_keeps_app_alive_and_reopen_restores_the_same_window(
             &owner.downgrade(),
             cx
         ));
-        assert!(!owner.read(cx).main_window_visible);
+        assert!(!owner.read(cx).shell.main_window_visible);
         assert_eq!(
-            owner.read(cx).quit_state,
+            owner.read(cx).shell.quit_state,
             crate::app::system_proxy::QuitState::Idle
         );
     })
@@ -173,8 +174,8 @@ fn native_close_keeps_app_alive_and_reopen_restores_the_same_window(
     cx.update(crate::app::bootstrap::reopen_main_window);
     cx.update(|cx| {
         assert_eq!(cx.windows().len(), 1);
-        assert!(owner.read(cx).main_window_visible);
-        assert_eq!(owner.read(cx).main_window, main.into());
+        assert!(owner.read(cx).shell.main_window_visible);
+        assert_eq!(owner.read(cx).shell.main_window, main.into());
     });
     cx.update_window(main.into(), |_, window, _| window.remove_window())
         .unwrap();
@@ -205,7 +206,7 @@ fn taskbar_activation_restores_hidden_main_window_data(cx: &mut gpui_kit::TestAp
         owner.update(cx, |app, cx| app.hide_main_window_in(window, cx));
     })
     .unwrap();
-    assert!(!cx.update(|cx| owner.read(cx).main_window_visible));
+    assert!(!cx.update(|cx| owner.read(cx).shell.main_window_visible));
     assert!(!cx.update(|cx| owner.read(cx).runtime_page.read(cx).live_updates_enabled()));
     gpui_kit::VisualTestContext::from_window(main.into(), cx).deactivate_window();
 
@@ -214,11 +215,11 @@ fn taskbar_activation_restores_hidden_main_window_data(cx: &mut gpui_kit::TestAp
         .unwrap();
     cx.run_until_parked();
     cx.update(|cx| {
-        assert!(owner.read(cx).main_window_visible);
+        assert!(owner.read(cx).shell.main_window_visible);
         assert!(owner.read(cx).runtime_page.read(cx).live_updates_enabled());
-        assert_eq!(owner.read(cx).main_window, main.into());
+        assert_eq!(owner.read(cx).shell.main_window, main.into());
         assert_eq!(
-            owner.read(cx).quit_state,
+            owner.read(cx).shell.quit_state,
             crate::app::system_proxy::QuitState::Idle
         );
     });

@@ -7,11 +7,11 @@ use crate::application_commands::{
 
 impl RuntimePage {
     pub(in crate::pages::runtime) fn enabled_override_paths(&self) -> Vec<PathBuf> {
-        self.overrides.enabled_paths()
+        self.library.overrides.enabled_paths()
     }
 
     pub(super) fn import_override_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let Some(store) = self.overrides.store().cloned() else {
+        let Some(store) = self.library.overrides.store().cloned() else {
             self.error = Some(zenclash_i18n::text("overrides.errors.store_unavailable"));
             cx.notify();
             return;
@@ -56,7 +56,7 @@ impl RuntimePage {
     }
 
     pub(super) fn set_override_enabled(&mut self, id: &str, enabled: bool, cx: &mut Context<Self>) {
-        let before = self.overrides.catalog().clone();
+        let before = self.library.overrides.catalog().clone();
         let mut next = before.clone();
         let Some(record) = next.items.iter_mut().find(|record| record.id == id) else {
             self.error = Some(zenclash_i18n::text("overrides.errors.record_missing"));
@@ -77,7 +77,7 @@ impl RuntimePage {
     }
 
     pub(super) fn move_override(&mut self, id: &str, offset: isize, cx: &mut Context<Self>) {
-        let before = self.overrides.catalog().clone();
+        let before = self.library.overrides.catalog().clone();
         let mut next = before.clone();
         let Some(current) = next.items.iter().position(|record| record.id == id) else {
             return;
@@ -97,7 +97,7 @@ impl RuntimePage {
     }
 
     pub(super) fn delete_disabled_override(&mut self, id: String, cx: &mut Context<Self>) {
-        let Some(store) = self.overrides.store().cloned() else {
+        let Some(store) = self.library.overrides.store().cloned() else {
             return;
         };
         let Some(token) = self.begin_mutation(Page::Override) else {
@@ -137,7 +137,7 @@ impl RuntimePage {
         success: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(store) = self.overrides.store().cloned() else {
+        let Some(store) = self.library.overrides.store().cloned() else {
             return;
         };
         let Some(token) = self.begin_mutation(Page::Override) else {
@@ -180,7 +180,7 @@ impl RuntimePage {
         receipt: OverrideApplicationReceipt,
         cx: &mut Context<Self>,
     ) {
-        self.overrides.adopt_receipt(receipt);
+        self.library.overrides.adopt_receipt(receipt);
         self.invalidate_config_inputs(cx);
     }
 
@@ -190,7 +190,7 @@ impl RuntimePage {
         token: super::super::PageTaskToken,
         cx: &mut Context<Self>,
     ) {
-        let feedback = self.overrides.adopt_failure(failure);
+        let feedback = self.library.overrides.adopt_failure(failure);
         if feedback.kind != OverrideFailureKind::Rejected {
             self.invalidate_config_inputs(cx);
         }

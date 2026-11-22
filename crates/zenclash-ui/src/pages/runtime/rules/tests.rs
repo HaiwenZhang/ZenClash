@@ -28,7 +28,7 @@ fn actual_rule_filter_input_publishes_the_matching_projection(cx: &mut TestAppCo
     fixture.settle_with_context(cx, &page, |page, _| !page.persistent_loading);
     cx.update_window(window, |_, _, cx| {
         page.update(cx, |page, cx| {
-            page.ui_visibility = lifecycle::UiVisibility::new(true);
+            page.shell.ui_visibility = lifecycle::UiVisibility::new(true);
             page.invalidate_page_load();
             let data = PageSnapshotData::Rules {
                 proxies: None,

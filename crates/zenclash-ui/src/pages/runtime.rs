@@ -31,7 +31,9 @@ use zenclash_core::{
 #[cfg(test)]
 use zenclash_core::{ConnectionsSnapshot, CoreLaunchConfig};
 
-use crate::app::{HideTrafficIcon, SetDarkTheme, SetLightTheme, SetSystemTheme, ShowTrafficIcon};
+use crate::actions::{
+    HideTrafficIcon, SetDarkTheme, SetLightTheme, SetSystemTheme, ShowTrafficIcon,
+};
 
 use super::Page;
 #[cfg(all(test, target_os = "windows"))]
@@ -76,55 +78,72 @@ use mihomo::CoreReleaseState;
 use page_observation::{PageSnapshotData, load_page};
 use page_task::PageTaskToken;
 
+struct RuntimeMonitors {
+    traffic_monitor: Arc<TrafficMonitor>,
+    log_monitor: Arc<LogMonitor>,
+    operational_status: Arc<OperationalStatus>,
+    traffic_capture: TrafficCaptureSession,
+    provider_operations: ProviderOperations,
+}
+
+struct SettingsWorkspaceState {
+    controlled_config: Value,
+    controlled_config_generation: u64,
+    core_management: settings::CoreManagementUiState,
+    core_releases: CoreReleaseState,
+    system_proxy_editor: Option<system_proxy::SystemProxyEditorState>,
+    system_proxy_session: Option<SystemProxySession>,
+    preference_previews: crate::preference_previews::PreferencePreviews,
+}
+
+struct LibraryPagesState {
+    resources: resources::ResourcesState,
+    overrides: overrides::OverridesState,
+}
+
+struct ShellPresentationState {
+    feedback_notifications: crate::components::feedback::FeedbackNotifications,
+    body_scroll: gpui_kit::ScrollHandle,
+    window_handle: AnyWindowHandle,
+    ui_visibility: lifecycle::UiVisibility,
+    live_updates_enabled: tokio::sync::watch::Sender<bool>,
+    startup_error: Option<String>,
+    tasks: Vec<gpui_kit::Task<()>>,
+    _subscriptions: Vec<Subscription>,
+}
+
 /// Stateful GPUI page host for Mihomo runtime, configuration, and diagnostics.
 pub struct RuntimePage {
-    feedback_notifications: crate::components::feedback::FeedbackNotifications,
     page: Page,
     core_kind: CoreKind,
     core_session: CoreSession,
     application_commands: crate::ApplicationCommands,
     client: MihomoClient,
     runtime: tokio::runtime::Handle,
-    traffic_monitor: Arc<TrafficMonitor>,
-    log_monitor: Arc<LogMonitor>,
-    operational_status: Arc<OperationalStatus>,
-    traffic_capture: TrafficCaptureSession,
+    monitors: RuntimeMonitors,
+    settings: SettingsWorkspaceState,
+    library: LibraryPagesState,
+    shell: ShellPresentationState,
     profile_path: Option<PathBuf>,
     controlled_config_store: ControlledConfigStore,
-    controlled_config: Value,
     config_inputs: ConfigInputs,
     persistent_loading: bool,
     preferences_store: Option<AppPreferencesStore>,
     preferences: AppPreferences,
-    preference_previews: crate::preference_previews::PreferencePreviews,
-    core_management: settings::CoreManagementUiState,
-    body_scroll: gpui_kit::ScrollHandle,
-    resources: resources::ResourcesState,
-    system_proxy_session: Option<SystemProxySession>,
     profiles: profiles::ProfileLibrary,
-    overrides: overrides::OverridesState,
     connections: Entity<connections::ConnectionsView>,
     logs: Entity<logs::LogsView>,
     rules: Entity<rules::RulesView>,
-    system_proxy_editor: Option<system_proxy::SystemProxyEditorState>,
-    core_releases: CoreReleaseState,
     page_observation: page_observation::PageObservationOwner,
     home: home::HomeUiState,
     traffic_history: traffic::TrafficHistory,
     network_diagnostics: network::NetworkDiagnosticsUiState,
-    provider_operations: ProviderOperations,
     navigation_generation: u64,
-    controlled_config_generation: u64,
     loading: bool,
     mutations: busy::MutationState,
     error: Option<String>,
-    startup_error: Option<String>,
     notice: Option<String>,
     focus_handle: gpui_kit::FocusHandle,
-    window_handle: AnyWindowHandle,
-    ui_visibility: lifecycle::UiVisibility,
-    live_updates_enabled: tokio::sync::watch::Sender<bool>,
-    _subscriptions: Vec<Subscription>,
 }
 
 /// Runtime services shared by the native Mihomo management pages.

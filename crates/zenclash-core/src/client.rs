@@ -2,12 +2,14 @@
 
 use std::{sync::Arc, time::Duration};
 
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
-
 use crate::{
-    CoreConfigValidator, CoreKind, ManagedCoreProcess, MihomoEndpoint, owned_core::OwnedCore,
+    CoreConfigValidator, CoreKind, MihomoEndpoint,
+    runtime_launcher::{
+        CoreLaunchDescriptor, CoreProcessLease, CoreRuntimeDescriptor, KernelOwner,
+    },
 };
+
+pub use crate::core_errors::{MihomoError, MihomoResult, VersionInfo};
 
 mod api;
 pub(crate) use api::AppliedConfig;
@@ -15,7 +17,7 @@ mod connections;
 mod request;
 mod transport;
 
-pub(crate) use transport::{ControllerBinding, ControllerStream};
+pub(crate) use transport::{BindingSnapshot, ControllerBinding, ControllerStream};
 
 #[cfg(test)]
 mod tests;
@@ -25,139 +27,6 @@ mod ownership_tests;
 
 #[cfg(test)]
 mod startup_tests;
-
-/// Result type returned by Mihomo process, endpoint and API operations.
-pub type MihomoResult<T> = Result<T, MihomoError>;
-
-/// Definitive native rejection of startup ownership, without exposing IPC internals.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ServiceStartupRejection {
-    /// Another authenticated application already owns the service session.
-    Occupied,
-    /// The actual user is not approved to use the installation.
-    Unauthorized,
-    /// The verified service uses an incompatible protocol.
-    Incompatible,
-    /// Administrator maintenance must finish before ownership can be acquired.
-    MaintenancePending,
-}
-
-/// Error produced while configuring, launching or communicating with Mihomo.
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum MihomoError {
-    /// Controller URL is empty, malformed or uses an unsupported scheme.
-    #[error("invalid Mihomo controller endpoint: {0}")]
-    InvalidEndpoint(String),
-    /// HTTP transport, timeout or response-decoding failure.
-    #[error("Mihomo request failed: {0}")]
-    Http(#[from] reqwest::Error),
-    /// Local controller transport failure, retaining whether a request was sent.
-    #[error("Mihomo IPC request failed: {0}")]
-    Native(#[from] crate::service::NativeHttpError),
-    /// Authenticated native service transport or policy rejection.
-    #[error("Mihomo service request failed: {0}")]
-    Service(#[from] crate::service::ServiceCallError),
-    /// An admitted native mutation has no confirmed outcome yet.
-    #[error("service runtime outcome is unconfirmed")]
-    RuntimeOutcomeUnknown,
-    /// Files or a core already changed before a later operation failed.
-    #[error("service runtime changed before confirmation: {0}")]
-    RuntimePartiallyApplied(#[source] Box<MihomoError>),
-    /// A response belongs to a backend replaced before the request completed.
-    #[error("Mihomo controller changed during the request")]
-    StaleTransport,
-    /// Binding changed before dispatch: no request was sent and the outcome is definitive.
-    #[error("{}", zenclash_i18n::text("core_page.errors.binding_changed"))]
-    StaleBinding,
-    /// A Local Mihomo mutation requires authorization and service handover before dispatch.
-    #[error("{}", zenclash_i18n::text("core_page.service.required"))]
-    ServiceRequired,
-    /// The controller's JSON response does not match the requested schema.
-    #[error("invalid Mihomo response: {0}")]
-    Decode(#[from] serde_json::Error),
-    /// Response decoding failure annotated with its endpoint and JSON field path.
-    #[error("invalid Mihomo response from {endpoint} at {field_path}: {source}")]
-    ResponseDecode {
-        /// Controller route without query parameters or authentication information.
-        endpoint: String,
-        /// Nested JSON field or array entry that could not be decoded.
-        field_path: String,
-        /// Original JSON decoding failure, retaining line and column information.
-        #[source]
-        source: serde_json::Error,
-        /// Whether the original transport classified decoding failure as uncertain.
-        outcome_unknown: bool,
-    },
-    /// A direct controller response exceeded its defensive byte limit.
-    #[error("Mihomo response from {endpoint} exceeds {limit_bytes} bytes")]
-    ResponseTooLarge {
-        /// Controller route without query parameters or credentials.
-        endpoint: String,
-        /// Maximum accepted response size in bytes.
-        limit_bytes: usize,
-    },
-    /// Non-success response returned by Mihomo, including its bounded message.
-    #[error("Mihomo API returned HTTP {status}: {message}")]
-    Api {
-        /// HTTP response status code.
-        status: u16,
-        /// Error message returned by Mihomo.
-        message: String,
-    },
-    /// Invalid caller input rejected before a network request is sent.
-    #[error("invalid Mihomo request input: {0}")]
-    InvalidInput(String),
-    /// Process, filesystem or native-platform operation failure.
-    #[error("Mihomo process error: {0}")]
-    Process(String),
-    /// System-proxy or PAC operation failure, preserving native and recovery facts.
-    #[error(transparent)]
-    SystemProxy(#[from] Box<crate::SystemProxyError>),
-}
-
-impl From<std::io::Error> for MihomoError {
-    fn from(error: std::io::Error) -> Self {
-        Self::Process(error.to_string())
-    }
-}
-
-impl MihomoError {
-    /// Returns a definitive native startup rejection, if one was observed.
-    /// Transport loss and timeouts remain unknown; this reader performs no IPC.
-    #[must_use]
-    pub fn service_startup_rejection(&self) -> Option<ServiceStartupRejection> {
-        use crate::service::ServiceCallError;
-        use zenclash_service::ServiceErrorCode;
-        match self {
-            Self::Service(ServiceCallError::Rejected { code, .. })
-                if *code == ServiceErrorCode::UnauthorizedOwner as u16 =>
-            {
-                Some(ServiceStartupRejection::Unauthorized)
-            }
-            Self::Service(ServiceCallError::Rejected { code, .. })
-                if *code == ServiceErrorCode::ProtocolMismatch as u16 =>
-            {
-                Some(ServiceStartupRejection::Incompatible)
-            }
-            Self::Service(ServiceCallError::VersionMismatch(_)) => {
-                Some(ServiceStartupRejection::Incompatible)
-            }
-            _ => None,
-        }
-    }
-}
-
-/// Response returned by Mihomo's `/version` endpoint.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub struct VersionInfo {
-    /// Whether the running core identifies itself as Mihomo/Clash Meta.
-    #[serde(default)]
-    pub meta: bool,
-    /// Core version string.
-    #[serde(default)]
-    pub version: String,
-}
 
 /// Cloneable HTTP client for Mihomo's external-controller API.
 #[derive(Clone)]
@@ -224,8 +93,16 @@ impl MihomoClient {
     ///
     /// # Errors
     /// Returns an error if the underlying HTTP client cannot be constructed.
-    pub fn from_process(process: Arc<ManagedCoreProcess>) -> MihomoResult<Self> {
-        Self::new_binding(ControllerBinding::process_binding(process))
+    pub fn from_process<P: CoreProcessLease + 'static>(process: Arc<P>) -> MihomoResult<Self> {
+        Self::from_lease(process)
+    }
+
+    /// Creates a client retaining an owned [`CoreProcessLease`] and its controller.
+    ///
+    /// # Errors
+    /// Returns an error if the underlying HTTP client cannot be constructed.
+    pub fn from_lease(lease: Arc<dyn CoreProcessLease>) -> MihomoResult<Self> {
+        Self::new_binding(ControllerBinding::lease_binding(lease))
     }
 
     fn new_binding(binding: Arc<ControllerBinding>) -> MihomoResult<Self> {
@@ -285,13 +162,15 @@ impl MihomoClient {
         let mut scopes = self
             .current_config_validator()
             .map_or_else(Vec::new, |validator| validator.write_scopes());
-        match self.owned_core() {
-            Some(OwnedCore::Local(process)) => {
+        match &self.binding_snapshot().backend {
+            transport::ControllerBackend::Local(process) => {
                 // Restart also validates the actual launch config, which can be outside home.
                 scopes.extend(process.write_scopes());
             }
-            Some(OwnedCore::Service(runtime)) => scopes.push(runtime.source_home().to_path_buf()),
-            None => {}
+            transport::ControllerBackend::Service { runtime } => {
+                scopes.push(runtime.source_home().to_path_buf());
+            }
+            transport::ControllerBackend::Direct(_) => {}
         }
         scopes
     }
@@ -341,12 +220,22 @@ impl MihomoClient {
         self.binding.close_admission();
     }
 
-    pub(crate) fn runtime_descriptor(&self) -> crate::owned_core::CoreRuntimeDescriptor {
+    pub(crate) fn runtime_descriptor(&self) -> CoreRuntimeDescriptor {
         self.binding.descriptor()
     }
 
-    pub(crate) fn local_recovery_launch(&self) -> Option<crate::CoreLaunchConfig> {
+    pub(crate) fn local_recovery_launch(&self) -> Option<CoreLaunchDescriptor> {
         self.binding.local_recovery_launch()
+    }
+
+    /// Returns the high-level kernel ownership boundary for non-service bindings.
+    #[must_use]
+    pub fn kernel_owner(&self) -> Option<KernelOwner> {
+        self.binding_snapshot().kernel_owner()
+    }
+
+    pub(crate) fn local_lease(&self) -> Option<Arc<dyn CoreProcessLease>> {
+        self.binding_snapshot().local_lease()
     }
 
     pub(crate) async fn lock_runtime_binding(
@@ -366,7 +255,7 @@ impl MihomoClient {
         Ok(binding)
     }
 
-    fn binding_snapshot(&self) -> transport::BindingSnapshot {
+    pub(crate) fn binding_snapshot(&self) -> transport::BindingSnapshot {
         self.pinned_binding
             .clone()
             .unwrap_or_else(|| self.binding.snapshot())
@@ -449,10 +338,6 @@ impl MihomoClient {
         self.binding_snapshot().kind
     }
 
-    pub(crate) fn owned_core(&self) -> Option<OwnedCore> {
-        self.binding_snapshot().owned_core()
-    }
-
     pub(crate) fn normalize_config_payload(&self, payload: String) -> MihomoResult<String> {
         self.ensure_binding_current()?;
         if payload.trim().is_empty() {
@@ -480,13 +365,10 @@ impl MihomoClient {
         self.runtime_session().map(|runtime| runtime.client.clone())
     }
 
-    pub(super) fn runtime_session(
+    pub(crate) fn runtime_session(
         &self,
     ) -> Option<Arc<crate::service_runtime_session::ServiceRuntimeSession>> {
-        match self.owned_core() {
-            Some(OwnedCore::Service(runtime)) => Some(runtime),
-            Some(OwnedCore::Local(_)) | None => None,
-        }
+        self.binding_snapshot().service_runtime()
     }
 
     /// Commits a service transport to every clone after pending mutations finish.
@@ -539,14 +421,15 @@ impl MihomoClient {
     ///
     /// # Errors
     /// Rejects a different core kind, unresolved service mutation, or exhausted generation.
-    pub(crate) async fn switch_to_process(
+    pub(crate) async fn switch_to_process<P: CoreProcessLease + 'static>(
         &self,
-        process: Arc<ManagedCoreProcess>,
+        process: Arc<P>,
     ) -> MihomoResult<()> {
+        let lease: Arc<dyn CoreProcessLease> = process;
         let guard = self.mutation_gate.clone().lock_owned().await;
         self.ensure_binding_current()?;
         self.binding.ensure_open()?;
-        if process.kind() != self.current_kind() {
+        if lease.kind() != self.current_kind() {
             return Err(MihomoError::InvalidInput(
                 "绑定的进程与客户端内核类型不一致".into(),
             ));
@@ -554,7 +437,7 @@ impl MihomoClient {
         if let Some(runtime) = self.binding.runtime() {
             runtime.release_owned().await?;
         }
-        self.publish_backend(transport::ControllerBackend::Local(process), guard)
+        self.publish_backend(transport::ControllerBackend::Local(lease), guard)
             .await
     }
 
@@ -582,9 +465,9 @@ impl MihomoClient {
             .await
     }
 
-    pub(crate) async fn publish_prepared_process(
+    pub(crate) async fn publish_prepared_process<P: CoreProcessLease + 'static>(
         &self,
-        process: Arc<ManagedCoreProcess>,
+        process: Arc<P>,
         guard: tokio::sync::OwnedMutexGuard<()>,
     ) -> MihomoResult<tokio::sync::OwnedMutexGuard<()>> {
         self.publish_owned_backend(transport::ControllerBackend::Local(process), guard)
@@ -614,11 +497,14 @@ impl MihomoClient {
         tokio::task::spawn_blocking(move || {
             let result = match &retired.backend {
                 transport::ControllerBackend::Local(process)
-                    if !replacement
-                        .as_ref()
-                        .is_some_and(|next| Arc::ptr_eq(process, next)) =>
+                    if !replacement.as_ref().is_some_and(|next| {
+                        std::ptr::addr_eq(
+                            Arc::as_ptr(process).cast::<()>(),
+                            Arc::as_ptr(next).cast::<()>(),
+                        )
+                    }) =>
                 {
-                    process.stop()
+                    process.stop_process()
                 }
                 _ => Ok(()),
             };
@@ -670,29 +556,5 @@ impl MihomoClient {
         self.runtime_session()
             .map(|runtime| runtime.snapshot())
             .transpose()
-    }
-}
-
-impl MihomoError {
-    /// Reports whether a failed mutation may already have changed the controller.
-    /// Policy/input rejection and failure to establish native IPC are definitive.
-    #[must_use]
-    pub fn mutation_result_unknown(&self) -> bool {
-        match self {
-            Self::Http(_)
-            | Self::ResponseTooLarge { .. }
-            | Self::StaleTransport
-            | Self::RuntimeOutcomeUnknown
-            | Self::RuntimePartiallyApplied(_) => true,
-            Self::Service(error) => error.mutation_result_unknown(),
-            Self::ResponseDecode {
-                outcome_unknown, ..
-            } => *outcome_unknown,
-            Self::Native(crate::service::NativeHttpError::OutcomeUnknown(_)) => true,
-            Self::Native(crate::service::NativeHttpError::BudgetExceeded { request_sent }) => {
-                *request_sent
-            }
-            _ => false,
-        }
     }
 }

@@ -329,7 +329,7 @@ impl RuntimePage {
                         this.profiles.forms.subscription_error = None;
                         let was_adding = this.profiles.forms.close_subscription();
                         if was_adding && this.is_page_task_current(token) {
-                            let _ = cx.update_window(this.window_handle, |_, window, cx| {
+                            let _ = cx.update_window(this.shell.window_handle, |_, window, cx| {
                                 window.close_dialog(cx)
                             });
                         }

@@ -365,6 +365,7 @@ impl LogsView {
                     .small()
                     .ghost()
                     .w_20()
+                    .flex_shrink_0()
                     .label(zenclash_i18n::text("redesign.details"))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.selected = Some((detail_entry.clone(), detail_row.clone()));
@@ -481,7 +482,12 @@ fn log_columns(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
         .text_color(theme.muted_foreground)
         .border_b_1()
         .border_color(theme.border)
-        .child(div().w_24().child(zenclash_i18n::text("logs.columns.time")))
+        .child(
+            div()
+                .w_24()
+                .flex_shrink_0()
+                .child(zenclash_i18n::text("logs.columns.time")),
+        )
         .child(
             div()
                 .w(gpui_kit::rems(7.))
@@ -491,9 +497,15 @@ fn log_columns(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
         .child(
             div()
                 .flex_1()
+                .min_w_0()
                 .child(zenclash_i18n::text("logs.columns.message")),
         )
-        .child(div().w_20().child(zenclash_i18n::text("redesign.details")))
+        .child(
+            div()
+                .w_20()
+                .flex_shrink_0()
+                .child(zenclash_i18n::text("redesign.details")),
+        )
 }
 
 fn level_badge(level: gpui_kit::SharedString, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {

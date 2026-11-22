@@ -213,3 +213,29 @@ fn manifest_rejects_case_insensitive_duplicate_file_names() {
     assert!(matches!(store.load(), Err(YamlOverrideError::Invalid(_))));
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn metadata_operations_skip_full_yaml_parsing_of_unrelated_override_bodies() {
+    let root = test_root("metadata-no-body-parse");
+    let source = root.join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.yaml"), "mode: direct\n").unwrap();
+    fs::write(source.join("b.yaml"), "mode: rule\n").unwrap();
+    let store = YamlOverrideStore::new(root.join("store")).unwrap();
+    let imported = store.import_paths([source]).unwrap();
+
+    // Corrupt an unrelated override body on disk after import; lightweight metadata
+    // operations (list, toggle, reorder, delete) must succeed without re-parsing all bodies,
+    // while `load_validated` still detects the invalid YAML body.
+    fs::write(store.managed_path(&imported[1]), "[not valid yaml mapping").unwrap();
+
+    let listed = store.load().unwrap();
+    assert_eq!(listed.items.len(), 2);
+    store.set_enabled(&imported[0].id, false).unwrap();
+    store.move_to(&imported[0].id, 1).unwrap();
+    let remaining = store.delete_disabled(&imported[0].id).unwrap();
+    assert_eq!(remaining.items.len(), 1);
+    assert!(store.load_validated().is_err());
+
+    fs::remove_dir_all(root).unwrap();
+}

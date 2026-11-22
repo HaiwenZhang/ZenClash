@@ -730,6 +730,7 @@ impl RulesView {
             .child(
                 div()
                     .w(gpui_kit::rems(if compact { 7. } else { 9. }))
+                    .flex_shrink_0()
                     .text_sm()
                     .truncate()
                     .child(rule.kind.clone()),
@@ -769,9 +770,14 @@ impl RulesView {
                         })),
                 ),
             )
-            .child(h_flex().w_24().child(policy_badge(&rule.proxy, theme)))
             .child(
-                div().w_20().text_sm().text_right().child(
+                h_flex()
+                    .w_24()
+                    .flex_shrink_0()
+                    .child(policy_badge(&rule.proxy, theme)),
+            )
+            .child(
+                div().w_20().flex_shrink_0().text_sm().text_right().child(
                     rule.extra
                         .as_ref()
                         .map_or_else(|| "—".to_owned(), |stats| stats.hit_count.to_string()),
@@ -813,19 +819,22 @@ impl RulesView {
             row = row.child(
                 div()
                     .w_24()
+                    .flex_shrink_0()
                     .text_sm()
                     .text_color(theme.muted_foreground)
                     .child("—"),
             );
         }
         row.child(
-            Button::new(("open-rule-details", identity))
-                .ghost()
-                .small()
-                .label(zenclash_i18n::text("redesign.details"))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.open_rule_details(position, window, cx)
-                })),
+            h_flex().w_16().flex_shrink_0().justify_end().child(
+                Button::new(("open-rule-details", identity))
+                    .ghost()
+                    .small()
+                    .label(zenclash_i18n::text("redesign.details"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_rule_details(position, window, cx)
+                    })),
+            ),
         )
         .into_any_element()
     }
@@ -960,32 +969,48 @@ fn rule_columns(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
         .child(
             div()
                 .w_12()
+                .flex_shrink_0()
                 .child(zenclash_i18n::text("rules.columns.order")),
         )
         .child(
             div()
                 .w(gpui_kit::rems(9.))
+                .flex_shrink_0()
                 .child(zenclash_i18n::text("rules.columns.kind")),
         )
         .child(
             div()
                 .flex_1()
+                .min_w_0()
                 .child(zenclash_i18n::text("rules.columns.payload")),
         )
         .child(
             div()
                 .w_24()
+                .flex_shrink_0()
                 .child(zenclash_i18n::text("rules.columns.proxy")),
         )
         .child(
             div()
                 .w_20()
+                .flex_shrink_0()
                 .whitespace_nowrap()
                 .text_right()
                 .child(zenclash_i18n::text("rules.columns.hits")),
         )
-        .child(div().w_24().child(zenclash_i18n::text("redesign.status")))
-        .child(div().w_16().child(zenclash_i18n::text("redesign.action")))
+        .child(
+            div()
+                .w_24()
+                .flex_shrink_0()
+                .child(zenclash_i18n::text("redesign.status")),
+        )
+        .child(
+            div()
+                .w_16()
+                .flex_shrink_0()
+                .text_right()
+                .child(zenclash_i18n::text("redesign.action")),
+        )
 }
 
 fn policy_badge(policy: &str, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {

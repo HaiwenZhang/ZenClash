@@ -10,13 +10,13 @@ use std::{
 };
 
 use zenclash_core::{
-    CapabilityState, ConnectionPolicy, ControlledConfigStore, CoreKind, CoreSession, DnsRecordType,
-    LogMonitor, LogStreamFormat, LogTimeSource, MihomoClient, MihomoEndpoint, MihomoLaunchConfig,
-    MihomoLogLevel, MihomoProcess, NetworkLatencyTarget, NetworkProbeRoute, NetworkProbeService,
-    Observation, OperationalStatus, ProfileApplication, ProfileApplyOutcome, ProfileChange,
-    ProfileStore, ProxyCatalog, ProxyGroupBehavior, ProxyOperations, ProxyVisibility,
-    RemoteProfileOptions, RulesetBehavior, RulesetConverter, SystemNetworkSnapshot, TrafficMonitor,
-    YamlOverrideStore,
+    CapabilityState, ConnectionPolicy, ControlledConfigStore, CoreKind, CoreLaunchConfig,
+    CoreSession, DnsRecordType, LogMonitor, LogStreamFormat, LogTimeSource, ManagedCoreProcess,
+    MihomoClient, MihomoEndpoint, MihomoLogLevel, NetworkLatencyTarget, NetworkProbeRoute,
+    NetworkProbeService, Observation, OperationalStatus, ProfileApplication, ProfileApplyOutcome,
+    ProfileChange, ProfileStore, ProxyCatalog, ProxyGroupBehavior, ProxyOperations,
+    ProxyVisibility, RemoteProfileOptions, RulesetBehavior, RulesetConverter,
+    SystemNetworkSnapshot, TrafficMonitor, YamlOverrideStore,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -41,8 +41,8 @@ async fn runtime_config_accepts_real_mihomo_null_tun_dns_hijack() {
     fs::create_dir_all(&root).unwrap();
     let profile = root.join("profile.yaml");
     fs::write(&profile, "mixed-port: 0\nexternal-controller: ''\nmode: rule\ntun: {enable: false, dns-hijack: null}\ndns: {enable: false}\nrules: ['MATCH,DIRECT']\n").unwrap();
-    let process = MihomoProcess::spawn_isolated_for_test(
-        MihomoLaunchConfig::new(binary, &profile, root.join("home")).unwrap(),
+    let process = ManagedCoreProcess::spawn_isolated_for_test(
+        CoreLaunchConfig::new(binary, &profile, root.join("home")).unwrap(),
     )
     .unwrap();
     process
@@ -106,11 +106,11 @@ async fn proxy_catalog_preserves_subscription_group_and_member_order_across_relo
     let payload = format!("{prefix}{}", definitions.concat());
     let profile = root.join("profile.yaml");
     fs::write(&profile, &payload).unwrap();
-    let launch = MihomoLaunchConfig::new(binary, &profile, root.join("home")).unwrap();
+    let launch = CoreLaunchConfig::new(binary, &profile, root.join("home")).unwrap();
     #[cfg(feature = "test-support")]
-    let process = MihomoProcess::spawn_isolated_for_test(launch).unwrap();
+    let process = ManagedCoreProcess::spawn_isolated_for_test(launch).unwrap();
     #[cfg(not(feature = "test-support"))]
-    let process = MihomoProcess::spawn(launch).unwrap();
+    let process = ManagedCoreProcess::spawn(launch).unwrap();
     process
         .wait_until_ready(Duration::from_secs(20))
         .await
@@ -242,13 +242,13 @@ async fn managed_ipc_carries_http_and_all_realtime_streams_across_restart() {
     fs::create_dir_all(&root).unwrap();
     let profile = root.join("profile.yaml");
     fs::write(&profile, "mixed-port: 0\nexternal-controller: ''\nmode: rule\nlog-level: debug\ndns:\n  enable: false\nproxies: []\nproxy-groups:\n  - name: test group\n    type: select\n    proxies: [DIRECT, REJECT]\nrules: ['MATCH,DIRECT']\n").unwrap();
-    let launch = MihomoLaunchConfig::new(binary, &profile, root.join("home")).unwrap();
+    let launch = CoreLaunchConfig::new(binary, &profile, root.join("home")).unwrap();
     assert!(launch.endpoint.ipc_path().is_some());
     assert!(launch.controller_override.is_none());
     #[cfg(feature = "test-support")]
-    let process = MihomoProcess::spawn_isolated_for_test(launch).unwrap();
+    let process = ManagedCoreProcess::spawn_isolated_for_test(launch).unwrap();
     #[cfg(not(feature = "test-support"))]
-    let process = MihomoProcess::spawn(launch).unwrap();
+    let process = ManagedCoreProcess::spawn(launch).unwrap();
     process
         .wait_until_ready(Duration::from_secs(20))
         .await
@@ -379,7 +379,7 @@ async fn drives_the_supplied_profile_through_a_real_mihomo_process() {
     process.stop().expect("stop real Mihomo");
 }
 
-async fn verify_real_operational_status(client: &MihomoClient, process: Arc<MihomoProcess>) {
+async fn verify_real_operational_status(client: &MihomoClient, process: Arc<ManagedCoreProcess>) {
     let runtime = tokio::runtime::Handle::current();
     let traffic = TrafficMonitor::start(&runtime, process.endpoint().clone());
     let logs = LogMonitor::start(&runtime, process.endpoint().clone(), MihomoLogLevel::Info);
@@ -442,13 +442,13 @@ async fn verify_real_listener_conflict_fallback(inputs: &IntegrationInputs) {
     let endpoint = MihomoEndpoint::with_random_secret(controller.to_string())
         .expect("generate listener fallback controller secret");
     drop(controller_reservation);
-    let launch = MihomoLaunchConfig::new(&inputs.binary, runtime_profile, root.join("home"))
+    let launch = CoreLaunchConfig::new(&inputs.binary, runtime_profile, root.join("home"))
         .expect("build listener fallback launch")
         .with_controller_endpoint(endpoint);
     launch
         .validate_config()
         .expect("real Mihomo validates the fallback runtime profile");
-    let process = MihomoProcess::spawn(launch).expect("start real Mihomo on fallback port");
+    let process = ManagedCoreProcess::spawn(launch).expect("start real Mihomo on fallback port");
     process
         .wait_until_ready(Duration::from_secs(20))
         .await
@@ -465,7 +465,7 @@ async fn verify_real_listener_conflict_fallback(inputs: &IntegrationInputs) {
 }
 
 async fn wait_for_real_mixed_listener(
-    process: &MihomoProcess,
+    process: &ManagedCoreProcess,
     client: &MihomoClient,
     expected_port: u16,
 ) -> zenclash_core::RuntimeConfig {
@@ -940,17 +940,17 @@ impl IntegrationInputs {
     }
 }
 
-async fn start_mihomo(inputs: &IntegrationInputs) -> Arc<MihomoProcess> {
+async fn start_mihomo(inputs: &IntegrationInputs) -> Arc<ManagedCoreProcess> {
     let controlled = ControlledConfigStore::new(inputs.home.join("controlled-config-integration"));
     let runtime_profile = controlled
         .materialize(&inputs.profile)
         .expect("materialize managed startup profile");
     let endpoint = MihomoEndpoint::with_random_secret(&inputs.controller)
         .expect("generate authenticated integration controller endpoint");
-    let launch = MihomoLaunchConfig::new(&inputs.binary, runtime_profile, inputs.home.clone())
+    let launch = CoreLaunchConfig::new(&inputs.binary, runtime_profile, inputs.home.clone())
         .expect("real launch config")
         .with_controller_endpoint(endpoint);
-    let process = MihomoProcess::spawn(launch).expect("start real Mihomo");
+    let process = ManagedCoreProcess::spawn(launch).expect("start real Mihomo");
     process
         .wait_until_ready(Duration::from_secs(20))
         .await
@@ -1310,7 +1310,7 @@ async fn verify_explicit_override_preserves_controlled(
 
 async fn verify_profile_workflows(
     client: &MihomoClient,
-    process: Arc<MihomoProcess>,
+    process: Arc<ManagedCoreProcess>,
     profile: &Path,
     home: &Path,
 ) {
@@ -1441,7 +1441,7 @@ async fn verify_catalog_apis(client: &MihomoClient) {
     assert_eq!(connections.connections.len(), 0);
 }
 
-async fn verify_traffic_stream(process: &MihomoProcess) {
+async fn verify_traffic_stream(process: &ManagedCoreProcess) {
     let traffic = TrafficMonitor::start(
         &tokio::runtime::Handle::current(),
         process.endpoint().clone(),
@@ -1456,7 +1456,7 @@ async fn verify_traffic_stream(process: &MihomoProcess) {
 }
 
 async fn verify_managed_restart(
-    process: &MihomoProcess,
+    process: &ManagedCoreProcess,
     client: &MihomoClient,
     profile: &Path,
     home: &Path,

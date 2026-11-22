@@ -7,13 +7,13 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
-        mpsc::{self, RecvTimeoutError, SyncSender, TrySendError},
+        mpsc::{self, RecvTimeoutError, SyncSender, TryRecvError, TrySendError},
     },
     thread,
     time::{Duration, Instant},
 };
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
 
 use super::{LogEntry, format_log_entries, private_io};
@@ -23,6 +23,8 @@ const MIN_MAX_MEBIBYTES: u16 = 1;
 const MAX_MAX_MEBIBYTES: u16 = 100;
 const FILE_QUEUE_CAPACITY: usize = 512;
 const FILE_QUEUE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_WRITE_BATCH_ENTRIES: usize = 64;
+const MAX_WRITE_BATCH_BYTES: usize = 64 * 1024;
 const COMPACTION_RETAIN_PERCENT: u64 = 50;
 const TRUNCATE_MARKER: &[u8] =
     b"\n[ZENCLASH] Log compacted after reaching the configured size limit.\n";
@@ -98,6 +100,7 @@ impl LogFileConfig {
 enum LogFileCommand {
     Append(Arc<LogEntry>, LogByteReservation),
     Refresh,
+    Shutdown,
 }
 
 struct LogByteReservation {
@@ -115,7 +118,7 @@ impl Drop for LogByteReservation {
 
 #[derive(Clone)]
 pub(super) struct LogFileSender {
-    sender: SyncSender<LogFileCommand>,
+    sender: Arc<RwLock<Option<SyncSender<LogFileCommand>>>>,
     settings: Arc<RwLock<Option<LogFileConfig>>>,
     status: Arc<RwLock<LogPersistenceStatus>>,
     queued_bytes: Arc<AtomicUsize>,
@@ -132,6 +135,9 @@ impl LogFileSender {
         {
             return;
         }
+        let Some(channel) = self.sender.read().clone() else {
+            return;
+        };
         if bytes > super::MAX_LOG_ENTRY_BYTES {
             let mut status = self.status.write();
             status.dropped_entries = status.dropped_entries.saturating_add(1);
@@ -156,10 +162,7 @@ impl LogFileSender {
             queued_entries: self.queued_entries.clone(),
             bytes,
         };
-        match self
-            .sender
-            .try_send(LogFileCommand::Append(entry, reservation))
-        {
+        match channel.try_send(LogFileCommand::Append(entry, reservation)) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
                 self.record_full_queue();
@@ -179,75 +182,59 @@ impl LogFileSender {
 
 pub(super) struct LogFileWorker {
     sender: LogFileSender,
-    thread: Option<thread::JoinHandle<()>>,
+    thread: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
+impl Drop for LogFileWorker {
+    fn drop(&mut self) {
+        if let Some(channel) = self.sender.sender.write().take() {
+            let _ = channel.try_send(LogFileCommand::Shutdown);
+            drop(channel);
+        }
+        if let Some(handle) = self.thread.get_mut().take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 impl LogFileWorker {
+    /// Creates a lazy log-file worker without spawning an OS thread until
+    /// persistence is explicitly enabled via [`Self::configure`].
     pub(super) fn start() -> Self {
-        let (sender, receiver) = mpsc::sync_channel(FILE_QUEUE_CAPACITY);
-        let settings = Arc::new(RwLock::new(None));
-        let status = Arc::new(RwLock::new(LogPersistenceStatus::default()));
-        let queued_bytes = Arc::new(AtomicUsize::new(0));
         let file_sender = LogFileSender {
-            sender,
-            settings: settings.clone(),
-            status: status.clone(),
-            queued_bytes,
+            sender: Arc::new(RwLock::new(None)),
+            settings: Arc::new(RwLock::new(None)),
+            status: Arc::new(RwLock::new(LogPersistenceStatus::default())),
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
             queued_entries: Arc::default(),
-        };
-        let thread_settings = settings;
-        let thread_status = status.clone();
-        let thread = thread::Builder::new()
-            .name("zenclash-log-file".into())
-            .spawn(move || {
-                let mut writer = BoundedLogFile::default();
-                let mut observed = Instant::now();
-                loop {
-                    let command = match receiver.recv_timeout(Duration::from_secs(1)) {
-                        Ok(command) => Some(command),
-                        Err(RecvTimeoutError::Timeout) => None,
-                        Err(RecvTimeoutError::Disconnected) => break,
-                    };
-                    let config = thread_settings.read().clone();
-                    let Some(config) = config else {
-                        continue;
-                    };
-                    if observed.elapsed() >= Duration::from_secs(1)
-                        || matches!(command, Some(LogFileCommand::Refresh))
-                    {
-                        refresh_file_status(&thread_status, &config);
-                        observed = Instant::now();
-                    }
-                    if let Some(LogFileCommand::Append(entry, reservation)) = command
-                        && config.enabled
-                    {
-                        let result = writer.append(&config, &entry);
-                        drop(entry);
-                        drop(reservation);
-                        let mut snapshot = thread_status.write();
-                        if snapshot.path.as_ref() != Some(&config.path) {
-                            continue;
-                        }
-                        match result {
-                            Ok(size) => {
-                                snapshot.size_bytes = size;
-                                snapshot.last_error = None;
-                            }
-                            Err(error) => snapshot.last_error = Some(error.to_string()),
-                        }
-                    }
-                }
-            });
-        let thread = match thread {
-            Ok(thread) => Some(thread),
-            Err(error) => {
-                status.write().last_error = Some(format!("无法启动日志文件线程：{error}"));
-                None
-            }
         };
         Self {
             sender: file_sender,
-            thread,
+            thread: Mutex::new(None),
+        }
+    }
+
+    fn ensure_thread_started(&self) {
+        let mut handle = self.thread.lock();
+        if handle.is_some() {
+            return;
+        }
+        let (tx, receiver) = mpsc::sync_channel(FILE_QUEUE_CAPACITY);
+        *self.sender.sender.write() = Some(tx);
+        let thread_settings = self.sender.settings.clone();
+        let thread_status = self.sender.status.clone();
+        match thread::Builder::new()
+            .name("zenclash-log-file".into())
+            .spawn(move || run_log_file_worker(receiver, thread_settings, thread_status))
+        {
+            Ok(thread) => {
+                *handle = Some(thread);
+            }
+            Err(error) => {
+                *self.sender.sender.write() = None;
+                self.sender.status.write().last_error =
+                    Some(format!("无法启动日志文件线程：{error}"));
+            }
         }
     }
 
@@ -271,12 +258,19 @@ impl LogFileWorker {
         }
         status.path = Some(path);
         status.max_bytes = config.max_bytes;
-        if self.thread.is_none() {
-            status.last_error = Some("日志文件写入线程未能启动".into());
-        }
         drop(status);
+        if enabled {
+            self.ensure_thread_started();
+            if self.thread.lock().is_none() {
+                self.sender.status.write().last_error = Some("日志文件写入线程未能启动".into());
+            }
+        }
         // A full queue already wakes the worker; periodic refresh is the fallback.
-        let _ = self.sender.sender.try_send(LogFileCommand::Refresh);
+        if let Some(channel) = self.sender.sender.read().as_ref() {
+            let _ = channel.try_send(LogFileCommand::Refresh);
+        } else {
+            refresh_file_status(&self.sender.status, &config);
+        }
         Ok(())
     }
 
@@ -286,6 +280,80 @@ impl LogFileWorker {
 
     pub(super) fn status(&self) -> LogPersistenceStatus {
         self.sender.status.read().clone()
+    }
+}
+
+fn run_log_file_worker(
+    receiver: mpsc::Receiver<LogFileCommand>,
+    thread_settings: Arc<RwLock<Option<LogFileConfig>>>,
+    thread_status: Arc<RwLock<LogPersistenceStatus>>,
+) {
+    let mut writer = BoundedLogFile::default();
+    let mut observed = Instant::now();
+    loop {
+        let command = match receiver.recv_timeout(Duration::from_secs(1)) {
+            Ok(LogFileCommand::Shutdown) => break,
+            Ok(command) => Some(command),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
+        let config = thread_settings.read().clone();
+        let Some(config) = config else {
+            continue;
+        };
+        let mut refresh_requested = matches!(command, Some(LogFileCommand::Refresh));
+        let mut shutdown_requested = false;
+        if let Some(LogFileCommand::Append(first_entry, first_reservation)) = command {
+            let mut batch_entries = Vec::with_capacity(MAX_WRITE_BATCH_ENTRIES);
+            let mut batch_reservations = Vec::with_capacity(MAX_WRITE_BATCH_ENTRIES);
+            let mut batch_bytes = first_reservation.bytes;
+            batch_entries.push((*first_entry).clone());
+            batch_reservations.push(first_reservation);
+            while batch_entries.len() < MAX_WRITE_BATCH_ENTRIES
+                && batch_bytes < MAX_WRITE_BATCH_BYTES
+            {
+                match receiver.try_recv() {
+                    Ok(LogFileCommand::Append(entry, reservation)) => {
+                        batch_bytes = batch_bytes.saturating_add(reservation.bytes);
+                        batch_entries.push((*entry).clone());
+                        batch_reservations.push(reservation);
+                    }
+                    Ok(LogFileCommand::Refresh) => {
+                        refresh_requested = true;
+                    }
+                    Ok(LogFileCommand::Shutdown) | Err(TryRecvError::Disconnected) => {
+                        shutdown_requested = true;
+                        break;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                }
+            }
+            if config.enabled {
+                let result = writer.append_batch(&config, &batch_entries);
+                drop(batch_entries);
+                drop(batch_reservations);
+                let mut snapshot = thread_status.write();
+                if snapshot.path.as_ref() == Some(&config.path) {
+                    match result {
+                        Ok(size) => {
+                            snapshot.size_bytes = size;
+                            snapshot.last_error = None;
+                        }
+                        Err(error) => snapshot.last_error = Some(error.to_string()),
+                    }
+                }
+            } else {
+                drop(batch_entries);
+                drop(batch_reservations);
+            }
+        }
+        if observed.elapsed() >= Duration::from_secs(1) || refresh_requested {
+            refresh_file_status(&thread_status, &config);
+            observed = Instant::now();
+        }
+        if shutdown_requested {
+            break;
+        }
     }
 }
 
@@ -313,7 +381,19 @@ struct BoundedLogFile {
 }
 
 impl BoundedLogFile {
+    #[cfg(test)]
     fn append(&mut self, config: &LogFileConfig, entry: &LogEntry) -> LogPersistenceResult<u64> {
+        self.append_batch(config, std::slice::from_ref(entry))
+    }
+
+    fn append_batch(
+        &mut self,
+        config: &LogFileConfig,
+        entries: &[LogEntry],
+    ) -> LogPersistenceResult<u64> {
+        if entries.is_empty() {
+            return Ok(self.size);
+        }
         if self.path.as_ref() != Some(&config.path) {
             self.write_access = None;
         }
@@ -322,7 +402,7 @@ impl BoundedLogFile {
             .get_or_insert_with(|| crate::data_coordinator::DataWriteAccess::new(&config.path))
             .acquire()?;
         self.synchronize_path(config)?;
-        let data = format_log_entries(std::slice::from_ref(entry)).into_bytes();
+        let data = format_log_entries(entries).into_bytes();
         let max_bytes = usize::try_from(config.max_bytes)
             .map_err(|_| std::io::Error::other("平台无法表示日志大小上限"))?;
         if data.len() >= max_bytes {
@@ -486,7 +566,7 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(capacity);
         (
             LogFileSender {
-                sender,
+                sender: Arc::new(RwLock::new(Some(sender))),
                 settings: Arc::new(RwLock::new(Some(LogFileConfig::from_bytes(
                     test_path("queue"),
                     true,
@@ -792,6 +872,32 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(worker.status().size_bytes, 8);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn worker_stays_lazy_until_enabled_and_joins_cleanly_on_drop() {
+        let path = test_path("lazy-worker");
+        let worker = LogFileWorker::start();
+        assert!(worker.thread.lock().is_none());
+
+        // Disabled configuration must NOT spawn a background thread.
+        worker.configure(path.clone(), false, 1).unwrap();
+        assert!(worker.thread.lock().is_none());
+
+        // Enabling lazily spawns the writer thread, batches writes, and Drop joins cleanly.
+        worker.configure(path.clone(), true, 1).unwrap();
+        assert!(worker.thread.lock().is_some());
+        let sender = worker.sender();
+        for index in 0..10 {
+            append_entry(&sender, Arc::new(entry(&format!("batch-{index}"), index)));
+        }
+        drop(sender);
+        drop(worker);
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("batch-0"));
+        assert!(content.contains("batch-9"));
         fs::remove_file(path).unwrap();
     }
 }

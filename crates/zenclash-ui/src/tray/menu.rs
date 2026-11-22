@@ -15,6 +15,14 @@ fn select_profile_command(profile: &super::TrayProfile) -> TrayCommand {
     }
 }
 
+fn format_tray_delay(delay: Option<u32>) -> String {
+    match delay {
+        Some(0) => zenclash_i18n::text("tray.delay_timeout"),
+        Some(delay) => format!(" ({delay} ms)"),
+        None => String::new(),
+    }
+}
+
 struct MenuAssembler {
     commands: HashMap<String, TrayCommand>,
     generation: u64,
@@ -120,20 +128,22 @@ pub(super) fn build_menu(
                     test_url: group.test_url.clone(),
                 },
             );
-            let separator = PredefinedMenuItem::separator();
             submenu
-                .append_items(&[&delay_test, &separator])
+                .append(&delay_test)
                 .map_err(|error| error.to_string())?;
             if !group.selectable {
                 menu.append(&submenu).map_err(|error| error.to_string())?;
                 continue;
             }
-            for proxy in proxy_menu_items(group) {
-                let delay = match proxy.delay {
-                    Some(0) => zenclash_i18n::text("tray.delay_timeout"),
-                    Some(delay) => format!("  （{delay} ms）"),
-                    None => String::new(),
-                };
+            let items = proxy_menu_items(group);
+            if !items.is_empty() || group.has_more {
+                let separator = PredefinedMenuItem::separator();
+                submenu
+                    .append(&separator)
+                    .map_err(|error| error.to_string())?;
+            }
+            for proxy in items {
+                let delay = format_tray_delay(proxy.delay);
                 let item = builder.check(
                     format!("{}{delay}", proxy.name),
                     proxy.name == group.now,
@@ -273,6 +283,14 @@ mod tests {
         let second = MenuAssembler::new().register(TrayCommand::ShowWindow);
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn delay_formatting_uses_ascii_parentheses_without_hardcoded_fullwidth_punctuation() {
+        assert_eq!(format_tray_delay(Some(42)), " (42 ms)");
+        assert_eq!(format_tray_delay(None), "");
+        assert!(!format_tray_delay(Some(42)).contains('（'));
+        assert!(!format_tray_delay(Some(42)).contains('）'));
     }
 
     #[test]

@@ -5,7 +5,7 @@ pub(super) fn app_icon() -> Result<Icon, String> {
     // applies its own menu-bar tint to the resulting template image.
     let raster_size = if cfg!(target_os = "macos") { 36 } else { 18 };
     let renderer = gpui_kit::SvgRenderer::new(std::sync::Arc::new(crate::assets::Assets));
-    let svg = include_str!("../../../assets/icons/zenclash-tray.svg");
+    let svg = include_str!("../../assets/icons/zenclash-tray.svg");
     #[cfg(not(target_os = "macos"))]
     let svg = svg.replace("#000000", "#00BDA5");
     let parsed = renderer

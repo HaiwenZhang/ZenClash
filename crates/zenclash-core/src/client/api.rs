@@ -401,7 +401,7 @@ impl MihomoClient {
         let client = self.pin_binding()?;
         let body = serde_json::to_value(body)
             .map_err(|error| MihomoError::InvalidInput(error.to_string()))?;
-        if let Some(crate::owned_core::OwnedCore::Local(process)) = client.owned_core() {
+        if let Some(process) = client.local_lease() {
             crate::tun_admission::ensure_local_patch(process.kind(), &body)?;
         }
         if client.runtime_session().is_some() {
@@ -534,7 +534,7 @@ impl MihomoClient {
         self.prepare_runtime(
             payload,
             None,
-            crate::core_session::RuntimeRestoreAuthority::Ordinary,
+            crate::runtime_launcher::RuntimeRestoreAuthority::Ordinary,
         )
         .await
     }
@@ -568,7 +568,7 @@ impl MihomoClient {
         &self,
         payload: String,
         bundle: Option<std::sync::Arc<crate::ServiceRuntimeBundle>>,
-        authority: crate::core_session::RuntimeRestoreAuthority,
+        authority: crate::runtime_launcher::RuntimeRestoreAuthority,
     ) -> MihomoResult<PreparedConfig> {
         let client = self.pin_binding()?;
         if client.service_client().is_some() && bundle.is_none() {
@@ -583,7 +583,7 @@ impl MihomoClient {
         &self,
         payload: String,
         bundle: Option<std::sync::Arc<crate::ServiceRuntimeBundle>>,
-        authority: crate::core_session::RuntimeRestoreAuthority,
+        authority: crate::runtime_launcher::RuntimeRestoreAuthority,
     ) -> MihomoResult<PreparedConfig> {
         let client = self.pin_binding()?;
         let write_lease = client.acquire_write_lease().await?;
@@ -600,7 +600,7 @@ impl MihomoClient {
                 None => runtime.prepare(&payload).await?,
             })
         } else {
-            if let Some(crate::owned_core::OwnedCore::Local(process)) = client.owned_core() {
+            if let Some(process) = client.local_lease() {
                 crate::tun_admission::ensure_local_yaml(process.kind(), &payload)?;
             }
             client.validate_config_payload_unlocked(&payload).await?;

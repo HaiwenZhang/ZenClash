@@ -28,6 +28,32 @@ pub struct CoreLaunchConfig {
     pub controller_override: Option<String>,
 }
 
+impl From<&CoreLaunchConfig> for crate::runtime_launcher::CoreLaunchDescriptor {
+    fn from(config: &CoreLaunchConfig) -> Self {
+        Self {
+            kind: config.kind,
+            binary: config.binary.clone(),
+            config_file: config.config_file.clone(),
+            home_dir: config.home_dir.clone(),
+            endpoint: config.endpoint.clone(),
+            controller_override: config.controller_override.clone(),
+        }
+    }
+}
+
+impl From<crate::runtime_launcher::CoreLaunchDescriptor> for CoreLaunchConfig {
+    fn from(descriptor: crate::runtime_launcher::CoreLaunchDescriptor) -> Self {
+        Self {
+            kind: descriptor.kind,
+            binary: descriptor.binary,
+            config_file: descriptor.config_file,
+            home_dir: descriptor.home_dir,
+            endpoint: descriptor.endpoint,
+            controller_override: descriptor.controller_override,
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct FileControllerConfig {
     #[serde(default, rename = "external-controller")]
@@ -79,7 +105,7 @@ impl CoreLaunchConfig {
         })
     }
 
-    /// Overrides the selected core controller and the compatible [`crate::MihomoClient`].
+    /// Overrides the selected core controller and its compatible controller client.
     #[must_use]
     pub fn with_controller_override(mut self, controller: impl Into<String>) -> Self {
         let controller = controller.into();

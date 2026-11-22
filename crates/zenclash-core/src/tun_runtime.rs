@@ -1,6 +1,6 @@
 //! Platform readback for Mihomo TUN device and route state.
 
-use crate::{CapabilityState, TunConfig};
+use crate::{TunConfig, observation_types::CapabilityState};
 
 #[cfg(all(test, any(unix, windows)))]
 mod test_support;

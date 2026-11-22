@@ -50,7 +50,9 @@ fn offline_pages_render_local_content_and_delete_a_disabled_override(cx: &mut Te
         window.click(format!("override-delete:{}", record.id), cx);
     })
     .unwrap();
-    fixture.settle(cx, &page, |page| page.overrides.catalog().items.is_empty());
+    fixture.settle(cx, &page, |page| {
+        page.library.overrides.catalog().items.is_empty()
+    });
     assert!(fixture.overrides.load().unwrap().items.is_empty());
     cx.update_window(window, |_, window, cx| {
         page.update(cx, |page, cx| {
